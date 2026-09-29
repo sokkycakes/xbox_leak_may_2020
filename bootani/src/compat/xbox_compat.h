@@ -13,7 +13,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <math.h>
-#if defined(_MSC_VER)
+#if defined(_WIN32)
 #include <malloc.h>
 #else
 #include <alloca.h>

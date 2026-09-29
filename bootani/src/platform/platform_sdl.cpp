@@ -5,6 +5,8 @@
 //
 #include "backends.h"
 #include "../gfx/gl_loader.h"
+// main() lives in main.cpp and stays a plain C main; no SDL2main.
+#define SDL_MAIN_HANDLED
 #include <SDL.h>
 #include <stdio.h>
 
@@ -16,6 +18,7 @@ static void*             g_audio_user = NULL;
 
 bool Sdl_Init(const PlatformConfig& cfg)
 {
+    SDL_SetMainReady();
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) != 0) {
         fprintf(stderr, "bootani: SDL_Init failed: %s\n", SDL_GetError());
         return false;

@@ -38,6 +38,17 @@ headless mode there uses a hidden SDL window.
 
 Any SDL2 that CMake can find (`SDL2Config.cmake` or pkg-config) works.
 
+**Windows, cross-compiled from Linux (MinGW-w64)**
+
+    sudo apt install mingw-w64
+    # unpack SDL2-devel-2.x-mingw.tar.gz from github.com/libsdl-org/SDL/releases
+    S=$PWD/SDL2-2.30.9/x86_64-w64-mingw32
+    cmake -S bootani -B build-win -DCMAKE_TOOLCHAIN_FILE=bootani/cmake/mingw-w64-x86_64.cmake \
+          -DSDL2_MINGW_ROOT=$S -DSDL2_DIR=$S/lib/cmake/SDL2 -DCMAKE_EXE_LINKER_FLAGS=-static
+    cmake --build build-win -j
+
+Ship `bootani.exe` with `$S/bin/SDL2.dll`. This build has been run under Wine.
+
 Options: `-DBOOTANI_WITH_SDL2=OFF` or `-DBOOTANI_WITH_EGL=OFF` drop a
 backend. Configuration fails if neither is available.
 

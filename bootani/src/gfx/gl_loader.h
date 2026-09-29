@@ -7,6 +7,11 @@
 #ifndef BOOTANI_GL_LOADER_H
 #define BOOTANI_GL_LOADER_H
 
+// glcorearb.h pulls in <windows.h> on Windows unless APIENTRY is already
+// defined; its Win32 typedefs would clash with the Xbox ones in xbox_compat.h.
+#if defined(_WIN32) && !defined(APIENTRY)
+#define APIENTRY __stdcall
+#endif
 #include <GL/glcorearb.h>
 
 #define BOOTANI_GL_FUNCS(X) \
