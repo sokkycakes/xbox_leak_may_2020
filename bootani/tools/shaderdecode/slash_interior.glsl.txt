@@ -1,0 +1,85 @@
+// GLSL 330 core equivalent of g_slash_interior_xvu / g_slash_interior_xpu
+// (decoded from ani2/shaders.h with xshaderdecode.py; see slash_interior.vsh.txt / .psh.txt)
+//
+// App-side inputs (LogoRenderer::render):
+//   v0 = FLOAT3 position (w = 1), v1 = FLOAT2 uv (only v1.y is read)
+//   c[0..3] = transpose(world*view*proj), c[4..7] = four RGBA colours, c[8] = (w, w, w, 1)
+//   No pixel shader constants, no textures.
+//
+// Both shaders pass glslangValidator. Cut the file at the "=====" markers.
+
+// ===== VERTEX SHADER =====
+#version 330 core
+layout(location=0) in vec4 v0;
+layout(location=1) in vec4 v1;
+uniform vec4 c[96];
+out vec4 vD0; out vec4 vD1; out vec4 vT0; out vec4 vT1; out vec4 vT2; out vec4 vT3;
+
+void main()
+{
+    vec4 oPos = vec4(0.0, 0.0, 0.0, 1.0);
+    vD0 = vec4(0.0); vD1 = vec4(0.0);
+    vT0 = vec4(0.0, 0.0, 0.0, 1.0); vT1 = vec4(0.0, 0.0, 0.0, 1.0);
+    vT2 = vec4(0.0, 0.0, 0.0, 1.0); vT3 = vec4(0.0, 0.0, 0.0, 1.0);
+    vec4 r2 = vec4(0.0), r3 = vec4(0.0), r4 = vec4(0.0), r5 = vec4(0.0);
+    vec4 r6 = vec4(0.0), r7 = vec4(0.0), r8 = vec4(0.0), r9 = vec4(0.0);
+
+    // #00-#03  dp4 oPos.{x,y,z,w}, v0, c0..c3
+    oPos.x = dot(v0, c[0]);
+    oPos.y = dot(v0, c[1]);
+    oPos.z = dot(v0, c[2]);
+    oPos.w = dot(v0, c[3]);
+    // #04  mov r2.xyz, c5.xyz
+    r2.xyz = c[5].xyz;
+    // #05  add r3.xyz, c4.xyz, -r2.xyz
+    r3.xyz = c[4].xyz - r2.xyz;
+    // #06  mov r5.xyz, c7.xyz
+    r5.xyz = c[7].xyz;
+    // #07  mad r4.xyz, r3.xyz, v1.y, c5.xyz        -> mix(c5, c4, v)
+    r4.xyz = r3.xyz * v1.y + c[5].xyz;
+    // #08  add r6.xyz, c6.xyz, -r5.xyz
+    r6.xyz = c[6].xyz - r5.xyz;
+    // #09  (mul oPos.xyz, r12, c-38 + rcc r1.x, r12.w) : D3D viewport postfix, omitted
+    // #10  mad r7.xyz, r6.xyz, v1.y, c7.xyz        -> mix(c7, c6, v)
+    r7.xyz = r6.xyz * v1.y + c[7].xyz;
+    // #11  mad r8.xyz, r4.xyz, c8.xyz, r7.xyz
+    r8.xyz = r4.xyz * c[8].xyz + r7.xyz;
+    // #12  mul r9.xyz, r7.xyz, c8.xyz
+    r9.xyz = r7.xyz * c[8].xyz;
+    // #13  add oD0.xyz, r8.xyz, -r9.xyz            -> mix(mix(c7,c6,v), mix(c5,c4,v), w)
+    vD0.xyz = r8.xyz - r9.xyz;
+    // #14  (mad oPos.xyz, r12, r1.x, c-37) : D3D viewport postfix, omitted
+    // oD0.w is never written, so vD0.a keeps its default of 0. Nothing reads it:
+    // alpha blending and alpha test are off for this draw.
+
+    gl_Position = oPos;   // clip space, D3D z convention
+}
+
+// ===== FRAGMENT SHADER =====
+#version 330 core
+in vec4 vD0; in vec4 vD1; in vec4 vT0; in vec4 vT1; in vec4 vT2; in vec4 vT3;
+layout(location=0) out vec4 fragColor;
+
+void main()
+{
+    // v0 (diffuse) reaches the combiners clamped to [0,1]
+    vec4 D0 = clamp(vD0, 0.0, 1.0);
+    // r0.a starts as t0.a. Texture stage 0 is NONE, so that is 0; stage 0 overwrites it anyway.
+    vec4 R0 = vec4(0.0);
+
+    // combiner stage 0 (PSCombinerCount = 1):
+    //   RGB   in 0xC4200000: A = v0.rgb (signed identity), B = 1 (zero, unsigned invert), C = D = 0
+    //   RGB   out 0x000000C0: AB -> r0.rgb, identity output mapping, no dot or mux
+    //   alpha in 0xD4301010: A = v0.a (signed identity), B = 1, C = D = 0
+    //   alpha out 0x000000C0: AB -> r0.a
+    vec3  cab = D0.rgb * vec3(1.0);
+    float aab = D0.a * 1.0;
+    R0.rgb = clamp(cab, -1.0, 1.0);
+    R0.a   = clamp(aab, -1.0, 1.0);
+
+    // Final combiner: PSFinalCombinerInputsABCD = EFG = 0, so D3D (d3d8/se/pshader.cpp,
+    // lazy.cpp) leaves the fixed-function spec/fog combiner in place. With fog and
+    // specular off (the defaults, never enabled by the boot animation) that is
+    // D = r0.rgb and G = r0.a, clamped to [0,1].
+    fragColor = clamp(R0, 0.0, 1.0);   // == clamp(vD0, 0, 1)
+}
