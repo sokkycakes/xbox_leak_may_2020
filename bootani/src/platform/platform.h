@@ -16,15 +16,18 @@ struct PlatformConfig
     bool headless;      // no window: render off-screen
     bool fullscreen;
     bool vsync;
+    bool kms;                 // Linux console: draw straight to the display (DRM/KMS)
+    const char* drm_device;   // KMS: /dev/dri/cardN, or NULL for the first with a display
+    const char* audio_device; // ALSA PCM name, or NULL for the default
 };
 
 // Create the GL context. Returns false with a message on stderr on failure.
 bool  Platform_Init(const PlatformConfig& cfg);
 void  Platform_Shutdown();
 void* Platform_GetProcAddress(const char* name);
-const char* Platform_Describe();          // e.g. "SDL2 window" / "EGL surfaceless"
+const char* Platform_Describe();          // e.g. "SDL2 window" / "EGL (headless)" / "KMS 1920x1080@60"
 
-// Show a finished frame (windowed only). fbo holds the image with row 0 at
+// Show a finished frame (window or KMS; nothing when headless). fbo holds the image with row 0 at
 // the top; it is scaled to the window with the aspect ratio preserved.
 void  Platform_ShowFrame(unsigned int fbo, int width, int height);
 

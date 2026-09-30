@@ -313,7 +313,7 @@ void LogoRenderer::destroy()
 	pSlashTM_VB->Release();
 	pTextTM_VB->Release();
 	pTMTex->Release();
-	pSlashTexture->Release();
+	if (pSlashTexture) pSlashTexture->Release();   // created lazily; NULL if we quit before the logo
 
 	MemFree(indices_xboxlogolip_0);
 	MemFree(verts_xboxlogolip_0);

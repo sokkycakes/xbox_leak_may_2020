@@ -1,0 +1,51 @@
+#!/bin/sh
+#
+# Start the Xbox boot animation before anything else, in the background, so
+# the rest of the boot carries on while it plays.
+#
+
+DAEMON="bootani"
+PIDFILE="/var/run/$DAEMON.pid"
+BOOTANI_ARGS="--kms"
+
+# shellcheck source=/dev/null
+[ -r "/etc/default/$DAEMON" ] && . "/etc/default/$DAEMON"
+
+start() {
+	printf 'Starting %s: ' "$DAEMON"
+	# shellcheck disable=SC2086 # BOOTANI_ARGS holds several words
+	start-stop-daemon -S -q -b -m -p "$PIDFILE" -x "/usr/bin/$DAEMON" \
+		-- $BOOTANI_ARGS
+	status=$?
+	if [ "$status" -eq 0 ]; then
+		echo "OK"
+	else
+		echo "FAIL"
+	fi
+	return "$status"
+}
+
+stop() {
+	printf 'Stopping %s: ' "$DAEMON"
+	# bootani hands the display back to the console on SIGTERM.
+	start-stop-daemon -K -q -p "$PIDFILE"
+	status=$?
+	rm -f "$PIDFILE"
+	if [ "$status" -eq 0 ]; then
+		echo "OK"
+	else
+		echo "FAIL"
+	fi
+	return "$status"
+}
+
+case "$1" in
+	start|stop)
+		"$1";;
+	restart|reload)
+		stop
+		start;;
+	*)
+		echo "Usage: $0 {start|stop|restart}"
+		exit 1
+esac

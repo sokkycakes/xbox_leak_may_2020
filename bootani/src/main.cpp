@@ -12,12 +12,15 @@
 #include "io/image_io.h"
 #include "compat/xbox_compat.h"
 
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <chrono>
+#include <thread>
 
 bool Bootani_RunAnimation(int width, int height);
 extern int  g_bShortVersion;
@@ -43,10 +46,14 @@ struct Options
     std::string capture_prefix = "frame";
     std::string wav_path;                // headless audio capture
     bool        verbose = false;
+    bool        kms = false;             // draw on the Linux console (DRM/KMS)
+    std::string drm_device;
+    std::string audio_device;            // ALSA PCM name
+    bool        hold = false;            // keep the last frame up until killed
 };
 
 Options      g_opt;
-bool         g_quit = false;
+volatile sig_atomic_t g_quit = 0;
 double       g_virtual_ms = 0.0;
 int          g_frame = 0;
 size_t       g_next_capture = 0;
@@ -74,6 +81,10 @@ void Usage()
 "  --every N             with --frames-dir, keep every Nth frame\n"
 "  --capture-at T,T,...  with --frames-dir, only frames at these times (seconds)\n"
 "  --wav FILE            headless: write the boot sound to a WAV file\n"
+"  --kms                 draw full screen on the Linux console (DRM/KMS), no window system\n"
+"  --drm-device PATH     with --kms, the card to use (default: first with a display)\n"
+"  --audio-device NAME   ALSA device for sound without SDL2 (default: ALSA default, then HDMI)\n"
+"  --hold                after the animation, keep the last frame on screen until killed\n"
 "  --verbose             print progress and debug output\n");
 }
 
@@ -94,6 +105,10 @@ bool ParseArgs(int argc, char** argv)
         else if (a == "--loop") g_opt.loop = true;
         else if (a == "--short") g_opt.short_version = true;
         else if (a == "--verbose") g_opt.verbose = true;
+        else if (a == "--kms") g_opt.kms = true;
+        else if (a == "--hold") g_opt.hold = true;
+        else if (a == "--drm-device" && next) { g_opt.drm_device = next; i++; }
+        else if (a == "--audio-device" && next) { g_opt.audio_device = next; i++; }
         else if (a == "--size" && next) { if (!ParseSize(next, &g_opt.window_w, &g_opt.window_h)) return false; i++; }
         else if (a == "--msaa" && next) { g_opt.msaa = atoi(next); i++; }
         else if (a == "--fps" && next) { g_opt.fps = atof(next); if (g_opt.fps <= 0) return false; i++; }
@@ -182,7 +197,7 @@ void OnPresent(unsigned int fbo, int w, int h, void*)
 
     if (!g_opt.headless) {
         Platform_ShowFrame(fbo, w, h);
-        if (!Platform_PumpEvents()) g_quit = true;
+        if (!Platform_PumpEvents()) g_quit = 1;
     } else {
         g_virtual_ms += 1000.0 / g_opt.fps;
         CatchUpWavAudio();
@@ -235,9 +250,17 @@ void OutputDebugString(const char* s)
     if (g_opt.verbose) fputs(s, stderr);
 }
 
+void OnSignal(int)
+{
+    g_quit = 1;
+}
+
 int main(int argc, char** argv)
 {
     if (!ParseArgs(argc, argv)) { Usage(); return 2; }
+    // Stop cleanly (and hand the display back) when init or the user asks.
+    signal(SIGTERM, OnSignal);
+    signal(SIGINT, OnSignal);
     g_bShortVersion = g_opt.short_version;
     g_bBootaniLoop = g_opt.loop && !g_opt.headless;
 
@@ -247,6 +270,9 @@ int main(int argc, char** argv)
     cfg.headless = g_opt.headless;
     cfg.fullscreen = g_opt.fullscreen;
     cfg.vsync = g_opt.vsync;
+    cfg.kms = g_opt.kms;
+    cfg.drm_device = g_opt.drm_device.empty() ? NULL : g_opt.drm_device.c_str();
+    cfg.audio_device = g_opt.audio_device.empty() ? NULL : g_opt.audio_device.c_str();
     if (!Platform_Init(cfg)) return 1;
     if (!bootani_gl_load(Platform_GetProcAddress)) { Platform_Shutdown(); return 1; }
     if (g_opt.verbose)
@@ -282,6 +308,12 @@ int main(int argc, char** argv)
     g_start_ms = t0;
     bool ok = Bootani_RunAnimation(640, 480);
     uint64_t t1 = Platform_TicksMs();
+
+    if (g_opt.hold && !g_opt.headless) {
+        // The last frame stays on screen; wait for SIGTERM, Esc or Q.
+        while (!g_quit && Platform_PumpEvents())
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
 
     if (g_wav) {
         CatchUpWavAudio();

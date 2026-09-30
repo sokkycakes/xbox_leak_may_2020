@@ -49,8 +49,10 @@ Any SDL2 that CMake can find (`SDL2Config.cmake` or pkg-config) works.
 
 Ship `bootani.exe` with `$S/bin/SDL2.dll`. This build has been run under Wine.
 
-Options: `-DBOOTANI_WITH_SDL2=OFF` or `-DBOOTANI_WITH_EGL=OFF` drop a
-backend. Configuration fails if neither is available.
+Options: `-DBOOTANI_WITH_SDL2=OFF`, `-DBOOTANI_WITH_EGL=OFF`,
+`-DBOOTANI_WITH_KMS=OFF` or `-DBOOTANI_WITH_ALSA=OFF` drop a backend. KMS
+needs EGL plus `libdrm` and `gbm`, ALSA needs `alsa`, both found with
+pkg-config (`apt install libdrm-dev libgbm-dev libasound2-dev`). Configuration fails if neither is available.
 
 ## Run
 
@@ -69,6 +71,10 @@ backend. Configuration fails if neither is available.
 | `--fps F` | Headless: animation frames per second (default 60) |
 | `--frames-dir DIR`, `--every N`, `--capture-at T,...` | Save frames as PNG |
 | `--wav FILE` | Headless: write the boot sound, in sync with the frames |
+| `--kms` | Linux console: draw full screen straight to the display (DRM/KMS + GBM), no X11 or Wayland |
+| `--drm-device PATH` | With `--kms`, the card to use (default: the first with a connected display) |
+| `--audio-device NAME` | ALSA device, used when the window is not SDL's (default: ALSA default, then HDMI) |
+| `--hold` | After the animation, keep the last frame up until killed (SIGTERM), Esc or Q |
 | `--verbose` | Print backend, GL renderer and debug output |
 
 Headless mode runs on a virtual clock, so captures are deterministic and
@@ -92,16 +98,24 @@ Not ported: `mslogo` (a kernel-only Microsoft logo overlay), the shield and
 blob-renderer variants that the kernel build compiled out (`_SHIELD`), and
 the placement debugging tool.
 
+## Starting at boot (Buildroot)
+
+`buildroot/` is a Buildroot external tree that builds a UEFI-bootable image
+where bootani is the first thing init starts, drawing with `--kms`. It has
+configs for the Acer Chromebox CXI3 (Kaby Lake) and for QEMU. See
+`buildroot/README.md`.
+
 ## Layout
 
     src/anim/        original animation code (lightly patched, see below)
     src/compat/      Win32/XTL types and the Direct3D 8 interface subset
     src/gfx/         Direct3D 8 on OpenGL 3.3, GLSL shaders, GL loader
-    src/platform/    context, window, clock and audio (SDL2, EGL)
+    src/platform/    context, window, clock and audio (SDL2, EGL, KMS, ALSA)
     src/sound/       boot sound sequencer and software mixer (C)
     src/io/          PNG and WAV writers
     src/main.cpp     command line, clock, capture
     tools/           bootsound_wav, and the NV2A shader decoder
+    buildroot/       Buildroot external tree: bootani at boot on a bare console
     third_party/     Khronos GL headers
 
 The animation calls exactly four host services: `Bootani_GetTickCount`,

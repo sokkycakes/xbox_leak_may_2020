@@ -1,0 +1,1 @@
+source "$BR2_EXTERNAL_BOOTANI_PATH/package/bootani/Config.in"

@@ -1,0 +1,39 @@
+config BR2_PACKAGE_BOOTANI
+	bool "bootani"
+	depends on BR2_INSTALL_LIBSTDCPP
+	depends on BR2_TOOLCHAIN_HAS_THREADS
+	depends on BR2_PACKAGE_HAS_LIBEGL
+	depends on BR2_PACKAGE_HAS_LIBGBM
+	select BR2_PACKAGE_LIBDRM
+	select BR2_PACKAGE_ALSA_LIB
+	select BR2_PACKAGE_ALSA_LIB_PCM
+	help
+	  The original Xbox boot animation and sound, drawn with
+	  OpenGL 3.3 core straight to the display (DRM/KMS), with no
+	  window system. Needs a Mesa driver with desktop OpenGL 3.3
+	  (iris, radeonsi, softpipe, ...).
+
+if BR2_PACKAGE_BOOTANI
+
+config BR2_PACKAGE_BOOTANI_START_AT_BOOT
+	bool "start at boot"
+	default y
+	help
+	  Install /etc/init.d/S00bootani, which starts the animation
+	  in the background as the first init script.
+
+config BR2_PACKAGE_BOOTANI_ARGS
+	string "arguments"
+	default "--kms"
+	depends on BR2_PACKAGE_BOOTANI_START_AT_BOOT
+	help
+	  Command line for bootani when started at boot. Useful
+	  additions: --hold (keep the final logo up until the init
+	  script is stopped), --short, --loop, --audio-device NAME,
+	  --drm-device /dev/dri/cardN.
+
+endif
+
+comment "bootani needs a toolchain w/ C++, threads, and EGL + GBM (mesa3d)"
+	depends on !BR2_INSTALL_LIBSTDCPP || !BR2_TOOLCHAIN_HAS_THREADS || \
+		!BR2_PACKAGE_HAS_LIBEGL || !BR2_PACKAGE_HAS_LIBGBM

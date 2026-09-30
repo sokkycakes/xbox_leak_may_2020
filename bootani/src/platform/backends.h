@@ -26,4 +26,19 @@ void  Egl_Shutdown();
 void* Egl_GetProcAddress(const char* name);
 #endif
 
+#ifdef BOOTANI_HAVE_KMS
+bool  Kms_Init(const PlatformConfig& cfg);
+void  Kms_Shutdown();
+void* Kms_GetProcAddress(const char* name);
+const char* Kms_Describe();
+void  Kms_ShowFrame(unsigned int fbo, int width, int height);
+#endif
+
+#ifdef BOOTANI_HAVE_ALSA
+bool  Alsa_AudioOpen(const char* device, int rate, PlatformAudioCallback cb, void* user);
+void  Alsa_AudioLock();
+void  Alsa_AudioUnlock();
+void  Alsa_AudioClose();
+#endif
+
 #endif
