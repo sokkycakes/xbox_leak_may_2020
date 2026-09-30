@@ -98,6 +98,9 @@ static struct {
     D3DMATRIX transforms[10];    /* VIEW, PROJECTION, TEXTURE0-3, WORLD0-3 */
     D3DVIEWPORT8 viewport;
     struct { D3DResource *vb; ULONG stride; } streams[16];
+    ULONG *texture_state;        /* the title's D3D__TextureState[4][32] */
+    ULONG texture_state_fallback[4 * 32];
+    D3DResource *textures[4];
     ULONG vertex_shader;
     D3DResource *indices;
     ULONG base_vertex_index;
@@ -112,6 +115,14 @@ extern const char *g_screenshot_path;
 extern int g_exit_after_frames;
 
 #define RS(i) (d3d.render_state[i])
+#define TSS(stage, i) (d3d.texture_state[(stage) * 32 + (i)])
+
+enum {
+    D3DTSS_ADDRESSU = 0, D3DTSS_ADDRESSV = 1, D3DTSS_MAGFILTER = 3, D3DTSS_MINFILTER = 4,
+    D3DTSS_COLOROP = 12, D3DTSS_COLORARG0 = 13, D3DTSS_COLORARG1 = 14, D3DTSS_COLORARG2 = 15,
+    D3DTSS_ALPHAOP = 16, D3DTSS_ALPHAARG0 = 17, D3DTSS_ALPHAARG1 = 18, D3DTSS_ALPHAARG2 = 19,
+    D3DTSS_TEXCOORDINDEX = 28, D3DTSS_BORDERCOLOR = 29, D3DTSS_COLORKEYCOLOR = 30,
+};
 
 /* ---- device ------------------------------------------------------------ */
 
@@ -152,12 +163,26 @@ static void default_render_states(void)
     rs[D3DRS_FILLMODE] = GL_FILL;
     rs[D3DRS_CULLMODE] = 0x901;            /* D3DCULL_CCW */
     rs[D3DRS_FRONTFACE] = GL_CW;
+
+    for (int st = 0; st < 4; st++) {
+        TSS(st, D3DTSS_COLOROP) = st == 0 ? 4 /* MODULATE */ : 1 /* DISABLE */;
+        TSS(st, D3DTSS_COLORARG1) = 2;  /* D3DTA_TEXTURE */
+        TSS(st, D3DTSS_COLORARG2) = 1;  /* D3DTA_CURRENT */
+        TSS(st, D3DTSS_ALPHAOP) = st == 0 ? 2 /* SELECTARG1 */ : 1;
+        TSS(st, D3DTSS_ALPHAARG1) = 2;
+        TSS(st, D3DTSS_ALPHAARG2) = 1;
+        TSS(st, D3DTSS_ADDRESSU) = TSS(st, D3DTSS_ADDRESSV) = 1;  /* WRAP */
+        TSS(st, D3DTSS_MAGFILTER) = TSS(st, D3DTSS_MINFILTER) = 1;
+        TSS(st, D3DTSS_TEXCOORDINDEX) = st;
+    }
 }
 
 void d3d_bind_globals(void)
 {
     d3d.render_state = (ULONG *)hle_lookup("_D3D__RenderState");
     if (!d3d.render_state) d3d.render_state = d3d.render_state_fallback;
+    d3d.texture_state = (ULONG *)hle_lookup("_D3D__TextureState");
+    if (!d3d.texture_state) d3d.texture_state = d3d.texture_state_fallback;
     d3d.device = (ULONG *)hle_lookup_prefix("?g_Device@D3D@@");
     d3d.device_ptr = (ULONG *)hle_lookup_prefix("?g_pDevice@D3D@@");
     xlog("D3D: render states at %p, device at %p", (void *)d3d.render_state, (void *)d3d.device);
@@ -269,6 +294,8 @@ static void NTAPI D3DDevice_Clear(ULONG Count, const D3DRECT *pRects, ULONG Flag
 
 /* ---- resources --------------------------------------------------------- */
 
+static void color4(float *out, ULONG c);
+
 static PVOID resource_data(D3DResource *r)
 {
     /* Like the real library, Data holds a physical address. */
@@ -317,9 +344,240 @@ static ULONG NTAPI D3DResource_Release(D3DResource *r)
 
 static ULONG NTAPI D3DResource_GetType(D3DResource *r)
 {
+    if ((r->Common & D3DCOMMON_TYPE_MASK) == 0x00040000) {
+        ULONG format = ((ULONG *)r)[3];
+        if (format & 0x4) return 5;                     /* D3DRTYPE_CUBETEXTURE */
+        if (((format >> 4) & 0xF) == 3) return 4;       /* D3DRTYPE_VOLUMETEXTURE */
+        return 3;                                       /* D3DRTYPE_TEXTURE */
+    }
     static const ULONG types[] = { 6 /* VERTEXBUFFER */, 7 /* INDEXBUFFER */, 10 /* PUSHBUFFER */,
                                    9 /* PALETTE */, 3 /* TEXTURE */, 1 /* SURFACE */, 11 /* FIXUP */ };
     return types[(r->Common & D3DCOMMON_TYPE_MASK) >> 16];
+}
+
+
+static PVOID NTAPI D3D_AllocContiguousMemory(ULONG Size, ULONG Alignment)
+{
+    return MmAllocateContiguousMemoryEx(Size, 0, 0x7FFFFFFF, Alignment, 4);
+}
+
+static void NTAPI D3D_FreeContiguousMemory(PVOID p)
+{
+    MmFreeContiguousMemory(p);
+}
+
+static void NTAPI D3DResource_Register(D3DResource *r, PVOID base)
+{
+    ULONG mem = (ULONG)base + r->Data;
+    /* Push buffers keep a virtual address; everything else a GPU (physical) one. */
+    r->Data = (r->Common & D3DCOMMON_TYPE_MASK) == 0x00020000 ? mem : (mem & 0x7FFFFFFF);
+}
+
+/* ---- textures ---------------------------------------------------------- */
+
+typedef struct {
+    D3DResource res;
+    ULONG Format;
+    ULONG Size;
+} D3DPixelContainer;
+
+typedef struct tex_entry {
+    ULONG data, format, size;
+    GLuint id;
+    struct tex_entry *next;
+} tex_entry;
+
+static tex_entry *tex_cache;
+
+/* NV2A swizzled textures store texels in Morton order: the bits of x and y
+   interleave (x first) until the smaller dimension runs out. */
+static void unswizzle(const uint8_t *src, uint8_t *dst, ULONG w, ULONG h, ULONG bpp)
+{
+    ULONG xmask = 0, ymask = 0;
+    for (ULONG bit = 1, i = 1; i < w || i < h; i <<= 1) {
+        if (i < w) { xmask |= bit; bit <<= 1; }
+        if (i < h) { ymask |= bit; bit <<= 1; }
+    }
+    ULONG sy = 0;
+    for (ULONG y = 0; y < h; y++) {
+        ULONG sx = 0;
+        for (ULONG x = 0; x < w; x++) {
+            memcpy(dst + (y * w + x) * bpp, src + (sx | sy) * bpp, bpp);
+            sx = (sx - xmask) & xmask;
+        }
+        sy = (sy - ymask) & ymask;
+    }
+}
+
+static GLuint texture_for(D3DPixelContainer *t)
+{
+    for (tex_entry *e = tex_cache; e; e = e->next)
+        if (e->data == t->res.Data && e->format == t->Format && e->size == t->Size) return e->id;
+
+    ULONG fmt = (t->Format >> 8) & 0xFF;
+    ULONG w, h, pitch = 0;
+    if (t->Size) {
+        w = (t->Size & 0xFFF) + 1;
+        h = ((t->Size >> 12) & 0xFFF) + 1;
+        pitch = ((t->Size >> 24) + 1) * 64;
+    } else {
+        w = 1u << ((t->Format >> 20) & 0xF);
+        h = 1u << ((t->Format >> 24) & 0xF);
+    }
+    const uint8_t *src = (const uint8_t *)(t->res.Data | CONTIG_BASE);
+
+    GLuint id;
+    glGenTextures(1, &id);
+    glBindTexture(GL_TEXTURE_2D, id);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+    struct { ULONG fmt; int bpp; bool swizzled; GLenum gl_fmt, gl_type; bool force_alpha; } table[] = {
+        { 0x06, 4, true,  GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, false },   /* A8R8G8B8 */
+        { 0x07, 4, true,  GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, true },    /* X8R8G8B8 */
+        { 0x12, 4, false, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, false },   /* LIN_A8R8G8B8 */
+        { 0x1E, 4, false, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, true },    /* LIN_X8R8G8B8 */
+        { 0x05, 2, true,  GL_RGB,  GL_UNSIGNED_SHORT_5_6_5, false },       /* R5G6B5 */
+        { 0x11, 2, false, GL_RGB,  GL_UNSIGNED_SHORT_5_6_5, false },       /* LIN_R5G6B5 */
+        { 0x02, 2, true,  GL_BGRA, GL_UNSIGNED_SHORT_1_5_5_5_REV, false }, /* A1R5G5B5 */
+        { 0x03, 2, true,  GL_BGRA, GL_UNSIGNED_SHORT_1_5_5_5_REV, true },  /* X1R5G5B5 */
+        { 0x10, 2, false, GL_BGRA, GL_UNSIGNED_SHORT_1_5_5_5_REV, false }, /* LIN_A1R5G5B5 */
+        { 0x04, 2, true,  GL_BGRA, GL_UNSIGNED_SHORT_4_4_4_4_REV, false }, /* A4R4G4B4 */
+        { 0x1D, 2, false, GL_BGRA, GL_UNSIGNED_SHORT_4_4_4_4_REV, false }, /* LIN_A4R4G4B4 */
+        { 0x00, 1, true,  GL_LUMINANCE, GL_UNSIGNED_BYTE, false },         /* L8 */
+        { 0x13, 1, false, GL_LUMINANCE, GL_UNSIGNED_BYTE, false },         /* LIN_L8 */
+        { 0x19, 1, true,  GL_ALPHA, GL_UNSIGNED_BYTE, false },             /* A8 */
+        { 0x1F, 1, false, GL_ALPHA, GL_UNSIGNED_BYTE, false },             /* LIN_A8 */
+    };
+
+    if (fmt == 0x0C || fmt == 0x0E || fmt == 0x0F) {
+        /* DXT1/3/5 are stored linearly in 4x4 blocks, like on the PC. */
+        static const GLenum dxt[] = { 0x83F1, 0x83F2, 0x83F3 };  /* GL_COMPRESSED_RGBA_S3TC_DXT{1,3,5}_EXT */
+        GLenum internal = dxt[fmt == 0x0C ? 0 : fmt == 0x0E ? 1 : 2];
+        ULONG block = fmt == 0x0C ? 8 : 16;
+        ULONG bytes = ((w + 3) / 4) * ((h + 3) / 4) * block;
+        glCompressedTexImage2D(GL_TEXTURE_2D, 0, internal, w, h, 0, bytes, src);
+    } else {
+        unsigned i = 0;
+        while (i < sizeof(table) / sizeof(table[0]) && table[i].fmt != fmt) i++;
+        if (i == sizeof(table) / sizeof(table[0])) {
+            xlog("D3D: texture format %#x is not supported yet", fmt);
+            uint32_t magenta = 0xFFFF00FF;
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_BGRA, GL_UNSIGNED_BYTE, &magenta);
+        } else {
+            int bpp = table[i].bpp;
+            uint8_t *px = malloc(w * h * bpp);
+            if (table[i].swizzled) {
+                unswizzle(src, px, w, h, bpp);
+            } else {
+                if (!pitch) pitch = w * bpp;
+                for (ULONG y = 0; y < h; y++) memcpy(px + y * w * bpp, src + y * pitch, w * bpp);
+            }
+            if (table[i].force_alpha && bpp == 4)
+                for (ULONG k = 0; k < w * h; k++) px[k * 4 + 3] = 0xFF;
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+            glTexImage2D(GL_TEXTURE_2D, 0, table[i].force_alpha ? GL_RGB : GL_RGBA, w, h, 0,
+                         table[i].gl_fmt, table[i].gl_type, px);
+            free(px);
+        }
+    }
+    TRACE("D3D: uploaded %ux%u texture format %#x", w, h, fmt);
+
+    tex_entry *e = malloc(sizeof(*e));
+    *e = (tex_entry){ t->res.Data, t->Format, t->Size, id, tex_cache };
+    tex_cache = e;
+    return id;
+}
+
+static void NTAPI D3DDevice_SetTexture(ULONG Stage, D3DResource *t)
+{
+    if (Stage < 4) d3d.textures[Stage] = t;
+}
+
+static void NTAPI D3DDevice_SetTextureStageStateNotInline(ULONG Stage, ULONG Type, ULONG Value)
+{
+    if (Stage < 4 && Type < 32) TSS(Stage, Type) = Value;
+}
+
+static void NTAPI SetTextureState_TexCoordIndex(ULONG Stage, ULONG Value) { TSS(Stage, D3DTSS_TEXCOORDINDEX) = Value; }
+static void NTAPI SetTextureState_BorderColor(ULONG Stage, ULONG Value) { TSS(Stage, D3DTSS_BORDERCOLOR) = Value; }
+static void NTAPI SetTextureState_ColorKeyColor(ULONG Stage, ULONG Value) { TSS(Stage, D3DTSS_COLORKEYCOLOR) = Value; }
+static void NTAPI SetTextureState_BumpEnv(ULONG Stage, ULONG Type, ULONG Value) { TSS(Stage, Type) = Value; }
+static LONG NTAPI SetTextureState_ParameterCheck(ULONG Stage, ULONG Type, ULONG Value)
+{
+    (void)Stage; (void)Type; (void)Value;
+    return D3D_OK;
+}
+
+static GLenum combine_source(ULONG arg)
+{
+    switch (arg & 0xF) {
+    case 0: return GL_PRIMARY_COLOR;   /* D3DTA_DIFFUSE */
+    case 1: return GL_PREVIOUS;        /* D3DTA_CURRENT */
+    case 2: return GL_TEXTURE;         /* D3DTA_TEXTURE */
+    case 3: return GL_CONSTANT;        /* D3DTA_TFACTOR */
+    default: return GL_PREVIOUS;
+    }
+}
+
+/* Map one D3D texture op onto GL_COMBINE for either RGB or alpha. */
+static void combine(bool alpha, ULONG op, ULONG arg1, ULONG arg2)
+{
+    GLenum mode_p = alpha ? GL_COMBINE_ALPHA : GL_COMBINE_RGB;
+    GLenum src0 = alpha ? GL_SOURCE0_ALPHA : GL_SOURCE0_RGB, src1 = alpha ? GL_SOURCE1_ALPHA : GL_SOURCE1_RGB;
+    GLenum scale = alpha ? GL_ALPHA_SCALE : GL_RGB_SCALE;
+    GLenum mode = GL_MODULATE;
+    float s = 1;
+    switch (op) {
+    case 1: mode = GL_REPLACE; arg1 = 1; break;   /* DISABLE: pass the current color */
+    case 2: mode = GL_REPLACE; break;
+    case 3: mode = GL_REPLACE; arg1 = arg2; break;
+    case 4: mode = GL_MODULATE; break;
+    case 5: mode = GL_MODULATE; s = 2; break;
+    case 6: mode = GL_MODULATE; s = 4; break;
+    case 7: mode = GL_ADD; break;
+    case 8: mode = GL_ADD_SIGNED; break;
+    case 9: mode = GL_ADD_SIGNED; s = 2; break;
+    case 10: mode = GL_SUBTRACT; break;
+    default:
+        mode = GL_MODULATE;
+    }
+    glTexEnvi(GL_TEXTURE_ENV, mode_p, mode);
+    glTexEnvi(GL_TEXTURE_ENV, src0, combine_source(arg1));
+    glTexEnvi(GL_TEXTURE_ENV, src1, combine_source(arg2));
+    glTexEnvf(GL_TEXTURE_ENV, scale, s);
+}
+
+static GLenum gl_wrap(ULONG mode)
+{
+    switch (mode) {
+    case 2: return GL_MIRRORED_REPEAT;
+    case 3: case 5: return GL_CLAMP_TO_EDGE;
+    case 4: return GL_CLAMP_TO_BORDER;
+    default: return GL_REPEAT;
+    }
+}
+
+/* Only stage 0 for now; later stages fall back to pass-through. */
+static bool apply_textures(void)
+{
+    D3DPixelContainer *t = (D3DPixelContainer *)d3d.textures[0];
+    if (!t || TSS(0, D3DTSS_COLOROP) == 1) {
+        glDisable(GL_TEXTURE_2D);
+        return false;
+    }
+    glEnable(GL_TEXTURE_2D);
+    glBindTexture(GL_TEXTURE_2D, texture_for(t));
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, gl_wrap(TSS(0, D3DTSS_ADDRESSU)));
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, gl_wrap(TSS(0, D3DTSS_ADDRESSV)));
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_COMBINE);
+    float tf[4];
+    color4(tf, RS(D3DRS_TEXTUREFACTOR));
+    glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, tf);
+    combine(false, TSS(0, D3DTSS_COLOROP), TSS(0, D3DTSS_COLORARG1), TSS(0, D3DTSS_COLORARG2));
+    ULONG aop = TSS(0, D3DTSS_ALPHAOP);
+    combine(true, aop, TSS(0, D3DTSS_ALPHAARG1), TSS(0, D3DTSS_ALPHAARG2));
+    return true;
 }
 
 /* ---- state setters ----------------------------------------------------- */
@@ -630,7 +888,14 @@ static void draw(ULONG PrimitiveType, const UCHAR *base, ULONG stride, ULONG fir
         glDisable(GL_COLOR_MATERIAL);
         glColor4f(1, 1, 1, 1);
     }
-    glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+    ULONG tci = TSS(0, D3DTSS_TEXCOORDINDEX) & 0xFFFF;
+    if (apply_textures() && tci < (ULONG)l.ntex) {
+        glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+        glTexCoordPointer(l.tex_size[tci], GL_FLOAT, stride, base + l.tex_off[tci]);
+    } else {
+        glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+        glTexCoord2f(0, 0);
+    }
 
     if (indices)
         glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, indices + first);
@@ -685,6 +950,16 @@ static const struct hle_func funcs[] = {
     F("_D3DResource_Release@4", D3DResource_Release),
     F("_D3DResource_GetType@4", D3DResource_GetType),
     F("_D3DDevice_SetStreamSource@12", D3DDevice_SetStreamSource),
+    F("_D3D_AllocContiguousMemory@8", D3D_AllocContiguousMemory),
+    F("_D3D_FreeContiguousMemory@4", D3D_FreeContiguousMemory),
+    F("_D3DResource_Register@8", D3DResource_Register),
+    F("_D3DDevice_SetTexture@8", D3DDevice_SetTexture),
+    F("_D3DDevice_SetTextureStageStateNotInline@12", D3DDevice_SetTextureStageStateNotInline),
+    F("_D3DDevice_SetTextureState_TexCoordIndex@8", SetTextureState_TexCoordIndex),
+    F("_D3DDevice_SetTextureState_BorderColor@8", SetTextureState_BorderColor),
+    F("_D3DDevice_SetTextureState_ColorKeyColor@8", SetTextureState_ColorKeyColor),
+    F("_D3DDevice_SetTextureState_BumpEnv@12", SetTextureState_BumpEnv),
+    F("_D3DDevice_SetTextureState_ParameterCheck@12", SetTextureState_ParameterCheck),
     F("_D3DDevice_SetVertexShader@4", D3DDevice_SetVertexShader),
     F("_D3DDevice_SetTransform@8", D3DDevice_SetTransform),
     F("_D3DDevice_SetViewport@4", D3DDevice_SetViewport),
