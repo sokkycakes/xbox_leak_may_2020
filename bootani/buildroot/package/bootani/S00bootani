@@ -6,6 +6,7 @@
 
 DAEMON="bootani"
 PIDFILE="/var/run/$DAEMON.pid"
+LOGFILE="/var/log/$DAEMON.log"
 BOOTANI_ARGS="--kms"
 
 # shellcheck source=/dev/null
@@ -13,9 +14,9 @@ BOOTANI_ARGS="--kms"
 
 start() {
 	printf 'Starting %s: ' "$DAEMON"
-	# shellcheck disable=SC2086 # BOOTANI_ARGS holds several words
-	start-stop-daemon -S -q -b -m -p "$PIDFILE" -x "/usr/bin/$DAEMON" \
-		-- $BOOTANI_ARGS
+	# Through a shell so its messages land in $LOGFILE; exec keeps the pid.
+	start-stop-daemon -S -q -b -m -p "$PIDFILE" -x /bin/sh \
+		-- -c "exec /usr/bin/$DAEMON $BOOTANI_ARGS >$LOGFILE 2>&1"
 	status=$?
 	if [ "$status" -eq 0 ]; then
 		echo "OK"

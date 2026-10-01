@@ -27,13 +27,15 @@ Outputs in `output/images/`:
 
 Write the image to a USB stick with `dd if=output/images/bootani-usb.img of=/dev/sdX bs=4M`.
 
-Tested against Buildroot master from 2026-09-29.
+Built and boot-tested (UEFI, in QEMU) with Buildroot master from 2026-09-29. A
+first build compiles LLVM twice (host and target) and needs about 25 GB of disk.
+bootani's messages go to `/var/log/bootani.log` on the target.
 
 ## Configurations
 
 | Defconfig | Machine | GPU driver |
 | --- | --- | --- |
-| `sion_bootani_defconfig` | Acer Chromebox CXI3 ("sion", Kaby Lake) | i915 + Mesa iris |
+| `sion_bootani_defconfig` | Acer Chromebox CXI3 ("sion", Kaby Lake) | i915 + Mesa iris (softpipe as a slow fallback) |
 | `qemu_x86_64_bootani_defconfig` | QEMU, for testing | virtio-gpu + Mesa softpipe |
 
 The Sion build needs LLVM for Mesa's iris driver, so the first build takes a

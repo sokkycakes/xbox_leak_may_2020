@@ -25,6 +25,7 @@ endef
 ifeq ($(BR2_PACKAGE_BOOTANI_START_AT_BOOT),y)
 define BOOTANI_INSTALL_INIT_SYSV
 	$(INSTALL) -D -m 0755 $(BOOTANI_PKGDIR)/S00bootani $(TARGET_DIR)/etc/init.d/S00bootani
+	mkdir -p $(TARGET_DIR)/etc/default
 	echo 'BOOTANI_ARGS="$(call qstrip,$(BR2_PACKAGE_BOOTANI_ARGS))"' > $(TARGET_DIR)/etc/default/bootani
 endef
 endif

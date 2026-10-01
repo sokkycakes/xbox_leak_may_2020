@@ -1,4 +1,6 @@
 # Acer Chromebox CXI3 ("sion"): Kaby Lake, Intel UHD 620 through Mesa iris.
+# softpipe is a CPU fallback: it lets the same image show the animation (slowly)
+# in QEMU or if iris fails.
 BR2_x86_64=y
 BR2_TOOLCHAIN_EXTERNAL=y
 BR2_TOOLCHAIN_EXTERNAL_BOOTLIN=y
@@ -29,3 +31,4 @@ BR2_PACKAGE_LINUX_FIRMWARE=y
 BR2_PACKAGE_LINUX_FIRMWARE_I915=y
 BR2_PACKAGE_MESA3D_LLVM=y
 BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_IRIS=y
+BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_SOFTPIPE=y

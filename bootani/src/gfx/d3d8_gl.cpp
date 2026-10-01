@@ -380,7 +380,15 @@ static SurfaceImpl* MakeRenderbuffer(GLenum internal, UINT w, UINT h, int sample
 {
     SurfaceImpl* impl = new SurfaceImpl;
     impl->depth = (internal == GL_DEPTH24_STENCIL8 || internal == GL_DEPTH_COMPONENT16);
-    impl->samples = samples;
+    // Not every driver does multisampling (Mesa's softpipe has none); asking
+    // for more samples than GL_MAX_SAMPLES leaves the framebuffer incomplete.
+    static GLint max_samples = -1;
+    if (max_samples < 0) {
+        max_samples = 0;
+        glGetIntegerv(GL_MAX_SAMPLES, &max_samples);
+    }
+    if (samples > max_samples) samples = max_samples;
+    impl->samples = samples > 1 ? samples : 1;
     glGenRenderbuffers(1, &impl->rb);
     glBindRenderbuffer(GL_RENDERBUFFER, impl->rb);
     if (samples > 1) {
