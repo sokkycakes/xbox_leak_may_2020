@@ -6,6 +6,11 @@ struct hle_func {
     void *impl;
 };
 
+/* Each replaced library provides a NULL-terminated table. */
+extern const struct hle_func d3d8_funcs[];
+extern const struct hle_func xinput_funcs[];
+extern const struct hle_func dsound_funcs[];
+
 const struct hle_func *hle_find(const char *name);
 ULONG hle_lookup(const char *name);
 ULONG hle_lookup_prefix(const char *prefix);

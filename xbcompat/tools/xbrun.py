@@ -3,8 +3,9 @@
 
 Accepts an XBE or an Xbox PE (obj/i386/*.exe from the XDK build).  PE files
 are converted with pe2xbe.py into a scratch directory next to the media they
-need.  The library map that tells the loader where D3D8 lives in the image is
-generated with findsigs.py from the leak's own libraries and cached.
+need.  The library map that tells the loader where the replaced libraries (D3D8,
+XAPILIB's input functions, DSOUND) live in the image is generated with
+findsigs.py from the leak's own libraries and cached.
 """
 import argparse
 import hashlib
@@ -31,32 +32,39 @@ def library_versions(xbe):
     return [l.split()[1] for l in out.splitlines() if l.strip().startswith("lib ")]
 
 
-def signatures(debug):
+# XDK library name as recorded in the XBE's library version table -> .lib file.
+REPLACED_LIBS = {"D3D8": "d3d8", "D3D8D": "d3d8d", "XAPILIB": "xapilib", "XAPILIBD": "xapilibd",
+                 "DSOUND": "dsound", "DSOUNDD": "dsoundd"}
+
+
+def signatures(libs):
+    """One signature file for the given set of .lib names (sorted, joined by +)."""
     os.makedirs(CACHE, exist_ok=True)
-    name = "d3d8d" if debug else "d3d8"
-    path = os.path.join(CACHE, name + ".json")
+    libs = sorted(libs)
+    path = os.path.join(CACHE, "+".join(libs) + ".json")
     if not os.path.exists(path):
-        run(sys.executable, os.path.join(HERE, "mksigs.py"), os.path.join(LIBS, name + ".lib"), "-o", path)
+        run(sys.executable, os.path.join(HERE, "mksigs.py"), *[os.path.join(LIBS, l + ".lib") for l in libs],
+            "-o", path)
     return path
 
 
 def make_map(xbe):
+    libs = [REPLACED_LIBS[l] for l in library_versions(xbe) if l in REPLACED_LIBS]
+    if not libs:
+        return None
     digest = hashlib.sha1(open(xbe, "rb").read()).hexdigest()[:16]
-    path = os.path.join(CACHE, digest + ".map")
+    path = os.path.join(CACHE, digest + "-" + "+".join(sorted(libs)) + ".map")
     if os.path.exists(path):
         return path
-    libs = library_versions(xbe)
-    debug = "D3D8D" in libs
-    if "D3D8" not in libs and not debug:
-        return None
-    res = subprocess.run([sys.executable, os.path.join(HERE, "findsigs.py"), signatures(debug), xbe, "--json"],
+    res = subprocess.run([sys.executable, os.path.join(HERE, "findsigs.py"), signatures(libs), xbe, "--json"],
                          check=True, capture_output=True, text=True).stdout
     d = json.loads(res)
     with open(path, "w") as f:
+        # "name va" for functions, "name va data" for variables (never patched).
         for section in ("unique", "code_refs", "data_symbols"):
             for name, v in d.get(section, {}).items():
                 va = v["va"] if isinstance(v, dict) else v
-                f.write(f"{name} {va}\n")
+                f.write(f"{name} {va}{' data' if section == 'data_symbols' else ''}\n")
     return path
 
 
@@ -87,7 +95,7 @@ def main():
     else:
         xbe = image
 
-    cmd = [os.path.join(ROOT, "build", "xbcompat")]
+    cmd = [os.environ.get("XBCOMPAT_BIN", os.path.join(ROOT, "build", "xbcompat"))]
     m = make_map(xbe)
     if m:
         cmd += ["--hle", m]

@@ -18,10 +18,41 @@ int g_screenshot_frame = 60;
 const char *g_screenshot_path;
 int g_exit_after_frames;
 
+/* int 2Dh is the kernel debugger service (DebugService in the NT CRT):
+   eax = service, ecx/edx = arguments, followed by an int 3 that the kernel
+   skips when it handles the request.  xapilib's OutputDebugString uses it. */
+static bool debug_service(greg_t *r)
+{
+    const uint8_t *ip = (const uint8_t *)r[REG_EIP];
+    if (ip[0] != 0xCD || ip[1] != 0x2D) return false;
+    ULONG service = r[REG_EAX];
+    if (service == 1 /* BREAKPOINT_PRINT */) {
+        const ANSI_STRING *s = (const ANSI_STRING *)r[REG_ECX];
+        if (s && s->Buffer) {
+            int n = s->Length;
+            while (n && (s->Buffer[n - 1] == '\n' || s->Buffer[n - 1] == '\r')) n--;
+            xlog("[guest] %.*s", n, s->Buffer);
+        }
+    } else if (service == 2 /* BREAKPOINT_PROMPT */) {
+        r[REG_EAX] = 0;   /* no characters read */
+    } else {
+        TRACE("debug service %u ignored", service);
+    }
+    r[REG_EIP] += 2;
+    if (*(const uint8_t *)r[REG_EIP] == 0xCC) r[REG_EIP] += 1;
+    return true;
+}
+
 static void crash_handler(int sig, siginfo_t *si, void *uc_)
 {
     ucontext_t *uc = uc_;
     greg_t *r = uc->uc_mcontext.gregs;
+    if (sig == SIGSEGV && debug_service(r)) return;
+    if (sig == SIGTRAP) {
+        /* int 3 (DbgBreakPoint and friends): nobody is listening, carry on. */
+        xlog("breakpoint at eip=%08x ignored", r[REG_EIP]);
+        return;
+    }
     xlog("fatal signal %d (%s) at eip=%08x accessing %p", sig, strsignal(sig), r[REG_EIP], si->si_addr);
     xlog("  eax=%08x ebx=%08x ecx=%08x edx=%08x esi=%08x edi=%08x ebp=%08x esp=%08x",
          r[REG_EAX], r[REG_EBX], r[REG_ECX], r[REG_EDX], r[REG_ESI], r[REG_EDI], r[REG_EBP], r[REG_ESP]);
@@ -98,6 +129,7 @@ int main(int argc, char **argv)
     sigaction(SIGILL, &sa, NULL);
     sigaction(SIGFPE, &sa, NULL);
     sigaction(SIGBUS, &sa, NULL);
+    sigaction(SIGTRAP, &sa, NULL);
 
     mem_init();
     thread_init_main();

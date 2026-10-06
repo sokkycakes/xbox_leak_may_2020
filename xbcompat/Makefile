@@ -11,16 +11,17 @@ LDLIBS  += $(shell $(PKGCFG) --libs sdl2 gl) -lpthread -lm
 LEAK    ?= ../xbox_leak_may_2020/xbox trunk/xbox
 KERNSRC  = src/kernel/ke.c src/kernel/ob.c src/kernel/io.c src/kernel/rtl.c src/kernel/misc.c \
            src/kernel/kernel.c src/kernel/exports.gen.c
-HLESRC   = src/hle/hle.c src/hle/d3d8.c
+HLESRC   = src/hle/hle.c src/hle/d3d8.c src/hle/xinput.c src/hle/dsound.c
 SRC      = src/main.c src/log.c src/loader.c src/memory.c src/thread.c $(KERNSRC) $(HLESRC)
-OBJ      = $(SRC:%.c=build/%.o)
+BUILD   ?= build
+OBJ      = $(SRC:%.c=$(BUILD)/%.o)
 
-all: build/xbcompat
+all: $(BUILD)/xbcompat
 
-build/xbcompat: $(OBJ)
+$(BUILD)/xbcompat: $(OBJ)
 	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
-build/%.o: %.c src/xbcompat.h src/xbox.h
+$(BUILD)/%.o: %.c src/xbcompat.h src/xbox.h src/hle/hle.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
@@ -28,6 +29,6 @@ src/kernel/exports.gen.c: tools/gen_exports.py
 	python3 tools/gen_exports.py "$(LEAK)/private/ntos/init/ntoskrnl.src" $@
 
 clean:
-	rm -rf build
+	rm -rf $(BUILD)
 
 .PHONY: all clean

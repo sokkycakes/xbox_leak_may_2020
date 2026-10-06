@@ -15,7 +15,7 @@
 #include "../xbcompat.h"
 #include "hle.h"
 
-typedef struct { char *name; ULONG va; } sym;
+typedef struct { char *name; ULONG va; bool data; } sym;
 static sym *syms;
 static size_t nsyms;
 
@@ -39,17 +39,19 @@ static void load_map(const char *path)
 {
     FILE *f = fopen(path, "r");
     if (!f) fatal("cannot open HLE map %s", path);
-    char line[1024], name[1000];
+    char line[1024], name[1000], kind[16];
     unsigned va;
     size_t cap = 0;
     while (fgets(line, sizeof(line), f)) {
-        if (sscanf(line, "%999s %x", name, &va) != 2) continue;
+        kind[0] = 0;
+        if (sscanf(line, "%999s %x %15s", name, &va, kind) < 2) continue;
         if (nsyms == cap) {
             cap = cap ? cap * 2 : 1024;
             syms = realloc(syms, cap * sizeof(*syms));
         }
         syms[nsyms].name = strdup(name);
         syms[nsyms].va = va;
+        syms[nsyms].data = !strcmp(kind, "data");
         nsyms++;
     }
     fclose(f);
@@ -93,13 +95,28 @@ static void write_jmp(ULONG at, void *target)
     memcpy(p + 1, &rel, 4);
 }
 
+const struct hle_func *hle_find(const char *name)
+{
+    static const struct hle_func *const tables[] = { d3d8_funcs, xinput_funcs, dsound_funcs };
+    for (unsigned t = 0; t < sizeof(tables) / sizeof(tables[0]); t++)
+        for (const struct hle_func *f = tables[t]; f->name; f++)
+            if (!strcmp(f->name, name)) return f;
+    return NULL;
+}
+
 static bool replaced_library_api(const char *name)
 {
-    static const char *prefixes[] = { "_D3DDevice_", "@D3DDevice_", "_D3DResource_", "_D3DVertexBuffer_",
-                                      "_D3DIndexBuffer_", "_D3DTexture_", "_D3DSurface_",
-                                      "_D3DBaseTexture_", "_D3DCubeTexture_", "_D3DVolumeTexture_",
-                                      "_D3DPalette_", "_D3DPushBuffer_", "_Direct3D", "_D3D_",
-                                      "_D3DPERF_", "_XMETAL_", "_D3DRDI_", "_PerfGet" };
+    static const char *prefixes[] = {
+        /* d3d8 */
+        "_D3DDevice_", "@D3DDevice_", "_D3DResource_", "_D3DVertexBuffer_", "_D3DIndexBuffer_",
+        "_D3DTexture_", "_D3DSurface_", "_D3DBaseTexture_", "_D3DCubeTexture_", "_D3DVolumeTexture_",
+        "_D3DPalette_", "_D3DPushBuffer_", "_D3DFixup_", "_Direct3D", "_D3D_", "_D3DPERF_", "_XMETAL_",
+        "_D3DRDI_", "_PerfGet",
+        /* xapilib: the input device API sits on a USB stack we do not run */
+        "_XInitDevices@", "_XGetDevices@", "_XGetDeviceChanges@", "_XInput",
+        /* dsound */
+        "_DirectSound", "_IDirectSound", "_XAudio", "_XWaveFile", "_XFileMediaObject", "_XMediaObject",
+    };
     for (unsigned i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); i++)
         if (!strncmp(name, prefixes[i], strlen(prefixes[i]))) return true;
     return false;
@@ -115,7 +132,7 @@ void hle_patch(xbe_image *img, const char *mapfile)
     load_map(mapfile);
     unsigned replaced = 0, trapped = 0;
     for (size_t i = 0; i < nsyms; i++) {
-        if (!replaced_library_api(syms[i].name)) continue;
+        if (syms[i].data || !replaced_library_api(syms[i].name)) continue;
         const struct hle_func *h = hle_find(syms[i].name);
         if (h) {
             write_jmp(syms[i].va, h->impl);

@@ -35,6 +35,14 @@ typedef struct {
     DWORD Lock;
 } D3DResource;
 
+typedef struct D3DPixelContainer {
+    D3DResource res;
+    ULONG Format;
+    ULONG Size;
+} D3DPixelContainer;
+
+static void tex_invalidate(ULONG data);
+
 typedef struct {
     ULONG BackBufferWidth;
     ULONG BackBufferHeight;
@@ -60,6 +68,11 @@ typedef struct { LONG x1, y1, x2, y2; } D3DRECT;
 #define D3DCOMMON_REFCOUNT_MASK     0x0000FFFF
 #define D3DCOMMON_TYPE_VERTEXBUFFER 0x00000000
 #define D3DCOMMON_TYPE_INDEXBUFFER  0x00010000
+#define D3DCOMMON_TYPE_PUSHBUFFER   0x00020000
+#define D3DCOMMON_TYPE_PALETTE      0x00030000
+#define D3DCOMMON_TYPE_TEXTURE      0x00040000
+#define D3DCOMMON_TYPE_SURFACE      0x00050000
+#define D3DCOMMON_TYPE_FIXUP        0x00060000
 #define D3DCOMMON_TYPE_MASK         0x00070000
 #define D3DCOMMON_D3DCREATED        0x01000000
 
@@ -108,7 +121,32 @@ static struct {
              ULONG type; float range, attenuation[3]; bool enabled; } lights[8];
     float material[4][4];        /* diffuse, ambient, specular, emissive */
     float material_power;
+
+    struct D3DSurface *backbuffer, *depth;        /* the device's own surfaces */
+    struct D3DSurface *target, *target_depth;     /* current render target */
+    int rt_width, rt_height;     /* size of the current render target */
+    bool rt_texture;             /* rendering into a texture (GL rows run bottom-up) */
+    ULONG fbo;                   /* framebuffer object for texture targets */
+    struct { ULONG count; ULONG exclusive; D3DRECT rects[8]; } scissors;
+    float screen_offset[2];
+    float backbuffer_scale[2];
+    ULONG constant_mode;
+    float vs_const[192][4];      /* vertex shader constants, hardware numbering */
+    float ps_const[16][4];
+    ULONG pixel_shader;
+    PVOID vblank_callback;
+    struct { PVOID fn; ULONG ctx; } callbacks[64];
+    unsigned ncallbacks;
+    struct D3DPalette *palettes[4];
 } d3d;
+
+/* An Xbox surface: a pixel container plus the texture it belongs to. */
+typedef struct D3DSurface {
+    DWORD Common, Data, Lock, Format, Size;
+    struct D3DPixelContainer *Parent;
+} D3DSurface;
+
+typedef struct D3DPalette { DWORD Common, Data, Lock; } D3DPalette;
 
 extern int g_screenshot_frame;
 extern const char *g_screenshot_path;
@@ -125,6 +163,10 @@ enum {
 };
 
 /* ---- device ------------------------------------------------------------ */
+
+static void load_fbo_functions(void);
+static void create_device_surfaces(ULONG format, ULONG depth_format);
+static void run_callbacks(void);
 
 static ULONG direct3d_object[4];
 
@@ -215,6 +257,10 @@ static LONG NTAPI Direct3D_CreateDevice(UINT_ Adapter, ULONG DeviceType, PVOID p
     default_render_states();
     d3d.material[0][0] = d3d.material[0][1] = d3d.material[0][2] = d3d.material[0][3] = 1;
 
+    load_fbo_functions();
+    create_device_surfaces(pp->BackBufferFormat, pp->EnableAutoDepthStencil ? pp->AutoDepthStencilFormat : 0);
+    d3d.backbuffer_scale[0] = d3d.backbuffer_scale[1] = 1;
+
     ULONG *dev = d3d.device;
     if (!dev) dev = d3d.device = pool_alloc(4096);
     if (d3d.device_ptr) *d3d.device_ptr = (ULONG)dev;
@@ -242,9 +288,14 @@ static ULONG NTAPI D3DDevice_Swap(ULONG Flags)
 {
     (void)Flags;
     d3d.frame++;
+    run_callbacks();
     if (g_screenshot_path && (int)d3d.frame == g_screenshot_frame)
         save_screenshot(g_screenshot_path);
     SDL_GL_SwapWindow(d3d.window);
+    if (d3d.vblank_callback) {
+        ULONG data[3] = { d3d.frame, d3d.frame, 1 /* D3DVBLANK_SWAPDONE */ };
+        ((void (CDECLAPI *)(ULONG *))d3d.vblank_callback)(data);
+    }
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
         if (e.type == SDL_QUIT) {
@@ -262,8 +313,19 @@ static ULONG NTAPI D3DDevice_Swap(ULONG Flags)
 static void apply_viewport(void)
 {
     D3DVIEWPORT8 *v = &d3d.viewport;
-    glViewport(v->X, d3d.height - (v->Y + v->Height), v->Width, v->Height);
+    /* GL rows run bottom-up: flip the window viewport; a texture target is
+       drawn upside down instead (see apply_render_states). */
+    if (d3d.rt_texture) glViewport(v->X, v->Y, v->Width, v->Height);
+    else glViewport(v->X, d3d.rt_height - (v->Y + v->Height), v->Width, v->Height);
     glDepthRange(v->MinZ, v->MaxZ);
+    if (d3d.scissors.count && !d3d.scissors.exclusive) {
+        const D3DRECT *r = &d3d.scissors.rects[0];
+        glEnable(GL_SCISSOR_TEST);
+        if (d3d.rt_texture) glScissor(r->x1, r->y1, r->x2 - r->x1, r->y2 - r->y1);
+        else glScissor(r->x1, d3d.rt_height - r->y2, r->x2 - r->x1, r->y2 - r->y1);
+    } else {
+        glDisable(GL_SCISSOR_TEST);
+    }
 }
 
 static void NTAPI D3DDevice_Clear(ULONG Count, const D3DRECT *pRects, ULONG Flags, ULONG Color, float Z,
@@ -282,7 +344,8 @@ static void NTAPI D3DDevice_Clear(ULONG Count, const D3DRECT *pRects, ULONG Flag
         glEnable(GL_SCISSOR_TEST);
         for (ULONG i = 0; i < Count; i++) {
             const D3DRECT *r = &pRects[i];
-            glScissor(r->x1, d3d.height - r->y2, r->x2 - r->x1, r->y2 - r->y1);
+            if (d3d.rt_texture) glScissor(r->x1, r->y1, r->x2 - r->x1, r->y2 - r->y1);
+            else glScissor(r->x1, d3d.rt_height - r->y2, r->x2 - r->x1, r->y2 - r->y1);
             glClear(mask);
         }
         glDisable(GL_SCISSOR_TEST);
@@ -334,8 +397,19 @@ static ULONG NTAPI D3DResource_Release(D3DResource *r)
     ULONG refs = --r->Common & D3DCOMMON_REFCOUNT_MASK;
     if (refs == 0 && (r->Common & D3DCOMMON_D3DCREATED)) {
         ULONG type = r->Common & D3DCOMMON_TYPE_MASK;
-        if (type == D3DCOMMON_TYPE_VERTEXBUFFER || type == D3DCOMMON_TYPE_INDEXBUFFER) {
+        if (type == D3DCOMMON_TYPE_VERTEXBUFFER || type == D3DCOMMON_TYPE_INDEXBUFFER ||
+            type == D3DCOMMON_TYPE_PALETTE) {
             MmFreeContiguousMemory(resource_data(r));
+            pool_free(r);
+        } else if (type == D3DCOMMON_TYPE_TEXTURE) {
+            tex_invalidate(r->Data);
+            MmFreeContiguousMemory(resource_data(r));
+            pool_free(r);
+        } else if (type == D3DCOMMON_TYPE_SURFACE) {
+            D3DSurface *s = (D3DSurface *)r;
+            if (s == d3d.backbuffer || s == d3d.depth) { r->Common++; return 1; }
+            if (s->Parent) D3DResource_Release(&s->Parent->res);
+            else MmFreeContiguousMemory(resource_data(r));
             pool_free(r);
         }
     }
@@ -375,11 +449,6 @@ static void NTAPI D3DResource_Register(D3DResource *r, PVOID base)
 
 /* ---- textures ---------------------------------------------------------- */
 
-typedef struct {
-    D3DResource res;
-    ULONG Format;
-    ULONG Size;
-} D3DPixelContainer;
 
 typedef struct tex_entry {
     ULONG data, format, size;
@@ -388,6 +457,22 @@ typedef struct tex_entry {
 } tex_entry;
 
 static tex_entry *tex_cache;
+
+/* Forget the GL copy of a texture the title is about to modify. */
+static void tex_invalidate(ULONG data)
+{
+    tex_entry **pp = &tex_cache;
+    while (*pp) {
+        tex_entry *e = *pp;
+        if (e->data == data) {
+            glDeleteTextures(1, &e->id);
+            *pp = e->next;
+            free(e);
+        } else {
+            pp = &e->next;
+        }
+    }
+}
 
 /* NV2A swizzled textures store texels in Morton order: the bits of x and y
    interleave (x first) until the smaller dimension runs out. */
@@ -695,7 +780,7 @@ static void NTAPI D3DDevice_SetMaterial(const float *m)
     d3d.material_power = m[16];
 }
 
-static void NTAPI D3DDevice_BlockUntilIdle(void) {}
+static void NTAPI D3DDevice_BlockUntilIdle(void) { run_callbacks(); }
 static void NTAPI D3DDevice_BlockUntilVerticalBlank(void) {}
 static BOOLEAN NTAPI D3DDevice_IsBusy(void) { return 0; }
 static void NTAPI D3DDevice_SetFlickerFilter(ULONG v) { (void)v; }
@@ -763,7 +848,7 @@ static void apply_render_states(bool pretransformed, bool has_normal)
     } else {
         glEnable(GL_CULL_FACE);
         glCullFace(GL_BACK);
-        glFrontFace(cull == 0x900 ? GL_CCW : GL_CW);
+        glFrontFace((cull == 0x900) != d3d.rt_texture ? GL_CCW : GL_CW);
     }
 
     bool lighting = !pretransformed && RS(D3DRS_LIGHTING) && has_normal;
@@ -810,7 +895,8 @@ static void apply_render_states(bool pretransformed, bool has_normal)
         /* Screen-space vertices: map pixels (y down) and D3D's [0,1] z. */
         glMatrixMode(GL_PROJECTION);
         glLoadIdentity();
-        glOrtho(0, d3d.viewport.Width, d3d.viewport.Height, 0, 0, -1);
+        if (d3d.rt_texture) glOrtho(0, d3d.viewport.Width, 0, d3d.viewport.Height, 0, -1);
+        else glOrtho(0, d3d.viewport.Width, d3d.viewport.Height, 0, 0, -1);
         glMatrixMode(GL_MODELVIEW);
         glLoadIdentity();
         glTranslatef(-(float)d3d.viewport.X, -(float)d3d.viewport.Y, 0);
@@ -820,6 +906,7 @@ static void apply_render_states(bool pretransformed, bool has_normal)
         static const D3DMATRIX zfix = { { { 1, 0, 0, 0 }, { 0, 1, 0, 0 }, { 0, 0, 2, 0 }, { 0, 0, -1, 1 } } };
         D3DMATRIX proj, modelview;
         mat_mul(&proj, &d3d.transforms[1], &zfix);
+        if (d3d.rt_texture) for (int i = 0; i < 4; i++) proj.m[i][1] = -proj.m[i][1];
         mat_mul(&modelview, &d3d.transforms[6], &d3d.transforms[0]);
         glMatrixMode(GL_PROJECTION);
         glLoadMatrixf(&proj.m[0][0]);
@@ -936,10 +1023,796 @@ static void NTAPI D3DDevice_SetIndices(D3DResource *ib, UINT_ BaseVertexIndex)
     d3d.base_vertex_index = BaseVertexIndex;
 }
 
+/* ---- formats and surfaces -------------------------------------------- */
+
+
+#ifndef GL_FRAMEBUFFER
+#define GL_FRAMEBUFFER 0x8D40
+#define GL_RENDERBUFFER 0x8D41
+#define GL_COLOR_ATTACHMENT0 0x8CE0
+#define GL_DEPTH_STENCIL_ATTACHMENT 0x821A
+#define GL_DEPTH24_STENCIL8 0x88F0
+#define GL_FRAMEBUFFER_COMPLETE 0x8CD5
+#endif
+
+/* Framebuffer objects are GL 3.0 / ARB_framebuffer_object: fetch them. */
+static void (APIENTRY *p_glGenFramebuffers)(GLsizei, GLuint *);
+static void (APIENTRY *p_glBindFramebuffer)(GLenum, GLuint);
+static void (APIENTRY *p_glFramebufferTexture2D)(GLenum, GLenum, GLenum, GLuint, GLint);
+static void (APIENTRY *p_glFramebufferRenderbuffer)(GLenum, GLenum, GLenum, GLuint);
+static void (APIENTRY *p_glGenRenderbuffers)(GLsizei, GLuint *);
+static void (APIENTRY *p_glBindRenderbuffer)(GLenum, GLuint);
+static void (APIENTRY *p_glRenderbufferStorage)(GLenum, GLenum, GLsizei, GLsizei);
+static GLenum (APIENTRY *p_glCheckFramebufferStatus)(GLenum);
+
+static void load_fbo_functions(void)
+{
+#define LOAD(n) p_##n = SDL_GL_GetProcAddress(#n)
+    LOAD(glGenFramebuffers); LOAD(glBindFramebuffer); LOAD(glFramebufferTexture2D);
+    LOAD(glFramebufferRenderbuffer); LOAD(glGenRenderbuffers); LOAD(glBindRenderbuffer);
+    LOAD(glRenderbufferStorage); LOAD(glCheckFramebufferStatus);
+#undef LOAD
+}
+
+/* Bits per texel of an Xbox D3DFORMAT and whether it is stored linearly
+   (otherwise swizzled).  DXT formats report bits per texel too. */
+static int format_bits(ULONG fmt, bool *linear)
+{
+    *linear = false;
+    switch (fmt) {
+    case 0x00: case 0x01: case 0x0B: case 0x19: return 8;
+    case 0x13: case 0x1B: case 0x1F: *linear = true; return 8;
+    case 0x02: case 0x03: case 0x04: case 0x05: case 0x1A: case 0x27: case 0x28: case 0x29:
+    case 0x2C: case 0x2D: case 0x32: case 0x38: case 0x39: return 16;
+    case 0x10: case 0x11: case 0x16: case 0x17: case 0x1C: case 0x1D: case 0x20: case 0x24: case 0x25:
+    case 0x30: case 0x31: case 0x35: case 0x37: case 0x3D: case 0x3E: *linear = true; return 16;
+    case 0x06: case 0x07: case 0x2A: case 0x2B: case 0x33: case 0x3A: case 0x3B: case 0x3C: return 32;
+    case 0x12: case 0x1E: case 0x2E: case 0x2F: case 0x36: case 0x3F: case 0x40: case 0x41:
+        *linear = true; return 32;
+    case 0x0C: return 4;
+    case 0x0E: case 0x0F: return 8;
+    default: return 32;
+    }
+}
+
+static ULONG log2u(ULONG v)
+{
+    ULONG l = 0;
+    while ((1u << l) < v) l++;
+    return l;
+}
+
+/* Bytes of one mip level of a swizzled or compressed texture. */
+static ULONG level_bytes(ULONG fmt, ULONG w, ULONG h, ULONG d)
+{
+    bool linear;
+    int bits = format_bits(fmt, &linear);
+    if (fmt == 0x0C || fmt == 0x0E || fmt == 0x0F)
+        return ((w + 3) / 4) * ((h + 3) / 4) * (fmt == 0x0C ? 8 : 16) * d;
+    return w * h * d * bits / 8;
+}
+
+static void container_size(const D3DPixelContainer *t, ULONG *w, ULONG *h, ULONG *pitch)
+{
+    bool linear;
+    int bits = format_bits((t->Format >> 8) & 0xFF, &linear);
+    if (t->Size) {
+        *w = (t->Size & 0xFFF) + 1;
+        *h = ((t->Size >> 12) & 0xFFF) + 1;
+        *pitch = ((t->Size >> 24) + 1) * 64;
+    } else {
+        *w = 1u << ((t->Format >> 20) & 0xF);
+        *h = 1u << ((t->Format >> 24) & 0xF);
+        *pitch = *w * bits / 8;
+    }
+}
+
+/* Offset of mip level `level` from the start of the texture data. */
+static ULONG level_offset(const D3DPixelContainer *t, ULONG level)
+{
+    ULONG fmt = (t->Format >> 8) & 0xFF, w, h, pitch, off = 0;
+    container_size(t, &w, &h, &pitch);
+    ULONG d = 1u << ((t->Format >> 28) & 0xF);
+    for (ULONG i = 0; i < level; i++) {
+        off += level_bytes(fmt, w, h, d);
+        if (w > 1) w >>= 1;
+        if (h > 1) h >>= 1;
+        if (d > 1) d >>= 1;
+    }
+    return off;
+}
+
+static ULONG level_count(const D3DPixelContainer *t)
+{
+    ULONG n = (t->Format >> 16) & 0xF;
+    return n ? n : 1;
+}
+
+static D3DSurface *alloc_surface(ULONG format, ULONG size, ULONG data, D3DPixelContainer *parent)
+{
+    D3DSurface *s = pool_alloc(sizeof(*s));
+    memset(s, 0, sizeof(*s));
+    s->Common = 1 | D3DCOMMON_TYPE_SURFACE | D3DCOMMON_D3DCREATED;
+    s->Format = format;
+    s->Size = size;
+    s->Data = data;
+    s->Parent = parent;
+    if (parent) parent->res.Common++;
+    return s;
+}
+
+/* Format/Size words for a standalone linear surface of w x h. */
+static void linear_words(ULONG fmt, ULONG w, ULONG h, ULONG *format, ULONG *size, ULONG *bytes)
+{
+    bool linear;
+    int bits = format_bits(fmt, &linear);
+    ULONG pitch = (w * bits / 8 + 63) & ~63u;
+    *format = 1 | (2 << 4) | (fmt << 8) | (1 << 16);
+    *size = (w - 1) | ((h - 1) << 12) | ((pitch / 64 - 1) << 24);
+    *bytes = pitch * h;
+}
+
+/* The lib describes the back buffer with the linear variant of the format
+   the title asked for. */
+static ULONG linear_variant(ULONG fmt)
+{
+    switch (fmt) {
+    case 0x06: return 0x12;  /* A8R8G8B8 */
+    case 0x07: return 0x1E;  /* X8R8G8B8 */
+    case 0x05: return 0x11;  /* R5G6B5 */
+    case 0x03: return 0x1C;  /* X1R5G5B5 */
+    case 0x02: return 0x10;  /* A1R5G5B5 */
+    case 0x2A: return 0x2E;  /* D24S8 */
+    case 0x2B: return 0x2F;  /* F24S8 */
+    case 0x2C: return 0x30;  /* D16 */
+    case 0x2D: return 0x31;  /* F16 */
+    default: return fmt;
+    }
+}
+
+static D3DSurface *new_linear_surface(ULONG fmt, ULONG w, ULONG h)
+{
+    ULONG format, size, bytes;
+    linear_words(linear_variant(fmt), w, h, &format, &size, &bytes);
+    PVOID mem = MmAllocateContiguousMemoryEx(bytes, 0, 0x7FFFFFFF, 64, 4);
+    if (!mem) return NULL;
+    memset(mem, 0, bytes);
+    return alloc_surface(format, size, (ULONG)mem & 0x7FFFFFFF, NULL);
+}
+
+static void create_device_surfaces(ULONG format, ULONG depth_format)
+{
+    d3d.backbuffer = new_linear_surface(format, d3d.width, d3d.height);
+    d3d.depth = new_linear_surface(depth_format ? depth_format : 0x2A, d3d.width, d3d.height);
+    d3d.target = d3d.backbuffer;
+    d3d.target_depth = d3d.depth;
+    d3d.rt_width = d3d.width;
+    d3d.rt_height = d3d.height;
+    d3d.rt_texture = false;
+}
+
+static void NTAPI D3DDevice_GetBackBuffer(LONG BackBuffer, ULONG Type, D3DSurface **pp)
+{
+    (void)BackBuffer; (void)Type;
+    d3d.backbuffer->Common++;
+    *pp = d3d.backbuffer;
+}
+
+static LONG NTAPI D3DDevice_GetDepthStencilSurface(D3DSurface **pp)
+{
+    d3d.depth->Common++;
+    *pp = d3d.depth;
+    return D3D_OK;
+}
+
+static void NTAPI D3DDevice_GetRenderTarget(D3DSurface **pp)
+{
+    d3d.target->Common++;
+    *pp = d3d.target;
+}
+
+static GLuint texture_for(D3DPixelContainer *t);
+
+static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
+{
+    if (!target) target = d3d.target;
+    d3d.target = target;
+    d3d.target_depth = z;
+    if (!target->Parent) {
+        /* The back buffer (or a plain surface we cannot render into yet). */
+        if (target != d3d.backbuffer)
+            xlog("D3D: rendering into a standalone surface is not supported; using the back buffer");
+        if (p_glBindFramebuffer) p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        d3d.rt_width = d3d.width;
+        d3d.rt_height = d3d.height;
+        d3d.rt_texture = false;
+        return;
+    }
+    if (!p_glGenFramebuffers) {
+        xlog("D3D: no framebuffer objects, cannot render to texture");
+        return;
+    }
+    ULONG w, h, pitch;
+    container_size(target->Parent, &w, &h, &pitch);
+    if (!d3d.fbo) p_glGenFramebuffers(1, (GLuint *)&d3d.fbo);
+    p_glBindFramebuffer(GL_FRAMEBUFFER, d3d.fbo);
+    GLuint tex = texture_for(target->Parent);
+    p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+    /* A depth buffer always comes along: titles clear z without checking. */
+    static GLuint rb; static ULONG rb_w, rb_h;
+    if (!rb || rb_w != w || rb_h != h) {
+        if (!rb) p_glGenRenderbuffers(1, &rb);
+        p_glBindRenderbuffer(GL_RENDERBUFFER, rb);
+        p_glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h);
+        rb_w = w; rb_h = h;
+    }
+    p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, rb);
+    GLenum st = p_glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    if (st != GL_FRAMEBUFFER_COMPLETE) xlog("D3D: render target framebuffer incomplete (%#x)", st);
+    d3d.rt_width = w;
+    d3d.rt_height = h;
+    d3d.rt_texture = true;
+}
+
+static void NTAPI D3DSurface_GetDesc(D3DSurface *s, ULONG *desc)
+{
+    ULONG w, h, pitch;
+    container_size((D3DPixelContainer *)s, &w, &h, &pitch);
+    desc[0] = (s->Format >> 8) & 0xFF;       /* Format */
+    desc[1] = 1;                             /* D3DRTYPE_SURFACE */
+    desc[2] = 0;                             /* Usage */
+    desc[3] = pitch * h;                     /* Size */
+    desc[4] = 0;                             /* MultiSampleType */
+    desc[5] = w;
+    desc[6] = h;
+}
+
+static void tex_invalidate(ULONG data);
+
+static void NTAPI D3DSurface_LockRect(D3DSurface *s, ULONG *locked, const LONG *rect, ULONG flags)
+{
+    ULONG w, h, pitch;
+    container_size((D3DPixelContainer *)s, &w, &h, &pitch);
+    if (s == d3d.backbuffer) {
+        /* Hand out the real pixels: read the frame back. */
+        uint8_t *px = (uint8_t *)(s->Data | CONTIG_BASE);
+        uint8_t *tmp = malloc(w * h * 4);
+        glReadPixels(0, 0, w, h, GL_BGRA, GL_UNSIGNED_BYTE, tmp);
+        for (ULONG y = 0; y < h; y++) memcpy(px + y * pitch, tmp + (h - 1 - y) * w * 4, w * 4);
+        free(tmp);
+    }
+    if (s->Parent && !(flags & 0x80)) tex_invalidate(s->Parent->res.Data);
+    locked[0] = pitch;
+    locked[1] = (s->Data | CONTIG_BASE) + (rect ? rect[1] * pitch + rect[0] * (pitch / w) : 0);
+}
+
+static LONG NTAPI D3DDevice_CreateImageSurface(UINT_ w, UINT_ h, ULONG fmt, D3DSurface **pp)
+{
+    *pp = new_linear_surface(fmt, w, h);
+    return *pp ? D3D_OK : 0x8007000E;
+}
+
+static LONG NTAPI D3DDevice_CreateRenderTarget(UINT_ w, UINT_ h, ULONG fmt, ULONG ms, BOOLEAN lockable,
+                                               D3DSurface **pp)
+{
+    (void)ms; (void)lockable;
+    return D3DDevice_CreateImageSurface(w, h, fmt, pp);
+}
+
+static LONG NTAPI D3DDevice_CreateDepthStencilSurface(UINT_ w, UINT_ h, ULONG fmt, ULONG ms, D3DSurface **pp)
+{
+    (void)ms;
+    return D3DDevice_CreateImageSurface(w, h, fmt, pp);
+}
+
+static void NTAPI D3DDevice_CopyRects(D3DSurface *src, const LONG *rects, UINT_ n, D3DSurface *dst,
+                                      const LONG *points)
+{
+    ULONG sw, sh, sp, dw, dh, dp;
+    container_size((D3DPixelContainer *)src, &sw, &sh, &sp);
+    container_size((D3DPixelContainer *)dst, &dw, &dh, &dp);
+    bool lin;
+    int bytes = format_bits((src->Format >> 8) & 0xFF, &lin) / 8;
+    if (src == d3d.backbuffer) {
+        ULONG locked[2];
+        D3DSurface_LockRect(src, locked, NULL, 0x80);   /* refresh its pixels */
+    }
+    const uint8_t *s = (const uint8_t *)(src->Data | CONTIG_BASE);
+    uint8_t *d = (uint8_t *)(dst->Data | CONTIG_BASE);
+    if (!n) {
+        ULONG w = sw < dw ? sw : dw, h = sh < dh ? sh : dh;
+        for (ULONG y = 0; y < h; y++) memcpy(d + y * dp, s + y * sp, w * bytes);
+    } else {
+        for (UINT_ i = 0; i < n; i++) {
+            LONG x0 = rects[i * 4], y0 = rects[i * 4 + 1], x1 = rects[i * 4 + 2], y1 = rects[i * 4 + 3];
+            LONG dx = points ? points[i * 2] : 0, dy = points ? points[i * 2 + 1] : 0;
+            for (LONG y = y0; y < y1; y++)
+                memcpy(d + (dy + y - y0) * dp + dx * bytes, s + y * sp + x0 * bytes, (x1 - x0) * bytes);
+        }
+    }
+    if (dst->Parent) tex_invalidate(dst->Parent->res.Data);
+}
+
+/* ---- texture objects --------------------------------------------------- */
+
+static D3DPixelContainer *alloc_texture(ULONG w, ULONG h, ULONG depth, ULONG levels, ULONG fmt, bool cube)
+{
+    bool linear;
+    format_bits(fmt, &linear);
+    ULONG max_levels = 1;
+    if (!linear) {
+        ULONG m = w > h ? w : h;
+        if (depth > m) m = depth;
+        max_levels = log2u(m) + 1;
+    }
+    if (!levels || levels > max_levels) levels = max_levels;
+
+    D3DPixelContainer *t = pool_alloc(sizeof(*t));
+    memset(t, 0, sizeof(*t));
+    t->res.Common = 1 | D3DCOMMON_TYPE_TEXTURE | D3DCOMMON_D3DCREATED;
+    ULONG bytes;
+    if (linear) {
+        ULONG size;
+        linear_words(fmt, w, h, &t->Format, &size, &bytes);
+        t->Size = size;
+    } else {
+        t->Format = 1 | ((depth > 1 ? 3 : 2) << 4) | (fmt << 8) | (levels << 16) | (log2u(w) << 20) |
+                    (log2u(h) << 24) | (log2u(depth) << 28);
+        bytes = level_offset(t, levels);
+    }
+    if (cube) {
+        t->Format |= 0x4;
+        bytes = ((bytes + 127) & ~127u) * 6;
+    }
+    PVOID mem = MmAllocateContiguousMemoryEx(bytes, 0, 0x7FFFFFFF, 128, 4);
+    if (!mem) { pool_free(t); return NULL; }
+    memset(mem, 0, bytes);
+    t->res.Data = (ULONG)mem & 0x7FFFFFFF;
+    TRACE("D3D: texture %ux%ux%u fmt %#x levels %u%s = %p (%u bytes)", w, h, depth, fmt, levels,
+          cube ? " cube" : "", (void *)t, bytes);
+    return t;
+}
+
+static LONG NTAPI D3DDevice_CreateTexture(UINT_ w, UINT_ h, UINT_ levels, ULONG usage, ULONG fmt, ULONG pool,
+                                          D3DPixelContainer **pp)
+{
+    (void)usage; (void)pool;
+    *pp = alloc_texture(w, h, 1, levels, fmt, false);
+    return *pp ? D3D_OK : 0x8007000E;
+}
+
+static LONG NTAPI D3DDevice_CreateCubeTexture(UINT_ edge, UINT_ levels, ULONG usage, ULONG fmt, ULONG pool,
+                                              D3DPixelContainer **pp)
+{
+    (void)usage; (void)pool;
+    *pp = alloc_texture(edge, edge, 1, levels, fmt, true);
+    return *pp ? D3D_OK : 0x8007000E;
+}
+
+static LONG NTAPI D3DDevice_CreateVolumeTexture(UINT_ w, UINT_ h, UINT_ depth, UINT_ levels, ULONG usage,
+                                                ULONG fmt, ULONG pool, D3DPixelContainer **pp)
+{
+    (void)usage; (void)pool;
+    *pp = alloc_texture(w, h, depth, levels, fmt, false);
+    return *pp ? D3D_OK : 0x8007000E;
+}
+
+static ULONG NTAPI D3DBaseTexture_GetLevelCount(D3DPixelContainer *t)
+{
+    return level_count(t);
+}
+
+static void NTAPI D3DTexture_GetLevelDesc(D3DPixelContainer *t, UINT_ level, ULONG *desc)
+{
+    ULONG w, h, pitch;
+    container_size(t, &w, &h, &pitch);
+    for (UINT_ i = 0; i < level; i++) { if (w > 1) w >>= 1; if (h > 1) h >>= 1; }
+    ULONG fmt = (t->Format >> 8) & 0xFF;
+    desc[0] = fmt;
+    desc[1] = 3;   /* D3DRTYPE_TEXTURE */
+    desc[2] = 0;
+    desc[3] = level_bytes(fmt, w, h, 1);
+    desc[4] = 0;
+    desc[5] = w;
+    desc[6] = h;
+}
+
+static ULONG cube_face_bytes(D3DPixelContainer *t)
+{
+    return (level_offset(t, level_count(t)) + 127) & ~127u;
+}
+
+static D3DSurface *surface_of_level(D3DPixelContainer *t, ULONG face, ULONG level)
+{
+    ULONG w, h, pitch;
+    container_size(t, &w, &h, &pitch);
+    ULONG format = t->Format, size = t->Size;
+    if (!size) {
+        ULONG lw = log2u(w) > level ? log2u(w) - level : 0, lh = log2u(h) > level ? log2u(h) - level : 0;
+        format = (format & ~0x0FFF0000u) | (1 << 16) | (lw << 20) | (lh << 24);
+    }
+    ULONG data = t->res.Data + level_offset(t, level) + face * cube_face_bytes(t);
+    return alloc_surface(format & ~0x4u, size, data, t);
+}
+
+static LONG NTAPI D3DTexture_GetSurfaceLevel(D3DPixelContainer *t, UINT_ level, D3DSurface **pp)
+{
+    *pp = surface_of_level(t, 0, level);
+    return D3D_OK;
+}
+
+static LONG NTAPI D3DCubeTexture_GetCubeMapSurface(D3DPixelContainer *t, ULONG face, UINT_ level, D3DSurface **pp)
+{
+    *pp = surface_of_level(t, face, level);
+    return D3D_OK;
+}
+
+static void lock_level(D3DPixelContainer *t, ULONG face, ULONG level, ULONG *locked, const LONG *rect, ULONG flags)
+{
+    ULONG w, h, pitch;
+    container_size(t, &w, &h, &pitch);
+    bool linear;
+    int bits = format_bits((t->Format >> 8) & 0xFF, &linear);
+    for (ULONG i = 0; i < level; i++) { if (w > 1) w >>= 1; if (h > 1) h >>= 1; }
+    if (!linear) pitch = w * bits / 8;
+    if (!(flags & 0x80)) tex_invalidate(t->res.Data);
+    locked[0] = pitch;
+    locked[1] = (t->res.Data | CONTIG_BASE) + level_offset(t, level) + face * cube_face_bytes(t) +
+                (rect ? rect[1] * pitch + rect[0] * bits / 8 : 0);
+}
+
+static void NTAPI D3DTexture_LockRect(D3DPixelContainer *t, UINT_ level, ULONG *locked, const LONG *rect, ULONG flags)
+{
+    lock_level(t, 0, level, locked, rect, flags);
+}
+
+static void NTAPI D3DCubeTexture_LockRect(D3DPixelContainer *t, ULONG face, UINT_ level, ULONG *locked,
+                                          const LONG *rect, ULONG flags)
+{
+    lock_level(t, face, level, locked, rect, flags);
+}
+
+static void NTAPI D3DVolumeTexture_LockBox(D3DPixelContainer *t, UINT_ level, ULONG *locked, const LONG *box,
+                                           ULONG flags)
+{
+    (void)box;
+    ULONG w, h, pitch;
+    container_size(t, &w, &h, &pitch);
+    ULONG rl[2];
+    lock_level(t, 0, level, rl, NULL, flags);
+    locked[0] = rl[0];                    /* RowPitch */
+    locked[1] = rl[0] * (h >> level);     /* SlicePitch */
+    locked[2] = rl[1];
+}
+
+/* ---- index buffers, palettes, memory --------------------------------- */
+
+static LONG NTAPI D3DDevice_CreateIndexBuffer(UINT_ Length, ULONG Usage, ULONG Format, ULONG Pool, D3DResource **pp)
+{
+    (void)Usage; (void)Format; (void)Pool;
+    D3DResource *ib = pool_alloc(sizeof(*ib));
+    PVOID mem = MmAllocateContiguousMemoryEx(Length, 0, 0x7FFFFFFF, 0, 4);
+    if (!ib || !mem) return 0x8007000E;
+    ib->Common = 1 | D3DCOMMON_TYPE_INDEXBUFFER | D3DCOMMON_D3DCREATED;
+    ib->Data = (ULONG)mem & 0x7FFFFFFF;
+    ib->Lock = 0;
+    *pp = ib;
+    return D3D_OK;
+}
+
+static void NTAPI D3DIndexBuffer_Lock(D3DResource *ib, UINT_ Offset, UINT_ Size, PVOID *ppbData, ULONG Flags)
+{
+    (void)Size; (void)Flags;
+    *ppbData = (UCHAR *)resource_data(ib) + Offset;
+}
+
+static LONG NTAPI D3DDevice_CreatePalette(ULONG Size, D3DPalette **pp)
+{
+    D3DPalette *p = pool_alloc(sizeof(*p));
+    ULONG bytes = 1024u >> (Size & 3);
+    PVOID mem = MmAllocateContiguousMemoryEx(bytes, 0, 0x7FFFFFFF, 0, 4);
+    if (!p || !mem) return 0x8007000E;
+    p->Common = 1 | D3DCOMMON_TYPE_PALETTE | D3DCOMMON_D3DCREATED | (Size << 30);
+    p->Data = (ULONG)mem & 0x7FFFFFFF;
+    p->Lock = 0;
+    *pp = p;
+    return D3D_OK;
+}
+
+static void NTAPI D3DPalette_Lock(D3DPalette *p, PVOID *ppColors, ULONG Flags)
+{
+    (void)Flags;
+    *ppColors = (PVOID)(p->Data | CONTIG_BASE);
+}
+
+static void NTAPI D3DDevice_SetPalette(ULONG Stage, D3DPalette *p)
+{
+    if (Stage < 4) d3d.palettes[Stage] = p;
+}
+
+static PVOID NTAPI D3D_AllocNoncontiguousMemory(ULONG Size)
+{
+    return Size <= 65536 ? pool_alloc(Size) : arena_alloc(Size, 0);
+}
+
+static void NTAPI D3D_FreeNoncontiguousMemory(PVOID p)
+{
+    if ((ULONG)p < ARENA_BASE || (ULONG)p >= ARENA_END) return;
+    /* Pool blocks are freed; big arena blocks stay mapped. */
+    pool_free(p);
+}
+
+/* ---- getters and small state ---------------------------------------- */
+
+static void NTAPI D3DDevice_GetTransform(ULONG State, D3DMATRIX *m)
+{
+    if (State < 10) *m = d3d.transforms[State]; else identity(m);
+}
+
+static void NTAPI D3DDevice_GetViewport(D3DVIEWPORT8 *v) { *v = d3d.viewport; }
+
+static void NTAPI D3DDevice_GetRenderState(ULONG State, ULONG *v) { *v = State < D3DRS_MAX ? RS(State) : 0; }
+static void NTAPI D3DDevice_GetTextureStageState(ULONG Stage, ULONG Type, ULONG *v)
+{
+    *v = Stage < 4 && Type < 32 ? TSS(Stage, Type) : 0;
+}
+
+static void NTAPI D3DDevice_GetTexture(ULONG Stage, D3DResource **pp)
+{
+    *pp = Stage < 4 ? d3d.textures[Stage] : NULL;
+    if (*pp) (*pp)->Common++;
+}
+
+static void NTAPI D3DDevice_GetStreamSource(UINT_ Stream, D3DResource **pp, UINT_ *stride)
+{
+    *pp = Stream < 16 ? d3d.streams[Stream].vb : NULL;
+    *stride = Stream < 16 ? d3d.streams[Stream].stride : 0;
+    if (*pp) (*pp)->Common++;
+}
+
+static void NTAPI D3DDevice_GetIndices(D3DResource **pp, UINT_ *base)
+{
+    *pp = d3d.indices;
+    *base = d3d.base_vertex_index;
+    if (*pp) (*pp)->Common++;
+}
+
+static void NTAPI D3DDevice_GetMaterial(float *m)
+{
+    memcpy(m, d3d.material, 64);
+    m[16] = d3d.material_power;
+}
+
+static void NTAPI D3DDevice_GetLight(ULONG Index, D3DLIGHT8 *l)
+{
+    memset(l, 0, sizeof(*l));
+    if (Index >= 8) return;
+    typeof(d3d.lights[0]) *L = &d3d.lights[Index];
+    l->Type = L->type;
+    memcpy(l->Diffuse, L->diffuse, 16);
+    memcpy(l->Ambient, L->ambient, 16);
+    memcpy(l->Specular, L->specular, 16);
+    memcpy(l->Position, L->position, 12);
+    memcpy(l->Direction, L->direction, 12);
+    l->Range = L->range;
+    l->Attenuation0 = L->attenuation[0];
+    l->Attenuation1 = L->attenuation[1];
+    l->Attenuation2 = L->attenuation[2];
+}
+
+static void NTAPI D3DDevice_GetLightEnable(ULONG Index, ULONG *on) { *on = Index < 8 && d3d.lights[Index].enabled; }
+
+static void NTAPI D3DDevice_GetVertexShader(ULONG *h) { *h = d3d.vertex_shader; }
+
+/* Constants are numbered -96..95 by the title (D3DSCM_96CONSTANTS puts 0..95
+   at hardware slots 96..191; D3DSCM_192CONSTANTS exposes all of them). */
+static int constant_slot(LONG reg)
+{
+    int slot = (d3d.constant_mode & 0xF) == 0 ? reg + 96 : reg + 96;
+    return slot < 0 ? 0 : slot > 191 ? 191 : slot;
+}
+
+static void NTAPI D3DDevice_SetVertexShaderConstant(LONG Register, const float *data, ULONG count)
+{
+    for (ULONG i = 0; i < count; i++) {
+        int slot = constant_slot(Register + i);
+        memcpy(d3d.vs_const[slot], data + i * 4, 16);
+    }
+}
+
+static void NTAPI D3DDevice_GetVertexShaderConstant(LONG Register, float *data, ULONG count)
+{
+    for (ULONG i = 0; i < count; i++) memcpy(data + i * 4, d3d.vs_const[constant_slot(Register + i)], 16);
+}
+
+static void NTAPI D3DDevice_SetShaderConstantMode(ULONG mode) { d3d.constant_mode = mode; }
+static void NTAPI D3DDevice_GetShaderConstantMode(ULONG *mode) { *mode = d3d.constant_mode; }
+
+static void NTAPI D3DDevice_GetProjectionViewportMatrix(D3DMATRIX *out)
+{
+    D3DVIEWPORT8 *v = &d3d.viewport;
+    D3DMATRIX vp;
+    identity(&vp);
+    vp.m[0][0] = v->Width / 2.0f;
+    vp.m[1][1] = -(float)v->Height / 2.0f;
+    vp.m[2][2] = v->MaxZ - v->MinZ;
+    vp.m[3][0] = v->X + v->Width / 2.0f;
+    vp.m[3][1] = v->Y + v->Height / 2.0f;
+    vp.m[3][2] = v->MinZ;
+    mat_mul(out, &d3d.transforms[1], &vp);
+}
+
+static void NTAPI D3DDevice_GetDisplayMode(ULONG *mode)
+{
+    mode[0] = d3d.width;
+    mode[1] = d3d.height;
+    mode[2] = 60;
+    mode[3] = 0;
+    mode[4] = (d3d.backbuffer->Format >> 8) & 0xFF;
+}
+
+static void NTAPI D3DDevice_GetDeviceCaps(ULONG *caps)
+{
+    memset(caps, 0, 212);
+    caps[0] = 1;            /* D3DDEVTYPE_HAL */
+    caps[27] = caps[28] = 4096;   /* MaxTextureWidth/Height */
+    caps[29] = 512;         /* MaxVolumeExtent */
+    caps[30] = 8192;        /* MaxTextureRepeat */
+    caps[31] = 4096;        /* MaxTextureAspectRatio */
+    caps[32] = 4;           /* MaxAnisotropy */
+    caps[44] = 0x8;         /* FVFCaps: texcoord count 8 */
+    caps[46] = 8;           /* MaxActiveLights */
+    caps[47] = 2;           /* MaxUserClipPlanes */
+    caps[48] = 4;           /* MaxVertexBlendMatrices */
+    caps[50] = 1 | 0x100;   /* VertexShaderVersion 1.1-ish */
+    caps[51] = 192;         /* MaxVertexShaderConst */
+    caps[52] = 1 | 0x100;   /* PixelShaderVersion */
+}
+
+static LONG NTAPI Direct3D_GetDeviceCaps(UINT_ Adapter, ULONG DeviceType, ULONG *caps)
+{
+    (void)Adapter; (void)DeviceType;
+    D3DDevice_GetDeviceCaps(caps);
+    return D3D_OK;
+}
+
+static void NTAPI D3DDevice_GetCreationParameters(ULONG *p) { p[0] = 0; p[1] = 1; p[2] = 0; p[3] = 0; }
+static LONG NTAPI Direct3D_CheckDeviceFormat(UINT_ a, ULONG b, ULONG c, ULONG d, ULONG e, ULONG f) { return D3D_OK; }
+static LONG NTAPI Direct3D_CheckDeviceType(UINT_ a, ULONG b, ULONG c, ULONG d, BOOLEAN e) { return D3D_OK; }
+static LONG NTAPI Direct3D_CheckDeviceMultiSampleType(UINT_ a, ULONG b, ULONG c, BOOLEAN d, ULONG e) { return D3D_OK; }
+static LONG NTAPI Direct3D_CheckDepthStencilMatch(UINT_ a, ULONG b, ULONG c, ULONG d, ULONG e) { return D3D_OK; }
+static UINT_ NTAPI Direct3D_GetAdapterModeCount(UINT_ a) { return 1; }
+static LONG NTAPI Direct3D_GetAdapterDisplayMode(UINT_ a, ULONG *mode)
+{
+    mode[0] = 640; mode[1] = 480; mode[2] = 60; mode[3] = 0; mode[4] = 0x1E;
+    return D3D_OK;
+}
+static LONG NTAPI Direct3D_EnumAdapterModes(UINT_ a, UINT_ m, ULONG *mode) { return Direct3D_GetAdapterDisplayMode(a, mode); }
+static LONG NTAPI Direct3D_GetAdapterIdentifier(UINT_ a, ULONG flags, char *id)
+{
+    memset(id, 0, 1024);
+    strcpy(id, "xbcompat");
+    strcpy(id + 512, "NV2A");
+    return D3D_OK;
+}
+
+static void NTAPI D3DDevice_SetScissors(ULONG Count, BOOLEAN Exclusive, const D3DRECT *rects)
+{
+    if (Count > 8) Count = 8;
+    d3d.scissors.count = Count;
+    d3d.scissors.exclusive = Exclusive;
+    if (Count) memcpy(d3d.scissors.rects, rects, Count * sizeof(D3DRECT));
+}
+
+static void NTAPI D3DDevice_GetScissors(ULONG *Count, ULONG *Exclusive, D3DRECT *rects)
+{
+    *Count = d3d.scissors.count;
+    *Exclusive = d3d.scissors.exclusive;
+    if (rects) memcpy(rects, d3d.scissors.rects, d3d.scissors.count * sizeof(D3DRECT));
+}
+
+/* Callbacks run "when the GPU gets there": we run them at the next sync point. */
+static void run_callbacks(void)
+{
+    for (unsigned i = 0; i < d3d.ncallbacks; i++) {
+        void (CDECLAPI *fn)(ULONG) = d3d.callbacks[i].fn;
+        fn(d3d.callbacks[i].ctx);
+    }
+    d3d.ncallbacks = 0;
+}
+
+static void NTAPI D3DDevice_InsertCallback(ULONG Type, PVOID fn, ULONG Context)
+{
+    (void)Type;
+    if (d3d.ncallbacks == 64) run_callbacks();
+    d3d.callbacks[d3d.ncallbacks].fn = fn;
+    d3d.callbacks[d3d.ncallbacks].ctx = Context;
+    d3d.ncallbacks++;
+}
+
+static void NTAPI D3DDevice_SetVerticalBlankCallback(PVOID fn) { d3d.vblank_callback = fn; }
+static void NTAPI D3DDevice_SetSwapCallback(PVOID fn) { (void)fn; }
+static void NTAPI D3DDevice_GetDisplayFieldStatus(ULONG *st) { st[0] = 3; st[1] = d3d.frame; }
+static LONG NTAPI D3DDevice_PersistDisplay(void) { return D3D_OK; }
+static void NTAPI D3DDevice_SetScreenSpaceOffset(float x, float y) { d3d.screen_offset[0] = x; d3d.screen_offset[1] = y; }
+static void NTAPI D3DDevice_SetBackBufferScale(float x, float y) { d3d.backbuffer_scale[0] = x; d3d.backbuffer_scale[1] = y; }
+static void NTAPI D3DDevice_GetBackBufferScale(float *x, float *y) { *x = d3d.backbuffer_scale[0]; *y = d3d.backbuffer_scale[1]; }
+static void NTAPI D3DDevice_SetDebugMarker(ULONG v) { (void)v; }
+static void NTAPI D3DDevice_SetTile(ULONG i, const void *t) { (void)i; (void)t; }
+static void NTAPI D3DDevice_GetTile(ULONG i, ULONG *t) { (void)i; memset(t, 0, 24); }
+static void NTAPI D3DDevice_KickPushBuffer(void) {}
+static ULONG NTAPI D3DDevice_InsertFence(void) { return ++d3d.frame * 0 + 1; }
+static BOOLEAN NTAPI D3DDevice_IsFencePending(ULONG f) { (void)f; return 0; }
+static void NTAPI D3DDevice_BlockOnFence(ULONG f) { (void)f; }
+static void NTAPI D3DDevice_SetGammaRamp(ULONG flags, const void *ramp) { (void)flags; (void)ramp; }
+static void NTAPI D3DDevice_GetGammaRamp(USHORT *ramp) { for (int i = 0; i < 768; i++) ramp[i] = (i % 256) * 257; }
+static void NTAPI D3DDevice_EnableOverlay(BOOLEAN on) { (void)on; }
+static void NTAPI D3DDevice_UpdateOverlay(D3DSurface *s, const void *a, const void *b, BOOLEAN c, ULONG d) {}
+static BOOLEAN NTAPI D3DDevice_GetOverlayUpdateStatus(void) { return 1; }
+static void NTAPI D3DDevice_GetRasterStatus(ULONG *st) { st[0] = 1; st[1] = 0; }
+static ULONG NTAPI D3DDevice_GetPushDistance(ULONG a) { (void)a; return 0; }
+static ULONG NTAPI D3DPERF_Zero(void) { return 0; }
+static ULONG NTAPI D3DPERF_Zero4(ULONG a) { (void)a; return 0; }
+static ULONG NTAPI D3DPERF_Zero8(ULONG a, ULONG b) { return 0; }
+static ULONG NTAPI D3DPERF_Zero12(ULONG a, ULONG b, ULONG c) { return 0; }
+static ULONG NTAPI D3DPERF_Zero16(ULONG a, ULONG b, ULONG c, ULONG d) { return 0; }
+static BOOLEAN NTAPI D3DResource_IsBusy(D3DResource *r) { (void)r; return 0; }
+static void NTAPI D3DResource_BlockUntilNotBusy(D3DResource *r) { (void)r; }
+static void NTAPI D3DResource_GetDevice(D3DResource *r, PVOID *dev) { (void)r; *dev = d3d.device; }
+static void NTAPI D3DResource_MoveResourceMemory(D3DResource *r, ULONG where) {}
+static LONG NTAPI D3DResource_SetPrivateData(D3DResource *r, const void *g, const void *d, ULONG s, ULONG f) { return D3D_OK; }
+static LONG NTAPI D3DResource_GetPrivateData(D3DResource *r, const void *g, void *d, ULONG *s) { return D3DERR_INVALIDCALL; }
+static void NTAPI D3DResource_FreePrivateData(D3DResource *r, const void *g) {}
+
+/* ---- pixel shader objects --------------------------------------------- */
+
+/* A handle is the address of a copy of the D3DPIXELSHADERDEF; the def is
+   51 render states (D3DRS_PSALPHAINPUTS0 .. D3DRS_PSFINALCOMBINERCONSTANTS)
+   and SetPixelShader loads it into the title's render state array, like
+   the real library. */
+#define PSDEF_DWORDS 51
+
+static void NTAPI D3DDevice_CreatePixelShader(const ULONG *def, ULONG *handle)
+{
+    ULONG *copy = pool_alloc(PSDEF_DWORDS * 4);
+    memcpy(copy, def, PSDEF_DWORDS * 4);
+    *handle = (ULONG)copy;
+}
+
+static void NTAPI D3DDevice_SetPixelShader(ULONG handle)
+{
+    d3d.pixel_shader = handle;
+    if (handle) memcpy(d3d.render_state, (const void *)handle, PSDEF_DWORDS * 4);
+}
+
+static void NTAPI D3DDevice_SetPixelShaderProgram(const ULONG *def)
+{
+    ULONG h;
+    D3DDevice_CreatePixelShader(def, &h);
+    D3DDevice_SetPixelShader(h);
+}
+
+static void NTAPI D3DDevice_GetPixelShader(ULONG *handle) { *handle = d3d.pixel_shader; }
+static void NTAPI D3DDevice_DeletePixelShader(ULONG handle) { if (handle) pool_free((void *)handle); }
+static void NTAPI D3DDevice_GetPixelShaderFunction(ULONG handle, ULONG *def)
+{
+    if (handle) memcpy(def, (const void *)handle, PSDEF_DWORDS * 4);
+}
+
+static void NTAPI D3DDevice_SetPixelShaderConstant(ULONG Register, const float *data, ULONG count)
+{
+    for (ULONG i = 0; i < count && Register + i < 16; i++) memcpy(d3d.ps_const[Register + i], data + i * 4, 16);
+}
+
+static void NTAPI D3DDevice_GetPixelShaderConstant(ULONG Register, float *data, ULONG count)
+{
+    for (ULONG i = 0; i < count && Register + i < 16; i++) memcpy(data + i * 4, d3d.ps_const[Register + i], 16);
+}
+
 /* ---- table ------------------------------------------------------------- */
 
 #define F(dec, fn) { dec, (void *)fn }
-static const struct hle_func funcs[] = {
+const struct hle_func d3d8_funcs[] = {
     F("_Direct3DCreate8@4", Direct3DCreate8),
     F("_Direct3D_CreateDevice@24", Direct3D_CreateDevice),
     F("_D3DDevice_Swap@4", D3DDevice_Swap),
@@ -1009,12 +1882,113 @@ static const struct hle_func funcs[] = {
     F("_D3DDevice_SetRenderState_VertexBlend@4", SetRenderState_VertexBlend),
     F("_D3DDevice_SetRenderState_FogColor@4", SetRenderState_FogColor),
     F("_D3DDevice_SetRenderState_PSTextureModes@4", SetRenderState_PSTextureModes),
+    F("_D3DDevice_GetBackBuffer@12", D3DDevice_GetBackBuffer),
+    F("_D3DDevice_GetDepthStencilSurface@4", D3DDevice_GetDepthStencilSurface),
+    F("_D3DDevice_GetRenderTarget@4", D3DDevice_GetRenderTarget),
+    F("_D3DDevice_SetRenderTarget@8", D3DDevice_SetRenderTarget),
+    F("_D3DSurface_GetDesc@8", D3DSurface_GetDesc),
+    F("_D3DSurface_LockRect@16", D3DSurface_LockRect),
+    F("_D3DDevice_CreateImageSurface@16", D3DDevice_CreateImageSurface),
+    F("_D3DDevice_CreateRenderTarget@24", D3DDevice_CreateRenderTarget),
+    F("_D3DDevice_CreateDepthStencilSurface@20", D3DDevice_CreateDepthStencilSurface),
+    F("_D3DDevice_CopyRects@20", D3DDevice_CopyRects),
+    F("_D3DDevice_CreateTexture@28", D3DDevice_CreateTexture),
+    F("_D3DDevice_CreateCubeTexture@24", D3DDevice_CreateCubeTexture),
+    F("_D3DDevice_CreateVolumeTexture@32", D3DDevice_CreateVolumeTexture),
+    F("_D3DBaseTexture_GetLevelCount@4", D3DBaseTexture_GetLevelCount),
+    F("_D3DTexture_GetLevelDesc@12", D3DTexture_GetLevelDesc),
+    F("_D3DTexture_GetSurfaceLevel@12", D3DTexture_GetSurfaceLevel),
+    F("_D3DTexture_LockRect@20", D3DTexture_LockRect),
+    F("_D3DCubeTexture_GetCubeMapSurface@16", D3DCubeTexture_GetCubeMapSurface),
+    F("_D3DCubeTexture_LockRect@24", D3DCubeTexture_LockRect),
+    F("_D3DVolumeTexture_LockBox@20", D3DVolumeTexture_LockBox),
+    F("_D3DDevice_CreateIndexBuffer@20", D3DDevice_CreateIndexBuffer),
+    F("_D3DIndexBuffer_Lock@20", D3DIndexBuffer_Lock),
+    F("_D3DDevice_CreatePalette@8", D3DDevice_CreatePalette),
+    F("_D3DPalette_Lock@12", D3DPalette_Lock),
+    F("_D3DDevice_SetPalette@8", D3DDevice_SetPalette),
+    F("_D3D_AllocNoncontiguousMemory@4", D3D_AllocNoncontiguousMemory),
+    F("_D3D_FreeNoncontiguousMemory@4", D3D_FreeNoncontiguousMemory),
+    F("_D3DDevice_GetTransform@8", D3DDevice_GetTransform),
+    F("_D3DDevice_GetViewport@4", D3DDevice_GetViewport),
+    F("_D3DDevice_GetRenderState@8", D3DDevice_GetRenderState),
+    F("_D3DDevice_GetTextureStageState@12", D3DDevice_GetTextureStageState),
+    F("_D3DDevice_GetTexture@8", D3DDevice_GetTexture),
+    F("_D3DDevice_GetStreamSource@12", D3DDevice_GetStreamSource),
+    F("_D3DDevice_GetIndices@8", D3DDevice_GetIndices),
+    F("_D3DDevice_GetMaterial@4", D3DDevice_GetMaterial),
+    F("_D3DDevice_GetLight@8", D3DDevice_GetLight),
+    F("_D3DDevice_GetLightEnable@8", D3DDevice_GetLightEnable),
+    F("_D3DDevice_GetVertexShader@4", D3DDevice_GetVertexShader),
+    F("_D3DDevice_SetVertexShaderConstant@12", D3DDevice_SetVertexShaderConstant),
+    F("_D3DDevice_GetVertexShaderConstant@12", D3DDevice_GetVertexShaderConstant),
+    F("_D3DDevice_SetShaderConstantMode@4", D3DDevice_SetShaderConstantMode),
+    F("_D3DDevice_GetShaderConstantMode@4", D3DDevice_GetShaderConstantMode),
+    F("_D3DDevice_GetProjectionViewportMatrix@4", D3DDevice_GetProjectionViewportMatrix),
+    F("_D3DDevice_GetDisplayMode@4", D3DDevice_GetDisplayMode),
+    F("_D3DDevice_GetDeviceCaps@4", D3DDevice_GetDeviceCaps),
+    F("_D3DDevice_GetCreationParameters@4", D3DDevice_GetCreationParameters),
+    F("_Direct3D_GetDeviceCaps@12", Direct3D_GetDeviceCaps),
+    F("_Direct3D_CheckDeviceFormat@24", Direct3D_CheckDeviceFormat),
+    F("_Direct3D_CheckDeviceType@20", Direct3D_CheckDeviceType),
+    F("_Direct3D_CheckDeviceMultiSampleType@20", Direct3D_CheckDeviceMultiSampleType),
+    F("_Direct3D_CheckDepthStencilMatch@20", Direct3D_CheckDepthStencilMatch),
+    F("_Direct3D_GetAdapterModeCount@4", Direct3D_GetAdapterModeCount),
+    F("_Direct3D_GetAdapterDisplayMode@8", Direct3D_GetAdapterDisplayMode),
+    F("_Direct3D_EnumAdapterModes@12", Direct3D_EnumAdapterModes),
+    F("_Direct3D_GetAdapterIdentifier@12", Direct3D_GetAdapterIdentifier),
+    F("_D3DDevice_SetScissors@12", D3DDevice_SetScissors),
+    F("_D3DDevice_GetScissors@12", D3DDevice_GetScissors),
+    F("_D3DDevice_InsertCallback@12", D3DDevice_InsertCallback),
+    F("_D3DDevice_SetVerticalBlankCallback@4", D3DDevice_SetVerticalBlankCallback),
+    F("_D3DDevice_SetSwapCallback@4", D3DDevice_SetSwapCallback),
+    F("_D3DDevice_GetDisplayFieldStatus@4", D3DDevice_GetDisplayFieldStatus),
+    F("_D3DDevice_PersistDisplay@0", D3DDevice_PersistDisplay),
+    F("_D3DDevice_SetScreenSpaceOffset@8", D3DDevice_SetScreenSpaceOffset),
+    F("_D3DDevice_SetBackBufferScale@8", D3DDevice_SetBackBufferScale),
+    F("_D3DDevice_GetBackBufferScale@8", D3DDevice_GetBackBufferScale),
+    F("_D3DDevice_SetDebugMarker@4", D3DDevice_SetDebugMarker),
+    F("_D3DDevice_SetTile@8", D3DDevice_SetTile),
+    F("_D3DDevice_GetTile@8", D3DDevice_GetTile),
+    F("_D3DDevice_KickPushBuffer@0", D3DDevice_KickPushBuffer),
+    F("_D3DDevice_InsertFence@0", D3DDevice_InsertFence),
+    F("_D3DDevice_IsFencePending@4", D3DDevice_IsFencePending),
+    F("_D3DDevice_BlockOnFence@4", D3DDevice_BlockOnFence),
+    F("_D3DDevice_SetGammaRamp@8", D3DDevice_SetGammaRamp),
+    F("_D3DDevice_GetGammaRamp@4", D3DDevice_GetGammaRamp),
+    F("_D3DDevice_EnableOverlay@4", D3DDevice_EnableOverlay),
+    F("_D3DDevice_UpdateOverlay@20", D3DDevice_UpdateOverlay),
+    F("_D3DDevice_GetOverlayUpdateStatus@0", D3DDevice_GetOverlayUpdateStatus),
+    F("_D3DDevice_GetRasterStatus@4", D3DDevice_GetRasterStatus),
+    F("_D3DDevice_GetPushDistance@4", D3DDevice_GetPushDistance),
+    F("_D3DPERF_DumpCounterCycleInfo@12", D3DPERF_Zero12),
+    F("_D3DPERF_DumpFrameRateInfo@0", D3DPERF_Zero),
+    F("_D3DPERF_DumpPerfEvents@0", D3DPERF_Zero),
+    F("_D3DPERF_DumpPerfProfCounts@0", D3DPERF_Zero),
+    F("_D3DPERF_GetPushBufferBytesWritten@0", D3DPERF_Zero),
+    F("_D3DPERF_HandlePresent@0", D3DPERF_Zero),
+    F("_D3DPERF_PerfEventEnd@8", D3DPERF_Zero8),
+    F("_D3DPERF_PerfEventStart@8", D3DPERF_Zero8),
+    F("_D3DPERF_Reset@0", D3DPERF_Zero),
+    F("_D3DPERF_StartCountingPerfEvent@4", D3DPERF_Zero4),
+    F("_D3DPERF_StartPerfProfile@0", D3DPERF_Zero),
+    F("_D3DPERF_SetShowFrameRateInterval@4", D3DPERF_Zero4),
+    F("_D3DRDI_GetRamData@16", D3DPERF_Zero16),
+    F("_PerfGetPushBufferDistance@8", D3DPERF_Zero8),
+    F("_D3DResource_IsBusy@4", D3DResource_IsBusy),
+    F("_D3DResource_BlockUntilNotBusy@4", D3DResource_BlockUntilNotBusy),
+    F("_D3DResource_GetDevice@8", D3DResource_GetDevice),
+    F("_D3DResource_MoveResourceMemory@8", D3DResource_MoveResourceMemory),
+    F("_D3DResource_SetPrivateData@20", D3DResource_SetPrivateData),
+    F("_D3DResource_GetPrivateData@16", D3DResource_GetPrivateData),
+    F("_D3DResource_FreePrivateData@8", D3DResource_FreePrivateData),
+    F("_D3DDevice_CreatePixelShader@8", D3DDevice_CreatePixelShader),
+    F("_D3DDevice_SetPixelShader@4", D3DDevice_SetPixelShader),
+    F("_D3DDevice_SetPixelShaderProgram@4", D3DDevice_SetPixelShaderProgram),
+    F("_D3DDevice_GetPixelShader@4", D3DDevice_GetPixelShader),
+    F("_D3DDevice_DeletePixelShader@4", D3DDevice_DeletePixelShader),
+    F("_D3DDevice_GetPixelShaderFunction@8", D3DDevice_GetPixelShaderFunction),
+    F("_D3DDevice_SetPixelShaderConstant@12", D3DDevice_SetPixelShaderConstant),
+    F("_D3DDevice_GetPixelShaderConstant@12", D3DDevice_GetPixelShaderConstant),
     { NULL, NULL },
 };
-
-const struct hle_func *hle_find(const char *name)
-{
-    for (const struct hle_func *f = funcs; f->name; f++)
-        if (!strcmp(f->name, name)) return f;
-    return NULL;
-}
