@@ -96,6 +96,8 @@ enum {
     D3DRS_FOGENABLE = 82, D3DRS_FOGTABLEMODE = 83, D3DRS_FOGSTART = 84, D3DRS_FOGEND = 85,
     D3DRS_FOGDENSITY = 86, D3DRS_LIGHTING = 92, D3DRS_SPECULARENABLE = 93, D3DRS_COLORVERTEX = 95,
     D3DRS_DIFFUSEMATERIALSOURCE = 101, D3DRS_AMBIENTMATERIALSOURCE = 102, D3DRS_AMBIENT = 105,
+    D3DRS_POINTSIZE = 106, D3DRS_POINTSIZE_MIN = 107, D3DRS_POINTSPRITEENABLE = 108, D3DRS_POINTSCALEENABLE = 109,
+    D3DRS_POINTSCALE_A = 110, D3DRS_POINTSCALE_B = 111, D3DRS_POINTSCALE_C = 112, D3DRS_POINTSIZE_MAX = 113,
     D3DRS_PSTEXTUREMODES = 117, D3DRS_FOGCOLOR = 119,
     D3DRS_FILLMODE = 120, D3DRS_NORMALIZENORMALS = 123, D3DRS_ZENABLE = 124,
     D3DRS_STENCILENABLE = 125, D3DRS_FRONTFACE = 127, D3DRS_CULLMODE = 128,
@@ -144,7 +146,18 @@ static struct {
     struct { PVOID fn; ULONG ctx; } callbacks[64];
     unsigned ncallbacks;
     struct D3DPalette *palettes[4];
+    struct D3DPushBuffer *recording;   /* push buffer being recorded, if any */
 } d3d;
+
+/* Push buffer recording (see the push buffer section). */
+static void pb_record(unsigned op, const void *payload, unsigned bytes);
+static void pb_record2(unsigned op, const void *head, unsigned head_bytes, const void *data, unsigned data_bytes);
+enum {
+    OP_RS = 1, OP_TSS, OP_VS_CONST, OP_VERTEX_SHADER, OP_TEXTURE, OP_STREAM, OP_INDICES, OP_TRANSFORM,
+    OP_VIEWPORT, OP_DRAW, OP_DRAW_INDEXED, OP_DRAW_UP, OP_DRAW_INDEXED_UP, OP_BEGIN_END, OP_PIXEL_SHADER,
+    OP_PS_CONST, OP_VS_INPUT, OP_RENDER_TARGET, OP_PALETTE, OP_RUN, OP_CLEAR, OP_LIGHT, OP_LIGHT_ENABLE,
+    OP_MATERIAL, OP_RAW,
+};
 
 /* An Xbox surface: a pixel container plus the texture it belongs to. */
 typedef struct D3DSurface {
@@ -160,6 +173,8 @@ extern int g_exit_after_frames;
 
 #define RS(i) (d3d.render_state[i])
 #define TSS(stage, i) (d3d.texture_state[(stage) * 32 + (i)])
+static float rs_float(ULONG i) { float f; memcpy(&f, &d3d.render_state[i], 4); return f; }
+static float tss_float(int s, ULONG i) { float f; memcpy(&f, &d3d.texture_state[s * 32 + i], 4); return f; }
 
 enum {
     D3DTSS_ADDRESSU = 0, D3DTSS_ADDRESSV = 1, D3DTSS_ADDRESSW = 2, D3DTSS_MAGFILTER = 3, D3DTSS_MINFILTER = 4,
@@ -341,6 +356,12 @@ static void apply_viewport(void)
 static void NTAPI D3DDevice_Clear(ULONG Count, const D3DRECT *pRects, ULONG Flags, ULONG Color, float Z,
                                   ULONG Stencil)
 {
+    if (d3d.recording) {
+        ULONG h[5] = { Count, Flags, Color, 0, Stencil };
+        memcpy(&h[3], &Z, 4);
+        pb_record2(OP_CLEAR, h, sizeof(h), pRects, Count && pRects ? Count * sizeof(D3DRECT) : 0);
+        return;
+    }
     GLbitfield mask = 0;
     if (Flags & 0xF0) {
         glClearColor(((Color >> 16) & 255) / 255.0f, ((Color >> 8) & 255) / 255.0f, (Color & 255) / 255.0f,
@@ -402,6 +423,8 @@ static ULONG NTAPI D3DResource_AddRef(D3DResource *r)
     return r->Common & D3DCOMMON_REFCOUNT_MASK;
 }
 
+static void pushbuffer_free(struct D3DPushBuffer *pb);
+
 static ULONG NTAPI D3DResource_Release(D3DResource *r)
 {
     ULONG refs = --r->Common & D3DCOMMON_REFCOUNT_MASK;
@@ -414,6 +437,10 @@ static ULONG NTAPI D3DResource_Release(D3DResource *r)
         } else if (type == D3DCOMMON_TYPE_TEXTURE) {
             tex_invalidate(r->Data);
             MmFreeContiguousMemory(resource_data(r));
+            pool_free(r);
+        } else if (type == D3DCOMMON_TYPE_PUSHBUFFER) {
+            pushbuffer_free((struct D3DPushBuffer *)r);
+        } else if (type == D3DCOMMON_TYPE_FIXUP) {
             pool_free(r);
         } else if (type == D3DCOMMON_TYPE_SURFACE) {
             D3DSurface *s = (D3DSurface *)r;
@@ -531,6 +558,8 @@ static void (APIENTRY *p_glVertexAttrib4fv)(GLuint, const GLfloat *);
 static void (APIENTRY *p_glActiveTexture)(GLenum);
 static void (APIENTRY *p_glClientActiveTexture)(GLenum);
 static void (APIENTRY *p_glMultiTexCoord4fv)(GLenum, const GLfloat *);
+static void (APIENTRY *p_glPointParameterfv)(GLenum, const GLfloat *);
+static void (APIENTRY *p_glPointParameterf)(GLenum, GLfloat);
 static void (APIENTRY *p_glUniform2fv)(GLint, GLsizei, const GLfloat *);
 
 static void container_size(const D3DPixelContainer *t, ULONG *w, ULONG *h, ULONG *pitch);
@@ -639,6 +668,7 @@ static GLuint texture_for(D3DPixelContainer *t)
 
 static void NTAPI D3DDevice_SetTexture(ULONG Stage, D3DResource *t)
 {
+    if (d3d.recording) { ULONG a[2] = { Stage, (ULONG)t }; pb_record(OP_TEXTURE, a, sizeof(a)); }
     if (Stage < 4) d3d.textures[Stage] = t;
 }
 
@@ -732,7 +762,9 @@ static unsigned apply_textures(void)
         glDisable(GL_TEXTURE_2D);
         glDisable(GL_TEXTURE_CUBE_MAP);
         D3DPixelContainer *t = (D3DPixelContainer *)d3d.textures[s];
-        if (ended || !t || TSS(s, D3DTSS_COLOROP) == 1) { ended = true; continue; }
+        bool sprite = s == 3 && RS(D3DRS_POINTSPRITEENABLE);   /* point sprites always use stage 3 */
+        glTexEnvi(GL_POINT_SPRITE, GL_COORD_REPLACE, sprite);
+        if (!t || TSS(s, D3DTSS_COLOROP) == 1 || (ended && !sprite)) { ended = true; continue; }
         GLenum target = tex_target(t);
         if (target == GL_TEXTURE_3D) continue;
         glEnable(target);
@@ -754,6 +786,7 @@ static unsigned apply_textures(void)
 
 static void NTAPI D3DDevice_SetStreamSource(UINT_ Stream, D3DResource *vb, UINT_ Stride)
 {
+    if (d3d.recording) { ULONG a[3] = { Stream, (ULONG)vb, Stride }; pb_record(OP_STREAM, a, sizeof(a)); }
     if (Stream >= 16) return;
     d3d.streams[Stream].vb = vb;
     d3d.streams[Stream].stride = Stride;
@@ -761,16 +794,19 @@ static void NTAPI D3DDevice_SetStreamSource(UINT_ Stream, D3DResource *vb, UINT_
 
 static void NTAPI D3DDevice_SetVertexShader(ULONG Handle)
 {
+    if (d3d.recording) pb_record(OP_VERTEX_SHADER, &Handle, 4);
     d3d.vertex_shader = Handle;
 }
 
 static void NTAPI D3DDevice_SetTransform(ULONG State, const D3DMATRIX *m)
 {
+    if (d3d.recording) pb_record2(OP_TRANSFORM, &State, 4, m, sizeof(*m));
     if (State < 10) d3d.transforms[State] = *m;
 }
 
 static void NTAPI D3DDevice_SetViewport(const D3DVIEWPORT8 *v)
 {
+    if (d3d.recording) { ULONG has = v != NULL; pb_record2(OP_VIEWPORT, &has, 4, v, v ? sizeof(*v) : 0); }
     if (v) d3d.viewport = *v;
     else d3d.viewport = (D3DVIEWPORT8){ 0, 0, d3d.width, d3d.height, 0, 1 };
 }
@@ -833,6 +869,7 @@ typedef struct {
 
 static LONG NTAPI D3DDevice_SetLight(ULONG Index, const D3DLIGHT8 *l)
 {
+    if (d3d.recording) pb_record2(OP_LIGHT, &Index, 4, l, sizeof(*l));
     if (Index >= 8) return D3D_OK;
     typeof(d3d.lights[0]) *L = &d3d.lights[Index];
     L->set = true;
@@ -853,12 +890,14 @@ static LONG NTAPI D3DDevice_SetLight(ULONG Index, const D3DLIGHT8 *l)
 
 static LONG NTAPI D3DDevice_LightEnable(ULONG Index, BOOLEAN Enable)
 {
+    if (d3d.recording) { ULONG a[2] = { Index, Enable }; pb_record(OP_LIGHT_ENABLE, a, sizeof(a)); }
     if (Index < 8) d3d.lights[Index].enabled = Enable;
     return D3D_OK;
 }
 
 static void NTAPI D3DDevice_SetMaterial(const float *m)
 {
+    if (d3d.recording) pb_record(OP_MATERIAL, m, 17 * 4);
     /* D3DMATERIAL8: Diffuse, Ambient, Specular, Emissive, Power */
     memcpy(d3d.material, m, 64);
     d3d.material_power = m[16];
@@ -923,6 +962,27 @@ static void apply_render_states(bool pretransformed, bool has_normal)
     }
     glShadeModel(RS(D3DRS_SHADEMODE) == GL_FLAT ? GL_FLAT : GL_SMOOTH);
     glPolygonMode(GL_FRONT_AND_BACK, RS(D3DRS_FILLMODE) ? RS(D3DRS_FILLMODE) : GL_FILL);
+
+    /* Points: D3D scales the size by the viewport height and the distance
+       attenuation 1/sqrt(A + B*d + C*d^2) when POINTSCALEENABLE is set. */
+    float psize = rs_float(D3DRS_POINTSIZE), pmin = rs_float(D3DRS_POINTSIZE_MIN), pmax = rs_float(D3DRS_POINTSIZE_MAX);
+    if (!(psize > 0)) psize = 1;
+    if (!(pmax > 0)) pmax = 64;
+    if (RS(D3DRS_POINTSCALEENABLE)) {
+        float att[3] = { rs_float(D3DRS_POINTSCALE_A), rs_float(D3DRS_POINTSCALE_B), rs_float(D3DRS_POINTSCALE_C) };
+        p_glPointParameterfv(GL_POINT_DISTANCE_ATTENUATION, att);
+        glPointSize(psize * d3d.viewport.Height);
+    } else {
+        float att[3] = { 1, 0, 0 };
+        p_glPointParameterfv(GL_POINT_DISTANCE_ATTENUATION, att);
+        glPointSize(psize);
+    }
+    p_glPointParameterf(GL_POINT_SIZE_MIN, pmin > 0 ? pmin : 1);
+    p_glPointParameterf(GL_POINT_SIZE_MAX, pmax);
+    if (RS(D3DRS_POINTSPRITEENABLE)) glEnable(GL_POINT_SPRITE);
+    else glDisable(GL_POINT_SPRITE);
+    TRACE("D3D: points size %g scale %u sprite %u min %g max %g", psize, RS(D3DRS_POINTSCALEENABLE),
+          RS(D3DRS_POINTSPRITEENABLE), pmin, pmax);
 
     /* D3DCULL_CCW culls triangles that appear counter-clockwise on screen,
        so the GL front face is the opposite winding. */
@@ -1000,7 +1060,7 @@ static void apply_render_states(bool pretransformed, bool has_normal)
 }
 
 typedef struct {
-    int pos_size, pos_off, normal_off, diffuse_off, specular_off, tex_off[4], tex_size[4], ntex;
+    int pos_size, pos_off, normal_off, diffuse_off, specular_off, tex_off[4], tex_size[4], ntex, stride;
     bool pretransformed;
 } fvf_layout;
 
@@ -1028,6 +1088,7 @@ static fvf_layout parse_fvf(ULONG fvf)
         l.tex_size[i] = sizes[fmt];
         off += 4 * sizes[fmt];
     }
+    l.stride = off;
     return l;
 }
 
@@ -1050,7 +1111,7 @@ static void load_shader_functions(void)
     LOAD(glDeleteShader); LOAD(glDeleteProgram); LOAD(glGetUniformLocation); LOAD(glUniform4fv);
     LOAD(glUniform1f); LOAD(glUniform1i); LOAD(glEnableVertexAttribArray); LOAD(glDisableVertexAttribArray);
     LOAD(glVertexAttribPointer); LOAD(glVertexAttrib4fv); LOAD(glActiveTexture); LOAD(glClientActiveTexture);
-    LOAD(glMultiTexCoord4fv); LOAD(glUniform2fv);
+    LOAD(glMultiTexCoord4fv); LOAD(glUniform2fv); LOAD(glPointParameterfv); LOAD(glPointParameterf);
 #undef LOAD
 }
 
@@ -1228,6 +1289,7 @@ static void NTAPI D3DDevice_LoadVertexShader(ULONG handle, ULONG address) {}
 static void NTAPI D3DDevice_LoadVertexShaderProgram(const ULONG *func, ULONG address) {}
 static void NTAPI D3DDevice_SelectVertexShader(ULONG handle, ULONG address)
 {
+    if (d3d.recording && handle) pb_record(OP_VERTEX_SHADER, &handle, 4);
     /* The shader was loaded into program memory earlier; just use it. */
     if (handle) d3d.vertex_shader = handle;
 }
@@ -1235,6 +1297,7 @@ static void NTAPI D3DDevice_RunVertexStateShader(ULONG address, const float *dat
 
 static void NTAPI D3DDevice_SetVertexShaderInput(ULONG handle, UINT_ count, const ULONG *inputs)
 {
+    if (d3d.recording) { ULONG h[2] = { handle, count }; pb_record2(OP_VS_INPUT, h, 8, inputs, count * 12); }
     /* D3DSTREAM_INPUT: VertexBuffer, Stride, Offset */
     for (UINT_ i = 0; i < count && i < 16; i++) {
         d3d.streams[i].vb = (D3DResource *)inputs[i * 3];
@@ -1376,8 +1439,6 @@ static void apply_shader_textures(const program_entry *e)
     if (e->loc_tex_scale >= 0) p_glUniform4fv(e->loc_tex_scale, 4, &scale[0][0]);
 }
 
-static float rs_float(ULONG i) { float f; memcpy(&f, &d3d.render_state[i], 4); return f; }
-static float tss_float(int s, ULONG i) { float f; memcpy(&f, &d3d.texture_state[s * 32 + i], 4); return f; }
 
 /* The per-draw inputs of a fragment program. */
 static void upload_ps_uniforms(const program_entry *e)
@@ -1521,10 +1582,9 @@ static void draw_programmable(vshader *sh, ULONG PrimitiveType, const UCHAR *up,
 static const float default_texcoord[4] = { 0, 0, 0, 1 };
 
 /* A declaration without a program: fixed function with a custom layout. */
-static void draw_declared(ULONG PrimitiveType, const UCHAR *up, ULONG up_stride, ULONG first, ULONG count,
-                          const USHORT *indices)
+static void draw_declared(const vshader *sh, ULONG PrimitiveType, const UCHAR *up, ULONG up_stride, ULONG first,
+                          ULONG count, const USHORT *indices)
 {
-    vshader *sh = (vshader *)(d3d.vertex_shader & ~1u);
     const vattr *pos = &sh->attr[0];
     if (pos->stream < 0) return;
 #define STREAM(a, out_base, out_stride) do { \
@@ -1593,7 +1653,7 @@ static void draw(ULONG PrimitiveType, const UCHAR *base, ULONG stride, ULONG fir
     if (d3d.vertex_shader & 1) {
         vshader *sh = (vshader *)(d3d.vertex_shader & ~1u);
         if (sh->code) draw_programmable(sh, PrimitiveType, base, stride, first, count, indices);
-        else draw_declared(PrimitiveType, base, stride, first, count, indices);
+        else draw_declared(sh, PrimitiveType, base, stride, first, count, indices);
         return;
     }
     fvf_layout l = parse_fvf(d3d.vertex_shader);
@@ -1645,6 +1705,7 @@ static void draw(ULONG PrimitiveType, const UCHAR *base, ULONG stride, ULONG fir
 
 static void NTAPI D3DDevice_DrawVertices(ULONG PrimitiveType, UINT_ StartVertex, UINT_ VertexCount)
 {
+    if (d3d.recording) { ULONG a[3] = { PrimitiveType, StartVertex, VertexCount }; pb_record(OP_DRAW, a, sizeof(a)); return; }
     D3DResource *vb = d3d.streams[0].vb;
     if (!vb) return;
     draw(PrimitiveType, resource_data(vb), d3d.streams[0].stride, StartVertex, VertexCount, NULL);
@@ -1653,11 +1714,21 @@ static void NTAPI D3DDevice_DrawVertices(ULONG PrimitiveType, UINT_ StartVertex,
 static void NTAPI D3DDevice_DrawVerticesUP(ULONG PrimitiveType, UINT_ VertexCount, const void *pData,
                                            UINT_ Stride)
 {
+    if (d3d.recording) {
+        ULONG h[3] = { PrimitiveType, VertexCount, Stride };
+        pb_record2(OP_DRAW_UP, h, sizeof(h), pData, VertexCount * Stride);
+        return;
+    }
     draw(PrimitiveType, pData, Stride, 0, VertexCount, NULL);
 }
 
 static void NTAPI D3DDevice_DrawIndexedVertices(ULONG PrimitiveType, UINT_ VertexCount, const USHORT *pIndexData)
 {
+    if (d3d.recording) {
+        ULONG h[2] = { PrimitiveType, VertexCount };
+        pb_record2(OP_DRAW_INDEXED, h, sizeof(h), pIndexData, VertexCount * 2);
+        return;
+    }
     D3DResource *vb = d3d.streams[0].vb;
     if (!vb) return;
     const UCHAR *base = (const UCHAR *)resource_data(vb) + d3d.base_vertex_index * d3d.streams[0].stride;
@@ -1667,11 +1738,24 @@ static void NTAPI D3DDevice_DrawIndexedVertices(ULONG PrimitiveType, UINT_ Verte
 static void NTAPI D3DDevice_DrawIndexedVerticesUP(ULONG PrimitiveType, UINT_ VertexCount, const USHORT *pIndexData,
                                                   const void *pVertexData, UINT_ Stride)
 {
+    if (d3d.recording) {
+        ULONG nverts = 0;
+        for (UINT_ i = 0; i < VertexCount; i++) if (pIndexData[i] + 1u > nverts) nverts = pIndexData[i] + 1u;
+        ULONG ib = (VertexCount * 2 + 3) & ~3u;
+        ULONG *h = malloc(16 + ib + nverts * Stride);
+        h[0] = PrimitiveType; h[1] = VertexCount; h[2] = Stride; h[3] = nverts;
+        memcpy(h + 4, pIndexData, VertexCount * 2);
+        memcpy((char *)(h + 4) + ib, pVertexData, nverts * Stride);
+        pb_record(OP_DRAW_INDEXED_UP, h, 16 + ib + nverts * Stride);
+        free(h);
+        return;
+    }
     draw(PrimitiveType, pVertexData, Stride, 0, VertexCount, pIndexData);
 }
 
 static void NTAPI D3DDevice_SetIndices(D3DResource *ib, UINT_ BaseVertexIndex)
 {
+    if (d3d.recording) { ULONG a[2] = { (ULONG)ib, BaseVertexIndex }; pb_record(OP_INDICES, a, sizeof(a)); }
     d3d.indices = ib;
     d3d.base_vertex_index = BaseVertexIndex;
 }
@@ -1870,6 +1954,7 @@ static GLuint texture_for(D3DPixelContainer *t);
 
 static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
 {
+    if (d3d.recording) { ULONG a[2] = { (ULONG)target, (ULONG)z }; pb_record(OP_RENDER_TARGET, a, sizeof(a)); }
     if (!target) target = d3d.target;
     d3d.target = target;
     d3d.target_depth = z;
@@ -2182,6 +2267,7 @@ static void NTAPI D3DPalette_Lock(D3DPalette *p, PVOID *ppColors, ULONG Flags)
 
 static void NTAPI D3DDevice_SetPalette(ULONG Stage, D3DPalette *p)
 {
+    if (d3d.recording) { ULONG a[2] = { Stage, (ULONG)p }; pb_record(OP_PALETTE, a, sizeof(a)); }
     if (Stage < 4) d3d.palettes[Stage] = p;
 }
 
@@ -2269,6 +2355,7 @@ static int constant_slot(LONG reg)
 
 static void NTAPI D3DDevice_SetVertexShaderConstant(LONG Register, const float *data, ULONG count)
 {
+    if (d3d.recording) { ULONG h[2] = { (ULONG)Register, count }; pb_record2(OP_VS_CONST, h, 8, data, count * 16); }
     for (ULONG i = 0; i < count; i++) {
         int slot = constant_slot(Register + i);
         memcpy(d3d.vs_const[slot], data + i * 4, 16);
@@ -2436,6 +2523,7 @@ static void NTAPI D3DDevice_CreatePixelShader(const ULONG *def, ULONG *handle)
 
 static void NTAPI D3DDevice_SetPixelShader(ULONG handle)
 {
+    if (d3d.recording) pb_record(OP_PIXEL_SHADER, &handle, 4);
     d3d.pixel_shader = handle;
     if (!handle) return;
     const ULONG *def = (const ULONG *)handle;
@@ -2476,6 +2564,7 @@ static ULONG float_color(const float *f)
    nibble (PSC0Mapping / PSC1Mapping / PSFinalCombinerConstants) names it. */
 static void NTAPI D3DDevice_SetPixelShaderConstant(ULONG Register, const float *data, ULONG count)
 {
+    if (d3d.recording) { ULONG h[2] = { Register, count }; pb_record2(OP_PS_CONST, h, 8, data, count * 16); }
     const ULONG *def = (const ULONG *)d3d.pixel_shader;
     for (ULONG i = 0; i < count && Register < 16; i++, Register++, data += 4) {
         memcpy(d3d.ps_const[Register], data, 16);
@@ -2559,9 +2648,9 @@ static void NTAPI D3DDevice_SetVertexDataColor(LONG r, ULONG color)
     imm_set(r, c[0], c[1], c[2], c[3]);
 }
 
-static void NTAPI D3DDevice_End(void)
+/* Draw the vertices collected in `imm` as primitive `prim`. */
+static void imm_flush(ULONG prim)
 {
-    imm.active = false;
     if (!imm.n) return;
     vshader *sh = (d3d.vertex_shader & 1) ? (vshader *)(d3d.vertex_shader & ~1u) : NULL;
     if (sh && sh->code) {
@@ -2571,7 +2660,7 @@ static void NTAPI D3DDevice_End(void)
             if (r == 0 || imm.used[r]) tmp.attr[r] = (vattr){ 0, r * 16, 0x42, 4, GL_FLOAT, false, 16 };
             else tmp.attr[r].stream = -1;
         }
-        draw_programmable(&tmp, imm.prim, (const UCHAR *)imm.verts, sizeof(*imm.verts), 0, imm.n, NULL);
+        draw_programmable(&tmp, prim, (const UCHAR *)imm.verts, sizeof(*imm.verts), 0, imm.n, NULL);
         return;
     }
     bool pretransformed = sh ? sh->attr[0].components == 4 && sh->attr[0].gl_type == GL_FLOAT
@@ -2587,7 +2676,7 @@ static void NTAPI D3DDevice_End(void)
     unsigned units = d3d.pixel_shader ? 0xF : apply_textures();
     program_entry *e;
     if (!use_program(0, &e)) return;
-    glBegin(gl_primitive(imm.prim));
+    glBegin(gl_primitive(prim));
     for (unsigned i = 0; i < imm.n; i++) {
         float (*v)[4] = imm.verts[i];
         for (int u = 0; u < 4; u++) {
@@ -2603,6 +2692,567 @@ static void NTAPI D3DDevice_End(void)
     glEnd();
     end_program(e);
 }
+
+static void NTAPI D3DDevice_End(void)
+{
+    imm.active = false;
+    if (!imm.n) return;
+    if (d3d.recording) {
+        ULONG h[3] = { imm.prim, imm.n, 0 };
+        for (int r = 0; r < 16; r++) if (imm.used[r]) h[2] |= 1u << r;
+        pb_record2(OP_BEGIN_END, h, sizeof(h), imm.verts, imm.n * sizeof(*imm.verts));
+        return;
+    }
+    imm_flush(imm.prim);
+}
+
+
+/* ---- push buffers ------------------------------------------------------ */
+
+/* A recorded push buffer holds a stream of our own ops: the state changes
+   and draws made between BeginPushBuffer and EndPushBuffer, each as
+   [op | dwords << 8, payload...].  Render and texture states the title
+   writes inline are picked up as differences against a snapshot whenever
+   something else is recorded.  Offsets (from GetPushBufferOffset, used by
+   the fixup functions) are byte offsets into that stream, so a fixup can
+   replace the payload of the op recorded at that offset.  Running a push
+   buffer replays the ops through the ordinary entry points. */
+
+typedef struct D3DPushBuffer {
+    DWORD Common, Data, Lock, Size, AllocationSize;
+    ULONG *ops;              /* host side: the recorded stream */
+    unsigned n, cap;         /* dwords used / allocated */
+} D3DPushBuffer;
+
+typedef struct D3DFixup {
+    DWORD Common, Data, Lock, Run, Next, Size;
+} D3DFixup;
+
+#define D3DERR_BUFFERTOOSMALL ((LONG)0x88760829)
+
+/* Recording changes only our shadow state; this is put back at the end. */
+static struct {
+    ULONG rs[D3DRS_MAX], tss[4 * 32];
+    D3DResource *textures[4];
+    ULONG vertex_shader, pixel_shader;
+    typeof(d3d.streams) streams;
+    D3DResource *indices;
+    ULONG base_vertex_index;
+    typeof(d3d.transforms) transforms;
+    D3DVIEWPORT8 viewport;
+    typeof(d3d.lights) lights;
+    float material[4][4], material_power;
+    float vs_const[192][4], ps_const[16][4];
+    D3DPalette *palettes[4];
+    D3DSurface *target, *target_depth;
+} pb_saved;
+static ULONG pb_rs[D3DRS_MAX], pb_tss[4 * 32];   /* the state last written to the stream */
+
+static void pushbuffer_free(D3DPushBuffer *pb)
+{
+    if (d3d.recording == pb) d3d.recording = NULL;
+    free(pb->ops);
+    if (pb->Data) MmFreeContiguousMemory((PVOID)pb->Data);
+    pool_free(pb);
+}
+
+static ULONG *pb_emit(unsigned op, unsigned payload_dwords)
+{
+    D3DPushBuffer *pb = d3d.recording;
+    unsigned need = pb->n + 1 + payload_dwords;
+    if (need > pb->cap) {
+        while (pb->cap < need) pb->cap = pb->cap ? pb->cap * 2 : 1024;
+        pb->ops = realloc(pb->ops, pb->cap * 4);
+    }
+    ULONG *p = pb->ops + pb->n;
+    p[0] = op | ((1 + payload_dwords) << 8);
+    pb->n = need;
+    return p + 1;
+}
+
+static void pb_flush_state(void)
+{
+    for (unsigned i = 0; i < D3DRS_MAX; i++)
+        if (RS(i) != pb_rs[i]) {
+            ULONG *p = pb_emit(OP_RS, 2);
+            p[0] = i;
+            p[1] = pb_rs[i] = RS(i);
+        }
+    for (unsigned i = 0; i < 4 * 32; i++)
+        if (d3d.texture_state[i] != pb_tss[i]) {
+            ULONG *p = pb_emit(OP_TSS, 2);
+            p[0] = i;
+            p[1] = pb_tss[i] = d3d.texture_state[i];
+        }
+}
+
+static void pb_record2(unsigned op, const void *head, unsigned head_bytes, const void *data, unsigned data_bytes)
+{
+    pb_flush_state();
+    ULONG *p = pb_emit(op, (head_bytes + data_bytes + 3) / 4);
+    memcpy(p, head, head_bytes);
+    if (data_bytes) memcpy((char *)p + head_bytes, data, data_bytes);
+}
+
+static void pb_record(unsigned op, const void *payload, unsigned bytes)
+{
+    pb_record2(op, payload, bytes, NULL, 0);
+}
+
+static LONG NTAPI D3DDevice_CreatePushBuffer(UINT_ Size, ULONG RunUsingCpuCopy, D3DPushBuffer **pp)
+{
+    (void)RunUsingCpuCopy;
+    D3DPushBuffer *pb = pool_alloc(sizeof(*pb));
+    memset(pb, 0, sizeof(*pb));
+    pb->Common = 1 | D3DCOMMON_TYPE_PUSHBUFFER | D3DCOMMON_D3DCREATED;
+    pb->Data = (ULONG)MmAllocateContiguousMemoryEx(Size ? Size : 4, 0, 0x7FFFFFFF, 4, 4);
+    pb->AllocationSize = Size;
+    *pp = pb;
+    return D3D_OK;
+}
+
+static void NTAPI D3DDevice_BeginPushBuffer(D3DPushBuffer *pb)
+{
+    if (d3d.recording) xlog("D3D: BeginPushBuffer while already recording");
+    d3d.recording = pb;
+    pb->n = 0;
+    memcpy(pb_rs, d3d.render_state, sizeof(pb_rs));
+    memcpy(pb_tss, d3d.texture_state, sizeof(pb_tss));
+    memcpy(pb_saved.rs, d3d.render_state, sizeof(pb_saved.rs));
+    memcpy(pb_saved.tss, d3d.texture_state, sizeof(pb_saved.tss));
+    memcpy(pb_saved.textures, d3d.textures, sizeof(pb_saved.textures));
+    pb_saved.vertex_shader = d3d.vertex_shader;
+    pb_saved.pixel_shader = d3d.pixel_shader;
+    memcpy(&pb_saved.streams, &d3d.streams, sizeof(pb_saved.streams));
+    pb_saved.indices = d3d.indices;
+    pb_saved.base_vertex_index = d3d.base_vertex_index;
+    memcpy(&pb_saved.transforms, &d3d.transforms, sizeof(pb_saved.transforms));
+    pb_saved.viewport = d3d.viewport;
+    memcpy(&pb_saved.lights, &d3d.lights, sizeof(pb_saved.lights));
+    memcpy(pb_saved.material, d3d.material, sizeof(pb_saved.material));
+    pb_saved.material_power = d3d.material_power;
+    memcpy(pb_saved.vs_const, d3d.vs_const, sizeof(pb_saved.vs_const));
+    memcpy(pb_saved.ps_const, d3d.ps_const, sizeof(pb_saved.ps_const));
+    memcpy(pb_saved.palettes, d3d.palettes, sizeof(pb_saved.palettes));
+    pb_saved.target = d3d.target;
+    pb_saved.target_depth = d3d.target_depth;
+}
+
+static LONG NTAPI D3DDevice_EndPushBuffer(void)
+{
+    D3DPushBuffer *pb = d3d.recording;
+    if (!pb) return D3DERR_INVALIDCALL;
+    pb_flush_state();
+    pb->Size = pb->n * 4 + 4;
+    d3d.recording = NULL;
+    memcpy(d3d.render_state, pb_saved.rs, sizeof(pb_saved.rs));
+    memcpy(d3d.texture_state, pb_saved.tss, sizeof(pb_saved.tss));
+    memcpy(d3d.textures, pb_saved.textures, sizeof(pb_saved.textures));
+    d3d.vertex_shader = pb_saved.vertex_shader;
+    d3d.pixel_shader = pb_saved.pixel_shader;
+    memcpy(&d3d.streams, &pb_saved.streams, sizeof(pb_saved.streams));
+    d3d.indices = pb_saved.indices;
+    d3d.base_vertex_index = pb_saved.base_vertex_index;
+    memcpy(&d3d.transforms, &pb_saved.transforms, sizeof(pb_saved.transforms));
+    d3d.viewport = pb_saved.viewport;
+    memcpy(&d3d.lights, &pb_saved.lights, sizeof(pb_saved.lights));
+    memcpy(d3d.material, pb_saved.material, sizeof(pb_saved.material));
+    d3d.material_power = pb_saved.material_power;
+    memcpy(d3d.vs_const, pb_saved.vs_const, sizeof(pb_saved.vs_const));
+    memcpy(d3d.ps_const, pb_saved.ps_const, sizeof(pb_saved.ps_const));
+    memcpy(d3d.palettes, pb_saved.palettes, sizeof(pb_saved.palettes));
+    if (d3d.target != pb_saved.target || d3d.target_depth != pb_saved.target_depth)
+        D3DDevice_SetRenderTarget(pb_saved.target, pb_saved.target_depth);
+    TRACE("D3D: recorded push buffer %p: %u dwords", (void *)pb, pb->n);
+    return D3D_OK;
+}
+
+static void NTAPI D3DDevice_GetPushBufferOffset(ULONG *off)
+{
+    if (!d3d.recording) { *off = 0; return; }
+    pb_flush_state();
+    *off = d3d.recording->n * 4;
+}
+
+/* ---- fixups ---- */
+
+static D3DFixup *g_fixup;              /* BeginFixup/EndFixup bracket target */
+static D3DPushBuffer *g_fixup_pb;
+
+static LONG NTAPI D3DDevice_CreateFixup(UINT_ Size, D3DFixup **pp)
+{
+    D3DFixup *fx = pool_alloc(sizeof(*fx) + Size);
+    memset(fx, 0, sizeof(*fx));
+    fx->Common = 1 | D3DCOMMON_TYPE_FIXUP | D3DCOMMON_D3DCREATED;
+    fx->Data = (ULONG)(fx + 1);
+    fx->Size = Size;
+    *pp = fx;
+    return D3D_OK;
+}
+
+static void NTAPI D3DFixup_Reset(D3DFixup *fx) { fx->Next = fx->Run = 0; }
+static void NTAPI D3DFixup_GetSize(D3DFixup *fx, ULONG *size) { *size = fx->Next - fx->Run; }
+static void NTAPI D3DFixup_GetSpace(D3DFixup *fx, ULONG *space) { *space = fx->Size > fx->Next ? fx->Size - fx->Next : 0; }
+
+static void NTAPI D3DPushBuffer_BeginFixup(D3DPushBuffer *pb, D3DFixup *fx, ULONG NoWait)
+{
+    (void)NoWait;
+    g_fixup = fx;
+    g_fixup_pb = pb;
+    if (fx) fx->Run = fx->Next;
+}
+
+static LONG NTAPI D3DPushBuffer_EndFixup(D3DPushBuffer *pb)
+{
+    (void)pb;
+    D3DFixup *fx = g_fixup;
+    g_fixup = NULL;
+    if (!fx) return D3D_OK;
+    ULONG at = fx->Next;
+    fx->Next += 4;
+    if (fx->Next > fx->Size) return D3DERR_BUFFERTOOSMALL;
+    *(ULONG *)(fx->Data + at) = 0xFFFFFFFF;
+    return D3D_OK;
+}
+
+/* The op recorded at `offset`, or NULL (with one complaint) when there is
+   no op of that kind there. */
+static ULONG *pb_op_at(D3DPushBuffer *pb, ULONG offset, unsigned op)
+{
+    if (pb->ops && offset / 4 < pb->n && (pb->ops[offset / 4] & 0xFF) == op) return pb->ops + offset / 4 + 1;
+    static bool warned;
+    if (!warned) {
+        xlog("D3D: push buffer fixup at offset %u does not match the recorded op (kind %u)", offset, op);
+        warned = true;
+    }
+    return NULL;
+}
+
+/* Room for a fixup payload: in the fixup object of the current bracket
+   (as [size, offset, kind, payload...], terminated by EndFixup), or in the
+   op itself when BeginFixup was given no fixup object. */
+static ULONG *fixup_payload(D3DPushBuffer *pb, ULONG offset, unsigned op, unsigned bytes)
+{
+    pb_op_at(pb, offset, op);
+    if (g_fixup) {
+        D3DFixup *fx = g_fixup;
+        ULONG size = 4 + bytes, at = fx->Next;
+        fx->Next += 8 + size;
+        if (fx->Next > fx->Size) return NULL;
+        ULONG *e = (ULONG *)(fx->Data + at);
+        e[0] = size;
+        e[1] = offset;
+        e[2] = op;
+        return e + 3;
+    }
+    ULONG *p = pb_op_at(pb, offset, op);
+    if (p && ((p[-1] >> 8) - 1) * 4 < bytes) return NULL;
+    return p;
+}
+
+static const ULONG *fixup_find(const D3DFixup *fx, ULONG offset, unsigned op)
+{
+    if (!fx) return NULL;
+    ULONG end = fx->Next < fx->Size ? fx->Next : fx->Size;
+    const ULONG *e = (const ULONG *)(fx->Data + fx->Run), *stop = (const ULONG *)(fx->Data + end);
+    while (e + 3 <= stop && e[0] != 0xFFFFFFFF) {
+        if (e[1] == offset && e[2] == op) return e + 3;
+        e += 2 + e[0] / 4;
+    }
+    return NULL;
+}
+
+static void NTAPI D3DPushBuffer_SetVertexShaderConstant(D3DPushBuffer *pb, ULONG Offset, LONG Register,
+                                                        const float *data, ULONG count)
+{
+    const ULONG *rec = pb_op_at(pb, Offset, OP_VS_CONST);
+    ULONG *p = fixup_payload(pb, Offset, OP_VS_CONST, 8 + count * 16);
+    if (!p) return;
+    p[0] = rec ? rec[0] : (ULONG)Register;
+    p[1] = count;
+    memcpy(p + 2, data, count * 16);
+}
+
+static void NTAPI D3DPushBuffer_SetTexture(D3DPushBuffer *pb, ULONG Offset, ULONG Stage, D3DResource *t)
+{
+    ULONG *p = fixup_payload(pb, Offset, OP_TEXTURE, 8);
+    if (p) { p[0] = Stage; p[1] = (ULONG)t; }
+}
+
+static void NTAPI D3DPushBuffer_SetPalette(D3DPushBuffer *pb, ULONG Offset, ULONG Stage, D3DPalette *pal)
+{
+    ULONG *p = fixup_payload(pb, Offset, OP_PALETTE, 8);
+    if (p) { p[0] = Stage; p[1] = (ULONG)pal; }
+}
+
+static void NTAPI D3DPushBuffer_SetRenderTarget(D3DPushBuffer *pb, ULONG Offset, D3DSurface *rt, D3DSurface *z)
+{
+    ULONG *p = fixup_payload(pb, Offset, OP_RENDER_TARGET, 8);
+    if (p) { p[0] = (ULONG)rt; p[1] = (ULONG)z; }
+}
+
+static void NTAPI D3DPushBuffer_SetVertexShaderInput(D3DPushBuffer *pb, ULONG Offset, ULONG Handle, UINT_ count,
+                                                     const ULONG *inputs)
+{
+    ULONG *p = fixup_payload(pb, Offset, OP_VS_INPUT, 8 + count * 12);
+    if (p) { p[0] = Handle; p[1] = count; memcpy(p + 2, inputs, count * 12); }
+}
+
+static void NTAPI D3DPushBuffer_RunPushBuffer(D3DPushBuffer *pb, ULONG Offset, D3DPushBuffer *dest, D3DFixup *fx)
+{
+    ULONG *p = fixup_payload(pb, Offset, OP_RUN, 8);
+    if (p) { p[0] = (ULONG)dest; p[1] = (ULONG)fx; }
+}
+
+static void NTAPI D3DPushBuffer_Verify(D3DPushBuffer *pb, ULONG StampResources) { (void)pb; (void)StampResources; }
+
+/* ---- running ---- */
+
+static void pb_interpret(const ULONG *p, unsigned n);
+
+static void pb_run(D3DPushBuffer *pb, D3DFixup *fx, int depth)
+{
+    if (!pb || !pb->ops || depth > 8) return;
+    for (unsigned i = 0; i < pb->n;) {
+        const ULONG *p = pb->ops + i;
+        unsigned op = p[0] & 0xFF, len = p[0] >> 8;
+        const ULONG *a = p + 1;
+        const ULONG *f = fixup_find(fx, i * 4, op);
+        if (f) a = f;
+        switch (op) {
+        case OP_RS: if (a[0] < D3DRS_MAX) RS(a[0]) = a[1]; break;
+        case OP_TSS: if (a[0] < 4 * 32) d3d.texture_state[a[0]] = a[1]; break;
+        case OP_VS_CONST: D3DDevice_SetVertexShaderConstant((LONG)a[0], (const float *)(a + 2), a[1]); break;
+        case OP_VERTEX_SHADER: D3DDevice_SetVertexShader(a[0]); break;
+        case OP_TEXTURE: D3DDevice_SetTexture(a[0], (D3DResource *)a[1]); break;
+        case OP_STREAM: D3DDevice_SetStreamSource(a[0], (D3DResource *)a[1], a[2]); break;
+        case OP_INDICES: D3DDevice_SetIndices((D3DResource *)a[0], a[1]); break;
+        case OP_TRANSFORM: D3DDevice_SetTransform(a[0], (const D3DMATRIX *)(a + 1)); break;
+        case OP_VIEWPORT: D3DDevice_SetViewport(a[0] ? (const D3DVIEWPORT8 *)(a + 1) : NULL); break;
+        case OP_DRAW: D3DDevice_DrawVertices(a[0], a[1], a[2]); break;
+        case OP_DRAW_INDEXED: D3DDevice_DrawIndexedVertices(a[0], a[1], (const USHORT *)(a + 2)); break;
+        case OP_DRAW_UP: D3DDevice_DrawVerticesUP(a[0], a[1], a + 3, a[2]); break;
+        case OP_DRAW_INDEXED_UP: {
+            ULONG count = a[1], stride = a[2], ib = (count * 2 + 3) & ~3u;
+            D3DDevice_DrawIndexedVerticesUP(a[0], count, (const USHORT *)(a + 4), (const char *)(a + 4) + ib, stride);
+            break;
+        }
+        case OP_BEGIN_END: {
+            unsigned nv = a[1];
+            if (nv > imm.cap) {
+                imm.cap = nv;
+                imm.verts = realloc(imm.verts, imm.cap * sizeof(*imm.verts));
+            }
+            memcpy(imm.verts, a + 3, nv * sizeof(*imm.verts));
+            imm.n = nv;
+            for (int r = 0; r < 16; r++) imm.used[r] = (a[2] >> r) & 1;
+            imm_flush(a[0]);
+            break;
+        }
+        case OP_PIXEL_SHADER: D3DDevice_SetPixelShader(a[0]); break;
+        case OP_PS_CONST: D3DDevice_SetPixelShaderConstant(a[0], (const float *)(a + 2), a[1]); break;
+        case OP_VS_INPUT: D3DDevice_SetVertexShaderInput(a[0], a[1], a + 2); break;
+        case OP_RENDER_TARGET: D3DDevice_SetRenderTarget((D3DSurface *)a[0], (D3DSurface *)a[1]); break;
+        case OP_PALETTE: D3DDevice_SetPalette(a[0], (D3DPalette *)a[1]); break;
+        case OP_RUN: pb_run((D3DPushBuffer *)a[0], (D3DFixup *)a[1], depth + 1); break;
+        case OP_CLEAR: {
+            float z;
+            memcpy(&z, &a[3], 4);
+            D3DDevice_Clear(a[0], a[0] ? (const D3DRECT *)(a + 5) : NULL, a[1], a[2], z, a[4]);
+            break;
+        }
+        case OP_LIGHT: D3DDevice_SetLight(a[0], (const D3DLIGHT8 *)(a + 1)); break;
+        case OP_LIGHT_ENABLE: D3DDevice_LightEnable(a[0], a[1]); break;
+        case OP_MATERIAL: D3DDevice_SetMaterial((const float *)a); break;
+        case OP_RAW: pb_interpret(a + 1, a[0]); break;
+        default: xlog("D3D: bad push buffer op %u", op); return;
+        }
+        i += len;
+    }
+}
+
+static void NTAPI D3DDevice_RunPushBuffer(D3DPushBuffer *pb, D3DFixup *fx)
+{
+    if (d3d.recording) {
+        ULONG a[2] = { (ULONG)pb, (ULONG)fx };
+        pb_record(OP_RUN, a, sizeof(a));
+        return;
+    }
+    pb_run(pb, fx, 0);
+}
+
+/* ---- BeginPush / EndPush: raw NV2A methods ---- */
+
+/* The title writes [D3DPUSH_ENCODE(method, count), data...] runs into a
+   scratch buffer; EndPush hands it to a small interpreter for the methods
+   titles use this way (inline vertex data, draws, constants). */
+static ULONG *push_scratch;
+static unsigned push_scratch_cap;
+
+static void NTAPI D3DDevice_BeginPush(ULONG Count, ULONG **pp)
+{
+    if (Count + 1 > push_scratch_cap) {
+        push_scratch_cap = Count + 1;
+        push_scratch = realloc(push_scratch, push_scratch_cap * 4);
+    }
+    *pp = push_scratch;
+}
+
+/* Stride and layout of inline-array vertices for the current vertex
+   shader: the enabled attributes packed in register order. */
+static vshader inline_layout(const vshader *sh, ULONG *stride)
+{
+    vshader tmp = *sh;
+    ULONG off = 0;
+    for (int r = 0; r < 16; r++) {
+        if (tmp.attr[r].stream < 0) continue;
+        tmp.attr[r].stream = 0;
+        tmp.attr[r].offset = off;
+        off += tmp.attr[r].bytes;
+    }
+    *stride = off;
+    return tmp;
+}
+
+static void pb_interpret(const ULONG *p, unsigned n)
+{
+    static uint8_t *inline_buf;
+    static unsigned inline_n, inline_cap;
+    static USHORT *elems;
+    static unsigned elems_n, elems_cap;
+    static float partial[16][4];
+    static ULONG const_load;
+    static ULONG unknown[32];
+    static unsigned nunknown;
+    ULONG prim = 0;
+    inline_n = elems_n = 0;
+
+    for (unsigned i = 0; i < n;) {
+        ULONG hdr = p[i++];
+        if ((hdr & 3) != 0 || hdr == 0x20000 || (hdr & 0xE0000000) == 0x20000000) {   /* jump / call / return */
+            xlog("D3D: push buffer control word %#x is not supported", hdr);
+            return;
+        }
+        unsigned method = hdr & 0x1FFC, count = (hdr >> 18) & 0x7FF;
+        bool noinc = hdr & 0x40000000;
+        if (i + count > n) return;
+        const ULONG *v = p + i;
+        i += count;
+
+        if (method == 0x1818) {   /* NV097_INLINE_ARRAY */
+            if (inline_n + count * 4 > inline_cap) {
+                inline_cap = (inline_n + count * 4) * 2;
+                inline_buf = realloc(inline_buf, inline_cap);
+            }
+            memcpy(inline_buf + inline_n, v, count * 4);
+            inline_n += count * 4;
+            continue;
+        }
+        for (unsigned k = 0; k < count; k++) {
+            unsigned m = noinc ? method : method + 4 * k;
+            ULONG d = v[k];
+            float f;
+            memcpy(&f, &d, 4);
+            if (m == 0x17FC) {   /* NV097_SET_BEGIN_END */
+                if (d) {
+                    prim = d;
+                    imm_init();
+                    imm.active = true;
+                    imm.prim = d;
+                    imm.n = 0;
+                    inline_n = elems_n = 0;
+                } else {
+                    imm.active = false;
+                    if (inline_n) {
+                        ULONG stride;
+                        if (d3d.vertex_shader & 1) {
+                            vshader *sh = (vshader *)(d3d.vertex_shader & ~1u);
+                            vshader tmp = inline_layout(sh, &stride);
+                            if (stride) {
+                                if (sh->code) draw_programmable(&tmp, prim, inline_buf, stride, 0, inline_n / stride, NULL);
+                                else draw_declared(&tmp, prim, inline_buf, stride, 0, inline_n / stride, NULL);
+                            }
+                        } else {
+                            stride = parse_fvf(d3d.vertex_shader).stride;
+                            if (stride) draw(prim, inline_buf, stride, 0, inline_n / stride, NULL);
+                        }
+                    } else if (elems_n) {
+                        D3DResource *vb = d3d.streams[0].vb;
+                        if (vb) draw(prim, resource_data(vb), d3d.streams[0].stride, 0, elems_n, elems);
+                    } else {
+                        imm_flush(prim);
+                    }
+                    inline_n = elems_n = imm.n = 0;
+                }
+            } else if (m == 0x1810) {   /* NV097_DRAW_ARRAYS: count-1 << 24 | start */
+                D3DResource *vb = d3d.streams[0].vb;
+                if (vb) draw(prim, resource_data(vb), d3d.streams[0].stride, d & 0xFFFFFF, (d >> 24) + 1, NULL);
+            } else if (m == 0x1800 || m == 0x1808) {   /* NV097_ARRAY_ELEMENT16 / 32 */
+                if (elems_n + 2 > elems_cap) {
+                    elems_cap = (elems_n + 2) * 2;
+                    elems = realloc(elems, elems_cap * sizeof(*elems));
+                }
+                if (m == 0x1800) {
+                    elems[elems_n++] = d & 0xFFFF;
+                    elems[elems_n++] = d >> 16;
+                } else {
+                    elems[elems_n++] = d;
+                }
+            } else if (m == 0x1EA4) {   /* NV097_SET_TRANSFORM_CONSTANT_LOAD */
+                const_load = d;
+            } else if (m >= 0xB80 && m < 0xC00) {   /* NV097_SET_TRANSFORM_CONSTANT */
+                /* Consecutive dwords fill vec4s from the load index, which
+                   moves on by the number of vec4s written. */
+                unsigned pos = noinc ? k : (m - 0xB80) / 4;
+                unsigned slot = const_load + pos / 4;
+                if (slot < 192) d3d.vs_const[slot][pos % 4] = f;
+                if (k == count - 1) const_load += (pos + 1) / 4;
+            } else if (m >= 0x1880 && m < 0x1900) {   /* NV097_SET_VERTEX_DATA2F_M */
+                unsigned slot = (m - 0x1880) / 8, c = ((m - 0x1880) % 8) / 4;
+                partial[slot][c] = f;
+                if (c == 1) imm_set(slot, partial[slot][0], f, 0, 1);
+            } else if (m >= 0x1900 && m < 0x1940) {   /* NV097_SET_VERTEX_DATA2S */
+                unsigned slot = (m - 0x1900) / 4;
+                imm_set(slot, (SHORT)(d & 0xFFFF), (SHORT)(d >> 16), 0, 1);
+            } else if (m >= 0x1940 && m < 0x1980) {   /* NV097_SET_VERTEX_DATA4UB */
+                unsigned slot = (m - 0x1940) / 4;
+                imm_set(slot, (d & 255) / 255.0f, ((d >> 8) & 255) / 255.0f, ((d >> 16) & 255) / 255.0f,
+                        (d >> 24) / 255.0f);
+            } else if (m >= 0x1980 && m < 0x1A00) {   /* NV097_SET_VERTEX_DATA4S_M */
+                unsigned slot = (m - 0x1980) / 8, c = ((m - 0x1980) % 8) / 4;
+                partial[slot][c * 2] = (SHORT)(d & 0xFFFF);
+                partial[slot][c * 2 + 1] = (SHORT)(d >> 16);
+                if (c == 1) imm_set(slot, partial[slot][0], partial[slot][1], partial[slot][2], partial[slot][3]);
+            } else if (m >= 0x1A00 && m < 0x1B00) {   /* NV097_SET_VERTEX_DATA4F_M */
+                unsigned slot = (m - 0x1A00) / 16, c = ((m - 0x1A00) % 16) / 4;
+                partial[slot][c] = f;
+                if (c == 3) imm_set(slot, partial[slot][0], partial[slot][1], partial[slot][2], partial[slot][3]);
+            } else if (m == 0x100) {   /* NV097_NO_OPERATION */
+            } else {
+                unsigned u = 0;
+                while (u < nunknown && unknown[u] != m) u++;
+                if (u == nunknown && nunknown < 32) {
+                    unknown[nunknown++] = m;
+                    xlog("D3D: push buffer method %#x is not supported", m);
+                }
+            }
+        }
+    }
+}
+
+static void NTAPI D3DDevice_EndPush(ULONG *end)
+{
+    unsigned n = end - push_scratch;
+    if (!push_scratch || n > push_scratch_cap) return;
+    if (d3d.recording) {
+        ULONG h = n;
+        pb_record2(OP_RAW, &h, 4, push_scratch, n * 4);
+        return;
+    }
+    pb_interpret(push_scratch, n);
+}
+
+static void NTAPI D3DDevice_Nop(void) {}
 
 /* ---- table ------------------------------------------------------------- */
 
@@ -2746,6 +3396,27 @@ const struct hle_func d3d8_funcs[] = {
     F("_D3DDevice_SetTile@8", D3DDevice_SetTile),
     F("_D3DDevice_GetTile@8", D3DDevice_GetTile),
     F("_D3DDevice_KickPushBuffer@0", D3DDevice_KickPushBuffer),
+    F("_D3DDevice_CreatePushBuffer@12", D3DDevice_CreatePushBuffer),
+    F("_D3DDevice_BeginPushBuffer@4", D3DDevice_BeginPushBuffer),
+    F("_D3DDevice_EndPushBuffer@0", D3DDevice_EndPushBuffer),
+    F("_D3DDevice_RunPushBuffer@8", D3DDevice_RunPushBuffer),
+    F("_D3DDevice_GetPushBufferOffset@4", D3DDevice_GetPushBufferOffset),
+    F("_D3DDevice_CreateFixup@8", D3DDevice_CreateFixup),
+    F("_D3DDevice_BeginPush@8", D3DDevice_BeginPush),
+    F("_D3DDevice_EndPush@4", D3DDevice_EndPush),
+    F("_D3DDevice_Nop@0", D3DDevice_Nop),
+    F("_D3DFixup_Reset@4", D3DFixup_Reset),
+    F("_D3DFixup_GetSize@8", D3DFixup_GetSize),
+    F("_D3DFixup_GetSpace@8", D3DFixup_GetSpace),
+    F("_D3DPushBuffer_BeginFixup@12", D3DPushBuffer_BeginFixup),
+    F("_D3DPushBuffer_EndFixup@4", D3DPushBuffer_EndFixup),
+    F("_D3DPushBuffer_SetVertexShaderConstant@20", D3DPushBuffer_SetVertexShaderConstant),
+    F("_D3DPushBuffer_SetTexture@16", D3DPushBuffer_SetTexture),
+    F("_D3DPushBuffer_SetPalette@16", D3DPushBuffer_SetPalette),
+    F("_D3DPushBuffer_SetRenderTarget@16", D3DPushBuffer_SetRenderTarget),
+    F("_D3DPushBuffer_SetVertexShaderInput@20", D3DPushBuffer_SetVertexShaderInput),
+    F("_D3DPushBuffer_RunPushBuffer@16", D3DPushBuffer_RunPushBuffer),
+    F("_D3DPushBuffer_Verify@8", D3DPushBuffer_Verify),
     F("_D3DDevice_InsertFence@0", D3DDevice_InsertFence),
     F("_D3DDevice_IsFencePending@4", D3DDevice_IsFencePending),
     F("_D3DDevice_BlockOnFence@4", D3DDevice_BlockOnFence),
