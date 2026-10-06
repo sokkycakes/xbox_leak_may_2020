@@ -3,6 +3,8 @@
  * imports and replacing the statically linked libraries that touch hardware.
  */
 #define _GNU_SOURCE
+#include <dlfcn.h>
+#include <execinfo.h>
 #include <getopt.h>
 #include <signal.h>
 #include <stdlib.h>
@@ -59,6 +61,16 @@ static void crash_handler(int sig, siginfo_t *si, void *uc_)
     ULONG *sp = (ULONG *)r[REG_ESP];
     xlog("  stack: %08x %08x %08x %08x %08x %08x %08x %08x", sp[0], sp[1], sp[2], sp[3], sp[4], sp[5],
          sp[6], sp[7]);
+    /* Name the host code at the fault and unwind through the signal frame so a
+       crash inside the HLE layer or a host library is attributable. */
+    Dl_info info;
+    if (dladdr((void *)r[REG_EIP], &info) && info.dli_fname)
+        xlog("  eip is in %s%s%s+%#lx", info.dli_fname, info.dli_sname ? " " : "", info.dli_sname ? info.dli_sname : "",
+             (unsigned long)(r[REG_EIP] - (greg_t)(info.dli_saddr ? info.dli_saddr : info.dli_fbase)));
+    void *frames[32];
+    int n = backtrace(frames, 32);
+    char **names = backtrace_symbols(frames, n);
+    for (int i = 0; i < n; i++) xlog("  #%d %s", i, names ? names[i] : "?");
     _exit(128 + sig);
 }
 

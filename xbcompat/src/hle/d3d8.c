@@ -119,6 +119,7 @@ static struct {
     D3DVIEWPORT8 viewport;
     struct { D3DResource *vb; ULONG stride; } streams[16];
     ULONG *texture_state;        /* the title's D3D__TextureState[4][32] */
+    USHORT **index_data;         /* the title's D3D__IndexData, read by the DrawIndexedPrimitive inline */
     ULONG texture_state_fallback[4 * 32];
     D3DResource *textures[4];
     ULONG vertex_shader;
@@ -249,6 +250,7 @@ void d3d_bind_globals(void)
     if (!d3d.render_state) d3d.render_state = d3d.render_state_fallback;
     d3d.texture_state = (ULONG *)hle_lookup("_D3D__TextureState");
     if (!d3d.texture_state) d3d.texture_state = d3d.texture_state_fallback;
+    d3d.index_data = (USHORT **)hle_lookup("_D3D__IndexData");
     d3d.device = (ULONG *)hle_lookup_prefix("?g_Device@D3D@@");
     d3d.device_ptr = (ULONG *)hle_lookup_prefix("?g_pDevice@D3D@@");
     xlog("D3D: render states at %p, device at %p", (void *)d3d.render_state, (void *)d3d.device);
@@ -430,9 +432,11 @@ static ULONG NTAPI D3DResource_Release(D3DResource *r)
     ULONG refs = --r->Common & D3DCOMMON_REFCOUNT_MASK;
     if (refs == 0 && (r->Common & D3DCOMMON_D3DCREATED)) {
         ULONG type = r->Common & D3DCOMMON_TYPE_MASK;
-        if (type == D3DCOMMON_TYPE_VERTEXBUFFER || type == D3DCOMMON_TYPE_INDEXBUFFER ||
-            type == D3DCOMMON_TYPE_PALETTE) {
+        if (type == D3DCOMMON_TYPE_VERTEXBUFFER || type == D3DCOMMON_TYPE_PALETTE) {
             MmFreeContiguousMemory(resource_data(r));
+            pool_free(r);
+        } else if (type == D3DCOMMON_TYPE_INDEXBUFFER) {
+            MmFreeContiguousMemory((PVOID)r->Data);
             pool_free(r);
         } else if (type == D3DCOMMON_TYPE_TEXTURE) {
             tex_invalidate(r->Data);
@@ -479,9 +483,10 @@ static void NTAPI D3D_FreeContiguousMemory(PVOID p)
 
 static void NTAPI D3DResource_Register(D3DResource *r, PVOID base)
 {
-    ULONG mem = (ULONG)base + r->Data;
-    /* Push buffers keep a virtual address; everything else a GPU (physical) one. */
-    r->Data = (r->Common & D3DCOMMON_TYPE_MASK) == 0x00020000 ? mem : (mem & 0x7FFFFFFF);
+    ULONG mem = (ULONG)base + r->Data, type = r->Common & D3DCOMMON_TYPE_MASK;
+    /* Push and index buffers keep a virtual address (the CPU reads them);
+       everything else a GPU (physical) one. */
+    r->Data = type == D3DCOMMON_TYPE_PUSHBUFFER || type == D3DCOMMON_TYPE_INDEXBUFFER ? mem : (mem & 0x7FFFFFFF);
 }
 
 /* ---- textures ---------------------------------------------------------- */
@@ -1640,6 +1645,8 @@ static void draw_declared(const vshader *sh, ULONG PrimitiveType, const UCHAR *u
 #undef STREAM
     program_entry *e;
     if (!use_program(0, &e)) return;
+    TRACE("D3D: draw(declared) prim %u count %u stride %u indices %p shader %#x", PrimitiveType, count, stride,
+          indices ? indices + first : NULL, d3d.vertex_shader);
     if (indices)
         glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, indices + first);
     else
@@ -1696,6 +1703,8 @@ static void draw(ULONG PrimitiveType, const UCHAR *base, ULONG stride, ULONG fir
 
     program_entry *e;
     if (!use_program(0, &e)) return;
+    TRACE("D3D: draw prim %u count %u base %p stride %u indices %p fvf %#x", PrimitiveType, count, base, stride,
+          indices ? indices + first : NULL, d3d.vertex_shader);
     if (indices)
         glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, indices + first);
     else
@@ -1758,6 +1767,8 @@ static void NTAPI D3DDevice_SetIndices(D3DResource *ib, UINT_ BaseVertexIndex)
     if (d3d.recording) { ULONG a[2] = { (ULONG)ib, BaseVertexIndex }; pb_record(OP_INDICES, a, sizeof(a)); }
     d3d.indices = ib;
     d3d.base_vertex_index = BaseVertexIndex;
+    /* The DrawIndexedPrimitive inline in d3d8.h reads D3D__IndexData + StartIndex. */
+    if (d3d.index_data) *d3d.index_data = ib ? (USHORT *)ib->Data : NULL;
 }
 
 /* ---- formats and surfaces -------------------------------------------- */
@@ -2234,7 +2245,7 @@ static LONG NTAPI D3DDevice_CreateIndexBuffer(UINT_ Length, ULONG Usage, ULONG F
     PVOID mem = MmAllocateContiguousMemoryEx(Length, 0, 0x7FFFFFFF, 0, 4);
     if (!ib || !mem) return 0x8007000E;
     ib->Common = 1 | D3DCOMMON_TYPE_INDEXBUFFER | D3DCOMMON_D3DCREATED;
-    ib->Data = (ULONG)mem & 0x7FFFFFFF;
+    ib->Data = (ULONG)mem;   /* virtual, like the real library: D3D__IndexData points into it */
     ib->Lock = 0;
     *pp = ib;
     return D3D_OK;
@@ -2243,7 +2254,7 @@ static LONG NTAPI D3DDevice_CreateIndexBuffer(UINT_ Length, ULONG Usage, ULONG F
 static void NTAPI D3DIndexBuffer_Lock(D3DResource *ib, UINT_ Offset, UINT_ Size, PVOID *ppbData, ULONG Flags)
 {
     (void)Size; (void)Flags;
-    *ppbData = (UCHAR *)resource_data(ib) + Offset;
+    *ppbData = (UCHAR *)ib->Data + Offset;
 }
 
 static LONG NTAPI D3DDevice_CreatePalette(ULONG Size, D3DPalette **pp)
