@@ -1345,6 +1345,7 @@ typedef struct {
     GLuint vs;               /* compiled vertex shader, 0 until first use */
     bool failed;
     ULONG stream_mask;
+    int tess_normal_in, tess_normal_out, tess_uv_out;   /* tessellator outputs, -1 if unused */
 } vshader;
 
 /* D3DVSDT: high nibble = component count (7 = FLOAT2H), low nibble = NV2A type. */
@@ -1370,14 +1371,18 @@ static vshader *parse_declaration(const ULONG *decl)
 {
     vshader *sh = calloc(1, sizeof(*sh));
     for (int i = 0; i < 16; i++) sh->attr[i].stream = -1;
+    sh->tess_normal_in = sh->tess_normal_out = sh->tess_uv_out = -1;
     int stream = 0;
     ULONG offset = 0;
     for (const ULONG *p = decl; p && *p != 0xFFFFFFFF; p++) {   /* state shaders have no declaration */
         ULONG tok = *p, type = tok >> 29;
-        if (type == 1) {                     /* D3DVSD_STREAM */
-            stream = tok & 0xF;
+        if (type == 1) {                     /* D3DVSD_STREAM, or STREAM_TESS (bit 28) */
+            stream = (tok & 0x10000000) ? -1 : (int)(tok & 0xF);
             offset = 0;
-        } else if (type == 2) {              /* D3DVSD_STREAMDATA */
+        } else if (type == 3) {              /* D3DVSD_TESSUV / D3DVSD_TESSNORMAL */
+            if (tok & 0x10000000) sh->tess_uv_out = tok & 0xF;
+            else { sh->tess_normal_in = (tok >> 20) & 0xF; sh->tess_normal_out = tok & 0xF; }
+        } else if (type == 2 && stream >= 0) {              /* D3DVSD_STREAMDATA */
             if (tok & 0x10000000) {          /* SKIP (dwords) or SKIPBYTES */
                 ULONG n = (tok >> 16) & 0xF;
                 offset += (tok & 0x08000000) ? n : n * 4;
@@ -1405,7 +1410,7 @@ static vshader *parse_declaration(const ULONG *decl)
             }
             p += count * 4;
         }
-        /* tessellator and NOP tokens are ignored */
+        /* NOP and extension tokens are ignored */
     }
     return sh;
 }
@@ -1726,7 +1731,8 @@ static void bind_attributes(const vshader *sh, const UCHAR *up, ULONG up_stride,
             stride = d3d.streams[a->stream].stride;
         }
         p_glEnableVertexAttribArray(r);
-        p_glVertexAttribPointer(r, a->components, a->gl_type, a->normalized, stride,
+        /* D3DCOLOR is stored B, G, R, A and reaches the shader as (R, G, B, A). */
+        p_glVertexAttribPointer(r, a->type == 0x40 ? GL_BGRA : a->components, a->gl_type, a->normalized, stride,
                                 base + a->offset + first_vertex * stride);
     }
 }
@@ -1918,6 +1924,347 @@ static void draw(ULONG PrimitiveType, const UCHAR *base, ULONG stride, ULONG fir
         glDrawArrays(gl_primitive(PrimitiveType), first, count);
     debug_dump_draw();
     end_program(e);
+}
+
+/* ---- higher-order patches ---------------------------------------------- */
+
+/* DrawRectPatch / DrawTriPatch tessellate on the CPU: the control points are
+   read from the current streams, every register is evaluated as a float4,
+   and the grid is drawn through the declared-layout paths with each register
+   in its own 16-byte slot. */
+
+typedef struct { bool used, tri; ULONG handle; ULONG info[7]; } patch_entry;
+static patch_entry patches[64];
+
+static patch_entry *patch_slot(ULONG handle, bool create)
+{
+    patch_entry *free_slot = NULL;
+    for (unsigned i = 0; i < 64; i++) {
+        if (patches[i].used && patches[i].handle == handle) return &patches[i];
+        if (!patches[i].used && !free_slot) free_slot = &patches[i];
+    }
+    if (!create) return NULL;
+    if (!free_slot) free_slot = &patches[handle % 64];
+    free_slot->used = true;
+    free_slot->handle = handle;
+    return free_slot;
+}
+
+/* One attribute of one control vertex as a float4, the way the draw paths read it. */
+static void read_attr(const vattr *a, const UCHAR *p, float out[4])
+{
+    out[0] = out[1] = out[2] = 0; out[3] = 1;
+    int kind = a->type & 0xF, n = a->components;
+    switch (kind) {
+    case 0:   /* D3DCOLOR: bytes B, G, R, A */
+        out[0] = p[2] / 255.0f; out[1] = p[1] / 255.0f; out[2] = p[0] / 255.0f; out[3] = p[3] / 255.0f;
+        break;
+    case 1: for (int i = 0; i < n && i < 4; i++) out[i] = ((const short *)p)[i] / 32767.0f; break;
+    case 2: for (int i = 0; i < n && i < 4; i++) memcpy(&out[i], p + 4 * i, 4); break;
+    case 4: for (int i = 0; i < n && i < 4; i++) out[i] = p[i] / 255.0f; break;
+    case 5: for (int i = 0; i < n && i < 4; i++) out[i] = ((const short *)p)[i]; break;
+    case 6: {   /* NORMPACKED3: 11:11:10 signed */
+        uint32_t v; memcpy(&v, p, 4);
+        out[0] = ((int32_t)(v << 21) >> 21) / 1023.0f;
+        out[1] = ((int32_t)(v << 10) >> 21) / 1023.0f;
+        out[2] = ((int32_t)v >> 22) / 511.0f;
+        break;
+    }
+    }
+}
+
+/* The layout the patch reads: the declaration, or one built from the FVF. */
+static bool patch_layout(vshader *out, vshader **real)
+{
+    *real = NULL;
+    if (d3d.vertex_shader & 1) {
+        *real = (vshader *)(d3d.vertex_shader & ~1u);
+        *out = **real;
+        return true;
+    }
+    memset(out, 0, sizeof(*out));
+    for (int r = 0; r < 16; r++) out->attr[r].stream = -1;
+    out->tess_normal_in = out->tess_normal_out = out->tess_uv_out = -1;
+    fvf_layout l = parse_fvf(d3d.vertex_shader);
+    if (l.pretransformed) return false;
+    decode_vsdt(0x32, &out->attr[0]); out->attr[0].stream = 0; out->attr[0].offset = 0;
+    if (l.normal_off >= 0) { decode_vsdt(0x32, &out->attr[2]); out->attr[2].stream = 0; out->attr[2].offset = l.normal_off; }
+    if (l.diffuse_off >= 0) { decode_vsdt(0x40, &out->attr[3]); out->attr[3].stream = 0; out->attr[3].offset = l.diffuse_off; }
+    if (l.specular_off >= 0) { decode_vsdt(0x40, &out->attr[4]); out->attr[4].stream = 0; out->attr[4].offset = l.specular_off; }
+    for (int i = 0; i < l.ntex && i < 4; i++) {
+        decode_vsdt((ULONG)(l.tex_size[i] << 4) | 2, &out->attr[9 + i]);
+        out->attr[9 + i].stream = 0;
+        out->attr[9 + i].offset = l.tex_off[i];
+    }
+    d3d.streams[0].stride = d3d.streams[0].stride ? d3d.streams[0].stride : (ULONG)l.stride;
+    return true;
+}
+
+/* Fetch control vertex `index` (all 16 registers). */
+static void fetch_vertex(const vshader *sh, ULONG index, float regs[16][4])
+{
+    for (int r = 0; r < 16; r++) {
+        const vattr *a = &sh->attr[r];
+        regs[r][0] = regs[r][1] = regs[r][2] = 0; regs[r][3] = 1;
+        if (a->stream < 0) continue;
+        D3DResource *vb = d3d.streams[a->stream].vb;
+        if (!vb) continue;
+        read_attr(a, (const UCHAR *)resource_data(vb) + index * d3d.streams[a->stream].stride + a->offset, regs[r]);
+    }
+}
+
+/* Weights (and their derivatives) of the control points along one patch
+   direction at parameter t in [0,1].  Returns the first control point used;
+   *n is how many follow. */
+static unsigned basis_weights(ULONG basis, ULONG order, unsigned count, float t, float *w, float *dw, unsigned *n)
+{
+    if (order < 1) order = 1;
+    if (count < 2) { w[0] = 1; dw[0] = 0; *n = 1; return 0; }
+    if (basis == 1 && order == 3 && count >= 4) {
+        /* Uniform cubic B-spline: count - 3 segments. */
+        unsigned segs = count - 3;
+        float u = t * segs; unsigned s = u >= segs ? segs - 1 : (unsigned)u; float f = u - s;
+        float f2 = f * f, f3 = f2 * f;
+        w[0] = (1 - 3 * f + 3 * f2 - f3) / 6; w[1] = (4 - 6 * f2 + 3 * f3) / 6;
+        w[2] = (1 + 3 * f + 3 * f2 - 3 * f3) / 6; w[3] = f3 / 6;
+        dw[0] = (-3 + 6 * f - 3 * f2) / 6 * segs; dw[1] = (-12 * f + 9 * f2) / 6 * segs;
+        dw[2] = (3 + 6 * f - 9 * f2) / 6 * segs; dw[3] = 3 * f2 / 6 * segs;
+        *n = 4;
+        return s;
+    }
+    if (basis == 2 && order == 3) {
+        /* Interpolating: Catmull-Rom through the points, ends clamped. */
+        unsigned segs = count - 1;
+        float u = t * segs; unsigned s = u >= segs ? segs - 1 : (unsigned)u; float f = u - s;
+        float f2 = f * f, f3 = f2 * f;
+        float cw[4] = { (-f3 + 2 * f2 - f) / 2, (3 * f3 - 5 * f2 + 2) / 2, (-3 * f3 + 4 * f2 + f) / 2, (f3 - f2) / 2 };
+        float cd[4] = { (-3 * f2 + 4 * f - 1) / 2, (9 * f2 - 10 * f) / 2, (-9 * f2 + 8 * f + 1) / 2, (3 * f2 - 2 * f) / 2 };
+        /* Fold the clamped neighbours into the end points: return a window of 4 starting at s-1. */
+        int first = (int)s - 1;
+        for (int i = 0; i < 4; i++) { w[i] = 0; dw[i] = 0; }
+        unsigned lo = first < 0 ? 0 : (unsigned)first;
+        unsigned hi = s + 2 > count - 1 ? count - 1 : s + 2;
+        for (int i = 0; i < 4; i++) {
+            int idx = first + i;
+            if (idx < 0) idx = 0;
+            if (idx > (int)count - 1) idx = count - 1;
+            w[idx - lo] += cw[i];
+            dw[idx - lo] += cd[i] * segs;
+        }
+        *n = hi - lo + 1;
+        return lo;
+    }
+    /* Bezier (and the linear order of any basis): (count - 1) / order segments. */
+    if (order > count - 1) order = count - 1;
+    unsigned segs = (count - 1) / order;
+    if (!segs) segs = 1;
+    float u = t * segs; unsigned s = u >= segs ? segs - 1 : (unsigned)u; float f = u - s;
+    for (unsigned i = 0; i <= order; i++) {
+        /* Bernstein polynomial B(i, order) and its derivative. */
+        float c = 1;
+        for (unsigned k = 0; k < i; k++) c = c * (order - k) / (k + 1);
+        float a = powf(f, (float)i), b = powf(1 - f, (float)(order - i));
+        w[i] = c * a * b;
+        float da = i ? i * powf(f, (float)(i - 1)) : 0;
+        float db = order - i ? (order - i) * powf(1 - f, (float)(order - i - 1)) : 0;
+        dw[i] = c * (da * b - a * db) * segs;
+    }
+    *n = order + 1;
+    return s * order;
+}
+
+static void cross3(const float a[3], const float b[3], float out[3])
+{
+    out[0] = a[1] * b[2] - a[2] * b[1];
+    out[1] = a[2] * b[0] - a[0] * b[2];
+    out[2] = a[0] * b[1] - a[1] * b[0];
+}
+
+/* Draw `nverts` float4-register vertices with `nidx` triangle-list indices. */
+static void draw_patch_mesh(vshader *layout, vshader *real, const float (*verts)[16][4], ULONG nverts,
+                            const USHORT *idx, ULONG nidx)
+{
+    (void)nverts;
+    vshader tmp = *layout;
+    for (int r = 0; r < 16; r++) {
+        bool generated = r == layout->tess_normal_out || r == layout->tess_uv_out;
+        if (layout->attr[r].stream < 0 && !generated) { tmp.attr[r].stream = -1; continue; }
+        int comps = layout->attr[r].stream >= 0 && (layout->attr[r].type & 0xF) == 2 ? layout->attr[r].components : 4;
+        if (r == layout->tess_normal_out) comps = 3;
+        if (r == layout->tess_uv_out) comps = 2;
+        tmp.attr[r] = (vattr){ 0, (ULONG)r * 16, (ULONG)(comps << 4) | 2, comps, GL_FLOAT, false, comps * 4 };
+    }
+    if (tmp.code) {
+        draw_programmable(&tmp, 5, (const UCHAR *)verts, 256, 0, nidx, idx);
+        if (real && !real->vs) real->vs = tmp.vs;
+    } else {
+        draw_declared(&tmp, 5, (const UCHAR *)verts, 256, 0, nidx, idx);
+    }
+}
+
+static LONG NTAPI D3DDevice_DrawRectPatch(UINT_ Handle, const float *pNumSegs, const ULONG *info)
+{
+    patch_entry *pe = NULL;
+    if (Handle) {
+        pe = patch_slot(Handle, info != NULL);
+        if (!pe) return D3DERR_INVALIDCALL;
+        if (info) { memcpy(pe->info, info, 7 * 4); pe->tri = false; }
+        info = pe->info;
+    }
+    if (!info) return D3DERR_INVALIDCALL;
+    vshader layout, *real;
+    if (!patch_layout(&layout, &real)) return D3DERR_INVALIDCALL;
+    ULONG x0 = info[0], y0 = info[1], width = info[2], height = info[3], stride = info[4];
+    ULONG basis = info[5], order = info[6];
+    float su = 1, sv = 1;
+    if (pNumSegs) {
+        su = fmaxf(pNumSegs[0], pNumSegs[2]);
+        sv = fmaxf(pNumSegs[1], pNumSegs[3]);
+    }
+    unsigned nu = su < 1 ? 1 : su > 64 ? 64 : (unsigned)(su + 0.5f);
+    unsigned nv = sv < 1 ? 1 : sv > 64 ? 64 : (unsigned)(sv + 0.5f);
+    if (width < 2 || height < 2 || !stride) return D3DERR_INVALIDCALL;
+
+    float (*cp)[16][4] = malloc(width * height * sizeof(*cp));
+    for (ULONG j = 0; j < height; j++)
+        for (ULONG i = 0; i < width; i++)
+            fetch_vertex(&layout, (y0 + j) * stride + x0 + i, cp[j * width + i]);
+
+    ULONG nverts = (nu + 1) * (nv + 1);
+    float (*out)[16][4] = calloc(nverts, sizeof(*out));
+    int nin = layout.tess_normal_in;
+    for (unsigned b = 0; b <= nv; b++) {
+        for (unsigned a = 0; a <= nu; a++) {
+            float wu[8], dwu[8], wv[8], dwv[8];
+            unsigned cu, cv;
+            unsigned iu = basis_weights(basis, order, width, (float)a / nu, wu, dwu, &cu);
+            unsigned iv = basis_weights(basis, order, height, (float)b / nv, wv, dwv, &cv);
+            float (*o)[4] = out[b * (nu + 1) + a];
+            float du[3] = { 0, 0, 0 }, dv[3] = { 0, 0, 0 };
+            for (unsigned j = 0; j < cv; j++) {
+                for (unsigned i = 0; i < cu; i++) {
+                    const float (*c)[4] = cp[(iv + j) * width + iu + i];
+                    float wgt = wu[i] * wv[j];
+                    for (int r = 0; r < 16; r++)
+                        for (int k = 0; k < 4; k++) o[r][k] += wgt * c[r][k];
+                    if (nin >= 0)
+                        for (int k = 0; k < 3; k++) {
+                            du[k] += dwu[i] * wv[j] * c[nin][k];
+                            dv[k] += wu[i] * dwv[j] * c[nin][k];
+                        }
+                }
+            }
+            if (layout.tess_normal_out >= 0 && nin >= 0) {
+                float nrm[3];
+                cross3(du, dv, nrm);
+                float len = sqrtf(nrm[0] * nrm[0] + nrm[1] * nrm[1] + nrm[2] * nrm[2]);
+                if (len > 1e-12f) for (int k = 0; k < 3; k++) nrm[k] /= len;
+                memcpy(o[layout.tess_normal_out], nrm, 12);
+                o[layout.tess_normal_out][3] = 1;
+            }
+            if (layout.tess_uv_out >= 0) {
+                o[layout.tess_uv_out][0] = (float)a / nu;
+                o[layout.tess_uv_out][1] = (float)b / nv;
+                o[layout.tess_uv_out][2] = 0;
+                o[layout.tess_uv_out][3] = 1;
+            }
+        }
+    }
+    /* Degenerate edges (a pole, like the teapot's lid) give zero normals:
+       borrow the nearest non-zero one along v. */
+    if (layout.tess_normal_out >= 0 && nin >= 0) {
+        int r = layout.tess_normal_out;
+        for (unsigned a = 0; a <= nu; a++)
+            for (unsigned b = 0; b <= nv; b++) {
+                float *n = out[b * (nu + 1) + a][r];
+                if (n[0] * n[0] + n[1] * n[1] + n[2] * n[2] > 1e-12f) continue;
+                for (unsigned d = 1; d <= nv; d++) {
+                    float *m = NULL;
+                    if (b + d <= nv) m = out[(b + d) * (nu + 1) + a][r];
+                    if ((!m || m[0] * m[0] + m[1] * m[1] + m[2] * m[2] <= 1e-12f) && b >= d) m = out[(b - d) * (nu + 1) + a][r];
+                    if (m && m[0] * m[0] + m[1] * m[1] + m[2] * m[2] > 1e-12f) { memcpy(n, m, 12); break; }
+                }
+            }
+    }
+    ULONG nidx = nu * nv * 6;
+    USHORT *idx = malloc(nidx * sizeof(USHORT));
+    ULONG k = 0;
+    for (unsigned b = 0; b < nv; b++)
+        for (unsigned a = 0; a < nu; a++) {
+            USHORT v00 = b * (nu + 1) + a, v10 = v00 + 1, v01 = v00 + nu + 1, v11 = v01 + 1;
+            idx[k++] = v00; idx[k++] = v10; idx[k++] = v11;
+            idx[k++] = v00; idx[k++] = v11; idx[k++] = v01;
+        }
+    draw_patch_mesh(&layout, real, (const float (*)[16][4])out, nverts, idx, nidx);
+    free(idx);
+    free(out);
+    free(cp);
+    return D3D_OK;
+}
+
+/* Triangle patches: the corners are tessellated as a flat (linear) patch;
+   higher orders take their first three control points as the corners. */
+static LONG NTAPI D3DDevice_DrawTriPatch(UINT_ Handle, const float *pNumSegs, const ULONG *info)
+{
+    patch_entry *pe = NULL;
+    if (Handle) {
+        pe = patch_slot(Handle, info != NULL);
+        if (!pe) return D3DERR_INVALIDCALL;
+        if (info) { memcpy(pe->info, info, 4 * 4); pe->tri = true; }
+        info = pe->info;
+    }
+    if (!info) return D3DERR_INVALIDCALL;
+    if (info[3] != 1) {
+        static bool warned;
+        if (!warned) { xlog("D3D: tri patches of order %u are drawn flat through their corners", info[3]); warned = true; }
+    }
+    vshader layout, *real;
+    if (!patch_layout(&layout, &real)) return D3DERR_INVALIDCALL;
+    float s = pNumSegs ? fmaxf(pNumSegs[0], fmaxf(pNumSegs[1], pNumSegs[2])) : 1;
+    unsigned n = s < 1 ? 1 : s > 64 ? 64 : (unsigned)(s + 0.5f);
+    float c[3][16][4];
+    for (int i = 0; i < 3; i++) fetch_vertex(&layout, info[0] + i, c[i]);
+    ULONG nverts = (n + 1) * (n + 2) / 2;
+    float (*out)[16][4] = calloc(nverts, sizeof(*out));
+    float nrm[3] = { 0, 0, 1 };
+    if (layout.tess_normal_in >= 0) {
+        int r = layout.tess_normal_in;
+        float e1[3], e2[3];
+        for (int k = 0; k < 3; k++) { e1[k] = c[1][r][k] - c[0][r][k]; e2[k] = c[2][r][k] - c[0][r][k]; }
+        cross3(e2, e1, nrm);
+        float len = sqrtf(nrm[0] * nrm[0] + nrm[1] * nrm[1] + nrm[2] * nrm[2]);
+        if (len > 1e-12f) for (int k = 0; k < 3; k++) nrm[k] /= len;
+    }
+    ULONG v = 0;
+    for (unsigned row = 0; row <= n; row++)
+        for (unsigned col = 0; col <= n - row; col++, v++) {
+            float b1 = (float)col / n, b2 = (float)row / n, b0 = 1 - b1 - b2;
+            for (int r = 0; r < 16; r++)
+                for (int k = 0; k < 4; k++) out[v][r][k] = b0 * c[0][r][k] + b1 * c[1][r][k] + b2 * c[2][r][k];
+            if (layout.tess_normal_out >= 0) { memcpy(out[v][layout.tess_normal_out], nrm, 12); out[v][layout.tess_normal_out][3] = 1; }
+            if (layout.tess_uv_out >= 0) { out[v][layout.tess_uv_out][0] = b1; out[v][layout.tess_uv_out][1] = b2; }
+        }
+    ULONG nidx = n * n * 3, k = 0;
+    USHORT *idx = malloc(nidx * sizeof(USHORT));
+    unsigned start = 0;
+    for (unsigned row = 0; row < n; row++) {
+        unsigned len = n - row + 1, next = start + len;
+        for (unsigned col = 0; col < len - 1; col++) {
+            idx[k++] = start + col; idx[k++] = start + col + 1; idx[k++] = next + col;
+            if (col < len - 2) { idx[k++] = start + col + 1; idx[k++] = next + col + 1; idx[k++] = next + col; }
+        }
+        start = next;
+    }
+    draw_patch_mesh(&layout, real, (const float (*)[16][4])out, nverts, idx, k);
+    free(idx);
+    free(out);
+    return D3D_OK;
+}
+
+static void NTAPI D3DDevice_DeletePatch(UINT_ Handle)
+{
+    patch_entry *pe = patch_slot(Handle, false);
+    if (pe) pe->used = false;
 }
 
 static void NTAPI D3DDevice_DrawVertices(ULONG PrimitiveType, UINT_ StartVertex, UINT_ VertexCount)
@@ -3768,6 +4115,9 @@ const struct hle_func d3d8_funcs[] = {
     F("_D3DDevice_Release@0", D3DDevice_Release),
     F("_D3DDevice_GetDirect3D@4", D3DDevice_GetDirect3D),
     F("_D3DDevice_GetPersistedSurface@4", D3DDevice_GetPersistedSurface),
+    F("_D3DDevice_DrawRectPatch@12", D3DDevice_DrawRectPatch),
+    F("_D3DDevice_DrawTriPatch@12", D3DDevice_DrawTriPatch),
+    F("_D3DDevice_DeletePatch@4", D3DDevice_DeletePatch),
     F("_D3DDevice_CreateStateBlock@8", D3DDevice_CreateStateBlock),
     F("_D3DDevice_ApplyStateBlock@4", D3DDevice_ApplyStateBlock),
     F("_D3DDevice_CaptureStateBlock@4", D3DDevice_CaptureStateBlock),
