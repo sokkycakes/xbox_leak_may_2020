@@ -154,8 +154,11 @@ static bool replaced_library_api(const char *name)
         "_D3DTexture_", "_D3DSurface_", "_D3DBaseTexture_", "_D3DCubeTexture_", "_D3DVolumeTexture_",
         "_D3DPalette_", "_D3DPushBuffer_", "_D3DFixup_", "_Direct3D", "_D3D_", "_D3DPERF_", "_XMETAL_",
         "_D3DRDI_", "_PerfGet", "_Get2DSurfaceDesc@", "_Lock2DSurface@", "_Lock3DSurface@",
+        "?Get2DSurfaceDesc@PixelJar@D3D@@", "?Lock2DSurface@PixelJar@D3D@@",
         /* xapilib: the input device API sits on a USB stack we do not run */
         "_XInitDevices@", "_XGetDevices@", "_XGetDeviceChanges@", "_XInput",
+        "_USBD_Init@", "_XPeekDevices@", "_XMountMU", "_XUnmountMU@", "_XMUPortFromDriveLetterA@",
+        "_XMUSlotFromDriveLetterA@", "_XMUNameFromDriveLetter@", "_XReadMUMetaData@",
         /* dsound */
         "_DirectSound", "_IDirectSound", "_XAudio", "_XWaveFile", "_XFileCreateMediaObject",
         "_Ac97CreateMediaObject@",

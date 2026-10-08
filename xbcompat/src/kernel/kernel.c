@@ -21,6 +21,11 @@ const char *kernel_export_name(unsigned ordinal)
 
 static void CDECLAPI unimplemented(unsigned ordinal, void *return_address)
 {
+    /* Guest stack words that look like code addresses, for finding the caller. */
+    ULONG *sp = (ULONG *)&return_address + 1;
+    for (int i = 0; i < 64; i++)
+        if (sp[i] >= 0x10000 && sp[i] < 0x01000000)
+            xlog("  stack[%d] = 0x%lx", i, (unsigned long)sp[i]);
     fatal("guest called unimplemented kernel export %u (%s) from %p", ordinal,
           kernel_export_name(ordinal), return_address);
 }

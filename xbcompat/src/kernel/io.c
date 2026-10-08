@@ -105,8 +105,9 @@ static bool match_component(const char *dir, const char *name, char *out, size_t
 static NTSTATUS translate_path(const char *xpath, char *host, size_t hostlen, int *is_device)
 {
     char path[1024];
-    /* The object manager treats a bare "X:" prefix as the \??\X: link. */
-    if (((xpath[0] | 0x20) >= 'a' && (xpath[0] | 0x20) <= 'z') && xpath[1] == ':')
+    /* The object manager treats a bare "X:" or "CdRom0:" prefix as a \??\ link. */
+    const char *colon = strchr(xpath, ':'), *bslash = strchr(xpath, '\\');
+    if (xpath[0] != '\\' && colon && (!bslash || colon < bslash))
         snprintf(path, sizeof(path), "\\??\\%s", xpath);
     else
         snprintf(path, sizeof(path), "%s", xpath);
@@ -299,7 +300,7 @@ NTSTATUS NTAPI NtCreateFile(HANDLE *FileHandle, ACCESS_MASK DesiredAccess, OBJEC
 
     if (is_device == 2 || (exists && S_ISDIR(sb.st_mode))) {
         if (!exists) { st = STATUS_OBJECT_NAME_NOT_FOUND; goto out; }
-        if (CreateOptions & FILE_NON_DIRECTORY_FILE) { st = STATUS_FILE_IS_A_DIRECTORY; goto out; }
+        if (is_device != 2 && (CreateOptions & FILE_NON_DIRECTORY_FILE)) { st = STATUS_FILE_IS_A_DIRECTORY; goto out; }
         if (CreateDisposition == FILE_CREATE) { st = STATUS_OBJECT_NAME_COLLISION; goto out; }
         f->is_dir = true;
         f->is_device = is_device == 2;
@@ -735,6 +736,10 @@ NTSTATUS NTAPI NtDeleteFile(OBJECT_ATTRIBUTES *oa)
 #define IOCTL_DISK_GET_DRIVE_GEOMETRY   0x00070000
 #define IOCTL_DISK_GET_PARTITION_INFO   0x00074004
 #define IOCTL_CDROM_GET_DRIVE_GEOMETRY  0x0002404C
+#define STATUS_NO_MEDIA_IN_DEVICE       ((NTSTATUS)0xC0000013)
+#ifndef STATUS_INVALID_DEVICE_REQUEST
+#define STATUS_INVALID_DEVICE_REQUEST   ((NTSTATUS)0xC0000010)
+#endif
 #define FSCTL_DISMOUNT_VOLUME           0x00090020
 
 NTSTATUS NTAPI NtDeviceIoControlFile(HANDLE FileHandle, HANDLE Event, PVOID ApcRoutine, PVOID ApcContext,
@@ -764,6 +769,16 @@ NTSTATUS NTAPI NtDeviceIoControlFile(HANDLE FileHandle, HANDLE Event, PVOID ApcR
         ((UCHAR *)Out)[24] = 1;  /* PartitionType */
         ((UCHAR *)Out)[26] = 1;  /* RecognizedPartition */
         return complete(Event, ApcRoutine, iosb, STATUS_SUCCESS, 32);
+    }
+    case 0x24800: {   /* IOCTL_CDROM_CHECK_VERIFY: is there a disc in the tray? */
+        extern bool dvd_tray_empty(void);
+        return complete(Event, ApcRoutine, iosb, dvd_tray_empty() ? STATUS_NO_MEDIA_IN_DEVICE : STATUS_SUCCESS, 0);
+    }
+    case 0x24000:     /* IOCTL_CDROM_READ_TOC: the DVD directory is a data disc, never audio */
+    case 0x2403E: {   /* IOCTL_CDROM_RAW_READ (audio sectors) */
+        extern bool dvd_tray_empty(void);
+        return complete(Event, ApcRoutine, iosb,
+                        dvd_tray_empty() ? STATUS_NO_MEDIA_IN_DEVICE : STATUS_INVALID_DEVICE_REQUEST, 0);
     }
     default:
         xlog("NtDeviceIoControlFile: IOCTL %#x not implemented, reporting success", Code);

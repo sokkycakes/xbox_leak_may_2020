@@ -5114,6 +5114,10 @@ const struct hle_func d3d8_funcs[] = {
     F("_D3DPalette_Lock2@8", D3DPalette_Lock2),
     F("_Get2DSurfaceDesc@12", Get2DSurfaceDesc),
     F("_Lock2DSurface@24", Lock2DSurface),
+    /* the same in the 4xxx library, which keeps their C++ names */
+    F("?Get2DSurfaceDesc@PixelJar@D3D@@YGXPAUD3DPixelContainer@@IPAU_D3DSURFACE_DESC@@@Z", Get2DSurfaceDesc),
+    F("?Lock2DSurface@PixelJar@D3D@@YGXPAUD3DPixelContainer@@W4_D3DCUBEMAP_FACES@@IPAU_D3DLOCKED_RECT@@PBUtagRECT@@K@Z",
+      Lock2DSurface),
     F("_Lock3DSurface@20", Lock3DSurface),
     F("_Direct3D_CreateDevice_LTCG@12", Direct3D_CreateDevice_LTCG),
     F("_D3D_CommonSetMultiSampleModeAndScale@8", D3D_Nop8),

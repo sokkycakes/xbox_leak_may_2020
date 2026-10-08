@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <stdarg.h>
 #include <stdlib.h>
+#include <dirent.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -79,6 +80,10 @@ void launch_init(int argc, char **argv, const char *d_path, const char *launch_d
 {
     saved_argc = argc;
     saved_argv = argv;
+    {   /* the kernel's own link for the DVD drive (XAPI's "cdrom0:") */
+        OBJECT_STRING link = { 12, 13, "\\??\\CdRom0:" }, target = { 14, 15, "\\Device\\CdRom0" };
+        IoCreateSymbolicLink(&link, &target);
+    }
     if (d_path) {
         static char name[600];
         snprintf(name, sizeof(name), "%s\\%s", d_path, xbe_rel ? xbe_rel : "default.xbe");
@@ -200,9 +205,29 @@ NTSTATUS NTAPI HalWriteSMBusValue(UCHAR Address, UCHAR Command, BOOLEAN WriteWor
     return STATUS_SUCCESS;
 }
 
+/* An empty --dvd directory is an empty tray (the dashboard otherwise
+   reports an unrecognized disc); anything else is a detected disc. */
+bool dvd_tray_empty(void)
+{
+    extern char *g_dvd_root;
+    static int empty = -1;
+    if (empty < 0) {
+        empty = 0;
+        DIR *d = g_dvd_root ? opendir(g_dvd_root) : NULL;
+        if (d) {
+            struct dirent *e;
+            empty = 1;
+            while ((e = readdir(d)))
+                if (strcmp(e->d_name, ".") && strcmp(e->d_name, "..")) { empty = 0; break; }
+            closedir(d);
+        }
+    }
+    return empty;
+}
+
 void NTAPI HalReadSMCTrayState(ULONG *State, ULONG *Count)
 {
-    *State = 0x60; /* media detected */
+    *State = dvd_tray_empty() ? 0x40 /* no media */ : 0x60; /* media detected */
     if (Count) *Count = 1;
 }
 
