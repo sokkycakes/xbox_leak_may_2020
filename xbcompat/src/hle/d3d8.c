@@ -129,6 +129,9 @@ static struct {
              ULONG type; float range, attenuation[3]; bool enabled; } lights[8];
     float material[4][4];        /* diffuse, ambient, specular, emissive */
     float material_power;
+    float back_material[4][4];   /* SetBackMaterial: diffuse, ambient, specular, emissive */
+    float back_material_power;
+    ULONG device_refs;
 
     struct D3DSurface *backbuffer, *depth;        /* the device's own surfaces */
     struct D3DSurface *target, *target_depth;     /* current render target */
@@ -282,6 +285,8 @@ static LONG NTAPI Direct3D_CreateDevice(UINT_ Adapter, ULONG DeviceType, PVOID p
     d3d.viewport = (D3DVIEWPORT8){ 0, 0, d3d.width, d3d.height, 0, 1 };
     default_render_states();
     d3d.material[0][0] = d3d.material[0][1] = d3d.material[0][2] = d3d.material[0][3] = 1;
+    d3d.back_material[0][0] = d3d.back_material[0][1] = d3d.back_material[0][2] = d3d.back_material[0][3] = 1;
+    d3d.device_refs = 1;
 
     load_fbo_functions();
     load_shader_functions();
@@ -549,6 +554,30 @@ static void unswizzle(const uint8_t *src, uint8_t *dst, ULONG w, ULONG h, ULONG 
     }
 }
 
+/* Volume textures swizzle x, y and z bits in turn while each axis has bits left. */
+static void unswizzle3d(const uint8_t *src, uint8_t *dst, ULONG w, ULONG h, ULONG d, ULONG bpp)
+{
+    ULONG xmask = 0, ymask = 0, zmask = 0;
+    for (ULONG bit = 1, i = 1; i < w || i < h || i < d; i <<= 1) {
+        if (i < w) { xmask |= bit; bit <<= 1; }
+        if (i < h) { ymask |= bit; bit <<= 1; }
+        if (i < d) { zmask |= bit; bit <<= 1; }
+    }
+    ULONG sz = 0;
+    for (ULONG z = 0; z < d; z++) {
+        ULONG sy = 0;
+        for (ULONG y = 0; y < h; y++) {
+            ULONG sx = 0;
+            for (ULONG x = 0; x < w; x++) {
+                memcpy(dst + ((z * h + y) * w + x) * bpp, src + (sx | sy | sz) * bpp, bpp);
+                sx = (sx - xmask) & xmask;
+            }
+            sy = (sy - ymask) & ymask;
+        }
+        sz = (sz - zmask) & zmask;
+    }
+}
+
 /* GL 1.3 / 2.0 entry points, fetched at device creation. */
 static GLuint (APIENTRY *p_glCreateShader)(GLenum);
 static void (APIENTRY *p_glShaderSource)(GLuint, GLsizei, const char *const *, const GLint *);
@@ -576,6 +605,10 @@ static void (APIENTRY *p_glActiveTexture)(GLenum);
 static void (APIENTRY *p_glClientActiveTexture)(GLenum);
 static void (APIENTRY *p_glMultiTexCoord4fv)(GLenum, const GLfloat *);
 static void (APIENTRY *p_glPointParameterfv)(GLenum, const GLfloat *);
+static void (APIENTRY *p_glGenQueries)(GLsizei, GLuint *);
+static void (APIENTRY *p_glBeginQuery)(GLenum, GLuint);
+static void (APIENTRY *p_glEndQuery)(GLenum);
+static void (APIENTRY *p_glGetQueryObjectuiv)(GLuint, GLenum, GLuint *);
 static void (APIENTRY *p_glPointParameterf)(GLenum, GLfloat);
 static void (APIENTRY *p_glUniform2fv)(GLint, GLsizei, const GLfloat *);
 
@@ -591,8 +624,9 @@ static GLenum tex_target(const D3DPixelContainer *t)
     return GL_TEXTURE_2D;
 }
 
-/* Upload one image (a texture level, or one cube map face) to `target`. */
-static void upload_image(GLenum target, ULONG fmt, ULONG w, ULONG h, ULONG pitch, const uint8_t *src)
+/* Upload one image (a texture level, one cube map face, or a whole volume
+   when target is GL_TEXTURE_3D and d > 1) to `target`. */
+static void upload_image3(GLenum target, ULONG fmt, ULONG w, ULONG h, ULONG d, ULONG pitch, const uint8_t *src)
 {
     struct { ULONG fmt; int bpp; bool swizzled; GLenum gl_fmt, gl_type; bool force_alpha; } table[] = {
         { 0x06, 4, true,  GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, false },   /* A8R8G8B8 */
@@ -614,7 +648,7 @@ static void upload_image(GLenum target, ULONG fmt, ULONG w, ULONG h, ULONG pitch
         { 0x20, 2, false, GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE, false },   /* LIN_A8L8 */
     };
 
-    if (fmt == 0x0C || fmt == 0x0E || fmt == 0x0F) {
+    if ((fmt == 0x0C || fmt == 0x0E || fmt == 0x0F) && target != GL_TEXTURE_3D) {
         /* DXT1/3/5 are stored linearly in 4x4 blocks, like on the PC. */
         static const GLenum dxt[] = { 0x83F1, 0x83F2, 0x83F3 };  /* GL_COMPRESSED_RGBA_S3TC_DXT{1,3,5}_EXT */
         GLenum internal = dxt[fmt == 0x0C ? 0 : fmt == 0x0E ? 1 : 2];
@@ -626,21 +660,25 @@ static void upload_image(GLenum target, ULONG fmt, ULONG w, ULONG h, ULONG pitch
     unsigned i = 0;
     while (i < sizeof(table) / sizeof(table[0]) && table[i].fmt != fmt) i++;
     if (i == sizeof(table) / sizeof(table[0])) {
-        xlog("D3D: texture format %#x is not supported yet", fmt);
+        xlog("D3D: texture format %#x is not supported yet%s", fmt, target == GL_TEXTURE_3D ? " for volumes" : "");
         uint32_t magenta = 0xFFFF00FF;
-        glTexImage2D(target, 0, GL_RGBA, 1, 1, 0, GL_BGRA, GL_UNSIGNED_BYTE, &magenta);
+        if (target == GL_TEXTURE_3D) glTexImage3D(target, 0, GL_RGBA, 1, 1, 1, 0, GL_BGRA, GL_UNSIGNED_BYTE, &magenta);
+        else glTexImage2D(target, 0, GL_RGBA, 1, 1, 0, GL_BGRA, GL_UNSIGNED_BYTE, &magenta);
         return;
     }
     int bpp = table[i].bpp;
-    uint8_t *px = malloc(w * h * bpp);
-    if (table[i].swizzled) {
+    if (target != GL_TEXTURE_3D) d = 1;
+    uint8_t *px = malloc(w * h * d * bpp);
+    if (table[i].swizzled && d > 1) {
+        unswizzle3d(src, px, w, h, d, bpp);
+    } else if (table[i].swizzled) {
         unswizzle(src, px, w, h, bpp);
     } else {
         if (!pitch) pitch = w * bpp;
         for (ULONG y = 0; y < h; y++) memcpy(px + y * w * bpp, src + y * pitch, w * bpp);
     }
     if (table[i].force_alpha && bpp == 4)
-        for (ULONG k = 0; k < w * h; k++) px[k * 4 + 3] = 0xFF;
+        for (ULONG k = 0; k < w * h * d; k++) px[k * 4 + 3] = 0xFF;
     const char *dump = getenv("XBCOMPAT_DUMP_TEXTURES");
     if (dump) {
         /* Debug aid: XBCOMPAT_DUMP_TEXTURES=dir writes every upload as dir/texN_WxH_fmt.bin (tools/texdump.py renders them). */
@@ -650,8 +688,16 @@ static void upload_image(GLenum target, ULONG fmt, ULONG w, ULONG h, ULONG pitch
         if (f) { fwrite(px, 1, w * h * bpp, f); fclose(f); }
     }
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexImage2D(target, 0, table[i].force_alpha ? GL_RGB : GL_RGBA, w, h, 0, table[i].gl_fmt, table[i].gl_type, px);
+    if (target == GL_TEXTURE_3D)
+        glTexImage3D(target, 0, table[i].force_alpha ? GL_RGB : GL_RGBA, w, h, d, 0, table[i].gl_fmt, table[i].gl_type, px);
+    else
+        glTexImage2D(target, 0, table[i].force_alpha ? GL_RGB : GL_RGBA, w, h, 0, table[i].gl_fmt, table[i].gl_type, px);
     free(px);
+}
+
+static void upload_image(GLenum target, ULONG fmt, ULONG w, ULONG h, ULONG pitch, const uint8_t *src)
+{
+    upload_image3(target, fmt, w, h, 1, pitch, src);
 }
 
 static GLuint texture_for(D3DPixelContainer *t)
@@ -676,10 +722,7 @@ static GLuint texture_for(D3DPixelContainer *t)
         for (int f = 0; f < 6; f++)
             upload_image(GL_TEXTURE_CUBE_MAP_POSITIVE_X + f, fmt, w, h, pitch, src + f * face);
     } else if (target == GL_TEXTURE_3D) {
-        static bool warned;
-        if (!warned) { xlog("D3D: volume textures are not supported yet"); warned = true; }
-        uint32_t magenta = 0xFFFF00FF;
-        glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA, 1, 1, 1, 0, GL_BGRA, GL_UNSIGNED_BYTE, &magenta);
+        upload_image3(GL_TEXTURE_3D, fmt, w, h, 1u << ((t->Format >> 28) & 0xF), pitch, src);
     } else {
         upload_image(GL_TEXTURE_2D, fmt, w, h, pitch, src);
     }
@@ -800,6 +843,7 @@ static unsigned apply_textures(void)
         p_glActiveTexture(GL_TEXTURE0 + s);
         glDisable(GL_TEXTURE_2D);
         glDisable(GL_TEXTURE_CUBE_MAP);
+        glDisable(GL_TEXTURE_3D);
         D3DPixelContainer *t = (D3DPixelContainer *)d3d.textures[s];
         bool sprite = s == 3 && RS(D3DRS_POINTSPRITEENABLE);   /* point sprites always use stage 3 */
         glTexEnvi(GL_POINT_SPRITE, GL_COORD_REPLACE, sprite);
@@ -808,7 +852,6 @@ static unsigned apply_textures(void)
               TSS(s, D3DTSS_ALPHAARG1), TSS(s, D3DTSS_ALPHAARG2), RS(D3DRS_TEXTUREFACTOR));
         if (TSS(s, D3DTSS_COLOROP) == 1 || (ended && !sprite)) { ended = true; continue; }
         GLenum target = t ? tex_target(t) : GL_TEXTURE_2D;
-        if (target == GL_TEXTURE_3D) continue;
         glEnable(target);
         if (t) {
             glBindTexture(target, texture_for(t));
@@ -1049,11 +1092,22 @@ static void apply_render_states(bool pretransformed, bool has_normal)
         float amb[4];
         color4(amb, RS(D3DRS_AMBIENT));
         glLightModelfv(GL_LIGHT_MODEL_AMBIENT, amb);
-        glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE, d3d.material[0]);
-        glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT, d3d.material[1]);
-        glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, d3d.material[2]);
-        glMaterialfv(GL_FRONT_AND_BACK, GL_EMISSION, d3d.material[3]);
-        glMaterialf(GL_FRONT_AND_BACK, GL_SHININESS, d3d.material_power > 128 ? 128 : d3d.material_power);
+        /* D3DRS_TWOSIDEDLIGHTING (Xbox) lights back faces with the back material. */
+        bool two_sided = RS(122) != 0;
+        glLightModeli(GL_LIGHT_MODEL_TWO_SIDE, two_sided);
+        GLenum front = two_sided ? GL_FRONT : GL_FRONT_AND_BACK;
+        glMaterialfv(front, GL_DIFFUSE, d3d.material[0]);
+        glMaterialfv(front, GL_AMBIENT, d3d.material[1]);
+        glMaterialfv(front, GL_SPECULAR, d3d.material[2]);
+        glMaterialfv(front, GL_EMISSION, d3d.material[3]);
+        glMaterialf(front, GL_SHININESS, d3d.material_power > 128 ? 128 : d3d.material_power);
+        if (two_sided) {
+            glMaterialfv(GL_BACK, GL_DIFFUSE, d3d.back_material[0]);
+            glMaterialfv(GL_BACK, GL_AMBIENT, d3d.back_material[1]);
+            glMaterialfv(GL_BACK, GL_SPECULAR, d3d.back_material[2]);
+            glMaterialfv(GL_BACK, GL_EMISSION, d3d.back_material[3]);
+            glMaterialf(GL_BACK, GL_SHININESS, d3d.back_material_power > 128 ? 128 : d3d.back_material_power);
+        }
         if (RS(D3DRS_NORMALIZENORMALS)) glEnable(GL_NORMALIZE); else glDisable(GL_NORMALIZE);
 
         /* Lights are specified in world space: load the view matrix alone. */
@@ -1160,6 +1214,7 @@ static void load_shader_functions(void)
     LOAD(glUniform1f); LOAD(glUniform1i); LOAD(glEnableVertexAttribArray); LOAD(glDisableVertexAttribArray);
     LOAD(glVertexAttribPointer); LOAD(glVertexAttrib4fv); LOAD(glActiveTexture); LOAD(glClientActiveTexture);
     LOAD(glMultiTexCoord4fv); LOAD(glUniform2fv); LOAD(glPointParameterfv); LOAD(glPointParameterf);
+    LOAD(glGenQueries); LOAD(glBeginQuery); LOAD(glEndQuery); LOAD(glGetQueryObjectuiv);
 #undef LOAD
 }
 
@@ -1469,6 +1524,7 @@ static void apply_shader_textures(const program_entry *e)
         if (!t) {
             glBindTexture(GL_TEXTURE_2D, 0);
             glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
+            glBindTexture(GL_TEXTURE_3D, 0);
             continue;
         }
         GLenum target = tex_target(t);
@@ -2204,7 +2260,7 @@ static void NTAPI D3DTexture_GetLevelDesc(D3DPixelContainer *t, UINT_ level, ULO
     for (UINT_ i = 0; i < level; i++) { if (w > 1) w >>= 1; if (h > 1) h >>= 1; }
     ULONG fmt = (t->Format >> 8) & 0xFF;
     desc[0] = fmt;
-    desc[1] = 3;   /* D3DRTYPE_TEXTURE */
+    desc[1] = 1;   /* D3DRTYPE_SURFACE: a level is described as a surface */
     desc[2] = 0;
     desc[3] = level_bytes(fmt, w, h, 1);
     desc[4] = 0;
@@ -2267,17 +2323,89 @@ static void NTAPI D3DCubeTexture_LockRect(D3DPixelContainer *t, ULONG face, UINT
     lock_level(t, face, level, locked, rect, flags);
 }
 
+/* Width, height and depth of mip level `level` of a volume texture. */
+static void volume_dims(const D3DPixelContainer *t, ULONG level, ULONG *w, ULONG *h, ULONG *d)
+{
+    ULONG pitch;
+    container_size(t, w, h, &pitch);
+    *d = 1u << ((t->Format >> 28) & 0xF);
+    for (ULONG i = 0; i < level; i++) {
+        if (*w > 1) *w >>= 1;
+        if (*h > 1) *h >>= 1;
+        if (*d > 1) *d >>= 1;
+    }
+}
+
+static void volume_desc(ULONG format, ULONG w, ULONG h, ULONG d, ULONG *desc)
+{
+    ULONG fmt = (format >> 8) & 0xFF;
+    desc[0] = fmt;
+    desc[1] = 2;   /* D3DRTYPE_VOLUME */
+    desc[2] = 0;
+    desc[3] = level_bytes(fmt, w, h, d);
+    desc[4] = w;
+    desc[5] = h;
+    desc[6] = d;
+}
+
+static void NTAPI D3DVolumeTexture_GetLevelDesc(D3DPixelContainer *t, UINT_ level, ULONG *desc)
+{
+    ULONG w, h, d;
+    volume_dims(t, level, &w, &h, &d);
+    volume_desc(t->Format, w, h, d, desc);
+}
+
+/* A volume is a one-level volume container pointing into its texture's data. */
+static LONG NTAPI D3DVolumeTexture_GetVolumeLevel(D3DPixelContainer *t, UINT_ level, D3DSurface **pp)
+{
+    ULONG w, h, d;
+    volume_dims(t, level, &w, &h, &d);
+    ULONG format = (t->Format & ~0xFFFF0000u) | (1 << 16) | (log2u(w) << 20) | (log2u(h) << 24) | (log2u(d) << 28);
+    *pp = alloc_surface(format, 0, t->res.Data + level_offset(t, level), t);
+    return D3D_OK;
+}
+
+static void NTAPI D3DVolume_GetDesc(D3DSurface *v, ULONG *desc)
+{
+    volume_desc(v->Format, 1u << ((v->Format >> 20) & 0xF), 1u << ((v->Format >> 24) & 0xF),
+                1u << ((v->Format >> 28) & 0xF), desc);
+}
+
+static void NTAPI D3DVolume_GetContainer(D3DSurface *v, D3DPixelContainer **pp)
+{
+    *pp = v->Parent;
+    if (v->Parent) v->Parent->res.Common++;
+}
+
+/* D3DLOCKED_BOX {RowPitch, SlicePitch, pBits}; D3DBOX {Left, Top, Right, Bottom, Front, Back}.
+   Swizzled volumes are addressed as if linear, like the real library. */
+static void lock_box(ULONG data, ULONG fmt, ULONG w, ULONG h, ULONG *locked, const LONG *box, ULONG flags)
+{
+    bool linear;
+    int bits = format_bits(fmt, &linear);
+    ULONG pitch = w * bits / 8, slice = pitch * h;
+    if (fmt == 0x0C) { pitch = ((w + 3) / 4) * 8; slice = pitch * ((h + 3) / 4); }
+    else if (fmt == 0x0E || fmt == 0x0F) { pitch = ((w + 3) / 4) * 16; slice = pitch * ((h + 3) / 4); }
+    if (!(flags & 0x80)) tex_invalidate(data);
+    locked[0] = pitch;
+    locked[1] = slice;
+    locked[2] = (data | CONTIG_BASE) + (box ? box[4] * slice + box[1] * pitch + box[0] * bits / 8 : 0);
+}
+
 static void NTAPI D3DVolumeTexture_LockBox(D3DPixelContainer *t, UINT_ level, ULONG *locked, const LONG *box,
                                            ULONG flags)
 {
-    (void)box;
-    ULONG w, h, pitch;
-    container_size(t, &w, &h, &pitch);
-    ULONG rl[2];
-    lock_level(t, 0, level, rl, NULL, flags);
-    locked[0] = rl[0];                    /* RowPitch */
-    locked[1] = rl[0] * (h >> level);     /* SlicePitch */
-    locked[2] = rl[1];
+    ULONG w, h, d;
+    volume_dims(t, level, &w, &h, &d);
+    lock_box(t->res.Data + level_offset(t, level), (t->Format >> 8) & 0xFF, w, h, locked, box, flags);
+    if (!(flags & 0x80)) tex_invalidate(t->res.Data);
+}
+
+static void NTAPI D3DVolume_LockBox(D3DSurface *v, ULONG *locked, const LONG *box, ULONG flags)
+{
+    lock_box(v->Data, (v->Format >> 8) & 0xFF, 1u << ((v->Format >> 20) & 0xF), 1u << ((v->Format >> 24) & 0xF),
+             locked, box, flags);
+    if (v->Parent && !(flags & 0x80)) tex_invalidate(v->Parent->res.Data);
 }
 
 /* ---- index buffers, palettes, memory --------------------------------- */
@@ -2530,7 +2658,6 @@ static void NTAPI D3DDevice_InsertCallback(ULONG Type, PVOID fn, ULONG Context)
 static void NTAPI D3DDevice_SetVerticalBlankCallback(PVOID fn) { d3d.vblank_callback = fn; }
 static void NTAPI D3DDevice_SetSwapCallback(PVOID fn) { (void)fn; }
 static void NTAPI D3DDevice_GetDisplayFieldStatus(ULONG *st) { st[0] = 3; st[1] = d3d.frame; }
-static LONG NTAPI D3DDevice_PersistDisplay(void) { return D3D_OK; }
 static void NTAPI D3DDevice_SetScreenSpaceOffset(float x, float y) { d3d.screen_offset[0] = x; d3d.screen_offset[1] = y; }
 static void NTAPI D3DDevice_SetBackBufferScale(float x, float y) { d3d.backbuffer_scale[0] = x; d3d.backbuffer_scale[1] = y; }
 static void NTAPI D3DDevice_GetBackBufferScale(float *x, float *y) { *x = d3d.backbuffer_scale[0]; *y = d3d.backbuffer_scale[1]; }
@@ -3309,6 +3436,76 @@ static void NTAPI D3DDevice_EndPush(ULONG *end)
 
 static void NTAPI D3DDevice_Nop(void) {}
 
+/* ---- odds and ends ----------------------------------------------------- */
+
+static void NTAPI Direct3D_SetPushBufferSize(ULONG size, ULONG kickoff) { (void)size; (void)kickoff; }
+static ULONG NTAPI D3DDevice_AddRef(void) { return ++d3d.device_refs; }
+static ULONG NTAPI D3DDevice_Release(void) { return d3d.device_refs > 1 ? --d3d.device_refs : 1; }
+static void NTAPI D3DDevice_GetDirect3D(PVOID *pp) { *pp = direct3d_object; }
+static LONG NTAPI D3DDevice_PersistDisplay(void) { return D3D_OK; }
+
+/* Nothing survives a reboot here; hand out the back buffer so the title has a surface to read. */
+static LONG NTAPI D3DDevice_GetPersistedSurface(D3DSurface **pp)
+{
+    *pp = d3d.backbuffer;
+    if (d3d.backbuffer) d3d.backbuffer->Common++;
+    return d3d.backbuffer ? D3D_OK : D3DERR_INVALIDCALL;
+}
+
+static void NTAPI D3DDevice_SetBackMaterial(const float *m)
+{
+    memcpy(d3d.back_material, m, 64);
+    d3d.back_material_power = m[16];
+}
+
+static void NTAPI D3DDevice_GetBackMaterial(float *m)
+{
+    memcpy(m, d3d.back_material, 64);
+    m[16] = d3d.back_material_power;
+}
+
+/* Visibility tests are GL occlusion queries, one per index the title uses. */
+#define VIS_SLOTS 256
+static struct { ULONG index; GLuint query; bool used; } vis[VIS_SLOTS];
+static GLuint vis_active;
+
+static void NTAPI D3DDevice_BeginVisibilityTest(void)
+{
+    if (!p_glGenQueries || vis_active) return;
+    p_glGenQueries(1, &vis_active);
+    p_glBeginQuery(0x8914 /* GL_SAMPLES_PASSED */, vis_active);
+}
+
+static LONG NTAPI D3DDevice_EndVisibilityTest(ULONG index)
+{
+    if (!vis_active) return D3DERR_INVALIDCALL;
+    p_glEndQuery(0x8914);
+    unsigned slot = index % VIS_SLOTS;
+    if (vis[slot].used && vis[slot].query) {
+        static void (APIENTRY *del)(GLsizei, const GLuint *);
+        if (!del) del = SDL_GL_GetProcAddress("glDeleteQueries");
+        if (del) del(1, &vis[slot].query);
+    }
+    vis[slot].index = index;
+    vis[slot].query = vis_active;
+    vis[slot].used = true;
+    vis_active = 0;
+    return D3D_OK;
+}
+
+static LONG NTAPI D3DDevice_GetVisibilityTestResult(ULONG index, UINT_ *result, ULONGLONG *stamp)
+{
+    unsigned slot = index % VIS_SLOTS;
+    if (stamp) *stamp = d3d.frame;
+    if (!vis[slot].used || vis[slot].index != index) { if (result) *result = 0; return D3DERR_INVALIDCALL; }
+    GLuint avail = 0, n = 0;
+    p_glGetQueryObjectuiv(vis[slot].query, 0x8867 /* GL_QUERY_RESULT_AVAILABLE */, &avail);
+    if (!avail) return 0x88760828;   /* D3DERR_TESTINCOMPLETE */
+    p_glGetQueryObjectuiv(vis[slot].query, 0x8866 /* GL_QUERY_RESULT */, &n);
+    if (result) *result = n;
+    return D3D_OK;
+}
+
 /* ---- table ------------------------------------------------------------- */
 
 #define F(dec, fn) { dec, (void *)fn }
@@ -3339,6 +3536,16 @@ const struct hle_func d3d8_funcs[] = {
     F("_D3DDevice_SetLight@8", D3DDevice_SetLight),
     F("_D3DDevice_LightEnable@8", D3DDevice_LightEnable),
     F("_D3DDevice_SetMaterial@4", D3DDevice_SetMaterial),
+    F("_D3DDevice_SetBackMaterial@4", D3DDevice_SetBackMaterial),
+    F("_D3DDevice_GetBackMaterial@4", D3DDevice_GetBackMaterial),
+    F("_Direct3D_SetPushBufferSize@8", Direct3D_SetPushBufferSize),
+    F("_D3DDevice_AddRef@0", D3DDevice_AddRef),
+    F("_D3DDevice_Release@0", D3DDevice_Release),
+    F("_D3DDevice_GetDirect3D@4", D3DDevice_GetDirect3D),
+    F("_D3DDevice_GetPersistedSurface@4", D3DDevice_GetPersistedSurface),
+    F("_D3DDevice_BeginVisibilityTest@0", D3DDevice_BeginVisibilityTest),
+    F("_D3DDevice_EndVisibilityTest@4", D3DDevice_EndVisibilityTest),
+    F("_D3DDevice_GetVisibilityTestResult@12", D3DDevice_GetVisibilityTestResult),
     F("_D3DDevice_SetIndices@8", D3DDevice_SetIndices),
     F("_D3DDevice_DrawVertices@12", D3DDevice_DrawVertices),
     F("_D3DDevice_DrawVerticesUP@16", D3DDevice_DrawVerticesUP),
@@ -3402,6 +3609,11 @@ const struct hle_func d3d8_funcs[] = {
     F("_D3DCubeTexture_GetCubeMapSurface@16", D3DCubeTexture_GetCubeMapSurface),
     F("_D3DCubeTexture_LockRect@24", D3DCubeTexture_LockRect),
     F("_D3DVolumeTexture_LockBox@20", D3DVolumeTexture_LockBox),
+    F("_D3DVolumeTexture_GetLevelDesc@12", D3DVolumeTexture_GetLevelDesc),
+    F("_D3DVolumeTexture_GetVolumeLevel@12", D3DVolumeTexture_GetVolumeLevel),
+    F("_D3DVolume_GetDesc@8", D3DVolume_GetDesc),
+    F("_D3DVolume_GetContainer@8", D3DVolume_GetContainer),
+    F("_D3DVolume_LockBox@16", D3DVolume_LockBox),
     F("_D3DDevice_CreateIndexBuffer@20", D3DDevice_CreateIndexBuffer),
     F("_D3DIndexBuffer_Lock@20", D3DIndexBuffer_Lock),
     F("_D3DDevice_CreatePalette@8", D3DDevice_CreatePalette),
