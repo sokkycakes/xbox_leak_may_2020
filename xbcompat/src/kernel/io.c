@@ -10,6 +10,7 @@
  */
 #define _GNU_SOURCE
 #include <dirent.h>
+#include <ftw.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <fnmatch.h>
@@ -268,6 +269,14 @@ NTSTATUS NTAPI NtCreateFile(HANDLE *FileHandle, ACCESS_MASK DesiredAccess, OBJEC
     f->xbox = strdup(xpath);
 
     if (is_device == 1) {
+        /* The raw disk: XAPI keeps its cache partition database in sector 4,
+           so back the first megabyte with a file. */
+        char img[PATH_MAX];
+        snprintf(img, sizeof(img), "%s/partition0.img", host);
+        f->fd = open(img, O_RDWR | O_CREAT, 0644);
+        struct stat isb;
+        if (f->fd >= 0 && fstat(f->fd, &isb) == 0 && isb.st_size < (1 << 20) && ftruncate(f->fd, 1 << 20) != 0)
+            xlog("NtCreateFile: cannot size %s", img);
         f->is_device = true;
         goto made;
     }
@@ -358,11 +367,39 @@ static NTSTATUS complete(HANDLE Event, PVOID ApcRoutine, IO_STATUS_BLOCK *iosb, 
     return st;
 }
 
+/* Empty a formatted volume's host directory (but not the directory itself). */
+static int remove_entry(const char *path, const struct stat *sb, int type, struct FTW *ftw)
+{
+    (void)sb; (void)type;
+    if (ftw->level > 0) remove(path);
+    return 0;
+}
+
+/* A partition opened as a volume has no backing file: sector reads return
+   zeros and sector writes are dropped, except that rewriting the volume
+   header of a cache partition (3 and up) is a format, which empties it. */
+static NTSTATUS volume_io(xfile *f, HANDLE Event, PVOID ApcRoutine, IO_STATUS_BLOCK *iosb, PVOID Buffer,
+                          ULONG Length, LARGE_INTEGER *ByteOffset, bool write)
+{
+    LONGLONG off = ByteOffset ? ByteOffset->QuadPart : f->pos;
+    const char *p = strrchr(f->host, '/');
+    int part = p && !strncmp(p, "/partition", 10) ? atoi(p + 10) : 0;
+    if (!write) {
+        memset(Buffer, 0, Length);
+    } else if (off == 0 && part >= 3) {
+        xlog("formatting cache partition %d (%s)", part, f->host);
+        nftw(f->host, remove_entry, 16, FTW_DEPTH | FTW_PHYS);
+    }
+    f->pos = off + Length;
+    return complete(Event, ApcRoutine, iosb, STATUS_SUCCESS, Length);
+}
+
 NTSTATUS NTAPI NtReadFile(HANDLE FileHandle, HANDLE Event, PVOID ApcRoutine, PVOID ApcContext,
                           IO_STATUS_BLOCK *iosb, PVOID Buffer, ULONG Length, LARGE_INTEGER *ByteOffset)
 {
     (void)ApcContext;
     xfile *f = file_of(FileHandle);
+    if (f && f->fd < 0 && f->is_device) return volume_io(f, Event, ApcRoutine, iosb, Buffer, Length, ByteOffset, false);
     if (!f || f->fd < 0) return STATUS_INVALID_HANDLE;
     LONGLONG off = ByteOffset ? ByteOffset->QuadPart : f->pos;
     ssize_t n = pread(f->fd, Buffer, Length, off);
@@ -377,6 +414,7 @@ NTSTATUS NTAPI NtWriteFile(HANDLE FileHandle, HANDLE Event, PVOID ApcRoutine, PV
 {
     (void)ApcContext;
     xfile *f = file_of(FileHandle);
+    if (f && f->fd < 0 && f->is_device) return volume_io(f, Event, ApcRoutine, iosb, Buffer, Length, ByteOffset, true);
     if (!f || f->fd < 0) return STATUS_INVALID_HANDLE;
     LONGLONG off = ByteOffset && ByteOffset->QuadPart >= 0 ? ByteOffset->QuadPart : f->pos;
     ssize_t n = pwrite(f->fd, Buffer, Length, off);

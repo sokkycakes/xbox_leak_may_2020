@@ -111,7 +111,7 @@ static bool replaced_library_api(const char *name)
         "_D3DDevice_", "@D3DDevice_", "_D3DResource_", "_D3DVertexBuffer_", "_D3DIndexBuffer_",
         "_D3DTexture_", "_D3DSurface_", "_D3DBaseTexture_", "_D3DCubeTexture_", "_D3DVolumeTexture_",
         "_D3DPalette_", "_D3DPushBuffer_", "_D3DFixup_", "_Direct3D", "_D3D_", "_D3DPERF_", "_XMETAL_",
-        "_D3DRDI_", "_PerfGet",
+        "_D3DRDI_", "_PerfGet", "_Get2DSurfaceDesc@",
         /* xapilib: the input device API sits on a USB stack we do not run */
         "_XInitDevices@", "_XGetDevices@", "_XGetDeviceChanges@", "_XInput",
         /* dsound */

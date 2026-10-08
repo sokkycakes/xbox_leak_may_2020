@@ -5,7 +5,8 @@ Accepts an XBE or an Xbox PE (obj/i386/*.exe from the XDK build).  PE files
 are converted with pe2xbe.py into a scratch directory next to the media they
 need.  The library map that tells the loader where the replaced libraries (D3D8,
 XAPILIB's input functions, DSOUND) live in the image is generated with
-findsigs.py from the leak's own libraries and cached.
+findsigs.py from the leak's own libraries (XDK 4400), or with XbSymbolDatabase
+for titles built with other XDKs, and cached.
 """
 import argparse
 import hashlib
@@ -48,7 +49,51 @@ def signatures(libs):
     return path
 
 
+# XbSymbolDatabase (MIT) finds the libraries of XDK builds the leak does not
+# have.  It is fetched at this commit and built into the cache on first use.
+XBSYMDB_URL = "https://github.com/Cxbx-Reloaded/XbSymbolDatabase.git"
+XBSYMDB_COMMIT = "20eced544726f5558c5a408458f38a086cc4e543"
+LEAK_XDK_BUILD = 4400
+
+
+def xbsymdb_cli():
+    cli = os.environ.get("XBSYMDB_CLI")
+    if cli:
+        return cli
+    src = os.path.join(CACHE, "XbSymbolDatabase")
+    cli = os.path.join(src, "build", "projects", "cli", "XbSymbolDatabaseCLI")
+    if not os.path.exists(cli):
+        print(f"xbrun: building XbSymbolDatabase {XBSYMDB_COMMIT[:12]} in {src}", file=sys.stderr)
+        if not os.path.exists(src):
+            run("git", "clone", "-q", XBSYMDB_URL, src)
+        run("git", "-C", src, "checkout", "-q", XBSYMDB_COMMIT)
+        run("cmake", "-S", src, "-B", os.path.join(src, "build"), "-DCMAKE_BUILD_TYPE=Release",
+            stdout=subprocess.DEVNULL)
+        run("cmake", "--build", os.path.join(src, "build"), "--target", "XbSymbolDatabaseCLI", "-j8",
+            stdout=subprocess.DEVNULL)
+    return cli
+
+
+def xdk_build(xbe):
+    out = subprocess.run([sys.executable, os.path.join(HERE, "xbedump.py"), xbe],
+                         check=True, capture_output=True, text=True).stdout
+    for l in out.splitlines():
+        p = l.split()
+        if len(p) >= 3 and p[0] == "lib" and p[1] in ("D3D8", "D3D8LTCG", "D3D8D"):
+            return int(p[2].split(".")[2])
+    return LEAK_XDK_BUILD
+
+
 def make_map(xbe):
+    if xdk_build(xbe) != LEAK_XDK_BUILD:
+        digest = hashlib.sha1(open(xbe, "rb").read()).hexdigest()[:16]
+        binary = os.environ.get("XBCOMPAT_BIN", os.path.join(ROOT, "build", "xbcompat"))
+        bdigest = hashlib.sha1(open(binary, "rb").read()).hexdigest()[:8]
+        path = os.path.join(CACHE, f"{digest}-xbsym-{bdigest}.map")
+        if not os.path.exists(path):
+            os.makedirs(CACHE, exist_ok=True)
+            run(sys.executable, os.path.join(HERE, "xbsymmap.py"), xbsymdb_cli(), xbe, binary, "-o", path)
+        return path
     libs = [REPLACED_LIBS[l] for l in library_versions(xbe) if l in REPLACED_LIBS]
     if not libs:
         return None

@@ -113,6 +113,7 @@ static struct {
     ULONG frame;
     ULONG *render_state;         /* the title's D3D__RenderState[] */
     ULONG render_state_fallback[D3DRS_MAX];
+    unsigned rs_count;           /* entries in the title's array */
     ULONG *device;               /* the title's g_Device (or our own) */
     ULONG *device_ptr;           /* the title's g_pDevice */
     D3DMATRIX transforms[10];    /* VIEW, PROJECTION, TEXTURE0-3, WORLD0-3 */
@@ -176,9 +177,13 @@ extern int g_screenshot_frame;
 extern const char *g_screenshot_path;
 extern int g_exit_after_frames;
 
-#define RS(i) (d3d.render_state[i])
+/* Host code indexes render states with the 4400 D3DRS_* values below; later
+   XDKs insert states, so rs_xlat[] gives each one's index in the title's
+   own array (identity for 4400 titles; see bind_render_state_layout). */
+static unsigned char rs_xlat[D3DRS_MAX];
+#define RS(i) (d3d.render_state[rs_xlat[i]])
 #define TSS(stage, i) (d3d.texture_state[(stage) * 32 + (i)])
-static float rs_float(ULONG i) { float f; memcpy(&f, &d3d.render_state[i], 4); return f; }
+static float rs_float(ULONG i) { float f; memcpy(&f, &RS(i), 4); return f; }
 static float tss_float(int s, ULONG i) { float f; memcpy(&f, &d3d.texture_state[s * 32 + i], 4); return f; }
 
 enum {
@@ -213,27 +218,26 @@ static void identity(D3DMATRIX *m)
 
 static void default_render_states(void)
 {
-    ULONG *rs = d3d.render_state;
     /* The title's image carries the library's own defaults table. */
     ULONG init = hle_lookup_prefix("?g_InitialRenderStates@D3D@@");
     (void)init;
-    rs[D3DRS_ZFUNC] = GL_LEQUAL;
-    rs[D3DRS_ALPHAFUNC] = GL_ALWAYS;
-    rs[D3DRS_ALPHABLENDENABLE] = 0;
-    rs[D3DRS_ALPHATESTENABLE] = 0;
-    rs[D3DRS_SRCBLEND] = GL_ONE;
-    rs[D3DRS_DESTBLEND] = GL_ZERO;
-    rs[D3DRS_ZWRITEENABLE] = 1;
-    rs[D3DRS_SHADEMODE] = GL_SMOOTH;
-    rs[D3DRS_COLORWRITEENABLE] = 0x01010101;
-    rs[D3DRS_BLENDOP] = GL_FUNC_ADD;
-    rs[D3DRS_LIGHTING] = 1;
-    rs[D3DRS_COLORVERTEX] = 1;
-    rs[D3DRS_DIFFUSEMATERIALSOURCE] = 1;   /* D3DMCS_COLOR1 */
-    rs[D3DRS_AMBIENTMATERIALSOURCE] = 0;   /* D3DMCS_MATERIAL */
-    rs[D3DRS_FILLMODE] = GL_FILL;
-    rs[D3DRS_CULLMODE] = 0x901;            /* D3DCULL_CCW */
-    rs[D3DRS_FRONTFACE] = GL_CW;
+    RS(D3DRS_ZFUNC) = GL_LEQUAL;
+    RS(D3DRS_ALPHAFUNC) = GL_ALWAYS;
+    RS(D3DRS_ALPHABLENDENABLE) = 0;
+    RS(D3DRS_ALPHATESTENABLE) = 0;
+    RS(D3DRS_SRCBLEND) = GL_ONE;
+    RS(D3DRS_DESTBLEND) = GL_ZERO;
+    RS(D3DRS_ZWRITEENABLE) = 1;
+    RS(D3DRS_SHADEMODE) = GL_SMOOTH;
+    RS(D3DRS_COLORWRITEENABLE) = 0x01010101;
+    RS(D3DRS_BLENDOP) = GL_FUNC_ADD;
+    RS(D3DRS_LIGHTING) = 1;
+    RS(D3DRS_COLORVERTEX) = 1;
+    RS(D3DRS_DIFFUSEMATERIALSOURCE) = 1;   /* D3DMCS_COLOR1 */
+    RS(D3DRS_AMBIENTMATERIALSOURCE) = 0;   /* D3DMCS_MATERIAL */
+    RS(D3DRS_FILLMODE) = GL_FILL;
+    RS(D3DRS_CULLMODE) = 0x901;            /* D3DCULL_CCW */
+    RS(D3DRS_FRONTFACE) = GL_CW;
 
     for (int st = 0; st < 4; st++) {
         TSS(st, D3DTSS_COLOROP) = st == 0 ? 4 /* MODULATE */ : 1 /* DISABLE */;
@@ -249,6 +253,39 @@ static void default_render_states(void)
     }
 }
 
+/* The title's index of a state that has a symbol of its own (XbSymbolDatabase
+   maps them as _D3DRS_<Name>), or -1. */
+static int title_rs_index(const char *name)
+{
+    char sym[64];
+    snprintf(sym, sizeof(sym), "_D3DRS_%s", name);
+    ULONG va = hle_lookup(sym);
+    return va ? (int)((va - (ULONG)d3d.render_state) / 4) : -1;
+}
+
+/* XDK 4400's simple states end at 81, its deferred states run 82..116 and its
+   complex states 117..145.  Later XDKs append unused slots to the first two
+   groups and insert D3DRS_SAMPLEALPHA after D3DRS_LINEWIDTH, so each group
+   moves as a block; the blocks are found from states the title has symbols
+   for. */
+static void bind_render_state_layout(void)
+{
+    for (int i = 0; i < D3DRS_MAX; i++) rs_xlat[i] = i;
+    int fog = title_rs_index("FogEnable"), ps = title_rs_index("PSTextureModes");
+    int dxt1 = title_rs_index("Dxt1NoiseEnable");
+    if (fog < 0 && ps < 0) return;
+    int d_shift = fog >= 0 ? fog - D3DRS_FOGENABLE : 0;
+    int c_shift = ps >= 0 ? ps - D3DRS_PSTEXTUREMODES : d_shift;
+    int t_shift = dxt1 >= 0 ? dxt1 - 139 /* D3DRS_DXT1NOISEENABLE */ : c_shift;
+    for (int i = D3DRS_FOGENABLE; i < D3DRS_PSTEXTUREMODES; i++) rs_xlat[i] = i + d_shift;
+    for (int i = D3DRS_PSTEXTUREMODES; i < 139; i++) rs_xlat[i] = i + c_shift;
+    for (int i = 139; i < D3DRS_MAX; i++) rs_xlat[i] = i + t_shift;
+    d3d.rs_count = D3DRS_MAX + t_shift;
+    if (d_shift || c_shift || t_shift)
+        xlog("D3D: render state layout shifted by %d/%d/%d (title has %u states)", d_shift, c_shift, t_shift,
+             d3d.rs_count);
+}
+
 void d3d_bind_globals(void)
 {
     d3d.render_state = (ULONG *)hle_lookup("_D3D__RenderState");
@@ -258,6 +295,8 @@ void d3d_bind_globals(void)
     d3d.index_data = (USHORT **)hle_lookup("_D3D__IndexData");
     d3d.device = (ULONG *)hle_lookup_prefix("?g_Device@D3D@@");
     d3d.device_ptr = (ULONG *)hle_lookup_prefix("?g_pDevice@D3D@@");
+    d3d.rs_count = D3DRS_MAX;
+    bind_render_state_layout();
     xlog("D3D: render states at %p, device at %p", (void *)d3d.render_state, (void *)d3d.device);
 }
 
@@ -1159,7 +1198,7 @@ static LONG NTAPI SetRenderState_ParameterCheck(ULONG State, ULONG Value)
 
 static void NTAPI SetRenderStateNotInline(ULONG State, ULONG Value)
 {
-    if (State < D3DRS_MAX) RS(State) = Value;
+    if (State < d3d.rs_count) d3d.render_state[State] = Value;
 }
 
 #define COMPLEX_STATE(name, index) \
@@ -1807,7 +1846,9 @@ static GLuint fragment_shader_object(void)
     memcpy(e->key, key, sizeof(key));
     ULONG modes = RS(D3DRS_PSTEXTUREMODES);
     RS(D3DRS_PSTEXTUREMODES) = key[57];
-    char *src = psh_translate(d3d.render_state);
+    ULONG rs[D3DRS_MAX];   /* psh.c reads 4400 numbering */
+    for (int i = 0; i < D3DRS_MAX; i++) rs[i] = RS(i);
+    char *src = psh_translate(rs);
     RS(D3DRS_PSTEXTUREMODES) = modes;
     if (!src) {
         xlog("D3D: pixel shader %#x could not be translated", d3d.pixel_shader);
@@ -3185,7 +3226,10 @@ static void NTAPI D3DDevice_GetTransform(ULONG State, D3DMATRIX *m)
 
 static void NTAPI D3DDevice_GetViewport(D3DVIEWPORT8 *v) { *v = d3d.viewport; }
 
-static void NTAPI D3DDevice_GetRenderState(ULONG State, ULONG *v) { *v = State < D3DRS_MAX ? RS(State) : 0; }
+static void NTAPI D3DDevice_GetRenderState(ULONG State, ULONG *v)
+{
+    *v = State < d3d.rs_count ? d3d.render_state[State] : 0;
+}
 static void NTAPI D3DDevice_GetTextureStageState(ULONG Stage, ULONG Type, ULONG *v)
 {
     *v = Stage < 4 && Type < 32 ? TSS(Stage, Type) : 0;
@@ -3286,22 +3330,24 @@ static void NTAPI D3DDevice_GetDisplayMode(ULONG *mode)
     mode[4] = (d3d.backbuffer->Format >> 8) & 0xFF;
 }
 
+/* The Xbox's D3DCAPS8 (the library's g_DeviceCaps, from se/d3dbase.cpp and
+   the KELVIN_* masks in se/caps.hpp). */
 static void NTAPI D3DDevice_GetDeviceCaps(ULONG *caps)
 {
-    memset(caps, 0, 212);
-    caps[0] = 1;            /* D3DDEVTYPE_HAL */
-    caps[27] = caps[28] = 4096;   /* MaxTextureWidth/Height */
-    caps[29] = 512;         /* MaxVolumeExtent */
-    caps[30] = 8192;        /* MaxTextureRepeat */
-    caps[31] = 4096;        /* MaxTextureAspectRatio */
-    caps[32] = 4;           /* MaxAnisotropy */
-    caps[44] = 0x8;         /* FVFCaps: texcoord count 8 */
-    caps[46] = 8;           /* MaxActiveLights */
-    caps[47] = 2;           /* MaxUserClipPlanes */
-    caps[48] = 4;           /* MaxVertexBlendMatrices */
-    caps[50] = 1 | 0x100;   /* VertexShaderVersion 1.1-ish */
-    caps[51] = 192;         /* MaxVertexShaderConst */
-    caps[52] = 1 | 0x100;   /* PixelShaderVersion */
+    static const ULONG xbox_caps[53] = {
+        1, 0, 0x20000, 0, 0, 0x80000003,               /* HAL, Caps READ_SCANLINE, intervals ONE|TWO|IMMEDIATE */
+        0, 0x7bbef0, 0xcf2, 0x377101, 0xff, 0x1fff,    /* Cursor, Dev, PrimitiveMisc, Raster, ZCmp, SrcBlend */
+        0x1fff, 0xff, 0x84208, 0x7ec87, 0x1f030700,    /* DestBlend, AlphaCmp, Shade, Texture, TextureFilter */
+        0x1f030700, 0, 0x17, 0, 0x1f,                  /* CubeFilter, VolumeFilter, Address, VolumeAddress, Line */
+        0x1000, 0x1000, 0, 8192, 0, 2,                 /* MaxTexture W/H, VolumeExtent, Repeat, AspectRatio, Aniso */
+        0x501502f9,                                    /* MaxVertexW 1e10 */
+        0xccbebc20, 0xccbebc20, 0x4cbebc20, 0x4cbebc20, /* guard band -1e8, -1e8, 1e8, 1e8 */
+        0, 0xff, 0x80004, 0xffffff, 4, 4, 0xbb,        /* ExtentsAdjust, Stencil, FVF, TextureOps, stages, VtxP */
+        8, 0, 4, 0, 0x42800000,                        /* lights, clip planes, blend matrices, index, MaxPointSize 64 */
+        0xffff, 0xffff, 16, 0xff,                      /* MaxPrimitiveCount, MaxVertexIndex, streams, stride */
+        0xffff0101, 96, 0xffff0101, 0x3f800000,        /* VS 1.1, 96 constants, PS 1.1, MaxPixelShaderValue 1 */
+    };
+    memcpy(caps, xbox_caps, sizeof(xbox_caps));
 }
 
 static LONG NTAPI Direct3D_GetDeviceCaps(UINT_ Adapter, ULONG DeviceType, ULONG *caps)
@@ -3709,9 +3755,9 @@ static void NTAPI D3DDevice_BeginPushBuffer(D3DPushBuffer *pb)
     if (d3d.recording) xlog("D3D: BeginPushBuffer while already recording");
     d3d.recording = pb;
     pb->n = 0;
-    memcpy(pb_rs, d3d.render_state, sizeof(pb_rs));
+    for (int i = 0; i < D3DRS_MAX; i++) pb_rs[i] = RS(i);
     memcpy(pb_tss, d3d.texture_state, sizeof(pb_tss));
-    memcpy(pb_saved.rs, d3d.render_state, sizeof(pb_saved.rs));
+    for (int i = 0; i < D3DRS_MAX; i++) pb_saved.rs[i] = RS(i);
     memcpy(pb_saved.tss, d3d.texture_state, sizeof(pb_saved.tss));
     memcpy(pb_saved.textures, d3d.textures, sizeof(pb_saved.textures));
     pb_saved.vertex_shader = d3d.vertex_shader;
@@ -3738,7 +3784,7 @@ static LONG NTAPI D3DDevice_EndPushBuffer(void)
     pb_flush_state();
     pb->Size = pb->n * 4 + 4;
     d3d.recording = NULL;
-    memcpy(d3d.render_state, pb_saved.rs, sizeof(pb_saved.rs));
+    for (int i = 0; i < D3DRS_MAX; i++) RS(i) = pb_saved.rs[i];
     memcpy(d3d.texture_state, pb_saved.tss, sizeof(pb_saved.tss));
     memcpy(d3d.textures, pb_saved.textures, sizeof(pb_saved.textures));
     d3d.vertex_shader = pb_saved.vertex_shader;
@@ -4240,7 +4286,7 @@ typedef struct state_block {
 
 static void state_capture(state_block *b)
 {
-    memcpy(b->rs, d3d.render_state, sizeof(b->rs));
+    for (int i = 0; i < D3DRS_MAX; i++) b->rs[i] = RS(i);
     memcpy(b->tss, d3d.texture_state, sizeof(b->tss));
     memcpy(b->transforms, d3d.transforms, sizeof(b->transforms));
     b->viewport = d3d.viewport;
@@ -4261,7 +4307,7 @@ static void state_capture(state_block *b)
 
 static void state_apply(const state_block *b)
 {
-    memcpy(d3d.render_state, b->rs, sizeof(b->rs));
+    for (int i = 0; i < D3DRS_MAX; i++) RS(i) = b->rs[i];
     memcpy(d3d.texture_state, b->tss, sizeof(b->tss));
     memcpy(d3d.transforms, b->transforms, sizeof(b->transforms));
     D3DDevice_SetViewport(&b->viewport);
@@ -4322,6 +4368,79 @@ static LONG NTAPI D3DDevice_EndStateBlock(ULONG *pToken)
 /* ---- table ------------------------------------------------------------- */
 
 #define F(dec, fn) { dec, (void *)fn }
+/* ---- XDK 5xxx variants -------------------------------------------------
+   Later libraries return objects instead of filling an out parameter, and
+   pass some arguments in registers. */
+
+static D3DPixelContainer *NTAPI D3DDevice_CreateTexture2(UINT_ w, UINT_ h, UINT_ depth, UINT_ levels, ULONG usage,
+                                                         ULONG fmt, ULONG type)
+{
+    D3DPixelContainer *t = NULL;
+    TRACE("D3D: CreateTexture2(%u, %u, %u, levels %u, usage %#x, fmt %#x, type %u)", w, h, depth, levels, usage, fmt,
+          type);
+    switch (type) {
+    case 4: D3DDevice_CreateVolumeTexture(w, h, depth, levels, usage, fmt, 0, &t); break;   /* D3DRTYPE_VOLUMETEXTURE */
+    case 5: D3DDevice_CreateCubeTexture(w, levels, usage, fmt, 0, &t); break;              /* D3DRTYPE_CUBETEXTURE */
+    default: D3DDevice_CreateTexture(w, h, levels, usage, fmt, 0, &t); break;
+    }
+    return t;
+}
+
+static D3DSurface *NTAPI D3DDevice_GetBackBuffer2(LONG BackBuffer)
+{
+    D3DSurface *s;
+    D3DDevice_GetBackBuffer(BackBuffer, 0, &s);
+    return s;
+}
+
+static D3DSurface *NTAPI D3DDevice_GetDepthStencilSurface2(void)
+{
+    if (!d3d.depth) return NULL;
+    d3d.depth->Common++;
+    return d3d.depth;
+}
+
+static D3DSurface *NTAPI D3DDevice_GetRenderTarget2(void)
+{
+    D3DSurface *s;
+    D3DDevice_GetRenderTarget(&s);
+    return s;
+}
+
+static D3DResource *NTAPI D3DDevice_GetTexture2(ULONG Stage)
+{
+    D3DResource *r;
+    D3DDevice_GetTexture(Stage, &r);
+    return r;
+}
+
+static D3DSurface *NTAPI D3DTexture_GetSurfaceLevel2(D3DPixelContainer *t, UINT_ level)
+{
+    return surface_of_level(t, 0, level);
+}
+
+static PVOID NTAPI D3DPalette_Lock2(D3DPalette *p, ULONG Flags)
+{
+    PVOID colors;
+    D3DPalette_Lock(p, &colors, Flags);
+    return colors;
+}
+
+/* PixelJar::Get2DSurfaceDesc, which 5xxx headers call from the inline
+   D3DSurface_GetDesc and D3DTexture_GetLevelDesc. */
+static void NTAPI Get2DSurfaceDesc(D3DPixelContainer *p, UINT_ level, ULONG *desc)
+{
+    D3DTexture_GetLevelDesc(p, level, desc);
+    desc[1] = ((p->res.Common >> 16) & 7) == 5 ? 1 /* D3DRTYPE_SURFACE */ : 3 /* D3DRTYPE_TEXTURE */;
+    if ((D3DSurface *)p == d3d.backbuffer || (D3DSurface *)p == d3d.target) desc[2] = 1;   /* D3DUSAGE_RENDERTARGET */
+    else if ((D3DSurface *)p == d3d.depth) desc[2] = 2;                                   /* D3DUSAGE_DEPTHSTENCIL */
+}
+
+static void FASTCALL SetVertexShaderConstantNotInline(LONG Register, const float *data, ULONG count)
+{
+    D3DDevice_SetVertexShaderConstant(Register, data, count);
+}
+
 const struct hle_func d3d8_funcs[] = {
     F("_Direct3DCreate8@4", Direct3DCreate8),
     F("_Direct3D_CreateDevice@24", Direct3D_CreateDevice),
@@ -4455,6 +4574,16 @@ const struct hle_func d3d8_funcs[] = {
     F("_D3DDevice_GetLightEnable@8", D3DDevice_GetLightEnable),
     F("_D3DDevice_GetVertexShader@4", D3DDevice_GetVertexShader),
     F("_D3DDevice_SetVertexShaderConstant@12", D3DDevice_SetVertexShaderConstant),
+    F("_D3DDevice_CreateTexture2@28", D3DDevice_CreateTexture2),
+    F("_D3DDevice_GetBackBuffer2@4", D3DDevice_GetBackBuffer2),
+    F("_D3DDevice_GetDepthStencilSurface2@0", D3DDevice_GetDepthStencilSurface2),
+    F("_D3DDevice_GetRenderTarget2@0", D3DDevice_GetRenderTarget2),
+    F("_D3DDevice_GetTexture2@4", D3DDevice_GetTexture2),
+    F("_D3DTexture_GetSurfaceLevel2@8", D3DTexture_GetSurfaceLevel2),
+    F("_D3DPalette_Lock2@8", D3DPalette_Lock2),
+    F("_Get2DSurfaceDesc@12", Get2DSurfaceDesc),
+    F("@D3DDevice_SetVertexShaderConstantNotInline@12", SetVertexShaderConstantNotInline),
+    F("@D3DDevice_SetVertexShaderConstantNotInlineFast@12", SetVertexShaderConstantNotInline),
     F("_D3DDevice_GetVertexShaderConstant@12", D3DDevice_GetVertexShaderConstant),
     F("_D3DDevice_SetShaderConstantMode@4", D3DDevice_SetShaderConstantMode),
     F("_D3DDevice_GetShaderConstantMode@4", D3DDevice_GetShaderConstantMode),
