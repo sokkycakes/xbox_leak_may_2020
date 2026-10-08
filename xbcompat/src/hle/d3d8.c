@@ -416,21 +416,43 @@ static void draw_window_pixels(const uint8_t *tmp)
     glPopAttrib();
 }
 
-/* Wait for the next 60 Hz vertical blank, as the NV2A does on Present and
-   BlockUntilVerticalBlank.  The host's vsync may not throttle (a headless X
-   server, a compositor that ignores the swap interval), and titles that time
-   video or animation by the wall clock need frames to take real time.
-   XBCOMPAT_UNPACED=1 turns it off for quick headless runs. */
+/* 60 Hz vertical blank timing.  The host's vsync may not throttle (a
+   headless X server, a compositor that ignores the swap interval), and
+   titles that time video or animation by the wall clock need frames to take
+   real time.  BlockUntilVerticalBlank waits for the next blank of a free
+   running 60 Hz clock; Present queues a flip, so it only holds a title that
+   gets more than a frame ahead of the display.  XBCOMPAT_UNPACED=1 turns
+   both off for quick headless runs. */
+static bool unpaced(void)
+{
+    static int u = -1;
+    if (u < 0) u = getenv("XBCOMPAT_UNPACED") != NULL;
+    return u;
+}
+
+static void sleep_until(Uint64 t)
+{
+    Uint64 now = SDL_GetPerformanceCounter();
+    if (t > now) SDL_Delay((Uint32)((t - now) * 1000 / SDL_GetPerformanceFrequency()));
+}
+
 static void wait_vblank(void)
 {
+    static Uint64 base;
+    if (unpaced()) return;
+    Uint64 now = SDL_GetPerformanceCounter(), period = SDL_GetPerformanceFrequency() / 60;
+    if (!base) base = now;
+    sleep_until(base + ((now - base) / period + 1) * period);
+}
+
+static void pace_present(void)
+{
     static Uint64 next;
-    static int unpaced = -1;
-    if (unpaced < 0) unpaced = getenv("XBCOMPAT_UNPACED") != NULL;
-    if (unpaced) return;
-    Uint64 freq = SDL_GetPerformanceFrequency(), now = SDL_GetPerformanceCounter(), period = freq / 60;
+    if (unpaced()) return;
+    Uint64 now = SDL_GetPerformanceCounter(), period = SDL_GetPerformanceFrequency() / 60;
     if (!next || now > next + period) next = now;   /* first frame, or fell behind: resync */
+    sleep_until(next);
     next += period;
-    if (next > now) SDL_Delay((Uint32)((next - now) * 1000 / freq));
 }
 
 static ULONG NTAPI D3DDevice_Swap(ULONG Flags)
@@ -452,7 +474,7 @@ static ULONG NTAPI D3DDevice_Swap(ULONG Flags)
     }
     SDL_GL_SwapWindow(d3d.window);
     restore_overlay();
-    wait_vblank();
+    pace_present();
     if (d3d.vblank_callback) {
         ULONG data[3] = { d3d.frame, d3d.frame, 1 /* D3DVBLANK_SWAPDONE */ };
         ((void (CDECLAPI *)(ULONG *))d3d.vblank_callback)(data);
