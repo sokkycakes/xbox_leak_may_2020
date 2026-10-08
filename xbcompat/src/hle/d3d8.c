@@ -628,24 +628,42 @@ static GLenum tex_target(const D3DPixelContainer *t)
    when target is GL_TEXTURE_3D and d > 1) to `target`. */
 static void upload_image3(GLenum target, ULONG fmt, ULONG w, ULONG h, ULONG d, ULONG pitch, const uint8_t *src)
 {
-    struct { ULONG fmt; int bpp; bool swizzled; GLenum gl_fmt, gl_type; bool force_alpha; } table[] = {
-        { 0x06, 4, true,  GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, false },   /* A8R8G8B8 */
-        { 0x07, 4, true,  GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, true },    /* X8R8G8B8 */
-        { 0x12, 4, false, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, false },   /* LIN_A8R8G8B8 */
-        { 0x1E, 4, false, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, true },    /* LIN_X8R8G8B8 */
-        { 0x05, 2, true,  GL_RGB,  GL_UNSIGNED_SHORT_5_6_5, false },       /* R5G6B5 */
-        { 0x11, 2, false, GL_RGB,  GL_UNSIGNED_SHORT_5_6_5, false },       /* LIN_R5G6B5 */
-        { 0x02, 2, true,  GL_BGRA, GL_UNSIGNED_SHORT_1_5_5_5_REV, false }, /* A1R5G5B5 */
-        { 0x03, 2, true,  GL_BGRA, GL_UNSIGNED_SHORT_1_5_5_5_REV, true },  /* X1R5G5B5 */
-        { 0x10, 2, false, GL_BGRA, GL_UNSIGNED_SHORT_1_5_5_5_REV, false }, /* LIN_A1R5G5B5 */
-        { 0x04, 2, true,  GL_BGRA, GL_UNSIGNED_SHORT_4_4_4_4_REV, false }, /* A4R4G4B4 */
-        { 0x1D, 2, false, GL_BGRA, GL_UNSIGNED_SHORT_4_4_4_4_REV, false }, /* LIN_A4R4G4B4 */
-        { 0x00, 1, true,  GL_LUMINANCE, GL_UNSIGNED_BYTE, false },         /* L8 */
-        { 0x13, 1, false, GL_LUMINANCE, GL_UNSIGNED_BYTE, false },         /* LIN_L8 */
-        { 0x19, 1, true,  GL_ALPHA, GL_UNSIGNED_BYTE, false },             /* A8 */
-        { 0x1F, 1, false, GL_ALPHA, GL_UNSIGNED_BYTE, false },             /* LIN_A8 */
-        { 0x1A, 2, true,  GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE, false },   /* A8L8 */
-        { 0x20, 2, false, GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE, false },   /* LIN_A8L8 */
+    /* conv: 1 = V8U8 (bump), 2 = L6V5U5 (bump), both expanded to RGBA8 with
+       du/dv as the signed bytes' bit patterns in r/g and luminance in b. */
+    struct { ULONG fmt; int bpp; bool swizzled; GLenum gl_fmt, gl_type; bool force_alpha; int conv; } table[] = {
+        { 0x3A, 4, true,  GL_RGBA, GL_UNSIGNED_BYTE, false, 0 },               /* A8B8G8R8 / Q8W8V8U8 */
+        { 0x3F, 4, false, GL_RGBA, GL_UNSIGNED_BYTE, false, 0 },               /* LIN_A8B8G8R8 */
+        { 0x3B, 4, true,  GL_BGRA, GL_UNSIGNED_INT_8_8_8_8, false, 0 },        /* B8G8R8A8 */
+        { 0x40, 4, false, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8, false, 0 },        /* LIN_B8G8R8A8 */
+        { 0x3C, 4, true,  GL_RGBA, GL_UNSIGNED_INT_8_8_8_8, false, 0 },        /* R8G8B8A8 */
+        { 0x41, 4, false, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8, false, 0 },        /* LIN_R8G8B8A8 */
+        { 0x38, 2, true,  GL_RGBA, GL_UNSIGNED_SHORT_5_5_5_1, false, 0 },      /* R5G5B5A1 */
+        { 0x3D, 2, false, GL_RGBA, GL_UNSIGNED_SHORT_5_5_5_1, false, 0 },      /* LIN_R5G5B5A1 */
+        { 0x39, 2, true,  GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4, false, 0 },      /* R4G4B4A4 */
+        { 0x3E, 2, false, GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4, false, 0 },      /* LIN_R4G4B4A4 */
+        { 0x32, 2, true,  GL_LUMINANCE, GL_UNSIGNED_SHORT, false, 0 },         /* L16 */
+        { 0x35, 2, false, GL_LUMINANCE, GL_UNSIGNED_SHORT, false, 0 },         /* LIN_L16 */
+        { 0x28, 2, true,  GL_RGBA, GL_UNSIGNED_BYTE, false, 1 },            /* V8U8 / G8B8 */
+        { 0x17, 2, false, GL_RGBA, GL_UNSIGNED_BYTE, false, 1 },            /* LIN_V8U8 / LIN_G8B8 */
+        { 0x27, 2, true,  GL_RGBA, GL_UNSIGNED_BYTE, false, 2 },            /* L6V5U5 / R6G5B5 */
+        { 0x37, 2, false, GL_RGBA, GL_UNSIGNED_BYTE, false, 2 },            /* LIN_L6V5U5 */
+        { 0x06, 4, true,  GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, false, 0 },   /* A8R8G8B8 */
+        { 0x07, 4, true,  GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, true, 0 },    /* X8R8G8B8 */
+        { 0x12, 4, false, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, false, 0 },   /* LIN_A8R8G8B8 */
+        { 0x1E, 4, false, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, true, 0 },    /* LIN_X8R8G8B8 */
+        { 0x05, 2, true,  GL_RGB,  GL_UNSIGNED_SHORT_5_6_5, false, 0 },       /* R5G6B5 */
+        { 0x11, 2, false, GL_RGB,  GL_UNSIGNED_SHORT_5_6_5, false, 0 },       /* LIN_R5G6B5 */
+        { 0x02, 2, true,  GL_BGRA, GL_UNSIGNED_SHORT_1_5_5_5_REV, false, 0 }, /* A1R5G5B5 */
+        { 0x03, 2, true,  GL_BGRA, GL_UNSIGNED_SHORT_1_5_5_5_REV, true, 0 },  /* X1R5G5B5 */
+        { 0x10, 2, false, GL_BGRA, GL_UNSIGNED_SHORT_1_5_5_5_REV, false, 0 }, /* LIN_A1R5G5B5 */
+        { 0x04, 2, true,  GL_BGRA, GL_UNSIGNED_SHORT_4_4_4_4_REV, false, 0 }, /* A4R4G4B4 */
+        { 0x1D, 2, false, GL_BGRA, GL_UNSIGNED_SHORT_4_4_4_4_REV, false, 0 }, /* LIN_A4R4G4B4 */
+        { 0x00, 1, true,  GL_LUMINANCE, GL_UNSIGNED_BYTE, false, 0 },         /* L8 */
+        { 0x13, 1, false, GL_LUMINANCE, GL_UNSIGNED_BYTE, false, 0 },         /* LIN_L8 */
+        { 0x19, 1, true,  GL_ALPHA, GL_UNSIGNED_BYTE, false, 0 },             /* A8 */
+        { 0x1F, 1, false, GL_ALPHA, GL_UNSIGNED_BYTE, false, 0 },             /* LIN_A8 */
+        { 0x1A, 2, true,  GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE, false, 0 },   /* A8L8 */
+        { 0x20, 2, false, GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE, false, 0 },   /* LIN_A8L8 */
     };
 
     if ((fmt == 0x0C || fmt == 0x0E || fmt == 0x0F) && target != GL_TEXTURE_3D) {
@@ -679,6 +697,25 @@ static void upload_image3(GLenum target, ULONG fmt, ULONG w, ULONG h, ULONG d, U
     }
     if (table[i].force_alpha && bpp == 4)
         for (ULONG k = 0; k < w * h * d; k++) px[k * 4 + 3] = 0xFF;
+    if (table[i].conv) {
+        uint8_t *rgba = malloc(w * h * d * 4);
+        for (ULONG k = 0; k < w * h * d; k++) {
+            uint16_t v = px[k * 2] | px[k * 2 + 1] << 8;
+            uint8_t *o = rgba + k * 4;
+            if (table[i].conv == 1) {
+                o[0] = v & 0xFF; o[1] = v >> 8; o[2] = 0xFF;
+            } else {
+                int du = (int)(v << 27) >> 27, dv = (int)((v >> 5) << 27) >> 27;   /* signed 5-bit */
+                o[0] = (uint8_t)(int8_t)(du * 127 / 15 < -128 ? -128 : du * 127 / 15);
+                o[1] = (uint8_t)(int8_t)(dv * 127 / 15 < -128 ? -128 : dv * 127 / 15);
+                o[2] = (uint8_t)(((v >> 10) & 0x3F) * 255 / 63);
+            }
+            o[3] = 0xFF;
+        }
+        free(px);
+        px = rgba;
+        bpp = 4;
+    }
     const char *dump = getenv("XBCOMPAT_DUMP_TEXTURES");
     if (dump) {
         /* Debug aid: XBCOMPAT_DUMP_TEXTURES=dir writes every upload as dir/texN_WxH_fmt.bin (tools/texdump.py renders them). */
@@ -700,8 +737,43 @@ static void upload_image(GLenum target, ULONG fmt, ULONG w, ULONG h, ULONG pitch
     upload_image3(target, fmt, w, h, 1, pitch, src);
 }
 
+#ifndef GL_READ_FRAMEBUFFER
+#define GL_READ_FRAMEBUFFER 0x8CA8
+#endif
+static void (APIENTRY *p_glBindFramebuffer)(GLenum, GLuint);   /* loaded with the other FBO functions */
+
+/* Copy the window's color or depth/stencil buffer into a device surface's
+   memory (top row first), the way the NV2A keeps them in RAM. */
+static void readback_surface(D3DSurface *s, bool depth)
+{
+    ULONG w, h, pitch;
+    container_size((D3DPixelContainer *)s, &w, &h, &pitch);
+    if (w > (ULONG)d3d.width) w = d3d.width;
+    if (h > (ULONG)d3d.height) h = d3d.height;
+    uint8_t *px = (uint8_t *)(s->Data | CONTIG_BASE);
+    uint8_t *tmp = malloc(w * h * 4);
+    if (p_glBindFramebuffer) p_glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    if (depth) glReadPixels(0, 0, w, h, 0x84F9 /* GL_DEPTH_STENCIL */, 0x84FA /* GL_UNSIGNED_INT_24_8 */, tmp);
+    else glReadPixels(0, 0, w, h, GL_BGRA, GL_UNSIGNED_BYTE, tmp);
+    if (p_glBindFramebuffer) p_glBindFramebuffer(GL_READ_FRAMEBUFFER, d3d.rt_texture ? d3d.fbo : 0);
+    ULONG row = pitch < w * 4 ? pitch : w * 4;
+    for (ULONG y = 0; y < h; y++) memcpy(px + y * pitch, tmp + (h - 1 - y) * w * 4, row);
+    free(tmp);
+}
+
 static GLuint texture_for(D3DPixelContainer *t)
 {
+    /* A texture header over the back buffer or the depth buffer (titles
+       build these with XGSetTextureHeader to filter the frame): read the
+       current pixels back and upload them fresh. */
+    ULONG va = t->res.Data | CONTIG_BASE;
+    bool on_color = d3d.backbuffer && va == (d3d.backbuffer->Data | CONTIG_BASE) && t != (D3DPixelContainer *)d3d.backbuffer;
+    bool on_depth = d3d.depth && va == (d3d.depth->Data | CONTIG_BASE) && t != (D3DPixelContainer *)d3d.depth;
+    if (on_color || on_depth) {
+        readback_surface(on_color ? d3d.backbuffer : d3d.depth, on_depth);
+        tex_invalidate(t->res.Data);
+    }
     for (tex_entry *e = tex_cache; e; e = e->next)
         if (e->data == t->res.Data && e->format == t->Format && e->size == t->Size) return e->id;
 
@@ -2340,7 +2412,6 @@ static void NTAPI D3DDevice_SetIndices(D3DResource *ib, UINT_ BaseVertexIndex)
 
 /* Framebuffer objects are GL 3.0 / ARB_framebuffer_object: fetch them. */
 static void (APIENTRY *p_glGenFramebuffers)(GLsizei, GLuint *);
-static void (APIENTRY *p_glBindFramebuffer)(GLenum, GLuint);
 static void (APIENTRY *p_glFramebufferTexture2D)(GLenum, GLenum, GLenum, GLuint, GLint);
 static void (APIENTRY *p_glFramebufferRenderbuffer)(GLenum, GLenum, GLenum, GLuint);
 static void (APIENTRY *p_glGenRenderbuffers)(GLsizei, GLuint *);
