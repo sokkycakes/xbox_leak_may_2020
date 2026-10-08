@@ -260,10 +260,17 @@ static void OnFlip(int, unsigned int, unsigned int, unsigned int, void* data)
 void Kms_ShowFrame(unsigned int fbo, int width, int height)
 {
     int dw = g_mode.hdisplay, dh = g_mode.vdisplay;
-    // Letterbox to the animation's 4:3.
-    int w = dw, h = dw * height / width;
-    if (h > dh) { h = dh; w = dh * width / height; }
-    int x = (dw - w) / 2, y = (dh - h) / 2;
+    int w = dw, h = dh, x = 0, y = 0;
+    // Standard-definition TV modes (720x480 NTSC, 720x576 PAL, and their
+    // 704-wide forms) are 4:3 pictures with non-square pixels. Fill them,
+    // as the Xbox's video encoder stretched its 640x480 frame across the
+    // whole signal. Anything else has square pixels: letterbox to 4:3.
+    bool sd_tv = (dw == 720 || dw == 704) && (dh == 480 || dh == 576);
+    if (!sd_tv) {
+        h = dw * height / width;
+        if (h > dh) { h = dh; w = dh * width / height; }
+        x = (dw - w) / 2; y = (dh - h) / 2;
+    }
 
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
     glDisable(GL_SCISSOR_TEST);
