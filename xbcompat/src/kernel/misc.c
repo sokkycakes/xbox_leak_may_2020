@@ -84,6 +84,10 @@ void launch_init(int argc, char **argv, const char *d_path, const char *launch_d
         OBJECT_STRING link = { 12, 13, "\\??\\CdRom0:" }, target = { 14, 15, "\\Device\\CdRom0" };
         IoCreateSymbolicLink(&link, &target);
     }
+    {   /* xbcompat's game card slot (see io.c) */
+        OBJECT_STRING link = { 10, 11, "\\??\\CARD0:" }, target = { 17, 18, "\\Device\\GameCard0" };
+        IoCreateSymbolicLink(&link, &target);
+    }
     if (d_path) {
         static char name[600];
         snprintf(name, sizeof(name), "%s\\%s", d_path, xbe_rel ? xbe_rel : "default.xbe");

@@ -4,6 +4,12 @@
 # and stage an xbcompat hard disk for it.
 #
 #   tools/dashbuild/build.sh [WORK]     (default WORK=/tmp/xbdash)
+#   NEWGAMES=DIR tools/dashbuild/build.sh [WORK]
+#
+# NEWGAMES is the March 2001 dashboard's Games scene (TDATA\fffe0000\NewGames
+# on that recovery disc), with its Games_Title scene beside it.  With it the
+# Games screen is those scenes, packed into NewGames.xip and Games_Title.xip;
+# without it the Games screen is built on Settings home.
 #   tools/dashbuild/run.sh   [WORK] [xbrun options...]
 #
 # Needs wine + wine32 (apt: libgd3:i386 first, then wine wine32:i386).
@@ -19,16 +25,25 @@ export WINEDEBUG=-all WINEPREFIX=${WINEPREFIX:-$WORK/wineprefix}
 W=$(echo "Z:$WORK" | tr / '\\')          # WORK as a Wine path
 XB="$W\\xb"
 
+# Patched sources, rewritten only when they change so their objects stay cached.
+patch_src() { # file (as sources.txt spells it) sed-script
+    sed "$2" "$WORK/xb/private/ui/xapp/$(ls "$WORK/xb/private/ui/xapp" | grep -ix "$1")" > "$WORK/patch/$1.new"
+    cmp -s "$WORK/patch/$1.new" "$WORK/patch/$1" && rm -f "$WORK/patch/$1.new" || mv "$WORK/patch/$1.new" "$WORK/patch/$1"
+}
 # GuidDef.h defines `one`, which main.cpp uses as a variable name.
-sed 's/\bone\b/fOne/g' "$WORK/xb/private/ui/xapp/main.cpp" > "$WORK/patch/main.cpp"
+patch_src main.cpp 's/\bone\b/fOne/g'
+# A game disc in the tray at startup waits in the Games screen's top slot
+# instead of rebooting into the game (Microsoft's dashboard only ran with a
+# game disc in when a game had sent it there).
+patch_src Disc.cpp 's/theApp.m_bHasLaunchData || g_nDiscType == DISC_VIDEO/theApp.m_bHasLaunchData || g_nDiscType == DISC_TITLE || g_nDiscType == DISC_VIDEO/'
 
 G=$(echo "Z:$HERE/games" | tr / '\\')    # the Games area added to the dashboard
 for f in $(cat "$HERE/sources.txt") GameCollection.cpp; do
     o="$WORK/obj/${f%.cpp}.obj"
-    [ -s "$o" ] && [ "$o" -nt "$HERE/games/$f" ] && continue
-    src=$f; dir="$WORK/xb/private/ui/xapp"
-    [ "$f" = main.cpp ] && src="$W\\patch\\main.cpp"
-    [ "$f" = GameCollection.cpp ] && src="$G\\GameCollection.cpp"
+    src=$f; dir="$WORK/xb/private/ui/xapp"; dep=$dir/$f
+    [ -f "$WORK/patch/$f" ] && src="$W\\patch\\$f" dep=$WORK/patch/$f
+    [ "$f" = GameCollection.cpp ] && src="$G\\GameCollection.cpp" dep=$HERE/games/$f
+    [ -s "$o" ] && [ "$o" -nt "$dep" ] && continue
     echo "cc $f"
     WORK="$WORK" XB="$XB" CC_DIR="$dir" python3 "$HERE/cc.py" "$src" -D_AUDIO -D_CDPLAYER
 done
@@ -49,6 +64,29 @@ timeout 600 wine "$WORK/xb/public/mstools/vc70/link.exe" /nologo -subsystem:xbox
 rm -rf "$WORK/dash"
 cp -r "$WORK/xb/private/ui/dash" "$WORK/dash"
 python3 "$HERE/games/patch_dash.py" "$WORK/dash"
+XIPS=Games2.xip
+if [ -n "$NEWGAMES" ]; then
+    # An image as an XPR texture for the scene, the way mkxips.cmd's bundler step does.
+    tga2xbx() { # tga width height
+        printf 'Texture Tex\n{\n    Source %s\n    Format D3DFMT_A8R8G8B8\n    Width %s\n    Height %s\n    Levels 1\n}\n' "$1" "$2" "$3" > "${1%.tga}.rdf"
+        timeout 120 wine "$WORK/xb/public/idw/bundler.exe" "${1%.tga}.rdf" -o "${1%.tga}.xbx" | tr -d '\r'
+    }
+    cp -r "$NEWGAMES" "$WORK/dash/NewGames"
+    cp -r "$(dirname "$NEWGAMES")/Games_Title" "$WORK/dash/Games_Title"
+    cp "$HERE/games/newgames.xap" "$WORK/dash/games.xap"
+    (
+        cd "$WORK/dash/NewGames"
+        cp ../GameHilite_01.bmp .
+        tga2xbx 1gamespanel.tga 512 512
+        timeout 300 wine "$WORK/xb/private/ui/XIP/obj/i386/xip.exe" -q -m -i GameHilite_01.bmp ..\\NewGames.xip default.xap | tr -d '\r'
+        cd "$WORK/dash/Games_Title"
+        cp ../GameHilite_01.bmp .
+        tga2xbx panel6.tga 512 256
+        tga2xbx panel8.tga 512 512
+        timeout 300 wine "$WORK/xb/private/ui/XIP/obj/i386/xip.exe" -q -m -i GameHilite_01.bmp ..\\Games_Title.xip default.xap | tr -d '\r'
+    )
+    XIPS="$XIPS NewGames.xip Games_Title.xip"
+fi
 (
     cd "$WORK/dash"
     E="python3 $HERE/games/xipedit.py"
@@ -59,7 +97,7 @@ python3 "$HERE/games/patch_dash.py" "$WORK/dash"
         Keyboard.xip JKeyboard.xip mainmenu5.xip Memory_Files2.xip Memory2.xip Message.xip music_copy3.xip \
         Music_PlayEdit2.xip music2.xip Settings_Clock.xip settings_language.xip settings_list.xip \
         settings_panel.xip settings_parental.xip settings_timezone.xip settings_video.xip settings3.xip \
-        Games2.xip > /dev/null
+        $XIPS > /dev/null
 )
 
 D="$W\\dash"
