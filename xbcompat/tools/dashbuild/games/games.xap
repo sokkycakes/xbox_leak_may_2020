@@ -3,8 +3,8 @@
 // Not part of Microsoft's dashboard; added by xbcompat's dashbuild.  The
 // screen is the Settings home scene (Games2 is a copy of Settings3), which
 // was modelled as the Games screen: its rows are S_Home_text_games and its
-// pod carries the S_Home_GameModule cartridges.  The settings icons are
-// hidden so the pod is empty, as in the Max scene.
+// pod carries the S_Home_GameModule cartridges.  The settings orb and icons
+// are hidden and the game pod from mainmenu5.xip takes the orb's place.
 //
 
 var gamesCount;
@@ -31,6 +31,15 @@ function HideGamesIcons()
     c.LockIcon.visible = false;
     c.AutoOffIcon.visible = false;
     c.ConsoleIcon.visible = false;
+
+    // the game pod (GamesPod, from mainmenu5.xip) replaces the settings orb
+    c.S_Home_pod_shell_01.visible = false;
+    c.S_Home_podsocket_inner.visible = false;
+    c.S_Home_podsocket_outer.visible = false;
+    c.S_Home_pod_support_01.visible = false;
+    c.S_Home_pod_support_02.visible = false;
+    c.S_Home_pod_support_03.visible = false;
+    c.S_Home_pod_support_04.visible = false;
 }
 
 function FillGamesList()
