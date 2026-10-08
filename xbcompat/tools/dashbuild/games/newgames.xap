@@ -1,15 +1,19 @@
 //
-// The Games area on the March 2001 dashboard's own Games scene (NewGames,
-// from the recovery disc's TDATA\fffe0000\NewGames, packed into
-// NewGames.xip by build.sh).  The list logic follows that dashboard's
-// games.xap, with xbcompat's GameCollection (E:\Games\<folder>\default.xbe)
-// in place of its TitleCollection, and A launching the selected game.
+// The Games area on the March 2001 dashboard's own Games scenes, from that
+// recovery disc's TDATA\fffe0000: NewGames (the list, packed into
+// NewGames.xip by build.sh) and Games_Title (a game's details, packed into
+// Games_Title.xip).  The logic follows that dashboard's games.xap, with
+// xbcompat's GameCollection in place of its TitleCollection: the list's top
+// slot is the disc tray, then the games in E:\Games; A on a game opens its
+// details (Play, Saved Games, Game Info).
 //
 
 var titleScroll;
 var titleSelect;
 var titleButton;
 var titleCount;
+var curTitle;
+var bToGamesFromDetails;
 
 DEF theGameCollection GameCollection
 {
@@ -19,8 +23,10 @@ function GetTitleList()
 {
     titleCount = theGameCollection.Scan();
 
-    var str = titleCount + " ";
-    if (titleCount == 1)
+    // the tray slot counts only with a game disc in it
+    var nGames = titleCount - 1 + theGameCollection.HasDisc();
+    var str = nGames + " ";
+    if (nGames == 1)
         str = str + theTranslator.Translate("ITEM");
     else
         str = str + theTranslator.Translate("ITEMS");
@@ -28,6 +34,21 @@ function GetTitleList()
     theGamesMenu.children[0].children[0].New__text_games01.text = str;
 
     UpdateTitleListText();
+}
+
+// (the script language has no && or ||)
+function IsEmptyTray(nGame)
+{
+    if (nGame != 0)
+        return false;
+    return theGameCollection.HasDisc() == false;
+}
+
+function GetGameName(nGame)
+{
+    if (IsEmptyTray(nGame))
+        return "No Disc";
+    return theGameCollection.GetGameName(nGame);
 }
 
 function UpdateTitleListText()
@@ -42,7 +63,7 @@ function UpdateTitleListText()
         }
         else
         {
-            var str = theGameCollection.GetGameName(titleScroll + i);
+            var str = GetGameName(titleScroll + i);
             c.children[i].children[0].geometry.text = str.substr(0, 60);
         }
     }
@@ -50,15 +71,22 @@ function UpdateTitleListText()
 
 function UpdateTitleInfo()
 {
+    var c = theGamesMenu.children[0].children[0];
     var str;
 
-    if (titleSelect == -1)
-        str = "No games found";
+    if (IsEmptyTray(titleSelect))
+        str = "*No Disc*\rInsert a game disc.";
+    else if (titleSelect == 0)
+        str = "*" + GetGameName(0) + "*\rIn the disc tray";
     else
-        str = "*" + theGameCollection.GetGameName(titleSelect) + "*\r" + "ID " + theGameCollection.GetGameTitleID(titleSelect);
+        str = "*" + GetGameName(titleSelect) + "*\rID " + theGameCollection.GetGameTitleID(titleSelect);
 
-    theGamesMenu.children[0].children[0].GameMetaText.text = str;
-    theGamesMenu.children[0].children[0].TitleImageShape.visible = false;
+    c.GameMetaText.text = str;
+
+    // the game's own title image, or the Xbox logo
+    theGameCollection.SelectGameImage(titleSelect);
+    c.TitleImageShape.appearance.material.name = "SelectedIcon";
+    c.TitleImageShape.visible = (IsEmptyTray(titleSelect) == false);
 }
 
 function AdjustTitleScroll()
@@ -148,16 +176,14 @@ function ResetTitleList()
     titleScroll = 0;
     GetTitleList();
 
-    if (titleCount == 0)
+    // start on the disc, or on the first game when the tray is empty
+    titleSelect = 0;
+    if (IsEmptyTray(0))
     {
-        titleButton = -1;
-        titleSelect = -1;
+        if (titleCount > 1)
+            titleSelect = 1;
     }
-    else
-    {
-        titleButton = 0;
-        titleSelect = 0;
-    }
+    titleButton = titleSelect;
 
     UpdateTitleList();
 }
@@ -230,10 +256,17 @@ DEF theGamesMenu Level
             if (titleSelect < 0)
                 return;
 
+            if (IsEmptyTray(titleSelect))
+            {
+                PlaySoundError();
+                return;
+            }
+
             PlaySoundA();
             theGamesSubMenuIn.Play();
-            EnableInput(false);
-            theGameCollection.LaunchGame(titleSelect);
+            bToGamesFromDetails = true;
+            curTitle = titleSelect;
+            theTitleMenu.GoTo();
         }
 
         function OnAUp()
@@ -303,7 +336,341 @@ DEF theGamesMenu Level
         {
             children[0].children[0].G_L1_select_pod_HL.visible = false;
             children[0].children[0].G_L1_back_pod_HL.visible = false;
-            ResetTitleList();
+
+            // keep the selection when coming back from a game's details
+            if (bToGamesFromDetails != true)
+                ResetTitleList();
+            else
+                UpdateTitleInfo();
+            bToGamesFromDetails = false;
+        }
+    }
+}
+
+////////////////////////////////////////////////////////////////////////////
+// A game's details (Games_Title): Play, Saved Games and Game Info.  The
+// arm and camera moves are the March dashboard's.
+
+var bTitleInfoView;
+var nCurTitleMenuItem;
+var nTitleMenuItems;
+
+function ShowTitleMenuView()
+{
+    bTitleInfoView = false;
+
+    var c = theTitleMenu.children[0].children[0];
+
+    c.GM_L2_Arm01_04.SetTranslation(-225.399994, 15.100000, -140.100006);
+    c.GM_L2_Arm01_04.SetRotation(0.144500, 0.756000, 0.638400, -0.537000);
+    c.GM_L2_Arm01_05.SetTranslation(3.131000, 0.496100, -4.958000);
+    c.GM_L2_Arm01_05.SetRotation(-0.494100, -0.258500, 0.830100, -3.319000);
+    c.GM_L2_Arm02_03.SetTranslation(-226.600006, 21.190001, -136.000000);
+    c.GM_L2_Arm02_03.SetRotation(-0.968800, -0.183400, -0.166500, -1.606000);
+    c.GM_L2_Arm02_04.SetTranslation(4.058000, -0.000035, 1.126000);
+    c.GM_L2_Arm02_04.SetRotation(0.000000, 1.000000, 0.000000, -0.785400);
+    c.GM_L2_Arm02_05.SetTranslation(6.988000, -1.056000, -10.780000);
+    c.GM_L2_Arm02_05.SetRotation(0.207900, 0.000000, 0.978100, -3.142000);
+
+    c.select.SetTranslation(-224.100006, 8.351000, -140.800003);
+    c.back.SetTranslation(-224.699997, 8.713000, -129.399994);
+
+    theTitleMenuViewpoint.isBound = true;
+}
+
+function ShowTitleInfoView()
+{
+    var c = theTitleMenu.children[0].children[0];
+
+    if (nCurTitleMenuItem == 1)
+    {
+        c.PanelTitleText.text = theTranslator.Translate("SAVED GAMES");
+        c.CustomPanelText.text = theGameCollection.GetSavedGames(curTitle);
+    }
+    else
+    {
+        c.PanelTitleText.text = theTranslator.Translate("GAME INFO");
+        c.CustomPanelText.text = theGameCollection.GetGameInfo(curTitle);
+    }
+
+    c.CustomPanel1.visible = false;
+    c.CustomPanel2.visible = true;
+    c.GM_L2_panel02_backing.visible = true;
+
+    bTitleInfoView = true;
+    c.GM_L2_Arm01_04.SetTranslation(-224.500000, 15.100000, -144.300003);
+    c.GM_L2_Arm01_04.SetRotation(0.263300, -0.948900, 0.174300, -1.165000);
+    c.GM_L2_Arm01_05.SetTranslation(0.107800, -2.314000, -1.985000);
+    c.GM_L2_Arm01_05.SetRotation(0.227700, -0.028960, 0.973300, -2.815000);
+    c.GM_L2_Arm02_03.SetTranslation(-225.600006, 21.190001, -134.100006);
+    c.GM_L2_Arm02_03.SetRotation(-0.859900, 0.154600, -0.486500, -1.595000);
+    c.GM_L2_Arm02_04.SetTranslation(-0.172500, -0.077700, -0.262700);
+    c.GM_L2_Arm02_04.SetRotation(-0.007872, 1.000000, 0.000275, -1.361000);
+    c.GM_L2_Arm02_05.SetTranslation(6.501000, -0.816200, -8.807000);
+    c.GM_L2_Arm02_05.SetRotation(-0.273200, 0.322600, 0.906300, -3.334000);
+    c.select.SetTranslation(-222.100006, 8.351000, -135.399994);
+    c.back.SetTranslation(-222.899994, 8.025000, -126.099998);
+    theTitleInfoViewpoint.isBound = true;
+}
+
+function UpdateTitleMenu()
+{
+    var c = theTitleMenu.children[0].children[0];
+
+    for (var i = 0; i < 5; i = i + 1)
+    {
+        if (i == nCurTitleMenuItem)
+        {
+            c.theMenuButtons.children[i].children[1].children[0].appearance.name = "HilightedType";
+            c.theMenuButtons.children[i].children[0].appearance.material.name = "GameHilite";
+        }
+        else
+        {
+            c.theMenuButtons.children[i].children[1].children[0].appearance.name = "Typesdsafsda";
+            c.theMenuButtons.children[i].children[0].appearance.material.name = "FlatSurfaces";
+        }
+    }
+
+    var strName = "*" + GetGameName(curTitle) + "*\r";
+    var str;
+    if (nCurTitleMenuItem == 0)
+    {
+        str = theTranslator.Translate("Start the game.");
+    }
+    else if (nCurTitleMenuItem == 1)
+    {
+        var nSaves = theGameCollection.GetSavedGameCount(curTitle);
+        if (nSaves == 1)
+            str = "1 " + theTranslator.Translate("saved game");
+        else
+            str = nSaves + " " + theTranslator.Translate("saved games");
+    }
+    else
+    {
+        str = "ID " + theGameCollection.GetGameTitleID(curTitle);
+    }
+
+    c.HelpPanelText.text = strName + str;
+}
+
+function SetupTitle()
+{
+    var c = theTitleMenu.children[0].children[0];
+    var b = c.theMenuButtons;
+
+    b.children[0].children[1].children[0].geometry.text = theTranslator.Translate("Play Game");
+    b.children[1].children[1].children[0].geometry.text = theTranslator.Translate("Saved Games");
+    b.children[2].children[1].children[0].geometry.text = theTranslator.Translate("Game Info");
+    nTitleMenuItems = 3;
+
+    c.GM_L2_menubutton_01a.visible = true;
+    c.GM_L2_menubutton_02.visible = true;
+    c.GM_L2_menubutton_03.visible = true;
+    c.GM_L2_menubutton_04.visible = false;
+    c.GM_L2_menubutton_05.visible = false;
+
+    // the game's title image on the pod, or the Xbox logo
+    theGameCollection.SelectGameImage(curTitle);
+    c.GM_L2_starcraft_image.children[0].appearance.material.name = "SelectedIcon";
+
+    UpdateTitleMenu();
+}
+
+DEF theTitleInfoViewpoint Viewpoint
+{
+    fieldOfView 1.287000
+    orientation -0.066080 -0.996000 -0.059910 -1.477000
+    position -215.000000 13.660000 -128.100006
+    jump false
+}
+
+DEF theTitleMenu Level
+{
+    archive "Games_Title.xip"
+
+    children
+    [
+        Inline
+        {
+            url "Games_Title/default.xap"
+
+            function onLoad()
+            {
+                children[0].GM_L2_tube_01.visible = false; // NYI
+                children[0].GM_L2_tube_02.visible = false; // NYI
+                children[0].GM_L2_tube_03.visible = false; // NYI
+                children[0].GM_L2_tube_04.visible = false; // NYI
+
+                children[0].GM_L2_back_pod_HL.visible = false;
+                children[0].GM_L2_select_pod_HL.visible = false;
+
+                children[0].GM_L2_Arm01_04.fade = 1;
+                children[0].GM_L2_Arm01_05.fade = 1;
+                children[0].GM_L2_Arm02_03.fade = 1;
+                children[0].GM_L2_Arm02_04.fade = 1;
+                children[0].GM_L2_Arm02_05.fade = 1;
+                children[0].select.fade = 1;
+                children[0].back.fade = 1;
+
+                bTitleInfoView = false;
+                nCurTitleMenuItem = 0;
+
+                children[0].CustomPanel1.visible = false;
+                children[0].CustomPanel2.visible = false;
+                children[0].GM_L2_panel02_backing.visible = false;
+
+                SetupTitle();
+            }
+        }
+    ]
+
+    function OnActivate()
+    {
+        if (children[0].children.length() > 0)
+        {
+            var c = children[0].children[0];
+            c.GM_L2_back_pod_HL.visible = false;
+            c.GM_L2_select_pod_HL.visible = false;
+            c.CustomPanel2.visible = false;
+            c.GM_L2_panel02_backing.visible = false;
+
+            bTitleInfoView = false;
+            nCurTitleMenuItem = 0;
+            SetupTitle();
+        }
+    }
+
+    // the same cell wall as the Games list
+    shell Transform
+    {
+        scale 75 75 75
+        translation -182.0 25.0 -150.0
+        children
+        [
+            Waver
+            {
+                rpm 0.75
+                children
+                [
+                    Shape
+                    {
+                        appearance Appearance
+                        {
+                            material MaxMaterial { name "InnerWall_01" }
+                            texture ImageTexture { alpha true url "cellwall.bmp" }
+                        }
+                        geometry Mesh { url "Inner_cell-FACES.xm" }
+                    }
+                    Shape
+                    {
+                        appearance MaxMaterial { name "InnerWall_02" }
+                        geometry Sphere
+                    }
+                ]
+            }
+        ]
+    }
+
+    path DEF theTitleMenuViewpoint Viewpoint
+    {
+        fieldOfView 1.287000
+        orientation -0.055920 -0.997300 -0.048610 -1.434000
+        position -217.000000 14.020000 -133.600006
+        jump false
+    }
+
+    control Joystick
+    {
+        function OnADown()
+        {
+            var c = theTitleMenu.children[0].children[0];
+            if (c.GM_L2_Arm01_04.moving)
+                return;
+
+            c.GM_L2_select_pod_HL.visible = true;
+
+            if (bTitleInfoView)
+            {
+                PlaySoundA();
+                ShowTitleMenuView();
+            }
+            else if (nCurTitleMenuItem == 0)
+            {
+                PlaySoundA();
+                theGamesSubMenuIn.Play();
+                EnableInput(false);
+                theGameCollection.LaunchGame(curTitle);
+            }
+            else
+            {
+                PlaySoundA();
+                ShowTitleInfoView();
+            }
+        }
+
+        function OnAUp()
+        {
+            theTitleMenu.children[0].children[0].GM_L2_select_pod_HL.visible = false;
+        }
+
+        function OnBDown()
+        {
+            var c = theTitleMenu.children[0].children[0];
+            if (c.GM_L2_Arm01_04.moving)
+                return;
+
+            c.GM_L2_back_pod_HL.visible = true;
+            PlaySoundB();
+
+            if (bTitleInfoView)
+            {
+                ShowTitleMenuView();
+            }
+            else
+            {
+                c.CustomPanel1.visible = false;
+                c.CustomPanel2.visible = false;
+                c.GM_L2_panel02_backing.visible = false;
+
+                theGamesMenu.GoBackTo();
+            }
+        }
+
+        function OnBUp()
+        {
+            theTitleMenu.children[0].children[0].GM_L2_back_pod_HL.visible = false;
+        }
+
+        function OnMoveUp()
+        {
+            var c = theTitleMenu.children[0].children[0];
+            if (c.GM_L2_Arm01_04.moving)
+                return;
+            if (bTitleInfoView)
+                return;
+
+            if (nCurTitleMenuItem > 0)
+            {
+                PlaySoundMenuChange();
+                nCurTitleMenuItem = nCurTitleMenuItem - 1;
+                UpdateTitleMenu();
+            }
+        }
+
+        function OnMoveDown()
+        {
+            var c = theTitleMenu.children[0].children[0];
+            if (c.GM_L2_Arm01_04.moving)
+                return;
+            if (bTitleInfoView)
+                return;
+
+            if (nCurTitleMenuItem < nTitleMenuItems - 1)
+            {
+                PlaySoundMenuChange();
+                nCurTitleMenuItem = nCurTitleMenuItem + 1;
+                UpdateTitleMenu();
+            }
         }
     }
 }

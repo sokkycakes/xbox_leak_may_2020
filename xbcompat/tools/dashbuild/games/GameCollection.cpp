@@ -1,7 +1,10 @@
-// GameCollection: the dashboard's Games area.  Lists the titles installed on
-// the hard disk as E:\Games\<folder>\default.xbe (named from each XBE's
-// certificate) and launches one by pointing D: at its folder.  Not part of
-// Microsoft's dashboard; added by xbcompat's dashbuild.
+// GameCollection: the dashboard's Games area.  Entry 0 is the disc tray (the
+// game disc in the drive, if any); after it come the titles installed on the
+// hard disk as E:\Games\<folder>\default.xbe, named from each XBE's
+// certificate.  A hard disk game is launched by pointing D: at its folder.
+// It also supplies the details screen: the XBE's title image, its
+// certificate details and the title's saved games.  Not part of Microsoft's
+// dashboard; added by xbcompat's dashbuild.
 
 #include "std.h"
 #include "xapp.h"
@@ -12,10 +15,18 @@
 
 struct GAMEINFO
 {
-    CHAR m_szFolder[64];
-    WCHAR m_szName[41];
+    CHAR m_szFolder[64];        // empty for the disc
+    WCHAR m_szName[41];         // empty for an empty tray
     DWORD m_dwTitleID;
+    DWORD m_dwTimeDate;         // XBE build time (seconds since 1970)
+    DWORD m_dwRegion;
+    DWORD m_dwDiscNumber;
+    DWORD m_dwVersion;
+    DWORD m_dwImageOffset;      // $$XTIMAGE section in the file, if any
+    DWORD m_dwImageSize;
 };
+
+extern const TCHAR* g_szSelTitleImage;  // MaxMat.cpp: the "SelectedIcon" material's image
 
 static GAMEINFO* c_rgGames = NULL;
 static int c_nGameCount = 0;
@@ -32,9 +43,14 @@ public:
 
     int Scan();
     int GetGameCount();
+    int HasDisc();
     CStrObject* GetGameName(int nGame);
     CStrObject* GetGameFolder(int nGame);
     CStrObject* GetGameTitleID(int nGame);
+    CStrObject* GetGameInfo(int nGame);
+    CStrObject* GetSavedGames(int nGame);
+    int GetSavedGameCount(int nGame);
+    int SelectGameImage(int nGame);
     void LaunchGame(int nGame);
 
     DECLARE_NODE_PROPS()
@@ -49,9 +65,14 @@ END_NODE_PROPS()
 START_NODE_FUN(CGameCollection, CNode)
     NODE_FUN_IV(Scan)
     NODE_FUN_IV(GetGameCount)
+    NODE_FUN_IV(HasDisc)
     NODE_FUN_SI(GetGameName)
     NODE_FUN_SI(GetGameFolder)
     NODE_FUN_SI(GetGameTitleID)
+    NODE_FUN_SI(GetGameInfo)
+    NODE_FUN_SI(GetSavedGames)
+    NODE_FUN_II(GetSavedGameCount)
+    NODE_FUN_II(SelectGameImage)
     NODE_FUN_VI(LaunchGame)
 END_NODE_FUN()
 
@@ -65,7 +86,8 @@ CGameCollection::~CGameCollection()
 {
 }
 
-// Title name and ID from the XBE certificate; false if it is not an XBE.
+// The certificate details and title image location of an XBE; false if it
+// is not one.
 static bool ReadXbeTitle(const CHAR* szPath, GAMEINFO* pGame)
 {
     HANDLE hFile = CreateFileA(szPath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
@@ -79,14 +101,42 @@ static bool ReadXbeTitle(const CHAR* szPath, GAMEINFO* pGame)
     {
         DWORD dwBase = rgdw[0x104 / 4];
         DWORD dwCert = rgdw[0x118 / 4] - dwBase;
-        BYTE rgbCert[0x8C];
+        BYTE rgbCert[0xB0];
+        pGame->m_dwTimeDate = rgdw[0x114 / 4];
         if (SetFilePointer(hFile, dwCert, NULL, FILE_BEGIN) == dwCert &&
             ReadFile(hFile, rgbCert, sizeof (rgbCert), &cb, NULL) && cb == sizeof (rgbCert))
         {
             pGame->m_dwTitleID = *(DWORD*)(rgbCert + 0x08);
             CopyMemory(pGame->m_szName, rgbCert + 0x0C, 40 * sizeof (WCHAR));
             pGame->m_szName[40] = 0;
+            pGame->m_dwRegion = *(DWORD*)(rgbCert + 0xA0);
+            pGame->m_dwDiscNumber = *(DWORD*)(rgbCert + 0xA8);
+            pGame->m_dwVersion = *(DWORD*)(rgbCert + 0xAC);
             bOK = true;
+        }
+
+        // BLOCK: find the $$XTIMAGE section (56-byte headers, names by address)
+        pGame->m_dwImageOffset = pGame->m_dwImageSize = 0;
+        DWORD nSections = rgdw[0x11C / 4];
+        DWORD dwHeaders = rgdw[0x120 / 4] - dwBase;
+        for (DWORD i = 0; bOK && i < nSections && i < 64; i += 1)
+        {
+            DWORD rgdwSec[14];
+            CHAR szName[16];
+            DWORD dwPos = dwHeaders + i * sizeof (rgdwSec);
+            if (SetFilePointer(hFile, dwPos, NULL, FILE_BEGIN) != dwPos ||
+                !ReadFile(hFile, rgdwSec, sizeof (rgdwSec), &cb, NULL) || cb != sizeof (rgdwSec))
+                break;
+            DWORD dwName = rgdwSec[5] - dwBase;
+            if (SetFilePointer(hFile, dwName, NULL, FILE_BEGIN) != dwName ||
+                !ReadFile(hFile, szName, sizeof (szName), &cb, NULL) || cb != sizeof (szName))
+                break;
+            if (memcmp(szName, "$$XTIMAGE", 10) == 0)
+            {
+                pGame->m_dwImageOffset = rgdwSec[3];
+                pGame->m_dwImageSize = rgdwSec[4];
+                break;
+            }
         }
     }
 
@@ -103,12 +153,20 @@ int CGameCollection::Scan()
 {
     if (c_rgGames == NULL)
         c_rgGames = new GAMEINFO [MAX_GAMES];
-    c_nGameCount = 0;
+
+    // Entry 0: the disc tray.  An empty tray (or a disc that is not a game)
+    // leaves the name empty.
+    ZeroMemory(&c_rgGames[0], sizeof (GAMEINFO));
+    if (!ReadXbeTitle("CDROM0:\\default.xbe", &c_rgGames[0]))
+        ZeroMemory(&c_rgGames[0], sizeof (GAMEINFO));
+    else if (c_rgGames[0].m_szName[0] == 0)
+        lstrcpyW(c_rgGames[0].m_szName, L"Game Disc");
+    c_nGameCount = 1;
 
     WIN32_FIND_DATAA fd;
     HANDLE hFind = FindFirstFileA("E:\\Games\\*", &fd);
     if (hFind == INVALID_HANDLE_VALUE)
-        return 0;
+        return c_nGameCount;
 
     do
     {
@@ -133,13 +191,18 @@ int CGameCollection::Scan()
     while (c_nGameCount < MAX_GAMES && FindNextFileA(hFind, &fd));
 
     FindClose(hFind);
-    qsort(c_rgGames, c_nGameCount, sizeof (GAMEINFO), CompareGames);
+    qsort(c_rgGames + 1, c_nGameCount - 1, sizeof (GAMEINFO), CompareGames);
     return c_nGameCount;
 }
 
 int CGameCollection::GetGameCount()
 {
     return c_nGameCount;
+}
+
+int CGameCollection::HasDisc()
+{
+    return c_nGameCount > 0 && c_rgGames[0].m_szName[0] != 0;
 }
 
 CStrObject* CGameCollection::GetGameName(int nGame)
@@ -167,10 +230,260 @@ CStrObject* CGameCollection::GetGameTitleID(int nGame)
     return new CStrObject(sz);
 }
 
+// The XBE's path, for reading it again.
+static void GetXbePath(int nGame, CHAR* szPath)
+{
+    if (nGame == 0)
+        strcpy(szPath, "CDROM0:\\default.xbe");
+    else
+        sprintf(szPath, "E:\\Games\\%s\\default.xbe", c_rgGames[nGame].m_szFolder);
+}
+
+static const TCHAR* GetPublisher(DWORD dwTitleID)
+{
+    static const struct { CHAR sz[3]; const TCHAR* szName; } rgPub [] =
+    {
+        { "MS", _T("Microsoft") }, { "EA", _T("Electronic Arts") }, { "AC", _T("Acclaim") },
+        { "AV", _T("Activision") }, { "CM", _T("Capcom") }, { "KN", _T("Konami") },
+        { "NM", _T("Namco") }, { "SE", _T("Sega") }, { "TC", _T("Tecmo") },
+        { "TQ", _T("THQ") }, { "UB", _T("Ubisoft") }, { "EM", _T("Eidos") },
+        { "IF", _T("Infogrames") }, { "MW", _T("Midway") }, { "SQ", _T("Square Enix") },
+    };
+    CHAR sz[3] = { (CHAR)(dwTitleID >> 24), (CHAR)(dwTitleID >> 16), 0 };
+    for (int i = 0; i < countof(rgPub); i += 1)
+    {
+        if (strcmp(sz, rgPub[i].sz) == 0)
+            return rgPub[i].szName;
+    }
+    return NULL;
+}
+
+// Days since 1970-01-01 to a calendar date.
+static void DaysToDate(DWORD dwDays, int* pnYear, int* pnMonth, int* pnDay)
+{
+    int z = dwDays + 719468;
+    int era = z / 146097;
+    int doe = z - era * 146097;
+    int yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    int doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    int mp = (5 * doy + 2) / 153;
+    *pnDay = doy - (153 * mp + 2) / 5 + 1;
+    *pnMonth = mp < 10 ? mp + 3 : mp - 9;
+    *pnYear = yoe + era * 400 + (*pnMonth <= 2);
+}
+
+CStrObject* CGameCollection::GetGameInfo(int nGame)
+{
+    if (nGame < 0 || nGame >= c_nGameCount || c_rgGames[nGame].m_szName[0] == 0)
+        return new CStrObject;
+
+    const GAMEINFO* pGame = &c_rgGames[nGame];
+    TCHAR sz [1024];
+    TCHAR* pch = sz;
+
+    pch += _stprintf(pch, _T("Title ID: %08X\n"), pGame->m_dwTitleID);
+    const TCHAR* szPub = GetPublisher(pGame->m_dwTitleID);
+    if (szPub != NULL)
+        pch += _stprintf(pch, _T("Publisher: %s\n"), szPub);
+    else if (pGame->m_dwTitleID >> 16 == 0xFFFF)
+        pch += _stprintf(pch, _T("Publisher: Sample / test title\n"));
+    else
+        pch += _stprintf(pch, _T("Publisher code: %hc%hc\n"), (CHAR)(pGame->m_dwTitleID >> 24), (CHAR)(pGame->m_dwTitleID >> 16));
+
+    pch += _stprintf(pch, _T("Version: %u\n"), pGame->m_dwVersion);
+
+    pch += _stprintf(pch, _T("Region:"));
+    if ((pGame->m_dwRegion & 7) == 7)
+        pch += _stprintf(pch, _T(" All"));
+    else
+    {
+        if (pGame->m_dwRegion & 1)
+            pch += _stprintf(pch, _T(" North America"));
+        if (pGame->m_dwRegion & 2)
+            pch += _stprintf(pch, _T(" Japan"));
+        if (pGame->m_dwRegion & 4)
+            pch += _stprintf(pch, _T(" Rest of world"));
+    }
+    pch += _stprintf(pch, _T("\n"));
+
+    if (nGame == 0)
+        pch += _stprintf(pch, _T("Disc %u in the tray\n"), pGame->m_dwDiscNumber + 1);
+    else
+        pch += _stprintf(pch, _T("Installed: E:\\Games\\%hs\n"), pGame->m_szFolder);
+
+    int nYear, nMonth, nDay;
+    DaysToDate(pGame->m_dwTimeDate / 86400, &nYear, &nMonth, &nDay);
+    pch += _stprintf(pch, _T("Built: %04d-%02d-%02d\n"), nYear, nMonth, nDay);
+
+    pch += _stprintf(pch, _T("Saved games: %d"), GetSavedGameCount(nGame));
+
+    return new CStrObject(sz);
+}
+
+// Calls pfn for each saved game of the title (E:\UDATA\<title id>\<save>).
+static int EnumSavedGames(DWORD dwTitleID, void (*pfn)(const CHAR* szDir, const WIN32_FIND_DATAA* pfd, void* pv), void* pv)
+{
+    CHAR szDir [MAX_PATH];
+    sprintf(szDir, "E:\\UDATA\\%08x\\*", dwTitleID);
+
+    WIN32_FIND_DATAA fd;
+    HANDLE hFind = FindFirstFileA(szDir, &fd);
+    if (hFind == INVALID_HANDLE_VALUE)
+        return 0;
+
+    int nSaves = 0;
+    do
+    {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == '.')
+            continue;
+        if (pfn != NULL)
+        {
+            sprintf(szDir, "E:\\UDATA\\%08x\\%s", dwTitleID, fd.cFileName);
+            pfn(szDir, &fd, pv);
+        }
+        nSaves += 1;
+    }
+    while (FindNextFileA(hFind, &fd));
+
+    FindClose(hFind);
+    return nSaves;
+}
+
+int CGameCollection::GetSavedGameCount(int nGame)
+{
+    if (nGame < 0 || nGame >= c_nGameCount || c_rgGames[nGame].m_szName[0] == 0)
+        return 0;
+    return EnumSavedGames(c_rgGames[nGame].m_dwTitleID, NULL, NULL);
+}
+
+struct SAVELIST
+{
+    TCHAR* m_pch;
+    TCHAR* m_pchLim;
+};
+
+// One line per save: its name (SaveMeta.xbx, "Name=" in UTF-16) and date.
+static void AddSavedGame(const CHAR* szDir, const WIN32_FIND_DATAA* pfd, void* pv)
+{
+    SAVELIST* pList = (SAVELIST*)pv;
+    if (pList->m_pchLim - pList->m_pch < 80)
+        return;
+
+    WCHAR szName [64];
+    szName[0] = 0;
+
+    CHAR szPath [MAX_PATH];
+    sprintf(szPath, "%s\\SaveMeta.xbx", szDir);
+    HANDLE hFile = CreateFileA(szPath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (hFile != INVALID_HANDLE_VALUE)
+    {
+        WCHAR rgch [256];
+        DWORD cb = 0;
+        if (ReadFile(hFile, rgch, sizeof (rgch) - sizeof (WCHAR), &cb, NULL))
+        {
+            rgch[cb / sizeof (WCHAR)] = 0;
+            WCHAR* pchName = wcsstr(rgch, L"Name=");
+            if (pchName != NULL)
+            {
+                pchName += 5;
+                int i = 0;
+                while (i < 40 && pchName[i] != 0 && pchName[i] != '\r' && pchName[i] != '\n')
+                    szName[i] = pchName[i], i += 1;
+                szName[i] = 0;
+            }
+        }
+        CloseHandle(hFile);
+    }
+    if (szName[0] == 0)
+    {
+        int i = 0;
+        for (; i < 40 && pfd->cFileName[i]; i += 1)
+            szName[i] = pfd->cFileName[i];
+        szName[i] = 0;
+    }
+
+    SYSTEMTIME st;
+    FileTimeToSystemTime(&pfd->ftLastWriteTime, &st);
+    pList->m_pch += _stprintf(pList->m_pch, _T("%s\n    %04d-%02d-%02d\n"), szName, st.wYear, st.wMonth, st.wDay);
+}
+
+CStrObject* CGameCollection::GetSavedGames(int nGame)
+{
+    if (nGame < 0 || nGame >= c_nGameCount || c_rgGames[nGame].m_szName[0] == 0)
+        return new CStrObject;
+
+    TCHAR sz [2048];
+    SAVELIST list = { sz, sz + countof(sz) };
+    sz[0] = 0;
+    if (EnumSavedGames(c_rgGames[nGame].m_dwTitleID, AddSavedGame, &list) == 0)
+        _tcscpy(sz, _T("No saved games."));
+    return new CStrObject(sz);
+}
+
+// Points the "SelectedIcon" material at the game's title image, copied out of
+// its XBE into T:\GameImages (the dashboard's own title data), or at the
+// Xbox logo when it has none.  Returns whether the game has its own image.
+int CGameCollection::SelectGameImage(int nGame)
+{
+    static TCHAR szImage [MAX_PATH];
+    g_szSelTitleImage = _T("xboxlogo128.xbx");
+
+    if (nGame < 0 || nGame >= c_nGameCount || c_rgGames[nGame].m_dwImageSize == 0)
+        return 0;
+
+    const GAMEINFO* pGame = &c_rgGames[nGame];
+    CHAR szCache [MAX_PATH];
+    CreateDirectoryA("T:\\GameImages", NULL);
+    sprintf(szCache, "T:\\GameImages\\%08X%08X.xbx", pGame->m_dwTitleID, pGame->m_dwTimeDate);
+
+    if (GetFileAttributesA(szCache) == (DWORD)-1)
+    {
+        CHAR szPath [MAX_PATH];
+        GetXbePath(nGame, szPath);
+        HANDLE hFile = CreateFileA(szPath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+        if (hFile == INVALID_HANDLE_VALUE)
+            return 0;
+
+        bool bOK = false;
+        BYTE* pb = new BYTE [pGame->m_dwImageSize];
+        DWORD cb = 0;
+        if (SetFilePointer(hFile, pGame->m_dwImageOffset, NULL, FILE_BEGIN) == pGame->m_dwImageOffset &&
+            ReadFile(hFile, pb, pGame->m_dwImageSize, &cb, NULL) && cb == pGame->m_dwImageSize &&
+            *(DWORD*)pb == 0x30525058)  // "XPR0"
+        {
+            HANDLE hOut = CreateFileA(szCache, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+            if (hOut != INVALID_HANDLE_VALUE)
+            {
+                bOK = WriteFile(hOut, pb, cb, &cb, NULL) && cb == pGame->m_dwImageSize;
+                CloseHandle(hOut);
+                if (!bOK)
+                    DeleteFileA(szCache);
+            }
+        }
+        delete [] pb;
+        CloseHandle(hFile);
+        if (!bOK)
+            return 0;
+    }
+
+    _stprintf(szImage, _T("%hs"), szCache);
+    g_szSelTitleImage = szImage;
+    return 1;
+}
+
 void CGameCollection::LaunchGame(int nGame)
 {
-    if (nGame < 0 || nGame >= c_nGameCount)
+    if (nGame < 0 || nGame >= c_nGameCount || c_rgGames[nGame].m_szName[0] == 0)
         return;
+
+    XAppGetD3DDev()->PersistDisplay();
+
+    // The disc: D: is already the DVD drive.
+    if (nGame == 0)
+    {
+        XLaunchNewImage("D:\\default.xbe", NULL);
+        return;
+    }
 
     // XLaunchNewImage keeps D:'s mapping across the reboot.
     CHAR szTarget [MAX_PATH];
@@ -181,6 +494,5 @@ void CGameCollection::LaunchGame(int nGame)
     IoDeleteSymbolicLink(&dDrive);
     IoCreateSymbolicLink(&dDrive, &target);
 
-    XAppGetD3DDev()->PersistDisplay();
     XLaunchNewImage("D:\\default.xbe", NULL);
 }
