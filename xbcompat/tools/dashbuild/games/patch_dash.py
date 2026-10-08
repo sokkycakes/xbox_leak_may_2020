@@ -7,7 +7,8 @@
   existing 0..2 indices used elsewhere keep their meaning), opening games.xap.
 - MainMenu5/default.xap: a fourth pod, a copy of the top (MEMORY) pod turned
   one step further around the ring and labelled GAMES.
-- Games2/: a copy of the Music2 list scene with a GAMES heading.
+- Games2/: the Settings home scene with a GAMES heading.  It was modelled
+  as the Games screen (S_Home_text_games rows, S_Home_GameModule pods).
 - games.xap: the area script (from this folder).
 """
 import math, os, re, shutil, sys
@@ -149,9 +150,10 @@ wr("default.xap", d)
 # ---- the Games screen -----------------------------------------------------
 if os.path.isdir(os.path.join(dash, "Games2")):
     shutil.rmtree(os.path.join(dash, "Games2"))
-shutil.copytree(os.path.join(dash, "Music2"), os.path.join(dash, "Games2"))
-g = rd("Games2/default.xap")
-g = sub1(g, 'geometry Text { font "Heading" text "MUSIC COLLECTION" }', 'geometry Text { font "Heading" text "GAMES" }')
+os.makedirs(os.path.join(dash, "Games2"))
+g = rd("Settings3/default.xap")
+g = sub1(g, 'geometry Text { font "Heading" text "SETTINGS" }', 'geometry Text { font "Heading" text "GAMES" }')
+g = sub1(g, 'text "Testing123"', 'text ""')
 wr("Games2/default.xap", g)
 shutil.copy(os.path.join(here, "games.xap"), os.path.join(dash, "games.xap"))
 print("patched", dash)

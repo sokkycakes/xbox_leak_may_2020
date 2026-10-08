@@ -54,7 +54,7 @@ python3 "$HERE/games/patch_dash.py" "$WORK/dash"
     E="python3 $HERE/games/xipedit.py"
     $E default.xip default.xip default.xap=default.xap games.xap=games.xap
     $E mainmenu5.xip mainmenu5.xip default.xap=MainMenu5/default.xap
-    $E music2.xip Games2.xip default.xap=Games2/default.xap
+    $E settings3.xip Games2.xip default.xap=Games2/default.xap
     timeout 120 wine "$WORK/xb/private/ui/xipsign/obj/i386/xipsign.exe" obj\\xipsums.bin default.xip dvd.xip \
         Keyboard.xip JKeyboard.xip mainmenu5.xip Memory_Files2.xip Memory2.xip Message.xip music_copy3.xip \
         Music_PlayEdit2.xip music2.xip Settings_Clock.xip settings_language.xip settings_list.xip \

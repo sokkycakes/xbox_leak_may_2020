@@ -1,28 +1,41 @@
 //
 // The Games area: titles installed on the hard disk under E:\Games.
 // Not part of Microsoft's dashboard; added by xbcompat's dashbuild.  The
-// screen reuses the Music list scene (Games2 is a copy of Music2).
+// screen is the Settings home scene (Games2 is a copy of Settings3), which
+// was modelled as the Games screen: its rows are S_Home_text_games and its
+// pod carries the S_Home_GameModule cartridges.  The settings icons are
+// hidden so the pod is empty, as in the Max scene.
 //
 
 var gamesCount;
 var gamesScroll;
 var gamesSelect;
 var gamesButton;
+var gamesRows;
 
 DEF theGameCollection GameCollection
 {
 }
 
-function FillGamesList()
+function HideGamesIcons()
 {
     var c = theGamesMenu.children[0].children[0];
 
-    gamesCount = theGameCollection.Scan();
+    c.ClockIcon.visible = false;
+    c.GlobeIcon.visible = false;
+    c.StereoIcon.visible = false;
+    c.MonoIcon.visible = false;
+    c.FullscreenIcon.visible = false;
+    c.LetterboxIcon.visible = false;
+    c.WidescreenIcon.visible = false;
+    c.LockIcon.visible = false;
+    c.AutoOffIcon.visible = false;
+    c.ConsoleIcon.visible = false;
+}
 
-    if (gamesCount == 1)
-        c.MusicCountText.text = gamesCount + " " + theTranslator.Translate("ITEM");
-    else
-        c.MusicCountText.text = gamesCount + " " + theTranslator.Translate("ITEMS");
+function FillGamesList()
+{
+    gamesCount = theGameCollection.Scan();
 
     if (gamesSelect >= gamesCount)
     {
@@ -34,69 +47,48 @@ function FillGamesList()
     UpdateGamesList();
 }
 
-function UpdateGamesMetaData()
-{
-    var c = theGamesMenu.children[0].children[0];
-
-    if (gamesCount == 0)
-    {
-        c.MusicType.text = "";
-        c.TrackNum.text = "No games found";
-        c.TimeNum.text = "E:\\GAMES";
-        return;
-    }
-
-    c.MusicType.text = theTranslator.Translate("GAMES");
-    c.TrackNum.text = theGameCollection.GetGameFolder(gamesSelect);
-    c.TimeNum.text = "ID " + theGameCollection.GetGameTitleID(gamesSelect);
-}
-
 function UpdateGamesList()
 {
     var c = theGamesMenu.children[0].children[0];
 
-    for (var i = 0; i < 8; i = i + 1)
+    c.movearrow_up.visible = (gamesScroll > 0);
+    c.movearrow_dn.visible = (gamesScroll + gamesRows < gamesCount);
+
+    c.movearrow_up.children[0].appearance.material.name = "NavType";
+    c.movearrow_dn.children[0].appearance.material.name = "NavType";
+
+    for (var i = 0; i < gamesRows; i = i + 1)
     {
         var nGame = gamesScroll + i;
 
-        if (nGame >= gamesCount)
+        if (i == gamesButton)
         {
-            c.MenuButtons.children[i].visible = false;
+            c.MenuButtons.children[i].children[0].appearance.material.name = "GameHilite";
+            c.MenuButtons.children[i].children[0].appearance.texture.url = "GameHilite_01.bmp";
+            c.MenuText.children[i].children[0].appearance.material.name = "Material #133";
+
+            if (i == 0)
+                c.movearrow_up.children[0].appearance.material.name = "Material #133";
+            else if (i == gamesRows - 1)
+                c.movearrow_dn.children[0].appearance.material.name = "Material #133";
         }
         else
         {
-            c.MenuButtons.children[i].children[1].children[0].geometry.text = theGameCollection.GetGameName(nGame);
-            c.MenuButtons.children[i].visible = true;
-
-            if (i == gamesButton)
-            {
-                if (i == 0)
-                    c.MU_morearrow_up.children[0].appearance.material.name = "HilightedType";
-                else
-                    c.MU_morearrow_up.children[0].appearance.material.name = "NavType";
-
-                if (i == 7)
-                    c.MU_morearrow_down.children[0].appearance.material.name = "HilightedType";
-                else
-                    c.MU_morearrow_down.children[0].appearance.material.name = "NavType";
-
-                c.MenuButtons.children[i].children[0].children[0].appearance.material.name = "GameHilite";
-                c.MenuButtons.children[i].children[0].children[0].appearance.texture.url = "GameHilite_01.bmp";
-                c.MenuButtons.children[i].children[1].children[0].appearance.name = "HilightedType";
-            }
-            else
-            {
-                c.MenuButtons.children[i].children[0].children[0].appearance.material.name = "GameHilite";
-                c.MenuButtons.children[i].children[0].children[0].appearance.texture.url = "outline.tga";
-                c.MenuButtons.children[i].children[1].children[0].appearance.name = "NavType";
-            }
+            c.MenuButtons.children[i].children[0].appearance.material.name = "GameHilite";
+            c.MenuButtons.children[i].children[0].appearance.texture.url = "outline.tga";
+            c.MenuText.children[i].children[0].appearance.material.name = "NavType";
         }
+
+        if (nGame < gamesCount)
+            c.MenuText.children[i].children[0].geometry.text = theGameCollection.GetGameName(nGame);
+        else
+            c.MenuText.children[i].children[0].geometry.text = "";
     }
 
-    c.MU_morearrow_down.visible = (gamesCount - gamesScroll > 8);
-    c.MU_morearrow_up.visible = (gamesScroll > 0);
-
-    UpdateGamesMetaData();
+    if (gamesCount == 0)
+        c.metaPanel.children[0].geometry.text = "No games found";
+    else
+        c.metaPanel.children[0].geometry.text = "ID " + theGameCollection.GetGameTitleID(gamesSelect);
 }
 
 DEF theGamesMenu Level
@@ -111,9 +103,11 @@ DEF theGamesMenu Level
 
             function onLoad()
             {
+                gamesRows = 6;
                 gamesScroll = 0;
                 gamesSelect = 0;
                 gamesButton = 0;
+                HideGamesIcons();
                 FillGamesList();
             }
         }
@@ -121,8 +115,8 @@ DEF theGamesMenu Level
 
     shell Transform
     {
-        scale 21.504 21.504 21.504
-        translation -44.599998 54.270000 -186.500000
+        scale 75 75 75
+        translation 123.2 1.041 -190.3
         children
         [
             Waver
@@ -134,45 +128,17 @@ DEF theGamesMenu Level
                     {
                         appearance Appearance
                         {
-                            material MaxMaterial
-                            {
-                                name "InnerWall_01"
-                            }
-                            texture ImageTexture
-                            {
-                                alpha true
-                                url "cellwall.bmp"
-                            }
+                            material MaxMaterial { name "InnerWall_01" }
+                            texture ImageTexture { alpha true url "cellwall.bmp" }
                         }
                         geometry Mesh { url "Inner_cell-FACES.xm" }
                     }
                     Shape
                     {
-                        appearance Appearance
-                        {
-                            material MaxMaterial
-                            {
-                                name "InnerWall_02"
-                            }
-                        }
+                        appearance MaxMaterial { name "InnerWall_02" }
                         geometry Sphere
-                        {
-                            radius 1.0
-                        }
                     }
                 ]
-            }
-        ]
-    }
-
-    tunnel Transform
-    {
-        children
-        [
-            Shape
-            {
-                appearance Appearance { material MaxMaterial { name "Tubes" } }
-                geometry Mesh { url "Music/Tunnel_01-FACES.xm" }
             }
         ]
     }
@@ -180,8 +146,8 @@ DEF theGamesMenu Level
     path Viewpoint
     {
         fieldOfView 1.287000
-        orientation 0.015660 0.999900 0.001474 -0.187700
-        position -47.840000 53.889999 -172.199997
+        orientation 0.130300 -0.991400 -0.007829 -0.121100
+        position 123.300003 -0.918000 -152.600006
         jump false
     }
 
@@ -196,6 +162,7 @@ DEF theGamesMenu Level
 
             if (gamesCount > 0)
             {
+                theGamesSubMenuIn.Play();
                 EnableInput(false);
                 theGameCollection.LaunchGame(gamesSelect);
             }
@@ -236,7 +203,7 @@ DEF theGamesMenu Level
             PlaySoundMenuChange();
 
             gamesSelect = gamesSelect + 1;
-            if (gamesButton == 7)
+            if (gamesButton == gamesRows - 1)
                 gamesScroll = gamesScroll + 1;
             else
                 gamesButton = gamesButton + 1;
@@ -247,7 +214,6 @@ DEF theGamesMenu Level
 
     function OnActivate()
     {
-        EnableAmbientAudio();
         if (children[0].children.length() > 0)
             FillGamesList();
     }
