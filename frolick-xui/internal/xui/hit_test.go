@@ -1,6 +1,9 @@
 package xui
 
-import "testing"
+import (
+	"os"
+	"testing"
+)
 
 func TestLibraryPanel(t *testing.T) {
 	res := &Resources{Fonts: map[string]string{}}
@@ -48,5 +51,19 @@ func TestBladesScenesParse(t *testing.T) {
 	b, _ := pk.Get("skin.xur")
 	if _, err := ParseXUR(b); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSceneRelativePath(t *testing.T) {
+	wd, _ := os.Getwd()
+	defer os.Chdir(wd)
+	if err := os.Chdir("../.."); err != nil {
+		t.Fatal(err)
+	}
+	res := &Resources{Dirs: []string{"assets/xui"}}
+	for _, p := range []string{"assets/xui/library.xui", "assets/xui/frolick_skin.xui"} {
+		if _, err := res.Scene(p); err != nil {
+			t.Fatalf("%s: %v", p, err)
+		}
 	}
 }

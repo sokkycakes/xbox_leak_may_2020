@@ -24,7 +24,7 @@ type Resources struct {
 
 // Read returns a resource's bytes.
 func (r *Resources) Read(path string) ([]byte, bool) {
-	if !strings.Contains(path, "://") && !strings.Contains(path, "#") && (filepath.IsAbs(path) || strings.HasPrefix(path, ".")) {
+	if !strings.Contains(path, "://") && !strings.Contains(path, "#") {
 		if b, err := os.ReadFile(path); err == nil {
 			return b, true
 		}
@@ -94,7 +94,7 @@ func (r *Resources) Image(path string) *image.RGBA {
 func (r *Resources) Scene(path string) (*Element, error) {
 	b, ok := r.Read(path)
 	if !ok {
-		return nil, os.ErrNotExist
+		return nil, &os.PathError{Op: "open", Path: path, Err: os.ErrNotExist}
 	}
 	return ParseAny(b)
 }
