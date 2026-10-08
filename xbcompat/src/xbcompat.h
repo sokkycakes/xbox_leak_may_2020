@@ -135,6 +135,7 @@ const char *kernel_export_name(unsigned ordinal);
 /* ---- HLE -------------------------------------------------------------- */
 
 void hle_patch(xbe_image *img, const char *sigdir);
+ULONG d3d_frame_count(void);   /* frames presented so far (hle/d3d8.c) */
 void video_init(int width, int height);
 void video_present(void);
 

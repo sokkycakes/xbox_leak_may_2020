@@ -53,6 +53,12 @@
  * list such as "a,start,lt=255,ly=32767" holds buttons down (a b x y black
  * white start back lthumb rthumb up down left right) and sets axes (lt rt
  * 0..255; lx ly rx ry -32768..32767, up positive) for the whole run.
+ *
+ * XBCOMPAT_INPUT_SCRIPT presses keyboard-pad buttons at given frames, for
+ * headless runs that need to get through menus: "FRAME:BUTTON[/HOLD] ..."
+ * (separated by spaces or commas), BUTTON being one of the names above and
+ * HOLD the frames it stays down (default 6).  "1500:down 1530:a/10" moves
+ * down a menu at frame 1500 and presses A at frame 1530.
  */
 #define _GNU_SOURCE
 #include <SDL.h>
@@ -592,10 +598,41 @@ static void read_controller(SDL_GameController *gc, XINPUT_GAMEPAD *g)
 #undef AXIS
 }
 
+/* XBCOMPAT_INPUT_SCRIPT (see the top of the file). */
+static void read_script(XINPUT_GAMEPAD *g)
+{
+    static const char *script;
+    static int checked;
+    if (!checked) { script = getenv("XBCOMPAT_INPUT_SCRIPT"); checked = 1; }
+    if (!script) return;
+    ULONG now = d3d_frame_count();
+    char buf[1024];
+    snprintf(buf, sizeof buf, "%s", script);
+    for (char *save, *tok = strtok_r(buf, " ,", &save); tok; tok = strtok_r(NULL, " ,", &save)) {
+        char name[16] = "";
+        unsigned frame = 0, hold = 6;
+        if (sscanf(tok, "%u:%15[a-z]/%u", &frame, name, &hold) < 2) continue;
+        if (now < frame || now >= frame + hold) continue;
+        static const char *analog[] = { "a", "b", "x", "y", "black", "white", "lt", "rt" };
+        static const int analog_idx[] = { XINPUT_GAMEPAD_A, XINPUT_GAMEPAD_B, XINPUT_GAMEPAD_X, XINPUT_GAMEPAD_Y,
+                                          XINPUT_GAMEPAD_BLACK, XINPUT_GAMEPAD_WHITE,
+                                          XINPUT_GAMEPAD_LEFT_TRIGGER, XINPUT_GAMEPAD_RIGHT_TRIGGER };
+        static const char *digital[] = { "up", "down", "left", "right", "start", "back", "lthumb", "rthumb" };
+        static const USHORT digital_bit[] = { XINPUT_GAMEPAD_DPAD_UP, XINPUT_GAMEPAD_DPAD_DOWN,
+                                              XINPUT_GAMEPAD_DPAD_LEFT, XINPUT_GAMEPAD_DPAD_RIGHT,
+                                              XINPUT_GAMEPAD_START, XINPUT_GAMEPAD_BACK,
+                                              XINPUT_GAMEPAD_LEFT_THUMB, XINPUT_GAMEPAD_RIGHT_THUMB };
+        for (int i = 0; i < 8; i++) {
+            if (!strcmp(name, analog[i])) g->bAnalogButtons[analog_idx[i]] = 255;
+            if (!strcmp(name, digital[i])) g->wButtons |= digital_bit[i];
+        }
+    }
+}
+
 static void read_port(const xi_port *p, XINPUT_GAMEPAD *g)
 {
     memset(g, 0, sizeof(*g));
-    if (p->kbd) read_keyboard(g);
+    if (p->kbd) { read_keyboard(g); read_script(g); }
     else if (p->gc) read_controller(p->gc, g);
 }
 

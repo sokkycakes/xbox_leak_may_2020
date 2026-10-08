@@ -96,7 +96,7 @@ static void usage(void)
             "  --hdd DIR    directory backing the hard disk partitions (default ~/.local/share/xbcompat/hdd)\n"
             "  --trace      log every kernel call\n"
             "  --screenshot FILE  save frame --shot-frame (default 60) as a BMP\n"
-            "  --shot-frame N     which frame --screenshot captures\n"
+            "  --shot-frame N     which frame --screenshot captures (every Nth when FILE has %%d)\n"
             "  --frames N   exit after presenting N frames\n"
             "  --log FILE   write the log to FILE instead of stderr\n"
             "  --dvd DIR    directory backing the DVD drive (default: the XBE's directory)\n"

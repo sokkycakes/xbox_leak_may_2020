@@ -90,6 +90,7 @@ typedef int32_t HRESULT;
 #define DSBSTOPEX_RELEASEWAVEFORM 2
 #define DSBSTATUS_PLAYING 1
 #define DSBSTATUS_LOOPING 4
+#define DSBSTATUS_PAUSED 2
 #define DSBLOCK_FROMWRITECURSOR 1
 #define DSBLOCK_ENTIREBUFFER    2
 #define DSBPN_OFFSETSTOP 0xFFFFFFFFu
@@ -265,6 +266,7 @@ struct ds_buffer {
     DWORD play_start, play_len, loop_start, loop_len;   /* bytes; loop relative to play start */
     DWORD cursor;                     /* cached play cursor (bytes from play start) while stopped */
     int playing, looping;
+    int paused;                       /* IDirectSoundBuffer_Pause (XDK 5xxx) */
     double pos;                       /* play cursor in frames from play start (mixer) */
     int64_t start_at, stop_at;        /* REFERENCE_TIME deadlines, 0 = none */
     DWORD start_flags, stop_flags;
@@ -995,7 +997,7 @@ static void *completion_thread(void *arg)
 static void render_buffer(struct ds_buffer *b, float *out, int n, struct ds_events *ev)
 {
     struct ds_voice *v = &b->v;
-    if (!b->playing || !b->data || (v->flags & DSBCAPS_SUBMIXMASK)) return;
+    if (!b->playing || b->paused || !b->data || (v->flags & DSBCAPS_SUBMIXMASK)) return;
     const struct ds_fmt *f = &v->fmt;
     DWORD total = bytes_to_frames(f, b->play_len);
     if (!total) { b->playing = 0; b->cursor = 0; if (b->notify_active) buffer_position_delta(b, ev); return; }
@@ -2663,6 +2665,7 @@ static HRESULT NTAPI Buf_GetStatus(void *self, DWORD *st)
     DWORD s = 0;
     if (b->playing || b->start_at) s |= DSBSTATUS_PLAYING;
     if (b->playing && b->looping) s |= DSBSTATUS_LOOPING;
+    if (b->paused) s |= DSBSTATUS_PAUSED;
     *st = s;
     VOICE_RETURN(DS_OK);
 }
@@ -2961,6 +2964,54 @@ static HRESULT NTAPI Calc_GetVoiceData(DWORD a, DWORD b, void *c, void *d, void 
     return DS_OK;
 }
 
+/* More XDK 5xxx calls. */
+static HRESULT NTAPI Buf_Pause(void *self, DWORD pause)
+{
+    /* DSBPAUSE_RESUME 0, DSBPAUSE_PAUSE 1, DSBPAUSE_SYNCHPLAYBACK 2 (held
+       for SynchPlayback, which starts everything at once here). */
+    if (pause > 2) return DSERR_INVALIDPARAM;
+    BUFFER_ENTRY(b, self);
+    b->paused = pause == 1;
+    VOICE_RETURN(DS_OK);
+}
+static HRESULT NTAPI Buf_PauseEx(void *self, uint32_t rt_lo, uint32_t rt_hi, DWORD pause)
+{
+    (void)rt_lo; (void)rt_hi;
+    return Buf_Pause(self, pause);
+}
+static HRESULT NTAPI Stream_PauseEx(void *self, uint32_t rt_lo, uint32_t rt_hi, DWORD pause)
+{
+    (void)rt_lo; (void)rt_hi;
+    return Stream_Pause(self, pause == 2 ? 0 : pause);
+}
+static HRESULT NTAPI Voice_SetRolloffCurve(void *self, const float *points, DWORD count, DWORD apply)
+{
+    (void)self; (void)points; (void)count; (void)apply;
+    return DS_OK;
+}
+static HRESULT NTAPI DS_GetOutputLevels(void *self, void *levels, DWORD reset)
+{
+    (void)self; (void)reset;
+    if (levels) memset(levels, 0, 16 * sizeof(DWORD));   /* DSOUTPUTLEVELS */
+    return DS_OK;
+}
+/* Buffer data lives in host-visible memory already; mapping is identity. */
+static HRESULT NTAPI DS_MapBufferData(void *self, void *data, DWORD bytes, void **mapped)
+{
+    (void)self; (void)bytes;
+    if (mapped) *mapped = data;
+    return DS_OK;
+}
+static HRESULT NTAPI DS_UnmapBufferData(void *self, void *data) { (void)self; (void)data; return DS_OK; }
+static HRESULT NTAPI Calc_GetMixBinVolumes(DWORD a, DWORD b, void *c) { (void)a; (void)b; (void)c; return DS_OK; }
+static HRESULT NTAPI Calc_GetPanData(DWORD a, DWORD b, DWORD c, void *d) { (void)a; (void)b; (void)c; (void)d; return DS_OK; }
+static HRESULT NTAPI XAudioSetEffectData(DWORD index, void *desc, void *raw) { (void)index; (void)desc; (void)raw; return DS_OK; }
+static HRESULT NTAPI XFileCreateMediaObjectAsync(HANDLE h, DWORD max_packets, void **ppxmo)
+{
+    (void)max_packets;
+    return XFileCreateMediaObjectEx(h, ppxmo);
+}
+
 const struct hle_func dsound_funcs[] = {
     F("_IDirectSoundBuffer_Use3DVoiceData@8", Voice_Use3DVoiceData),
     F("_IDirectSoundBuffer_Set3DVoiceData@8", Voice_Use3DVoiceData),
@@ -2972,6 +3023,28 @@ const struct hle_func dsound_funcs[] = {
     F("_IDirectSound_SynchPlayback@4", DS_SynchPlayback),
     F("_CDirectSound_SynchPlayback@4", DS_SynchPlayback),
     F("_IDirectSound3DCalculator_GetVoiceData@20", Calc_GetVoiceData),
+    F("_IDirectSound3DCalculator_GetMixBinVolumes@12", Calc_GetMixBinVolumes),
+    F("_IDirectSound3DCalculator_GetPanData@16", Calc_GetPanData),
+    F("_IDirectSoundBuffer_Pause@8", Buf_Pause),
+    F("?Pause@CDirectSoundBuffer@DirectSound@@QAGJK@Z", Buf_Pause),
+    F("_IDirectSoundBuffer_PauseEx@16", Buf_PauseEx),
+    F("?PauseEx@CDirectSoundBuffer@DirectSound@@QAGJ_JK@Z", Buf_PauseEx),
+    F("_IDirectSoundStream_PauseEx@16", Stream_PauseEx),
+    F("?PauseEx@CDirectSoundStream@DirectSound@@QAGJ_JK@Z", Stream_PauseEx),
+    VOICE_SET("SetMixBinVolumes_8", "8", Voice_SetMixBinVolumes),
+    VOICE_CPP("SetMixBinVolumes_8", "JPBU_DSMIXBINS@@@Z", Voice_SetMixBinVolumes),
+    VOICE_SET("SetRolloffCurve", "16", Voice_SetRolloffCurve),
+    VOICE_CPP("SetRolloffCurve", "JPBMKK@Z", Voice_SetRolloffCurve),
+    F("_IDirectSound_GetOutputLevels@12", DS_GetOutputLevels),
+    F("?GetOutputLevels@CDirectSound@DirectSound@@QAGJPAU_DSOUTPUTLEVELS@@H@Z", DS_GetOutputLevels),
+    F("_IDirectSound_MapBufferData@16", DS_MapBufferData),
+    F("?MapBufferData@CDirectSound@DirectSound@@QAGJPAXKPAPAX@Z", DS_MapBufferData),
+    F("_IDirectSound_UnmapBufferData@8", DS_UnmapBufferData),
+    F("?UnmapBufferData@CDirectSound@DirectSound@@QAGJPAX@Z", DS_UnmapBufferData),
+    F("_DirectSoundUseFullHRTF4Channel@0", DirectSoundUseFullHRTF),
+    F("_DirectSoundUseLightHRTF4Channel@0", DirectSoundUseLightHRTF),
+    F("_XAudioSetEffectData@12", XAudioSetEffectData),
+    F("_XFileCreateMediaObjectAsync@12", XFileCreateMediaObjectAsync),
     /* globals */
     F("_DirectSoundCreate@12", DirectSoundCreate),
     F("_DirectSoundCreateBuffer@8", DirectSoundCreateBuffer),

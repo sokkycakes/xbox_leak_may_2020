@@ -106,8 +106,11 @@ void launch_init(int argc, char **argv, const char *d_path, const char *launch_d
 static void relaunch(const char *path)
 {
     char dpath[520], rel[520];
+    /* "<D: target>;<image relative to it>", or a plain image path, whose
+       directory becomes D: (titles launched from the hard disk). */
     const char *semi = strchr(path, ';');
-    if (!semi) { xlog("launch path %s has no D: part", path); return; }
+    if (!semi) semi = strrchr(path, '\\');
+    if (!semi) { xlog("launch path %s has no directory", path); return; }
     snprintf(dpath, sizeof(dpath), "%.*s", (int)(semi - path), path);
     snprintf(rel, sizeof(rel), "%s", semi + 1);
     char dir[4096], img[4096];

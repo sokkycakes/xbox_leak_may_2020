@@ -286,6 +286,9 @@ static void bind_render_state_layout(void)
              d3d.rs_count);
 }
 
+/* Frames presented so far (XBCOMPAT_INPUT_SCRIPT counts in these). */
+ULONG d3d_frame_count(void) { return d3d.frame; }
+
 void d3d_bind_globals(void)
 {
     d3d.render_state = (ULONG *)hle_lookup("_D3D__RenderState");
@@ -374,17 +377,29 @@ static void debug_dump_draw(void)
 static void (APIENTRY *p_glWindowPos2i)(GLint, GLint);
 static void (APIENTRY *p_glBindFramebuffer)(GLenum, GLuint);
 static void (APIENTRY *p_glActiveTexture)(GLenum);
+static void draw_window_pixels(const uint8_t *tmp);
+static void present_overlay(void);
+static void restore_overlay(void);
+
 static void flush_cpu_backbuffer(void)
 {
     if (!d3d.bb_cpu_dirty || !d3d.backbuffer) return;
     d3d.bb_cpu_dirty = false;
-    if (!p_glWindowPos2i) p_glWindowPos2i = SDL_GL_GetProcAddress("glWindowPos2i");
-    if (!p_glWindowPos2i) return;
     ULONG w = d3d.width, h = d3d.height;
     ULONG pitch = d3d.backbuffer->Size ? ((d3d.backbuffer->Size >> 24) + 1) * 64 : w * 4;
     const uint8_t *px = (const uint8_t *)(d3d.backbuffer->Data | CONTIG_BASE);
     uint8_t *tmp = malloc(w * h * 4);
     for (ULONG y = 0; y < h; y++) memcpy(tmp + (h - 1 - y) * w * 4, px + y * pitch, w * 4);
+    draw_window_pixels(tmp);
+    free(tmp);
+}
+
+/* Replace the window's color buffer with BGRA pixels, bottom row first. */
+static void draw_window_pixels(const uint8_t *tmp)
+{
+    if (!p_glWindowPos2i) p_glWindowPos2i = SDL_GL_GetProcAddress("glWindowPos2i");
+    if (!p_glWindowPos2i) return;
+    ULONG w = d3d.width, h = d3d.height;
     glPushAttrib(GL_ALL_ATTRIB_BITS);
     for (int u = 3; u >= 0; u--) {
         p_glActiveTexture(GL_TEXTURE0 + u);
@@ -399,7 +414,23 @@ static void flush_cpu_backbuffer(void)
     glDrawPixels(w, h, GL_BGRA, GL_UNSIGNED_BYTE, tmp);
     if (p_glBindFramebuffer) p_glBindFramebuffer(GL_FRAMEBUFFER, d3d.rt_texture ? d3d.fbo : 0);
     glPopAttrib();
-    free(tmp);
+}
+
+/* Wait for the next 60 Hz vertical blank, as the NV2A does on Present and
+   BlockUntilVerticalBlank.  The host's vsync may not throttle (a headless X
+   server, a compositor that ignores the swap interval), and titles that time
+   video or animation by the wall clock need frames to take real time.
+   XBCOMPAT_UNPACED=1 turns it off for quick headless runs. */
+static void wait_vblank(void)
+{
+    static Uint64 next;
+    static int unpaced = -1;
+    if (unpaced < 0) unpaced = getenv("XBCOMPAT_UNPACED") != NULL;
+    if (unpaced) return;
+    Uint64 freq = SDL_GetPerformanceFrequency(), now = SDL_GetPerformanceCounter(), period = freq / 60;
+    if (!next || now > next + period) next = now;   /* first frame, or fell behind: resync */
+    next += period;
+    if (next > now) SDL_Delay((Uint32)((next - now) * 1000 / freq));
 }
 
 static ULONG NTAPI D3DDevice_Swap(ULONG Flags)
@@ -408,9 +439,20 @@ static ULONG NTAPI D3DDevice_Swap(ULONG Flags)
     flush_cpu_backbuffer();
     d3d.frame++;
     run_callbacks();
-    if (g_screenshot_path && (int)d3d.frame == g_screenshot_frame)
+    present_overlay();
+    if (g_screenshot_path && strstr(g_screenshot_path, "%d")) {
+        /* A path with %d saves every --shot-frame frames, numbered by frame. */
+        if (g_screenshot_frame > 0 && d3d.frame % g_screenshot_frame == 0) {
+            char path[512];
+            snprintf(path, sizeof path, g_screenshot_path, (int)d3d.frame);
+            save_screenshot(path);
+        }
+    } else if (g_screenshot_path && (int)d3d.frame == g_screenshot_frame) {
         save_screenshot(g_screenshot_path);
+    }
     SDL_GL_SwapWindow(d3d.window);
+    restore_overlay();
+    wait_vblank();
     if (d3d.vblank_callback) {
         ULONG data[3] = { d3d.frame, d3d.frame, 1 /* D3DVBLANK_SWAPDONE */ };
         ((void (CDECLAPI *)(ULONG *))d3d.vblank_callback)(data);
@@ -705,7 +747,8 @@ static GLenum tex_target(const D3DPixelContainer *t)
 static void upload_image3(GLenum target, ULONG fmt, ULONG w, ULONG h, ULONG d, ULONG pitch, const uint8_t *src)
 {
     /* conv: 1 = V8U8 (bump), 2 = L6V5U5 (bump), both expanded to RGBA8 with
-       du/dv as the signed bytes' bit patterns in r/g and luminance in b. */
+       du/dv as the signed bytes' bit patterns in r/g and luminance in b;
+       3 = YUY2 and 4 = UYVY (video frames), converted to RGB with BT.601. */
     struct { ULONG fmt; int bpp; bool swizzled; GLenum gl_fmt, gl_type; bool force_alpha; int conv; } table[] = {
         { 0x3A, 4, true,  GL_RGBA, GL_UNSIGNED_BYTE, false, 0 },               /* A8B8G8R8 / Q8W8V8U8 */
         { 0x3F, 4, false, GL_RGBA, GL_UNSIGNED_BYTE, false, 0 },               /* LIN_A8B8G8R8 */
@@ -740,6 +783,8 @@ static void upload_image3(GLenum target, ULONG fmt, ULONG w, ULONG h, ULONG d, U
         { 0x1F, 1, false, GL_ALPHA, GL_UNSIGNED_BYTE, false, 0 },             /* LIN_A8 */
         { 0x1A, 2, true,  GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE, false, 0 },   /* A8L8 */
         { 0x20, 2, false, GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE, false, 0 },   /* LIN_A8L8 */
+        { 0x24, 2, false, GL_RGBA, GL_UNSIGNED_BYTE, false, 3 },            /* YUY2 */
+        { 0x25, 2, false, GL_RGBA, GL_UNSIGNED_BYTE, false, 4 },            /* UYVY */
     };
 
     if ((fmt == 0x0C || fmt == 0x0E || fmt == 0x0F) && target != GL_TEXTURE_3D) {
@@ -773,7 +818,23 @@ static void upload_image3(GLenum target, ULONG fmt, ULONG w, ULONG h, ULONG d, U
     }
     if (table[i].force_alpha && bpp == 4)
         for (ULONG k = 0; k < w * h * d; k++) px[k * 4 + 3] = 0xFF;
-    if (table[i].conv) {
+    if (table[i].conv >= 3) {
+        /* Each 4-byte pair of texels shares U and V. */
+        uint8_t *rgba = malloc(w * h * d * 4);
+        bool uyvy = table[i].conv == 4;
+        for (ULONG k = 0; k < w * h * d; k++) {
+            const uint8_t *q = px + (k & ~1u) * 2;
+            int y = uyvy ? q[1 + (k & 1) * 2] : q[(k & 1) * 2];
+            int u = (uyvy ? q[0] : q[1]) - 128, v = (uyvy ? q[2] : q[3]) - 128;
+            int c = (y - 16) * 298 + 128;
+            int rgb[3] = { (c + 409 * v) >> 8, (c - 100 * u - 208 * v) >> 8, (c + 516 * u) >> 8 };
+            for (int j = 0; j < 3; j++) rgba[k * 4 + j] = rgb[j] < 0 ? 0 : rgb[j] > 255 ? 255 : rgb[j];
+            rgba[k * 4 + 3] = 0xFF;
+        }
+        free(px);
+        px = rgba;
+        bpp = 4;
+    } else if (table[i].conv) {
         uint8_t *rgba = malloc(w * h * d * 4);
         for (ULONG k = 0; k < w * h * d; k++) {
             uint16_t v = px[k * 2] | px[k * 2 + 1] << 8;
@@ -1147,6 +1208,13 @@ static void apply_texture_transforms(unsigned units, const int tsize[4])
                 for (int i = 0; i < 4; i++) m[i][3] = i == 3;
             }
         }
+        D3DPixelContainer *t = (D3DPixelContainer *)d3d.textures[u];
+        if (on && t && t->Size) {
+            /* Linear textures are addressed in texels; GL wants [0,1]. */
+            ULONG w, h, pitch;
+            container_size(t, &w, &h, &pitch);
+            for (int i = 0; i < 4; i++) { m[i][0] /= w; m[i][1] /= h; }
+        }
         glMatrixMode(GL_TEXTURE);
         glLoadMatrixf(&m[0][0]);
         glMatrixMode(GL_MODELVIEW);
@@ -1277,7 +1345,7 @@ static void NTAPI D3DDevice_SetMaterial(const float *m)
 }
 
 static void NTAPI D3DDevice_BlockUntilIdle(void) { run_callbacks(); }
-static void NTAPI D3DDevice_BlockUntilVerticalBlank(void) {}
+static void NTAPI D3DDevice_BlockUntilVerticalBlank(void) { wait_vblank(); }
 static BOOLEAN NTAPI D3DDevice_IsBusy(void) { return 0; }
 static void NTAPI D3DDevice_SetFlickerFilter(ULONG v) { (void)v; }
 static void NTAPI D3DDevice_SetSoftDisplayFilter(ULONG v) { (void)v; }
@@ -3426,9 +3494,88 @@ static BOOLEAN NTAPI D3DDevice_IsFencePending(ULONG f) { (void)f; return 0; }
 static void NTAPI D3DDevice_BlockOnFence(ULONG f) { (void)f; }
 static void NTAPI D3DDevice_SetGammaRamp(ULONG flags, const void *ramp) { (void)flags; (void)ramp; }
 static void NTAPI D3DDevice_GetGammaRamp(USHORT *ramp) { for (int i = 0; i < 768; i++) ramp[i] = (i % 256) * 257; }
-static void NTAPI D3DDevice_EnableOverlay(BOOLEAN on) { (void)on; }
-static void NTAPI D3DDevice_UpdateOverlay(D3DSurface *s, const void *a, const void *b, BOOLEAN c, ULONG d) {}
+/* The video overlay: the NV2A scales a YUY2 surface onto the screen as it
+   is scanned out, over the frame buffer or only where the frame buffer holds
+   the color key.  It never touches the frame buffer, so present_overlay()
+   composites into the window just for the swap and restore_overlay() puts
+   the back buffer back afterwards. */
+typedef struct { LONG left, top, right, bottom; } XRECT;
+static struct {
+    bool enabled;
+    D3DSurface *surface;
+    XRECT src, dst;
+    bool use_key;
+    ULONG key;
+    uint8_t *saved;   /* the frame buffer under the overlay, bottom row first */
+} overlay;
+
+static void NTAPI D3DDevice_EnableOverlay(BOOLEAN on)
+{
+    overlay.enabled = on;
+    if (!on) overlay.surface = NULL;
+}
+
+static void NTAPI D3DDevice_UpdateOverlay(D3DSurface *s, const XRECT *src, const XRECT *dst, BOOLEAN use_key, ULONG key)
+{
+    overlay.surface = s;
+    if (!s) return;
+    ULONG w, h, pitch;
+    container_size((D3DPixelContainer *)s, &w, &h, &pitch);
+    overlay.src = src ? *src : (XRECT){ 0, 0, (LONG)w, (LONG)h };
+    overlay.dst = dst ? *dst : (XRECT){ 0, 0, d3d.width, d3d.height };
+    overlay.use_key = use_key;
+    overlay.key = key & 0xFFFFFF;
+}
+
 static BOOLEAN NTAPI D3DDevice_GetOverlayUpdateStatus(void) { return 1; }
+
+static void present_overlay(void)
+{
+    if (!overlay.enabled || !overlay.surface) return;
+    D3DSurface *s = overlay.surface;
+    ULONG fmt = (s->Format >> 8) & 0xFF, sw, sh, pitch;
+    if (fmt != 0x24 && fmt != 0x25) return;
+    container_size((D3DPixelContainer *)s, &sw, &sh, &pitch);
+    const uint8_t *yuv = (const uint8_t *)(s->Data | CONTIG_BASE);
+    int w = d3d.width, h = d3d.height;
+    XRECT r = overlay.src, d = overlay.dst;
+    if (r.right <= r.left || r.bottom <= r.top || d.right <= d.left || d.bottom <= d.top) return;
+    if (p_glBindFramebuffer) p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    overlay.saved = malloc(w * h * 4);
+    glReadPixels(0, 0, w, h, GL_BGRA, GL_UNSIGNED_BYTE, overlay.saved);
+    uint8_t *px = malloc(w * h * 4);
+    memcpy(px, overlay.saved, w * h * 4);
+    bool uyvy = fmt == 0x25;
+    for (int y = d.top < 0 ? 0 : d.top; y < d.bottom && y < h; y++) {
+        ULONG sy = r.top + (ULONG)(y - d.top) * (r.bottom - r.top) / (d.bottom - d.top);
+        if (sy >= sh) break;
+        const uint8_t *row = yuv + sy * pitch;
+        uint8_t *o = px + (h - 1 - y) * w * 4;
+        for (int x = d.left < 0 ? 0 : d.left; x < d.right && x < w; x++) {
+            uint8_t *p = o + x * 4;
+            if (overlay.use_key && (ULONG)(p[0] | p[1] << 8 | p[2] << 16) != overlay.key) continue;
+            ULONG sx = r.left + (ULONG)(x - d.left) * (r.right - r.left) / (d.right - d.left);
+            if (sx >= sw) break;
+            const uint8_t *q = row + (sx & ~1u) * 2;
+            int Y = uyvy ? q[1 + (sx & 1) * 2] : q[(sx & 1) * 2];
+            int U = (uyvy ? q[0] : q[1]) - 128, V = (uyvy ? q[2] : q[3]) - 128;
+            int c = (Y - 16) * 298 + 128;
+            int rgb[3] = { (c + 516 * U) >> 8, (c - 100 * U - 208 * V) >> 8, (c + 409 * V) >> 8 };   /* b, g, r */
+            for (int j = 0; j < 3; j++) p[j] = rgb[j] < 0 ? 0 : rgb[j] > 255 ? 255 : rgb[j];
+            p[3] = 0xFF;
+        }
+    }
+    draw_window_pixels(px);
+    free(px);
+}
+
+static void restore_overlay(void)
+{
+    if (!overlay.saved) return;
+    draw_window_pixels(overlay.saved);
+    free(overlay.saved);
+    overlay.saved = NULL;
+}
 static void NTAPI D3DDevice_GetRasterStatus(ULONG *st) { st[0] = 1; st[1] = 0; }
 static ULONG NTAPI D3DDevice_GetPushDistance(ULONG a) { (void)a; return 0; }
 static ULONG NTAPI D3DPERF_Zero(void) { return 0; }
@@ -4441,6 +4588,163 @@ static void FASTCALL SetVertexShaderConstantNotInline(LONG Register, const float
     D3DDevice_SetVertexShaderConstant(Register, data, count);
 }
 
+static void FASTCALL SetVertexShaderConstant1(LONG Register, const float *data)
+{
+    D3DDevice_SetVertexShaderConstant(Register, data, 1);
+}
+
+static void FASTCALL SetVertexShaderConstant4(LONG Register, const float *data)
+{
+    D3DDevice_SetVertexShaderConstant(Register, data, 4);
+}
+
+static D3DResource *NTAPI D3DDevice_CreateVertexBuffer2(UINT_ Length)
+{
+    D3DResource *vb = NULL;
+    D3DDevice_CreateVertexBuffer(Length, 0, 0, 0, &vb);
+    return vb;
+}
+
+static D3DResource *NTAPI D3DDevice_CreateIndexBuffer2(UINT_ Length)
+{
+    D3DResource *ib = NULL;
+    D3DDevice_CreateIndexBuffer(Length, 0, 0x65 /* D3DFMT_INDEX16 */, 0, &ib);
+    return ib;
+}
+
+static D3DPalette *NTAPI D3DDevice_CreatePalette2(ULONG Size)
+{
+    D3DPalette *p = NULL;
+    D3DDevice_CreatePalette(Size, &p);
+    return p;
+}
+
+static D3DSurface *NTAPI D3DCubeTexture_GetCubeMapSurface2(D3DPixelContainer *t, ULONG face, UINT_ level)
+{
+    D3DSurface *s = NULL;
+    D3DCubeTexture_GetCubeMapSurface(t, face, level, &s);
+    return s;
+}
+
+static D3DResource *NTAPI D3DDevice_GetStreamSource2(UINT_ Stream, UINT_ *stride)
+{
+    D3DResource *vb = NULL;
+    D3DDevice_GetStreamSource(Stream, &vb, stride);
+    return vb;
+}
+
+static PVOID NTAPI D3DVertexBuffer_Lock2(D3DResource *vb, ULONG Flags)
+{
+    PVOID p;
+    D3DVertexBuffer_Lock(vb, 0, 0, &p, Flags);
+    return p;
+}
+
+static ULONG *NTAPI D3DDevice_BeginPush2(ULONG Count)
+{
+    ULONG *p;
+    D3DDevice_BeginPush(Count, &p);
+    return p;
+}
+
+SIZE_T NTAPI MmQueryAllocationSize(PVOID BaseAddress);
+
+static void NTAPI D3DVertexBuffer_GetDesc(D3DResource *vb, ULONG *desc)
+{
+    /* D3DVERTEXBUFFER_DESC: Format, Type, Usage, Pool, Size, FVF.  The
+       resource does not record its length; report the allocation's. */
+    desc[0] = 100;   /* D3DFMT_VERTEXDATA */
+    desc[1] = 6;     /* D3DRTYPE_VERTEXBUFFER */
+    desc[2] = 0;
+    desc[3] = 0;
+    desc[4] = MmQueryAllocationSize(resource_data(vb));
+    desc[5] = 0;
+}
+
+/* The inline Release in 5xxx headers drops the count itself and calls this
+   on the last reference. */
+static void NTAPI D3D_DestroyResource(D3DResource *r)
+{
+    r->Common = (r->Common & ~D3DCOMMON_REFCOUNT_MASK) | 1;
+    D3DResource_Release(r);
+}
+
+static void NTAPI D3DDevice_MultiplyTransform(ULONG State, const D3DMATRIX *m)
+{
+    if (State >= 10) return;
+    D3DMATRIX r;
+    mat_mul(&r, m, &d3d.transforms[State]);
+    D3DDevice_SetTransform(State, &r);
+}
+
+static void NTAPI D3DDevice_GetModelView(D3DMATRIX *m)
+{
+    mat_mul(m, &d3d.transforms[6], &d3d.transforms[0]);
+}
+
+static void NTAPI D3DDevice_SetModelView(const D3DMATRIX *mv, const D3DMATRIX *inv, const D3DMATRIX *composite)
+{
+    (void)inv; (void)composite;
+    static bool warned;
+    if (mv && !warned) { xlog("D3D: SetModelView overrides are ignored"); warned = true; }
+}
+
+static void NTAPI D3DDevice_GetViewportOffsetAndScale(float *offset, float *scale)
+{
+    /* The screen-space transform the hardware applies after projection
+       (CDevice::GetViewportOffsetAndScale): pixel centres at +0.53125 and
+       z scaled to the depth buffer's range. */
+    float zscale = d3d.depth ? (((d3d.depth->Format >> 8) & 0xFF) == 0x2C ? 65535.0f : 16777215.0f) : 1.0f;
+    const D3DVIEWPORT8 *v = &d3d.viewport;
+    scale[0] = v->Width * 0.5f;
+    scale[1] = -(v->Height * 0.5f);
+    scale[2] = (v->MaxZ - v->MinZ) * zscale;
+    scale[3] = 1;
+    offset[0] = v->X + v->Width * 0.5f + 0.53125f;
+    offset[1] = v->Y + v->Height * 0.5f + 0.53125f;
+    offset[2] = v->MinZ * zscale;
+    offset[3] = 0;
+}
+
+static void NTAPI D3DDevice_SetRenderTargetFast(D3DSurface *target, D3DSurface *z, ULONG Flags)
+{
+    (void)Flags;
+    D3DDevice_SetRenderTarget(target, z);
+}
+
+/* SetTexture's fast path when only the image moves (same size and format):
+   the method is NV097_SET_TEXTURE_OFFSET(stage).  The stage keeps a copy of
+   its texture header pointing at the new data. */
+static void FASTCALL D3DDevice_SwitchTexture(ULONG Method, ULONG Data, ULONG Format)
+{
+    static D3DPixelContainer shadow[4];
+    ULONG stage = ((Method - 0x1B00) >> 6) & 3;
+    D3DPixelContainer *cur = (D3DPixelContainer *)d3d.textures[stage];
+    if (!cur) { xlog("D3D: SwitchTexture on empty stage %u", stage); return; }
+    if (cur != &shadow[stage]) shadow[stage] = *cur;
+    shadow[stage].res.Data = Data;
+    shadow[stage].Format = Format;
+    D3DDevice_SetTexture(stage, &shadow[stage].res);
+}
+
+static ULONG fence;
+static ULONG NTAPI D3D_SetFence(ULONG Flags) { (void)Flags; return ++fence; }
+static void NTAPI D3D_BlockOnTime(ULONG Time, ULONG Flags) { (void)Time; (void)Flags; }
+static void NTAPI D3D_BlockOnResource(D3DResource *r) { (void)r; }
+static void NTAPI D3D_Nop0(void) {}
+static void NTAPI D3D_Nop4(ULONG a) { (void)a; }
+static void NTAPI D3D_Nop8(ULONG a, ULONG b) { (void)a; (void)b; }
+static void NTAPI D3D_Nop12(ULONG a, ULONG b, ULONG c) { (void)a; (void)b; (void)c; }
+static void FASTCALL D3D_FastNop(ULONG a, ULONG b) { (void)a; (void)b; }
+static LONG NTAPI D3DDevice_Reset(PVOID pp) { (void)pp; return D3D_OK; }
+static void NTAPI SetRenderState_SampleAlpha(ULONG Value) { (void)Value; }
+
+static ULONG NTAPI D3D_GetAdapterModeCount2(UINT_ Adapter, ULONG Format)
+{
+    (void)Format;
+    return Direct3D_GetAdapterModeCount(Adapter);
+}
+
 const struct hle_func d3d8_funcs[] = {
     F("_Direct3DCreate8@4", Direct3DCreate8),
     F("_Direct3D_CreateDevice@24", Direct3D_CreateDevice),
@@ -4583,6 +4887,51 @@ const struct hle_func d3d8_funcs[] = {
     F("_D3DPalette_Lock2@8", D3DPalette_Lock2),
     F("_Get2DSurfaceDesc@12", Get2DSurfaceDesc),
     F("@D3DDevice_SetVertexShaderConstantNotInline@12", SetVertexShaderConstantNotInline),
+    F("@D3DDevice_SetVertexShaderConstant1@8", SetVertexShaderConstant1),
+    F("@D3DDevice_SetVertexShaderConstant1Fast@8", SetVertexShaderConstant1),
+    F("@D3DDevice_SetVertexShaderConstant4@8", SetVertexShaderConstant4),
+    F("_D3DDevice_CreateVertexBuffer2@4", D3DDevice_CreateVertexBuffer2),
+    F("_D3DDevice_CreateIndexBuffer2@4", D3DDevice_CreateIndexBuffer2),
+    F("_D3DDevice_CreatePalette2@4", D3DDevice_CreatePalette2),
+    F("_D3DCubeTexture_GetCubeMapSurface2@12", D3DCubeTexture_GetCubeMapSurface2),
+    F("_D3DDevice_GetStreamSource2@8", D3DDevice_GetStreamSource2),
+    F("_D3DVertexBuffer_Lock2@8", D3DVertexBuffer_Lock2),
+    F("_D3DVertexBuffer_GetDesc@8", D3DVertexBuffer_GetDesc),
+    F("_D3DDevice_BeginPush_4@4", D3DDevice_BeginPush2),
+    F("_D3D_DestroyResource@4", D3D_DestroyResource),
+    F("_D3DDevice_MultiplyTransform@8", D3DDevice_MultiplyTransform),
+    F("_D3DDevice_GetModelView@4", D3DDevice_GetModelView),
+    F("_D3DDevice_SetModelView@12", D3DDevice_SetModelView),
+    F("_D3DDevice_GetViewportOffsetAndScale@8", D3DDevice_GetViewportOffsetAndScale),
+    F("_D3DDevice_SetRenderTargetFast@12", D3DDevice_SetRenderTargetFast),
+    F("@D3DDevice_SwitchTexture@12", D3DDevice_SwitchTexture),
+    F("_D3DDevice_SetRenderState@8", SetRenderStateNotInline),
+    F("_D3DDevice_SetRenderState2@8", SetRenderStateNotInline),
+    F("_D3DDevice_SetRenderState_SampleAlpha@4", SetRenderState_SampleAlpha),
+    F("_D3DDevice_Reset@4", D3DDevice_Reset),
+    F("_D3DDevice_Suspend@0", D3D_Nop0),
+    F("_D3DDevice_FlushVertexCache@0", D3D_Nop0),
+    F("_D3DDevice_PrimeVertexCache@8", D3D_Nop8),
+    F("_D3DDevice_SetStipple@4", D3D_Nop4),
+    F("_D3DDevice_SetDepthClipPlanes@12", D3D_Nop12),
+    F("_D3D_SetFence@4", D3D_SetFence),
+    F("_D3D_BlockOnTime@8", D3D_BlockOnTime),
+    F("_D3D_BlockOnResource@4", D3D_BlockOnResource),
+    F("_D3D_KickOffAndWaitForIdle@0", D3D_Nop0),
+    F("_D3D_CommonSetDebugRegisters@0", D3D_Nop0),
+    F("_D3D_ClearStateBlockFlags@0", D3D_Nop0),
+    F("_D3D_RecordStateBlock@4", D3D_Nop4),
+    F("_D3D_UpdateProjectionViewportTransform@0", D3D_Nop0),
+    F("_D3D_LazySetPointParams@4", D3D_Nop4),
+    F("_D3D_SetTileNoWait@8", D3DDevice_SetTile),
+    F("@D3D_CommonSetMultiSampleModeAndScale@8", D3D_FastNop),
+    F("_D3D_SetPushBufferSize@8", Direct3D_SetPushBufferSize),
+    F("_D3D_GetDeviceCaps@12", Direct3D_GetDeviceCaps),
+    F("_D3D_CheckDeviceFormat@24", Direct3D_CheckDeviceFormat),
+    F("_D3D_GetAdapterModeCount@8", D3D_GetAdapterModeCount2),
+    F("_D3D_GetAdapterDisplayMode@8", Direct3D_GetAdapterDisplayMode),
+    F("_D3D_EnumAdapterModes@12", Direct3D_EnumAdapterModes),
+    F("_D3D_GetAdapterIdentifier@12", Direct3D_GetAdapterIdentifier),
     F("@D3DDevice_SetVertexShaderConstantNotInlineFast@12", SetVertexShaderConstantNotInline),
     F("_D3DDevice_GetVertexShaderConstant@12", D3DDevice_GetVertexShaderConstant),
     F("_D3DDevice_SetShaderConstantMode@4", D3DDevice_SetShaderConstantMode),
