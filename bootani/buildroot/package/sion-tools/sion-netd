@@ -47,6 +47,15 @@ alive() {
 # so the machine is always at the same place on the network.
 static_ip() {
 	ifc=$1
+	# Only while the Wi-Fi is connected: an address (and its routes) on a
+	# disconnected interface would swallow replies meant for Ethernet.
+	if [ "$(cat "/sys/class/net/$ifc/operstate")" != up ]; then
+		if ip -4 addr show dev "$ifc" | grep -q inet; then
+			ip addr flush dev "$ifc"
+			log "$ifc disconnected; removed its address"
+		fi
+		return 0
+	fi
 	case "$WIFI_ADDRESS" in */*) addr=$WIFI_ADDRESS ;; *) addr=$WIFI_ADDRESS/24 ;; esac
 	gw=${WIFI_GATEWAY:-${WIFI_ADDRESS%.*}.1}
 	ip -4 addr show dev "$ifc" | grep -q " ${addr%/*}/" || ip addr add "$addr" dev "$ifc"
@@ -64,7 +73,14 @@ bring_up() {
 		[ -r "$WPA_CONF" ] || return 0
 		if ! alive "$SION_RUN/wpa.$ifc.pid"; then
 			ip link set "$ifc" up
-			wpa_supplicant -B -s -i "$ifc" -c "$WPA_CONF" -P "$SION_RUN/wpa.$ifc.pid"
+			log "starting wpa_supplicant on $ifc"
+			wpa_supplicant -B -s -i "$ifc" -c "$WPA_CONF" -P "$SION_RUN/wpa.$ifc.pid" >> "$SION_LOG" 2>&1
+		fi
+		# Log each change of the connection state (SCANNING, COMPLETED, ...).
+		st=$(wpa_cli -i "$ifc" status 2>/dev/null | sed -n 's/^wpa_state=//p')
+		if [ "$st" != "$(cat "$SION_RUN/wpa.$ifc.state" 2>/dev/null)" ]; then
+			echo "$st" > "$SION_RUN/wpa.$ifc.state"
+			log "$ifc: $st"
 		fi
 	fi
 	if [ -n "$wireless" ] && [ -n "$WIFI_ADDRESS" ]; then
@@ -94,6 +110,15 @@ report() {
 	} | sed 's/$/\r/' > "$m/sion/logs/network.txt"
 	esp_umount "$m"
 }
+
+# Ignore routes through interfaces with no link, and answer ARP only on the
+# interface that has the address, so a dead Wi-Fi or an unplugged cable
+# never takes the replies meant for the interface that works.
+for c in /proc/sys/net/ipv4/conf/*; do
+	echo 1 > "$c/ignore_routes_with_linkdown"
+	echo 1 > "$c/arp_ignore"
+	echo 2 > "$c/arp_announce"
+done
 
 make_wpa_conf
 while true; do
