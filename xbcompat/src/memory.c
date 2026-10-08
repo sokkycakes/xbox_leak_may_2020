@@ -48,6 +48,12 @@ void mem_init(void)
        host allocations (malloc, SDL, GL) can never land inside them. */
     reserve_fixed(ARENA_BASE, ARENA_END - ARENA_BASE, PROT_NONE);
     reserve_fixed(CONTIG_BASE, CONTIG_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC);
+    /* The network library pokes the MCP NIC's registers at 0xFEF00000
+       directly.  Back them with plain memory: every register reads zero,
+       which the driver sees as a NIC with no link. */
+    void *nic = mmap((void *)0xFEF00000u, 0x10000, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+    if (nic != (void *)0xFEF00000u) xlog("NIC register window unavailable: %s", strerror(errno));
     /* Physical page 0 holds the kernel on a real console; never hand it out. */
     for (unsigned i = 0; i < 16; i++)
         contig_used[i] = 1;

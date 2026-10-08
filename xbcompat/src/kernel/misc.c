@@ -283,17 +283,176 @@ LONGLONG FASTCALL ExInterlockedCompareExchange64(LONGLONG *Dest, LONGLONG *Excha
     return __sync_val_compare_and_swap(Dest, *Comperand, *Exchange);
 }
 
-/* ---- crypto: titles only use these for save signatures --------------- */
+/* ---- crypto: save signatures (SHA-1 / HMAC) and RC4 ------------------ */
 
-void NTAPI XcSHAInit(UCHAR *ctx) { memset(ctx, 0, 116); }
-void NTAPI XcSHAUpdate(UCHAR *ctx, const UCHAR *in, ULONG n) { (void)ctx; (void)in; (void)n; }
-void NTAPI XcSHAFinal(UCHAR *ctx, UCHAR *digest) { (void)ctx; memset(digest, 0, 20); }
+/* The title's 116-byte SHA context holds this. */
+typedef struct { uint32_t h[5]; uint64_t len; uint8_t buf[64]; uint32_t n; } sha1_ctx;
+
+static uint32_t rol32(uint32_t v, int s) { return (v << s) | (v >> (32 - s)); }
+
+static void sha1_block(sha1_ctx *c, const uint8_t *p)
+{
+    uint32_t w[80];
+    for (int i = 0; i < 16; i++) w[i] = (uint32_t)p[4 * i] << 24 | p[4 * i + 1] << 16 | p[4 * i + 2] << 8 | p[4 * i + 3];
+    for (int i = 16; i < 80; i++) w[i] = rol32(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
+    uint32_t a = c->h[0], b = c->h[1], cc = c->h[2], d = c->h[3], e = c->h[4];
+    for (int i = 0; i < 80; i++) {
+        uint32_t f, k;
+        if (i < 20) { f = (b & cc) | (~b & d); k = 0x5A827999; }
+        else if (i < 40) { f = b ^ cc ^ d; k = 0x6ED9EBA1; }
+        else if (i < 60) { f = (b & cc) | (b & d) | (cc & d); k = 0x8F1BBCDC; }
+        else { f = b ^ cc ^ d; k = 0xCA62C1D6; }
+        uint32_t t = rol32(a, 5) + f + e + k + w[i];
+        e = d; d = cc; cc = rol32(b, 30); b = a; a = t;
+    }
+    c->h[0] += a; c->h[1] += b; c->h[2] += cc; c->h[3] += d; c->h[4] += e;
+}
+
+void NTAPI XcSHAInit(UCHAR *ctx)
+{
+    sha1_ctx *c = (sha1_ctx *)ctx;
+    memset(ctx, 0, 116);
+    c->h[0] = 0x67452301; c->h[1] = 0xEFCDAB89; c->h[2] = 0x98BADCFE; c->h[3] = 0x10325476; c->h[4] = 0xC3D2E1F0;
+}
+
+void NTAPI XcSHAUpdate(UCHAR *ctx, const UCHAR *in, ULONG n)
+{
+    sha1_ctx *c = (sha1_ctx *)ctx;
+    c->len += n;
+    while (n) {
+        ULONG take = 64 - c->n < n ? 64 - c->n : n;
+        memcpy(c->buf + c->n, in, take);
+        c->n += take; in += take; n -= take;
+        if (c->n == 64) { sha1_block(c, c->buf); c->n = 0; }
+    }
+}
+
+void NTAPI XcSHAFinal(UCHAR *ctx, UCHAR *digest)
+{
+    sha1_ctx *c = (sha1_ctx *)ctx;
+    uint64_t bits = c->len * 8;
+    static const UCHAR pad[64] = { 0x80 };
+    ULONG padlen = c->n < 56 ? 56 - c->n : 120 - c->n;
+    XcSHAUpdate(ctx, pad, padlen);
+    UCHAR lenbe[8];
+    for (int i = 0; i < 8; i++) lenbe[i] = (UCHAR)(bits >> (56 - 8 * i));
+    XcSHAUpdate(ctx, lenbe, 8);
+    for (int i = 0; i < 5; i++) {
+        digest[4 * i] = c->h[i] >> 24; digest[4 * i + 1] = c->h[i] >> 16;
+        digest[4 * i + 2] = c->h[i] >> 8; digest[4 * i + 3] = c->h[i];
+    }
+}
+
+/* HMAC-SHA1 over the concatenation of two buffers (either may be empty). */
 void NTAPI XcHMAC(const UCHAR *key, ULONG keylen, const UCHAR *a, ULONG alen, const UCHAR *b, ULONG blen,
                   UCHAR *digest)
 {
-    (void)key; (void)keylen; (void)a; (void)alen; (void)b; (void)blen;
-    memset(digest, 0, 20);
+    UCHAR k[64] = { 0 }, ctx[116], inner[20];
+    if (keylen > 64) { XcSHAInit(ctx); XcSHAUpdate(ctx, key, keylen); XcSHAFinal(ctx, k); }
+    else if (key) memcpy(k, key, keylen);
+    UCHAR pad[64];
+    for (int i = 0; i < 64; i++) pad[i] = k[i] ^ 0x36;
+    XcSHAInit(ctx); XcSHAUpdate(ctx, pad, 64);
+    if (a && alen) XcSHAUpdate(ctx, a, alen);
+    if (b && blen) XcSHAUpdate(ctx, b, blen);
+    XcSHAFinal(ctx, inner);
+    for (int i = 0; i < 64; i++) pad[i] = k[i] ^ 0x5C;
+    XcSHAInit(ctx); XcSHAUpdate(ctx, pad, 64); XcSHAUpdate(ctx, inner, 20);
+    XcSHAFinal(ctx, digest);
 }
+
+/* RC4: the title's key structure is 256 state bytes plus the two indices. */
+void NTAPI XcRC4Key(UCHAR *state, ULONG keylen, const UCHAR *key)
+{
+    for (int i = 0; i < 256; i++) state[i] = (UCHAR)i;
+    for (int i = 0, j = 0; i < 256; i++) {
+        j = (j + state[i] + (keylen ? key[i % keylen] : 0)) & 0xFF;
+        UCHAR t = state[i]; state[i] = state[j]; state[j] = t;
+    }
+    state[256] = state[257] = 0;
+}
+
+void NTAPI XcRC4Crypt(UCHAR *state, ULONG len, UCHAR *data)
+{
+    unsigned i = state[256], j = state[257];
+    for (ULONG n = 0; n < len; n++) {
+        i = (i + 1) & 0xFF;
+        j = (j + state[i]) & 0xFF;
+        UCHAR t = state[i]; state[i] = state[j]; state[j] = t;
+        data[n] ^= state[(state[i] + state[j]) & 0xFF];
+    }
+    state[256] = (UCHAR)i; state[257] = (UCHAR)j;
+}
+
+/* DES keys carry odd parity in each byte's low bit. */
+void NTAPI XcDESKeyParity(UCHAR *key, ULONG len)
+{
+    for (ULONG i = 0; i < len; i++) {
+        UCHAR b = key[i] & 0xFE;
+        key[i] = b | !(__builtin_popcount(b) & 1);
+    }
+}
+
+/* Big numbers: n little-endian 32-bit limbs.  r = (r + r [+ b]) mod m. */
+static int bn_cmp(const uint32_t *a, const uint32_t *b, ULONG n)
+{
+    for (ULONG i = n; i-- > 0;) if (a[i] != b[i]) return a[i] < b[i] ? -1 : 1;
+    return 0;
+}
+
+static void bn_sub(uint32_t *a, const uint32_t *b, ULONG n)
+{
+    uint64_t borrow = 0;
+    for (ULONG i = 0; i < n; i++) {
+        uint64_t d = (uint64_t)a[i] - b[i] - borrow;
+        a[i] = (uint32_t)d;
+        borrow = (d >> 63) & 1;
+    }
+}
+
+/* a = (a + b) mod m, with a, b < m; `carry` handles the bit past n limbs. */
+static void bn_addmod(uint32_t *a, const uint32_t *b, const uint32_t *m, ULONG n)
+{
+    uint64_t c = 0;
+    for (ULONG i = 0; i < n; i++) { c += (uint64_t)a[i] + b[i]; a[i] = (uint32_t)c; c >>= 32; }
+    if (c || bn_cmp(a, m, n) >= 0) bn_sub(a, m, n);
+}
+
+/* r = a * b mod m by double-and-add over a's bits. */
+static void bn_mulmod(uint32_t *r, const uint32_t *a, const uint32_t *b, const uint32_t *m, ULONG n)
+{
+    uint32_t *acc = calloc(n, 4);
+    for (ULONG i = n * 32; i-- > 0;) {
+        bn_addmod(acc, acc, m, n);
+        if ((a[i / 32] >> (i % 32)) & 1) bn_addmod(acc, b, m, n);
+    }
+    memcpy(r, acc, n * 4);
+    free(acc);
+}
+
+/* A = B^C mod D, all n limbs. */
+ULONG NTAPI XcModExp(ULONG *A, const ULONG *B, const ULONG *C, const ULONG *D, ULONG n)
+{
+    if (!n) return 0;
+    uint32_t *base = calloc(n, 4), *res = calloc(n, 4);
+    memcpy(base, B, n * 4);
+    while (bn_cmp(base, (const uint32_t *)D, n) >= 0) bn_sub(base, (const uint32_t *)D, n);   /* B < D in practice */
+    res[0] = 1;
+    if (n == 1 && D[0] == 1) res[0] = 0;
+    for (ULONG i = n * 32; i-- > 0;) {
+        bn_mulmod(res, res, res, (const uint32_t *)D, n);
+        if ((C[i / 32] >> (i % 32)) & 1) bn_mulmod(res, res, base, (const uint32_t *)D, n);
+    }
+    memcpy(A, res, n * 4);
+    free(base);
+    free(res);
+    return 1;
+}
+
+/* ---- network PHY: there is no Ethernet link ------------------------------ */
+
+ULONG NTAPI PhyGetLinkState(BOOLEAN Update) { (void)Update; return 0; }
+NTSTATUS NTAPI PhyInitialize(BOOLEAN ForceReset, PVOID Param) { (void)ForceReset; (void)Param; return STATUS_SUCCESS; }
 
 /* ---- misc -------------------------------------------------------------- */
 
