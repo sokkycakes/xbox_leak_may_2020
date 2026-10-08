@@ -1,0 +1,229 @@
+//
+// The Games area: titles installed on the hard disk under E:\Games.
+// Not part of Microsoft's dashboard; added by xbcompat's dashbuild.  The
+// screen is the Settings home scene (Games2 is a copy of Settings3), which
+// was modelled as the Games screen: its rows are S_Home_text_games and its
+// pod carries the S_Home_GameModule cartridges.  The settings orb and icons
+// are hidden and the game pod from mainmenu5.xip takes the orb's place.
+//
+
+var gamesCount;
+var gamesScroll;
+var gamesSelect;
+var gamesButton;
+var gamesRows;
+
+DEF theGameCollection GameCollection
+{
+}
+
+function HideGamesIcons()
+{
+    var c = theGamesMenu.children[0].children[0];
+
+    c.ClockIcon.visible = false;
+    c.GlobeIcon.visible = false;
+    c.StereoIcon.visible = false;
+    c.MonoIcon.visible = false;
+    c.FullscreenIcon.visible = false;
+    c.LetterboxIcon.visible = false;
+    c.WidescreenIcon.visible = false;
+    c.LockIcon.visible = false;
+    c.AutoOffIcon.visible = false;
+    c.ConsoleIcon.visible = false;
+
+    // the game pod (GamesPod, from mainmenu5.xip) replaces the settings orb
+    c.S_Home_pod_shell_01.visible = false;
+    c.S_Home_podsocket_inner.visible = false;
+    c.S_Home_podsocket_outer.visible = false;
+    c.S_Home_pod_support_01.visible = false;
+    c.S_Home_pod_support_02.visible = false;
+    c.S_Home_pod_support_03.visible = false;
+    c.S_Home_pod_support_04.visible = false;
+}
+
+function FillGamesList()
+{
+    gamesCount = theGameCollection.Scan();
+
+    if (gamesSelect >= gamesCount)
+    {
+        gamesScroll = 0;
+        gamesSelect = 0;
+        gamesButton = 0;
+    }
+
+    UpdateGamesList();
+}
+
+function UpdateGamesList()
+{
+    var c = theGamesMenu.children[0].children[0];
+
+    c.movearrow_up.visible = (gamesScroll > 0);
+    c.movearrow_dn.visible = (gamesScroll + gamesRows < gamesCount);
+
+    c.movearrow_up.children[0].appearance.material.name = "NavType";
+    c.movearrow_dn.children[0].appearance.material.name = "NavType";
+
+    for (var i = 0; i < gamesRows; i = i + 1)
+    {
+        var nGame = gamesScroll + i;
+
+        if (i == gamesButton)
+        {
+            c.MenuButtons.children[i].children[0].appearance.material.name = "GameHilite";
+            c.MenuButtons.children[i].children[0].appearance.texture.url = "GameHilite_01.bmp";
+            c.MenuText.children[i].children[0].appearance.material.name = "Material #133";
+
+            if (i == 0)
+                c.movearrow_up.children[0].appearance.material.name = "Material #133";
+            else if (i == gamesRows - 1)
+                c.movearrow_dn.children[0].appearance.material.name = "Material #133";
+        }
+        else
+        {
+            c.MenuButtons.children[i].children[0].appearance.material.name = "GameHilite";
+            c.MenuButtons.children[i].children[0].appearance.texture.url = "outline.tga";
+            c.MenuText.children[i].children[0].appearance.material.name = "NavType";
+        }
+
+        if (nGame < gamesCount)
+            c.MenuText.children[i].children[0].geometry.text = theGameCollection.GetGameName(nGame);
+        else
+            c.MenuText.children[i].children[0].geometry.text = "";
+    }
+
+    if (gamesCount == 0)
+        c.metaPanel.children[0].geometry.text = "No games found";
+    else
+        c.metaPanel.children[0].geometry.text = "ID " + theGameCollection.GetGameTitleID(gamesSelect);
+}
+
+DEF theGamesMenu Level
+{
+    archive "Games2.xip"
+
+    children
+    [
+        Inline
+        {
+            url "Games2/default.xap"
+
+            function onLoad()
+            {
+                gamesRows = 6;
+                gamesScroll = 0;
+                gamesSelect = 0;
+                gamesButton = 0;
+                HideGamesIcons();
+                FillGamesList();
+            }
+        }
+    ]
+
+    shell Transform
+    {
+        scale 75 75 75
+        translation 123.2 1.041 -190.3
+        children
+        [
+            Waver
+            {
+                rpm 0.75
+                children
+                [
+                    Shape
+                    {
+                        appearance Appearance
+                        {
+                            material MaxMaterial { name "InnerWall_01" }
+                            texture ImageTexture { alpha true url "cellwall.bmp" }
+                        }
+                        geometry Mesh { url "Inner_cell-FACES.xm" }
+                    }
+                    Shape
+                    {
+                        appearance MaxMaterial { name "InnerWall_02" }
+                        geometry Sphere
+                    }
+                ]
+            }
+        ]
+    }
+
+    path Viewpoint
+    {
+        fieldOfView 1.287000
+        orientation 0.130300 -0.991400 -0.007829 -0.121100
+        position 123.300003 -0.918000 -152.600006
+        jump false
+    }
+
+    control Joystick
+    {
+        function OnADown()
+        {
+            var c = theGamesMenu.children[0].children[0];
+            c.MU_select_pod_HL.children[0].appearance.material.param = 1;
+
+            PlaySoundA();
+
+            if (gamesCount > 0)
+            {
+                theGamesSubMenuIn.Play();
+                EnableInput(false);
+                theGameCollection.LaunchGame(gamesSelect);
+            }
+        }
+
+        function OnBDown()
+        {
+            var c = theGamesMenu.children[0].children[0];
+            c.MU_back_pod_HL.children[0].appearance.material.param = 1;
+
+            PlaySoundB();
+
+            theMainMenu.GoBackTo();
+            theGamesMenuOut.Play();
+        }
+
+        function OnMoveUp()
+        {
+            if (gamesSelect <= 0)
+                return;
+
+            PlaySoundMenuChange();
+
+            gamesSelect = gamesSelect - 1;
+            if (gamesButton == 0)
+                gamesScroll = gamesScroll - 1;
+            else
+                gamesButton = gamesButton - 1;
+
+            UpdateGamesList();
+        }
+
+        function OnMoveDown()
+        {
+            if (gamesSelect >= gamesCount - 1)
+                return;
+
+            PlaySoundMenuChange();
+
+            gamesSelect = gamesSelect + 1;
+            if (gamesButton == gamesRows - 1)
+                gamesScroll = gamesScroll + 1;
+            else
+                gamesButton = gamesButton + 1;
+
+            UpdateGamesList();
+        }
+    }
+
+    function OnActivate()
+    {
+        if (children[0].children.length() > 0)
+            FillGamesList();
+    }
+}
