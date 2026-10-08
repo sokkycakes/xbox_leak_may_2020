@@ -2168,10 +2168,42 @@ static void end_program(program_entry *e)
     if (e) p_glUseProgram(0);
 }
 
+/* GL has no signed 11:11:10 vertex format, so NORMPACKED3 attributes are
+   unpacked to float3 for the vertices a draw reads (one buffer per register). */
+static const float *unpack_normpacked3(int slot, const UCHAR *src, ULONG stride, ULONG n)
+{
+    static float *buf[16];
+    static ULONG cap[16];
+    if (n > cap[slot]) {
+        free(buf[slot]);
+        cap[slot] = n + 1024;
+        buf[slot] = malloc(cap[slot] * 12);
+    }
+    float *o = buf[slot];
+    for (ULONG i = 0; i < n; i++, src += stride, o += 3) {
+        uint32_t v;
+        memcpy(&v, src, 4);
+        o[0] = ((int32_t)(v << 21) >> 21) / 1023.0f;
+        o[1] = ((int32_t)(v << 10) >> 21) / 1023.0f;
+        o[2] = ((int32_t)v >> 22) / 511.0f;
+    }
+    return buf[slot];
+}
+
+/* How many vertices from the start of the streams a draw reads. */
+static ULONG vertex_limit(ULONG first, ULONG count, const USHORT *indices)
+{
+    if (!indices) return first + count;
+    ULONG m = 0;
+    for (ULONG i = 0; i < count; i++)
+        if (indices[first + i] >= m) m = indices[first + i] + 1u;
+    return m;
+}
+
 /* Bind the generic attribute arrays of a declared vertex layout.  `up` is
    the user-pointer data for stream 0 (DrawVerticesUP), else streams come
    from SetStreamSource. */
-static void bind_attributes(const vshader *sh, const UCHAR *up, ULONG up_stride, ULONG first_vertex)
+static void bind_attributes(const vshader *sh, const UCHAR *up, ULONG up_stride, ULONG first_vertex, ULONG nverts)
 {
     for (int r = 0; r < 16; r++) {
         const vattr *a = &sh->attr[r];
@@ -2193,6 +2225,11 @@ static void bind_attributes(const vshader *sh, const UCHAR *up, ULONG up_stride,
             stride = d3d.streams[a->stream].stride;
         }
         p_glEnableVertexAttribArray(r);
+        if ((a->type & 0xF) == 6) {
+            p_glVertexAttribPointer(r, 3, GL_FLOAT, GL_FALSE, 12,
+                                    unpack_normpacked3(r, base + a->offset + first_vertex * stride, stride, nverts));
+            continue;
+        }
         /* D3DCOLOR is stored B, G, R, A and reaches the shader as (R, G, B, A). */
         p_glVertexAttribPointer(r, a->type == 0x40 ? GL_BGRA : a->components, a->gl_type, a->normalized, stride,
                                 base + a->offset + first_vertex * stride);
@@ -2239,7 +2276,7 @@ static void draw_programmable(vshader *sh, ULONG PrimitiveType, const UCHAR *up,
           RS(D3DRS_STENCILENABLE), d3d.viewport.X, d3d.viewport.Y, d3d.viewport.Width, d3d.viewport.Height,
           d3d.viewport.MinZ, d3d.viewport.MaxZ);
     upload_constants(sh, e);
-    bind_attributes(sh, up, up_stride, 0);
+    bind_attributes(sh, up, up_stride, 0, vertex_limit(first, count, indices));
     if (indices)
         glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, indices + first);
     else
@@ -2286,7 +2323,11 @@ static void draw_declared(const vshader *sh, ULONG PrimitiveType, const UCHAR *u
         const UCHAR *b; ULONG s;
         STREAM(&sh->attr[2], b, s);
         glEnableClientState(GL_NORMAL_ARRAY);
-        glNormalPointer(sh->attr[2].gl_type, s, b + sh->attr[2].offset);
+        if ((sh->attr[2].type & 0xF) == 6)
+            glNormalPointer(GL_FLOAT, 12, unpack_normpacked3(2, b + sh->attr[2].offset, s,
+                                                             vertex_limit(first, count, indices)));
+        else
+            glNormalPointer(sh->attr[2].gl_type, s, b + sh->attr[2].offset);
     } else {
         glDisableClientState(GL_NORMAL_ARRAY);
     }
