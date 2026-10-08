@@ -51,6 +51,49 @@ screen. It runs on KMSDRM too, with no X11 or Wayland:
 
 Set `BR2_PACKAGE_THESEUS=n` to boot to the animation alone.
 
+## Remote access and updates
+
+`package/sion-tools` (on in both defconfigs) makes a running machine
+reachable for testing and lets it take new images safely:
+
+- **The stick** has two partitions. `SIONBOOT` (FAT, 1 GiB) is the EFI
+  system partition with `EFI/BOOT/BOOTX64.EFI` (the whole system), room for
+  two more images, and the folders a PC edits: `sion/` and `theseus/`.
+  `SIONDATA` (ext4) is mounted on `/data` and grows to fill the stick on
+  first boot. The root filesystem still runs from RAM, so `/data` is the
+  only thing that persists.
+- **Network.** `sion/sion.conf` on the stick holds the Wi-Fi network
+  (`WIFI_SSID`, `WIFI_PASSWORD`), the root password and the hostname. Wired
+  Ethernet and USB Ethernet adapters (ASIX, Realtek, CDC ECM/NCM, RNDIS)
+  need no settings. `sion-netd` brings up each interface as it appears and
+  writes its addresses to `sion/logs/network.txt` on the stick. Avahi
+  announces `<hostname>.local` (default `sion.local`).
+- **SSH.** OpenSSH with SFTP, root only, by password (`PASSWORD` in
+  `sion.conf`) or by key (`sion/authorized_keys` on the stick, or
+  `/data/sion/ssh/authorized_keys`). Host keys are kept on `/data`, so the
+  machine's identity survives reboots.
+- **Pushing files.** Anything copied in with `scp` lasts until reboot.
+  `sion persist PATH...` copies files into `/data/overlay`, which is copied
+  over `/` at every boot (before everything but the boot animation).
+  `sion restart theseus` restarts the dashboard.
+- **Image updates.** `sion update FILE` writes a new `BOOTX64.EFI` to
+  `EFI/sion/trial.efi`, adds a UEFI boot entry for it and sets `BootNext`,
+  so the firmware boots it exactly once. If that boot has `sshd` (and the
+  dashboard, when the image has one) up for 30 seconds, the trial becomes
+  `EFI/BOOT/BOOTX64.EFI` and the old image is kept as
+  `EFI/sion/previous.efi`. If it panics (the kernel reboots after 10 s),
+  hangs (the chipset watchdog resets it), or isn't healthy within 5 minutes,
+  the next boot is the old image again, and the trial is kept as
+  `EFI/sion/failed.efi`. `sion rollback` swaps back by hand; `--direct`
+  replaces the image without a trial boot, for firmware that can't do
+  `BootNext`. `sion/logs/update.txt` on the stick records each step.
+
+From a PC on the same network (Windows has `ssh` and `scp` built in):
+
+    ssh root@sion.local sion status
+    scp BOOTX64.EFI root@sion.local:/data/
+    ssh root@sion.local sion update /data/BOOTX64.EFI
+
 ## Build
 
     git clone https://gitlab.com/buildroot.org/buildroot.git

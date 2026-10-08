@@ -43,3 +43,13 @@ BR2_PACKAGE_SDL2_OPENGLES=y
 BR2_PACKAGE_MPV=y
 BR2_PACKAGE_OPENSSL=y
 BR2_PACKAGE_THESEUS=y
+# Remote access (SSH over Wi-Fi, wired or USB Ethernet), a persistent /data
+# partition and A/B image updates (package/sion-tools, sion/sion.conf on the
+# stick). Wi-Fi firmware for the Intel cards Kaby Lake Chromeboxes ship with.
+BR2_PACKAGE_SION_TOOLS=y
+BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_7265D=y
+BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_8000C=y
+BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_8265=y
+BR2_PACKAGE_LINUX_FIRMWARE_RTL_8169=y
+BR2_PACKAGE_LINUX_FIRMWARE_RTL_815X=y
+BR2_PACKAGE_HOST_E2FSPROGS=y

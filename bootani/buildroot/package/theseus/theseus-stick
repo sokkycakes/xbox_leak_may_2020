@@ -25,6 +25,14 @@ mount_stick() {
 		mount -t vfat -o rw,noatime "$(cat "$DEVFILE")" "$STICK" 2>/dev/null
 		return
 	fi
+	# sion-tools has already found the partition the machine booted from.
+	if [ -r /var/run/sion/esp-dev ]; then
+		dev=$(cat /var/run/sion/esp-dev)
+		mount -t vfat -o rw,noatime "$dev" "$STICK" 2>/dev/null || return 1
+		[ -d "$DIR" ] && echo "$dev" > "$DEVFILE" && return 0
+		umount "$STICK"
+		return 1
+	fi
 	# The kernel enumerates the USB stick a moment after init starts.
 	for _ in $(seq 1 50); do
 		for dev in /dev/sd?1 /dev/mmcblk?p1 /dev/nvme?n?p1; do
