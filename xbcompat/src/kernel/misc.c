@@ -336,20 +336,30 @@ void NTAPI ExRaiseStatus(NTSTATUS st)
     RtlRaiseStatus(st);
 }
 
-/* ---- Xe: XBE sections are all loaded up front ------------------------ */
+/* ---- Xe: XBE sections ------------------------------------------------ */
 
-typedef struct { ULONG SectionFlags, VirtualAddress, VirtualSize, PointerToRawData, SizeOfRawData,
-                 SectionName, SectionReferenceCount; USHORT *Head, *Tail; } XBE_SECTION_HDR;
+/* Every section is mapped up front, but one loaded with nobody holding it
+   is read from the XBE again, as the console would: titles fix up resource
+   bundles in place and expect a fresh copy after XFreeSection. */
+static pthread_mutex_t section_lock = PTHREAD_MUTEX_INITIALIZER;
 
-NTSTATUS NTAPI XeLoadSection(XBE_SECTION_HDR *Section)
+NTSTATUS NTAPI XeLoadSection(XBE_SECTION *Section)
 {
-    Section->SectionReferenceCount++;
+    pthread_mutex_lock(&section_lock);
+    if (Section->SectionReferenceCount++ == 0)
+        xbe_reload_section(Section->VirtualAddress, Section->PointerToRawData, Section->SizeOfRawData,
+                           Section->VirtualSize);
+    TRACE("XeLoadSection(%s) refs %u", (char *)Section->SectionName, Section->SectionReferenceCount);
+    pthread_mutex_unlock(&section_lock);
     return STATUS_SUCCESS;
 }
 
-NTSTATUS NTAPI XeUnloadSection(XBE_SECTION_HDR *Section)
+NTSTATUS NTAPI XeUnloadSection(XBE_SECTION *Section)
 {
+    pthread_mutex_lock(&section_lock);
     if (Section->SectionReferenceCount) Section->SectionReferenceCount--;
+    TRACE("XeUnloadSection(%s) refs %u", (char *)Section->SectionName, Section->SectionReferenceCount);
+    pthread_mutex_unlock(&section_lock);
     return STATUS_SUCCESS;
 }
 

@@ -551,6 +551,7 @@ BOOLEAN NTAPI KeSynchronizeExecution(PVOID Interrupt, BOOLEAN (NTAPI *Routine)(P
 LONG NTAPI KeSetBasePriorityThread(KTHREAD *Thread, LONG Increment)
 {
     LONG old = Thread->BasePriority;
+    TRACE("KeSetBasePriorityThread(%p, %d)", (void *)Thread, (int)Increment);
     Thread->BasePriority = (SCHAR)(8 + Increment);
     return old - 8;
 }
@@ -560,6 +561,7 @@ LONG NTAPI KeQueryBasePriorityThread(KTHREAD *Thread) { return Thread->BasePrior
 LONG NTAPI KeSetPriorityThread(KTHREAD *Thread, LONG Priority)
 {
     LONG old = Thread->Priority;
+    TRACE("KeSetPriorityThread(%p, %d)", (void *)Thread, (int)Priority);
     Thread->Priority = (SCHAR)Priority;
     return old;
 }

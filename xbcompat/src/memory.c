@@ -145,6 +145,7 @@ NTSTATUS NTAPI NtAllocateVirtualMemory(PVOID *BaseAddress, ULONG_PTR ZeroBits,
     *RegionSize = size;
 out:
     pthread_mutex_unlock(&mem_lock);
+    if (st) TRACE("NtAllocateVirtualMemory(%#x, %#x, type %#x) failed: %#x", base, size, AllocationType, st);
     return st;
 }
 

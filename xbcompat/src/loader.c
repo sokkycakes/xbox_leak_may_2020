@@ -15,6 +15,21 @@ static const struct { const char *kind; ULONG ep, kt; } keys[] = {
     { "chihiro", 0x40B5C16E, 0x2290059D },
 };
 
+static char *xbe_path;
+
+/* XeLoadSection on a section nobody holds: the console reads it from disk
+   again, so whatever the title changed in place since (fixed-up resource
+   headers, say) is back as shipped. */
+void xbe_reload_section(ULONG va, ULONG raw_offset, ULONG raw_size, ULONG virtual_size)
+{
+    FILE *f = xbe_path ? fopen(xbe_path, "rb") : NULL;
+    if (!f) return;
+    if (fseek(f, raw_offset, SEEK_SET) == 0 && fread((void *)va, 1, raw_size, f) == raw_size &&
+        virtual_size > raw_size)
+        memset((uint8_t *)va + raw_size, 0, virtual_size - raw_size);
+    fclose(f);
+}
+
 void xbe_load(const char *path, xbe_image *img)
 {
     FILE *f = fopen(path, "rb");
@@ -45,10 +60,14 @@ void xbe_load(const char *path, xbe_image *img)
         if (sec[i].PointerToRawData + sec[i].SizeOfRawData > (ULONG)size)
             fatal("section %u runs past the end of the file", i);
         memcpy((void *)sec[i].VirtualAddress, file + sec[i].PointerToRawData, sec[i].SizeOfRawData);
+        /* Preloaded sections are in use from the start; the rest count
+           XeLoadSection calls, as on the console. */
+        if (sec[i].SectionFlags & XBE_SECTION_PRELOAD) sec[i].SectionReferenceCount = 1;
         xlog("section %-8s %#010x +%#08x", (char *)sec[i].SectionName, sec[i].VirtualAddress,
              sec[i].VirtualSize);
     }
     free(file);
+    xbe_path = strdup(path);
 
     const char *kind = NULL;
     for (unsigned i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {

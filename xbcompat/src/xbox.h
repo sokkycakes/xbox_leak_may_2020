@@ -303,6 +303,8 @@ typedef struct {
     UCHAR SectionDigest[20];
 } XBE_SECTION;
 
+#define XBE_SECTION_PRELOAD 0x00000002
+
 typedef struct {
     ULONG SizeOfCertificate;
     ULONG TimeDateStamp;
