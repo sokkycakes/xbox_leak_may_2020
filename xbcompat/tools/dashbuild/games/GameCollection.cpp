@@ -3,7 +3,9 @@
 // hard disk as E:\Games\<folder>\default.xbe, named from each XBE's
 // certificate.  A hard disk game is launched by pointing D: at its folder.
 // It also supplies the details screen: the XBE's title image, its
-// certificate details and the title's saved games.  Not part of Microsoft's
+// certificate details and the title's saved games, and installs the disc
+// to E:\Games on a background thread (OnInstallProgress, OnInstallComplete
+// and OnInstallError are called on the node while it runs).  Not part of Microsoft's
 // dashboard; added by xbcompat's dashbuild.
 
 #include "std.h"
@@ -53,6 +55,15 @@ public:
     int SelectGameImage(int nGame);
     void LaunchGame(int nGame);
 
+    int IsDiscInstalled();
+    int StartInstall();
+    CStrObject* GetInstallStatus();
+    CStrObject* GetInstallError();
+    CStrObject* GetInstallFolder();
+    float m_installProgress;
+
+    void Advance(float nSeconds);
+
     DECLARE_NODE_PROPS()
     DECLARE_NODE_FUNCTIONS()
 };
@@ -60,6 +71,7 @@ public:
 IMPLEMENT_NODE("GameCollection", CGameCollection, CNode)
 
 START_NODE_PROPS(CGameCollection, CNode)
+    NODE_PROP(pt_number, CGameCollection, installProgress)
 END_NODE_PROPS()
 
 START_NODE_FUN(CGameCollection, CNode)
@@ -74,9 +86,15 @@ START_NODE_FUN(CGameCollection, CNode)
     NODE_FUN_II(GetSavedGameCount)
     NODE_FUN_II(SelectGameImage)
     NODE_FUN_VI(LaunchGame)
+    NODE_FUN_IV(IsDiscInstalled)
+    NODE_FUN_IV(StartInstall)
+    NODE_FUN_SV(GetInstallStatus)
+    NODE_FUN_SV(GetInstallError)
+    NODE_FUN_SV(GetInstallFolder)
 END_NODE_FUN()
 
-CGameCollection::CGameCollection()
+CGameCollection::CGameCollection() :
+    m_installProgress(0.0f)
 {
     // The retail dashboard does not map E: (the data partition); games live there.
     IoCreateSymbolicLink((POBJECT_STRING)&c_eDrive, (POBJECT_STRING)&c_ePath);
@@ -495,4 +513,279 @@ void CGameCollection::LaunchGame(int nGame)
     IoCreateSymbolicLink(&dDrive, &target);
 
     XLaunchNewImage("D:\\default.xbe", NULL);
+}
+
+////////////////////////////////////////////////////////////////////////////
+// Installing the disc: the whole disc is copied to E:\Games\<title>, which
+// GameCollection then lists and launches like any other installed game.
+
+struct INSTALL
+{
+    HANDLE m_hThread;
+    CHAR m_szFolder[64];        // E:\Games\<m_szFolder>
+    ULONGLONG m_qwTotal;
+    volatile ULONGLONG m_qwCopied;
+    volatile bool m_bNoSpace;
+    volatile bool m_bFailed;
+};
+
+static INSTALL c_install;
+
+// Total size of a directory tree; false if it can't be read.
+static bool SizeTree(const CHAR* szDir, ULONGLONG* pqw)
+{
+    CHAR szPath [MAX_PATH];
+    sprintf(szPath, "%s\\*", szDir);
+    WIN32_FIND_DATAA fd;
+    HANDLE hFind = FindFirstFileA(szPath, &fd);
+    if (hFind == INVALID_HANDLE_VALUE)
+        return GetLastError() == ERROR_FILE_NOT_FOUND || GetLastError() == ERROR_NO_MORE_FILES;
+
+    bool bOK = true;
+    do
+    {
+        if (fd.cFileName[0] == '.')
+            continue;
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+        {
+            sprintf(szPath, "%s\\%s", szDir, fd.cFileName);
+            bOK = SizeTree(szPath, pqw);
+        }
+        else
+        {
+            *pqw += ((ULONGLONG)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
+        }
+    }
+    while (bOK && FindNextFileA(hFind, &fd));
+
+    FindClose(hFind);
+    return bOK;
+}
+
+static bool CopyOneFile(const CHAR* szSrc, const CHAR* szDest, BYTE* pbBuf, DWORD cbBuf)
+{
+    HANDLE hSrc = CreateFileA(szSrc, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+    if (hSrc == INVALID_HANDLE_VALUE)
+        return false;
+    HANDLE hDest = CreateFileA(szDest, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+    if (hDest == INVALID_HANDLE_VALUE)
+    {
+        CloseHandle(hSrc);
+        return false;
+    }
+
+    bool bOK = true;
+    for (;;)
+    {
+        DWORD cbRead = 0, cbWritten = 0;
+        if (!ReadFile(hSrc, pbBuf, cbBuf, &cbRead, NULL))
+        {
+            bOK = false;
+            break;
+        }
+        if (cbRead == 0)
+            break;
+        if (!WriteFile(hDest, pbBuf, cbRead, &cbWritten, NULL) || cbWritten != cbRead)
+        {
+            bOK = false;
+            break;
+        }
+        c_install.m_qwCopied += cbRead;
+    }
+
+    CloseHandle(hDest);
+    CloseHandle(hSrc);
+    return bOK;
+}
+
+static bool CopyTree(const CHAR* szSrc, const CHAR* szDest, BYTE* pbBuf, DWORD cbBuf)
+{
+    if (!CreateDirectoryA(szDest, NULL) && GetLastError() != ERROR_ALREADY_EXISTS)
+        return false;
+
+    CHAR szPath [MAX_PATH], szTo [MAX_PATH];
+    sprintf(szPath, "%s\\*", szSrc);
+    WIN32_FIND_DATAA fd;
+    HANDLE hFind = FindFirstFileA(szPath, &fd);
+    if (hFind == INVALID_HANDLE_VALUE)
+        return true;   // empty directory
+
+    bool bOK = true;
+    do
+    {
+        if (fd.cFileName[0] == '.')
+            continue;
+        sprintf(szPath, "%s\\%s", szSrc, fd.cFileName);
+        sprintf(szTo, "%s\\%s", szDest, fd.cFileName);
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+            bOK = CopyTree(szPath, szTo, pbBuf, cbBuf);
+        else
+            bOK = CopyOneFile(szPath, szTo, pbBuf, cbBuf);
+    }
+    while (bOK && FindNextFileA(hFind, &fd));
+
+    FindClose(hFind);
+    return bOK;
+}
+
+// Removes a partly copied install.
+static void DeleteTree(const CHAR* szDir)
+{
+    CHAR szPath [MAX_PATH];
+    sprintf(szPath, "%s\\*", szDir);
+    WIN32_FIND_DATAA fd;
+    HANDLE hFind = FindFirstFileA(szPath, &fd);
+    if (hFind != INVALID_HANDLE_VALUE)
+    {
+        do
+        {
+            if (fd.cFileName[0] == '.')
+                continue;
+            sprintf(szPath, "%s\\%s", szDir, fd.cFileName);
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+                DeleteTree(szPath);
+            else
+                DeleteFileA(szPath);
+        }
+        while (FindNextFileA(hFind, &fd));
+        FindClose(hFind);
+    }
+    RemoveDirectoryA(szDir);
+}
+
+static DWORD WINAPI InstallThread(LPVOID)
+{
+    CHAR szDest [MAX_PATH];
+    sprintf(szDest, "E:\\Games\\%s", c_install.m_szFolder);
+
+    ULARGE_INTEGER qwAvail, qwTotal, qwFree;
+    if (GetDiskFreeSpaceExA("E:\\", &qwAvail, &qwTotal, &qwFree) && qwAvail.QuadPart < c_install.m_qwTotal)
+    {
+        c_install.m_bNoSpace = true;
+        return 0;
+    }
+
+    const DWORD cbBuf = 256 * 1024;
+    BYTE* pbBuf = new BYTE [cbBuf];
+    CreateDirectoryA("E:\\Games", NULL);
+    if (!CopyTree("CDROM0:", szDest, pbBuf, cbBuf))
+    {
+        c_install.m_bFailed = true;
+        DeleteTree(szDest);
+    }
+    delete [] pbBuf;
+    return 0;
+}
+
+// The installed copy of the disc in the tray, if there is one.
+static int FindInstalledDisc()
+{
+    if (c_nGameCount == 0 || c_rgGames[0].m_szName[0] == 0)
+        return -1;
+    for (int i = 1; i < c_nGameCount; i += 1)
+    {
+        if (c_rgGames[i].m_dwTitleID == c_rgGames[0].m_dwTitleID &&
+            c_rgGames[i].m_dwTimeDate == c_rgGames[0].m_dwTimeDate)
+            return i;
+    }
+    return -1;
+}
+
+int CGameCollection::IsDiscInstalled()
+{
+    return FindInstalledDisc() >= 0;
+}
+
+int CGameCollection::StartInstall()
+{
+    if (c_install.m_hThread != NULL || c_nGameCount == 0 || c_rgGames[0].m_szName[0] == 0 || FindInstalledDisc() >= 0)
+        return 0;
+
+    // The folder is the game's name, kept to characters FATX allows.
+    CHAR szName [43];
+    int cch = 0;
+    for (const WCHAR* pch = c_rgGames[0].m_szName; *pch != 0 && cch < 36; pch += 1)
+    {
+        WCHAR ch = *pch;
+        if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') ||
+            ch == ' ' || ch == '-' || ch == '_' || ch == '.' || ch == '(' || ch == ')' || ch == '!' || ch == '\'')
+            szName[cch++] = (CHAR)ch;
+    }
+    while (cch > 0 && (szName[cch - 1] == ' ' || szName[cch - 1] == '.'))
+        cch -= 1;
+    szName[cch] = 0;
+    if (cch == 0)
+        strcpy(szName, "Game");
+
+    // A different game (or version) may already have that name.
+    CHAR szPath [MAX_PATH];
+    strcpy(c_install.m_szFolder, szName);
+    for (int n = 2; n < 100; n += 1)
+    {
+        sprintf(szPath, "E:\\Games\\%s", c_install.m_szFolder);
+        if (GetFileAttributesA(szPath) == (DWORD)-1)
+            break;
+        sprintf(c_install.m_szFolder, "%s %d", szName, n);
+    }
+
+    c_install.m_qwTotal = 0;
+    c_install.m_qwCopied = 0;
+    c_install.m_bNoSpace = false;
+    c_install.m_bFailed = false;
+    if (!SizeTree("CDROM0:", &c_install.m_qwTotal))
+        return 0;
+
+    m_installProgress = 0.0f;
+    c_install.m_hThread = CreateThread(NULL, 0, InstallThread, NULL, 0, NULL);
+    return c_install.m_hThread != NULL;
+}
+
+CStrObject* CGameCollection::GetInstallStatus()
+{
+    TCHAR sz [64];
+    _stprintf(sz, _T("%u of %u MB"), (DWORD)(c_install.m_qwCopied >> 20), (DWORD)((c_install.m_qwTotal + 0xFFFFF) >> 20));
+    return new CStrObject(sz);
+}
+
+CStrObject* CGameCollection::GetInstallError()
+{
+    if (c_install.m_bNoSpace)
+        return new CStrObject(_T("There isn't enough free space on the hard disk to install this game."));
+    return new CStrObject(_T("The game couldn't be installed. Check the disc and try again."));
+}
+
+CStrObject* CGameCollection::GetInstallFolder()
+{
+    TCHAR sz [80];
+    _stprintf(sz, _T("E:\\Games\\%hs"), c_install.m_szFolder);
+    return new CStrObject(sz);
+}
+
+void CGameCollection::Advance(float nSeconds)
+{
+    CNode::Advance(nSeconds);
+
+    if (c_install.m_hThread == NULL)
+        return;
+
+    if (c_install.m_qwTotal != 0)
+    {
+        float progress = (float)((double)(LONGLONG)c_install.m_qwCopied / (double)(LONGLONG)c_install.m_qwTotal);
+        if (progress - m_installProgress >= 0.01f || (progress >= 1.0f && m_installProgress < 1.0f))
+        {
+            m_installProgress = progress;
+            CallFunction(this, _T("OnInstallProgress"));
+        }
+    }
+
+    if (WaitForSingleObject(c_install.m_hThread, 0) != WAIT_OBJECT_0)
+        return;
+
+    CloseHandle(c_install.m_hThread);
+    c_install.m_hThread = NULL;
+    Scan();
+    if (c_install.m_bNoSpace || c_install.m_bFailed)
+        CallFunction(this, _T("OnInstallError"));
+    else
+        CallFunction(this, _T("OnInstallComplete"));
 }

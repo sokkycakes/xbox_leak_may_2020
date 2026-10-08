@@ -5,7 +5,8 @@
 // Games_Title.xip).  The logic follows that dashboard's games.xap, with
 // xbcompat's GameCollection in place of its TitleCollection: the list's top
 // slot is the disc tray, then the games in E:\Games; A on a game opens its
-// details (Play, Saved Games, Game Info).
+// details (Play, Install for the disc, Saved Games, Game Info).  Installs
+// show their progress in the dashboard's progress panel.
 //
 
 var titleScroll;
@@ -17,6 +18,51 @@ var bToGamesFromDetails;
 
 DEF theGameCollection GameCollection
 {
+    function OnInstallProgress()
+    {
+        SetProgress(theGameCollection.installProgress);
+        UpdateProgressText(GetInstallText());
+    }
+
+    function OnInstallComplete()
+    {
+        SetProgress(1);
+        CloseMessage();
+        OnInstallEnd();
+        TellUser(GetGameName(0) + " " + theTranslator.Translate("is installed in") + " " + theGameCollection.GetInstallFolder() + ".", "");
+    }
+
+    function OnInstallError()
+    {
+        CloseMessage();
+        OnInstallEnd();
+        TellUser(theGameCollection.GetInstallError(), "");
+    }
+}
+
+function GetInstallText()
+{
+    return theTranslator.Translate("Installing") + " " + GetGameName(0) + "\r" + theGameCollection.GetInstallStatus();
+}
+
+function StartGameInstall()
+{
+    if (theGameCollection.StartInstall() == false)
+    {
+        TellUser(theGameCollection.GetInstallError(), "");
+        return;
+    }
+
+    ShowProgress(GetInstallText());
+}
+
+// The installed game joins the list; the disc stays selected in slot 0.
+function OnInstallEnd()
+{
+    GetTitleList();
+    UpdateTitleList();
+    if (theTitleMenu.children[0].children.length() > 0)
+        SetupTitle();
 }
 
 function GetTitleList()
@@ -354,6 +400,9 @@ DEF theGamesMenu Level
 var bTitleInfoView;
 var nCurTitleMenuItem;
 var nTitleMenuItems;
+var nItemInstall;
+var nItemSaves;
+var nItemInfo;
 
 function ShowTitleMenuView()
 {
@@ -382,7 +431,7 @@ function ShowTitleInfoView()
 {
     var c = theTitleMenu.children[0].children[0];
 
-    if (nCurTitleMenuItem == 1)
+    if (nCurTitleMenuItem == nItemSaves)
     {
         c.PanelTitleText.text = theTranslator.Translate("SAVED GAMES");
         c.CustomPanelText.text = theGameCollection.GetSavedGames(curTitle);
@@ -437,7 +486,14 @@ function UpdateTitleMenu()
     {
         str = theTranslator.Translate("Start the game.");
     }
-    else if (nCurTitleMenuItem == 1)
+    else if (nCurTitleMenuItem == nItemInstall)
+    {
+        if (theGameCollection.IsDiscInstalled())
+            str = theTranslator.Translate("This game is already on the hard disk.");
+        else
+            str = theTranslator.Translate("Copy the game to the hard disk.");
+    }
+    else if (nCurTitleMenuItem == nItemSaves)
     {
         var nSaves = theGameCollection.GetSavedGameCount(curTitle);
         if (nSaves == 1)
@@ -458,15 +514,32 @@ function SetupTitle()
     var c = theTitleMenu.children[0].children[0];
     var b = c.theMenuButtons;
 
-    b.children[0].children[1].children[0].geometry.text = theTranslator.Translate("Play Game");
-    b.children[1].children[1].children[0].geometry.text = theTranslator.Translate("Saved Games");
-    b.children[2].children[1].children[0].geometry.text = theTranslator.Translate("Game Info");
-    nTitleMenuItems = 3;
+    // Play Game, Install Game (the disc only), Saved Games, Game Info
+    var n = 0;
+    b.children[n].children[1].children[0].geometry.text = theTranslator.Translate("Play Game");
+    n = n + 1;
+    nItemInstall = -1;
+    if (curTitle == 0)
+    {
+        nItemInstall = n;
+        if (theGameCollection.IsDiscInstalled())
+            b.children[n].children[1].children[0].geometry.text = theTranslator.Translate("Installed");
+        else
+            b.children[n].children[1].children[0].geometry.text = theTranslator.Translate("Install Game");
+        n = n + 1;
+    }
+    nItemSaves = n;
+    b.children[n].children[1].children[0].geometry.text = theTranslator.Translate("Saved Games");
+    n = n + 1;
+    nItemInfo = n;
+    b.children[n].children[1].children[0].geometry.text = theTranslator.Translate("Game Info");
+    n = n + 1;
+    nTitleMenuItems = n;
 
     c.GM_L2_menubutton_01a.visible = true;
     c.GM_L2_menubutton_02.visible = true;
     c.GM_L2_menubutton_03.visible = true;
-    c.GM_L2_menubutton_04.visible = false;
+    c.GM_L2_menubutton_04.visible = (n > 3);
     c.GM_L2_menubutton_05.visible = false;
 
     // the game's title image on the pod, or the Xbox logo
@@ -600,6 +673,19 @@ DEF theTitleMenu Level
                 theGamesSubMenuIn.Play();
                 EnableInput(false);
                 theGameCollection.LaunchGame(curTitle);
+            }
+            else if (nCurTitleMenuItem == nItemInstall)
+            {
+                if (theGameCollection.IsDiscInstalled())
+                {
+                    PlaySoundError();
+                    TellUser(theTranslator.Translate("This game is already on the hard disk."), "");
+                }
+                else
+                {
+                    PlaySoundA();
+                    AskQuestion(theTranslator.Translate("Install") + " " + GetGameName(0) + " " + theTranslator.Translate("to the hard disk?"), "theGamesInline.children[0].StartGameInstall()", "", 0);
+                }
             }
             else
             {
