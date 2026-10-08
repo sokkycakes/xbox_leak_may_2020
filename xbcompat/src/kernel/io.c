@@ -5,6 +5,11 @@
  *   \??\X:                       symbolic link (created by the kernel or XAPI)
  *   \Device\CdRom0               the directory holding the XBE (the game disc)
  *   \Device\Harddisk0\PartitionN <hdd root>/partitionN
+ *   \Device\GameCard0            a Kazeta game card: --card DIR, or else the
+ *                                first SD card or USB drive mounted under
+ *                                /media or /run/media with a .kzi or .kzp cart
+ *                                at its top (looked up on every open, so cards
+ *                                can come and go)
  * FATX and the DVD file system are case-insensitive, so each path component
  * is matched case-insensitively against the host directory.
  */
@@ -39,6 +44,69 @@ typedef struct xfile {
 
 static char cdrom_dir[PATH_MAX];
 static char hdd_dir[PATH_MAX];
+static char card_dir[PATH_MAX];
+
+void fs_set_card(const char *dir)
+{
+    snprintf(card_dir, sizeof(card_dir), "%s", dir);
+}
+
+static bool has_cart(const char *dir)
+{
+    DIR *d = opendir(dir);
+    if (!d) return false;
+    struct dirent *e;
+    bool found = false;
+    while (!found && (e = readdir(d))) {
+        size_t n = strlen(e->d_name);
+        found = n > 4 && (!strcasecmp(e->d_name + n - 4, ".kzi") || !strcasecmp(e->d_name + n - 4, ".kzp"));
+    }
+    closedir(d);
+    return found;
+}
+
+/* The mounted game card, the way Kazeta finds one (find /media -maxdepth 2
+   -name '*.kzi'); desktop automounters add a /run/media/<user> level. */
+static bool find_card(char *out, size_t outlen)
+{
+    if (card_dir[0]) {
+        snprintf(out, outlen, "%s", card_dir);
+        return has_cart(card_dir);
+    }
+    static const char *roots[] = { "/media", "/run/media" };
+    for (size_t r = 0; r < sizeof(roots) / sizeof(roots[0]); r++) {
+        DIR *d = opendir(roots[r]);
+        if (!d) continue;
+        struct dirent *e;
+        bool found = false;
+        while (!found && (e = readdir(d))) {
+            if (e->d_name[0] == '.') continue;
+            char p[PATH_MAX];
+            snprintf(p, sizeof(p), "%s/%s", roots[r], e->d_name);
+            if (has_cart(p)) {
+                snprintf(out, outlen, "%s", p);
+                found = true;
+                break;
+            }
+            DIR *d2 = opendir(p);
+            if (!d2) continue;
+            struct dirent *e2;
+            while (!found && (e2 = readdir(d2))) {
+                if (e2->d_name[0] == '.') continue;
+                char p2[PATH_MAX];
+                snprintf(p2, sizeof(p2), "%s/%s", p, e2->d_name);
+                if (has_cart(p2)) {
+                    snprintf(out, outlen, "%s", p2);
+                    found = true;
+                }
+            }
+            closedir(d2);
+        }
+        closedir(d);
+        if (found) return true;
+    }
+    return false;
+}
 
 char *symlink_lookup(const char *name);
 
@@ -134,6 +202,9 @@ static NTSTATUS translate_path(const char *xpath, char *host, size_t hostlen, in
     if (!strncasecmp(path, "\\Device\\CdRom0", 14)) {
         snprintf(base, sizeof(base), "%s", cdrom_dir);
         rest = path + 14;
+    } else if (!strncasecmp(path, "\\Device\\GameCard0", 17)) {
+        if (!find_card(base, sizeof(base))) return STATUS_OBJECT_PATH_NOT_FOUND;
+        rest = path + 17;
     } else if (!strncasecmp(path, "\\Device\\Harddisk0\\Partition", 27)) {
         int part = atoi(path + 27);
         if (part == 0) {

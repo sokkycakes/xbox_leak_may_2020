@@ -111,6 +111,8 @@ static void usage(void)
             "  --frames N   exit after presenting N frames\n"
             "  --log FILE   write the log to FILE instead of stderr\n"
             "  --dvd DIR    directory backing the DVD drive (default: the XBE's directory)\n"
+            "  --card DIR   the game card (Kazeta cart media); default: the first card\n"
+            "               with a .kzi or .kzp under /media or /run/media\n"
             "  --d-path P, --xbe-path P, --launch-data FILE\n"
             "               D: target, image path and launch page of a title started by\n"
             "               XLaunchNewImage (set when xbcompat relaunches itself)\n");
@@ -127,7 +129,8 @@ int main(int argc, char **argv)
         { "screenshot", required_argument, 0, 's' }, { "shot-frame", required_argument, 0, 'n' },
         { "frames", required_argument, 0, 'f' }, { "dvd", required_argument, 0, 'v' },
         { "d-path", required_argument, 0, 'D' }, { "launch-data", required_argument, 0, 'L' },
-        { "xbe-path", required_argument, 0, 'X' }, { 0, 0, 0, 0 },
+        { "xbe-path", required_argument, 0, 'X' }, { "card", required_argument, 0, 'c' },
+        { 0, 0, 0, 0 },
     };
     const char *hle = NULL, *hdd = NULL, *d_path = NULL, *launch_data = NULL, *xbe_rel = NULL;
     int c;
@@ -144,6 +147,7 @@ int main(int argc, char **argv)
         case 'D': d_path = optarg; break;
         case 'L': launch_data = optarg; break;
         case 'X': xbe_rel = optarg; break;
+        case 'c': fs_set_card(optarg); break;
         default: usage();
         }
     }

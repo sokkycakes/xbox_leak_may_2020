@@ -113,6 +113,7 @@ void object_release(xobject *obj);
 void fs_init(const char *xbe_path, const char *hdd_root, const char *dvd_root);
 NTSTATUS fs_host_path(const char *xpath, char *host, size_t hostlen);
 const char *fs_hdd_root(void);
+void fs_set_card(const char *dir);
 
 /* ---- title launches (XLaunchNewImage) --------------------------------- */
 

@@ -1,11 +1,15 @@
-// GameCollection: the dashboard's Games area.  Entry 0 is the disc tray (the
-// game disc in the drive, if any); after it come the titles installed on the
-// hard disk as E:\Games\<folder>\default.xbe, named from each XBE's
-// certificate.  A hard disk game is launched by pointing D: at its folder.
+// GameCollection: the dashboard's Games area.  The list starts with the
+// media slots: the game disc in the tray and the carts on the game card (a
+// Kazeta-style SD card or USB drive: a .kzi info file per cart at the top of
+// the card, which xbcompat mounts as CARD0:), or one empty slot when there
+// is neither.  After them come the titles installed on the hard disk as
+// E:\Games\<folder>\default.xbe, named from each XBE's certificate.  A game
+// is launched by pointing D: at its directory.
 // It also supplies the details screen: the XBE's title image, its
-// certificate details and the title's saved games, and installs the disc
-// to E:\Games on a background thread (OnInstallProgress, OnInstallComplete
-// and OnInstallError are called on the node while it runs).  Not part of Microsoft's
+// certificate details and the title's saved games, and installs a disc or
+// cart to E:\Games on a background thread (OnInstallProgress,
+// OnInstallComplete and OnInstallError are called on the node while it
+// runs; OnMediaChanged when a card comes or goes).  Not part of Microsoft's
 // dashboard; added by xbcompat's dashbuild.
 
 #include "std.h"
@@ -15,10 +19,19 @@
 
 #define MAX_GAMES 256
 
+enum { KIND_EMPTY, KIND_DISC, KIND_CARD, KIND_HDD };
+
 struct GAMEINFO
 {
-    CHAR m_szFolder[64];        // empty for the disc
-    WCHAR m_szName[41];         // empty for an empty tray
+    int m_nKind;
+    bool m_bXbox;               // has an XBE the dashboard can launch
+    CHAR m_szDir[160];          // its directory: CDROM0:, CARD0:[\dir] or E:\Games\<folder>
+    CHAR m_szXbe[64];           // the XBE in m_szDir
+    CHAR m_szFolder[64];        // E:\Games\<m_szFolder> (installed games)
+    CHAR m_szCart[64];          // the cart's .kzi or .kzp file on the card
+    CHAR m_szRuntime[32];       // the cart's Kazeta runtime
+    CHAR m_szId[64];            // the cart's Kazeta save Id
+    WCHAR m_szName[41];
     DWORD m_dwTitleID;
     DWORD m_dwTimeDate;         // XBE build time (seconds since 1970)
     DWORD m_dwRegion;
@@ -32,6 +45,8 @@ extern const TCHAR* g_szSelTitleImage;  // MaxMat.cpp: the "SelectedIcon" materi
 
 static GAMEINFO* c_rgGames = NULL;
 static int c_nGameCount = 0;
+static int c_nMediaCount = 0;   // the disc and card slots at the top
+static CHAR c_szCardSig [512];  // the card's carts at the last Scan
 
 static const OBJECT_STRING c_eDrive = CONSTANT_OBJECT_STRING("\\??\\E:");
 static const OBJECT_STRING c_ePath  = CONSTANT_OBJECT_STRING("\\Device\\Harddisk0\\Partition1");
@@ -45,7 +60,10 @@ public:
 
     int Scan();
     int GetGameCount();
-    int HasDisc();
+    int GetMediaCount();
+    int GetGameKind(int nGame);
+    int IsPlayable(int nGame);
+    CStrObject* GetNotPlayableReason(int nGame);
     CStrObject* GetGameName(int nGame);
     CStrObject* GetGameFolder(int nGame);
     CStrObject* GetGameTitleID(int nGame);
@@ -55,8 +73,8 @@ public:
     int SelectGameImage(int nGame);
     void LaunchGame(int nGame);
 
-    int IsDiscInstalled();
-    int StartInstall();
+    int IsInstalled(int nGame);
+    int StartInstall(int nGame);
     CStrObject* GetInstallStatus();
     CStrObject* GetInstallError();
     CStrObject* GetInstallFolder();
@@ -77,7 +95,10 @@ END_NODE_PROPS()
 START_NODE_FUN(CGameCollection, CNode)
     NODE_FUN_IV(Scan)
     NODE_FUN_IV(GetGameCount)
-    NODE_FUN_IV(HasDisc)
+    NODE_FUN_IV(GetMediaCount)
+    NODE_FUN_II(GetGameKind)
+    NODE_FUN_II(IsPlayable)
+    NODE_FUN_SI(GetNotPlayableReason)
     NODE_FUN_SI(GetGameName)
     NODE_FUN_SI(GetGameFolder)
     NODE_FUN_SI(GetGameTitleID)
@@ -86,8 +107,8 @@ START_NODE_FUN(CGameCollection, CNode)
     NODE_FUN_II(GetSavedGameCount)
     NODE_FUN_II(SelectGameImage)
     NODE_FUN_VI(LaunchGame)
-    NODE_FUN_IV(IsDiscInstalled)
-    NODE_FUN_IV(StartInstall)
+    NODE_FUN_II(IsInstalled)
+    NODE_FUN_II(StartInstall)
     NODE_FUN_SV(GetInstallStatus)
     NODE_FUN_SV(GetInstallError)
     NODE_FUN_SV(GetInstallFolder)
@@ -167,38 +188,213 @@ static int __cdecl CompareGames(const void* p1, const void* p2)
     return lstrcmpiW(((const GAMEINFO*)p1)->m_szName, ((const GAMEINFO*)p2)->m_szName);
 }
 
+static bool EndsWith(const CHAR* sz, const CHAR* szEnd)
+{
+    int cch = strlen(sz), cchEnd = strlen(szEnd);
+    return cch >= cchEnd && _stricmp(sz + cch - cchEnd, szEnd) == 0;
+}
+
+// The carts' file names on the game card, to notice it changing.
+static void GetCardSignature(CHAR* szSig, int cchSig)
+{
+    szSig[0] = 0;
+    WIN32_FIND_DATAA fd;
+    HANDLE hFind = FindFirstFileA("CARD0:\\*", &fd);
+    if (hFind == INVALID_HANDLE_VALUE)
+        return;
+    int cch = 0;
+    do
+    {
+        int cchName = strlen(fd.cFileName);
+        if ((EndsWith(fd.cFileName, ".kzi") || EndsWith(fd.cFileName, ".kzp")) && cch + cchName + 2 < cchSig)
+        {
+            strcpy(szSig + cch, fd.cFileName);
+            cch += cchName;
+            szSig[cch++] = '|';
+            szSig[cch] = 0;
+        }
+    }
+    while (FindNextFileA(hFind, &fd));
+    FindClose(hFind);
+}
+
+// A Kazeta cart info file: Name, Id, Exec, Runtime (key=value lines, UTF-8).
+static void ReadCart(const CHAR* szKzi, GAMEINFO* pGame)
+{
+    CHAR szPath [MAX_PATH];
+    sprintf(szPath, "CARD0:\\%s", szKzi);
+    CHAR rgch [2048];
+    DWORD cb = 0;
+    HANDLE hFile = CreateFileA(szPath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (hFile == INVALID_HANDLE_VALUE)
+        return;
+    if (!ReadFile(hFile, rgch, sizeof (rgch) - 1, &cb, NULL))
+        cb = 0;
+    CloseHandle(hFile);
+    rgch[cb] = 0;
+
+    CHAR szExec [128];
+    szExec[0] = 0;
+    for (CHAR* pchLine = rgch; *pchLine != 0; )
+    {
+        CHAR* pchEnd = pchLine;
+        while (*pchEnd != 0 && *pchEnd != '\n' && *pchEnd != '\r')
+            pchEnd += 1;
+        CHAR chEnd = *pchEnd;
+        *pchEnd = 0;
+
+        CHAR* pchValue = strchr(pchLine, '=');
+        if (pchValue != NULL)
+        {
+            *pchValue++ = 0;
+            // values may be quoted
+            int cch = strlen(pchValue);
+            if (cch >= 2 && pchValue[0] == '"' && pchValue[cch - 1] == '"')
+                pchValue[cch - 1] = 0, pchValue += 1;
+
+            if (_stricmp(pchLine, "Name") == 0)
+                MultiByteToWideChar(CP_UTF8, 0, pchValue, -1, pGame->m_szName, 40);
+            else if (_stricmp(pchLine, "Id") == 0)
+                lstrcpynA(pGame->m_szId, pchValue, sizeof (pGame->m_szId));
+            else if (_stricmp(pchLine, "Runtime") == 0)
+                lstrcpynA(pGame->m_szRuntime, pchValue, sizeof (pGame->m_szRuntime));
+            else if (_stricmp(pchLine, "Exec") == 0)
+                lstrcpynA(szExec, pchValue, sizeof (szExec));
+        }
+
+        pchLine = pchEnd;
+        if (chEnd != 0)
+            pchLine += 1;
+    }
+
+    // An Xbox cart (runtime "xbox", or an XBE to run): D: is the XBE's directory.
+    if (_stricmp(pGame->m_szRuntime, "xbox") == 0 || EndsWith(szExec, ".xbe"))
+    {
+        for (CHAR* pch = szExec; *pch != 0; pch += 1)
+        {
+            if (*pch == '/')
+                *pch = '\\';
+        }
+        CHAR* pchSlash = strrchr(szExec, '\\');
+        if (pchSlash != NULL)
+        {
+            *pchSlash = 0;
+            sprintf(pGame->m_szDir, "CARD0:\\%s", szExec);
+            lstrcpynA(pGame->m_szXbe, pchSlash + 1, sizeof (pGame->m_szXbe));
+        }
+        else
+        {
+            strcpy(pGame->m_szDir, "CARD0:");
+            lstrcpynA(pGame->m_szXbe, szExec[0] != 0 ? szExec : "default.xbe", sizeof (pGame->m_szXbe));
+        }
+
+        WCHAR szName [41];
+        lstrcpyW(szName, pGame->m_szName);
+        sprintf(szPath, "%s\\%s", pGame->m_szDir, pGame->m_szXbe);
+        pGame->m_bXbox = ReadXbeTitle(szPath, pGame);
+        if (szName[0] != 0)
+            lstrcpyW(pGame->m_szName, szName);   // the cart's own name wins
+    }
+}
+
 int CGameCollection::Scan()
 {
     if (c_rgGames == NULL)
         c_rgGames = new GAMEINFO [MAX_GAMES];
+    c_nGameCount = 0;
 
-    // Entry 0: the disc tray.  An empty tray (or a disc that is not a game)
-    // leaves the name empty.
-    ZeroMemory(&c_rgGames[0], sizeof (GAMEINFO));
-    if (!ReadXbeTitle("CDROM0:\\default.xbe", &c_rgGames[0]))
-        ZeroMemory(&c_rgGames[0], sizeof (GAMEINFO));
-    else if (c_rgGames[0].m_szName[0] == 0)
-        lstrcpyW(c_rgGames[0].m_szName, L"Game Disc");
-    c_nGameCount = 1;
+    // The game disc in the tray.
+    GAMEINFO* pGame = &c_rgGames[0];
+    ZeroMemory(pGame, sizeof (GAMEINFO));
+    if (ReadXbeTitle("CDROM0:\\default.xbe", pGame))
+    {
+        pGame->m_nKind = KIND_DISC;
+        pGame->m_bXbox = true;
+        strcpy(pGame->m_szDir, "CDROM0:");
+        strcpy(pGame->m_szXbe, "default.xbe");
+        if (pGame->m_szName[0] == 0)
+            lstrcpyW(pGame->m_szName, L"Game Disc");
+        c_nGameCount += 1;
+    }
 
+    // The carts on the game card, by name.
+    int nFirstCart = c_nGameCount;
+    GetCardSignature(c_szCardSig, sizeof (c_szCardSig));
     WIN32_FIND_DATAA fd;
-    HANDLE hFind = FindFirstFileA("E:\\Games\\*", &fd);
+    HANDLE hFind = FindFirstFileA("CARD0:\\*", &fd);
+    if (hFind != INVALID_HANDLE_VALUE)
+    {
+        do
+        {
+            bool bKzi = EndsWith(fd.cFileName, ".kzi");
+            if ((!bKzi && !EndsWith(fd.cFileName, ".kzp")) || strlen(fd.cFileName) >= sizeof (pGame->m_szCart))
+                continue;
+
+            pGame = &c_rgGames[c_nGameCount];
+            ZeroMemory(pGame, sizeof (GAMEINFO));
+            pGame->m_nKind = KIND_CARD;
+            strcpy(pGame->m_szCart, fd.cFileName);
+            if (bKzi)
+                ReadCart(fd.cFileName, pGame);
+            else
+                strcpy(pGame->m_szRuntime, "packaged cart (.kzp)");
+            if (pGame->m_szName[0] == 0)
+            {
+                int i = 0;
+                for (; i < 40 && fd.cFileName[i] != 0 && fd.cFileName[i] != '.'; i += 1)
+                    pGame->m_szName[i] = fd.cFileName[i];
+                pGame->m_szName[i] = 0;
+            }
+            c_nGameCount += 1;
+        }
+        while (c_nGameCount < 16 && FindNextFileA(hFind, &fd));
+        FindClose(hFind);
+        qsort(c_rgGames + nFirstCart, c_nGameCount - nFirstCart, sizeof (GAMEINFO), CompareGames);
+    }
+
+    // Neither: one empty slot.
+    if (c_nGameCount == 0)
+    {
+        ZeroMemory(&c_rgGames[0], sizeof (GAMEINFO));
+        c_nGameCount = 1;
+    }
+    c_nMediaCount = c_nGameCount;
+
+    // The games on the hard disk: default.xbe, or else the folder's one XBE.
+    hFind = FindFirstFileA("E:\\Games\\*", &fd);
     if (hFind == INVALID_HANDLE_VALUE)
         return c_nGameCount;
 
     do
     {
         if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == '.' ||
-            strlen(fd.cFileName) >= sizeof (c_rgGames[0].m_szFolder))
+            strlen(fd.cFileName) >= sizeof (pGame->m_szFolder))
             continue;
 
-        GAMEINFO* pGame = &c_rgGames[c_nGameCount];
+        pGame = &c_rgGames[c_nGameCount];
+        ZeroMemory(pGame, sizeof (GAMEINFO));
+        pGame->m_nKind = KIND_HDD;
+        pGame->m_bXbox = true;
+        strcpy(pGame->m_szFolder, fd.cFileName);
+        sprintf(pGame->m_szDir, "E:\\Games\\%s", fd.cFileName);
+        strcpy(pGame->m_szXbe, "default.xbe");
+
         CHAR szPath [MAX_PATH];
-        sprintf(szPath, "E:\\Games\\%s\\default.xbe", fd.cFileName);
+        sprintf(szPath, "%s\\default.xbe", pGame->m_szDir);
+        if (GetFileAttributesA(szPath) == (DWORD)-1)
+        {
+            WIN32_FIND_DATAA fdXbe;
+            sprintf(szPath, "%s\\*.xbe", pGame->m_szDir);
+            HANDLE hXbe = FindFirstFileA(szPath, &fdXbe);
+            if (hXbe == INVALID_HANDLE_VALUE)
+                continue;
+            lstrcpynA(pGame->m_szXbe, fdXbe.cFileName, sizeof (pGame->m_szXbe));
+            FindClose(hXbe);
+        }
+        sprintf(szPath, "%s\\%s", pGame->m_szDir, pGame->m_szXbe);
         if (!ReadXbeTitle(szPath, pGame))
             continue;
 
-        strcpy(pGame->m_szFolder, fd.cFileName);
         if (pGame->m_szName[0] == 0)
         {
             for (int i = 0; i < 40 && fd.cFileName[i]; i += 1)
@@ -209,7 +405,7 @@ int CGameCollection::Scan()
     while (c_nGameCount < MAX_GAMES && FindNextFileA(hFind, &fd));
 
     FindClose(hFind);
-    qsort(c_rgGames + 1, c_nGameCount - 1, sizeof (GAMEINFO), CompareGames);
+    qsort(c_rgGames + c_nMediaCount, c_nGameCount - c_nMediaCount, sizeof (GAMEINFO), CompareGames);
     return c_nGameCount;
 }
 
@@ -218,9 +414,36 @@ int CGameCollection::GetGameCount()
     return c_nGameCount;
 }
 
-int CGameCollection::HasDisc()
+int CGameCollection::GetMediaCount()
 {
-    return c_nGameCount > 0 && c_rgGames[0].m_szName[0] != 0;
+    return c_nMediaCount;
+}
+
+int CGameCollection::GetGameKind(int nGame)
+{
+    if (nGame < 0 || nGame >= c_nGameCount)
+        return KIND_EMPTY;
+    return c_rgGames[nGame].m_nKind;
+}
+
+int CGameCollection::IsPlayable(int nGame)
+{
+    return nGame >= 0 && nGame < c_nGameCount && c_rgGames[nGame].m_bXbox;
+}
+
+CStrObject* CGameCollection::GetNotPlayableReason(int nGame)
+{
+    if (nGame < 0 || nGame >= c_nGameCount || c_rgGames[nGame].m_nKind != KIND_CARD)
+        return new CStrObject;
+    const GAMEINFO* pGame = &c_rgGames[nGame];
+    TCHAR sz [256];
+    if (_stricmp(pGame->m_szRuntime, "xbox") == 0)
+        _stprintf(sz, _T("The cart's Xbox game (%hs) couldn't be read."), pGame->m_szXbe);
+    else if (EndsWith(pGame->m_szCart, ".kzp"))
+        _stprintf(sz, _T("Packaged carts (.kzp) are started by Sion's cart launcher, not the dashboard."));
+    else
+        _stprintf(sz, _T("This cart uses the %hs runtime. Sion's cart launcher starts it, not the dashboard."), pGame->m_szRuntime[0] != 0 ? pGame->m_szRuntime : "none");
+    return new CStrObject(sz);
 }
 
 CStrObject* CGameCollection::GetGameName(int nGame)
@@ -251,10 +474,7 @@ CStrObject* CGameCollection::GetGameTitleID(int nGame)
 // The XBE's path, for reading it again.
 static void GetXbePath(int nGame, CHAR* szPath)
 {
-    if (nGame == 0)
-        strcpy(szPath, "CDROM0:\\default.xbe");
-    else
-        sprintf(szPath, "E:\\Games\\%s\\default.xbe", c_rgGames[nGame].m_szFolder);
+    sprintf(szPath, "%s\\%s", c_rgGames[nGame].m_szDir, c_rgGames[nGame].m_szXbe);
 }
 
 static const TCHAR* GetPublisher(DWORD dwTitleID)
@@ -299,6 +519,17 @@ CStrObject* CGameCollection::GetGameInfo(int nGame)
     TCHAR sz [1024];
     TCHAR* pch = sz;
 
+    if (pGame->m_nKind == KIND_CARD)
+    {
+        pch += _stprintf(pch, _T("Game card: %hs\n"), pGame->m_szCart);
+        if (pGame->m_szRuntime[0] != 0)
+            pch += _stprintf(pch, _T("Runtime: %hs\n"), pGame->m_szRuntime);
+        if (pGame->m_szId[0] != 0)
+            pch += _stprintf(pch, _T("Cart Id: %hs\n"), pGame->m_szId);
+        if (!pGame->m_bXbox)
+            return new CStrObject(sz);
+    }
+
     pch += _stprintf(pch, _T("Title ID: %08X\n"), pGame->m_dwTitleID);
     const TCHAR* szPub = GetPublisher(pGame->m_dwTitleID);
     if (szPub != NULL)
@@ -324,9 +555,9 @@ CStrObject* CGameCollection::GetGameInfo(int nGame)
     }
     pch += _stprintf(pch, _T("\n"));
 
-    if (nGame == 0)
+    if (pGame->m_nKind == KIND_DISC)
         pch += _stprintf(pch, _T("Disc %u in the tray\n"), pGame->m_dwDiscNumber + 1);
-    else
+    else if (pGame->m_nKind == KIND_HDD)
         pch += _stprintf(pch, _T("Installed: E:\\Games\\%hs\n"), pGame->m_szFolder);
 
     int nYear, nMonth, nDay;
@@ -369,7 +600,7 @@ static int EnumSavedGames(DWORD dwTitleID, void (*pfn)(const CHAR* szDir, const 
 
 int CGameCollection::GetSavedGameCount(int nGame)
 {
-    if (nGame < 0 || nGame >= c_nGameCount || c_rgGames[nGame].m_szName[0] == 0)
+    if (nGame < 0 || nGame >= c_nGameCount || !c_rgGames[nGame].m_bXbox)
         return 0;
     return EnumSavedGames(c_rgGames[nGame].m_dwTitleID, NULL, NULL);
 }
@@ -491,37 +722,40 @@ int CGameCollection::SelectGameImage(int nGame)
 
 void CGameCollection::LaunchGame(int nGame)
 {
-    if (nGame < 0 || nGame >= c_nGameCount || c_rgGames[nGame].m_szName[0] == 0)
+    if (nGame < 0 || nGame >= c_nGameCount || !c_rgGames[nGame].m_bXbox)
         return;
 
-    XAppGetD3DDev()->PersistDisplay();
-
-    // The disc: D: is already the DVD drive.
-    if (nGame == 0)
-    {
-        XLaunchNewImage("D:\\default.xbe", NULL);
-        return;
-    }
-
-    // XLaunchNewImage keeps D:'s mapping across the reboot.
+    // D: is the game's directory (XLaunchNewImage keeps D:'s mapping across
+    // the reboot): CDROM0:, CARD0: and E: as device paths.
+    const GAMEINFO* pGame = &c_rgGames[nGame];
     CHAR szTarget [MAX_PATH];
-    sprintf(szTarget, "\\Device\\Harddisk0\\Partition1\\Games\\%s", c_rgGames[nGame].m_szFolder);
+    if (pGame->m_nKind == KIND_DISC)
+        strcpy(szTarget, "\\Device\\CdRom0");
+    else if (pGame->m_nKind == KIND_CARD)
+        sprintf(szTarget, "\\Device\\GameCard0%s", pGame->m_szDir + 6);
+    else
+        sprintf(szTarget, "\\Device\\Harddisk0\\Partition1\\Games\\%s", pGame->m_szFolder);
     OBJECT_STRING dDrive = CONSTANT_OBJECT_STRING("\\??\\D:");
     OBJECT_STRING target;
     RtlInitObjectString(&target, szTarget);
     IoDeleteSymbolicLink(&dDrive);
     IoCreateSymbolicLink(&dDrive, &target);
 
-    XLaunchNewImage("D:\\default.xbe", NULL);
+    CHAR szImage [MAX_PATH];
+    sprintf(szImage, "D:\\%s", pGame->m_szXbe);
+    XAppGetD3DDev()->PersistDisplay();
+    XLaunchNewImage(szImage, NULL);
 }
 
 ////////////////////////////////////////////////////////////////////////////
-// Installing the disc: the whole disc is copied to E:\Games\<title>, which
+// Installing a disc or cart: the game's directory (the whole disc, or the
+// cart's XBE directory on the card) is copied to E:\Games\<title>, which
 // GameCollection then lists and launches like any other installed game.
 
 struct INSTALL
 {
     HANDLE m_hThread;
+    CHAR m_szSource[160];
     CHAR m_szFolder[64];        // E:\Games\<m_szFolder>
     ULONGLONG m_qwTotal;
     volatile ULONGLONG m_qwCopied;
@@ -668,7 +902,7 @@ static DWORD WINAPI InstallThread(LPVOID)
     const DWORD cbBuf = 256 * 1024;
     BYTE* pbBuf = new BYTE [cbBuf];
     CreateDirectoryA("E:\\Games", NULL);
-    if (!CopyTree("CDROM0:", szDest, pbBuf, cbBuf))
+    if (!CopyTree(c_install.m_szSource, szDest, pbBuf, cbBuf))
     {
         c_install.m_bFailed = true;
         DeleteTree(szDest);
@@ -677,34 +911,35 @@ static DWORD WINAPI InstallThread(LPVOID)
     return 0;
 }
 
-// The installed copy of the disc in the tray, if there is one.
-static int FindInstalledDisc()
+// The installed copy of a disc or cart game, if there is one.
+static int FindInstalled(int nGame)
 {
-    if (c_nGameCount == 0 || c_rgGames[0].m_szName[0] == 0)
+    if (nGame < 0 || nGame >= c_nMediaCount || !c_rgGames[nGame].m_bXbox)
         return -1;
-    for (int i = 1; i < c_nGameCount; i += 1)
+    for (int i = c_nMediaCount; i < c_nGameCount; i += 1)
     {
-        if (c_rgGames[i].m_dwTitleID == c_rgGames[0].m_dwTitleID &&
-            c_rgGames[i].m_dwTimeDate == c_rgGames[0].m_dwTimeDate)
+        if (c_rgGames[i].m_dwTitleID == c_rgGames[nGame].m_dwTitleID &&
+            c_rgGames[i].m_dwTimeDate == c_rgGames[nGame].m_dwTimeDate)
             return i;
     }
     return -1;
 }
 
-int CGameCollection::IsDiscInstalled()
+int CGameCollection::IsInstalled(int nGame)
 {
-    return FindInstalledDisc() >= 0;
+    return FindInstalled(nGame) >= 0;
 }
 
-int CGameCollection::StartInstall()
+int CGameCollection::StartInstall(int nGame)
 {
-    if (c_install.m_hThread != NULL || c_nGameCount == 0 || c_rgGames[0].m_szName[0] == 0 || FindInstalledDisc() >= 0)
+    if (c_install.m_hThread != NULL || nGame < 0 || nGame >= c_nMediaCount || !c_rgGames[nGame].m_bXbox ||
+        FindInstalled(nGame) >= 0)
         return 0;
 
     // The folder is the game's name, kept to characters FATX allows.
     CHAR szName [43];
     int cch = 0;
-    for (const WCHAR* pch = c_rgGames[0].m_szName; *pch != 0 && cch < 36; pch += 1)
+    for (const WCHAR* pch = c_rgGames[nGame].m_szName; *pch != 0 && cch < 36; pch += 1)
     {
         WCHAR ch = *pch;
         if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') ||
@@ -732,7 +967,8 @@ int CGameCollection::StartInstall()
     c_install.m_qwCopied = 0;
     c_install.m_bNoSpace = false;
     c_install.m_bFailed = false;
-    if (!SizeTree("CDROM0:", &c_install.m_qwTotal))
+    strcpy(c_install.m_szSource, c_rgGames[nGame].m_szDir);
+    if (!SizeTree(c_install.m_szSource, &c_install.m_qwTotal))
         return 0;
 
     m_installProgress = 0.0f;
@@ -751,7 +987,7 @@ CStrObject* CGameCollection::GetInstallError()
 {
     if (c_install.m_bNoSpace)
         return new CStrObject(_T("There isn't enough free space on the hard disk to install this game."));
-    return new CStrObject(_T("The game couldn't be installed. Check the disc and try again."));
+    return new CStrObject(_T("The game couldn't be installed. Check the disc or card and try again."));
 }
 
 CStrObject* CGameCollection::GetInstallFolder()
@@ -765,8 +1001,23 @@ void CGameCollection::Advance(float nSeconds)
 {
     CNode::Advance(nSeconds);
 
+    // Cards come and go: look for a change once a second.
     if (c_install.m_hThread == NULL)
+    {
+        static XTIME timeLastPoll = 0.0f;
+        if (c_rgGames == NULL || XAppGetNow() - timeLastPoll < 1.0f)
+            return;
+        timeLastPoll = XAppGetNow();
+
+        CHAR szSig [sizeof (c_szCardSig)];
+        GetCardSignature(szSig, sizeof (szSig));
+        if (strcmp(szSig, c_szCardSig) != 0)
+        {
+            Scan();
+            CallFunction(this, _T("OnMediaChanged"));
+        }
         return;
+    }
 
     if (c_install.m_qwTotal != 0)
     {
