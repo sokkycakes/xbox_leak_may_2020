@@ -1,0 +1,217 @@
+<XuiCanvas version="000c">
+<XuiScene>
+<Properties>
+ <Id>FrolickSkin</Id>
+ <Width>1280</Width>
+ <Height>720</Height>
+</Properties>
+<XuiVisual>
+<Properties>
+ <Id>FrolickTile</Id>
+ <Width>200</Width>
+ <Height>160</Height>
+</Properties>
+<XuiFigure>
+<Properties>
+ <Id>halo</Id>
+ <Width>214</Width>
+ <Height>174</Height>
+ <Position>-7,-7,0</Position>
+ <Anchor>15</Anchor>
+ <Opacity>0</Opacity>
+ <Fill>
+  <FillType>3</FillType>
+  <Gradient>
+   <Radial>true</Radial>
+   <NumStops>3</NumStops>
+   <StopColor>0x006cc417</StopColor>
+   <StopColor>0x006cc417</StopColor>
+   <StopColor>0xa06cc417</StopColor>
+   <StopPos>0</StopPos>
+   <StopPos>0.82</StopPos>
+   <StopPos>1</StopPos>
+  </Gradient>
+ </Fill>
+ <Closed>true</Closed>
+ <Points>214,174;14,0;200,0,207.732,0,214,6.2678;214,14;214,160,214,167.732,207.732,174;200,174;14,174,6.2678,174,0,167.732;0,160;0,14,0,6.2678,6.2678,0</Points>
+</Properties>
+</XuiFigure>
+<XuiFigure>
+<Properties>
+ <Id>bg</Id>
+ <Width>200</Width>
+ <Height>160</Height>
+ <Position>0,0,0</Position>
+ <Anchor>15</Anchor>
+ <Stroke>
+  <StrokeWidth>2</StrokeWidth>
+  <StrokeColor>0xff6e6e6e</StrokeColor>
+ </Stroke>
+ <Fill>
+  <FillType>2</FillType>
+  <Gradient>
+   <NumStops>4</NumStops>
+   <StopColor>0xfff6f6f6</StopColor>
+   <StopColor>0xffdadada</StopColor>
+   <StopColor>0xffc9c9c9</StopColor>
+   <StopColor>0xffa9a9a9</StopColor>
+   <StopPos>0</StopPos>
+   <StopPos>0.48</StopPos>
+   <StopPos>0.52</StopPos>
+   <StopPos>1</StopPos>
+  </Gradient>
+  <Rotation>90</Rotation>
+ </Fill>
+ <Closed>true</Closed>
+ <Points>200,160;8,0;192,0,196.418,0,200,3.5816;200,8;200,152,200,156.418,196.418,160;192,160;8,160,3.5816,160,0,156.418;0,152;0,8,0,3.5816,3.5816,0</Points>
+</Properties>
+</XuiFigure>
+<XuiFigure>
+<Properties>
+ <Id>gloss</Id>
+ <Width>196</Width>
+ <Height>72.0</Height>
+ <Position>2,2,0</Position>
+ <Anchor>7</Anchor>
+ <Fill>
+  <FillType>2</FillType>
+  <Gradient>
+   <NumStops>2</NumStops>
+   <StopColor>0x90ffffff</StopColor>
+   <StopColor>0x10ffffff</StopColor>
+   <StopPos>0</StopPos>
+   <StopPos>1</StopPos>
+  </Gradient>
+  <Rotation>90</Rotation>
+ </Fill>
+ <Closed>true</Closed>
+ <Points>196,72;7,0;189,0,192.866,0,196,3.1339;196,7;196,72;0,72;0,7,0,3.1339,3.1339,0</Points>
+</Properties>
+</XuiFigure>
+<XuiFigure>
+<Properties>
+ <Id>glow</Id>
+ <Width>200</Width>
+ <Height>160</Height>
+ <Position>0,0,0</Position>
+ <Anchor>15</Anchor>
+ <Opacity>0</Opacity>
+ <Stroke>
+  <StrokeWidth>3</StrokeWidth>
+  <StrokeColor>0xff6cc417</StrokeColor>
+ </Stroke>
+ <Fill>
+  <FillType>2</FillType>
+  <Gradient>
+   <NumStops>3</NumStops>
+   <StopColor>0x30b6f27a</StopColor>
+   <StopColor>0x00b6f27a</StopColor>
+   <StopColor>0x406cc417</StopColor>
+   <StopPos>0</StopPos>
+   <StopPos>0.5</StopPos>
+   <StopPos>1</StopPos>
+  </Gradient>
+  <Rotation>90</Rotation>
+ </Fill>
+ <Closed>true</Closed>
+ <Points>200,160;8,0;192,0,196.418,0,200,3.5816;200,8;200,152,200,156.418,196.418,160;192,160;8,160,3.5816,160,0,156.418;0,152;0,8,0,3.5816,3.5816,0</Points>
+</Properties>
+</XuiFigure>
+<XuiGroup>
+<Properties>
+ <Id>shineClip</Id>
+ <Width>200</Width>
+ <Height>160</Height>
+ <Anchor>15</Anchor>
+ <ClipChildren>true</ClipChildren>
+</Properties>
+<XuiFigure>
+<Properties>
+ <Id>shine</Id>
+ <Width>120</Width>
+ <Height>160</Height>
+ <Position>-160,0,0</Position>
+ <Anchor>10</Anchor>
+ <Fill>
+  <FillType>2</FillType>
+  <Gradient>
+   <NumStops>3</NumStops>
+   <StopColor>0x00ffffff</StopColor>
+   <StopColor>0x70ffffff</StopColor>
+   <StopColor>0x00ffffff</StopColor>
+   <StopPos>0</StopPos>
+   <StopPos>0.5</StopPos>
+   <StopPos>1</StopPos>
+  </Gradient>
+ </Fill>
+ <Closed>true</Closed>
+ <Points>120,160;120,0;120,160;0,160;0,0</Points>
+</Properties>
+</XuiFigure>
+<Timelines>
+<NamedFrames>
+<NamedFrame><Name>Sweep</Name><Time>0</Time><Command>play</Command><CommandParams></CommandParams></NamedFrame>
+<NamedFrame><Name>EndSweep</Name><Time>100</Time><Command>gotoandplay</Command><CommandParams>Sweep</CommandParams></NamedFrame>
+</NamedFrames>
+<Timeline>
+<Id>shine</Id>
+<TimelineProp>Position</TimelineProp>
+<KeyFrame><Time>0</Time><Interpolation>0</Interpolation><Prop>-160,0,0</Prop></KeyFrame>
+<KeyFrame><Time>40</Time><Interpolation>2</Interpolation><Prop>420,0,0</Prop></KeyFrame>
+<KeyFrame><Time>100</Time><Interpolation>0</Interpolation><Prop>420,0,0</Prop></KeyFrame>
+</Timeline>
+</Timelines>
+</XuiGroup>
+<Timelines>
+<NamedFrames>
+<NamedFrame><Name>KillFocus</Name><Time>0</Time><Command>play</Command><CommandParams></CommandParams></NamedFrame>
+<NamedFrame><Name>Normal</Name><Time>8</Time><Command>play</Command><CommandParams></CommandParams></NamedFrame>
+<NamedFrame><Name>EndNormal</Name><Time>9</Time><Command>stop</Command><CommandParams></CommandParams></NamedFrame>
+<NamedFrame><Name>Focus</Name><Time>10</Time><Command>play</Command><CommandParams></CommandParams></NamedFrame>
+<NamedFrame><Name>FocusLoop</Name><Time>18</Time><Command>play</Command><CommandParams></CommandParams></NamedFrame>
+<NamedFrame><Name>EndFocus</Name><Time>120</Time><Command>gotoandplay</Command><CommandParams>FocusLoop</CommandParams></NamedFrame>
+<NamedFrame><Name>Press</Name><Time>130</Time><Command>play</Command><CommandParams></CommandParams></NamedFrame>
+<NamedFrame><Name>EndPress</Name><Time>140</Time><Command>gotoandplay</Command><CommandParams>FocusLoop</CommandParams></NamedFrame>
+</NamedFrames>
+<Timeline>
+<Id>halo</Id>
+<TimelineProp>Opacity</TimelineProp>
+<KeyFrame><Time>0</Time><Interpolation>0</Interpolation><Prop>1</Prop></KeyFrame>
+<KeyFrame><Time>8</Time><Interpolation>0</Interpolation><Prop>0</Prop></KeyFrame>
+<KeyFrame><Time>10</Time><Interpolation>0</Interpolation><Prop>0</Prop></KeyFrame>
+<KeyFrame><Time>18</Time><Interpolation>0</Interpolation><Prop>1</Prop></KeyFrame>
+<KeyFrame><Time>69</Time><Interpolation>2</Interpolation><Prop>0.55</Prop></KeyFrame>
+<KeyFrame><Time>120</Time><Interpolation>2</Interpolation><Prop>1</Prop></KeyFrame>
+<KeyFrame><Time>130</Time><Interpolation>0</Interpolation><Prop>1</Prop></KeyFrame>
+<KeyFrame><Time>140</Time><Interpolation>0</Interpolation><Prop>1</Prop></KeyFrame>
+</Timeline>
+<Timeline>
+<Id>glow</Id>
+<TimelineProp>Opacity</TimelineProp>
+<KeyFrame><Time>0</Time><Interpolation>0</Interpolation><Prop>1</Prop></KeyFrame>
+<KeyFrame><Time>8</Time><Interpolation>0</Interpolation><Prop>0</Prop></KeyFrame>
+<KeyFrame><Time>10</Time><Interpolation>0</Interpolation><Prop>0</Prop></KeyFrame>
+<KeyFrame><Time>18</Time><Interpolation>0</Interpolation><Prop>1</Prop></KeyFrame>
+<KeyFrame><Time>120</Time><Interpolation>0</Interpolation><Prop>1</Prop></KeyFrame>
+<KeyFrame><Time>130</Time><Interpolation>0</Interpolation><Prop>1</Prop></KeyFrame>
+<KeyFrame><Time>133</Time><Interpolation>0</Interpolation><Prop>0.4</Prop></KeyFrame>
+<KeyFrame><Time>140</Time><Interpolation>0</Interpolation><Prop>1</Prop></KeyFrame>
+</Timeline>
+<Timeline>
+<Id>bg</Id>
+<TimelineProp>Fill.FillType</TimelineProp>
+<KeyFrame><Time>0</Time><Interpolation>1</Interpolation><Prop>2</Prop></KeyFrame>
+</Timeline>
+<Timeline>
+<Id>shineClip</Id>
+<TimelineProp>Opacity</TimelineProp>
+<KeyFrame><Time>0</Time><Interpolation>0</Interpolation><Prop>0</Prop></KeyFrame>
+<KeyFrame><Time>18</Time><Interpolation>0</Interpolation><Prop>0</Prop></KeyFrame>
+<KeyFrame><Time>20</Time><Interpolation>0</Interpolation><Prop>1</Prop></KeyFrame>
+<KeyFrame><Time>120</Time><Interpolation>0</Interpolation><Prop>1</Prop></KeyFrame>
+<KeyFrame><Time>130</Time><Interpolation>0</Interpolation><Prop>1</Prop></KeyFrame>
+</Timeline>
+</Timelines>
+</XuiVisual>
+</XuiScene>
+</XuiCanvas>
