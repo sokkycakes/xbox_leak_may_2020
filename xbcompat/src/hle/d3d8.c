@@ -599,6 +599,10 @@ static void NTAPI D3DVertexBuffer_Lock(D3DResource *vb, UINT_ Offset, UINT_ Size
 
 static ULONG NTAPI D3DResource_AddRef(D3DResource *r)
 {
+    /* A surface holds one reference on its parent while anyone holds it. */
+    if (!(r->Common & D3DCOMMON_REFCOUNT_MASK) && (r->Common & D3DCOMMON_TYPE_MASK) == D3DCOMMON_TYPE_SURFACE &&
+        ((D3DSurface *)r)->Parent)
+        D3DResource_AddRef(&((D3DSurface *)r)->Parent->res);
     r->Common++;
     return r->Common & D3DCOMMON_REFCOUNT_MASK;
 }
@@ -612,35 +616,77 @@ static void res_free_header(D3DResource *r)
     if (pool_owns(r)) pool_free(r);
 }
 
+/* Free a resource whose references are all gone.  A surface's reference on
+   its parent has already been dropped by whoever released it. */
+static void destroy_resource(D3DResource *r)
+{
+    if (!(r->Common & D3DCOMMON_D3DCREATED)) return;
+    ULONG type = r->Common & D3DCOMMON_TYPE_MASK;
+    if (type == D3DCOMMON_TYPE_VERTEXBUFFER || type == D3DCOMMON_TYPE_PALETTE) {
+        MmFreeContiguousMemory(resource_data(r));
+        res_free_header(r);
+    } else if (type == D3DCOMMON_TYPE_INDEXBUFFER) {
+        MmFreeContiguousMemory((PVOID)r->Data);
+        res_free_header(r);
+    } else if (type == D3DCOMMON_TYPE_TEXTURE) {
+        tex_invalidate(r->Data);
+        MmFreeContiguousMemory(resource_data(r));
+        res_free_header(r);
+    } else if (type == D3DCOMMON_TYPE_PUSHBUFFER) {
+        pushbuffer_free((struct D3DPushBuffer *)r);
+    } else if (type == D3DCOMMON_TYPE_FIXUP) {
+        res_free_header(r);
+    } else if (type == D3DCOMMON_TYPE_SURFACE) {
+        D3DSurface *s = (D3DSurface *)r;
+        if (s == d3d.backbuffer || s == d3d.depth) return;
+        if (!s->Parent) MmFreeContiguousMemory(resource_data(r));
+        res_free_header(r);
+    }
+}
+
+/* The library's own reference counts (D3DCOMMON_INTREFCOUNT): a render
+   target is held this way, so the title can release its surface while the
+   device still draws into it. */
+#define D3DCOMMON_INTREFCOUNT_MASK 0x00780000
+#define D3DCOMMON_INTREFCOUNT_1    0x00080000
+
+static void internal_release(D3DResource *r)
+{
+    r->Common -= D3DCOMMON_INTREFCOUNT_1;
+    if (!(r->Common & (D3DCOMMON_INTREFCOUNT_MASK | D3DCOMMON_REFCOUNT_MASK))) destroy_resource(r);
+}
+
+static void internal_addref_surface(D3DSurface *s)
+{
+    if (!(s->Common & D3DCOMMON_INTREFCOUNT_MASK) && s->Parent) s->Parent->res.Common += D3DCOMMON_INTREFCOUNT_1;
+    s->Common += D3DCOMMON_INTREFCOUNT_1;
+}
+
+static void internal_release_surface(D3DSurface *s)
+{
+    if ((s->Common & D3DCOMMON_INTREFCOUNT_MASK) == D3DCOMMON_INTREFCOUNT_1) {
+        if (s->Parent) internal_release(&s->Parent->res);
+        if (!(s->Common & D3DCOMMON_REFCOUNT_MASK)) { destroy_resource((D3DResource *)s); return; }
+    }
+    s->Common -= D3DCOMMON_INTREFCOUNT_1;
+}
+
 static ULONG NTAPI D3DResource_Release(D3DResource *r)
 {
-    ULONG refs = --r->Common & D3DCOMMON_REFCOUNT_MASK;
-    TRACE("D3D: Release(%p) type %#x refs %u from %p", (void *)r, r->Common & D3DCOMMON_TYPE_MASK, refs, __builtin_return_address(0));
-    if (refs == 0 && (r->Common & D3DCOMMON_D3DCREATED)) {
-        ULONG type = r->Common & D3DCOMMON_TYPE_MASK;
-        if (type == D3DCOMMON_TYPE_VERTEXBUFFER || type == D3DCOMMON_TYPE_PALETTE) {
-            MmFreeContiguousMemory(resource_data(r));
-            res_free_header(r);
-        } else if (type == D3DCOMMON_TYPE_INDEXBUFFER) {
-            MmFreeContiguousMemory((PVOID)r->Data);
-            res_free_header(r);
-        } else if (type == D3DCOMMON_TYPE_TEXTURE) {
-            tex_invalidate(r->Data);
-            MmFreeContiguousMemory(resource_data(r));
-            res_free_header(r);
-        } else if (type == D3DCOMMON_TYPE_PUSHBUFFER) {
-            pushbuffer_free((struct D3DPushBuffer *)r);
-        } else if (type == D3DCOMMON_TYPE_FIXUP) {
-            res_free_header(r);
-        } else if (type == D3DCOMMON_TYPE_SURFACE) {
-            D3DSurface *s = (D3DSurface *)r;
-            if (s == d3d.backbuffer || s == d3d.depth) { r->Common++; return 1; }
-            if (s->Parent) D3DResource_Release(&s->Parent->res);
-            else MmFreeContiguousMemory(resource_data(r));
-            res_free_header(r);
+    TRACE("D3D: Release(%p) type %#x refs %u from %p", (void *)r, r->Common & D3DCOMMON_TYPE_MASK,
+          (r->Common & D3DCOMMON_REFCOUNT_MASK) - 1, __builtin_return_address(0));
+    if ((r->Common & D3DCOMMON_REFCOUNT_MASK) == 1) {
+        /* The last outside reference on a surface drops its parent's. */
+        if ((r->Common & D3DCOMMON_TYPE_MASK) == D3DCOMMON_TYPE_SURFACE && ((D3DSurface *)r)->Parent)
+            D3DResource_Release(&((D3DSurface *)r)->Parent->res);
+        if (!(r->Common & D3DCOMMON_INTREFCOUNT_MASK)) {
+            r->Common--;
+            destroy_resource(r);
+            return 0;
         }
     }
-    return refs;
+    if (!(r->Common & D3DCOMMON_REFCOUNT_MASK)) return 0;
+    return --r->Common & D3DCOMMON_REFCOUNT_MASK;
 }
 
 static ULONG NTAPI D3DResource_GetType(D3DResource *r)
@@ -2927,6 +2973,8 @@ static void create_device_surfaces(ULONG format, ULONG depth_format)
                      ? 65535.0f : 16777215.0f;
     d3d.target = d3d.backbuffer;
     d3d.target_depth = d3d.depth;
+    internal_addref_surface(d3d.target);
+    internal_addref_surface(d3d.target_depth);
     d3d.rt_width = d3d.width;
     d3d.rt_height = d3d.height;
     d3d.rt_texture = false;
@@ -2959,6 +3007,12 @@ static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
 {
     if (d3d.recording) { ULONG a[2] = { (ULONG)target, (ULONG)z }; pb_record(OP_RENDER_TARGET, a, sizeof(a)); }
     if (!target) target = d3d.target;
+    /* The device holds its targets with internal references, and resets the
+       viewport to the whole new target. */
+    internal_addref_surface(target);
+    if (z) internal_addref_surface(z);
+    if (d3d.target) internal_release_surface(d3d.target);
+    if (d3d.target_depth) internal_release_surface(d3d.target_depth);
     d3d.target = target;
     d3d.target_depth = z;
     TRACE("D3D: render target %p (parent %p) depth %p", (void *)target, (void *)target->Parent, (void *)z);
@@ -2970,6 +3024,7 @@ static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
         d3d.rt_width = d3d.width;
         d3d.rt_height = d3d.height;
         d3d.rt_texture = false;
+        d3d.viewport = (D3DVIEWPORT8){ 0, 0, d3d.rt_width, d3d.rt_height, 0, 1 };
         return;
     }
     if (!p_glGenFramebuffers) {
@@ -3002,6 +3057,7 @@ static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
     d3d.rt_width = w;
     d3d.rt_height = h;
     d3d.rt_texture = true;
+    d3d.viewport = (D3DVIEWPORT8){ 0, 0, w, h, 0, 1 };
 }
 
 static void NTAPI D3DSurface_GetDesc(D3DSurface *s, ULONG *desc)
@@ -4720,10 +4776,11 @@ static void NTAPI Get2DSurfaceDesc(D3DPixelContainer *p, UINT_ level, ULONG *des
 }
 
 /* The inline SetVertexShaderConstant adds 96 before calling these, so
-   their register is a 0..191 slot rather than D3D's -96..95. */
-static void FASTCALL SetVertexShaderConstantNotInline(LONG Register, const float *data, ULONG count)
+   their register is a 0..191 slot rather than D3D's -96..95, and it passes
+   the NotInline forms a count of dwords, not vectors. */
+static void FASTCALL SetVertexShaderConstantNotInline(LONG Register, const float *data, ULONG dwords)
 {
-    D3DDevice_SetVertexShaderConstant(Register - 96, data, count);
+    D3DDevice_SetVertexShaderConstant(Register - 96, data, dwords / 4);
 }
 
 static void FASTCALL SetVertexShaderConstant1(LONG Register, const float *data)
@@ -4800,16 +4857,10 @@ static void NTAPI D3DVertexBuffer_GetDesc(D3DResource *vb, ULONG *desc)
 }
 
 /* The inline Release in 5xxx headers drops the count itself and calls this
-   on the last reference.  For a surface it has already released the parent
-   texture, so only the surface header goes. */
+   on the last reference, after releasing a surface's parent itself. */
 static void NTAPI D3D_DestroyResource(D3DResource *r)
 {
-    if ((r->Common & D3DCOMMON_TYPE_MASK) == D3DCOMMON_TYPE_SURFACE && ((D3DSurface *)r)->Parent) {
-        res_free_header(r);
-        return;
-    }
-    r->Common = (r->Common & ~D3DCOMMON_REFCOUNT_MASK) | 1;
-    D3DResource_Release(r);
+    destroy_resource(r);
 }
 
 static void NTAPI D3DDevice_MultiplyTransform(ULONG State, const D3DMATRIX *m)
