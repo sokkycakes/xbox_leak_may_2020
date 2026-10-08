@@ -83,13 +83,15 @@ def main():
         if os.path.exists(game):
             shutil.rmtree(game)
         os.makedirs(game)
+        media = os.path.join(game, "media")
         for entry in os.listdir(project):
             if entry.lower() == "media":
-                shutil.copytree(os.path.join(project, entry), os.path.join(game, entry))
+                media = os.path.join(game, entry)   # keep the project's spelling: one media directory
+                shutil.copytree(os.path.join(project, entry), media)
         for entry in os.listdir(os.path.dirname(image)):
             if entry.lower().endswith(".xpr"):
-                os.makedirs(os.path.join(game, "media"), exist_ok=True)
-                shutil.copy(os.path.join(os.path.dirname(image), entry), os.path.join(game, "media", entry))
+                os.makedirs(media, exist_ok=True)
+                shutil.copy(os.path.join(os.path.dirname(image), entry), os.path.join(media, entry))
         xbe = os.path.join(game, "default.xbe")
         run(sys.executable, os.path.join(HERE, "pe2xbe.py"), image, xbe)
     else:

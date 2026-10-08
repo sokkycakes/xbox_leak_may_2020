@@ -151,6 +151,7 @@ static struct {
     unsigned ncallbacks;
     struct D3DPalette *palettes[4];
     struct D3DPushBuffer *recording;   /* push buffer being recorded, if any */
+    bool bb_cpu_dirty;           /* the title locked the back buffer and may have written it */
 } d3d;
 
 /* Push buffer recording (see the push buffer section). */
@@ -328,9 +329,43 @@ static void debug_dump_draw(void)
     save_screenshot(path);
 }
 
+/* The title wrote the back buffer through LockRect (XFONT text, software
+   effects): put its memory back on screen before GL draws over it. */
+static void (APIENTRY *p_glWindowPos2i)(GLint, GLint);
+static void (APIENTRY *p_glBindFramebuffer)(GLenum, GLuint);
+static void (APIENTRY *p_glActiveTexture)(GLenum);
+static void flush_cpu_backbuffer(void)
+{
+    if (!d3d.bb_cpu_dirty || !d3d.backbuffer) return;
+    d3d.bb_cpu_dirty = false;
+    if (!p_glWindowPos2i) p_glWindowPos2i = SDL_GL_GetProcAddress("glWindowPos2i");
+    if (!p_glWindowPos2i) return;
+    ULONG w = d3d.width, h = d3d.height;
+    ULONG pitch = d3d.backbuffer->Size ? ((d3d.backbuffer->Size >> 24) + 1) * 64 : w * 4;
+    const uint8_t *px = (const uint8_t *)(d3d.backbuffer->Data | CONTIG_BASE);
+    uint8_t *tmp = malloc(w * h * 4);
+    for (ULONG y = 0; y < h; y++) memcpy(tmp + (h - 1 - y) * w * 4, px + y * pitch, w * 4);
+    glPushAttrib(GL_ALL_ATTRIB_BITS);
+    for (int u = 3; u >= 0; u--) {
+        p_glActiveTexture(GL_TEXTURE0 + u);
+        glDisable(GL_TEXTURE_2D); glDisable(GL_TEXTURE_3D); glDisable(GL_TEXTURE_CUBE_MAP);
+    }
+    glDisable(GL_DEPTH_TEST); glDisable(GL_BLEND); glDisable(GL_ALPHA_TEST); glDisable(GL_FOG);
+    glDisable(GL_STENCIL_TEST); glDisable(GL_SCISSOR_TEST); glDisable(GL_LIGHTING);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    if (p_glBindFramebuffer) p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    p_glWindowPos2i(0, 0);
+    glDrawPixels(w, h, GL_BGRA, GL_UNSIGNED_BYTE, tmp);
+    if (p_glBindFramebuffer) p_glBindFramebuffer(GL_FRAMEBUFFER, d3d.rt_texture ? d3d.fbo : 0);
+    glPopAttrib();
+    free(tmp);
+}
+
 static ULONG NTAPI D3DDevice_Swap(ULONG Flags)
 {
     (void)Flags;
+    flush_cpu_backbuffer();
     d3d.frame++;
     run_callbacks();
     if (g_screenshot_path && (int)d3d.frame == g_screenshot_frame)
@@ -606,6 +641,7 @@ static void (APIENTRY *p_glClientActiveTexture)(GLenum);
 static void (APIENTRY *p_glMultiTexCoord4fv)(GLenum, const GLfloat *);
 static void (APIENTRY *p_glPointParameterfv)(GLenum, const GLfloat *);
 static void (APIENTRY *p_glGenQueries)(GLsizei, GLuint *);
+static void (APIENTRY *p_glSecondaryColorPointer)(GLint, GLenum, GLsizei, const void *);
 static void (APIENTRY *p_glBeginQuery)(GLenum, GLuint);
 static void (APIENTRY *p_glEndQuery)(GLenum);
 static void (APIENTRY *p_glGetQueryObjectuiv)(GLuint, GLenum, GLuint *);
@@ -1165,6 +1201,7 @@ static void color4(float *out, ULONG c)
 
 static void apply_render_states(bool pretransformed, bool has_normal)
 {
+    flush_cpu_backbuffer();
     apply_viewport();
 
     if (RS(D3DRS_ZENABLE)) {
@@ -1234,13 +1271,18 @@ static void apply_render_states(bool pretransformed, bool has_normal)
         GLenum front = two_sided ? GL_FRONT : GL_FRONT_AND_BACK;
         glMaterialfv(front, GL_DIFFUSE, d3d.material[0]);
         glMaterialfv(front, GL_AMBIENT, d3d.material[1]);
-        glMaterialfv(front, GL_SPECULAR, d3d.material[2]);
+        /* D3D adds specular after the texture stages, and only with
+           D3DRS_SPECULARENABLE; GL's separate specular color matches. */
+        static const float no_specular[4] = { 0, 0, 0, 0 };
+        bool specular = RS(D3DRS_SPECULARENABLE) != 0;
+        glLightModeli(0x81F8 /* GL_LIGHT_MODEL_COLOR_CONTROL */, specular ? 0x81FA /* SEPARATE_SPECULAR */ : 0x81F9);
+        glMaterialfv(front, GL_SPECULAR, specular ? d3d.material[2] : no_specular);
         glMaterialfv(front, GL_EMISSION, d3d.material[3]);
         glMaterialf(front, GL_SHININESS, d3d.material_power > 128 ? 128 : d3d.material_power);
         if (two_sided) {
             glMaterialfv(GL_BACK, GL_DIFFUSE, d3d.back_material[0]);
             glMaterialfv(GL_BACK, GL_AMBIENT, d3d.back_material[1]);
-            glMaterialfv(GL_BACK, GL_SPECULAR, d3d.back_material[2]);
+            glMaterialfv(GL_BACK, GL_SPECULAR, specular ? d3d.back_material[2] : no_specular);
             glMaterialfv(GL_BACK, GL_EMISSION, d3d.back_material[3]);
             glMaterialf(GL_BACK, GL_SHININESS, d3d.back_material_power > 128 ? 128 : d3d.back_material_power);
         }
@@ -1350,6 +1392,7 @@ static void load_shader_functions(void)
     LOAD(glUniform1f); LOAD(glUniform1i); LOAD(glEnableVertexAttribArray); LOAD(glDisableVertexAttribArray);
     LOAD(glVertexAttribPointer); LOAD(glVertexAttrib4fv); LOAD(glActiveTexture); LOAD(glClientActiveTexture);
     LOAD(glMultiTexCoord4fv); LOAD(glUniform2fv); LOAD(glPointParameterfv); LOAD(glPointParameterf);
+    LOAD(glSecondaryColorPointer);
     LOAD(glGenQueries); LOAD(glBeginQuery); LOAD(glEndQuery); LOAD(glGetQueryObjectuiv);
 #undef LOAD
 }
@@ -1854,6 +1897,20 @@ static void draw_programmable(vshader *sh, ULONG PrimitiveType, const UCHAR *up,
 
 static const float default_texcoord[4] = { 0, 0, 0, 1 };
 
+/* Unlit specular: the vertex's specular color is added after texturing
+   when D3DRS_SPECULARENABLE is on (lighting computes its own). */
+static void secondary_color(bool lit, const void *ptr, GLint size, GLenum type, GLsizei stride)
+{
+    if (!lit && ptr && RS(D3DRS_SPECULARENABLE) && p_glSecondaryColorPointer) {
+        glEnable(0x8458 /* GL_COLOR_SUM */);
+        glEnableClientState(0x845E /* GL_SECONDARY_COLOR_ARRAY */);
+        p_glSecondaryColorPointer(size, type, stride, ptr);
+    } else {
+        glDisable(0x8458);
+        glDisableClientState(0x845E);
+    }
+}
+
 /* A declaration without a program: fixed function with a custom layout. */
 static void draw_declared(const vshader *sh, ULONG PrimitiveType, const UCHAR *up, ULONG up_stride, ULONG first,
                           ULONG count, const USHORT *indices)
@@ -1893,6 +1950,15 @@ static void draw_declared(const vshader *sh, ULONG PrimitiveType, const UCHAR *u
         glDisableClientState(GL_COLOR_ARRAY);
         glDisable(GL_COLOR_MATERIAL);
         glColor4f(1, 1, 1, 1);
+    }
+    if (sh->attr[4].stream >= 0) {
+        const UCHAR *b; ULONG s;
+        STREAM(&sh->attr[4], b, s);
+        const vattr *a = &sh->attr[4];
+        secondary_color(lit, b + a->offset, a->type == 0x40 ? GL_BGRA : 3,
+                        a->gl_type, s);
+    } else {
+        secondary_color(lit, NULL, 0, 0, 0);
     }
     unsigned units = d3d.pixel_shader ? 0xF : apply_textures();
     for (int u = 0; u < 4; u++) {
@@ -1964,6 +2030,7 @@ static void draw(ULONG PrimitiveType, const UCHAR *base, ULONG stride, ULONG fir
         glDisable(GL_COLOR_MATERIAL);
         glColor4f(1, 1, 1, 1);
     }
+    secondary_color(lit, l.specular_off >= 0 ? base + l.specular_off : NULL, GL_BGRA, GL_UNSIGNED_BYTE, stride);
     unsigned units = d3d.pixel_shader ? 0xF : apply_textures();
     for (int u = 0; u < 4; u++) {
         ULONG tci = TSS(u, D3DTSS_TEXCOORDINDEX) & 0xFFFF;
@@ -2664,6 +2731,7 @@ static void NTAPI D3DSurface_LockRect(D3DSurface *s, ULONG *locked, const LONG *
         glReadPixels(0, 0, w, h, GL_BGRA, GL_UNSIGNED_BYTE, tmp);
         for (ULONG y = 0; y < h; y++) memcpy(px + y * pitch, tmp + (h - 1 - y) * w * 4, w * 4);
         free(tmp);
+        if (!(flags & 0x10 /* D3DLOCK_READONLY */)) d3d.bb_cpu_dirty = true;
     }
     if (s->Parent && !(flags & 0x80)) tex_invalidate(s->Parent->res.Data);
     locked[0] = pitch;

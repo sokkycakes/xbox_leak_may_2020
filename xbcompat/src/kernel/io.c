@@ -452,6 +452,27 @@ NTSTATUS NTAPI NtQueryInformationFile(HANDLE FileHandle, IO_STATUS_BLOCK *iosb, 
         size = sizeof(*s);
         break;
     }
+    case 6:    /* FileInternalInformation: a stable file id */
+        if (Length < 8) return STATUS_BUFFER_TOO_SMALL;
+        ((LARGE_INTEGER *)Info)->QuadPart = (LONGLONG)sb.st_ino;
+        size = 8;
+        break;
+    case 7:    /* FileEaInformation: no extended attributes */
+    case 17:   /* FileAlignmentInformation: byte aligned */
+        if (Length < 4) return STATUS_BUFFER_TOO_SMALL;
+        *(ULONG *)Info = 0;
+        size = 4;
+        break;
+    case 8:    /* FileAccessInformation */
+        if (Length < 4) return STATUS_BUFFER_TOO_SMALL;
+        *(ULONG *)Info = 0x001F01FF;   /* FILE_ALL_ACCESS */
+        size = 4;
+        break;
+    case 16:   /* FileModeInformation */
+        if (Length < 4) return STATUS_BUFFER_TOO_SMALL;
+        *(ULONG *)Info = 0;
+        size = 4;
+        break;
     case 14:   /* FilePositionInformation */
         ((LARGE_INTEGER *)Info)->QuadPart = f->pos;
         size = 8;
