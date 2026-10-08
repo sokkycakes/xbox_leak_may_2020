@@ -45,11 +45,22 @@ static bool debug_service(greg_t *r)
     return true;
 }
 
+/* Ring 0 instructions titles run themselves (wbinvd before handing memory
+   to the GPU, cli/sti around hardware access) fault in user mode; none of
+   them has anything to do here. */
+static bool privileged_insn(greg_t *r)
+{
+    const uint8_t *ip = (const uint8_t *)r[REG_EIP];
+    if (ip[0] == 0x0F && (ip[1] == 0x08 || ip[1] == 0x09)) { r[REG_EIP] += 2; return true; }   /* invd, wbinvd */
+    if (ip[0] == 0xFA || ip[0] == 0xFB) { r[REG_EIP] += 1; return true; }                    /* cli, sti */
+    return false;
+}
+
 static void crash_handler(int sig, siginfo_t *si, void *uc_)
 {
     ucontext_t *uc = uc_;
     greg_t *r = uc->uc_mcontext.gregs;
-    if (sig == SIGSEGV && debug_service(r)) return;
+    if (sig == SIGSEGV && (debug_service(r) || privileged_insn(r))) return;
     if (sig == SIGTRAP) {
         /* int 3 (DbgBreakPoint and friends): nobody is listening, carry on. */
         xlog("breakpoint at eip=%08x ignored", r[REG_EIP]);

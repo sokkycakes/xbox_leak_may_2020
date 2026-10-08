@@ -29,7 +29,48 @@ DATA_ALIASES = {
     "g_DeviceType_MU": ["_XDEVICE_TYPE_MEMORY_UNIT_TABLE"],
 }
 
+# XbSymbolDatabase argument lists that disagree with the code (checked by the
+# callee's ret): the stack bytes the function really pops.
+STACK_FIX = {
+    "D3DDevice_CreateTexture2": 28,     # (Width, Height, Depth, Levels, Usage, Format, Type)
+    "D3DDevice_GetPixelShader": 4,      # (pHandle)
+}
+
+# Argument lists XbSymbolDatabase gets wrong: these take every argument on the
+# stack (the function overwrites the register it names before reading it).
+ARGS_FIX = {
+    "D3DDevice_DrawIndexedVertices": "psh PrimitiveType, psh VertexCount, psh pIndexData",
+    "D3DDevice_DrawIndexedVerticesUP": "psh PrimitiveType, psh VertexCount, psh pIndexData, "
+                                       "psh pVertexStreamZeroData, psh VertexStreamZeroStride",
+}
+
 LINE = re.compile(r"^(\w+?)__(FUN|VAR)__(?:(\w+?)__)?(\w+)(?:\((.*)\))? = (0x[0-9a-fA-F]+)$")
+
+
+def xbe_reader(path):
+    """read(va, n): bytes of the XBE image at a virtual address."""
+    import struct
+    d = open(path, "rb").read()
+    u32 = lambda o: struct.unpack_from("<I", d, o)[0]
+    base, nsec, sh = u32(0x104), u32(0x11C), u32(0x120)
+    secs = [struct.unpack_from("<6I", d, sh - base + i * 56) for i in range(nsec)]
+
+    def read(va, n):
+        for _, sva, _, raw, rs, _ in secs:
+            if sva <= va < sva + rs:
+                return d[raw + va - sva: raw + min(va - sva + n, rs)]
+        return b""
+    return read
+
+
+def index_data_global(read, set_indices):
+    """D3D__IndexData, which the inlined DrawIndexedPrimitive reads, from the
+    D3DDevice_SetIndices that writes it: "mov [g], eax ... mov dword [g], 0"."""
+    code = read(set_indices, 0x60)
+    for m in re.finditer(rb"\xc7\x05(....)\x00\x00\x00\x00", code, re.S):
+        if b"\xa3" + m.group(1) in code:
+            return int.from_bytes(m.group(1), "little")
+    return None
 
 
 def host_names(binary):
@@ -75,6 +116,22 @@ def parse_args_list(s):
     return stack, regs
 
 
+def arg_spec(s):
+    """Where each argument arrives, in order: a register name, 's' (a stack
+    dword) or 's2' (a stack qword)."""
+    out = []
+    for a in filter(None, (x.strip() for x in (s or "").split(","))):
+        kind = a.split()[0]
+        out.append({"psh": "s", "psh2": "s2"}.get(kind, kind))
+    return out
+
+
+def base_name(name):
+    """The API name under an LTCG build's internal entry point:
+    D3DDevice_SetTransform_0__LTCG_eax1_edx2 -> D3DDevice_SetTransform."""
+    return re.sub(r"(_\d+)?__LTCG_\w*$", "", name)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("cli")
@@ -89,6 +146,8 @@ def main():
         m = LINE.match(line.strip())
         if m:
             lib, kind, conv, name, args, va = m.groups()
+            if name in ARGS_FIX:
+                conv, args = "stdcall", ARGS_FIX[name]
             found.setdefault(name, (kind, conv, args, int(va, 16), lib))
 
     lines, skipped = [], []
@@ -99,6 +158,7 @@ def main():
         key, conv, nbytes = k
         kind, fconv, args, va, _ = found[key]
         stack, regs = parse_args_list(args)
+        stack = STACK_FIX.get(key, stack)
         if fconv == "thiscall" and conv == "stdcall" and nbytes is None:
             # A C++ __stdcall member pushes `this`; the scanner names it a thiscall
             # only when the library passes it in ecx.
@@ -115,10 +175,24 @@ def main():
     # convention, so the loader traps them (with that name) instead of letting
     # code that drives the NV2A or the APU run.
     mapped_va = {int(l.split()[1], 16) for l in lines}
+    hosts = host_names(a.binary)
     for name, (kind, fconv, args, va, lib) in sorted(found.items()):
         if kind != "FUN" or va in mapped_va or not lib.startswith(("D3D8", "DSOUND")):
             continue
         stack, regs = parse_args_list(args)
+        if regs and fconv not in ("fastcall", "thiscall") and "cl" not in regs:
+            # Arguments in registers (an LTCG build's internal entry point, or
+            # one the optimizer gave a register argument): name the API it
+            # implements, by argument count, with where each argument arrives,
+            # so the loader can put them on the stack for the host function.
+            spec = arg_spec(args)
+            base = base_name(name)
+            nbytes = sum(8 if x == "s2" else 4 for x in spec)
+            host = f"_{base}_LTCG@{nbytes}"
+            if host not in hosts:
+                host = f"_{base}@{nbytes}"
+            lines.append(f"{host} {va:#x} regs={','.join(spec)}")
+            continue
         if fconv == "fastcall":
             lines.append(f"@{name}@{stack + 4 * len(regs)} {va:#x}")
         elif re.match(r"^(D3D|IDirect|Direct|XAudio|XWave|XFile)", name):
@@ -127,6 +201,10 @@ def main():
     for name, (kind, _, _, va, lib) in sorted(found.items()):
         if kind == "VAR" and name.startswith("D3DRS_"):
             lines.append(f"_{name} {va:#x} data")
+    if "D3DDevice_SetIndices" in found:
+        g = index_data_global(xbe_reader(a.xbe), found["D3DDevice_SetIndices"][3])
+        if g:
+            lines.append(f"_D3D__IndexData {g:#x} data")
     for key, aliases in DATA_ALIASES.items():
         if key in found:
             for alias in aliases:

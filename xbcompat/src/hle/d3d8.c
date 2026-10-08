@@ -583,6 +583,13 @@ static ULONG NTAPI D3DResource_AddRef(D3DResource *r)
 
 static void pushbuffer_free(struct D3DPushBuffer *pb);
 
+/* Headers the title allocated itself (an LTCG build's inlined create
+   functions) stay its own; only the data goes back. */
+static void res_free_header(D3DResource *r)
+{
+    if (pool_owns(r)) pool_free(r);
+}
+
 static ULONG NTAPI D3DResource_Release(D3DResource *r)
 {
     ULONG refs = --r->Common & D3DCOMMON_REFCOUNT_MASK;
@@ -590,24 +597,24 @@ static ULONG NTAPI D3DResource_Release(D3DResource *r)
         ULONG type = r->Common & D3DCOMMON_TYPE_MASK;
         if (type == D3DCOMMON_TYPE_VERTEXBUFFER || type == D3DCOMMON_TYPE_PALETTE) {
             MmFreeContiguousMemory(resource_data(r));
-            pool_free(r);
+            res_free_header(r);
         } else if (type == D3DCOMMON_TYPE_INDEXBUFFER) {
             MmFreeContiguousMemory((PVOID)r->Data);
-            pool_free(r);
+            res_free_header(r);
         } else if (type == D3DCOMMON_TYPE_TEXTURE) {
             tex_invalidate(r->Data);
             MmFreeContiguousMemory(resource_data(r));
-            pool_free(r);
+            res_free_header(r);
         } else if (type == D3DCOMMON_TYPE_PUSHBUFFER) {
             pushbuffer_free((struct D3DPushBuffer *)r);
         } else if (type == D3DCOMMON_TYPE_FIXUP) {
-            pool_free(r);
+            res_free_header(r);
         } else if (type == D3DCOMMON_TYPE_SURFACE) {
             D3DSurface *s = (D3DSurface *)r;
             if (s == d3d.backbuffer || s == d3d.depth) { r->Common++; return 1; }
             if (s->Parent) D3DResource_Release(&s->Parent->res);
             else MmFreeContiguousMemory(resource_data(r));
-            pool_free(r);
+            res_free_header(r);
         }
     }
     return refs;
@@ -1600,6 +1607,7 @@ static void load_shader_functions(void)
 static GLuint compile_shader(GLenum kind, const char *src)
 {
     GLuint sh = p_glCreateShader(kind);
+    TRACE("D3D: compiling %s shader %u", kind == GL_VERTEX_SHADER ? "vertex" : "fragment", sh);
     p_glShaderSource(sh, 1, &src, NULL);
     p_glCompileShader(sh);
     GLint ok = 0;
@@ -1619,6 +1627,7 @@ static GLuint compile_shader(GLenum kind, const char *src)
 static GLuint link_program(GLuint vs, GLuint fs)
 {
     GLuint prog = p_glCreateProgram();
+    TRACE("D3D: linking program %u (vs %u, fs %u)", prog, vs, fs);
     if (vs) p_glAttachShader(prog, vs);
     if (fs) p_glAttachShader(prog, fs);
     for (int i = 0; i < 16; i++) {
@@ -1746,11 +1755,33 @@ static LONG NTAPI D3DDevice_CreateVertexShader(const ULONG *decl, const ULONG *f
     return D3D_OK;
 }
 
+/* A linked program: a vertex shader object and a fragment shader object
+   (0 = fixed function for that stage) with its uniform locations. */
+typedef struct program_entry {
+    GLuint vs, fs, prog;
+    GLint loc_c, loc_flip_y;
+    GLint loc_tex[4], loc_cube[4], loc_vol[4], loc_tex_scale, loc_c0, loc_c1, loc_fc0, loc_fc1,
+          loc_bump_env, loc_bump_lum;
+    struct program_entry *next;
+} program_entry;
+
+static program_entry *programs;
+
 static void NTAPI D3DDevice_DeleteVertexShader(ULONG handle)
 {
     if (!(handle & 1)) return;
     vshader *sh = (vshader *)(handle & ~1u);
-    if (sh->vs) p_glDeleteShader(sh->vs);
+    if (sh->vs) {
+        /* GL reuses the name, so programs linked with it must go too. */
+        for (program_entry **pp = &programs; *pp;) {
+            program_entry *e = *pp;
+            if (e->vs != sh->vs) { pp = &e->next; continue; }
+            if (e->prog) p_glDeleteProgram(e->prog);
+            *pp = e->next;
+            free(e);
+        }
+        p_glDeleteShader(sh->vs);
+    }
     free(sh->code);
     free(sh->consts);
     free(sh->const_slots);
@@ -1818,17 +1849,6 @@ static void NTAPI D3DDevice_SetVertexShaderInput(ULONG handle, UINT_ count, cons
     if (handle) d3d.vertex_shader = handle;
 }
 
-/* A linked program: a vertex shader object and a fragment shader object
-   (0 = fixed function for that stage) with its uniform locations. */
-typedef struct program_entry {
-    GLuint vs, fs, prog;
-    GLint loc_c, loc_flip_y;
-    GLint loc_tex[4], loc_cube[4], loc_vol[4], loc_tex_scale, loc_c0, loc_c1, loc_fc0, loc_fc1,
-          loc_bump_env, loc_bump_lum;
-    struct program_entry *next;
-} program_entry;
-
-static program_entry *programs;
 
 static GLuint vertex_shader_object(vshader *sh)
 {
@@ -3761,7 +3781,9 @@ static void imm_flush(ULONG prim)
     if (!imm.n) return;
     vshader *sh = (d3d.vertex_shader & 1) ? (vshader *)(d3d.vertex_shader & ~1u) : NULL;
     if (sh && sh->code) {
-        /* Feed the vertex registers to the program as 16 float4 attributes. */
+        /* Feed the vertex registers to the program as 16 float4 attributes.
+           Compile on the real shader first so the copy reuses its object. */
+        vertex_shader_object(sh);
         vshader tmp = *sh;
         for (int r = 0; r < 16; r++) {
             if (r == 0 || imm.used[r]) tmp.attr[r] = (vattr){ 0, r * 16, 0x42, 4, GL_FLOAT, false, 16 };
@@ -3828,9 +3850,29 @@ static void NTAPI D3DDevice_End(void)
 
 typedef struct D3DPushBuffer {
     DWORD Common, Data, Lock, Size, AllocationSize;
-    ULONG *ops;              /* host side: the recorded stream */
-    unsigned n, cap;         /* dwords used / allocated */
 } D3DPushBuffer;
+
+/* The recorded stream of a push buffer, kept beside it: an LTCG build's
+   inlined CreatePushBuffer makes headers of the Xbox size itself. */
+typedef struct pb_stream {
+    const D3DPushBuffer *pb;
+    ULONG *ops;              /* the recorded ops */
+    unsigned n, cap;         /* dwords used / allocated */
+    struct pb_stream *next;
+} pb_stream;
+static pb_stream *pb_streams;
+
+static pb_stream *pb_stream_of(const D3DPushBuffer *pb, bool create)
+{
+    for (pb_stream *s = pb_streams; s; s = s->next)
+        if (s->pb == pb) return s;
+    if (!create || !pb) return NULL;
+    pb_stream *s = calloc(1, sizeof(*s));
+    s->pb = pb;
+    s->next = pb_streams;
+    pb_streams = s;
+    return s;
+}
 
 typedef struct D3DFixup {
     DWORD Common, Data, Lock, Run, Next, Size;
@@ -3859,14 +3901,21 @@ static ULONG pb_rs[D3DRS_MAX], pb_tss[4 * 32];   /* the state last written to th
 static void pushbuffer_free(D3DPushBuffer *pb)
 {
     if (d3d.recording == pb) d3d.recording = NULL;
-    free(pb->ops);
+    for (pb_stream **l = &pb_streams; *l; l = &(*l)->next) {
+        if ((*l)->pb != pb) continue;
+        pb_stream *s = *l;
+        *l = s->next;
+        free(s->ops);
+        free(s);
+        break;
+    }
     if (pb->Data) MmFreeContiguousMemory((PVOID)pb->Data);
-    pool_free(pb);
+    if (pool_owns(pb)) pool_free(pb);   /* a header the title allocated stays its own */
 }
 
 static ULONG *pb_emit(unsigned op, unsigned payload_dwords)
 {
-    D3DPushBuffer *pb = d3d.recording;
+    pb_stream *pb = pb_stream_of(d3d.recording, true);
     unsigned need = pb->n + 1 + payload_dwords;
     if (need > pb->cap) {
         while (pb->cap < need) pb->cap = pb->cap ? pb->cap * 2 : 1024;
@@ -3923,7 +3972,7 @@ static void NTAPI D3DDevice_BeginPushBuffer(D3DPushBuffer *pb)
 {
     if (d3d.recording) xlog("D3D: BeginPushBuffer while already recording");
     d3d.recording = pb;
-    pb->n = 0;
+    pb_stream_of(pb, true)->n = 0;
     for (int i = 0; i < D3DRS_MAX; i++) pb_rs[i] = RS(i);
     memcpy(pb_tss, d3d.texture_state, sizeof(pb_tss));
     for (int i = 0; i < D3DRS_MAX; i++) pb_saved.rs[i] = RS(i);
@@ -3951,7 +4000,7 @@ static LONG NTAPI D3DDevice_EndPushBuffer(void)
     D3DPushBuffer *pb = d3d.recording;
     if (!pb) return D3DERR_INVALIDCALL;
     pb_flush_state();
-    pb->Size = pb->n * 4 + 4;
+    pb->Size = pb_stream_of(pb, true)->n * 4 + 4;
     d3d.recording = NULL;
     for (int i = 0; i < D3DRS_MAX; i++) RS(i) = pb_saved.rs[i];
     memcpy(d3d.texture_state, pb_saved.tss, sizeof(pb_saved.tss));
@@ -3971,7 +4020,7 @@ static LONG NTAPI D3DDevice_EndPushBuffer(void)
     memcpy(d3d.palettes, pb_saved.palettes, sizeof(pb_saved.palettes));
     if (d3d.target != pb_saved.target || d3d.target_depth != pb_saved.target_depth)
         D3DDevice_SetRenderTarget(pb_saved.target, pb_saved.target_depth);
-    TRACE("D3D: recorded push buffer %p: %u dwords", (void *)pb, pb->n);
+    TRACE("D3D: recorded push buffer %p: %u dwords", (void *)pb, pb_stream_of(pb, true)->n);
     return D3D_OK;
 }
 
@@ -3979,7 +4028,7 @@ static void NTAPI D3DDevice_GetPushBufferOffset(ULONG *off)
 {
     if (!d3d.recording) { *off = 0; return; }
     pb_flush_state();
-    *off = d3d.recording->n * 4;
+    *off = pb_stream_of(d3d.recording, true)->n * 4;
 }
 
 /* ---- fixups ---- */
@@ -4025,9 +4074,10 @@ static LONG NTAPI D3DPushBuffer_EndFixup(D3DPushBuffer *pb)
 
 /* The op recorded at `offset`, or NULL (with one complaint) when there is
    no op of that kind there. */
-static ULONG *pb_op_at(D3DPushBuffer *pb, ULONG offset, unsigned op)
+static ULONG *pb_op_at(D3DPushBuffer *b, ULONG offset, unsigned op)
 {
-    if (pb->ops && offset / 4 < pb->n && (pb->ops[offset / 4] & 0xFF) == op) return pb->ops + offset / 4 + 1;
+    pb_stream *pb = pb_stream_of(b, false);
+    if (pb && pb->ops && offset / 4 < pb->n && (pb->ops[offset / 4] & 0xFF) == op) return pb->ops + offset / 4 + 1;
     static bool warned;
     if (!warned) {
         xlog("D3D: push buffer fixup at offset %u does not match the recorded op (kind %u)", offset, op);
@@ -4118,8 +4168,9 @@ static void NTAPI D3DPushBuffer_Verify(D3DPushBuffer *pb, ULONG StampResources) 
 
 static void pb_interpret(const ULONG *p, unsigned n);
 
-static void pb_run(D3DPushBuffer *pb, D3DFixup *fx, int depth)
+static void pb_run(D3DPushBuffer *b, D3DFixup *fx, int depth)
 {
+    pb_stream *pb = pb_stream_of(b, false);
     if (!pb || !pb->ops || depth > 8) return;
     for (unsigned i = 0; i < pb->n;) {
         const ULONG *p = pb->ops + i;
@@ -4275,6 +4326,7 @@ static void pb_interpret(const ULONG *p, unsigned n)
                         ULONG stride;
                         if (d3d.vertex_shader & 1) {
                             vshader *sh = (vshader *)(d3d.vertex_shader & ~1u);
+                            if (sh->code) vertex_shader_object(sh);   /* so the copy reuses it */
                             vshader tmp = inline_layout(sh, &stride);
                             if (stride) {
                                 if (sh->code) draw_programmable(&tmp, prim, inline_buf, stride, 0, inline_n / stride, NULL);
@@ -4753,6 +4805,29 @@ static ULONG fence;
 static ULONG NTAPI D3D_SetFence(ULONG Flags) { (void)Flags; return ++fence; }
 static void NTAPI D3D_BlockOnTime(ULONG Time, ULONG Flags) { (void)Time; (void)Flags; }
 static void NTAPI D3D_BlockOnResource(D3DResource *r) { (void)r; }
+/* ---- LTCG builds: entry points the whole-program optimizer cut down ---- */
+
+/* CreateDevice with the adapter, device type and window it always ignores dropped. */
+static LONG NTAPI Direct3D_CreateDevice_LTCG(ULONG Flags, D3DPRESENT_PARAMETERS *pp, PVOID *ppDevice)
+{
+    return Direct3D_CreateDevice(0, 1, NULL, Flags, pp, ppDevice);
+}
+
+/* PixelJar::Lock2DSurface and Lock3DSurface, which LTCG builds call in place
+   of the inlined LockRect and LockBox of every resource type. */
+static void NTAPI Lock2DSurface(D3DPixelContainer *p, ULONG face, UINT_ level, ULONG *locked, const LONG *rect,
+                                ULONG flags)
+{
+    if (((p->res.Common >> 16) & 7) == 5) D3DSurface_LockRect((D3DSurface *)p, locked, rect, flags);
+    else D3DCubeTexture_LockRect(p, face, level, locked, rect, flags);
+}
+
+static void NTAPI Lock3DSurface(D3DPixelContainer *p, UINT_ level, ULONG *locked, const LONG *box, ULONG flags)
+{
+    if (((p->res.Common >> 16) & 7) == 5) D3DVolume_LockBox((D3DSurface *)p, locked, box, flags);
+    else D3DVolumeTexture_LockBox(p, level, locked, box, flags);
+}
+
 static void NTAPI D3D_Nop0(void) {}
 static void NTAPI D3D_Nop4(ULONG a) { (void)a; }
 static void NTAPI D3D_Nop8(ULONG a, ULONG b) { (void)a; (void)b; }
@@ -4908,6 +4983,11 @@ const struct hle_func d3d8_funcs[] = {
     F("_D3DTexture_GetSurfaceLevel2@8", D3DTexture_GetSurfaceLevel2),
     F("_D3DPalette_Lock2@8", D3DPalette_Lock2),
     F("_Get2DSurfaceDesc@12", Get2DSurfaceDesc),
+    F("_Lock2DSurface@24", Lock2DSurface),
+    F("_Lock3DSurface@20", Lock3DSurface),
+    F("_Direct3D_CreateDevice_LTCG@12", Direct3D_CreateDevice_LTCG),
+    F("_D3D_CommonSetMultiSampleModeAndScale@8", D3D_Nop8),
+    F("_D3D_KickOffAndWaitForIdle2@8", D3D_Nop8),
     F("@D3DDevice_SetVertexShaderConstantNotInline@12", SetVertexShaderConstantNotInline),
     F("@D3DDevice_SetVertexShaderConstant1@8", SetVertexShaderConstant1),
     F("@D3DDevice_SetVertexShaderConstant1Fast@8", SetVertexShaderConstant1),

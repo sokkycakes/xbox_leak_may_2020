@@ -33,6 +33,7 @@ typedef struct xfile {
     bool is_dir;
     bool is_device;         /* raw partition/drive opened for IOCTLs */
     bool delete_on_close;
+    bool async;             /* opened without FILE_SYNCHRONOUS_IO_*: reads and writes pend */
     LONGLONG pos;
 } xfile;
 
@@ -252,6 +253,8 @@ static NTSTATUS errno_status(int e)
 #define FILE_DIRECTORY_FILE     0x00000001
 #define FILE_NON_DIRECTORY_FILE 0x00000040
 #define FILE_DELETE_ON_CLOSE    0x00001000
+#define FILE_SYNCHRONOUS_IO_ALERT    0x00000010
+#define FILE_SYNCHRONOUS_IO_NONALERT 0x00000020
 
 #define FILE_ATTRIBUTE_READONLY  0x01
 #define FILE_ATTRIBUTE_DIRECTORY 0x10
@@ -335,6 +338,7 @@ NTSTATUS NTAPI NtCreateFile(HANDLE *FileHandle, ACCESS_MASK DesiredAccess, OBJEC
 
 made:
     if (CreateOptions & FILE_DELETE_ON_CLOSE) f->delete_on_close = true;
+    f->async = !(CreateOptions & (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT));
     {
         xobject *o = object_new(OBJ_FILE);
         o->file = f;
@@ -415,7 +419,11 @@ NTSTATUS NTAPI NtReadFile(HANDLE FileHandle, HANDLE Event, PVOID ApcRoutine, PVO
     if (n < 0) return complete(Event, ApcRoutine, iosb, errno_status(errno), 0);
     f->pos = off + n;
     if (n == 0 && Length > 0) return complete(Event, ApcRoutine, iosb, STATUS_END_OF_FILE, 0);
-    return complete(Event, ApcRoutine, iosb, STATUS_SUCCESS, (ULONG)n);
+    complete(Event, ApcRoutine, iosb, STATUS_SUCCESS, (ULONG)n);
+    /* The read is done, but a handle opened for overlapped I/O reports it
+       the way the disk driver would, as pending: titles wait on the I/O
+       status block, and some only advance after an ERROR_IO_PENDING. */
+    return f->async ? STATUS_PENDING : STATUS_SUCCESS;
 }
 
 NTSTATUS NTAPI NtWriteFile(HANDLE FileHandle, HANDLE Event, PVOID ApcRoutine, PVOID ApcContext,
@@ -429,7 +437,8 @@ NTSTATUS NTAPI NtWriteFile(HANDLE FileHandle, HANDLE Event, PVOID ApcRoutine, PV
     ssize_t n = pwrite(f->fd, Buffer, Length, off);
     if (n < 0) return complete(Event, ApcRoutine, iosb, errno_status(errno), 0);
     f->pos = off + n;
-    return complete(Event, ApcRoutine, iosb, STATUS_SUCCESS, (ULONG)n);
+    complete(Event, ApcRoutine, iosb, STATUS_SUCCESS, (ULONG)n);
+    return f->async ? STATUS_PENDING : STATUS_SUCCESS;
 }
 
 NTSTATUS NTAPI NtFlushBuffersFile(HANDLE FileHandle, IO_STATUS_BLOCK *iosb)

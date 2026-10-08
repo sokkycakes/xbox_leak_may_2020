@@ -259,6 +259,8 @@ typedef struct pool_hdr { uint32_t size, cls; } pool_hdr;
 #define POOL_BIG     0xFFu
 static void *pool_free_list[POOL_CLASSES];
 static char *pool_chunk, *pool_chunk_end;
+static char *pool_chunks[1024];    /* every 1 MB chunk, for pool_owns */
+static unsigned pool_nchunks;
 static pthread_mutex_t pool_lock = PTHREAD_MUTEX_INITIALIZER;
 
 void *pool_alloc(size_t size)
@@ -282,6 +284,7 @@ void *pool_alloc(size_t size)
                 pool_chunk = arena_alloc(1 << 20, 1);
                 if (!pool_chunk) { pthread_mutex_unlock(&pool_lock); return NULL; }
                 pool_chunk_end = pool_chunk + (1 << 20);
+                if (pool_nchunks < sizeof(pool_chunks) / sizeof(pool_chunks[0])) pool_chunks[pool_nchunks++] = pool_chunk;
             }
             h = (pool_hdr *)pool_chunk;
             pool_chunk += csize;
@@ -292,6 +295,21 @@ void *pool_alloc(size_t size)
     h->size = size;
     memset(h + 1, 0, size);
     return h + 1;
+}
+
+/* Whether p came from pool_alloc: guest code (an LTCG build's inlined
+   D3D create functions, say) can hand back objects it allocated itself. */
+bool pool_owns(const void *p)
+{
+    if (!p) return false;
+    const pool_hdr *h = (const pool_hdr *)p - 1;
+    if (h->cls == POOL_BIG && ((uintptr_t)h & 0xFFF) == 0) return true;
+    pthread_mutex_lock(&pool_lock);
+    bool in = false;
+    for (unsigned i = 0; i < pool_nchunks && !in; i++)
+        in = (const char *)p > pool_chunks[i] && (const char *)p < pool_chunks[i] + (1 << 20);
+    pthread_mutex_unlock(&pool_lock);
+    return in;
 }
 
 void pool_free(void *p)

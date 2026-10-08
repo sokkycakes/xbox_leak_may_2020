@@ -242,37 +242,72 @@ ULONG NTAPI AvSetDisplayMode(PVOID RegisterBase, ULONG Step, ULONG Mode, ULONG F
 
 /* ---- Ex: nonvolatile settings (EEPROM) ------------------------------- */
 
+/* The EEPROM's user settings section (XBOX_USER_SETTINGS, 96 bytes), which
+   XC_MAX_OS (0xFF) returns whole: XAPI's time zone code reads it that way. */
+#pragma pack(push, 1)
+static struct {
+    ULONG Checksum;
+    LONG TimeZoneBias;
+    char TimeZoneStdName[4], TimeZoneDltName[4];
+    ULONG Reserved1[2];
+    UCHAR TimeZoneStdDate[4], TimeZoneDltDate[4];   /* month, day, day of week, hour */
+    ULONG Reserved2[2];
+    LONG TimeZoneStdBias, TimeZoneDltBias;
+    ULONG Language, VideoFlags, AudioFlags;
+    ULONG ParentalControlGames, ParentalControlPassword, ParentalControlMovies;
+    ULONG OnlineIpAddress, OnlineDnsAddress, OnlineDefaultGatewayAddress, OnlineSubnetMask;
+    ULONG MiscFlags, DvdRegion;
+} user_settings = {
+    .TimeZoneStdName = "GMT", .TimeZoneDltName = "BST",
+    .Language = 1,                         /* English */
+    .MiscFlags = 2,                        /* XC_MISC_FLAG_DONT_USE_DST: plain UTC */
+};
+#pragma pack(pop)
+_Static_assert(sizeof(user_settings) == 96, "XBOX_USER_SETTINGS is 96 bytes");
+
 NTSTATUS NTAPI ExQueryNonVolatileSetting(ULONG ValueIndex, ULONG *Type, PVOID Value, ULONG ValueLength,
                                          ULONG *ResultLength)
 {
-    ULONG v = 0, len = 4;
-    switch (ValueIndex) {
-    case 0x03: v = 0; break;               /* XC_TIMEZONE_BIAS */
-    case 0x07: v = 1; break;               /* XC_LANGUAGE: English */
-    case 0x08: v = 0x00400100; break;      /* XC_VIDEO_FLAGS */
-    case 0x09: v = 0; break;               /* XC_AUDIO_FLAGS */
-    case 0x0A: v = 0; break;               /* XC_PARENTAL_CONTROL_GAMES: allow all */
-    case 0x0B: v = 0; break;               /* XC_PARENTAL_CONTROL_PASSWORD */
-    case 0x0C: v = 0; break;               /* XC_PARENTAL_CONTROL_MOVIES */
-    case 0x0E: v = 0; break;               /* XC_DVD_REGION */
-    case 0x10: v = 0; break;               /* XC_MISC_FLAGS */
-    case 0x103: v = 1; break;              /* XC_FACTORY_GAME_REGION: North America */
-    case 0x104: v = 0x00400100; break;     /* XC_FACTORY_AV_REGION: NTSC-M */
-    case 0xFFFF: {                         /* XC_MAX_ALL: whole EEPROM image */
-        len = 256;
-        if (ValueLength < len) return STATUS_BUFFER_TOO_SMALL;
-        memset(Value, 0, len);
-        if (Type) *Type = 3;
-        if (ResultLength) *ResultLength = len;
-        return STATUS_SUCCESS;
-    }
-    default:
+    /* User settings by XC_VALUE_INDEX: offset and size in user_settings. */
+    static const struct { UCHAR off, len; } user[] = {
+        { 4, 4 }, { 8, 4 }, { 24, 4 }, { 40, 4 }, { 12, 4 }, { 28, 4 }, { 44, 4 },   /* time zone */
+        { 48, 4 }, { 52, 4 }, { 56, 4 }, { 60, 4 }, { 64, 4 }, { 68, 4 },           /* language .. movies */
+        { 72, 4 }, { 76, 4 }, { 80, 4 }, { 84, 4 }, { 88, 4 }, { 92, 4 },           /* online, misc, DVD */
+    };
+    static const UCHAR serial[12] = "000000000000", mac[6] = { 0x00, 0x50, 0xf2, 0x00, 0x00, 0x01 };
+    static const ULONG av_region = 0x00400100;    /* NTSC-M */
+    static const ULONG game_region = 1;           /* North America */
+    static UCHAR all[256];
+    const void *src;
+    ULONG len, type = 4;   /* REG_DWORD */
+
+    if (ValueIndex < sizeof(user) / sizeof(user[0])) {
+        src = (const UCHAR *)&user_settings + user[ValueIndex].off;
+        len = user[ValueIndex].len;
+        if (ValueIndex == 1 || ValueIndex == 2 || ValueIndex == 4 || ValueIndex == 5) type = 3;
+    } else switch (ValueIndex) {
+    case 0xFF: src = &user_settings; len = sizeof(user_settings); type = 3; break;   /* XC_MAX_OS */
+    case 0x100: src = serial; len = sizeof(serial); type = 3; break;               /* XC_FACTORY_SERIAL_NUMBER */
+    case 0x101: src = mac; len = sizeof(mac); type = 3; break;                     /* XC_FACTORY_ETHERNET_ADDR */
+    case 0x103: src = &av_region; len = 4; break;                                  /* XC_FACTORY_AV_REGION */
+    case 0x104: src = &game_region; len = 4; break;                                /* XC_FACTORY_GAME_REGION */
+    case 0xFFFF:                                                                   /* XC_MAX_ALL */
+        /* The factory section starts at 0x30 of the 256-byte image (AV region
+           at +40), the user section at 0x60. */
+        memcpy(all + 0x30 + 40, &av_region, 4);
+        memcpy(all + 0x60, &user_settings, sizeof(user_settings));
+        src = all; len = sizeof(all); type = 3;
+        break;
+    default: {
+        static const ULONG zero;
         TRACE("ExQueryNonVolatileSetting(%#x): unknown, returning 0", ValueIndex);
+        src = &zero; len = 4;
     }
-    if (ValueLength < len) return STATUS_BUFFER_TOO_SMALL;
-    memcpy(Value, &v, len);
-    if (Type) *Type = 4;  /* REG_DWORD */
+    }
     if (ResultLength) *ResultLength = len;
+    if (ValueLength < len) return STATUS_BUFFER_TOO_SMALL;
+    memcpy(Value, src, len);
+    if (Type) *Type = type;
     return STATUS_SUCCESS;
 }
 

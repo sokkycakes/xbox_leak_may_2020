@@ -15,7 +15,10 @@
 #include "../xbcompat.h"
 #include "hle.h"
 
-typedef struct { char *name; ULONG va; bool data; } sym;
+/* regs: where each argument arrives when some come in registers ("eax,s,ecx":
+   the first in eax, the second on the stack, the third in ecx), from an LTCG
+   build; NULL for a plain stdcall/fastcall/cdecl function. */
+typedef struct { char *name; ULONG va; bool data; char *regs; } sym;
 static sym *syms;
 static size_t nsyms;
 
@@ -39,12 +42,12 @@ static void load_map(const char *path)
 {
     FILE *f = fopen(path, "r");
     if (!f) fatal("cannot open HLE map %s", path);
-    char line[1024], name[1000], kind[16];
+    char line[1024], name[1000], kind[128];
     unsigned va;
     size_t cap = 0;
     while (fgets(line, sizeof(line), f)) {
         kind[0] = 0;
-        if (sscanf(line, "%999s %x %15s", name, &va, kind) < 2) continue;
+        if (sscanf(line, "%999s %x %127s", name, &va, kind) < 2) continue;
         if (nsyms == cap) {
             cap = cap ? cap * 2 : 1024;
             syms = realloc(syms, cap * sizeof(*syms));
@@ -52,6 +55,7 @@ static void load_map(const char *path)
         syms[nsyms].name = strdup(name);
         syms[nsyms].va = va;
         syms[nsyms].data = !strcmp(kind, "data");
+        syms[nsyms].regs = !strncmp(kind, "regs=", 5) ? strdup(kind + 5) : NULL;
         nsyms++;
     }
     fclose(f);
@@ -87,6 +91,44 @@ static void *make_trap(const char *name)
     return s;
 }
 
+/* A thunk from a function taking some arguments in registers (spec as in
+   sym.regs) to the stdcall host function `target`: it pushes every argument
+   in order, calls, and returns popping the caller's stack arguments. */
+static void *make_reg_thunk(const char *spec, void *target)
+{
+    static const char *const reg_names[] = { "eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi" };
+    enum { MAXARGS = 16 };
+    int reg[MAXARGS], off[MAXARGS], n = 0, stack = 0;
+    char buf[128];
+    snprintf(buf, sizeof(buf), "%s", spec);
+    for (char *save, *t = strtok_r(buf, ",", &save); t; t = strtok_r(NULL, ",", &save)) {
+        if (n + 2 > MAXARGS) return NULL;
+        if (!strcmp(t, "s") || !strcmp(t, "s2")) {
+            for (int k = 0; k < (t[1] ? 2 : 1); k++) { reg[n] = -1; off[n++] = stack; stack += 4; }
+            continue;
+        }
+        int r = -1;
+        for (int k = 0; k < 8; k++) if (!strcmp(t, reg_names[k]) && k != 4) r = k;
+        if (r < 0) return NULL;
+        reg[n] = r; off[n++] = 0;
+    }
+    uint8_t *code = alloc_code(16 + n * 8), *c = code;
+    for (int i = n - 1, pushed = 0; i >= 0; i--, pushed++) {
+        if (reg[i] >= 0) {
+            *c++ = 0x50 + reg[i];                        /* push reg */
+        } else {
+            uint32_t d = 4 + off[i] + 4 * pushed;        /* past the return address and our pushes */
+            *c++ = 0xFF; *c++ = 0xB4; *c++ = 0x24;       /* push dword [esp + d] */
+            memcpy(c, &d, 4); c += 4;
+        }
+    }
+    int32_t rel = (int32_t)((uint32_t)target - ((uint32_t)c + 5));
+    *c++ = 0xE8; memcpy(c, &rel, 4); c += 4;             /* call target (stdcall: pops n dwords) */
+    if (stack) { *c++ = 0xC2; *c++ = stack & 0xFF; *c++ = stack >> 8; }   /* ret stack */
+    else *c++ = 0xC3;
+    return code;
+}
+
 static void write_jmp(ULONG at, void *target)
 {
     uint8_t *p = (uint8_t *)at;
@@ -111,7 +153,7 @@ static bool replaced_library_api(const char *name)
         "_D3DDevice_", "@D3DDevice_", "_D3DResource_", "_D3DVertexBuffer_", "_D3DIndexBuffer_",
         "_D3DTexture_", "_D3DSurface_", "_D3DBaseTexture_", "_D3DCubeTexture_", "_D3DVolumeTexture_",
         "_D3DPalette_", "_D3DPushBuffer_", "_D3DFixup_", "_Direct3D", "_D3D_", "_D3DPERF_", "_XMETAL_",
-        "_D3DRDI_", "_PerfGet", "_Get2DSurfaceDesc@",
+        "_D3DRDI_", "_PerfGet", "_Get2DSurfaceDesc@", "_Lock2DSurface@", "_Lock3DSurface@",
         /* xapilib: the input device API sits on a USB stack we do not run */
         "_XInitDevices@", "_XGetDevices@", "_XGetDeviceChanges@", "_XInput",
         /* dsound */
@@ -168,6 +210,10 @@ void hle_patch(xbe_image *img, const char *mapfile)
             xlog("HLE: %s shares %#x with a name implemented differently; not patched",
                  syms[i].name, (unsigned)syms[i].va);
             continue;
+        }
+        if (impl && syms[i].regs) {
+            impl = make_reg_thunk(syms[i].regs, impl);
+            if (!impl) xlog("HLE: cannot read the argument registers of %s (%s)", syms[i].name, syms[i].regs);
         }
         if (impl) {
             write_jmp(syms[i].va, impl);

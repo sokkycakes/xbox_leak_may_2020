@@ -88,7 +88,9 @@ def make_map(xbe):
     if xdk_build(xbe) != LEAK_XDK_BUILD:
         digest = hashlib.sha1(open(xbe, "rb").read()).hexdigest()[:16]
         binary = os.environ.get("XBCOMPAT_BIN", os.path.join(ROOT, "build", "xbcompat"))
-        bdigest = hashlib.sha1(open(binary, "rb").read()).hexdigest()[:8]
+        # The map depends on the binary's host tables and on xbsymmap itself.
+        bdigest = hashlib.sha1(open(binary, "rb").read() +
+                               open(os.path.join(HERE, "xbsymmap.py"), "rb").read()).hexdigest()[:8]
         path = os.path.join(CACHE, f"{digest}-xbsym-{bdigest}.map")
         if not os.path.exists(path):
             os.makedirs(CACHE, exist_ok=True)
