@@ -8,6 +8,17 @@ BOOTANI_PIDFILE=/var/run/bootani.pid
 
 # shellcheck source=/dev/null
 [ -r /etc/default/theseus ] && . /etc/default/theseus
+# The display mode bootani used (KMS_MODE=WxH), so the dashboard keeps it.
+# shellcheck source=/dev/null
+[ -r /etc/default/kms ] && . /etc/default/kms
+
+# Test builds, settings and logs through the boot stick (see theseus-stick).
+if [ -x /usr/libexec/theseus-stick ]; then
+	/usr/libexec/theseus-stick overlay
+	# shellcheck source=/dev/null
+	[ -r /var/run/theseus.env ] && . /var/run/theseus.env
+	/usr/libexec/theseus-stick logs &
+fi
 
 # bootani owns the display until its last frame; KMS allows one master.
 if [ -r "$BOOTANI_PIDFILE" ]; then
@@ -21,6 +32,7 @@ export HOME=/root
 # User data and shipped files are the same tree (see theseus.mk).
 export XDG_DATA_HOME=/opt
 export SDL_VIDEODRIVER=kmsdrm
+export KMS_MODE
 export SDL_AUDIODRIVER=alsa
 
 # Same output bootani picks: the ALSA default (card 0, device 0) if it

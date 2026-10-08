@@ -49,10 +49,25 @@ static bool FindOutput(int fd)
     }
     if (!conn) { drmModeFreeResources(res); return false; }
 
-    // The display's preferred mode, else the first (largest) one.
+    // KMS_MODE=WxH (e.g. 720x480 for NTSC) if the display offers it,
+    // progressive before interlaced; else the display's preferred mode,
+    // else the first (largest) one.
     g_mode = conn->modes[0];
     for (int i = 0; i < conn->count_modes; i++)
         if (conn->modes[i].type & DRM_MODE_TYPE_PREFERRED) { g_mode = conn->modes[i]; break; }
+    int want_w = 0, want_h = 0;
+    const char* want = getenv("KMS_MODE");
+    if (want && sscanf(want, "%dx%d", &want_w, &want_h) == 2) {
+        int best = -1;
+        for (int i = 0; i < conn->count_modes; i++) {
+            const drmModeModeInfo* m = &conn->modes[i];
+            if (m->hdisplay != want_w || m->vdisplay != want_h) continue;
+            if (best < 0 || ((conn->modes[best].flags & DRM_MODE_FLAG_INTERLACE) &&
+                             !(m->flags & DRM_MODE_FLAG_INTERLACE)))
+                best = i;
+        }
+        if (best >= 0) g_mode = conn->modes[best];
+    }
     g_connector_id = conn->connector_id;
 
     // Keep the CRTC the console is using if there is one, else any CRTC the

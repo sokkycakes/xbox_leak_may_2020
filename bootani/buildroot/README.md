@@ -28,8 +28,19 @@ screen. It runs on KMSDRM too, with no X11 or Wayland:
   for bootani to exit (KMS allows one master), then starts
   `/opt/theseus/theseus --dashboard --no-toolbar --no-boot-anim` and restarts
   it if it exits. Its output goes to `/var/log/theseus.log`.
-- Input is game controllers: Xbox pads through `xpad`, other HID pads through
-  evdev. The image has no udev, so SDL doesn't see keyboards or mice.
+- Input: keyboards and game controllers (Xbox pads through `xpad`, other HID
+  pads through evdev). SDL finds them through eudev, which the image runs.
+- Display mode: 720x480 (NTSC) everywhere by default. The kernel console
+  starts there (`video=720x480@60` on the Sion command line), and bootani and
+  SDL both read `KMS_MODE=720x480` from `/etc/default/kms`
+  (`BR2_PACKAGE_BOOTANI_KMS_MODE`). When the display doesn't offer that mode,
+  they fall back to its preferred mode, never to whatever the firmware left
+  on the CRTC (`patches/sdl2/`).
+- The boot stick is a test loop for machines with no network. If the stick's
+  EFI partition has a `theseus/` folder (the image ships one), then at every
+  boot `theseus/opt/` is copied over `/opt/theseus`, `theseus/theseus.env` is
+  sourced (`THESEUS_ARGS=...`, `KMS_MODE=...`), and `theseus/logs/` gets the
+  displays and modes, input devices, the dashboard's log and dmesg.
 - The dashboard and its data live in `/opt/theseus` (about 190 MB, in the
   initramfs like everything else). Extra arguments go in
   `/etc/default/theseus` as `THESEUS_ARGS="..."`.

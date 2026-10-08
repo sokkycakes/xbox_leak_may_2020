@@ -20,6 +20,8 @@ BOOTANI_CONF_OPTS = \
 
 define BOOTANI_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(BOOTANI_BUILDDIR)/bootani $(TARGET_DIR)/usr/bin/bootani
+	mkdir -p $(TARGET_DIR)/etc/default
+	echo 'KMS_MODE="$(call qstrip,$(BR2_PACKAGE_BOOTANI_KMS_MODE))"' > $(TARGET_DIR)/etc/default/kms
 endef
 
 ifeq ($(BR2_PACKAGE_BOOTANI_START_AT_BOOT),y)

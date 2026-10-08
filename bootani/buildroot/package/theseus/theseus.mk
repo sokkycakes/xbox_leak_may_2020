@@ -55,6 +55,7 @@ ifeq ($(BR2_PACKAGE_THESEUS_START_AT_BOOT),y)
 define THESEUS_INSTALL_INIT_SYSV
 	$(INSTALL) -D -m 0755 $(THESEUS_PKGDIR)/S99theseus $(TARGET_DIR)/etc/init.d/S99theseus
 	$(INSTALL) -D -m 0755 $(THESEUS_PKGDIR)/theseus-session $(TARGET_DIR)/usr/libexec/theseus-session
+	$(INSTALL) -D -m 0755 $(THESEUS_PKGDIR)/theseus-stick $(TARGET_DIR)/usr/libexec/theseus-stick
 endef
 endif
 

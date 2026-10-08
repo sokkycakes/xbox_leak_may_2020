@@ -32,6 +32,17 @@ config BR2_PACKAGE_BOOTANI_ARGS
 	  script is stopped), --short, --loop, --audio-device NAME,
 	  --drm-device /dev/dri/cardN.
 
+config BR2_PACKAGE_BOOTANI_KMS_MODE
+	string "display mode"
+	default "720x480"
+	help
+	  Display mode for the boot animation and whatever follows it
+	  on KMS (the Theseus dashboard), as WIDTHxHEIGHT. Used when the
+	  display offers it, progressive before interlaced; otherwise
+	  the display's preferred mode. 720x480 is NTSC. Empty means
+	  always the preferred mode. Written to /etc/default/kms as
+	  KMS_MODE.
+
 endif
 
 comment "bootani needs a toolchain w/ C++, threads, and EGL + GBM (mesa3d)"

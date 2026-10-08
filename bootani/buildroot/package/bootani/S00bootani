@@ -11,6 +11,9 @@ BOOTANI_ARGS="--kms"
 
 # shellcheck source=/dev/null
 [ -r "/etc/default/$DAEMON" ] && . "/etc/default/$DAEMON"
+# shellcheck source=/dev/null
+[ -r /etc/default/kms ] && . /etc/default/kms
+export KMS_MODE
 
 start() {
 	printf 'Starting %s: ' "$DAEMON"
