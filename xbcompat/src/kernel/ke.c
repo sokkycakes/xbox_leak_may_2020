@@ -459,6 +459,7 @@ static void *dpc_thread(void *arg)
     for (;;) {
         ULONGLONG now = mono_100ns();
         KeTickCount = (ULONG)((now - boot_mono) / 10000);
+        if (g_apu_sample_counter) *g_apu_sample_counter = (ULONG)((now - boot_mono) * 48 / 10000);
 
         /* Expire timers. */
         for (timer_node **pp = &timers; *pp;) {

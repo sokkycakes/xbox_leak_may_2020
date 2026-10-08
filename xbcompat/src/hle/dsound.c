@@ -85,6 +85,7 @@ typedef int32_t HRESULT;
 
 #define DSBPLAY_LOOPING   1
 #define DSBPLAY_FROMSTART 2
+#define DSBPLAY_SYNCHPLAYBACK      0x4   /* XDK 5xxx: start with CDirectSound::SynchPlayback; played at once here */
 #define DSBSTOPEX_ENVELOPE        1
 #define DSBSTOPEX_RELEASEWAVEFORM 2
 #define DSBSTATUS_PLAYING 1
@@ -1293,7 +1294,12 @@ static HRESULT buffer_create_locked(const DSBUFFERDESC *desc, uint32_t *pp)
     if (desc->dwSize < sizeof(DSBUFFERDESC) && desc->dwSize != 0) {
         xlog("DSound: DSBUFFERDESC size %u", desc->dwSize);
     }
-    if (desc->dwFlags & ~DSBCAPS_VALID) { xlog("DSound: invalid buffer flags %#x", desc->dwFlags); return DSERR_INVALIDPARAM; }
+    if (desc->dwFlags & ~DSBCAPS_VALID) {
+        /* Later XDKs add flags (0x400000 in 5849); their buffers still play. */
+        static ULONG warned;
+        if ((desc->dwFlags & ~DSBCAPS_VALID) & ~warned) xlog("DSound: ignoring unknown buffer flags %#x", desc->dwFlags & ~DSBCAPS_VALID);
+        warned |= desc->dwFlags & ~DSBCAPS_VALID;
+    }
     struct ds_fmt fmt; DWORD mask = 0;
     int submix = !!(desc->dwFlags & DSBCAPS_SUBMIXMASK);
     if (submix) {
@@ -2570,7 +2576,7 @@ static HRESULT buffer_play_locked(struct ds_buffer *b, DWORD flags)
 
 static HRESULT NTAPI Buf_Play(void *self, DWORD r1, DWORD r2, DWORD flags)
 {
-    if (r1 || r2 || (flags & ~(DSBPLAY_LOOPING | DSBPLAY_FROMSTART))) return DSERR_INVALIDPARAM;
+    if (r1 || r2 || (flags & ~(DSBPLAY_LOOPING | DSBPLAY_FROMSTART | DSBPLAY_SYNCHPLAYBACK))) return DSERR_INVALIDPARAM;
     BUFFER_ENTRY(b, self);
     b->start_at = 0;
     HRESULT hr = buffer_play_locked(b, flags);
@@ -2580,7 +2586,7 @@ static HRESULT NTAPI Buf_Play(void *self, DWORD r1, DWORD r2, DWORD flags)
 
 static HRESULT NTAPI Buf_PlayEx(void *self, uint32_t rt_lo, uint32_t rt_hi, DWORD flags)
 {
-    if (flags & ~(DSBPLAY_LOOPING | DSBPLAY_FROMSTART)) return DSERR_INVALIDPARAM;
+    if (flags & ~(DSBPLAY_LOOPING | DSBPLAY_FROMSTART | DSBPLAY_SYNCHPLAYBACK)) return DSERR_INVALIDPARAM;
     int64_t rt = (int64_t)(((uint64_t)rt_hi << 32) | rt_lo);
     BUFFER_ENTRY(b, self);
     HRESULT hr = DS_OK;
@@ -2936,7 +2942,36 @@ static void *file_vtbl[9] = {
     F("?" name "@CDirectSoundStream@DirectSound@@QAG" sig, impl), \
     F("?" name "@CDirectSoundVoice@DirectSound@@QAG" sig, impl)
 
+/* XDK 5xxx shared 3D voice data (XACT computes 3D positioning once and
+   hands it to its voices).  3D is mixed from each voice's own parameters
+   here, so these only answer. */
+static HRESULT NTAPI Voice_Use3DVoiceData(void *self, void *data) { (void)self; (void)data; return DS_OK; }
+static HRESULT NTAPI Voice_GetVoiceProperties(void *self, void *props)
+{
+    (void)self;
+    if (props) memset(props, 0, 80);   /* DSVOICEPROPS: no mixbins, pitch 0, I3DL2 volumes 0 */
+    return DS_OK;
+}
+/* Buffers played with DSBPLAY_SYNCHPLAYBACK already started. */
+static HRESULT NTAPI DS_SynchPlayback(void *self) { (void)self; return DS_OK; }
+static HRESULT NTAPI Calc_Calculate3D(DWORD a, void *b) { (void)a; (void)b; return DS_OK; }
+static HRESULT NTAPI Calc_GetVoiceData(DWORD a, DWORD b, void *c, void *d, void *e)
+{
+    (void)a; (void)b; (void)c; (void)d; (void)e;
+    return DS_OK;
+}
+
 const struct hle_func dsound_funcs[] = {
+    F("_IDirectSoundBuffer_Use3DVoiceData@8", Voice_Use3DVoiceData),
+    F("_IDirectSoundBuffer_Set3DVoiceData@8", Voice_Use3DVoiceData),
+    F("_IDirectSoundBuffer_GetVoiceProperties@8", Voice_GetVoiceProperties),
+    F("_IDirectSoundStream_Use3DVoiceData@8", Voice_Use3DVoiceData),
+    F("_IDirectSoundStream_Set3DVoiceData@8", Voice_Use3DVoiceData),
+    F("_IDirectSoundStream_GetVoiceProperties@8", Voice_GetVoiceProperties),
+    F("_IDirectSound3DCalculator_Calculate3D@8", Calc_Calculate3D),
+    F("_IDirectSound_SynchPlayback@4", DS_SynchPlayback),
+    F("_CDirectSound_SynchPlayback@4", DS_SynchPlayback),
+    F("_IDirectSound3DCalculator_GetVoiceData@20", Calc_GetVoiceData),
     /* globals */
     F("_DirectSoundCreate@12", DirectSoundCreate),
     F("_DirectSoundCreateBuffer@8", DirectSoundCreateBuffer),

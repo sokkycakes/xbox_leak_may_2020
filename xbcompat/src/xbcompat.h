@@ -13,6 +13,7 @@
 
 extern int g_trace;          /* --trace: log every kernel call */
 extern FILE *g_log;
+extern volatile ULONG *g_apu_sample_counter;   /* the APU's 48 kHz counter, or NULL */
 
 void xlog(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void fatal(const char *fmt, ...) __attribute__((format(printf, 1, 2), noreturn));
@@ -108,7 +109,13 @@ void object_release(xobject *obj);
 
 /* ---- files ------------------------------------------------------------ */
 
-void fs_init(const char *xbe_path, const char *hdd_root);
+void fs_init(const char *xbe_path, const char *hdd_root, const char *dvd_root);
+NTSTATUS fs_host_path(const char *xpath, char *host, size_t hostlen);
+const char *fs_hdd_root(void);
+
+/* ---- title launches (XLaunchNewImage) --------------------------------- */
+
+void launch_init(int argc, char **argv, const char *d_path, const char *launch_data_file, const char *xbe_rel);
 NTSTATUS fs_translate(const OBJECT_ATTRIBUTES *oa, char *host, size_t hostlen, int *is_device);
 
 /* ---- loader ----------------------------------------------------------- */

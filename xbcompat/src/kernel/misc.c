@@ -1,5 +1,6 @@
 /* Hal, Av, Dbg, Ex settings, Xe section loading and the kernel's data exports. */
 #define _GNU_SOURCE
+#include <errno.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
@@ -61,8 +62,105 @@ ULONG NTAPI DbgPrompt(const char *p, char *r, ULONG n) { (void)p; if (n) r[0] = 
 
 /* ---- Hal -------------------------------------------------------------- */
 
+/* ---- title launches ----------------------------------------------------
+   XLaunchNewImage writes the next title's path ("<D: target>;<path>") and
+   its launch data into the LaunchDataPage, then quick-reboots.  xbcompat
+   reboots by running itself again (through the XBCOMPAT_LAUNCHER command when
+   set, so xbrun can build the new title's library map) with the D: target,
+   the image and the launch page passed on the command line. */
+
+NTSTATUS NTAPI IoCreateSymbolicLink(OBJECT_STRING *Link, OBJECT_STRING *Target);
+PVOID NTAPI MmAllocateContiguousMemory(SIZE_T NumberOfBytes);
+
+static int saved_argc;
+static char **saved_argv;
+
+void launch_init(int argc, char **argv, const char *d_path, const char *launch_data_file, const char *xbe_rel)
+{
+    saved_argc = argc;
+    saved_argv = argv;
+    if (d_path) {
+        static char name[600];
+        snprintf(name, sizeof(name), "%s\\%s", d_path, xbe_rel ? xbe_rel : "default.xbe");
+        XeImageFileName.Buffer = name;
+        XeImageFileName.Length = strlen(name);
+        XeImageFileName.MaximumLength = XeImageFileName.Length + 1;
+        OBJECT_STRING link = { 6, 7, "\\??\\D:" }, target;
+        target.Buffer = (char *)d_path;
+        target.Length = strlen(d_path);
+        target.MaximumLength = target.Length + 1;
+        IoCreateSymbolicLink(&link, &target);
+        xlog("launched with D: -> %s", d_path);
+    }
+    if (launch_data_file) {
+        FILE *f = fopen(launch_data_file, "rb");
+        if (f) {
+            LaunchDataPage = MmAllocateContiguousMemory(4096);
+            memset(LaunchDataPage, 0, 4096);
+            if (fread(LaunchDataPage, 1, 4096, f) != 4096) xlog("launch data %s is short", launch_data_file);
+            fclose(f);
+        }
+    }
+}
+
+static void relaunch(const char *path)
+{
+    char dpath[520], rel[520];
+    const char *semi = strchr(path, ';');
+    if (!semi) { xlog("launch path %s has no D: part", path); return; }
+    snprintf(dpath, sizeof(dpath), "%.*s", (int)(semi - path), path);
+    snprintf(rel, sizeof(rel), "%s", semi + 1);
+    char dir[4096], img[4096];
+    if (!NT_SUCCESS(fs_host_path(dpath, dir, sizeof(dir)))) { xlog("cannot map %s", dpath); return; }
+    char full[1100];
+    snprintf(full, sizeof(full), "%s\\%s", dpath, rel);
+    if (!NT_SUCCESS(fs_host_path(full, img, sizeof(img)))) { xlog("cannot map %s", full); return; }
+    char page[4096];
+    snprintf(page, sizeof(page), "%s/.launchdata", fs_hdd_root());
+    FILE *f = fopen(page, "wb");
+    if (!f || fwrite(LaunchDataPage, 1, 4096, f) != 4096) { xlog("cannot write %s", page); if (f) fclose(f); return; }
+    fclose(f);
+
+    /* The new command line: the launcher (or this binary), the options this
+       run was given except --hle, --dvd and launch state, then the new ones. */
+    char *args[64];
+    int n = 0;
+    const char *launcher = getenv("XBCOMPAT_LAUNCHER");
+    char *lcopy = launcher ? strdup(launcher) : NULL;
+    if (lcopy) {
+        /* xbrun.py takes the image first, then xbcompat's options. */
+        for (char *tok = strtok(lcopy, " "); tok && n < 8; tok = strtok(NULL, " ")) args[n++] = tok;
+        args[n++] = img;
+    } else {
+        args[n++] = "/proc/self/exe";
+    }
+    for (int i = 1; i < saved_argc - 1 && n < 48; i++) {
+        const char *a = saved_argv[i];
+        if (!strcmp(a, "--hle") || !strcmp(a, "--dvd") || !strcmp(a, "--d-path") || !strcmp(a, "--launch-data") ||
+            !strcmp(a, "--xbe-path")) {
+            i++;
+            continue;
+        }
+        args[n++] = saved_argv[i];
+    }
+    extern char *g_dvd_root;
+    if (g_dvd_root) { args[n++] = "--dvd"; args[n++] = g_dvd_root; }
+    args[n++] = "--d-path"; args[n++] = dpath;
+    args[n++] = "--xbe-path"; args[n++] = rel;
+    args[n++] = "--launch-data"; args[n++] = page;
+    if (!lcopy) args[n++] = img;
+    args[n] = NULL;
+    xlog("XLaunchNewImage: %s (D: %s)", img, dpath);
+    if (g_log) fflush(g_log);
+    fflush(stderr);
+    execvp(args[0], args);
+    xlog("relaunch failed: %s", strerror(errno));
+}
+
 void NTAPI HalReturnToFirmware(ULONG Routine)
 {
+    const char *path = LaunchDataPage ? (const char *)LaunchDataPage + 8 : NULL;
+    if (Routine == 2 && path && path[0]) relaunch(path);
     xlog("HalReturnToFirmware(%u): title asked to reboot or return to the dashboard", Routine);
     exit(0);
 }
@@ -473,4 +571,37 @@ NTSTATUS NTAPI IoSynchronousDeviceIoControlRequest(ULONG Code, PVOID Dev, PVOID 
     if (Out) memset(Out, 0, OutLen);
     if (Returned) *Returned = 0;
     return STATUS_SUCCESS;
+}
+
+/* ---- small exports later XDKs import ------------------------------------ */
+
+ULONG KeTimeIncrement = 10000;   /* 100 ns units per clock tick (1 ms) */
+
+static ULONG fsc_pages = 16;
+
+NTSTATUS NTAPI FscSetCacheSize(ULONG NumberOfCachePages)
+{
+    TRACE("FscSetCacheSize(%u)", NumberOfCachePages);
+    fsc_pages = NumberOfCachePages;
+    return STATUS_SUCCESS;
+}
+
+ULONG NTAPI FscGetCacheSize(void) { return fsc_pages; }
+
+/* The host saves and restores the FPU and SSE state for every thread. */
+NTSTATUS NTAPI KeSaveFloatingPointState(PVOID FloatSave) { (void)FloatSave; return STATUS_SUCCESS; }
+NTSTATUS NTAPI KeRestoreFloatingPointState(PVOID FloatSave) { (void)FloatSave; return STATUS_SUCCESS; }
+
+/* Kernel stacks are only for drivers; hand out ordinary memory. */
+PVOID NTAPI MmCreateKernelStack(ULONG NumberOfBytes, BOOLEAN DebuggerThread)
+{
+    (void)DebuggerThread;
+    char *p = calloc(1, NumberOfBytes);
+    return p ? p + NumberOfBytes : NULL;
+}
+
+void NTAPI MmDeleteKernelStack(PVOID StackBase, PVOID StackLimit)
+{
+    (void)StackBase;
+    free(StackLimit);
 }

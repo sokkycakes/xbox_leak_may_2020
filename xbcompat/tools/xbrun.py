@@ -142,6 +142,9 @@ def main():
     else:
         xbe = image
 
+    # A title that calls XLaunchNewImage comes back through this script, so
+    # the next image gets its own library map.
+    os.environ["XBCOMPAT_LAUNCHER"] = f"{sys.executable} {os.path.abspath(__file__)}"
     cmd = [os.environ.get("XBCOMPAT_BIN", os.path.join(ROOT, "build", "xbcompat"))]
     m = make_map(xbe)
     if m:

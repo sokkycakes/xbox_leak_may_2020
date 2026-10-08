@@ -55,12 +55,12 @@ static void mkdir_p(const char *path)
     mkdir(tmp, 0755);
 }
 
-void fs_init(const char *xbe_path, const char *hdd_root)
+void fs_init(const char *xbe_path, const char *hdd_root, const char *dvd_root)
 {
-    char *dup = realpath(xbe_path, NULL);
-    if (!dup) fatal("cannot resolve %s", xbe_path);
+    char *dup = realpath(dvd_root ? dvd_root : xbe_path, NULL);
+    if (!dup) fatal("cannot resolve %s", dvd_root ? dvd_root : xbe_path);
     char *slash = strrchr(dup, '/');
-    *slash = 0;
+    if (!dvd_root) *slash = 0;   /* the DVD is the XBE's directory */
     snprintf(cdrom_dir, sizeof(cdrom_dir), "%s", dup);
     free(dup);
     snprintf(hdd_dir, sizeof(hdd_dir), "%s", hdd_root);
@@ -196,6 +196,15 @@ static char *full_xbox_path(OBJECT_ATTRIBUTES *oa)
     }
     return strdup(name);
 }
+
+/* The host path of an Xbox object path (\Device\..., \??\X:..., X:\...). */
+NTSTATUS fs_host_path(const char *xpath, char *host, size_t hostlen)
+{
+    int dev;
+    return translate_path(xpath, host, hostlen, &dev);
+}
+
+const char *fs_hdd_root(void) { return hdd_dir; }
 
 NTSTATUS fs_translate(const OBJECT_ATTRIBUTES *oa, char *host, size_t hostlen, int *is_device)
 {

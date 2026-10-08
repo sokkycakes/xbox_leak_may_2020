@@ -98,9 +98,15 @@ static void usage(void)
             "  --screenshot FILE  save frame --shot-frame (default 60) as a BMP\n"
             "  --shot-frame N     which frame --screenshot captures\n"
             "  --frames N   exit after presenting N frames\n"
-            "  --log FILE   write the log to FILE instead of stderr\n");
+            "  --log FILE   write the log to FILE instead of stderr\n"
+            "  --dvd DIR    directory backing the DVD drive (default: the XBE's directory)\n"
+            "  --d-path P, --xbe-path P, --launch-data FILE\n"
+            "               D: target, image path and launch page of a title started by\n"
+            "               XLaunchNewImage (set when xbcompat relaunches itself)\n");
     exit(2);
 }
+
+char *g_dvd_root;
 
 int main(int argc, char **argv)
 {
@@ -108,9 +114,11 @@ int main(int argc, char **argv)
         { "hle", required_argument, 0, 'h' }, { "hdd", required_argument, 0, 'd' },
         { "trace", no_argument, 0, 't' }, { "log", required_argument, 0, 'l' },
         { "screenshot", required_argument, 0, 's' }, { "shot-frame", required_argument, 0, 'n' },
-        { "frames", required_argument, 0, 'f' }, { 0, 0, 0, 0 },
+        { "frames", required_argument, 0, 'f' }, { "dvd", required_argument, 0, 'v' },
+        { "d-path", required_argument, 0, 'D' }, { "launch-data", required_argument, 0, 'L' },
+        { "xbe-path", required_argument, 0, 'X' }, { 0, 0, 0, 0 },
     };
-    const char *hle = NULL, *hdd = NULL;
+    const char *hle = NULL, *hdd = NULL, *d_path = NULL, *launch_data = NULL, *xbe_rel = NULL;
     int c;
     while ((c = getopt_long(argc, argv, "", opts, NULL)) != -1) {
         switch (c) {
@@ -121,6 +129,10 @@ int main(int argc, char **argv)
         case 's': g_screenshot_path = optarg; break;
         case 'n': g_screenshot_frame = atoi(optarg); break;
         case 'f': g_exit_after_frames = atoi(optarg); break;
+        case 'v': g_dvd_root = optarg; break;
+        case 'D': d_path = optarg; break;
+        case 'L': launch_data = optarg; break;
+        case 'X': xbe_rel = optarg; break;
         default: usage();
         }
     }
@@ -150,7 +162,8 @@ int main(int argc, char **argv)
 
     xbe_image img;
     xbe_load(xbe, &img);
-    fs_init(xbe, hdd);
+    fs_init(xbe, hdd, g_dvd_root);
+    launch_init(argc, argv, d_path, launch_data, xbe_rel);
     kernel_resolve_imports(&img);
     hle_patch(&img, hle);
 

@@ -42,6 +42,8 @@ static void reserve_fixed(uint32_t base, uint32_t size, int prot)
               base, base + size, strerror(errno));
 }
 
+volatile ULONG *g_apu_sample_counter;
+
 void mem_init(void)
 {
     /* The image region is mapped by the loader; reserve the rest up front so
@@ -54,6 +56,12 @@ void mem_init(void)
     void *nic = mmap((void *)0xFEF00000u, 0x10000, PROT_READ | PROT_WRITE,
                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
     if (nic != (void *)0xFEF00000u) xlog("NIC register window unavailable: %s", strerror(errno));
+    /* Later XDKs read the APU's sample counter (0xFE80200C) directly for
+       DirectSoundGetSampleTime; the DPC thread keeps it counting at 48 kHz. */
+    void *apu = mmap((void *)0xFE800000u, 0x80000, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+    if (apu != (void *)0xFE800000u) xlog("APU register window unavailable: %s", strerror(errno));
+    else g_apu_sample_counter = (volatile ULONG *)0xFE80200Cu;
     /* Physical page 0 holds the kernel on a real console; never hand it out. */
     for (unsigned i = 0; i < 16; i++)
         contig_used[i] = 1;
@@ -472,4 +480,13 @@ void NTAPI MmLockUnlockBufferPages(PVOID BaseAddress, SIZE_T NumberOfBytes, BOOL
 void NTAPI MmLockUnlockPhysicalPage(ULONG_PTR PhysicalAddress, BOOLEAN Unlock)
 {
     (void)PhysicalAddress; (void)Unlock;
+}
+
+/* Committed guest memory stays readable, writable and executable; report
+   the change without making it. */
+NTSTATUS NTAPI NtProtectVirtualMemory(PVOID *BaseAddress, SIZE_T *RegionSize, ULONG NewProtect, ULONG *OldProtect)
+{
+    TRACE("NtProtectVirtualMemory(%p, %#lx, %#x)", *BaseAddress, (unsigned long)*RegionSize, NewProtect);
+    if (OldProtect) *OldProtect = 0x04;   /* PAGE_READWRITE */
+    return STATUS_SUCCESS;
 }
