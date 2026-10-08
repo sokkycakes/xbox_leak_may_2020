@@ -248,6 +248,13 @@ struct ds_voice {
     int dirty;                /* recompute 3D + gains before the next block */
     float gain[6][2];         /* per source channel: left, right */
     float subgain[6];         /* per source channel: into the output (submix) buffer */
+    /* voice processor: the two envelope generators and the filter */
+    struct ds_eg { DWORD d[10]; int seg; uint32_t count; float value, step, coef, target; } eg[2];
+    int noteoff;              /* StopEx(ENVELOPE): releasing, off when the amplitude EG ends */
+    DWORD fmode, fc0, fc1;    /* SetFilter: mode, DLS2 cutoff and resonance registers */
+    float fc_cur, q_cur, svf_f, svf_q, low[6], band[6];
+    uint32_t ctl;             /* frames since VoiceOn: control-rate phase */
+    double step_cur;
     /* decoded ADPCM block cache (mixer-owned) */
     int16_t adpcm_cache[2 * 64];
     int32_t adpcm_block;
@@ -781,6 +788,132 @@ static LONG voice_effective_pitch(const struct ds_voice *v)
     return p;
 }
 
+/* ---- voice processor: envelopes and filter ----------------------------------- */
+
+/* The model is the one bootani's software mixer uses (dsound_soft.c):
+   envelope lengths count 512-sample units; attack is linear, decay and
+   release exponential, landing at the end of their programmed length.  The
+   multi-function EG moves pitch by lPitchScale (s.7 octaves at full scale)
+   and the filter cutoff by lFilterCutOff (s3.4 octaves).  DLS2 filter
+   coefficient 0 is log2 of a Chamberlin SVF frequency coefficient in s3.12,
+   coefficient 1 its damping in 1.15; the MCPX's own fixed-point filter is not
+   documented, so this is an approximation.  Parameters update every 32
+   frames, as the APU processes voices in 32-sample frames. */
+enum { DSEG_IDX_MULTI = 0, DSEG_IDX_AMP = 1 };
+enum { EGD_EG, EGD_MODE, EGD_DELAY, EGD_ATTACK, EGD_HOLD, EGD_DECAY, EGD_RELEASE, EGD_SUSTAIN, EGD_PITCH, EGD_FC };
+enum { EG_OFF, EG_DELAY, EG_ATTACK, EG_HOLD, EG_DECAY, EG_SUSTAIN, EG_RELEASE };
+#define EG_LEN(x) (((uint32_t)(x) & 0xFFFu) * 512u)
+
+static void eg_enter(struct ds_eg *e, int seg)
+{
+    for (;;) {
+        e->seg = seg;
+        switch (seg) {
+        case EG_DELAY:
+            e->value = 0.0f;
+            if ((e->count = EG_LEN(e->d[EGD_DELAY]))) return;
+            seg = EG_ATTACK; break;
+        case EG_ATTACK:
+            if ((e->count = EG_LEN(e->d[EGD_ATTACK]))) { e->step = (1.0f - e->value) / e->count; return; }
+            seg = EG_HOLD; break;
+        case EG_HOLD:
+            e->value = 1.0f;
+            if ((e->count = EG_LEN(e->d[EGD_HOLD]))) return;
+            seg = EG_DECAY; break;
+        case EG_DECAY:
+            e->target = (e->d[EGD_SUSTAIN] & 0xFF) / 256.0f;
+            if ((e->count = EG_LEN(e->d[EGD_DECAY]))) { e->coef = (float)exp(-5.0 / e->count); return; }
+            seg = EG_SUSTAIN; break;
+        case EG_SUSTAIN:
+            e->value = (e->d[EGD_SUSTAIN] & 0xFF) / 256.0f;
+            e->count = 0;
+            return;
+        case EG_RELEASE:
+            if ((e->count = EG_LEN(e->d[EGD_RELEASE]))) { e->coef = (float)exp(-5.0 / e->count); return; }
+            seg = EG_OFF; break;
+        default:
+            e->seg = EG_OFF; e->value = 0.0f; e->count = 0;
+            return;
+        }
+    }
+}
+
+static void eg_default(struct ds_eg *e, DWORD which)
+{
+    memset(e, 0, sizeof(*e));
+    e->d[EGD_EG] = which;
+    e->d[EGD_SUSTAIN] = 0xFF;
+    e->seg = EG_SUSTAIN;
+    e->value = 1.0f;
+}
+
+static void eg_start(struct ds_eg *e)
+{
+    switch (e->d[EGD_MODE]) {
+    case 1: eg_enter(e, EG_DELAY); break;                        /* DSEG_MODE_DELAY */
+    case 2: e->value = 0.0f; eg_enter(e, EG_ATTACK); break;      /* DSEG_MODE_ATTACK */
+    case 3: eg_enter(e, EG_HOLD); break;                         /* DSEG_MODE_HOLD */
+    default: e->seg = EG_SUSTAIN; e->value = 1.0f; e->count = 0; /* disabled: full scale */
+    }
+}
+
+static float eg_tick(struct ds_eg *e)
+{
+    float v = e->value;
+    switch (e->seg) {
+    case EG_DELAY: if (--e->count == 0) eg_enter(e, EG_ATTACK); break;
+    case EG_ATTACK: e->value += e->step; if (--e->count == 0) eg_enter(e, EG_HOLD); break;
+    case EG_HOLD: if (--e->count == 0) eg_enter(e, EG_DECAY); break;
+    case EG_DECAY:
+        e->value = e->target + (e->value - e->target) * e->coef;
+        if (--e->count == 0) eg_enter(e, EG_SUSTAIN);
+        break;
+    case EG_RELEASE: e->value *= e->coef; if (--e->count == 0) eg_enter(e, EG_OFF); break;
+    }
+    return v;
+}
+
+static float s16field(DWORD v) { return (float)(int16_t)(uint16_t)(v & 0xFFFF); }
+static float s8field(DWORD v) { return (float)(int8_t)(uint8_t)(v & 0xFF); }
+
+/* VoiceOn: restart both envelopes and the filter. */
+static void voice_on(struct ds_voice *v)
+{
+    v->noteoff = 0;
+    v->ctl = 0;
+    eg_start(&v->eg[DSEG_IDX_AMP]);
+    eg_start(&v->eg[DSEG_IDX_MULTI]);
+    memset(v->low, 0, sizeof(v->low));
+    memset(v->band, 0, sizeof(v->band));
+    v->fc_cur = s16field(v->fc0);
+    v->q_cur = (v->fc1 & 0xFFFF) / 32768.0f;
+}
+
+static bool voice_has_vp(const struct ds_voice *v)
+{
+    return v->fmode == 1 || v->eg[DSEG_IDX_AMP].d[EGD_MODE] || v->eg[DSEG_IDX_MULTI].d[EGD_MODE];
+}
+
+/* Per 32-frame update: pitch and cutoff with the multi-function EG. */
+static void voice_frame_params(struct ds_voice *v, LONG pitch)
+{
+    const struct ds_eg *m = &v->eg[DSEG_IDX_MULTI];
+    float env = m->value;
+    float p = pitch + s8field(m->d[EGD_PITCH]) * 32.0f * env;
+    if (p < DSBPITCH_MIN) p = DSBPITCH_MIN;
+    if (p > DSBPITCH_MAX) p = DSBPITCH_MAX;
+    v->step_cur = exp2(p / 4096.0);
+    if (v->fmode == 1) {   /* DSFILTER_MODE_DLS2; other modes are passed through */
+        v->fc_cur += (s16field(v->fc0) - v->fc_cur) * 0.25f;
+        v->q_cur += ((v->fc1 & 0xFFFF) / 32768.0f - v->q_cur) * 0.25f;
+        float fc = v->fc_cur + s8field(m->d[EGD_FC]) * 256.0f * env;
+        if (fc > 0.0f) fc = 0.0f;
+        if (fc < -32768.0f) fc = -32768.0f;
+        v->svf_f = exp2f(fc / 4096.0f);
+        v->svf_q = v->q_cur < 0.02f ? 0.02f : v->q_cur > 2.0f ? 2.0f : v->q_cur;
+    }
+}
+
 static void voice_init(struct ds_voice *v, int kind, void *owner, DWORD flags, const struct ds_fmt *fmt,
                        DWORD channel_mask)
 {
@@ -798,6 +931,8 @@ static void voice_init(struct ds_voice *v, int kind, void *owner, DWORD flags, c
     v->p3d_def = v->p3d;
     v->adpcm_block = -1;
     v->dirty = 1;
+    eg_default(&v->eg[DSEG_IDX_MULTI], 0);
+    eg_default(&v->eg[DSEG_IDX_AMP], 1);
 }
 
 static HRESULT voice_set_mixbins(struct ds_voice *v, const DSMIXBINS *p)
@@ -1005,7 +1140,9 @@ static void render_buffer(struct ds_buffer *b, float *out, int n, struct ds_even
     int looping = b->looping && ll > 0 && ls + ll <= total;
     DWORD le = ls + ll;
     voice_refresh(v);
-    double step = exp2((double)voice_effective_pitch(v) / 4096.0);
+    LONG pitch = voice_effective_pitch(v);
+    double step = exp2((double)pitch / 4096.0);
+    bool vp = voice_has_vp(v);
     struct ds_src src = { b->data + b->play_start, total, f, v };
     int ch = f->ch;
     float *sub = v->output ? v->output->sub : NULL;
@@ -1021,9 +1158,22 @@ static void render_buffer(struct ds_buffer *b, float *out, int n, struct ds_even
         if (nxt >= total) nxt = idx;
         fetch_frame(&src, idx, a);
         fetch_frame(&src, nxt, c);
-        float l = 0, r = 0, m = 0;
+        float l = 0, r = 0, m = 0, amp = 1.0f;
+        if (vp) {
+            if ((v->ctl++ & 31) == 0) voice_frame_params(v, pitch);
+            step = v->step_cur;
+            amp = eg_tick(&v->eg[DSEG_IDX_AMP]);
+            eg_tick(&v->eg[DSEG_IDX_MULTI]);
+        }
         for (int k = 0; k < ch; k++) {
             float s = a[k] + (c[k] - a[k]) * frac;
+            if (vp && v->fmode == 1) {   /* Chamberlin state-variable low-pass */
+                v->low[k] += v->svf_f * v->band[k];
+                float high = s - v->low[k] - v->svf_q * v->band[k];
+                v->band[k] += v->svf_f * high;
+                s = v->low[k];
+            }
+            s *= amp;
             l += s * v->gain[k][0];
             r += s * v->gain[k][1];
             m += s * v->subgain[k];
@@ -1031,6 +1181,10 @@ static void render_buffer(struct ds_buffer *b, float *out, int n, struct ds_even
         out[2 * i] += l;
         out[2 * i + 1] += r;
         if (sub) sub[i] += m;
+        if (v->noteoff && v->eg[DSEG_IDX_AMP].seg == EG_OFF) {   /* end of release: voice off */
+            b->playing = 0;
+            break;
+        }
         pos += step;
     }
     if (b->playing) {
@@ -1272,14 +1426,28 @@ static void buffer_stop_locked(struct ds_buffer *b, struct ds_events *ev)
     b->start_at = 0; b->stop_at = 0;
 }
 
-/* StopEx: DSBSTOPEX_ENVELOPE enters the release phase of the envelope,
-   which we do not model (the voice stops now), except that together with
-   DSBSTOPEX_RELEASEWAVEFORM the loop is broken and the play region runs to
-   its end.  Without ENVELOPE it is a plain Stop. */
+/* StopEx: DSBSTOPEX_ENVELOPE enters the release phase of the envelopes and
+   the voice turns off when the amplitude envelope reaches zero; with
+   DSBSTOPEX_RELEASEWAVEFORM the loop is also broken.  A voice whose
+   envelopes are disabled has no release: with RELEASEWAVEFORM the play
+   region runs to its end, otherwise it stops now.  Without ENVELOPE it is a
+   plain Stop. */
 static void buffer_stopex_locked(struct ds_buffer *b, DWORD flags, struct ds_events *ev)
 {
-    if (b->playing && (flags & DSBSTOPEX_ENVELOPE) && (flags & DSBSTOPEX_RELEASEWAVEFORM)) b->looping = 0;
-    else buffer_stop_locked(b, ev);
+    struct ds_voice *v = &b->v;
+    if (b->playing && (flags & DSBSTOPEX_ENVELOPE) && voice_has_vp(v)) {
+        if (flags & DSBSTOPEX_RELEASEWAVEFORM) b->looping = 0;
+        if (!v->noteoff) {
+            v->noteoff = 1;
+            if (v->eg[DSEG_IDX_AMP].seg != EG_OFF) eg_enter(&v->eg[DSEG_IDX_AMP], EG_RELEASE);
+            if (v->eg[DSEG_IDX_MULTI].seg != EG_OFF) eg_enter(&v->eg[DSEG_IDX_MULTI], EG_RELEASE);
+            if (v->eg[DSEG_IDX_AMP].seg == EG_OFF) buffer_stop_locked(b, ev);
+        }
+    } else if (b->playing && (flags & DSBSTOPEX_ENVELOPE) && (flags & DSBSTOPEX_RELEASEWAVEFORM)) {
+        b->looping = 0;
+    } else {
+        buffer_stop_locked(b, ev);
+    }
 }
 
 static void buffer_set_regions_locked(struct ds_buffer *b)
@@ -2376,17 +2544,31 @@ static HRESULT NTAPI Voice_SetLFO(void *self, const void *desc)
     VOICE_RETURN(DS_OK);
 }
 
+/* New envelope registers; a running segment keeps going and picks up new
+   lengths at its next transition, as the APU does. */
 static HRESULT NTAPI Voice_SetEG(void *self, const void *desc)
 {
     if (!desc) return DSERR_INVALIDPARAM;
+    const DWORD *d = desc;
+    if (d[0] > 1) return DSERR_INVALIDPARAM;
     VOICE_ENTRY(v, self);
+    struct ds_eg *e = &v->eg[d[0] == 1 ? DSEG_IDX_AMP : DSEG_IDX_MULTI];
+    memcpy(e->d, d, sizeof(e->d));
     VOICE_RETURN(DS_OK);
 }
 
 static HRESULT NTAPI Voice_SetFilter(void *self, const void *desc)
 {
     if (!desc) return DSERR_INVALIDPARAM;
+    const DWORD *d = desc;   /* dwMode, dwQCoefficient, adwCoefficients[4] */
     VOICE_ENTRY(v, self);
+    if (v->fmode != 1 && (d[0] & 3) == 1) {   /* switched on: track from the new values */
+        v->fc_cur = s16field(d[2]);
+        v->q_cur = (d[3] & 0xFFFF) / 32768.0f;
+    }
+    v->fmode = d[0] & 3;
+    v->fc0 = d[2] & 0xFFFF;
+    v->fc1 = d[3] & 0xFFFF;
     VOICE_RETURN(DS_OK);
 }
 
@@ -2567,6 +2749,7 @@ static HRESULT buffer_play_locked(struct ds_buffer *b, DWORD flags)
         if (start >= bytes_to_frames(&b->v.fmt, b->play_len)) start = 0;
         b->pos = start;
         b->v.adpcm_block = -1;
+        voice_on(&b->v);
     }
     b->cursor = 0;
     b->looping = !!(flags & DSBPLAY_LOOPING);

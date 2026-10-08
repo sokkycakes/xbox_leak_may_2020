@@ -30,7 +30,8 @@ and three whose media or DSP image is missing from the leak. What works:
   cube map faces; visibility tests; state blocks; rect and tri patches
   tessellated on the CPU; back buffer and depth buffer reads from memory.
 - **DirectSound**: buffers, streams, submixes, 3D positioning and packet
-  completion, mixed in software to SDL2 audio.
+  completion, mixed in software to SDL2 audio.  Voices run their amplitude
+  and multi-function envelopes and the DLS2 low-pass filter.
 - **Input**: XInput on SDL2 game controllers, with rumble, plus a keyboard pad
   when no controller is attached (see below).
 - **Kernel**: SHA-1, HMAC, RC4 and big-number crypto are real, so save

@@ -488,7 +488,13 @@ static void *dpc_thread(void *arg)
                 }
             }
             if (t->Period > 0) {
-                n->due = fixed_step ? n->due + (ULONGLONG)t->Period * 10000 : now + (ULONGLONG)t->Period * 10000;
+                /* Keep the period's phase, as the kernel's clock interrupt
+                   does: rescheduling from `now` would add this thread's
+                   wake-up latency to every period (a 5 ms music timer ran
+                   about 20% slow).  Far behind (a stall), skip ahead. */
+                ULONGLONG period = (ULONGLONG)t->Period * 10000;
+                n->due += period;
+                if (!fixed_step && n->due + 100 * 10000ULL < now) n->due = now + period;
                 pp = &n->next;
             } else {
                 t->Header.Inserted = 0;
