@@ -73,6 +73,8 @@ bring_up() {
 		[ -r "$WPA_CONF" ] || return 0
 		if ! alive "$SION_RUN/wpa.$ifc.pid"; then
 			ip link set "$ifc" up
+			# Power saving adds 200 ms to every reply over SSH.
+			iw dev "$ifc" set power_save off 2>/dev/null
 			log "starting wpa_supplicant on $ifc"
 			wpa_supplicant -B -i "$ifc" -c "$WPA_CONF" -P "$SION_RUN/wpa.$ifc.pid" \
 				-f "/var/log/wpa_supplicant.$ifc.log" >> "$SION_LOG" 2>&1
