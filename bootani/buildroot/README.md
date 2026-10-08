@@ -36,6 +36,10 @@ screen. It runs on KMSDRM too, with no X11 or Wayland:
   (`BR2_PACKAGE_BOOTANI_KMS_MODE`). When the display doesn't offer that mode,
   they fall back to its preferred mode, never to whatever the firmware left
   on the CRTC (`patches/sdl2/`).
+- Theseus draws at 640x480 and stretches that over the display mode
+  (`THESEUS_SCENE=640x480`, set in `theseus-session`), as the Xbox drew its
+  dashboard into a 640x480 back buffer and its video encoder stretched it
+  across the 720x480 NTSC signal. `THESEUS_SCENE=` draws at the display mode.
 - The boot stick is a test loop for machines with no network. If the stick's
   EFI partition has a `theseus/` folder (the image ships one), then at every
   boot `theseus/opt/` is copied over `/opt/theseus`, `theseus/theseus.env` is

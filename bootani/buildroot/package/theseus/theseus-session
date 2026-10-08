@@ -33,6 +33,10 @@ export HOME=/root
 export XDG_DATA_HOME=/opt
 export SDL_VIDEODRIVER=kmsdrm
 export KMS_MODE
+# Draw the dashboard at the Xbox's own 640x480 and stretch it over the
+# display mode, as the Xbox's video encoder did across 720x480 NTSC.
+# THESEUS_SCENE= (empty) draws at the display mode instead.
+export THESEUS_SCENE="${THESEUS_SCENE-640x480}"
 export SDL_AUDIODRIVER=alsa
 
 # Same output bootani picks: the ALSA default (card 0, device 0) if it
