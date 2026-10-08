@@ -873,6 +873,70 @@ static unsigned apply_textures(void)
     return mask;
 }
 
+
+/* Fixed-function texture coordinate generation (D3DTSS_TEXCOORDINDEX high
+   word) and texture transforms (D3DTS_TEXTUREn with
+   D3DTSS_TEXTURETRANSFORMFLAGS).  `tsize[u]` is the number of components the
+   vertex supplies for unit u.  D3D pads two-component coordinates to
+   (u, v, 1) and divides only with D3DTTFF_PROJECTED; GL pads to (s, t, 0, 1)
+   and always divides by q, so the matrix is rearranged to match. */
+static void apply_texture_transforms(unsigned units, const int tsize[4])
+{
+    static const float sx[4] = { 1, 0, 0, 0 }, sy[4] = { 0, 1, 0, 0 }, sz[4] = { 0, 0, 1, 0 };
+    glMatrixMode(GL_MODELVIEW);
+    glPushMatrix();
+    glLoadIdentity();   /* eye-linear planes are given in eye space */
+    for (int u = 0; u < 4; u++) {
+        p_glActiveTexture(GL_TEXTURE0 + u);
+        ULONG gen = TSS(u, D3DTSS_TEXCOORDINDEX) >> 16, ttff = TSS(u, 21 /* TEXTURETRANSFORMFLAGS */);
+        bool on = (units >> u) & 1;
+        GLint mode = 0;
+        switch (on ? gen : 0) {
+        case 1: mode = GL_NORMAL_MAP; break;        /* D3DTSS_TCI_CAMERASPACENORMAL */
+        case 2: mode = GL_EYE_LINEAR; break;        /* CAMERASPACEPOSITION */
+        case 3: mode = GL_REFLECTION_MAP; break;    /* CAMERASPACEREFLECTIONVECTOR */
+        case 4: mode = GL_OBJECT_LINEAR; break;     /* D3DTSS_TCI_OBJECT (Xbox) */
+        case 5: mode = GL_SPHERE_MAP; break;        /* D3DTSS_TCI_SPHERE (Xbox) */
+        }
+        static const GLenum coord[3] = { GL_S, GL_T, GL_R };
+        static const GLenum en[3] = { GL_TEXTURE_GEN_S, GL_TEXTURE_GEN_T, GL_TEXTURE_GEN_R };
+        const float *planes[3] = { sx, sy, sz };
+        for (int k = 0; k < 3; k++) {
+            if (!mode || (mode == GL_SPHERE_MAP && k == 2)) { glDisable(en[k]); continue; }
+            glTexGeni(coord[k], GL_TEXTURE_GEN_MODE, mode);
+            if (mode == GL_EYE_LINEAR) glTexGenfv(coord[k], GL_EYE_PLANE, planes[k]);
+            if (mode == GL_OBJECT_LINEAR) glTexGenfv(coord[k], GL_OBJECT_PLANE, planes[k]);
+            glEnable(en[k]);
+        }
+        glDisable(GL_TEXTURE_GEN_Q);
+
+        float m[4][4];
+        ULONG count = ttff & 0xFF;
+        bool projected = (ttff & 0x100) != 0;
+        if (!on || (!count && !projected)) {
+            static const float ident[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+            memcpy(m, ident, sizeof m);
+        } else {
+            memcpy(m, &d3d.transforms[2 + u], sizeof m);   /* m[input][output] */
+            int n_in = mode ? 3 : tsize[u];
+            if (n_in <= 2) {           /* D3D's constant 1 sits in row 2, GL's in row 3 */
+                memcpy(m[3], m[2], sizeof m[3]);
+                memset(m[2], 0, sizeof m[2]);
+            }
+            if (projected && count >= 1 && count < 4) {
+                for (int i = 0; i < 4; i++) m[i][3] = m[i][count - 1];
+            } else if (!projected) {
+                for (int i = 0; i < 4; i++) m[i][3] = i == 3;
+            }
+        }
+        glMatrixMode(GL_TEXTURE);
+        glLoadMatrixf(&m[0][0]);
+        glMatrixMode(GL_MODELVIEW);
+    }
+    glPopMatrix();
+    p_glActiveTexture(GL_TEXTURE0);
+}
+
 /* ---- state setters ----------------------------------------------------- */
 
 static void NTAPI D3DDevice_SetStreamSource(UINT_ Stream, D3DResource *vb, UINT_ Stride)
@@ -1529,6 +1593,8 @@ static GLuint fragment_shader_object(void)
     if (!src) {
         xlog("D3D: pixel shader %#x could not be translated", d3d.pixel_shader);
     } else {
+        /* Debug aid: XBCOMPAT_PSH_DUMP=1 logs every translated pixel shader. */
+        if (getenv("XBCOMPAT_PSH_DUMP")) xlog("D3D: pixel shader %#x:\n%s", d3d.pixel_shader, src);
         e->fs = compile_shader(GL_FRAGMENT_SHADER, src);
         free(src);
     }
@@ -1766,6 +1832,15 @@ static void draw_declared(const vshader *sh, ULONG PrimitiveType, const UCHAR *u
         }
     }
     p_glClientActiveTexture(GL_TEXTURE0);
+    {
+        int tsize[4];
+        for (int u = 0; u < 4; u++) {
+            ULONG tci = TSS(u, D3DTSS_TEXCOORDINDEX) & 0xFFFF;
+            const vattr *tc = &sh->attr[9 + (tci < 4 ? tci : 0)];
+            tsize[u] = tc->stream >= 0 ? tc->components : 2;
+        }
+        apply_texture_transforms(units, tsize);
+    }
 #undef STREAM
     program_entry *e;
     if (!use_program(0, &e)) return;
@@ -1824,6 +1899,14 @@ static void draw(ULONG PrimitiveType, const UCHAR *base, ULONG stride, ULONG fir
         }
     }
     p_glClientActiveTexture(GL_TEXTURE0);
+    {
+        int tsize[4];
+        for (int u = 0; u < 4; u++) {
+            ULONG tci = TSS(u, D3DTSS_TEXCOORDINDEX) & 0xFFFF;
+            tsize[u] = tci < (ULONG)l.ntex ? l.tex_size[tci] : 2;
+        }
+        apply_texture_transforms(units, tsize);
+    }
 
     program_entry *e;
     if (!use_program(0, &e)) return;
@@ -2087,6 +2170,7 @@ static void NTAPI D3DDevice_GetRenderTarget(D3DSurface **pp)
 }
 
 static GLuint texture_for(D3DPixelContainer *t);
+static ULONG cube_face_bytes(D3DPixelContainer *t);
 
 static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
 {
@@ -2113,7 +2197,13 @@ static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
     if (!d3d.fbo) p_glGenFramebuffers(1, (GLuint *)&d3d.fbo);
     p_glBindFramebuffer(GL_FRAMEBUFFER, d3d.fbo);
     GLuint tex = texture_for(target->Parent);
-    p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+    GLenum face_target = GL_TEXTURE_2D;
+    if (tex_target(target->Parent) == GL_TEXTURE_CUBE_MAP) {
+        /* A cube face surface sits face * cube_face_bytes past the cube's data. */
+        ULONG face = (target->Data - target->Parent->res.Data) / cube_face_bytes(target->Parent);
+        face_target = GL_TEXTURE_CUBE_MAP_POSITIVE_X + (face < 6 ? face : 0);
+    }
+    p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, face_target, tex, 0);
     /* A depth buffer always comes along: titles clear z without checking. */
     static GLuint rb; static ULONG rb_w, rb_h;
     if (!rb || rb_w != w || rb_h != h) {
@@ -2278,8 +2368,11 @@ static ULONG NTAPI D3DBaseTexture_GetLevelCount(D3DPixelContainer *t)
     return level_count(t);
 }
 
+static void NTAPI D3DVolumeTexture_GetLevelDesc(D3DPixelContainer *t, UINT_ level, ULONG *desc);
+
 static void NTAPI D3DTexture_GetLevelDesc(D3DPixelContainer *t, UINT_ level, ULONG *desc)
 {
+    if (tex_target(t) == GL_TEXTURE_3D) { D3DVolumeTexture_GetLevelDesc(t, level, desc); return; }
     ULONG w, h, pitch;
     container_size(t, &w, &h, &pitch);
     for (UINT_ i = 0; i < level; i++) { if (w > 1) w >>= 1; if (h > 1) h >>= 1; }
@@ -2373,8 +2466,12 @@ static void volume_desc(ULONG format, ULONG w, ULONG h, ULONG d, ULONG *desc)
     desc[6] = d;
 }
 
+/* The debug library folds Texture, CubeTexture and VolumeTexture GetLevelDesc
+   into one function, so both table entries can land on the same address:
+   each one answers by the container's real type. */
 static void NTAPI D3DVolumeTexture_GetLevelDesc(D3DPixelContainer *t, UINT_ level, ULONG *desc)
 {
+    if (tex_target(t) != GL_TEXTURE_3D) { D3DTexture_GetLevelDesc(t, level, desc); return; }
     ULONG w, h, d;
     volume_dims(t, level, &w, &h, &d);
     volume_desc(t->Format, w, h, d, desc);
@@ -2881,6 +2978,7 @@ static void imm_flush(ULONG prim)
         glDisable(GL_COLOR_MATERIAL);
     }
     unsigned units = d3d.pixel_shader ? 0xF : apply_textures();
+    if (!sh) { static const int two[4] = { 2, 2, 2, 2 }; apply_texture_transforms(units, two); }
     program_entry *e;
     if (!use_program(0, &e)) return;
     glBegin(gl_primitive(prim));
@@ -3531,6 +3629,108 @@ static LONG NTAPI D3DDevice_GetVisibilityTestResult(ULONG index, UINT_ *result, 
     return D3D_OK;
 }
 
+/* ---- state blocks ----------------------------------------------------- */
+
+/* A state block is a snapshot of everything a title can set.  Every block
+   type captures the whole device (a superset of what PIXELSTATE or
+   VERTEXSTATE ask for), and Begin/EndStateBlock capture the state as it
+   stands at EndStateBlock. */
+typedef struct state_block {
+    ULONG rs[D3DRS_MAX];
+    ULONG tss[4 * 32];
+    D3DMATRIX transforms[10];
+    D3DVIEWPORT8 viewport;
+    typeof(d3d.streams) streams;
+    D3DResource *textures[4];
+    ULONG vertex_shader, pixel_shader, base_vertex_index;
+    D3DResource *indices;
+    typeof(d3d.lights) lights;
+    float material[4][4], material_power, back_material[4][4], back_material_power;
+    float vs_const[192][4];
+    float ps_const[16][4];
+} state_block;
+
+static void state_capture(state_block *b)
+{
+    memcpy(b->rs, d3d.render_state, sizeof(b->rs));
+    memcpy(b->tss, d3d.texture_state, sizeof(b->tss));
+    memcpy(b->transforms, d3d.transforms, sizeof(b->transforms));
+    b->viewport = d3d.viewport;
+    memcpy(b->streams, d3d.streams, sizeof(b->streams));
+    memcpy(b->textures, d3d.textures, sizeof(b->textures));
+    b->vertex_shader = d3d.vertex_shader;
+    b->pixel_shader = d3d.pixel_shader;
+    b->indices = d3d.indices;
+    b->base_vertex_index = d3d.base_vertex_index;
+    memcpy(b->lights, d3d.lights, sizeof(b->lights));
+    memcpy(b->material, d3d.material, sizeof(b->material));
+    b->material_power = d3d.material_power;
+    memcpy(b->back_material, d3d.back_material, sizeof(b->back_material));
+    b->back_material_power = d3d.back_material_power;
+    memcpy(b->vs_const, d3d.vs_const, sizeof(b->vs_const));
+    memcpy(b->ps_const, d3d.ps_const, sizeof(b->ps_const));
+}
+
+static void state_apply(const state_block *b)
+{
+    memcpy(d3d.render_state, b->rs, sizeof(b->rs));
+    memcpy(d3d.texture_state, b->tss, sizeof(b->tss));
+    memcpy(d3d.transforms, b->transforms, sizeof(b->transforms));
+    D3DDevice_SetViewport(&b->viewport);
+    memcpy(d3d.streams, b->streams, sizeof(b->streams));
+    memcpy(d3d.textures, b->textures, sizeof(b->textures));
+    d3d.vertex_shader = b->vertex_shader;
+    d3d.pixel_shader = b->pixel_shader;
+    D3DDevice_SetIndices(b->indices, b->base_vertex_index);
+    memcpy(d3d.lights, b->lights, sizeof(b->lights));
+    memcpy(d3d.material, b->material, sizeof(b->material));
+    d3d.material_power = b->material_power;
+    memcpy(d3d.back_material, b->back_material, sizeof(b->back_material));
+    d3d.back_material_power = b->back_material_power;
+    memcpy(d3d.vs_const, b->vs_const, sizeof(b->vs_const));
+    memcpy(d3d.ps_const, b->ps_const, sizeof(b->ps_const));
+}
+
+static LONG NTAPI D3DDevice_CreateStateBlock(ULONG Type, ULONG *pToken)
+{
+    (void)Type;
+    state_block *b = malloc(sizeof(*b));
+    if (!b) return 0x8007000E;   /* E_OUTOFMEMORY */
+    state_capture(b);
+    *pToken = (ULONG)b;
+    return D3D_OK;
+}
+
+static LONG NTAPI D3DDevice_ApplyStateBlock(ULONG Token)
+{
+    if (Token && Token != (ULONG)-1) state_apply((state_block *)Token);
+    return D3D_OK;
+}
+
+static LONG NTAPI D3DDevice_CaptureStateBlock(ULONG Token)
+{
+    if (Token && Token != (ULONG)-1) state_capture((state_block *)Token);
+    return D3D_OK;
+}
+
+static LONG NTAPI D3DDevice_DeleteStateBlock(ULONG Token)
+{
+    if (Token && Token != (ULONG)-1) free((state_block *)Token);
+    return D3D_OK;
+}
+
+static LONG NTAPI D3DDevice_BeginStateBlock(void)
+{
+    static bool warned;
+    if (!warned) { xlog("D3D: BeginStateBlock records the whole device state at EndStateBlock"); warned = true; }
+    return D3D_OK;
+}
+
+static LONG NTAPI D3DDevice_EndStateBlock(ULONG *pToken)
+{
+    return D3DDevice_CreateStateBlock(1, pToken);
+}
+
 /* ---- table ------------------------------------------------------------- */
 
 #define F(dec, fn) { dec, (void *)fn }
@@ -3568,6 +3768,12 @@ const struct hle_func d3d8_funcs[] = {
     F("_D3DDevice_Release@0", D3DDevice_Release),
     F("_D3DDevice_GetDirect3D@4", D3DDevice_GetDirect3D),
     F("_D3DDevice_GetPersistedSurface@4", D3DDevice_GetPersistedSurface),
+    F("_D3DDevice_CreateStateBlock@8", D3DDevice_CreateStateBlock),
+    F("_D3DDevice_ApplyStateBlock@4", D3DDevice_ApplyStateBlock),
+    F("_D3DDevice_CaptureStateBlock@4", D3DDevice_CaptureStateBlock),
+    F("_D3DDevice_DeleteStateBlock@4", D3DDevice_DeleteStateBlock),
+    F("_D3DDevice_BeginStateBlock@0", D3DDevice_BeginStateBlock),
+    F("_D3DDevice_EndStateBlock@4", D3DDevice_EndStateBlock),
     F("_D3DDevice_BeginVisibilityTest@0", D3DDevice_BeginVisibilityTest),
     F("_D3DDevice_EndVisibilityTest@4", D3DDevice_EndVisibilityTest),
     F("_D3DDevice_GetVisibilityTestResult@12", D3DDevice_GetVisibilityTestResult),
