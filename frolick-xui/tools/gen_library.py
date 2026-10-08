@@ -117,14 +117,13 @@ def timelines(frames, tracks):
 # One visual, FrolickTile: a glossy 360-style tile that lights up green when
 # focused, with the Blades-style shine sweeping across while it holds focus.
 TW, TH = 200, 160  # design size; anchors stretch it to each tile
-GREEN = '0xff6cc417'
+GREEN = '0xffd9d9d9'  # focus accent (light grey from the Figma panel)
 tile_kids = [
-    fig('halo', -7, -7, TW + 14, TH + 14, radial([(0, '0x006cc417'), (0.82, '0x006cc417'), (1, '0xa06cc417')]),
-        radius=(14, 14, 14, 14), Anchor=15, Opacity=0),
-    fig('bg', 0, 0, TW, TH, linear([(0, '0xfff6f6f6'), (0.48, '0xffdadada'), (0.52, '0xffc9c9c9'), (1, '0xffa9a9a9')], rot=90),
-        radius=(8, 8, 8, 8), stroke=(2, '0xff6e6e6e'), Anchor=15),
-    fig('gloss', 2, 2, TW - 4, TH * 0.45, linear([(0, '0x90ffffff'), (1, '0x10ffffff')], rot=90), radius=(7, 7, 0, 0), Anchor=7),
-    fig('glow', 0, 0, TW, TH, linear([(0, '0x30b6f27a'), (0.5, '0x00b6f27a'), (1, '0x406cc417')], rot=90),
+    fig('halo', -4, -4, TW + 8, TH + 8, {'FillType': 0}, radius=(11, 11, 11, 11), stroke=(3, '0x70d9d9d9'),
+        Anchor=15, Opacity=0),
+    fig('bg', 0, 0, TW, TH, {'FillType': 0}, radius=(8, 8, 8, 8), stroke=(2, '0xff404040'), Anchor=15),
+    fig('gloss', 2, 2, TW - 4, TH * 0.45, linear([(0, '0x57ffffff'), (1, '0x00ffffff')], rot=90), radius=(7, 7, 0, 0), Anchor=7),
+    fig('glow', 0, 0, TW, TH, linear([(0, '0x30ffffff'), (0.5, '0x00ffffff'), (1, '0x20d9d9d9')], rot=90),
         radius=(8, 8, 8, 8), stroke=(3, GREEN), Anchor=15, Opacity=0),
     el('XuiGroup', {'Id': 'shineClip', 'Width': TW, 'Height': TH, 'Anchor': 15, 'ClipChildren': 'true'}, [
         fig('shine', -160, 0, 120, TH, linear([(0, '0x00ffffff'), (0.5, '0x70ffffff'), (1, '0x00ffffff')]),
@@ -139,7 +138,6 @@ tile_tl = timelines(
                              (130, 0, [1]), (140, 0, [1])]),
      ('glow', ['Opacity'], [(0, 0, [1]), (8, 0, [0]), (10, 0, [0]), (18, 0, [1]), (120, 0, [1]),
                              (130, 0, [1]), (133, 0, [0.4]), (140, 0, [1])]),
-     ('bg', ['Fill.FillType'], [(0, 1, [2])]),
      ('shineClip', ['Opacity'], [(0, 0, [0]), (18, 0, [0]), (20, 0, [1]), (120, 0, [1]), (130, 0, [1])]),
      ])
 # The shine moves inside its clip group; put that track on the group.
@@ -155,10 +153,21 @@ skin = '<XuiCanvas version="000c">\n' + el('XuiScene', {'Id': 'FrolickSkin', 'Wi
 W, H = 586, 402
 kids = [
     # Card: an Xbox-green blade with a dark rim, like the Blades "games" blade.
-    fig('card', 0, 0, W, H, linear([(0, '0xff7fd03a'), (0.5, '0xff4fa61e'), (1, '0xff2d6f0f')], rot=90),
-        radius=(36, 36, 36, 36), stroke=(5, '0xff1f4a0a')),
-    fig('cardGloss', 6, 6, W - 12, 150, linear([(0, '0x60ffffff'), (1, '0x00ffffff')], rot=90), radius=(30, 30, 0, 0)),
-    fig('cardShade', 6, H - 120, W - 12, 114, linear([(0, '0x00000000'), (1, '0x50000000')], rot=90), radius=(0, 0, 30, 30)),
+    fig('card', 0, 0, W, H, solid('0xff55534e'), radius=(36, 36, 36, 36), stroke=(6, '0xff898989')),
+    fig('cardSheen', 3, 3, W - 6, H - 6, linear([(0, '0x4dd9d9d9'), (0.97, '0x4d000000'), (1, '0x00000000')], rot=90),
+        radius=(33, 33, 33, 33)),
+    # tile backgrounds sit under the buttons; the FrolickTile visual adds the stroke, gloss and focus
+    fig('spotBg', 16, 16, 330, 370, linear([(0, '0xff6a6864'), (0.3, '0xff55534e'), (1, '0xff3e3d39')], rot=90),
+        radius=(8, 8, 8, 8)),
+    fig('exploreBg', 352, 16, 218, 180, solid('0xff737373'), radius=(8, 8, 8, 8)),
+    fig('exploreGlow', 352, 16, 218, 180, dict(radial([(0, '0xff505899'), (0.55, '0xff4a5272'), (1, '0xff55534e')]), Translation='-94,79,0', Scale='2,2,1'),
+        radius=(8, 8, 8, 8), Opacity=0.9),
+    fig('exploreShade', 352, 16, 218, 180, linear([(0, '0x00575757'), (0.59, '0x00575757'), (0.7, '0x80575757'), (1, '0xcc000000')], rot=90),
+        radius=(8, 8, 8, 8)),
+    fig('dlBg', 352, 206, 218, 180, solid('0xff737373'), radius=(8, 8, 8, 8)),
+    fig('dlGlow', 352, 206, 218, 180, dict(radial([(0, '0xffbbbb00'), (1, '0xff41433e')]), Translation='-94,-62,0', Scale='2,2,1'), radius=(8, 8, 8, 8), Opacity=0.6),
+    fig('dlShade', 352, 206, 218, 180, linear([(0, '0x00000000'), (0.7, '0x00000000'), (1, '0xcc000000')], rot=90),
+        radius=(8, 8, 8, 8)),
 ]
 # Tiles are XuiButtons drawn with FrolickTile; their children sit on top.
 def tile(id_, x, y, w, h, nav, children):
@@ -166,32 +175,32 @@ def tile(id_, x, y, w, h, nav, children):
     p.update(nav)
     return el('XuiButton', p, children)
 
-DARK = '0xff2a2a2a'
+DARK = '0xffffffff'
 kids.append(tile('tileSpotlight', 16, 16, 330, 370, {'NavRight': 'tileExplore'}, [
-    fig('coverFrame', 95, 34, 140, 140, linear([(0, '0xff505050'), (1, '0xff2a2a2a')], rot=90), radius=(10, 10, 10, 10),
-        stroke=(2, '0xff1c1c1c')),
+    fig('coverFrame', 95, 34, 140, 140, solid('0xffd9d9d9'), radius=(10, 10, 10, 10),
+        stroke=(2, '0xff000000')),
     image('cover', 100, 39, 130, 130, 'cover.png'),
     text('title', 16, 196, 298, 36, 'Stiletto Swift', 26, DARK, 0x400, '0'),
-    text('subtitle', 16, 234, 298, 28, 'spotlight + featured', 18, '0xff4d4d4d', 0x400, '0'),
+    text('subtitle', 16, 234, 298, 28, 'spotlight + featured', 18, '0xffd2d2d2', 0x400, '0'),
     image('glyphA', 118, 292, 40, 40, 'glyph_a.png'),
     text('playLabel', 162, 297, 120, 32, 'play', 22, DARK, 0, '0'),
 ]))
 kids.append(tile('tileExplore', 352, 16, 218, 180, {'NavLeft': 'tileSpotlight', 'NavDown': 'tileDownloads'}, [
     text('exploreLabel', 16, 18, 190, 40, 'explore', 30, DARK, 0, '0'),
-    text('exploreSub', 16, 60, 190, 50, 'browse every system and core', 15, '0xff505050', 0, '0'),
+    text('exploreSub', 16, 60, 190, 50, 'browse every system and core', 15, '0xffd2d2d2', 0, '0'),
     image('glyphX', 16, 132, 32, 32, 'glyph_x.png'),
-    text('exploreHint', 54, 134, 150, 28, 'catalog', 17, '0xff3a3a3a', 0, '0'),
+    text('exploreHint', 54, 134, 150, 28, 'catalog', 17, '0xffd2d2d2', 0, '0'),
 ]))
 kids.append(tile('tileDownloads', 352, 206, 218, 180, {'NavLeft': 'tileSpotlight', 'NavUp': 'tileExplore'}, [
     text('dlLabel', 16, 18, 190, 40, 'downloads', 30, DARK, 0, '0'),
-    text('dlTitle', 16, 70, 150, 24, 'Stiletto Swift', 16, '0xff3a3a3a', 0x10, '0'),
-    text('dlPct', 150, 70, 52, 24, '70%', 16, '0xff3a3a3a', 0x200 | 0x10, '0'),
-    fig('dlTrack', 16, 98, 186, 14, linear([(0, '0xff5a5a5a'), (1, '0xff8a8a8a')], rot=90), radius=(7, 7, 7, 7),
-        stroke=(1, '0xff404040')),
-    fig('dlFill', 16, 98, 130, 14, linear([(0, '0xffa8f060'), (0.5, '0xff6cc417'), (1, '0xff3e8a0c')], rot=90),
+    text('dlTitle', 16, 70, 150, 24, 'Stiletto Swift', 16, '0xffd2d2d2', 0x10, '0'),
+    text('dlPct', 150, 70, 52, 24, '70%', 16, '0xffd2d2d2', 0x200 | 0x10, '0'),
+    fig('dlTrack', 16, 98, 186, 14, solid('0xff727272'), radius=(7, 7, 7, 7),
+        stroke=(2, '0xff5c5c5c')),
+    fig('dlFill', 16, 98, 130, 14, linear([(0, '0xff6cf98d'), (0.4, '0xff2df65c'), (1, '0xff2df65c')], rot=90),
         radius=(7, 7, 7, 7)),
     image('glyphY', 16, 132, 32, 32, 'glyph_y.png'),
-    text('dlHint', 54, 134, 150, 28, 'queue', 17, '0xff3a3a3a', 0, '0'),
+    text('dlHint', 54, 134, 150, 28, 'queue', 17, '0xffd2d2d2', 0, '0'),
 ]))
 intro = timelines([('Intro', 0, 'play', ''), ('EndIntro', 12, 'stop', '')],
                   [('LibraryPanel', ['Opacity', 'Scale'], [(0, 2, [0, '0.94,0.94,1']), (12, 0, [1, '1,1,1'])])])
