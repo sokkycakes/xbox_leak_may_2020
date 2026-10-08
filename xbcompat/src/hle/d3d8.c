@@ -311,6 +311,18 @@ static void save_screenshot(const char *path)
     free(px);
 }
 
+/* Debug aid: XBCOMPAT_DUMP_DRAWS=dir saves the back buffer after every draw
+   of the first frame as dir/drawNNN.bmp. */
+static void debug_dump_draw(void)
+{
+    static const char *dir; static int checked, n;
+    if (!checked) { dir = getenv("XBCOMPAT_DUMP_DRAWS"); checked = 1; }
+    if (!dir || d3d.frame > 0) return;
+    char path[512];
+    snprintf(path, sizeof path, "%s/draw%03d.bmp", dir, n++);
+    save_screenshot(path);
+}
+
 static ULONG NTAPI D3DDevice_Swap(ULONG Flags)
 {
     (void)Flags;
@@ -629,6 +641,14 @@ static void upload_image(GLenum target, ULONG fmt, ULONG w, ULONG h, ULONG pitch
     }
     if (table[i].force_alpha && bpp == 4)
         for (ULONG k = 0; k < w * h; k++) px[k * 4 + 3] = 0xFF;
+    const char *dump = getenv("XBCOMPAT_DUMP_TEXTURES");
+    if (dump) {
+        /* Debug aid: XBCOMPAT_DUMP_TEXTURES=dir writes every upload as dir/texN_WxH_fmt.bin (tools/texdump.py renders them). */
+        static int n; char path[512];
+        snprintf(path, sizeof path, "%s/tex%d_%lux%lu_%lx.bin", dump, n++, (unsigned long)w, (unsigned long)h, (unsigned long)fmt);
+        FILE *f = fopen(path, "wb");
+        if (f) { fwrite(px, 1, w * h * bpp, f); fclose(f); }
+    }
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     glTexImage2D(target, 0, table[i].force_alpha ? GL_RGB : GL_RGBA, w, h, 0, table[i].gl_fmt, table[i].gl_type, px);
     free(px);
@@ -756,6 +776,20 @@ static void apply_sampler(GLenum target, int s)
     glTexParameteri(target, GL_TEXTURE_MIN_FILTER, gl_filter(TSS(s, D3DTSS_MINFILTER)));
 }
 
+static GLuint white_texture(void)
+{
+    static GLuint id;
+    if (!id) {
+        static const unsigned char white[4] = { 255, 255, 255, 255 };
+        glGenTextures(1, &id);
+        glBindTexture(GL_TEXTURE_2D, id);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, white);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    }
+    return id;
+}
+
 /* Fixed-function texturing: one GL unit per stage, GL_COMBINE for the ops.
    Returns the mask of units in use; a disabled stage ends the chain. */
 static unsigned apply_textures(void)
@@ -769,12 +803,21 @@ static unsigned apply_textures(void)
         D3DPixelContainer *t = (D3DPixelContainer *)d3d.textures[s];
         bool sprite = s == 3 && RS(D3DRS_POINTSPRITEENABLE);   /* point sprites always use stage 3 */
         glTexEnvi(GL_POINT_SPRITE, GL_COORD_REPLACE, sprite);
-        if (!t || TSS(s, D3DTSS_COLOROP) == 1 || (ended && !sprite)) { ended = true; continue; }
-        GLenum target = tex_target(t);
+        TRACE("D3D: stage %d texture %p colorop %u(%u,%u) alphaop %u(%u,%u) tfactor %#x", s, (void *)t,
+              TSS(s, D3DTSS_COLOROP), TSS(s, D3DTSS_COLORARG1), TSS(s, D3DTSS_COLORARG2), TSS(s, D3DTSS_ALPHAOP),
+              TSS(s, D3DTSS_ALPHAARG1), TSS(s, D3DTSS_ALPHAARG2), RS(D3DRS_TEXTUREFACTOR));
+        if (TSS(s, D3DTSS_COLOROP) == 1 || (ended && !sprite)) { ended = true; continue; }
+        GLenum target = t ? tex_target(t) : GL_TEXTURE_2D;
         if (target == GL_TEXTURE_3D) continue;
         glEnable(target);
-        glBindTexture(target, texture_for(t));
-        apply_sampler(target, s);
+        if (t) {
+            glBindTexture(target, texture_for(t));
+            apply_sampler(target, s);
+        } else {
+            /* A stage with no texture still combines DIFFUSE, CURRENT and
+               TFACTOR on the Xbox; run it with a white texture. */
+            glBindTexture(GL_TEXTURE_2D, white_texture());
+        }
         glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_COMBINE);
         float tf[4];
         color4(tf, RS(D3DRS_TEXTUREFACTOR));
@@ -1709,6 +1752,7 @@ static void draw(ULONG PrimitiveType, const UCHAR *base, ULONG stride, ULONG fir
         glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, indices + first);
     else
         glDrawArrays(gl_primitive(PrimitiveType), first, count);
+    debug_dump_draw();
     end_program(e);
 }
 
