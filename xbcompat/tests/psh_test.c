@@ -231,7 +231,7 @@ static void test_texture_modes(void)
     expect("tm_bumpenv", src, "uniform vec2 bump_lum[4];", 1);
     expect("tm_bumpenv", src, "vec2 dsdt1 = vec2(snorm8(t0.r), snorm8(t0.g));", 1);
     expect("tm_bumpenv", src, "vec2 dsdt2 = vec2(snorm8(t1.r), snorm8(t1.g));", 1);
-    expect("tm_bumpenv", src, "t2 *= bump_lum[2].x * t1.b + bump_lum[2].y;", 1);
+    expect("tm_bumpenv", src, "t2 = clamp(t2 * (bump_lum[2].x * t1.b + bump_lum[2].y), 0.0, 1.0);", 1);
     free(src);
 
     /* BRDF as the BRDF sample sets it up */

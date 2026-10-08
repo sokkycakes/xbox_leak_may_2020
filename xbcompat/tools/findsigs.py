@@ -188,6 +188,39 @@ def collect_refs(img, placed):
     return known, is_code, conflicts
 
 
+def reject_contradicted(img, placed, matches):
+    """Several names placed at one address are either bodies folded by
+    /OPT:ICF or same-shaped stubs (a thunk per method that differs only in
+    the function it calls) of which the linker kept one.  Drop each name
+    whose code references contradict the placement of the function they
+    point at: it calls an address another function was placed at (and its
+    callee's own signature does not match there), or the function it names
+    lives elsewhere.  Removes the names from `placed`
+    and returns {name: va}."""
+    rejected = {}
+    while True:
+        at = {}
+        for n, (va, _) in placed.items():
+            at.setdefault(va, set()).add(n)
+        bad = set()
+        for va, names in at.items():
+            if len(names) < 2:
+                continue
+            for n in names:
+                for sym, addr, code in reloc_targets(img, placed[n][1], va):
+                    if not code:
+                        continue
+                    if (sym in placed and placed[sym][0] != addr) or \
+                            (addr in at and sym not in at[addr] and
+                             addr not in matches.get(sym, {})):
+                        bad.add(n)
+                        break
+        if not bad:
+            return rejected
+        for n in bad:
+            rejected[n] = "%#x" % placed.pop(n)[0]
+
+
 def consistent(img, sig, va, known):
     """(agree, disagree) counts of this placement's references vs `known`."""
     ok = bad = 0
@@ -228,14 +261,18 @@ def run(sigs_path, image_path, names=None, min_fixed=8):
 
     placed = {n: next(iter(h.items())) for n, h in matches.items()
               if len(h) == 1}
+    rejected = reject_contradicted(img, placed, matches)
     n_sig_unique = len(placed)
     how = {n: "signature" for n in placed}
 
     # Iteratively pin down ambiguous names: a candidate survives only if
     # every reference it makes to an already-known symbol agrees, and a
     # candidate that is itself a known call/pointer target wins outright.
+    # A placed function is known at its own address too, so thunks that
+    # differ only in the function they call are told apart by it.
     while True:
         known, is_code, _ = collect_refs(img, placed)
+        known.update((n, va) for n, (va, _) in placed.items())
         progress = False
         for name, hits in matches.items():
             if name in placed or len(hits) < 2:
@@ -255,6 +292,7 @@ def run(sigs_path, image_path, names=None, min_fixed=8):
                 progress = True
         if not progress:
             break
+    rejected.update(reject_contradicted(img, placed, matches))
 
     known, is_code, conflicts = collect_refs(img, placed)
     ambiguous = {n: sorted(h) for n, h in matches.items()
@@ -284,7 +322,8 @@ def run(sigs_path, image_path, names=None, min_fixed=8):
         stats=dict(searched=len(sigs), skipped_too_short=skipped,
                    unique_by_signature=n_sig_unique,
                    disambiguated=len(placed) - n_sig_unique,
-                   ambiguous=len(ambiguous), not_found=len(missing),
+                   ambiguous=len(ambiguous), rejected=len(rejected),
+                   not_found=len(missing),
                    code_refs_without_sig_match=len(via_ref),
                    shared_addresses=len(shared),
                    data_symbols=len(data_syms),
@@ -292,6 +331,7 @@ def run(sigs_path, image_path, names=None, min_fixed=8):
         unique={n: {"va": "%#x" % va, "how": how[n]} for n, (va, _) in
                 sorted(placed.items(), key=lambda x: x[1][0])},
         shared_addresses=shared,
+        rejected=rejected,
         ambiguous={n: ["%#x" % v for v in vs] for n, vs in
                    sorted(ambiguous.items())},
         not_found=missing,
@@ -311,6 +351,9 @@ def print_report(r, show_strings=False):
     print("\n== addresses claimed by several names (folded bodies) ==")
     for va, ns in r["shared_addresses"].items():
         print("  %s  %s" % (va, " = ".join(ns)))
+    print("\n== rejected (shared address, references contradict) ==")
+    for n, va in r["rejected"].items():
+        print("  %s  %s" % (va, n))
     print("\n== ambiguous ==")
     for n, vs in r["ambiguous"].items():
         print("  %s  %s" % (n, " ".join(vs)))

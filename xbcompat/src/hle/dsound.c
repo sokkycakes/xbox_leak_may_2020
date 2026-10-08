@@ -237,8 +237,7 @@ struct ds_voice {
     LONG volume;              /* m_lVolume = user volume - headroom */
     DWORD headroom;
     DWORD nbins; uint8_t bins[DSMIXBIN_ASSIGNMENT_MAX]; LONG binvol[DSMIXBIN_COUNT];
-    int custom_bins;
-    struct ds_buffer *output; /* SetOutputBuffer target */
+    struct ds_buffer *output; /* SetOutputBuffer target; holds a reference on it */
     /* 3D */
     struct ds_3d p3d, p3d_def;
     int def_dirty;
@@ -246,6 +245,7 @@ struct ds_voice {
     LONG pan[DSMIXBIN_COUNT];
     int dirty;                /* recompute 3D + gains before the next block */
     float gain[6][2];         /* per source channel: left, right */
+    float subgain[6];         /* per source channel: into the output (submix) buffer */
     /* decoded ADPCM block cache (mixer-owned) */
     int16_t adpcm_cache[2 * 64];
     int32_t adpcm_block;
@@ -266,10 +266,12 @@ struct ds_buffer {
     int playing, looping;
     double pos;                       /* play cursor in frames from play start (mixer) */
     int64_t start_at, stop_at;        /* REFERENCE_TIME deadlines, 0 = none */
-    DWORD start_flags;
-    struct ds_notify *notify; DWORD nnotify;
-    double notify_pos;                /* position up to which notifications were evaluated */
+    DWORD start_flags, stop_flags;
+    struct ds_notify *notify; DWORD nnotify;   /* sorted ascending, OFFSETSTOP last */
+    DWORD notify_next, notify_last;   /* next entry to signal, cursor (bytes) of the last evaluation */
+    int notify_active;                /* position checks registered (the library's POSITIONDELTA command) */
     DWORD input_mixbin;
+    float *sub;                       /* MIXIN/FXIN: this block's submix input (mono, 48 kHz) */
 };
 _Static_assert(offsetof(struct ds_buffer, iface) == 0x24, "buffer layout");
 _Static_assert(offsetof(struct ds_buffer, hdr) == 8, "buffer header");
@@ -332,6 +334,8 @@ static struct {
     pthread_cond_t ccond;
     struct ds_done *acc; DWORD nacc, acc_cap;
     DWORD mem_allocated;
+    /* statistics, logged at exit */
+    float peak; uint64_t audible_frames; unsigned plays, packets_done;
 } g = { .lock = PTHREAD_MUTEX_INITIALIZER, .override_speaker = 0xFFFFFFFFu, .ccond = PTHREAD_COND_INITIALIZER };
 
 /* Tests can drive the mixer by hand: set this before any DirectSound call. */
@@ -581,21 +585,38 @@ static const DSMIXBINVOLUMEPAIR default_bins_4ch[] = { { 0, 0 }, { 1, 0 }, { 4, 
 static const DSMIXBINVOLUMEPAIR default_bins_6ch[] = { { 0, 0 }, { 1, 0 }, { 2, 0 }, { 3, 0 }, { 4, 0 }, { 5, 0 } };
 static const DSMIXBINVOLUMEPAIR default_bins_3d[] = { { 6, 0 }, { 8, 0 }, { 7, 0 }, { 9, 0 }, { 10, 0 } };
 
-static void voice_default_bins(struct ds_voice *v, DWORD channel_mask)
+/* Default mixbins (CDirectSoundVoiceSettings::SetMixBins(NULL)): the 3D set for
+   CTRL3D voices, else by nChannels / 2 (Mono and Stereo are both FL+FR). */
+static void voice_default_bins(struct ds_voice *v)
 {
     const DSMIXBINVOLUMEPAIR *p; DWORD n;
     if (v->flags & DSBCAPS_CTRL3D) { p = default_bins_3d; n = 5; }
-    else if (channel_mask) {
-        v->nbins = 0;
-        for (DWORD b = 0; b < 6 && v->nbins < DSMIXBIN_ASSIGNMENT_MAX; b++)
-            if (channel_mask & (1u << b)) { v->bins[v->nbins++] = (uint8_t)b; v->binvol[b] = 0; }
-        return;
-    }
     else if (v->fmt.ch >= 6) { p = default_bins_6ch; n = 6; }
     else if (v->fmt.ch >= 4) { p = default_bins_4ch; n = 4; }
     else { p = default_bins_stereo; n = 2; }
     v->nbins = n;
     for (DWORD i = 0; i < n; i++) { v->bins[i] = (uint8_t)p[i].dwMixBin; v->binvol[p[i].dwMixBin] = p[i].lVolume; }
+}
+
+/* A WAVE_FORMAT_EXTENSIBLE channel mask assigns a 2D voice one bin per set
+   bit, lowest first, at full volume (CDirectSoundVoiceSettings::SetFormat). */
+static void voice_mask_bins(struct ds_voice *v, DWORD channel_mask)
+{
+    v->nbins = 0;
+    for (DWORD b = 0; b < 6 && v->nbins < DSMIXBIN_ASSIGNMENT_MAX; b++)
+        if (channel_mask & (1u << b)) { v->bins[v->nbins++] = (uint8_t)b; v->binvol[b] = 0; }
+}
+
+/* SetMixBins on a voice that feeds a submix buffer keeps (or appends) the
+   submix buffer's input bin, at full volume when appended. */
+static void voice_keep_submix_bin(struct ds_voice *v)
+{
+    if (!v->output) return;
+    uint8_t in = (uint8_t)v->output->input_mixbin;
+    for (DWORD i = 0; i < v->nbins; i++) if (v->bins[i] == in) return;
+    if (v->nbins >= DSMIXBIN_ASSIGNMENT_MAX) v->nbins = DSMIXBIN_ASSIGNMENT_MAX - 1;
+    v->bins[v->nbins++] = in;
+    v->binvol[in] = 0;
 }
 
 static float vnorm(float *x)
@@ -605,6 +626,8 @@ static float vnorm(float *x)
     return m;
 }
 
+static float vlen(const float *x) { return sqrtf(x[0] * x[0] + x[1] * x[1] + x[2] * x[2]); }
+
 static void voice_calc_3d(struct ds_voice *v)
 {
     memset(v->pan, 0, sizeof(v->pan));
@@ -613,65 +636,42 @@ static void voice_calc_3d(struct ds_voice *v)
     const struct ds_3d *s = &v->p3d;
     const struct ds_listener *l = &g.ds->listener;
     int headrel = s->mode == DS3DMODE_HEADRELATIVE;
-    float rel[3] = { s->pos[0], s->pos[1], s->pos[2] };
-    float svel[3] = { s->vel[0], s->vel[1], s->vel[2] };
-    if (!headrel) {
-        for (int i = 0; i < 3; i++) { rel[i] -= l->pos[i]; svel[i] -= l->vel[i]; }
-        /* Rotate into listener space: z = front, y = top orthogonalised, x = y cross z. */
-        float z[3] = { l->front[0], l->front[1], l->front[2] };
-        float y[3] = { l->top[0], l->top[1], l->top[2] };
-        if (vnorm(z) > 0 && vnorm(y) > 0) {
-            float d = y[0] * z[0] + y[1] * z[1] + y[2] * z[2];
-            for (int i = 0; i < 3; i++) y[i] -= d * z[i];
-            if (vnorm(y) > 0) {
-                float x[3] = { y[1] * z[2] - y[2] * z[1], y[2] * z[0] - y[0] * z[2], y[0] * z[1] - y[1] * z[0] };
-                float r2[3] = { rel[0] * x[0] + rel[1] * x[1] + rel[2] * x[2],
-                                rel[0] * y[0] + rel[1] * y[1] + rel[2] * y[2],
-                                rel[0] * z[0] + rel[1] * z[1] + rel[2] * z[2] };
-                float v2[3] = { svel[0] * x[0] + svel[1] * x[1] + svel[2] * x[2],
-                                svel[0] * y[0] + svel[1] * y[1] + svel[2] * y[2],
-                                svel[0] * z[0] + svel[1] * z[1] + svel[2] * z[2] };
-                memcpy(rel, r2, sizeof(rel)); memcpy(svel, v2, sizeof(svel));
-            }
-        }
-    }
-    float norm[3] = { rel[0], rel[1], rel[2] };
-    float mag = vnorm(norm);
+    /* Direction and distance from the listener in world space (CalcPosition). */
+    float wn[3] = { s->pos[0], s->pos[1], s->pos[2] };
+    if (!headrel) for (int i = 0; i < 3; i++) wn[i] -= l->pos[i];
+    float mag = vnorm(wn);
 
-    /* Distance attenuation. */
+    /* Distance attenuation (CalcDistanceVolume): the listener's distance
+       factor scales velocities only, not this distance. */
     LONG dist_vol = 0;
-    float d = mag * l->dist_factor;
-    if (d > s->min_dist && s->min_dist > 0) {
-        if (d > s->max_dist) d = s->max_dist;
-        float rolloff = s->rolloff * l->rolloff;
-        float x = rolloff * (d / s->min_dist - 1.0f);
+    if (mag > s->min_dist) {
+        float d = mag > s->max_dist ? s->max_dist : mag;
+        float x = s->rolloff * l->rolloff * (d / s->min_dist - 1.0f);
         dist_vol = x >= 0 ? (LONG)lrintf(-2000.0f * log10f(x + 1.0f)) : 0;
         if (dist_vol < DSBVOLUME_MIN) dist_vol = DSBVOLUME_MIN;
     }
-    /* Cone. */
+    /* Cone (CalcDirection / CalcConeVolume): flThetaS approximates the full
+       angle (0..360) between the cone orientation and the direction from
+       the source to the listener, as the cone angles are full apex angles. */
     LONG cone_vol = 0;
-    if (mag > 0 && s->cone_in < 360) {
-        float cd[3] = { s->cone_dir[0], s->cone_dir[1], s->cone_dir[2] };
-        if (vnorm(cd) > 0) {
-            float c = -(cd[0] * norm[0] + cd[1] * norm[1] + cd[2] * norm[2]);
-            if (c > 1) c = 1;
-            if (c < -1) c = -1;
-            float theta = acosf(c) * (180.0f / (float)M_PI);
-            DWORD in = s->cone_in, out = s->cone_out;
-            if (theta <= (float)in) cone_vol = 0;
-            else if (in < out && theta >= (float)out) cone_vol = s->cone_vol;
-            else {
-                DWORD w = out > in ? out - in : 1;
-                cone_vol = (LONG)((float)s->cone_vol * (theta - (float)in) / (float)w);
-            }
-        }
+    const float *c = s->cone_dir;
+    if (s->cone_in < 360 && (c[0] || c[1] || c[2])) {
+        float cm[3] = { c[0] - wn[0], c[1] - wn[1], c[2] - wn[2] };
+        float cp[3] = { c[0] + wn[0], c[1] + wn[1], c[2] + wn[2] };
+        float acm = vlen(cm), acp = vlen(cp), theta;
+        if (acp < acm) theta = 4.0f * (acp / acm * 45.0f);
+        else theta = acp > 0 ? 4.0f * (90.0f - acm / acp * 45.0f) : 0.0f;
+        DWORD in = s->cone_in, out = s->cone_out;
+        if (theta <= (float)in) cone_vol = 0;
+        else if (in < out && theta >= (float)out) cone_vol = s->cone_vol;
+        else cone_vol = (LONG)lrintf((float)s->cone_vol * (theta - (float)in) / (float)(out > in ? out - in : 1));
     }
     v->l3d_vol = dist_vol + cone_vol;
     if (v->l3d_vol < DSBVOLUME_MIN) v->l3d_vol = DSBVOLUME_MIN;
 
-    /* Doppler. */
-    float vel = headrel ? (s->vel[0] * norm[0] + s->vel[1] * norm[1] + s->vel[2] * norm[2])
-                        : (svel[0] * norm[0] + svel[1] * norm[1] + svel[2] * norm[2]);
+    /* Doppler (CalcDoppler), along the world-space direction. */
+    float vel = 0;
+    for (int i = 0; i < 3; i++) vel += (s->vel[i] - (headrel ? 0.0f : l->vel[i])) * wn[i];
     vel *= s->dist_factor * l->dist_factor;
     vel *= s->doppler * l->doppler;
     if (vel == 0) v->l3d_doppler = 0;
@@ -679,16 +679,39 @@ static void voice_calc_3d(struct ds_voice *v)
     else if (vel <= -342.0f) v->l3d_doppler = 4096;
     else v->l3d_doppler = (LONG)lrint(4096.0 * log2(1.0 - vel / 342.0));
 
-    /* Pan3D: speaker gains from the distance between the source direction and each speaker. */
+    /* Pan3D (CPan3dSource::CalcPan): per speaker, -6400 * |(dir - speaker)/2|^2.
+       The speakers sit around the listener, so the direction is taken into
+       listener space (z = front, y = top, x = right) instead of rotating the
+       speakers into world space; head-relative sources are already there. */
     static const struct { float pos[3]; int bin; } speakers[5] = {
         { { -0.7f, 0, 0.7f }, 6 }, { { 0.7f, 0, 0.7f }, 7 }, { { -0.7f, 0, -0.7f }, 8 }, { { 0.7f, 0, -0.7f }, 9 },
         { { 0, 0, 1 }, 2 },
     };
     if (mag > 0) {
-        int n = (g.ds->speaker_config & 0xFFFF) == 2 ? 5 : 2;   /* DSSPEAKER_SURROUND */
+        float dir[3] = { wn[0], wn[1], wn[2] };
+        if (!headrel) {
+            float z[3] = { l->front[0], l->front[1], l->front[2] };
+            float y[3] = { l->top[0], l->top[1], l->top[2] };
+            if (vnorm(z) > 0 && vnorm(y) > 0) {
+                float d = y[0] * z[0] + y[1] * z[1] + y[2] * z[2];
+                for (int i = 0; i < 3; i++) y[i] -= d * z[i];
+                if (vnorm(y) > 0) {
+                    float x[3] = { y[1] * z[2] - y[2] * z[1], y[2] * z[0] - y[0] * z[2], y[0] * z[1] - y[1] * z[0] };
+                    float r[3] = { wn[0] * x[0] + wn[1] * x[1] + wn[2] * x[2],
+                                   wn[0] * y[0] + wn[1] * y[1] + wn[2] * y[2],
+                                   wn[0] * z[0] + wn[1] * z[1] + wn[2] * z[2] };
+                    memcpy(dir, r, sizeof(dir));
+                }
+            }
+        }
+        /* The library's stereo Pan3D sets only the front pair and leaves the
+           rear 3D bins at full volume for the DSP (crosstalk / HRTF) to place;
+           we have no DSP, so the rear pair is panned too and folded into the
+           stereo output, which keeps left/right and front/back cues audible. */
+        int n = (g.ds->speaker_config & 0xFFFF) == 2 ? 5 : 4;   /* DSSPEAKER_SURROUND adds the center */
         for (int i = 0; i < n; i++) {
-            float dx = (norm[0] - speakers[i].pos[0]) / 2, dy = (norm[1] - speakers[i].pos[1]) / 2,
-                  dz = (norm[2] - speakers[i].pos[2]) / 2;
+            float dx = (dir[0] - speakers[i].pos[0]) / 2, dy = (dir[1] - speakers[i].pos[1]) / 2,
+                  dz = (dir[2] - speakers[i].pos[2]) / 2;
             LONG vol = (LONG)((dx * dx + dy * dy + dz * dz) * -6400.0f);
             if (vol < DSBVOLUME_MIN) vol = DSBVOLUME_MIN;
             if (vol > 0) vol = 0;
@@ -697,23 +720,45 @@ static void voice_calc_3d(struct ds_voice *v)
     }
 }
 
+/* Source channel that mixbin slot k of the voice carries.  The hardware
+   plays a voice of more than two channels as ((ch-1)>>1)+1 stereo voices,
+   gives each an equal share of the slots in order, and a stereo hardware
+   voice sends its left channel to the even slots and its right channel to
+   the odd ones (ConvertVolumeValues; CMcpxVoiceClient::SetFormat). */
+static int voice_slot_channel(const struct ds_voice *v, DWORD k)
+{
+    int ch = v->fmt.ch ? v->fmt.ch : 1;
+    if (ch == 1) return 0;
+    DWORD hw = (DWORD)((ch - 1) >> 1) + 1, per = v->nbins / hw;
+    DWORD voice = per ? k / per : 0;
+    if (voice >= hw) voice = hw - 1;
+    int c = (int)(2 * voice + (k & 1));
+    return c < ch ? c : ch - 1;
+}
+
 static void voice_calc_gains(struct ds_voice *v)
 {
     int ch = v->fmt.ch ? v->fmt.ch : 1;
     memset(v->gain, 0, sizeof(v->gain));
-    for (int c = 0; c < ch && c < 6; c++) {
-        for (DWORD k = 0; k < v->nbins; k++) {
-            if ((int)(k % ch) != c) continue;
-            int b = v->bins[k];
-            LONG att = -v->volume - v->binvol[b] - v->l3d_vol - v->pan[b];
-            if (att < 0) att = 0;
-            float gain = att >= 6400 ? 0.0f : powf(10.0f, -(float)att / 2000.0f);
-            int hr = g.ds ? g.ds->mixbin_headroom[b] : 1;
-            gain = ldexpf(gain, -hr);
-            v->gain[c][0] += gain * bin_fold[b][0];
-            v->gain[c][1] += gain * bin_fold[b][1];
+    memset(v->subgain, 0, sizeof(v->subgain));
+    int sub_bin = v->output ? (int)v->output->input_mixbin : -1;
+    for (DWORD k = 0; k < v->nbins; k++) {
+        int c = voice_slot_channel(v, k);
+        if (c >= 6) continue;
+        int b = v->bins[k];
+        LONG att = -v->volume - v->binvol[b] - v->l3d_vol - v->pan[b];
+        if (att < 0) att = 0;
+        float gain = att >= 6400 ? 0.0f : powf(10.0f, -(float)att / 2000.0f);
+        gain = ldexpf(gain, -(g.ds ? g.ds->mixbin_headroom[b] : (b == DSMIXBIN_SUBMIX ? 0 : 1)));
+        if (b == sub_bin) {
+            /* SetOutputBuffer: the bin feeds the (mono) submix buffer. */
+            v->subgain[c] += gain;
+            continue;
         }
+        v->gain[c][0] += gain * bin_fold[b][0];
+        v->gain[c][1] += gain * bin_fold[b][1];
     }
+    (void)ch;
 }
 
 static void voice_refresh(struct ds_voice *v)
@@ -741,7 +786,8 @@ static void voice_init(struct ds_voice *v, int kind, void *owner, DWORD flags, c
     v->headroom = (flags & DSBCAPS_SUBMIXMASK) ? 0 : (flags & DSBCAPS_CTRL3D) ? 0 : DSBHEADROOM_DEFAULT_2D;
     v->volume = -(LONG)v->headroom;
     v->pitch = calc_pitch(fmt->rate);
-    voice_default_bins(v, channel_mask);
+    if (channel_mask && !(flags & DSBCAPS_CTRL3D)) voice_mask_bins(v, channel_mask);
+    else voice_default_bins(v);
     v->p3d.cone_in = v->p3d.cone_out = 360;
     v->p3d.cone_dir[2] = 1.0f;
     v->p3d.min_dist = 1.0f; v->p3d.max_dist = 1000000000.0f;
@@ -753,7 +799,7 @@ static void voice_init(struct ds_voice *v, int kind, void *owner, DWORD flags, c
 
 static HRESULT voice_set_mixbins(struct ds_voice *v, const DSMIXBINS *p)
 {
-    if (!p) { v->custom_bins = 0; voice_default_bins(v, 0); v->dirty = 1; return DS_OK; }
+    if (!p) { voice_default_bins(v); voice_keep_submix_bin(v); v->dirty = 1; return DS_OK; }
     if (p->dwMixBinCount > DSMIXBIN_ASSIGNMENT_MAX || (p->dwMixBinCount && !p->lpMixBinVolumePairs))
         return DSERR_INVALIDPARAM;
     for (DWORD i = 0; i < p->dwMixBinCount; i++) {
@@ -766,7 +812,7 @@ static HRESULT voice_set_mixbins(struct ds_voice *v, const DSMIXBINS *p)
         v->bins[i] = (uint8_t)p->lpMixBinVolumePairs[i].dwMixBin;
         v->binvol[v->bins[i]] = p->lpMixBinVolumePairs[i].lVolume;
     }
-    v->custom_bins = 1;
+    voice_keep_submix_bin(v);
     v->dirty = 1;
     return DS_OK;
 }
@@ -804,7 +850,7 @@ struct ds_events { HANDLE ev[MAX_EVENTS]; unsigned n; };
 
 static void events_add(struct ds_events *e, HANDLE h)
 {
-    if (h && e->n < MAX_EVENTS) e->ev[e->n++] = h;
+    if (e && h && e->n < MAX_EVENTS) e->ev[e->n++] = h;
 }
 
 static void events_signal(struct ds_events *e)
@@ -814,27 +860,46 @@ static void events_signal(struct ds_events *e)
     e->n = 0;
 }
 
-/* Fire the notifications of b whose offset (in frames from the play start)
-   lies in (from, to].  A wrapped range (to < from) covers (from, end] and
-   [loop start, to]. */
-static void buffer_notify_range(struct ds_buffer *b, double from, double to, struct ds_events *ev)
+/* Buffer position notifications, as CMcpxBuffer::OnPositionDelta: the
+   sorted entries are signalled in order while their offset is below the
+   play cursor; a cursor that moved backwards is taken as a loop (signal to
+   the end of the region, rewind to its start); once the voice has stopped,
+   the OFFSETSTOP entries are signalled.  Lock held; events are queued. */
+static DWORD buffer_cursor_locked(const struct ds_buffer *b)
 {
-    if (!b->nnotify) return;
-    const struct ds_fmt *f = &b->v.fmt;
-    DWORD end = bytes_to_frames(f, b->play_len);
-    DWORD ls = bytes_to_frames(f, b->loop_start);
-    for (DWORD i = 0; i < b->nnotify; i++) {
-        if (b->notify[i].offset == DSBPN_OFFSETSTOP) continue;
-        double o = bytes_to_frames(f, b->notify[i].offset);
-        int hit = to >= from ? (o > from && o <= to) : ((o > from && o <= end) || (o >= ls && o <= to));
-        if (hit) events_add(ev, b->notify[i].event);
-    }
+    return b->playing ? frames_to_bytes(&b->v.fmt, (DWORD)b->pos) : b->cursor;
 }
 
-static void buffer_notify_stop(struct ds_buffer *b, struct ds_events *ev)
+static void buffer_notify_to(struct ds_buffer *b, DWORD cursor, int signal, struct ds_events *ev)
 {
-    for (DWORD i = 0; i < b->nnotify; i++)
-        if (b->notify[i].offset == DSBPN_OFFSETSTOP) events_add(ev, b->notify[i].event);
+    while (b->notify_next < b->nnotify) {
+        DWORD off = b->notify[b->notify_next].offset;
+        if (off == DSBPN_OFFSETSTOP || off >= cursor) break;
+        if (signal) events_add(ev, b->notify[b->notify_next].event);
+        b->notify_next++;
+    }
+    b->notify_last = cursor;
+}
+
+static void buffer_position_delta(struct ds_buffer *b, struct ds_events *ev)
+{
+    if (!b->nnotify) return;
+    DWORD start = 0, end = b->play_len;
+    if (b->playing && b->looping) { start = b->loop_start; end = b->loop_start + b->loop_len; }
+    DWORD cur = buffer_cursor_locked(b);
+    if (cur > b->notify_last || b->notify_last > end) {
+        buffer_notify_to(b, cur, 1, ev);
+    } else if (cur < b->notify_last) {
+        buffer_notify_to(b, end, 1, ev);
+        b->notify_next = 0;
+        buffer_notify_to(b, start, 0, ev);
+        buffer_notify_to(b, cur, 1, ev);
+    }
+    if (!b->playing) {
+        b->notify_active = 0;
+        for (DWORD i = b->nnotify; i > 0 && b->notify[i - 1].offset == DSBPN_OFFSETSTOP; i--)
+            events_add(ev, b->notify[i - 1].event);
+    }
 }
 
 static void done_push(struct ds_done **list, DWORD *n, DWORD *cap, const struct ds_done *d)
@@ -850,6 +915,7 @@ static void done_push(struct ds_done **list, DWORD *n, DWORD *cap, const struct 
 static void stream_complete(struct ds_stream *s, const struct ds_packet *p, DWORD status)
 {
     struct ds_done d = { p->xmp, status, s->callback, s->context, s };
+    if (status == XMEDIAPACKET_STATUS_SUCCESS) g.packets_done++;
     if (s->v.flags & DSSTREAMCAPS_ACCURATENOTIFY) {
         done_push(&g.acc, &g.nacc, &g.acc_cap, &d);
         pthread_cond_signal(&g.ccond);
@@ -931,7 +997,7 @@ static void render_buffer(struct ds_buffer *b, float *out, int n, struct ds_even
     if (!b->playing || !b->data || (v->flags & DSBCAPS_SUBMIXMASK)) return;
     const struct ds_fmt *f = &v->fmt;
     DWORD total = bytes_to_frames(f, b->play_len);
-    if (!total) { b->playing = 0; return; }
+    if (!total) { b->playing = 0; b->cursor = 0; if (b->notify_active) buffer_position_delta(b, ev); return; }
     DWORD ls = bytes_to_frames(f, b->loop_start), ll = bytes_to_frames(f, b->loop_len);
     int looping = b->looping && ll > 0 && ls + ll <= total;
     DWORD le = ls + ll;
@@ -939,7 +1005,8 @@ static void render_buffer(struct ds_buffer *b, float *out, int n, struct ds_even
     double step = exp2((double)voice_effective_pitch(v) / 4096.0);
     struct ds_src src = { b->data + b->play_start, total, f, v };
     int ch = f->ch;
-    double pos = b->pos, from = b->notify_pos;
+    float *sub = v->output ? v->output->sub : NULL;
+    double pos = b->pos;
     float a[6], c[6];
     for (int i = 0; i < n; i++) {
         if (looping && pos >= le) pos = ls + fmod(pos - ls, (double)ll);
@@ -951,27 +1018,27 @@ static void render_buffer(struct ds_buffer *b, float *out, int n, struct ds_even
         if (nxt >= total) nxt = idx;
         fetch_frame(&src, idx, a);
         fetch_frame(&src, nxt, c);
-        float l = 0, r = 0;
+        float l = 0, r = 0, m = 0;
         for (int k = 0; k < ch; k++) {
             float s = a[k] + (c[k] - a[k]) * frac;
             l += s * v->gain[k][0];
             r += s * v->gain[k][1];
+            m += s * v->subgain[k];
         }
         out[2 * i] += l;
         out[2 * i + 1] += r;
+        if (sub) sub[i] += m;
         pos += step;
     }
     if (b->playing) {
         if (looping && pos >= le) pos = ls + fmod(pos - ls, (double)ll);
         b->pos = pos;
-        buffer_notify_range(b, from, pos, ev);
-        b->notify_pos = pos;
     } else {
-        /* Reached the end of a non-looping play region. */
-        buffer_notify_range(b, from, (double)total, ev);
-        buffer_notify_stop(b, ev);
-        b->pos = 0; b->cursor = 0; b->notify_pos = 0;
+        /* Reached the end of a non-looping play region: the voice is off
+           and the cached cursor is the 0 that Play left there. */
+        b->pos = 0; b->cursor = 0;
     }
+    if (b->notify_active) buffer_position_delta(b, ev);
 }
 
 static void render_stream(struct ds_stream *s, float *out, int n)
@@ -982,6 +1049,7 @@ static void render_stream(struct ds_stream *s, float *out, int n)
     voice_refresh(v);
     double step = exp2((double)voice_effective_pitch(v) / 4096.0);
     int ch = f->ch;
+    float *sub = v->output ? v->output->sub : NULL;
     float a[6], c[6];
     for (int i = 0; i < n; i++) {
         struct ds_packet *p = &s->pk[s->head];
@@ -1004,24 +1072,43 @@ static void render_stream(struct ds_stream *s, float *out, int n)
         DWORD nxt = idx + 1 < p->frames ? idx + 1 : idx;
         fetch_frame(&src, idx, a);
         fetch_frame(&src, nxt, c);
-        float l = 0, r = 0;
+        float l = 0, r = 0, m = 0;
         for (int k = 0; k < ch; k++) {
             float smp = a[k] + (c[k] - a[k]) * frac;
             l += smp * v->gain[k][0];
             r += smp * v->gain[k][1];
+            m += smp * v->subgain[k];
         }
         out[2 * i] += l;
         out[2 * i + 1] += r;
+        if (sub) sub[i] += m;
         s->pos += step;
     }
 }
 
+/* A MIXIN/FXIN buffer is a voice whose input is what the voices routed to it
+   (SetOutputBuffer) produced this block; it is always active, as the
+   hardware's submix voices are.  FXIN input would pass through a DSP effect
+   first; without a DSP it is mixed in dry. */
+static void render_submix(struct ds_buffer *b, float *out, int n)
+{
+    struct ds_voice *v = &b->v;
+    voice_refresh(v);
+    for (int i = 0; i < n; i++) {
+        out[2 * i] += b->sub[i] * v->gain[0][0];
+        out[2 * i + 1] += b->sub[i] * v->gain[0][1];
+    }
+}
+
 static void buffer_stop_locked(struct ds_buffer *b, struct ds_events *ev);
+static void buffer_stopex_locked(struct ds_buffer *b, DWORD flags, struct ds_events *ev);
+static HRESULT buffer_play_locked(struct ds_buffer *b, DWORD flags);
 
 /* Mix one block of n frames into out (zeroed here).  Called from the audio
    thread, the clock thread, or a test. */
 void ds_mix_block(float *out, int n)
 {
+    for (; n > MIX_FRAMES; n -= MIX_FRAMES, out += 2 * MIX_FRAMES) ds_mix_block(out, MIX_FRAMES);
     struct ds_events ev = { .n = 0 };
     memset(out, 0, (size_t)n * 2 * sizeof(float));
     LOCK();
@@ -1030,25 +1117,38 @@ void ds_mix_block(float *out, int n)
     int64_t now = reference_time_locked();
     for (unsigned i = 0; i < g.nobjs; i++) {
         struct ds_entry *e = &g.objs[i];
+        if (e->kind == DS_BUFFER && ((struct ds_buffer *)e->obj)->sub)
+            memset(((struct ds_buffer *)e->obj)->sub, 0, (size_t)n * sizeof(float));
+    }
+    for (unsigned i = 0; i < g.nobjs; i++) {
+        struct ds_entry *e = &g.objs[i];
         if (e->kind == DS_BUFFER) {
             struct ds_buffer *b = e->obj;
+            if (b->sub) continue;
             if (b->start_at && now >= b->start_at) {
                 b->start_at = 0;
-                if (!b->playing || (b->start_flags & DSBPLAY_FROMSTART)) b->pos = (b->start_flags & DSBPLAY_FROMSTART) ? 0 : bytes_to_frames(&b->v.fmt, b->cursor);
-                b->looping = !!(b->start_flags & DSBPLAY_LOOPING);
-                b->playing = 1; b->notify_pos = b->pos;
+                buffer_play_locked(b, b->start_flags);
             }
-            if (b->stop_at && now >= b->stop_at) { b->stop_at = 0; buffer_stop_locked(b, &ev); }
+            if (b->stop_at && now >= b->stop_at) { b->stop_at = 0; buffer_stopex_locked(b, b->stop_flags, &ev); }
             render_buffer(b, out, n, &ev);
         } else if (e->kind == DS_STREAM) {
             render_stream(e->obj, out, n);
         }
     }
-    UNLOCK();
+    for (unsigned i = 0; i < g.nobjs; i++) {
+        struct ds_entry *e = &g.objs[i];
+        if (e->kind == DS_BUFFER && ((struct ds_buffer *)e->obj)->sub) render_submix(e->obj, out, n);
+    }
+    float peak = 0;
     for (int i = 0; i < 2 * n; i++) {
+        float a = fabsf(out[i]);
+        if (a > peak) peak = a;
         if (out[i] > 1.0f) out[i] = 1.0f;
         else if (out[i] < -1.0f) out[i] = -1.0f;
     }
+    if (peak > g.peak) g.peak = peak;
+    if (peak > 0) g.audible_frames += (uint64_t)n;
+    UNLOCK();
     events_signal(&ev);
 }
 
@@ -1079,6 +1179,8 @@ static void *clock_thread(void *arg)
 
 static void audio_stop(void)
 {
+    xlog("DSound: %llu frames mixed (%llu in audible blocks), peak %.3f, %u buffer plays, %u packets completed",
+         (unsigned long long)g.frames, (unsigned long long)g.audible_frames, g.peak, g.plays, g.packets_done);
     g.stopping = 1;
     if (g.audio_mode == 1 && g.dev) { SDL_CloseAudioDevice(g.dev); g.dev = 0; }
     pthread_cond_broadcast(&g.ccond);
@@ -1155,21 +1257,33 @@ static void ds_release_ref_locked(struct ds_object *d)
 
 /* ---- buffers ------------------------------------------------------------------- */
 
+/* CMcpxBuffer::Stop: cache the play cursor, turn the voice off and signal
+   the positions passed up to here plus the OFFSETSTOP entries. */
 static void buffer_stop_locked(struct ds_buffer *b, struct ds_events *ev)
 {
     if (b->playing) {
         b->cursor = frames_to_bytes(&b->v.fmt, (DWORD)b->pos);
         b->playing = 0;
-        buffer_notify_stop(b, ev);
+        buffer_position_delta(b, ev);
     }
     b->start_at = 0; b->stop_at = 0;
+}
+
+/* StopEx: DSBSTOPEX_ENVELOPE enters the release phase of the envelope,
+   which we do not model (the voice stops now), except that together with
+   DSBSTOPEX_RELEASEWAVEFORM the loop is broken and the play region runs to
+   its end.  Without ENVELOPE it is a plain Stop. */
+static void buffer_stopex_locked(struct ds_buffer *b, DWORD flags, struct ds_events *ev)
+{
+    if (b->playing && (flags & DSBSTOPEX_ENVELOPE) && (flags & DSBSTOPEX_RELEASEWAVEFORM)) b->looping = 0;
+    else buffer_stop_locked(b, ev);
 }
 
 static void buffer_set_regions_locked(struct ds_buffer *b)
 {
     b->play_start = 0; b->play_len = b->size;
     b->loop_start = 0; b->loop_len = b->size;
-    b->cursor = 0; b->pos = 0; b->notify_pos = 0;
+    b->cursor = 0; b->pos = 0;
     b->v.adpcm_block = -1;
 }
 
@@ -1209,7 +1323,8 @@ static HRESULT buffer_create_locked(const DSBUFFERDESC *desc, uint32_t *pp)
         HRESULT hr = voice_set_mixbins(&b->v, desc->lpMixBins);
         if (hr != DS_OK) { ds_release_ref_locked(ds); pool_free(b); return hr; }
     }
-    b->input_mixbin = desc->dwInputMixBin;
+    b->input_mixbin = (desc->dwFlags & DSBCAPS_FXIN) ? desc->dwInputMixBin : DSMIXBIN_SUBMIX;
+    if (submix) b->sub = calloc(MIX_FRAMES, sizeof(float));
     if (desc->dwBufferBytes) {
         b->data = pool_alloc(desc->dwBufferBytes);
         if (!b->data) { ds_release_ref_locked(ds); pool_free(b); return DSERR_OUTOFMEMORY; }
@@ -1224,6 +1339,20 @@ static HRESULT buffer_create_locked(const DSBUFFERDESC *desc, uint32_t *pp)
     return DS_OK;
 }
 
+static void buffer_free_locked(struct ds_buffer *b);
+
+/* Drop one reference on a buffer; the last one stops and frees it. */
+static ULONG buffer_release_locked(struct ds_buffer *b, struct ds_events *ev)
+{
+    ULONG r = b->hdr.refs ? --b->hdr.refs : 0;
+    if (!r) {
+        buffer_stop_locked(b, ev);
+        xlog("DSound: buffer %p released", b->iface);
+        buffer_free_locked(b);
+    }
+    return r;
+}
+
 static void buffer_free_locked(struct ds_buffer *b)
 {
     registry_remove(b);
@@ -1236,8 +1365,12 @@ static void buffer_free_locked(struct ds_buffer *b)
     }
     if (b->data && !b->app_owned) { g.mem_allocated -= b->size; pool_free(b->data); }
     free(b->notify);
+    free(b->sub);
+    struct ds_buffer *out = b->v.output;
+    b->v.output = NULL;
     ds_release_ref_locked(g.ds);
     pool_free(b);
+    if (out) buffer_release_locked(out, NULL);
 }
 
 /* ---- streams ------------------------------------------------------------------- */
@@ -1267,7 +1400,7 @@ static HRESULT stream_create_locked(const DSSTREAMDESC *desc, uint32_t *pp)
     s->max_packets = desc->dwMaxAttachedPackets;
     s->pk = calloc(s->max_packets, sizeof(*s->pk));
     s->callback = desc->lpfnCallback; s->context = desc->lpvContext;
-    s->active = 1;
+    s->active = 0;   /* the voice starts with the first packet (CMcpxStream::CommitSsl) */
     if ((desc->dwFlags & DSSTREAMCAPS_ACCURATENOTIFY) && !g.cthread_started && !g_ds_no_audio_thread) {
         pthread_t t;
         g.cthread_started = 1;
@@ -1312,27 +1445,33 @@ static ULONG NTAPI Obj_Release(void *self)
         r = d->hdr.refs ? d->hdr.refs - 1 : 0;
         ds_release_ref_locked(d);
     } else if (e->kind == DS_BUFFER) {
-        struct ds_buffer *b = e->obj;
-        r = b->hdr.refs ? --b->hdr.refs : 0;
-        if (!r) {
-            buffer_stop_locked(b, &ev);
-            xlog("DSound: buffer %p released", b->iface);
-            buffer_free_locked(b);
-        }
+        r = buffer_release_locked(e->obj, &ev);
     } else {
         struct ds_stream *s = e->obj;
         r = s->hdr_rel.refs ? s->hdr_rel.refs - 1 : 0;
         stream_set_refs(s, r);
         if (!r) {
+            /* Completions already queued for this stream go first, in order
+               (ACCURATENOTIFY ones are taken out of the shared queue without
+               reordering the other streams'), then the flushed packets. */
+            DWORD cap = 0, keep = 0;
+            for (DWORD i = 0; i < g.nacc; i++) {
+                if (g.acc[i].s == s) done_push(&dl, &dn, &cap, &g.acc[i]);
+                else g.acc[keep++] = g.acc[i];
+            }
+            g.nacc = keep;
+            for (DWORD i = 0; i < s->ndone; i++) done_push(&dl, &dn, &cap, &s->done[i]);
+            s->ndone = 0;
             flush_locked(s, XMEDIAPACKET_STATUS_FLUSHED);
-            dl = stream_take_done(s, &dn);
-            /* ACCURATENOTIFY completions of this stream are delivered here too. */
-            for (DWORD i = 0; i < g.nacc;) {
-                if (g.acc[i].s == s) { done_push(&dl, &dn, &(DWORD){ dn }, &g.acc[i]); g.acc[i] = g.acc[--g.nacc]; }
+            for (DWORD i = 0; i < s->ndone; i++) done_push(&dl, &dn, &cap, &s->done[i]);
+            for (DWORD i = 0; i < g.nacc;) {   /* flushed ACCURATENOTIFY packets */
+                if (g.acc[i].s == s) { done_push(&dl, &dn, &cap, &g.acc[i]); memmove(&g.acc[i], &g.acc[i + 1], (g.nacc - i - 1) * sizeof(*g.acc)); g.nacc--; }
                 else i++;
             }
+            free(s->done);
             registry_remove(s);
             free(s->pk);
+            if (s->v.output) { buffer_release_locked(s->v.output, &ev); s->v.output = NULL; }
             ds_release_ref_locked(g.ds);
             xlog("DSound: stream %p released", s);
             pool_free(s);
@@ -1401,12 +1540,24 @@ static void do_work(void)
         for (DWORD k = 0; k < s->ndone; k++) done_push(&all, &n, &cap, &s->done[k]);
         s->ndone = 0;
     }
+    if (!g.cthread_started) {
+        /* No completion thread (tests): ACCURATENOTIFY streams are served here too. */
+        for (DWORD k = 0; k < g.nacc; k++) done_push(&all, &n, &cap, &g.acc[k]);
+        g.nacc = 0;
+    }
     UNLOCK();
     if (n) deliver(all, n);
     free(all);
 }
 
 static void NTAPI DirectSoundDoWork(void) { do_work(); }
+static void NTAPI DS_Force3dRecalc(void *self, DWORD flags)
+{
+    (void)flags;
+    LOCK();
+    if (find_ds(self)) mark_all_3d_dirty();
+    UNLOCK();
+}
 static void NTAPI DS_DoWork(void *self) { (void)self; do_work(); }
 
 static DWORD NTAPI DirectSoundGetSampleTime(void)
@@ -1444,6 +1595,37 @@ static HRESULT NTAPI DirectSoundLoadEncoder(const char *name, DWORD flags, void 
     (void)name; (void)flags; (void)ppv; (void)psize;
     return DSERR_UNSUPPORTED;
 }
+
+/* The library's allocators.  Our own objects never use them, but library code
+   that still runs (the WMA decoder XMOs) does.  Pool memory comes from the
+   kernel pool, physical memory from the contiguous window. */
+static void *ds_pool_alloc(DWORD size, ULONG zero) { (void)zero; return pool_alloc(size ? size : 1); }
+static void ds_free(void *p)
+{
+    if (!p) return;
+    if ((uint32_t)p >= CONTIG_BASE) MmFreeContiguousMemory(p);
+    else pool_free(p);
+}
+static void *NTAPI DirectSoundMemAlloc(DWORD tag, DWORD size, ULONG zero) { (void)tag; return ds_pool_alloc(size, zero); }
+static void *NTAPI DirectSoundTrackingAlloc(const char *file, ULONG line, const char *cls, DWORD tag, DWORD size,
+                                           ULONG zero)
+{
+    (void)file; (void)line; (void)cls; (void)tag;
+    return ds_pool_alloc(size, zero);
+}
+static void *NTAPI DirectSoundPhysicalAlloc(DWORD size, DWORD align, DWORD flags, ULONG zero)
+{
+    void *p = MmAllocateContiguousMemoryEx(size ? size : 1, 0, 0xFFFFFFFFu, align, flags ? flags : 4);
+    if (p && zero) memset(p, 0, size);
+    return p;
+}
+static void *NTAPI DirectSoundTrackingPhysicalAlloc(const char *file, ULONG line, const char *cls, DWORD size,
+                                                   DWORD align, DWORD flags, ULONG zero)
+{
+    (void)file; (void)line; (void)cls;
+    return DirectSoundPhysicalAlloc(size, align, flags, zero);
+}
+static void NTAPI DirectSoundMemFree(void *p) { ds_free(p); }
 
 static LONG NTAPI XAudioCalculatePitch(DWORD freq) { return calc_pitch(freq); }
 
@@ -2142,12 +2324,14 @@ static HRESULT NTAPI Voice_SetFormat(void *self, const WAVEFORMATEX *w)
     if (v->flags & DSBCAPS_SUBMIXMASK) VOICE_RETURN(DSERR_INVALIDCALL);
     v->fmt = fmt;
     v->pitch = calc_pitch(fmt.rate);
-    if (!v->custom_bins) voice_default_bins(v, mask);
+    /* Only a format with a channel mask reassigns the mixbins of a 2D voice;
+       otherwise they stay as they are (CDirectSoundVoiceSettings::SetFormat). */
+    if (mask && !(v->flags & DSBCAPS_CTRL3D)) { voice_mask_bins(v, mask); voice_keep_submix_bin(v); }
     v->adpcm_block = -1;
     v->dirty = 1;
     if (v->kind == DS_BUFFER) {
         struct ds_buffer *b = v->owner;
-        b->pos = 0; b->cursor = 0; b->notify_pos = 0;
+        b->pos = 0; b->cursor = 0;
     }
     VOICE_RETURN(DS_OK);
 }
@@ -2208,14 +2392,33 @@ static HRESULT NTAPI Voice_SetHeadroom(void *self, DWORD headroom)
     VOICE_RETURN(DS_OK);
 }
 
+/* SetOutputBuffer (CDirectSoundVoiceSettings::SetOutputBuffer): the voice
+   is routed to the submix buffer's input bin *instead of* its mixbins (the
+   mixbin list becomes that one bin), and keeps a reference on the buffer.
+   Disconnecting drops that bin, leaving whatever came before it. */
 static HRESULT NTAPI Voice_SetOutputBuffer(void *self, void *out)
 {
+    struct ds_events ev = { .n = 0 };
     VOICE_ENTRY(v, self);
     struct ds_buffer *ob = out ? find_buffer(out) : NULL;
-    if (out && (!ob || !(ob->v.flags & DSBCAPS_SUBMIXMASK))) VOICE_RETURN(DSERR_INVALIDPARAM);
-    v->output = ob;
+    if (out && (!ob || !(ob->v.flags & DSBCAPS_SUBMIXMASK) || &ob->v == v)) VOICE_RETURN(DSERR_INVALIDPARAM);
+    if (ob == v->output) VOICE_RETURN(DS_OK);
+    if (v->output) {
+        struct ds_buffer *old = v->output;
+        if (v->nbins && v->bins[v->nbins - 1] == (uint8_t)old->input_mixbin) v->nbins--;
+        v->output = NULL;
+        buffer_release_locked(old, &ev);
+    }
+    if (ob) {
+        ob->hdr.refs++;
+        v->output = ob;
+        v->nbins = 1;
+        v->bins[0] = (uint8_t)ob->input_mixbin;
+    }
     v->dirty = 1;
-    VOICE_RETURN(DS_OK);
+    UNLOCK();
+    events_signal(&ev);
+    return DS_OK;
 }
 
 static HRESULT NTAPI Voice_SetMixBins(void *self, const DSMIXBINS *p)
@@ -2348,16 +2551,20 @@ static HRESULT buffer_play_locked(struct ds_buffer *b, DWORD flags)
 {
     if (b->v.flags & DSBCAPS_SUBMIXMASK) { b->playing = 1; return DS_OK; }
     if (!b->data || !b->play_len) { xlog("DSound: Play on buffer %p without data", b->iface); return DSERR_INVALIDCALL; }
+    /* CMcpxBuffer::Play: a stopped voice resumes from the cached cursor
+       unless FROMSTART; a playing one keeps its position unless FROMSTART;
+       either way the cached cursor is consumed. */
     if (!b->playing || (flags & DSBPLAY_FROMSTART)) {
         DWORD start = (flags & DSBPLAY_FROMSTART) ? 0 : bytes_to_frames(&b->v.fmt, b->cursor);
         if (start >= bytes_to_frames(&b->v.fmt, b->play_len)) start = 0;
         b->pos = start;
-        b->notify_pos = start;
         b->v.adpcm_block = -1;
     }
+    b->cursor = 0;
     b->looping = !!(flags & DSBPLAY_LOOPING);
+    if (!b->playing) g.plays++;
     b->playing = 1;
-    b->stop_at = 0;
+    if (b->nnotify) b->notify_active = 1;
     return DS_OK;
 }
 
@@ -2403,12 +2610,11 @@ static HRESULT NTAPI Buf_StopEx(void *self, uint32_t rt_lo, uint32_t rt_hi, DWOR
     int64_t rt = (int64_t)(((uint64_t)rt_hi << 32) | rt_lo);
     struct ds_events ev = { .n = 0 };
     BUFFER_ENTRY(b, self);
-    if ((flags & DSBSTOPEX_RELEASEWAVEFORM) && b->playing && b->looping) {
-        b->looping = 0;   /* break out of the loop and run to the end of the play region */
-    } else if (rt > 0 && rt > reference_time_locked() && b->playing) {
-        b->stop_at = rt;
+    if (rt > 0 && rt > reference_time_locked() && b->playing) {
+        b->stop_at = rt; b->stop_flags = flags;
     } else {
-        buffer_stop_locked(b, &ev);
+        b->stop_at = 0;
+        buffer_stopex_locked(b, flags, &ev);
     }
     UNLOCK();
     events_signal(&ev);
@@ -2425,8 +2631,10 @@ static HRESULT NTAPI Buf_SetPlayRegion(void *self, DWORD start, DWORD len)
     if (start + len > b->size || start + len < start) VOICE_RETURN(DSERR_INVALIDCALL);
     b->play_start = start; b->play_len = len;
     b->loop_start = 0; b->loop_len = len;
-    b->cursor = 0; b->pos = 0; b->notify_pos = 0;
-    b->v.adpcm_block = -1;
+    /* CMcpxBuffer::SetPlayRegion: drop the cached cursor; a playing voice
+       restarts from the start of the new region, keeping its loop flag. */
+    b->cursor = 0;
+    if (b->playing) { b->pos = 0; b->v.adpcm_block = -1; }
     VOICE_RETURN(DS_OK);
 }
 
@@ -2483,11 +2691,18 @@ static HRESULT NTAPI Buf_SetCurrentPosition(void *self, DWORD pos)
     BUFFER_ENTRY(b, self);
     if (b->v.flags & DSBCAPS_SUBMIXMASK) VOICE_RETURN(DSERR_INVALIDCALL);
     if (pos % b->v.fmt.align || pos >= b->play_len) VOICE_RETURN(DSERR_INVALIDPARAM);
-    if (b->playing && b->looping && pos >= b->loop_start + b->loop_len) b->looping = 0;
-    b->cursor = pos;
-    b->pos = bytes_to_frames(&b->v.fmt, pos);
-    b->notify_pos = b->pos;
-    VOICE_RETURN(DS_OK);
+    struct ds_events ev = { .n = 0 };
+    if (b->playing) {
+        if (b->looping && pos >= b->loop_start + b->loop_len) b->looping = 0;
+        b->pos = bytes_to_frames(&b->v.fmt, pos);
+        b->v.adpcm_block = -1;
+    } else {
+        b->cursor = pos;   /* cached for the next Play */
+    }
+    buffer_position_delta(b, &ev);
+    UNLOCK();
+    events_signal(&ev);
+    return DS_OK;
 }
 
 static HRESULT NTAPI Buf_SetBufferData(void *self, void *pv, DWORD bytes)
@@ -2546,7 +2761,6 @@ static HRESULT NTAPI Buf_Unlock(void *self, void *p1, DWORD n1, void *p2, DWORD 
     return DS_OK;
 }
 
-static HRESULT NTAPI Buf_Restore(void *self) { (void)self; return DS_OK; }
 
 static int notify_cmp(const void *a, const void *b)
 {
@@ -2569,6 +2783,8 @@ static HRESULT NTAPI Buf_SetNotificationPositions(void *self, DWORD count, const
     if (count) qsort(copy, count, sizeof(*copy), notify_cmp);
     free(b->notify);
     b->notify = copy; b->nnotify = count;
+    b->notify_next = 0; b->notify_last = 0xFFFFFFFFu;
+    b->notify_active = b->playing && count;
     VOICE_RETURN(DS_OK);
 }
 
@@ -2733,6 +2949,18 @@ const struct hle_func dsound_funcs[] = {
     F("_DirectSoundOverrideSpeakerConfig@4", DirectSoundOverrideSpeakerConfig),
     F("_DirectSoundDumpMemoryUsage@4", DirectSoundDumpMemoryUsage),
     F("_DirectSoundLoadEncoder@16", DirectSoundLoadEncoder),
+    F("_DirectSoundMemAlloc@12", DirectSoundMemAlloc),
+    F("_DirectSoundPoolAlloc@12", DirectSoundMemAlloc),
+    F("_DirectSoundPhysicalAlloc@16", DirectSoundPhysicalAlloc),
+    F("_DirectSoundTrackingMemAlloc@24", DirectSoundTrackingAlloc),
+    F("_DirectSoundTrackingPoolAlloc@24", DirectSoundTrackingAlloc),
+    F("_DirectSoundTrackingPhysicalAlloc@28", DirectSoundTrackingPhysicalAlloc),
+    F("_DirectSoundMemFree@4", DirectSoundMemFree),
+    F("_DirectSoundPoolFree@4", DirectSoundMemFree),
+    F("_DirectSoundPhysicalFree@4", DirectSoundMemFree),
+    F("_DirectSoundTrackingMemFree@4", DirectSoundMemFree),
+    F("_DirectSoundTrackingPoolFree@4", DirectSoundMemFree),
+    F("_DirectSoundTrackingPhysicalFree@4", DirectSoundMemFree),
     F("_XAudioCalculatePitch@4", XAudioCalculatePitch),
     F("_XAudioCreatePcmFormat@16", XAudioCreatePcmFormat),
     F("_XAudioCreateAdpcmFormat@12", XAudioCreateAdpcmFormat),
@@ -2751,6 +2979,7 @@ const struct hle_func dsound_funcs[] = {
     F("?AddRef@CDirectSound@DirectSound@@UAGKXZ", Obj_AddRef),
     F("?Release@CDirectSound@DirectSound@@UAGKXZ", Obj_Release),
     F("?DoWork@CDirectSound@DirectSound@@QAGXXZ", DS_DoWork),
+    F("?Force3dRecalc@CDirectSound@DirectSound@@QAGXK@Z", DS_Force3dRecalc),
     F("_IDirectSound_GetCaps@8", DS_GetCaps),
     F("?GetCaps@CDirectSound@DirectSound@@QAGJPAU_DSCAPS@@@Z", DS_GetCaps),
     F("_IDirectSound_CreateSoundBuffer@16", DS_CreateSoundBuffer),
@@ -2882,7 +3111,7 @@ const struct hle_func dsound_funcs[] = {
     F("_IDirectSoundBuffer_Lock@32", Buf_Lock),
     F("?Lock@CDirectSoundBuffer@DirectSound@@QAGJKKPAPAXPAK01K@Z", Buf_Lock),
     F("_IDirectSoundBuffer_Unlock@20", Buf_Unlock),
-    F("_IDirectSoundBuffer_Restore@4", Buf_Restore),
+    F("_IDirectSoundBuffer_Restore@4", DS_Compact),   /* both just return DS_OK */
     F("_IDirectSoundBuffer_SetNotificationPositions@12", Buf_SetNotificationPositions),
     F("?SetNotificationPositions@CDirectSoundBuffer@DirectSound@@QAGJKPBU_DSBPOSITIONNOTIFY@@@Z",
       Buf_SetNotificationPositions),

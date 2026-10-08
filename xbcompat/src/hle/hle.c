@@ -115,10 +115,24 @@ static bool replaced_library_api(const char *name)
         /* xapilib: the input device API sits on a USB stack we do not run */
         "_XInitDevices@", "_XGetDevices@", "_XGetDeviceChanges@", "_XInput",
         /* dsound */
-        "_DirectSound", "_IDirectSound", "_XAudio", "_XWaveFile", "_XFileMediaObject", "_XMediaObject",
+        "_DirectSound", "_IDirectSound", "_XAudio", "_XWaveFile", "_XFileCreateMediaObject",
+        "_Ac97CreateMediaObject@",
     };
     for (unsigned i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); i++)
         if (!strncmp(name, prefixes[i], strlen(prefixes[i]))) return true;
+    /* dsound: the public methods of the C++ classes behind the C thunks
+       ("?Method@Class@DirectSound@@QAG..." / "...@@UAG..."), since a thunk
+       findsigs could not tell apart still lands in its method. */
+    static const char *classes[] = {
+        "@CDirectSound@DirectSound@@", "@CDirectSoundBuffer@DirectSound@@",
+        "@CDirectSoundStream@DirectSound@@", "@CDirectSoundVoice@DirectSound@@",
+    };
+    const char *at = name[0] == '?' && name[1] != '?' ? strchr(name, '@') : NULL;
+    for (unsigned i = 0; at && i < sizeof(classes) / sizeof(classes[0]); i++) {
+        size_t n = strlen(classes[i]);
+        if (!strncmp(at, classes[i], n) && (!strncmp(at + n, "QAG", 3) || !strncmp(at + n, "UAG", 3)))
+            return true;
+    }
     return false;
 }
 
@@ -134,8 +148,29 @@ void hle_patch(xbe_image *img, const char *mapfile)
     for (size_t i = 0; i < nsyms; i++) {
         if (syms[i].data || !replaced_library_api(syms[i].name)) continue;
         const struct hle_func *h = hle_find(syms[i].name);
-        if (h) {
-            write_jmp(syms[i].va, h->impl);
+        /* Never patch one address twice: the names sharing an address are
+           decided once, by the first of them, and must agree on the
+           implementation (bodies folded by the linker); otherwise the
+           placement is in doubt and the original code is left alone. */
+        void *impl = h ? h->impl : NULL;
+        bool first = true, clash = false;
+        for (size_t j = 0; j < nsyms; j++) {
+            if (j == i || syms[j].data || syms[j].va != syms[i].va || !replaced_library_api(syms[j].name))
+                continue;
+            if (j < i) { first = false; break; }
+            const struct hle_func *o = hle_find(syms[j].name);
+            if (!o) continue;
+            if (!impl) impl = o->impl;
+            else if (o->impl != impl) clash = true;
+        }
+        if (!first) continue;
+        if (clash) {
+            xlog("HLE: %s shares %#x with a name implemented differently; not patched",
+                 syms[i].name, (unsigned)syms[i].va);
+            continue;
+        }
+        if (impl) {
+            write_jmp(syms[i].va, impl);
             replaced++;
         } else {
             write_jmp(syms[i].va, make_trap(syms[i].name));

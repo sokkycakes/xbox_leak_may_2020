@@ -378,8 +378,14 @@ static int emit_texture_stage(psh_ctx *c, int i)
         sb_fmt(o, "    vec4 t%d = texture2D(tex%d, (gl_TexCoord[%d].xy + vec2(dot(bump_env[%d].xz, dsdt%d), dot(bump_env[%d].yw, dsdt%d))) * tex_scale[%d].xy);\n",
                i, i, i, i, i, i, i, i);
         if (mode == TM_BUMPENVMAP_LUM) {
+            /* The texel is scaled by lscale * L + loffset (L: the input's
+               luminance, b in the host's bump upload).  The factor itself
+               may exceed 1 (BumpEarth uses lscale 4 so that L = 0.25 is
+               "1x" and L = 0.5 is "2x"), but a texture register only holds
+               0..1, so the product saturates. */
             c->use_bumplum = 1;
-            sb_fmt(o, "    t%d *= bump_lum[%d].x * t%d.b + bump_lum[%d].y;\n", i, i, in, i);
+            sb_fmt(o, "    t%d = clamp(t%d * (bump_lum[%d].x * t%d.b + bump_lum[%d].y), 0.0, 1.0);\n",
+                   i, i, i, in, i);
         }
         break;
     case TM_BRDF:

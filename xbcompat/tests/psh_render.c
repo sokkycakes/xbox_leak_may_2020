@@ -9,6 +9,8 @@
  * Needs a display (xvfb-run).  Build:
  *   gcc -std=gnu11 -Wall -I src/hle $(pkg-config --cflags sdl2) tests/psh_render.c src/hle/psh.c \
  *       $(pkg-config --libs sdl2 gl) -o psh_render
+ *   (without pkg-config, e.g. 32-bit: gcc -m32 -std=gnu11 -Wall -I src/hle -I/usr/include/SDL2
+ *    -D_REENTRANT tests/psh_render.c src/hle/psh.c -lSDL2 -lGL -lm -o psh_render)
  */
 #include <SDL.h>
 #include <SDL_opengl.h>
