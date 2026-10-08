@@ -846,7 +846,8 @@ static void upload_image3(GLenum target, ULONG fmt, ULONG w, ULONG h, ULONG d, U
 {
     /* conv: 1 = V8U8 (bump), 2 = L6V5U5 (bump), both expanded to RGBA8 with
        du/dv as the signed bytes' bit patterns in r/g and luminance in b;
-       3 = YUY2 and 4 = UYVY (video frames), converted to RGB with BT.601. */
+       3 = YUY2 and 4 = UYVY (video frames), converted to RGB with BT.601;
+       5 = A8, which the NV2A samples as white with that alpha. */
     struct { ULONG fmt; int bpp; bool swizzled; GLenum gl_fmt, gl_type; bool force_alpha; int conv; } table[] = {
         { 0x3A, 4, true,  GL_RGBA, GL_UNSIGNED_BYTE, false, 0 },               /* A8B8G8R8 / Q8W8V8U8 */
         { 0x3F, 4, false, GL_RGBA, GL_UNSIGNED_BYTE, false, 0 },               /* LIN_A8B8G8R8 */
@@ -877,8 +878,8 @@ static void upload_image3(GLenum target, ULONG fmt, ULONG w, ULONG h, ULONG d, U
         { 0x1D, 2, false, GL_BGRA, GL_UNSIGNED_SHORT_4_4_4_4_REV, false, 0 }, /* LIN_A4R4G4B4 */
         { 0x00, 1, true,  GL_LUMINANCE, GL_UNSIGNED_BYTE, false, 0 },         /* L8 */
         { 0x13, 1, false, GL_LUMINANCE, GL_UNSIGNED_BYTE, false, 0 },         /* LIN_L8 */
-        { 0x19, 1, true,  GL_ALPHA, GL_UNSIGNED_BYTE, false, 0 },             /* A8 */
-        { 0x1F, 1, false, GL_ALPHA, GL_UNSIGNED_BYTE, false, 0 },             /* LIN_A8 */
+        { 0x19, 1, true,  GL_RGBA, GL_UNSIGNED_BYTE, false, 5 },              /* A8 */
+        { 0x1F, 1, false, GL_RGBA, GL_UNSIGNED_BYTE, false, 5 },              /* LIN_A8 */
         { 0x1A, 2, true,  GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE, false, 0 },   /* A8L8 */
         { 0x20, 2, false, GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE, false, 0 },   /* LIN_A8L8 */
         { 0x24, 2, false, GL_RGBA, GL_UNSIGNED_BYTE, false, 3 },            /* YUY2 */
@@ -916,7 +917,16 @@ static void upload_image3(GLenum target, ULONG fmt, ULONG w, ULONG h, ULONG d, U
     }
     if (table[i].force_alpha && bpp == 4)
         for (ULONG k = 0; k < w * h * d; k++) px[k * 4 + 3] = 0xFF;
-    if (table[i].conv >= 3) {
+    if (table[i].conv == 5) {
+        uint8_t *rgba = malloc(w * h * d * 4);
+        for (ULONG k = 0; k < w * h * d; k++) {
+            rgba[k * 4] = rgba[k * 4 + 1] = rgba[k * 4 + 2] = 0xFF;
+            rgba[k * 4 + 3] = px[k];
+        }
+        free(px);
+        px = rgba;
+        bpp = 4;
+    } else if (table[i].conv >= 3) {
         /* Each 4-byte pair of texels shares U and V. */
         uint8_t *rgba = malloc(w * h * d * 4);
         bool uyvy = table[i].conv == 4;
