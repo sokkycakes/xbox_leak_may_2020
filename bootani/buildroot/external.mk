@@ -19,3 +19,9 @@ define HOST_LIBCLC_BUILD_CMDS
 endef
 define HOST_LIBCLC_INSTALL_CMDS
 endef
+
+# Theseus plays MP3 soundtracks through SDL_mixer. Buildroot builds SDL2_mixer
+# without MP3; its bundled dr_mp3 decoder needs no other library.
+ifeq ($(BR2_PACKAGE_THESEUS),y)
+SDL2_MIXER_CONF_OPTS += --enable-music-mp3 --enable-music-mp3-drmp3
+endif

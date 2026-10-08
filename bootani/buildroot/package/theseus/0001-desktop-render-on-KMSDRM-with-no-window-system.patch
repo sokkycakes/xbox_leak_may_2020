@@ -140,7 +140,7 @@ index 1da1a90..b72d5b1 100644
  
      return extractedMode;
 diff --git a/theseus/desktop/sdl_main.cpp b/theseus/desktop/sdl_main.cpp
-index 7ca83f7..d573574 100644
+index 7ca83f7..8b7c16c 100644
 --- a/theseus/desktop/sdl_main.cpp
 +++ b/theseus/desktop/sdl_main.cpp
 @@ -201,6 +201,12 @@ VirtualGameDB g_vgames = {};
@@ -184,7 +184,7 @@ index 7ca83f7..d573574 100644
      SDL_SetWindowFullscreen(g_pSDLWindow, 0);
  
      if (g_windowResolution > 0) {
-@@ -1479,6 +1499,32 @@ int main(int argc, char* argv[]) {
+@@ -1479,6 +1499,35 @@ int main(int argc, char* argv[]) {
      // macOS, Vulkan/D3D11 elsewhere), so no GL drawable flag.
      Uint32 windowFlags = SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
  
@@ -209,7 +209,10 @@ index 7ca83f7..d573574 100644
 +            SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE, 8);
 +            SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
 +            SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
-+            windowFlags = SDL_WINDOW_SHOWN | SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN;
++            // FULLSCREEN_DESKTOP keeps the mode the display is already in
++            // (the panel's or TV's preferred one) instead of picking the
++            // mode closest to the 1280x720 asked for below.
++            windowFlags = SDL_WINDOW_SHOWN | SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN_DESKTOP;
 +            fprintf(stdout, "KMSDRM: rendering through bgfx OpenGL on SDL's EGL context\n");
 +        }
 +    }
@@ -217,7 +220,7 @@ index 7ca83f7..d573574 100644
      g_pSDLWindow = SDL_CreateWindow(
          "UIX Desktop - Preview",
          SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-@@ -1492,6 +1538,19 @@ int main(int argc, char* argv[]) {
+@@ -1492,6 +1541,19 @@ int main(int argc, char* argv[]) {
          return 1;
      }
  
@@ -237,7 +240,7 @@ index 7ca83f7..d573574 100644
      // Window icon (TeamUIX logo, embedded).
      {
          int iw, ih, ich;
-@@ -1516,6 +1575,14 @@ int main(int argc, char* argv[]) {
+@@ -1516,6 +1578,14 @@ int main(int argc, char* argv[]) {
          } else {
              bgfx::PlatformData pd;
              std::memset(&pd, 0, sizeof(pd));
@@ -252,7 +255,7 @@ index 7ca83f7..d573574 100644
  #  if defined(__APPLE__)
              pd.nwh = wmi.info.cocoa.window;
  #  elif defined(_WIN32)
-@@ -1524,16 +1591,23 @@ int main(int argc, char* argv[]) {
+@@ -1524,16 +1594,23 @@ int main(int argc, char* argv[]) {
              // Branch on SDL's actual subsystem. Feeding x11 lanes to
              // bgfx on a Wayland session hands RADV a NULL Display and
              // it crashes in vkGetPhysicalDeviceSurfaceSupportKHR.
@@ -277,7 +280,7 @@ index 7ca83f7..d573574 100644
              bgfx::Init bgfxInit;
              bgfxInit.platformData       = pd;
              // Pixels, not points. On a HiDPI display the drawable is larger
-@@ -1559,6 +1633,7 @@ int main(int argc, char* argv[]) {
+@@ -1559,6 +1636,7 @@ int main(int argc, char* argv[]) {
                  case 5: bgfxInit.type = bgfx::RendererType::OpenGLES;   break;
                  default: bgfxInit.type = bgfx::RendererType::Count;     break;
              }
@@ -285,7 +288,7 @@ index 7ca83f7..d573574 100644
              if (!bgfx::init(bgfxInit)) {
                  fprintf(stderr, "bgfx::init failed\n");
              } else {
-@@ -1780,6 +1855,7 @@ int main(int argc, char* argv[]) {
+@@ -1780,6 +1858,7 @@ int main(int argc, char* argv[]) {
          else if (strcmp(argv[i], "--graphics-debug") == 0) g_graphicsDebug = true;
          else if (strcmp(argv[i], "--fullscreen") == 0) cliFullscreen = true;
          else if (strcmp(argv[i], "--no-toolbar") == 0) g_showMenuBar = false;
@@ -293,7 +296,7 @@ index 7ca83f7..d573574 100644
          else if (strcmp(argv[i], "--scale") == 0 && i + 1 < argc) {
              cliUiScale = (float)atof(argv[++i]);
          }
-@@ -2297,8 +2373,8 @@ int main(int argc, char* argv[]) {
+@@ -2297,8 +2376,8 @@ int main(int argc, char* argv[]) {
          // Swap
          Uint64 tSwap0 = SDL_GetPerformanceCounter();
          // bgfx owns presentation; its backend layer is the visible surface.
