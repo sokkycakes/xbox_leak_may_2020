@@ -59,7 +59,7 @@ reachable for testing and lets it take new images safely:
 - **The stick** has two partitions. `SIONBOOT` (FAT, 1 GiB) is the EFI
   system partition with `EFI/BOOT/BOOTX64.EFI` (the whole system), room for
   two more images, and the folders a PC edits: `sion/` and `theseus/`.
-  `SIONDATA` (ext4) is mounted on `/data` and grows to fill the stick on
+  `SIONDATA` (ext4) is mounted on `/data` and grows (up to 16 GiB) on
   first boot. The root filesystem still runs from RAM, so `/data` is the
   only thing that persists.
 - **Network.** `sion/sion.conf` on the stick holds the Wi-Fi network

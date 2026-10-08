@@ -87,6 +87,7 @@ logs)
 	while sleep 5; do
 		mount_stick || continue
 		cp /var/log/theseus.log "$L/theseus.log" 2>/dev/null
+		[ -r /var/log/sion.log ] && cp /var/log/sion.log "$L/sion.log"
 		dmesg > "$L/dmesg.txt"
 		umount "$STICK"
 	done

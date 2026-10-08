@@ -24,9 +24,15 @@ grow_data() {
 	# GPT keeps a 33-sector backup at the end; grow only for more than 64 MiB.
 	free=$(( $(cat "$sysd/size") - end - 34 ))
 	[ "$free" -gt 131072 ] || return 0
-	log "growing $data by $((free / 2048)) MiB"
+	# At most 16 GiB: growing ext4 over a whole large stick writes gigabytes
+	# of inode tables at once, which cheap sticks handle badly.
+	size=$(( $(cat "$sysp/size") + free ))
+	max=$(( 16 * 1024 * 1024 * 2 ))
+	[ "$size" -gt "$max" ] && size=$max
+	[ "$size" -gt "$(cat "$sysp/size")" ] || return 0
+	log "growing $data to $((size / 2048)) MiB"
 	sfdisk -q --relocate gpt-bak-std "$disk" >> "$SION_LOG" 2>&1
-	echo ', +' | sfdisk -q --no-reread -N "$n" "$disk" >> "$SION_LOG" 2>&1
+	echo ", $size" | sfdisk -q --no-reread -N "$n" "$disk" >> "$SION_LOG" 2>&1
 	partx -u "$disk" >> "$SION_LOG" 2>&1
 	sleep 0.5
 	e2fsck -fy "$data" >> "$SION_LOG" 2>&1
@@ -54,7 +60,11 @@ setup_data() {
 	[ -e "$SION_RUN/grown" ] || { grow_data "$data"; touch "$SION_RUN/grown"; }
 	e2fsck -p "$data" >> "$SION_LOG" 2>&1
 	mkdir -p "$SION_DATA"
-	mount -t ext4 -o noatime "$data" "$SION_DATA" || { log "mounting $data failed"; return 1; }
+	if ! mount -t ext4 -o noatime "$data" "$SION_DATA"; then
+		log "mounting $data failed; repairing it"
+		e2fsck -fy "$data" >> "$SION_LOG" 2>&1
+		mount -t ext4 -o noatime "$data" "$SION_DATA" || { log "mounting $data failed"; return 1; }
+	fi
 	mkdir -p "$SION_DATA/overlay" "$SION_DATA/sion/ssh"
 	chmod 700 "$SION_DATA/sion/ssh"
 	if [ -n "$(ls -A "$SION_DATA/overlay")" ]; then
