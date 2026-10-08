@@ -18,16 +18,44 @@ What differs from a PC is replaced underneath it:
 
 ## Status
 
-The ATG graphics tutorials run: CreateDevice, Vertices, Matrices, Lights and
-Textures (with swizzled and DXT textures).
+87 of the 113 prebuilt ATG samples in the leak run 60 frames without a trap
+or crash. What works:
+
+- **Direct3D 8**: fixed function with lighting, specular, fog and texture
+  stages; texture coordinate generation and texture matrices; NV2A vertex
+  programs and register combiners translated to GLSL; vertex state shaders run
+  on the CPU; push buffers (recorded and BeginPush); point sprites; swizzled,
+  linear, DXT, cube, volume and bump-map textures; render targets, including
+  cube map faces; visibility tests; state blocks; rect and tri patches
+  tessellated on the CPU; back buffer and depth buffer reads from memory.
+- **Input**: XInput on SDL2 game controllers, with rumble, plus a keyboard pad
+  when no controller is attached (see below).
+- **Kernel**: SHA-1, HMAC, RC4 and big-number crypto are real, so save
+  signatures work. There is no Ethernet: the Xbox Live samples start and
+  report that the console is offline.
 
 Not done yet:
 
-- DirectSound
-- XInput
-- Vertex and pixel shaders (only FVF/fixed-function is supported)
-- Push buffers
-- Retail titles, which would need signatures for more XDK versions
+- DirectSound is partly done: streams play, but most sound samples still fail
+  to initialize.
+- The debug-monitor samples import `xbdm.dll`, which `pe2xbe.py` does not
+  handle.
+- Retail titles need signatures for their XDK versions.
+
+## Keyboard pad
+
+| Key | Button |
+| --- | --- |
+| Space or Enter | A |
+| B, X, Y | B, X, Y |
+| 1, 2 | White, Black |
+| Q, E | Left and right triggers |
+| Arrow keys | D-pad |
+| Backspace | Start |
+| Escape | Back |
+| W A S D | Left stick |
+| I J K L | Right stick |
+| 3, 4 | Left and right stick clicks |
 
 ## Build
 
@@ -57,3 +85,14 @@ Options:
 | `--log FILE` | Write the log to a file. |
 | `--screenshot FILE --shot-frame N` | Save frame N as a BMP. |
 | `--frames N` | Exit after N frames. |
+
+Environment variables:
+
+| Variable | Meaning |
+| --- | --- |
+| `XBCOMPAT_NO_KBD_PAD=1` | Do not offer the keyboard pad. |
+| `XBCOMPAT_VIRTUAL_PAD=1` | Attach an SDL virtual controller (for testing). |
+| `XBCOMPAT_DUMP_TEXTURES=DIR` | Write every texture upload to DIR; `tools/texdump.py` turns one into a PNG. |
+| `XBCOMPAT_DUMP_DRAWS=DIR` | Save the frame after each draw of the first frame. |
+| `XBCOMPAT_PSH_DUMP=1` | Log each translated pixel shader. |
+| `XBCOMPAT_VSH_DUMP=DIR` | Write each vertex program and its GLSL to DIR. |

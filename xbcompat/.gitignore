@@ -1,3 +1,4 @@
 build/
 src/kernel/exports.gen.c
 __pycache__/
+build-*/
