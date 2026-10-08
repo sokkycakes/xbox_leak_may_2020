@@ -89,6 +89,9 @@ logs)
 		cp /var/log/theseus.log "$L/theseus.log" 2>/dev/null
 		[ -r /var/log/sion.log ] && cp /var/log/sion.log "$L/sion.log"
 		[ -r /var/log/messages ] && cp /var/log/messages "$L/messages.txt"
+		for w in /var/log/wpa_supplicant.*.log; do
+			[ -r "$w" ] && cp "$w" "$L/${w##*/}"
+		done
 		dmesg > "$L/dmesg.txt"
 		umount "$STICK"
 	done
