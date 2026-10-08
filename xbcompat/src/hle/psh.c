@@ -142,7 +142,7 @@ typedef struct {
     int texmode[4], inputtex[4], dotmap[4], compare[4];
 
     /* usage discovered while generating */
-    int sampler[4];          /* 0 none, 2 = sampler2D, 3 = sampler3D, 6 = samplerCube */
+    int sampler[4];          /* 0 none, 2 = sampler2D, 3 = sampler3D, 4 = sampler2DShadow, 6 = samplerCube */
     int use_texscale, use_c0, use_c1, use_fc0, use_fc1, use_bumpenv, use_bumplum;
     int use_fog, use_v1r0, use_efprod, use_frag_depth;
     int use_snorm8[3];       /* snorm8_d3d, snorm8_gl, snorm8 */
@@ -344,8 +344,14 @@ static int emit_texture_stage(psh_ctx *c, int i)
         sb_fmt(o, "    vec4 t%d = vec4(0.0, 0.0, 0.0, 1.0);\n", i);
         break;
     case TM_PROJECT2D:
-        c->sampler[i] = 2;
         c->use_texscale = 1;
+        if (psh_shadow_stages & (1u << i)) {
+            /* A depth texture: the NV2A compares r/q with the stored depth. */
+            c->sampler[i] = 4;
+            sb_fmt(o, "    vec4 t%d = shadow2DProj(tex%d, gl_TexCoord[%d] * vec4(tex_scale[%d].xyz, 1.0));\n", i, i, i, i);
+            break;
+        }
+        c->sampler[i] = 2;
         sb_fmt(o, "    vec4 t%d = texture2DProj(tex%d, vec3(gl_TexCoord[%d].xy * tex_scale[%d].xy, gl_TexCoord[%d].w));\n",
                i, i, i, i, i);
         break;
@@ -590,6 +596,8 @@ static void emit_final(psh_ctx *c, uint32_t abcd, uint32_t efg)
 
 /* ---- top level --------------------------------------------------------- */
 
+uint32_t psh_shadow_stages;
+
 char *psh_translate(const uint32_t *rs)
 {
     psh_ctx cx, *c = &cx;
@@ -645,6 +653,7 @@ char *psh_translate(const uint32_t *rs)
     sb_cat(&out, "#version 120\n");
     for (int i = 0; i < 4; i++) {
         if (c->sampler[i] == 2) sb_fmt(&out, "uniform sampler2D tex%d;\n", i);
+        if (c->sampler[i] == 4) sb_fmt(&out, "uniform sampler2DShadow tex%d;\n", i);
         if (c->sampler[i] == 3) sb_fmt(&out, "uniform sampler3D vol%d;\n", i);
         if (c->sampler[i] == 6) sb_fmt(&out, "uniform samplerCube cube%d;\n", i);
     }

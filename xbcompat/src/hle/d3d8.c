@@ -93,6 +93,7 @@ enum {
     D3DRS_ZFUNC = 57, D3DRS_ALPHAFUNC = 58, D3DRS_ALPHABLENDENABLE = 59, D3DRS_ALPHATESTENABLE = 60,
     D3DRS_ALPHAREF = 61, D3DRS_SRCBLEND = 62, D3DRS_DESTBLEND = 63, D3DRS_ZWRITEENABLE = 64,
     D3DRS_SHADEMODE = 66, D3DRS_COLORWRITEENABLE = 67, D3DRS_BLENDOP = 74,
+    D3DRS_POLYGONOFFSETZSLOPESCALE = 77, D3DRS_POLYGONOFFSETZOFFSET = 78, D3DRS_SOLIDOFFSETENABLE = 81,
     D3DRS_FOGENABLE = 82, D3DRS_FOGTABLEMODE = 83, D3DRS_FOGSTART = 84, D3DRS_FOGEND = 85,
     D3DRS_FOGDENSITY = 86, D3DRS_LIGHTING = 92, D3DRS_SPECULARENABLE = 93, D3DRS_COLORVERTEX = 95,
     D3DRS_DIFFUSEMATERIALSOURCE = 101, D3DRS_AMBIENTMATERIALSOURCE = 102, D3DRS_AMBIENT = 105,
@@ -101,7 +102,7 @@ enum {
     D3DRS_PSTEXTUREMODES = 117, D3DRS_FOGCOLOR = 119,
     D3DRS_FILLMODE = 120, D3DRS_NORMALIZENORMALS = 123, D3DRS_ZENABLE = 124,
     D3DRS_STENCILENABLE = 125, D3DRS_FRONTFACE = 127, D3DRS_CULLMODE = 128,
-    D3DRS_TEXTUREFACTOR = 129, D3DRS_MAX = 146,
+    D3DRS_TEXTUREFACTOR = 129, D3DRS_SHADOWFUNC = 137, D3DRS_MAX = 146,
 };
 
 /* ---- state ------------------------------------------------------------- */
@@ -138,6 +139,7 @@ static struct {
     struct D3DSurface *target, *target_depth;     /* current render target */
     int rt_width, rt_height;     /* size of the current render target */
     bool rt_texture;             /* rendering into a texture (GL rows run bottom-up) */
+    float target_zmax;           /* largest value of the current depth buffer's format */
     ULONG fbo;                   /* framebuffer object for texture targets */
     struct { ULONG count; ULONG exclusive; D3DRECT rects[8]; } scissors;
     float screen_offset[2];
@@ -481,6 +483,7 @@ static ULONG NTAPI D3DDevice_Swap(ULONG Flags)
     (void)Flags;
     flush_cpu_backbuffer();
     d3d.frame++;
+    ke_frame_presented();
     run_callbacks();
     present_overlay();
     if (g_screenshot_path && strstr(g_screenshot_path, "%d")) {
@@ -639,7 +642,10 @@ static void destroy_resource(D3DResource *r)
     } else if (type == D3DCOMMON_TYPE_SURFACE) {
         D3DSurface *s = (D3DSurface *)r;
         if (s == d3d.backbuffer || s == d3d.depth) return;
-        if (!s->Parent) MmFreeContiguousMemory(resource_data(r));
+        if (!s->Parent) {
+            tex_invalidate(r->Data);   /* its GL copy, if it was a render target */
+            MmFreeContiguousMemory(resource_data(r));
+        }
         res_free_header(r);
     }
 }
@@ -769,6 +775,25 @@ static void unswizzle(const uint8_t *src, uint8_t *dst, ULONG w, ULONG h, ULONG 
     }
 }
 
+/* The inverse of unswizzle: linear rows into Morton order. */
+static void swizzle(const uint8_t *src, ULONG src_pitch, uint8_t *dst, ULONG w, ULONG h, ULONG bpp)
+{
+    ULONG xmask = 0, ymask = 0;
+    for (ULONG bit = 1, i = 1; i < w || i < h; i <<= 1) {
+        if (i < w) { xmask |= bit; bit <<= 1; }
+        if (i < h) { ymask |= bit; bit <<= 1; }
+    }
+    ULONG sy = 0;
+    for (ULONG y = 0; y < h; y++) {
+        ULONG sx = 0;
+        for (ULONG x = 0; x < w; x++) {
+            memcpy(dst + (sx | sy) * bpp, src + y * src_pitch + x * bpp, bpp);
+            sx = (sx - xmask) & xmask;
+        }
+        sy = (sy - ymask) & ymask;
+    }
+}
+
 /* Volume textures swizzle x, y and z bits in turn while each axis has bits left. */
 static void unswizzle3d(const uint8_t *src, uint8_t *dst, ULONG w, ULONG h, ULONG d, ULONG bpp)
 {
@@ -842,8 +867,27 @@ static GLenum tex_target(const D3DPixelContainer *t)
 
 /* Upload one image (a texture level, one cube map face, or a whole volume
    when target is GL_TEXTURE_3D and d > 1) to `target`. */
+/* D24S8, F24S8, D16, F16 and their linear variants. */
+static bool is_depth_format(ULONG fmt) { return fmt >= 0x2A && fmt <= 0x31; }
+static float depth_format_max(ULONG fmt) { return (fmt & ~4u) == 0x2A || (fmt & ~4u) == 0x2B ? 16777215.0f : 65535.0f; }
+
 static void upload_image3(GLenum target, ULONG fmt, ULONG w, ULONG h, ULONG d, ULONG pitch, const uint8_t *src)
 {
+    if (is_depth_format(fmt) && target == GL_TEXTURE_2D) {
+        /* A depth texture (a shadow buffer): sampled with a depth compare.
+           The float variants are uploaded as if they were integer depth. */
+        bool d24 = depth_format_max(fmt) > 65535.0f, swz = fmt <= 0x2D;
+        ULONG bpp = d24 ? 4 : 2;
+        uint8_t *px = malloc(w * h * bpp);
+        if (swz) unswizzle(src, px, w, h, bpp);
+        else for (ULONG y = 0; y < h; y++) memcpy(px + y * w * bpp, src + y * (pitch ? pitch : w * bpp), w * bpp);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        if (d24) glTexImage2D(target, 0, 0x88F0 /* GL_DEPTH24_STENCIL8 */, w, h, 0, 0x84F9 /* GL_DEPTH_STENCIL */,
+                              0x84FA /* GL_UNSIGNED_INT_24_8 */, px);
+        else glTexImage2D(target, 0, GL_DEPTH_COMPONENT24, w, h, 0, GL_DEPTH_COMPONENT, GL_UNSIGNED_SHORT, px);
+        free(px);
+        return;
+    }
     /* conv: 1 = V8U8 (bump), 2 = L6V5U5 (bump), both expanded to RGBA8 with
        du/dv as the signed bytes' bit patterns in r/g and luminance in b;
        3 = YUY2 and 4 = UYVY (video frames), converted to RGB with BT.601;
@@ -1208,6 +1252,19 @@ static void apply_sampler(GLenum target, int s)
     if (target != GL_TEXTURE_2D) glTexParameteri(target, GL_TEXTURE_WRAP_R, gl_wrap(TSS(s, D3DTSS_ADDRESSW)));
     glTexParameteri(target, GL_TEXTURE_MAG_FILTER, gl_filter(TSS(s, D3DTSS_MAGFILTER)));
     glTexParameteri(target, GL_TEXTURE_MIN_FILTER, gl_filter(TSS(s, D3DTSS_MINFILTER)));
+    float border[4];
+    color4(border, TSS(s, D3DTSS_BORDERCOLOR));
+    glTexParameterfv(target, GL_TEXTURE_BORDER_COLOR, border);
+    D3DPixelContainer *t = (D3DPixelContainer *)d3d.textures[s];
+    if (target == GL_TEXTURE_2D && t && is_depth_format((t->Format >> 8) & 0xFF)) {
+        /* The NV2A compares the stage's r/q with the stored depth as
+           "stored SHADOWFUNC r"; GL compares "r FUNC stored", so mirror it.
+           The D3DCMP values are the GL enums. */
+        static const GLenum mirror[8] = { GL_NEVER, GL_GREATER, GL_EQUAL, GL_GEQUAL,
+                                          GL_LESS, GL_NOTEQUAL, GL_LEQUAL, GL_ALWAYS };
+        glTexParameteri(target, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE);
+        glTexParameteri(target, GL_TEXTURE_COMPARE_FUNC, mirror[RS(D3DRS_SHADOWFUNC) & 7]);
+    }
 }
 
 static GLuint white_texture(void)
@@ -1512,6 +1569,14 @@ static void apply_render_states(bool pretransformed, bool has_normal)
         glDisable(GL_DEPTH_TEST);
     }
     glDepthMask(RS(D3DRS_ZWRITEENABLE) ? GL_TRUE : GL_FALSE);
+    if (RS(D3DRS_SOLIDOFFSETENABLE)) {
+        /* The offset counts steps of the Xbox depth format; GL's of a 24-bit buffer. */
+        glEnable(GL_POLYGON_OFFSET_FILL);
+        glPolygonOffset(rs_float(D3DRS_POLYGONOFFSETZSLOPESCALE),
+                        rs_float(D3DRS_POLYGONOFFSETZOFFSET) * 16777215.0f / d3d.target_zmax);
+    } else {
+        glDisable(GL_POLYGON_OFFSET_FILL);
+    }
 
     if (RS(D3DRS_ALPHABLENDENABLE)) {
         glEnable(GL_BLEND);
@@ -2029,6 +2094,17 @@ static ULONG adjusted_texture_modes(void)
     return out;
 }
 
+/* Stages whose texture is a depth format: sampled as shadow buffers. */
+static ULONG shadow_stages(void)
+{
+    ULONG mask = 0;
+    for (int s = 0; s < 4; s++) {
+        D3DPixelContainer *t = (D3DPixelContainer *)d3d.textures[s];
+        if (t && tex_target(t) == GL_TEXTURE_2D && is_depth_format((t->Format >> 8) & 0xFF)) mask |= 1u << s;
+    }
+    return mask;
+}
+
 static void fshader_key(uint32_t *key)
 {
     memset(key, 0, 64 * 4);
@@ -2038,6 +2114,7 @@ static void fshader_key(uint32_t *key)
     key[57] = adjusted_texture_modes();
     key[58] = RS(D3DRS_FOGENABLE);
     key[59] = RS(D3DRS_FOGTABLEMODE);
+    key[60] = shadow_stages();
 }
 
 static GLuint fragment_shader_object(void)
@@ -2052,6 +2129,7 @@ static GLuint fragment_shader_object(void)
     RS(D3DRS_PSTEXTUREMODES) = key[57];
     ULONG rs[D3DRS_MAX];   /* psh.c reads 4400 numbering */
     for (int i = 0; i < D3DRS_MAX; i++) rs[i] = RS(i);
+    psh_shadow_stages = key[60];
     char *src = psh_translate(rs);
     RS(D3DRS_PSTEXTUREMODES) = modes;
     if (!src) {
@@ -2091,6 +2169,8 @@ static void apply_shader_textures(const program_entry *e)
             scale[s][0] = 1.0f / w;
             scale[s][1] = 1.0f / h;
         }
+        if (is_depth_format((t->Format >> 8) & 0xFF))   /* r/q is in depth buffer steps */
+            scale[s][2] = 1.0f / depth_format_max((t->Format >> 8) & 0xFF);
         /* The program declares at most one sampler per stage, of the type its
            texture mode wants; point it at unit s whatever is bound there. */
         if (e->loc_tex[s] >= 0) p_glUniform1i(e->loc_tex[s], s);
@@ -3029,6 +3109,7 @@ static void create_device_surfaces(ULONG format, ULONG depth_format)
     d3d.rt_width = d3d.width;
     d3d.rt_height = d3d.height;
     d3d.rt_texture = false;
+    d3d.target_zmax = d3d.zscale;
 }
 
 static void NTAPI D3DDevice_GetBackBuffer(LONG BackBuffer, ULONG Type, D3DSurface **pp)
@@ -3054,6 +3135,45 @@ static void NTAPI D3DDevice_GetRenderTarget(D3DSurface **pp)
 static GLuint texture_for(D3DPixelContainer *t);
 static ULONG cube_face_bytes(D3DPixelContainer *t);
 
+/* The GL texture behind a standalone render target surface, kept in the
+   texture cache under the surface's own memory so destroy_resource frees it. */
+static GLuint surface_rt_texture(D3DSurface *s, ULONG w, ULONG h)
+{
+    for (tex_entry *e = tex_cache; e; e = e->next)
+        if (e->data == s->Data && e->format == s->Format && e->size == s->Size) return e->id;
+    GLuint id;
+    glGenTextures(1, &id);
+    glBindTexture(GL_TEXTURE_2D, id);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_BGRA, GL_UNSIGNED_BYTE, NULL);
+    tex_entry *e = malloc(sizeof(*e));
+    *e = (tex_entry){ s->Data, s->Format, s->Size, id, GL_TEXTURE_2D, tex_cache };
+    tex_cache = e;
+    return id;
+}
+
+/* Copy a standalone render target's GL pixels into its memory.  Render
+   targets are drawn flipped, so GL row 0 is the top row. */
+static bool readback_rt_surface(D3DSurface *s)
+{
+    if (s->Parent || s == d3d.backbuffer) return false;
+    for (tex_entry *e = tex_cache; e; e = e->next) {
+        if (e->data != s->Data || e->format != s->Format || e->size != s->Size) continue;
+        ULONG w, h, pitch;
+        container_size((D3DPixelContainer *)s, &w, &h, &pitch);
+        uint8_t *tmp = malloc(w * h * 4), *px = (uint8_t *)(s->Data | CONTIG_BASE);
+        glBindTexture(GL_TEXTURE_2D, e->id);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glGetTexImage(GL_TEXTURE_2D, 0, GL_BGRA, GL_UNSIGNED_BYTE, tmp);
+        ULONG row = pitch < w * 4 ? pitch : w * 4;
+        for (ULONG y = 0; y < h; y++) memcpy(px + y * pitch, tmp + y * w * 4, row);
+        free(tmp);
+        return true;
+    }
+    return false;
+}
+
 static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
 {
     if (d3d.recording) { ULONG a[2] = { (ULONG)target, (ULONG)z }; pb_record(OP_RENDER_TARGET, a, sizeof(a)); }
@@ -3067,10 +3187,9 @@ static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
     d3d.target = target;
     d3d.target_depth = z;
     TRACE("D3D: render target %p (parent %p) depth %p", (void *)target, (void *)target->Parent, (void *)z);
-    if (!target->Parent) {
-        /* The back buffer (or a plain surface we cannot render into yet). */
+    if (target == d3d.backbuffer || (!target->Parent && !p_glGenFramebuffers)) {
         if (target != d3d.backbuffer)
-            xlog("D3D: rendering into a standalone surface is not supported; using the back buffer");
+            xlog("D3D: no framebuffer objects, rendering a standalone surface into the back buffer");
         if (p_glBindFramebuffer) p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
         d3d.rt_width = d3d.width;
         d3d.rt_height = d3d.height;
@@ -3083,17 +3202,35 @@ static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
         return;
     }
     ULONG w, h, pitch;
-    container_size(target->Parent, &w, &h, &pitch);
+    container_size(target->Parent ? target->Parent : (D3DPixelContainer *)target, &w, &h, &pitch);
     if (!d3d.fbo) p_glGenFramebuffers(1, (GLuint *)&d3d.fbo);
     p_glBindFramebuffer(GL_FRAMEBUFFER, d3d.fbo);
-    GLuint tex = texture_for(target->Parent);
+    /* A standalone surface (CreateRenderTarget) renders into a GL texture of
+       its own; CopyRects reads it back. */
+    GLuint tex = target->Parent ? texture_for(target->Parent) : surface_rt_texture(target, w, h);
     GLenum face_target = GL_TEXTURE_2D;
-    if (tex_target(target->Parent) == GL_TEXTURE_CUBE_MAP) {
+    if (target->Parent && tex_target(target->Parent) == GL_TEXTURE_CUBE_MAP) {
         /* A cube face surface sits face * cube_face_bytes past the cube's data. */
         ULONG face = (target->Data - target->Parent->res.Data) / cube_face_bytes(target->Parent);
         face_target = GL_TEXTURE_CUBE_MAP_POSITIVE_X + (face < 6 ? face : 0);
     }
     p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, face_target, tex, 0);
+    d3d.target_zmax = z ? depth_format_max((z->Format >> 8) & 0xFF) : d3d.zscale;
+    if (z && z->Parent && tex_target(z->Parent) == GL_TEXTURE_2D) {
+        /* Depth into a texture (a shadow buffer). */
+        GLuint dt = texture_for(z->Parent);
+        bool d24 = depth_format_max((z->Format >> 8) & 0xFF) > 65535.0f;
+        p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, 0);
+        p_glFramebufferTexture2D(GL_FRAMEBUFFER, d24 ? GL_DEPTH_STENCIL_ATTACHMENT : GL_DEPTH_ATTACHMENT,
+                                 GL_TEXTURE_2D, dt, 0);
+        GLenum st = p_glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        if (st != GL_FRAMEBUFFER_COMPLETE) xlog("D3D: depth texture framebuffer incomplete (%#x)", st);
+        d3d.rt_width = w;
+        d3d.rt_height = h;
+        d3d.rt_texture = true;
+        d3d.viewport = (D3DVIEWPORT8){ 0, 0, w, h, 0, 1 };
+        return;
+    }
     /* A depth buffer always comes along: titles clear z without checking. */
     static GLuint rb; static ULONG rb_w, rb_h;
     if (!rb || rb_w != w || rb_h != h) {
@@ -3102,6 +3239,7 @@ static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
         p_glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h);
         rb_w = w; rb_h = h;
     }
+    p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
     p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, rb);
     GLenum st = p_glCheckFramebufferStatus(GL_FRAMEBUFFER);
     if (st != GL_FRAMEBUFFER_COMPLETE) xlog("D3D: render target framebuffer incomplete (%#x)", st);
@@ -3180,10 +3318,17 @@ static void NTAPI D3DDevice_CopyRects(D3DSurface *src, const LONG *rects, UINT_ 
     if (src == d3d.backbuffer) {
         ULONG locked[2];
         D3DSurface_LockRect(src, locked, NULL, 0x80);   /* refresh its pixels */
+    } else {
+        readback_rt_surface(src);
     }
     const uint8_t *s = (const uint8_t *)(src->Data | CONTIG_BASE);
     uint8_t *d = (uint8_t *)(dst->Data | CONTIG_BASE);
-    if (!n) {
+    bool dst_lin;
+    int dst_bytes = format_bits((dst->Format >> 8) & 0xFF, &dst_lin) / 8;
+    if (!n && !dst_lin && dst_bytes == bytes && sw == dw && sh == dh) {
+        /* Into a swizzled texture level: the copy swizzles. */
+        swizzle(s, sp, d, dw, dh, bytes);
+    } else if (!n) {
         ULONG w = sw < dw ? sw : dw, h = sh < dh ? sh : dh;
         for (ULONG y = 0; y < h; y++) memcpy(d + y * dp, s + y * sp, w * bytes);
     } else {

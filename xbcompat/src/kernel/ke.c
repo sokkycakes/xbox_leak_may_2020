@@ -36,8 +36,15 @@ ULONGLONG system_time_now(void)
     return EPOCH_DIFF_100NS + (ULONGLONG)ts.tv_sec * 10000000ULL + ts.tv_nsec / 100;
 }
 
+/* XBCOMPAT_FIXED_FPS=N: the guest clock stops following the wall clock and
+   advances 1/N s per presented frame instead, so frame K of a title that
+   animates by time always shows the moment K/N s.  Used to compare frames
+   with a reference renderer; audio still mixes in real time. */
+static ULONGLONG fixed_step, fixed_now;
+
 static ULONGLONG mono_100ns(void)
 {
+    if (fixed_step) return __atomic_load_n(&fixed_now, __ATOMIC_ACQUIRE);
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (ULONGLONG)ts.tv_sec * 10000000ULL + ts.tv_nsec / 100;
@@ -61,6 +68,7 @@ ULONGLONG NTAPI KeQueryInterruptTime(void)
 
 ULONGLONG NTAPI KeQueryPerformanceCounter(void)
 {
+    if (fixed_step) return mono_100ns() * XBOX_PERF_FREQ / 10000000ULL;
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (ULONGLONG)ts.tv_sec * XBOX_PERF_FREQ + (ULONGLONG)ts.tv_nsec * XBOX_PERF_FREQ / 1000000000ULL;
@@ -480,7 +488,7 @@ static void *dpc_thread(void *arg)
                 }
             }
             if (t->Period > 0) {
-                n->due = now + (ULONGLONG)t->Period * 10000;
+                n->due = fixed_step ? n->due + (ULONGLONG)t->Period * 10000 : now + (ULONGLONG)t->Period * 10000;
                 pp = &n->next;
             } else {
                 t->Header.Inserted = 0;
@@ -508,8 +516,23 @@ static void *dpc_thread(void *arg)
     return NULL;
 }
 
+/* Called once per presented frame. */
+void ke_frame_presented(void)
+{
+    if (!fixed_step) return;
+    __atomic_add_fetch(&fixed_now, fixed_step, __ATOMIC_RELEASE);
+    pthread_mutex_lock(&dpc_lock);
+    pthread_cond_broadcast(&dpc_cond);
+    pthread_mutex_unlock(&dpc_lock);
+}
+
 void timers_init(void)
 {
+    const char *fps = getenv("XBCOMPAT_FIXED_FPS");
+    if (fps && atoi(fps) > 0) {
+        fixed_step = 10000000ULL / (ULONGLONG)atoi(fps);
+        fixed_now = 1;   /* boot_mono below: nonzero so differences stay positive */
+    }
     pthread_condattr_t ca;
     pthread_condattr_init(&ca);
     pthread_cond_init(&g_disp_cond, &ca);          /* CLOCK_REALTIME deadlines */

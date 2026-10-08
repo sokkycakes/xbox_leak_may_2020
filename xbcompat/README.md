@@ -99,3 +99,4 @@ Environment variables:
 | `XBCOMPAT_DUMP_DRAWS=DIR` | Save the frame after each draw of the first frame. |
 | `XBCOMPAT_PSH_DUMP=1` | Log each translated pixel shader. |
 | `XBCOMPAT_VSH_DUMP=DIR` | Write each vertex program and its GLSL to DIR. |
+| `XBCOMPAT_FIXED_FPS=N` | Advance the guest clock 1/N s per frame instead of following the wall clock, so frame K shows the moment K/N s. Audio still plays in real time. |

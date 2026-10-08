@@ -80,6 +80,7 @@ void disp_signal_all(void);  /* call with g_disp_lock held after changing a Sign
 NTSTATUS wait_objects(ULONG count, PVOID objects[], int wait_any,
                       BOOLEAN alertable, LARGE_INTEGER *timeout);
 void timers_init(void);
+void ke_frame_presented(void);   /* XBCOMPAT_FIXED_FPS clock step */
 ULONGLONG system_time_now(void);   /* 100 ns units since 1601 */
 
 /* ---- handles ---------------------------------------------------------- */

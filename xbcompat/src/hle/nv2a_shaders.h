@@ -90,6 +90,8 @@ char *vsh_translate(const uint32_t *code, unsigned count);
  * Alpha test is done by the host (fixed-function GL alpha test).
  */
 char *psh_translate(const uint32_t *rs);
+/* Stages psh_translate samples as shadow buffers (depth textures), one bit each. */
+extern uint32_t psh_shadow_stages;
 
 /*
  * Run a state shader on the CPU: `code`/`count` as for vsh_translate, v0 is
