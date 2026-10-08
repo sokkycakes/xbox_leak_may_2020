@@ -360,13 +360,19 @@ static void save_screenshot(const char *path)
     free(px);
 }
 
-/* Debug aid: XBCOMPAT_DUMP_DRAWS=dir saves the back buffer after every draw
-   of the first frame as dir/drawNNN.bmp. */
+/* Debug aid: XBCOMPAT_DUMP_DRAWS=dir saves the current target after every
+   draw of one frame (XBCOMPAT_DUMP_FRAME, default the first) as
+   dir/drawNNN.bmp. */
 static void debug_dump_draw(void)
 {
-    static const char *dir; static int checked, n;
-    if (!checked) { dir = getenv("XBCOMPAT_DUMP_DRAWS"); checked = 1; }
-    if (!dir || d3d.frame > 0) return;
+    static const char *dir; static int checked, n; static ULONG frame;
+    if (!checked) {
+        dir = getenv("XBCOMPAT_DUMP_DRAWS");
+        const char *f = getenv("XBCOMPAT_DUMP_FRAME");
+        frame = f ? strtoul(f, NULL, 0) : 0;
+        checked = 1;
+    }
+    if (!dir || d3d.frame != frame) return;
     char path[512];
     snprintf(path, sizeof path, "%s/draw%03d.bmp", dir, n++);
     save_screenshot(path);
@@ -535,6 +541,7 @@ static void NTAPI D3DDevice_Clear(ULONG Count, const D3DRECT *pRects, ULONG Flag
         pb_record2(OP_CLEAR, h, sizeof(h), pRects, Count && pRects ? Count * sizeof(D3DRECT) : 0);
         return;
     }
+    TRACE("D3D: Clear(%u rects, flags %#x, color %#x, z %g)", Count, Flags, Color, Z);
     GLbitfield mask = 0;
     if (Flags & 0xF0) {
         glClearColor(((Color >> 16) & 255) / 255.0f, ((Color >> 8) & 255) / 255.0f, (Color & 255) / 255.0f,
@@ -1301,10 +1308,21 @@ static void NTAPI D3DDevice_SetViewport(const D3DVIEWPORT8 *v)
     else d3d.viewport = (D3DVIEWPORT8){ 0, 0, d3d.width, d3d.height, 0, 1 };
 }
 
+/* The NV097 method each simple state from D3DRS_ZFUNC to
+   D3DRS_SOLIDOFFSETENABLE writes; their values go to the GPU unchanged. */
+static const USHORT simple_state_method[] = {
+    0x354, 0x33C, 0x304, 0x300, 0x340, 0x344, 0x348, 0x35C, 0x310, 0x37C, 0x358, 0x370, 0x374,
+    0x364, 0x368, 0x36C, 0x360, 0x350, 0x34C, 0x9F8, 0x384, 0x388, 0x318, 0x31C, 0x320,
+};
+
 static void FASTCALL SetRenderState_Simple(ULONG Method, ULONG Value)
 {
-    /* Inline header code already stored the value in D3D__RenderState. */
-    (void)Method; (void)Value;
+    /* Inline header code usually stores the value in D3D__RenderState
+       itself, but LTCG builds can drop or defer that store; record it from
+       the method too. */
+    Method &= 0x1FFC;
+    for (unsigned i = 0; i < sizeof(simple_state_method) / sizeof(simple_state_method[0]); i++)
+        if (simple_state_method[i] == Method) { RS(D3DRS_ZFUNC + i) = Value; return; }
 }
 
 static LONG NTAPI SetRenderState_ParameterCheck(ULONG State, ULONG Value)
@@ -2158,6 +2176,12 @@ static void draw_programmable(vshader *sh, ULONG PrimitiveType, const UCHAR *up,
     if (!d3d.pixel_shader) apply_textures();
     program_entry *e;
     if (!use_program(vs, &e)) return;
+    TRACE("D3D: draw(program) prim %u count %u indices %p vs %u ps %#x z %u/%u/%u blend %u %u/%u atest %u cw %#x stencil %u vp %u,%u %ux%u %g-%g",
+          PrimitiveType, count, indices ? indices + first : NULL, vs, d3d.pixel_shader,
+          RS(D3DRS_ZENABLE), RS(D3DRS_ZFUNC), RS(D3DRS_ZWRITEENABLE), RS(D3DRS_ALPHABLENDENABLE),
+          RS(D3DRS_SRCBLEND), RS(D3DRS_DESTBLEND), RS(D3DRS_ALPHATESTENABLE), RS(D3DRS_COLORWRITEENABLE),
+          RS(D3DRS_STENCILENABLE), d3d.viewport.X, d3d.viewport.Y, d3d.viewport.Width, d3d.viewport.Height,
+          d3d.viewport.MinZ, d3d.viewport.MaxZ);
     upload_constants(sh, e);
     bind_attributes(sh, up, up_stride, 0);
     if (indices)
@@ -2166,6 +2190,7 @@ static void draw_programmable(vshader *sh, ULONG PrimitiveType, const UCHAR *up,
         glDrawArrays(gl_primitive(PrimitiveType), first, count);
     unbind_attributes();
     end_program(e);
+    debug_dump_draw();
 }
 
 static const float default_texcoord[4] = { 0, 0, 0, 1 };
@@ -2936,6 +2961,7 @@ static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
     if (!target) target = d3d.target;
     d3d.target = target;
     d3d.target_depth = z;
+    TRACE("D3D: render target %p (parent %p) depth %p", (void *)target, (void *)target->Parent, (void *)z);
     if (!target->Parent) {
         /* The back buffer (or a plain surface we cannot render into yet). */
         if (target != d3d.backbuffer)
@@ -3438,6 +3464,7 @@ static int constant_slot(LONG reg)
 static void NTAPI D3DDevice_SetVertexShaderConstant(LONG Register, const float *data, ULONG count)
 {
     if (d3d.recording) { ULONG h[2] = { (ULONG)Register, count }; pb_record2(OP_VS_CONST, h, 8, data, count * 16); }
+    TRACE("D3D: vs constant %d x%u = %g %g %g %g", Register, count, data[0], data[1], data[2], data[3]);
     for (ULONG i = 0; i < count; i++) {
         int slot = constant_slot(Register + i);
         memcpy(d3d.vs_const[slot], data + i * 4, 16);
@@ -4692,19 +4719,21 @@ static void NTAPI Get2DSurfaceDesc(D3DPixelContainer *p, UINT_ level, ULONG *des
     else if ((D3DSurface *)p == d3d.depth) desc[2] = 2;                                   /* D3DUSAGE_DEPTHSTENCIL */
 }
 
+/* The inline SetVertexShaderConstant adds 96 before calling these, so
+   their register is a 0..191 slot rather than D3D's -96..95. */
 static void FASTCALL SetVertexShaderConstantNotInline(LONG Register, const float *data, ULONG count)
 {
-    D3DDevice_SetVertexShaderConstant(Register, data, count);
+    D3DDevice_SetVertexShaderConstant(Register - 96, data, count);
 }
 
 static void FASTCALL SetVertexShaderConstant1(LONG Register, const float *data)
 {
-    D3DDevice_SetVertexShaderConstant(Register, data, 1);
+    D3DDevice_SetVertexShaderConstant(Register - 96, data, 1);
 }
 
 static void FASTCALL SetVertexShaderConstant4(LONG Register, const float *data)
 {
-    D3DDevice_SetVertexShaderConstant(Register, data, 4);
+    D3DDevice_SetVertexShaderConstant(Register - 96, data, 4);
 }
 
 static D3DResource *NTAPI D3DDevice_CreateVertexBuffer2(UINT_ Length)
