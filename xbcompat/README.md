@@ -18,16 +18,19 @@ What differs from a PC is replaced underneath it:
 
 ## Status
 
-87 of the 113 prebuilt ATG samples in the leak run 60 frames without a trap
-or crash. What works:
+106 of the 113 prebuilt ATG samples in the leak run 60 frames without a trap
+or crash. The other seven are a Windows tool, three debug-monitor samples,
+and three whose media or DSP image is missing from the leak. What works:
 
 - **Direct3D 8**: fixed function with lighting, specular, fog and texture
-  stages; texture coordinate generation and texture matrices; NV2A vertex
+  stages (all texture ops but bump env mapping); texture coordinate generation and texture matrices; NV2A vertex
   programs and register combiners translated to GLSL; vertex state shaders run
   on the CPU; push buffers (recorded and BeginPush); point sprites; swizzled,
   linear, DXT, cube, volume and bump-map textures; render targets, including
   cube map faces; visibility tests; state blocks; rect and tri patches
   tessellated on the CPU; back buffer and depth buffer reads from memory.
+- **DirectSound**: buffers, streams, submixes, 3D positioning and packet
+  completion, mixed in software to SDL2 audio.
 - **Input**: XInput on SDL2 game controllers, with rumble, plus a keyboard pad
   when no controller is attached (see below).
 - **Kernel**: SHA-1, HMAC, RC4 and big-number crypto are real, so save
@@ -36,8 +39,8 @@ or crash. What works:
 
 Not done yet:
 
-- DirectSound is partly done: streams play, but most sound samples still fail
-  to initialize.
+- DirectSound effects that run on the audio DSP (the GlobalFX sample) are
+  not emulated.
 - The debug-monitor samples import `xbdm.dll`, which `pe2xbe.py` does not
   handle.
 - Retail titles need signatures for their XDK versions.

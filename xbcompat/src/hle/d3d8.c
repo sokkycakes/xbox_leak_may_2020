@@ -242,6 +242,7 @@ static void default_render_states(void)
         TSS(st, D3DTSS_ALPHAOP) = st == 0 ? 2 /* SELECTARG1 */ : 1;
         TSS(st, D3DTSS_ALPHAARG1) = 2;
         TSS(st, D3DTSS_ALPHAARG2) = 1;
+        TSS(st, D3DTSS_COLORARG0) = TSS(st, D3DTSS_ALPHAARG0) = 1;  /* D3DTA_CURRENT */
         TSS(st, D3DTSS_ADDRESSU) = TSS(st, D3DTSS_ADDRESSV) = 1;  /* WRAP */
         TSS(st, D3DTSS_MAGFILTER) = TSS(st, D3DTSS_MINFILTER) = 1;
         TSS(st, D3DTSS_TEXCOORDINDEX) = st;
@@ -874,31 +875,101 @@ static GLenum combine_source(ULONG arg)
     }
 }
 
+#ifndef GL_MODULATE_ADD_ATI
+#define GL_MODULATE_ADD_ATI 0x8744
+#endif
+
+/* GL_ATI_texture_env_combine3 adds MODULATE_ADD (s0 * s2 + s1), which the
+   triadic and "add smooth" ops need. */
+static bool have_combine3(void)
+{
+    static int have = -1;
+    if (have < 0) {
+        const char *ext = (const char *)glGetString(GL_EXTENSIONS);
+        have = ext && (strstr(ext, "GL_ATI_texture_env_combine3") || strstr(ext, "GL_NV_texture_env_combine4"));
+        if (!have) xlog("D3D: no GL_ATI_texture_env_combine3; triadic texture ops fall back to MODULATE");
+    }
+    return have;
+}
+
+/* Combiner input n from a D3DTA_* argument.  `use_alpha` reads its alpha
+   (as D3DTA_ALPHAREPLICATE does), `invert` flips D3DTA_COMPLEMENT. */
+static void combine_arg(bool alpha, int n, ULONG arg, bool use_alpha, bool invert)
+{
+    static const GLenum src_rgb[3] = { GL_SOURCE0_RGB, GL_SOURCE1_RGB, GL_SOURCE2_RGB };
+    static const GLenum src_a[3] = { GL_SOURCE0_ALPHA, GL_SOURCE1_ALPHA, GL_SOURCE2_ALPHA };
+    static const GLenum op_rgb[3] = { GL_OPERAND0_RGB, GL_OPERAND1_RGB, GL_OPERAND2_RGB };
+    static const GLenum op_a[3] = { GL_OPERAND0_ALPHA, GL_OPERAND1_ALPHA, GL_OPERAND2_ALPHA };
+    bool comp = ((arg & 0x10) != 0) != invert;
+    GLenum operand;
+    if (alpha || use_alpha || (arg & 0x20)) operand = comp ? GL_ONE_MINUS_SRC_ALPHA : GL_SRC_ALPHA;
+    else operand = comp ? GL_ONE_MINUS_SRC_COLOR : GL_SRC_COLOR;
+    glTexEnvi(GL_TEXTURE_ENV, alpha ? src_a[n] : src_rgb[n], combine_source(arg));
+    glTexEnvi(GL_TEXTURE_ENV, alpha ? op_a[n] : op_rgb[n], operand);
+}
+
 /* Map one D3D texture op onto GL_COMBINE for either RGB or alpha. */
-static void combine(bool alpha, ULONG op, ULONG arg1, ULONG arg2)
+static void combine(bool alpha, ULONG op, ULONG arg0, ULONG arg1, ULONG arg2)
 {
     GLenum mode_p = alpha ? GL_COMBINE_ALPHA : GL_COMBINE_RGB;
-    GLenum src0 = alpha ? GL_SOURCE0_ALPHA : GL_SOURCE0_RGB, src1 = alpha ? GL_SOURCE1_ALPHA : GL_SOURCE1_RGB;
     GLenum scale = alpha ? GL_ALPHA_SCALE : GL_RGB_SCALE;
     GLenum mode = GL_MODULATE;
     float s = 1;
+    /* Sources: s0/s1/s2 as D3DTA args, with "read alpha" and "complement" flags. */
+    ULONG a[3] = { arg1, arg2, 1 };
+    bool ua[3] = { false, false, false }, inv[3] = { false, false, false };
+    bool c3 = have_combine3();
     switch (op) {
-    case 1: mode = GL_REPLACE; arg1 = 1; break;   /* DISABLE: pass the current color */
+    case 1: mode = GL_REPLACE; a[0] = 1; break;   /* DISABLE: pass the current color */
     case 2: mode = GL_REPLACE; break;
-    case 3: mode = GL_REPLACE; arg1 = arg2; break;
-    case 4: mode = GL_MODULATE; break;
-    case 5: mode = GL_MODULATE; s = 2; break;
-    case 6: mode = GL_MODULATE; s = 4; break;
+    case 3: mode = GL_REPLACE; a[0] = arg2; break;
+    case 4: break;
+    case 5: s = 2; break;
+    case 6: s = 4; break;
     case 7: mode = GL_ADD; break;
     case 8: mode = GL_ADD_SIGNED; break;
     case 9: mode = GL_ADD_SIGNED; s = 2; break;
     case 10: mode = GL_SUBTRACT; break;
+    case 12: case 13: case 14: case 15:   /* BLEND{DIFFUSE,CURRENT,TEXTURE,FACTOR}ALPHA */
+        mode = GL_INTERPOLATE;
+        a[2] = op == 12 ? 0 : op == 13 ? 1 : op == 14 ? 2 : 3;
+        ua[2] = true;
+        break;
+    case 17: mode = GL_MODULATE; break;   /* PREMODULATE: approximated */
+    case 22:   /* DOTPRODUCT3: replicated to all four channels */
+        mode = alpha ? GL_MODULATE : GL_DOT3_RGBA;
+        break;
+    case 24:   /* LERP: arg0 * arg1 + (1 - arg0) * arg2 */
+        mode = GL_INTERPOLATE;
+        a[2] = arg0;
+        break;
+    case 25: case 26:   /* BUMPENVMAP*: the stage itself passes the current color */
+        mode = GL_REPLACE; a[0] = 1;
+        break;
     default:
-        mode = GL_MODULATE;
+        if (!c3) break;
+        mode = GL_MODULATE_ADD_ATI;   /* s0 * s2 + s1 */
+        switch (op) {
+        case 11:   /* ADDSMOOTH: arg1 + (1 - arg1) * arg2 */
+            a[0] = arg1; inv[0] = true; a[2] = arg2; a[1] = arg1; break;
+        case 16:   /* BLENDTEXTUREALPHAPM: arg1 + arg2 * (1 - texture alpha) */
+            a[0] = arg2; a[2] = 2; ua[2] = inv[2] = true; a[1] = arg1; break;
+        case 18:   /* MODULATEALPHA_ADDCOLOR: arg1 + arg1.a * arg2 */
+            a[0] = arg1; ua[0] = true; a[2] = arg2; a[1] = arg1; break;
+        case 19:   /* MODULATECOLOR_ADDALPHA: arg1 * arg2 + arg1.a */
+            a[0] = arg1; a[2] = arg2; a[1] = arg1; ua[1] = true; break;
+        case 20:   /* MODULATEINVALPHA_ADDCOLOR: (1 - arg1.a) * arg2 + arg1 */
+            a[0] = arg1; ua[0] = inv[0] = true; a[2] = arg2; a[1] = arg1; break;
+        case 21:   /* MODULATEINVCOLOR_ADDALPHA: (1 - arg1) * arg2 + arg1.a */
+            a[0] = arg1; inv[0] = true; a[2] = arg2; a[1] = arg1; ua[1] = true; break;
+        case 23:   /* MULTIPLYADD: arg0 + arg1 * arg2 */
+            a[0] = arg1; a[2] = arg2; a[1] = arg0; break;
+        default:
+            mode = GL_MODULATE;
+        }
     }
     glTexEnvi(GL_TEXTURE_ENV, mode_p, mode);
-    glTexEnvi(GL_TEXTURE_ENV, src0, combine_source(arg1));
-    glTexEnvi(GL_TEXTURE_ENV, src1, combine_source(arg2));
+    for (int n = 0; n < 3; n++) combine_arg(alpha, n, a[n], ua[n], inv[n]);
     glTexEnvf(GL_TEXTURE_ENV, scale, s);
 }
 
@@ -973,8 +1044,8 @@ static unsigned apply_textures(void)
         float tf[4];
         color4(tf, RS(D3DRS_TEXTUREFACTOR));
         glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, tf);
-        combine(false, TSS(s, D3DTSS_COLOROP), TSS(s, D3DTSS_COLORARG1), TSS(s, D3DTSS_COLORARG2));
-        combine(true, TSS(s, D3DTSS_ALPHAOP), TSS(s, D3DTSS_ALPHAARG1), TSS(s, D3DTSS_ALPHAARG2));
+        combine(false, TSS(s, D3DTSS_COLOROP), TSS(s, D3DTSS_COLORARG0), TSS(s, D3DTSS_COLORARG1), TSS(s, D3DTSS_COLORARG2));
+        combine(true, TSS(s, D3DTSS_ALPHAOP), TSS(s, D3DTSS_ALPHAARG0), TSS(s, D3DTSS_ALPHAARG1), TSS(s, D3DTSS_ALPHAARG2));
         mask |= 1u << s;
     }
     p_glActiveTexture(GL_TEXTURE0);
@@ -1690,13 +1761,38 @@ typedef struct fshader_entry {
 
 static fshader_entry *fshaders;
 
+/* PS_GLOBALFLAGS_TEXMODE_ADJUST (bit 8 of PSFinalCombinerConstants): like
+   the real library's LazySetShaderStageProgram, pick each stage's texture
+   mode from the texture that is set, so one shader serves 2D, 3D and cube
+   textures, and a stage that needs a texture but has none is switched off. */
+static ULONG adjusted_texture_modes(void)
+{
+    ULONG modes = RS(D3DRS_PSTEXTUREMODES);
+    const ULONG *def = (const ULONG *)d3d.pixel_shader;
+    if (!def || !(def[59] & 0x100)) return modes;
+    ULONG out = 0;
+    for (int s = 3; s >= 0; s--) {
+        ULONG m = (modes >> (s * 5)) & 0x1F;
+        D3DPixelContainer *t = (D3DPixelContainer *)d3d.textures[s];
+        GLenum target = t ? tex_target(t) : 0;
+        if (!t && m != 0x04 && m != 0x05 && m != 0x0A && m != 0x11)
+            m = 0;
+        else if (t && m >= 0x01 && m <= 0x03)
+            m = target == GL_TEXTURE_CUBE_MAP ? 0x03 : target == GL_TEXTURE_3D ? 0x02 : 0x01;
+        else if (t && (m == 0x0D || m == 0x0E))
+            m = target == GL_TEXTURE_CUBE_MAP ? 0x0E : 0x0D;
+        out = (out << 5) | m;
+    }
+    return out;
+}
+
 static void fshader_key(uint32_t *key)
 {
     memset(key, 0, 64 * 4);
     memcpy(key, d3d.render_state, D3DRS_PS_MAX * 4);
     for (int i = D3DRS_PSCONSTANT0_0; i <= D3DRS_PSCONSTANT1_7; i++) key[i] = 0;
     key[D3DRS_PSFINALCOMBINERCONSTANT0] = key[D3DRS_PSFINALCOMBINERCONSTANT1] = 0;
-    key[57] = RS(D3DRS_PSTEXTUREMODES);
+    key[57] = adjusted_texture_modes();
     key[58] = RS(D3DRS_FOGENABLE);
     key[59] = RS(D3DRS_FOGTABLEMODE);
 }
@@ -1709,7 +1805,10 @@ static GLuint fragment_shader_object(void)
         if (!memcmp(e->key, key, sizeof(key))) return e->fs;
     fshader_entry *e = calloc(1, sizeof(*e));
     memcpy(e->key, key, sizeof(key));
+    ULONG modes = RS(D3DRS_PSTEXTUREMODES);
+    RS(D3DRS_PSTEXTUREMODES) = key[57];
     char *src = psh_translate(d3d.render_state);
+    RS(D3DRS_PSTEXTUREMODES) = modes;
     if (!src) {
         xlog("D3D: pixel shader %#x could not be translated", d3d.pixel_shader);
     } else {
@@ -1747,8 +1846,11 @@ static void apply_shader_textures(const program_entry *e)
             scale[s][0] = 1.0f / w;
             scale[s][1] = 1.0f / h;
         }
-        GLint loc = target == GL_TEXTURE_CUBE_MAP ? e->loc_cube[s] : target == GL_TEXTURE_3D ? e->loc_vol[s] : e->loc_tex[s];
-        if (loc >= 0) p_glUniform1i(loc, s);
+        /* The program declares at most one sampler per stage, of the type its
+           texture mode wants; point it at unit s whatever is bound there. */
+        if (e->loc_tex[s] >= 0) p_glUniform1i(e->loc_tex[s], s);
+        if (e->loc_cube[s] >= 0) p_glUniform1i(e->loc_cube[s], s);
+        if (e->loc_vol[s] >= 0) p_glUniform1i(e->loc_vol[s], s);
     }
     p_glActiveTexture(GL_TEXTURE0);
     if (e->loc_tex_scale >= 0) p_glUniform4fv(e->loc_tex_scale, 4, &scale[0][0]);
