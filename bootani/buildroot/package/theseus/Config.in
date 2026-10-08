@@ -1,0 +1,40 @@
+config BR2_PACKAGE_THESEUS
+	bool "theseus"
+	depends on BR2_INSTALL_LIBSTDCPP
+	depends on BR2_TOOLCHAIN_GCC_AT_LEAST_10 # bgfx: C++20
+	depends on BR2_TOOLCHAIN_HAS_THREADS
+	depends on !BR2_STATIC_LIBS # dlopen of libEGL
+	depends on BR2_HOSTARCH = "x86_64" # bx ships genie as an x86_64 binary
+	depends on BR2_PACKAGE_SDL2_KMSDRM
+	depends on BR2_PACKAGE_MPV # also brings ffmpeg
+	select BR2_PACKAGE_SDL2_MIXER
+	select BR2_PACKAGE_FFMPEG_SWSCALE
+	select BR2_PACKAGE_LIBCURL
+	select BR2_PACKAGE_OPUS
+	help
+	  Theseus, a reconstruction of the original Xbox dashboard
+	  (TeamUIX), built as its desktop "UIX Desktop" engine and
+	  patched to render straight to the display through SDL's
+	  KMSDRM driver and bgfx's OpenGL backend, with no X11 or
+	  Wayland. Needs a Mesa driver with desktop OpenGL 3.3
+	  (iris, radeonsi, softpipe, ...).
+
+	  https://github.com/MrMilenko/Theseus
+
+if BR2_PACKAGE_THESEUS
+
+config BR2_PACKAGE_THESEUS_START_AT_BOOT
+	bool "start after bootani"
+	default y
+	help
+	  Install /etc/init.d/S99theseus, which waits for the boot
+	  animation to finish and then runs the dashboard, restarting
+	  it if it exits.
+
+endif
+
+comment "theseus needs SDL2 with KMSDRM, mpv, and a toolchain w/ C++, threads, gcc >= 10, dynamic library"
+	depends on BR2_HOSTARCH = "x86_64"
+	depends on !BR2_PACKAGE_SDL2_KMSDRM || !BR2_PACKAGE_MPV || \
+		!BR2_INSTALL_LIBSTDCPP || !BR2_TOOLCHAIN_HAS_THREADS || \
+		!BR2_TOOLCHAIN_GCC_AT_LEAST_10 || BR2_STATIC_LIBS

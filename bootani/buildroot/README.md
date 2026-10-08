@@ -13,6 +13,29 @@ screen, with no X11 or Wayland.
   as an initramfs, so the GPU driver, its firmware and bootani are all there
   before any disk is touched.
 
+## The dashboard after the animation
+
+When bootani finishes, [Theseus](https://github.com/MrMilenko/Theseus) (TeamUIX's
+rebuild of the original Xbox dashboard, built as its desktop engine) takes the
+screen. It runs on KMSDRM too, with no X11 or Wayland:
+
+- SDL2's KMSDRM driver owns the display and creates an OpenGL 3.3 core context
+  (EGL on a GBM surface). bgfx, Theseus's renderer, draws into that context
+  with its OpenGL backend, and `SDL_GL_SwapWindow` does the page flip. The
+  patches in `package/theseus/` add this path; on a desktop Theseus still
+  uses X11/Wayland and Vulkan.
+- `/etc/init.d/S99theseus` runs `/usr/libexec/theseus-session`, which waits
+  for bootani to exit (KMS allows one master), then starts
+  `/opt/theseus/theseus --dashboard --no-toolbar --no-boot-anim` and restarts
+  it if it exits. Its output goes to `/var/log/theseus.log`.
+- Input is game controllers: Xbox pads through `xpad`, other HID pads through
+  evdev. The image has no udev, so SDL doesn't see keyboards or mice.
+- The dashboard and its data live in `/opt/theseus` (about 190 MB, in the
+  initramfs like everything else). Extra arguments go in
+  `/etc/default/theseus` as `THESEUS_ARGS="..."`.
+
+Set `BR2_PACKAGE_THESEUS=n` to boot to the animation alone.
+
 ## Build
 
     git clone https://gitlab.com/buildroot.org/buildroot.git

@@ -1,0 +1,47 @@
+#!/bin/sh
+#
+# Start the dashboard after the boot animation (see theseus-session).
+#
+
+DAEMON="theseus"
+PIDFILE="/var/run/$DAEMON.pid"
+LOGFILE="/var/log/$DAEMON.log"
+
+start() {
+	printf 'Starting %s: ' "$DAEMON"
+	start-stop-daemon -S -q -b -m -p "$PIDFILE" -x /bin/sh \
+		-- -c "exec /usr/libexec/theseus-session >$LOGFILE 2>&1"
+	status=$?
+	if [ "$status" -eq 0 ]; then
+		echo "OK"
+	else
+		echo "FAIL"
+	fi
+	return "$status"
+}
+
+stop() {
+	printf 'Stopping %s: ' "$DAEMON"
+	# The session loop first, so it doesn't start the dashboard again.
+	start-stop-daemon -K -q -p "$PIDFILE"
+	status=$?
+	killall -q theseus
+	rm -f "$PIDFILE"
+	if [ "$status" -eq 0 ]; then
+		echo "OK"
+	else
+		echo "FAIL"
+	fi
+	return "$status"
+}
+
+case "$1" in
+	start|stop)
+		"$1";;
+	restart|reload)
+		stop
+		start;;
+	*)
+		echo "Usage: $0 {start|stop|restart}"
+		exit 1
+esac
