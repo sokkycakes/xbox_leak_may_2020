@@ -1308,7 +1308,7 @@ static vshader *parse_declaration(const ULONG *decl)
     for (int i = 0; i < 16; i++) sh->attr[i].stream = -1;
     int stream = 0;
     ULONG offset = 0;
-    for (const ULONG *p = decl; *p != 0xFFFFFFFF; p++) {
+    for (const ULONG *p = decl; p && *p != 0xFFFFFFFF; p++) {   /* state shaders have no declaration */
         ULONG tok = *p, type = tok >> 29;
         if (type == 1) {                     /* D3DVSD_STREAM */
             stream = tok & 0xF;
@@ -1388,15 +1388,40 @@ static LONG NTAPI D3DDevice_GetVertexShaderType(ULONG handle, ULONG *type)
 static LONG NTAPI D3DDevice_GetVertexShaderDeclaration(ULONG h, void *data, ULONG *size) { return D3DERR_INVALIDCALL; }
 static LONG NTAPI D3DDevice_GetVertexShaderFunction(ULONG h, void *data, ULONG *size) { return D3DERR_INVALIDCALL; }
 
-static void NTAPI D3DDevice_LoadVertexShader(ULONG handle, ULONG address) {}
-static void NTAPI D3DDevice_LoadVertexShaderProgram(const ULONG *func, ULONG address) {}
+/* Vertex program memory (136 instruction slots), used for state shaders and
+   for SelectVertexShader(NULL, address); ordinary programs are compiled from
+   their own copy of the microcode. */
+static uint32_t vp_mem[136][4];
+
+static void vp_load(const uint32_t *code, unsigned n, ULONG address)
+{
+    if (address >= 136) return;
+    if (n > 136 - address) n = 136 - address;
+    memcpy(vp_mem[address], code, n * 16);
+}
+
+static void NTAPI D3DDevice_LoadVertexShader(ULONG handle, ULONG address)
+{
+    if (!(handle & 1)) return;
+    vshader *sh = (vshader *)(handle & ~1u);
+    if (sh->code) vp_load(sh->code, sh->ninstr, address);
+}
+
+static void NTAPI D3DDevice_LoadVertexShaderProgram(const ULONG *func, ULONG address)
+{
+    if (func) vp_load(func + 1, func[0] >> 16, address);
+}
 static void NTAPI D3DDevice_SelectVertexShader(ULONG handle, ULONG address)
 {
     if (d3d.recording && handle) pb_record(OP_VERTEX_SHADER, &handle, 4);
     /* The shader was loaded into program memory earlier; just use it. */
     if (handle) d3d.vertex_shader = handle;
 }
-static void NTAPI D3DDevice_RunVertexStateShader(ULONG address, const float *data) {}
+static void NTAPI D3DDevice_RunVertexStateShader(ULONG address, const float *data)
+{
+    if (address >= 136) return;
+    vsh_run_state(vp_mem[address], 136 - address, data, d3d.vs_const);
+}
 
 static void NTAPI D3DDevice_SetVertexShaderInput(ULONG handle, UINT_ count, const ULONG *inputs)
 {

@@ -91,4 +91,11 @@ char *vsh_translate(const uint32_t *code, unsigned count);
  */
 char *psh_translate(const uint32_t *rs);
 
+/*
+ * Run a state shader on the CPU: `code`/`count` as for vsh_translate, v0 is
+ * the input vector (may be NULL), and `consts` are the 192 constant registers
+ * in hardware numbering, which the program reads and writes in place.
+ */
+void vsh_run_state(const uint32_t *code, unsigned count, const float v0[4], float consts[192][4]);
+
 #endif
