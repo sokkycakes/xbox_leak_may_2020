@@ -608,6 +608,7 @@ static void res_free_header(D3DResource *r)
 static ULONG NTAPI D3DResource_Release(D3DResource *r)
 {
     ULONG refs = --r->Common & D3DCOMMON_REFCOUNT_MASK;
+    TRACE("D3D: Release(%p) type %#x refs %u from %p", (void *)r, r->Common & D3DCOMMON_TYPE_MASK, refs, __builtin_return_address(0));
     if (refs == 0 && (r->Common & D3DCOMMON_D3DCREATED)) {
         ULONG type = r->Common & D3DCOMMON_TYPE_MASK;
         if (type == D3DCOMMON_TYPE_VERTEXBUFFER || type == D3DCOMMON_TYPE_PALETTE) {
@@ -955,6 +956,9 @@ static GLuint texture_for(D3DPixelContainer *t)
         readback_surface(on_color ? d3d.backbuffer : d3d.depth, on_depth);
         tex_invalidate(t->res.Data);
     }
+    static int nocache = -1;
+    if (nocache < 0) nocache = getenv("XBCOMPAT_NO_TEXCACHE") != NULL;
+    if (nocache) tex_invalidate(t->res.Data);
     for (tex_entry *e = tex_cache; e; e = e->next)
         if (e->data == t->res.Data && e->format == t->Format && e->size == t->Size) return e->id;
 
@@ -4767,9 +4771,14 @@ static void NTAPI D3DVertexBuffer_GetDesc(D3DResource *vb, ULONG *desc)
 }
 
 /* The inline Release in 5xxx headers drops the count itself and calls this
-   on the last reference. */
+   on the last reference.  For a surface it has already released the parent
+   texture, so only the surface header goes. */
 static void NTAPI D3D_DestroyResource(D3DResource *r)
 {
+    if ((r->Common & D3DCOMMON_TYPE_MASK) == D3DCOMMON_TYPE_SURFACE && ((D3DSurface *)r)->Parent) {
+        res_free_header(r);
+        return;
+    }
     r->Common = (r->Common & ~D3DCOMMON_REFCOUNT_MASK) | 1;
     D3DResource_Release(r);
 }
