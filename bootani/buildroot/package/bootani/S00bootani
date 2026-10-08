@@ -15,11 +15,18 @@ BOOTANI_ARGS="--kms"
 [ -r /etc/default/kms ] && . /etc/default/kms
 export KMS_MODE
 
+# The Xbox's own boot animation under xbcompat (package/xbcompat), when
+# the image has it, unless BOOT_ANIMATION=bootani. It falls back to bootani.
+CMD="/usr/bin/$DAEMON $BOOTANI_ARGS"
+if [ -x /usr/libexec/xbox-boot ] && [ "$BOOT_ANIMATION" != bootani ]; then
+	CMD=/usr/libexec/xbox-boot
+fi
+
 start() {
 	printf 'Starting %s: ' "$DAEMON"
 	# Through a shell so its messages land in $LOGFILE; exec keeps the pid.
 	start-stop-daemon -S -q -b -m -p "$PIDFILE" -x /bin/sh \
-		-- -c "exec /usr/bin/$DAEMON $BOOTANI_ARGS >$LOGFILE 2>&1"
+		-- -c "exec $CMD >$LOGFILE 2>&1"
 	status=$?
 	if [ "$status" -eq 0 ]; then
 		echo "OK"

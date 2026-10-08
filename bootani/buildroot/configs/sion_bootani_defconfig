@@ -53,3 +53,7 @@ BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_8265=y
 BR2_PACKAGE_LINUX_FIRMWARE_RTL_8169=y
 BR2_PACKAGE_LINUX_FIRMWARE_RTL_815X=y
 BR2_PACKAGE_HOST_E2FSPROGS=y
+# The Xbox's own boot animation and dashboard under xbcompat; the bundle is
+# built by xbcompat/tools/sion/bundle.sh.
+BR2_PACKAGE_XBCOMPAT=y
+BR2_PACKAGE_XBCOMPAT_BUNDLE="$(BR2_EXTERNAL_BOOTANI_PATH)/../../xbcompat/build-sion/xbcompat-sion.tar.gz"

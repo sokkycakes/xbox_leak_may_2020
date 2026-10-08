@@ -1,0 +1,36 @@
+config BR2_PACKAGE_XBCOMPAT
+	bool "xbcompat (Xbox boot animation and dashboard)"
+	depends on BR2_x86_64 # runs 32-bit x86 code: needs IA32 emulation
+	help
+	  The original Xbox boot animation (the leak's ani2) and
+	  dashboard (xboxdash.xbe), run by xbcompat, the compatibility
+	  layer in xbcompat/ of this repository, straight on KMSDRM.
+
+	  The boot animation replaces bootani at boot (bootani is
+	  still there, and runs if xbcompat can't start). The
+	  dashboard runs instead of Theseus when DASHBOARD=xbox (the
+	  default, in /etc/default/dashboard or sion/sion.conf);
+	  Theseus takes over if the Xbox dashboard keeps failing to
+	  start.
+
+	  xbcompat and the two titles are 32-bit programs with their
+	  own userspace (glibc, SDL2, Mesa), built outside Buildroot
+	  by xbcompat/tools/sion/bundle.sh into a tarball, which this
+	  package unpacks into /opt/xbcompat.
+
+if BR2_PACKAGE_XBCOMPAT
+
+config BR2_PACKAGE_XBCOMPAT_BUNDLE
+	string "bundle"
+	help
+	  Path to xbcompat-sion.tar.gz from xbcompat/tools/sion/bundle.sh.
+
+config BR2_PACKAGE_XBCOMPAT_DASHBOARD
+	string "dashboard at boot"
+	default "xbox"
+	help
+	  "xbox" for the Xbox dashboard under xbcompat, "theseus"
+	  for Theseus. Written to /etc/default/dashboard; DASHBOARD=
+	  in the boot stick's sion/sion.conf overrides it.
+
+endif

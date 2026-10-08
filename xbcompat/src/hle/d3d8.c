@@ -202,6 +202,9 @@ enum {
 static void load_fbo_functions(void);
 static void load_shader_functions(void);
 static void create_device_surfaces(ULONG format, ULONG depth_format);
+static void create_window_framebuffer(void);
+static void present_window_framebuffer(void);
+static void restore_window_framebuffer(void);
 static void run_callbacks(void);
 
 static ULONG direct3d_object[4];
@@ -335,6 +338,7 @@ static LONG NTAPI Direct3D_CreateDevice(UINT_ Adapter, ULONG DeviceType, PVOID p
     d3d.device_refs = 1;
 
     load_fbo_functions();
+    create_window_framebuffer();
     load_shader_functions();
     create_device_surfaces(pp->BackBufferFormat, pp->EnableAutoDepthStencil ? pp->AutoDepthStencilFormat : 0);
     d3d.backbuffer_scale[0] = d3d.backbuffer_scale[1] = 1;
@@ -496,7 +500,9 @@ static ULONG NTAPI D3DDevice_Swap(ULONG Flags)
     } else if (g_screenshot_path && (int)d3d.frame == g_screenshot_frame) {
         save_screenshot(g_screenshot_path);
     }
+    present_window_framebuffer();
     SDL_GL_SwapWindow(d3d.window);
+    restore_window_framebuffer();
     restore_overlay();
     pace_present();
     if (d3d.vblank_callback) {
@@ -2968,6 +2974,72 @@ static void load_fbo_functions(void)
     LOAD(glFramebufferRenderbuffer); LOAD(glGenRenderbuffers); LOAD(glBindRenderbuffer);
     LOAD(glRenderbufferStorage); LOAD(glCheckFramebufferStatus);
 #undef LOAD
+}
+
+/* A window that isn't the back buffer's size: KMSDRM always makes the window
+   the display mode, so a 640x480 back buffer meets a 720x480 NTSC screen.
+   The back buffer is then a framebuffer object of the size the title asked
+   for, standing in for framebuffer 0 everywhere, and Present stretches it
+   over the whole window, as the Xbox's video encoder stretched its 640x480
+   frame across the NTSC signal. */
+#ifndef GL_DRAW_FRAMEBUFFER
+#define GL_DRAW_FRAMEBUFFER 0x8CA9
+#endif
+static struct {
+    GLuint fbo;
+    int w, h;
+    void (APIENTRY *bind)(GLenum, GLuint);
+    void (APIENTRY *blit)(GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield, GLenum);
+} window_fb;
+
+static void APIENTRY bind_framebuffer(GLenum target, GLuint fb)
+{
+    window_fb.bind(target, fb ? fb : window_fb.fbo);
+}
+
+static void create_window_framebuffer(void)
+{
+    SDL_GL_GetDrawableSize(d3d.window, &window_fb.w, &window_fb.h);
+    if ((window_fb.w == d3d.width && window_fb.h == d3d.height) || !p_glGenFramebuffers) return;
+    window_fb.blit = SDL_GL_GetProcAddress("glBlitFramebuffer");
+    if (!window_fb.blit) return;
+    GLuint rb[2];
+    p_glGenRenderbuffers(2, rb);
+    p_glBindRenderbuffer(GL_RENDERBUFFER, rb[0]);
+    p_glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, d3d.width, d3d.height);
+    p_glBindRenderbuffer(GL_RENDERBUFFER, rb[1]);
+    p_glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, d3d.width, d3d.height);
+    p_glGenFramebuffers(1, &window_fb.fbo);
+    p_glBindFramebuffer(GL_FRAMEBUFFER, window_fb.fbo);
+    p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rb[0]);
+    p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, rb[1]);
+    if (p_glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        xlog("D3D: no back buffer framebuffer, drawing %dx%d into the corner of a %dx%d window", d3d.width,
+             d3d.height, window_fb.w, window_fb.h);
+        p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        window_fb.fbo = 0;
+        return;
+    }
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+    window_fb.bind = p_glBindFramebuffer;
+    p_glBindFramebuffer = bind_framebuffer;
+    xlog("D3D: %dx%d back buffer stretched over a %dx%d window", d3d.width, d3d.height, window_fb.w, window_fb.h);
+}
+
+static void present_window_framebuffer(void)
+{
+    if (!window_fb.fbo) return;
+    GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
+    glDisable(GL_SCISSOR_TEST);
+    window_fb.bind(GL_READ_FRAMEBUFFER, window_fb.fbo);
+    window_fb.bind(GL_DRAW_FRAMEBUFFER, 0);
+    window_fb.blit(0, 0, d3d.width, d3d.height, 0, 0, window_fb.w, window_fb.h, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    if (scissor) glEnable(GL_SCISSOR_TEST);
+}
+
+static void restore_window_framebuffer(void)
+{
+    if (window_fb.fbo) window_fb.bind(GL_FRAMEBUFFER, d3d.rt_texture ? d3d.fbo : window_fb.fbo);
 }
 
 /* Bits per texel of an Xbox D3DFORMAT and whether it is stored linearly

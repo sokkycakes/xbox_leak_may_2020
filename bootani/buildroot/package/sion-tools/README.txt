@@ -12,7 +12,12 @@ Once it's on the network:
   scp -r mydir root@sion.local:/opt/       copy files in (they last until
                                            reboot; the system runs from RAM)
   ssh root@sion.local sion persist /opt/x  keep them across reboots
-  ssh root@sion.local sion restart theseus restart the dashboard
+  ssh root@sion.local sion restart dashboard   restart the dashboard
+
+The dashboard is the Xbox's own, run by xbcompat (DASHBOARD="xbox" in
+sion.conf), or Theseus (DASHBOARD="theseus"). Its hard disk is /data/xbox/hdd
+(E: is partition1, with saves and E:\Games); put an extracted game disc in
+/data/xbox/disc to have it in the tray. Its log: sion logs xbox.
 
 Updating the whole system image (a new BOOTX64.EFI):
 

@@ -101,3 +101,17 @@ Environment variables:
 | `XBCOMPAT_PSH_DUMP=1` | Log each translated pixel shader. |
 | `XBCOMPAT_VSH_DUMP=DIR` | Write each vertex program and its GLSL to DIR. |
 | `XBCOMPAT_FIXED_FPS=N` | Advance the guest clock 1/N s per frame instead of following the wall clock, so frame K shows the moment K/N s. Audio still plays in real time. |
+
+When a title quits to the dashboard with launch data (`XLaunchNewImage(NULL,
+data)`), xbcompat saves the page as `.dashlaunch` in the hard disk directory,
+for whoever starts the dashboard next to pass with `--launch-data`.
+
+## On the Sion (KMSDRM, no window system)
+
+`tools/sion/bundle.sh` builds `/opt/xbcompat` for the Sion image: xbcompat
+linked against glvnd's `libOpenGL` (`make GL=opengl`), SDL2 with KMSDRM,
+Mesa, python3 for `xbrun.py`, the boot animation and the dashboard, all as a
+32-bit tree with its own loader beside the image's 64-bit system. See
+`bootani/buildroot/README.md` for how the image boots it. On KMSDRM the
+window is always the display mode, so a back buffer of another size is drawn
+into a framebuffer object and stretched over the screen at each Present.

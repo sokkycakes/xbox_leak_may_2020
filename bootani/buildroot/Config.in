@@ -1,3 +1,4 @@
 source "$BR2_EXTERNAL_BOOTANI_PATH/package/bootani/Config.in"
 source "$BR2_EXTERNAL_BOOTANI_PATH/package/theseus/Config.in"
 source "$BR2_EXTERNAL_BOOTANI_PATH/package/sion-tools/Config.in"
+source "$BR2_EXTERNAL_BOOTANI_PATH/package/xbcompat/Config.in"

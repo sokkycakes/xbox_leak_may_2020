@@ -1,21 +1,21 @@
 #!/bin/sh
 #
-# Start the dashboard after the boot animation (see theseus-session).
+# Start the Xbox dashboard after the boot animation (see xbox-session), when
+# it's the dashboard this boot runs (see /usr/libexec/dashboard).
 #
 
-DAEMON="theseus"
+DAEMON="xbox"
 PIDFILE="/var/run/$DAEMON.pid"
-LOGFILE="/var/log/$DAEMON.log"
+LOGFILE="/var/log/xbox-session.log"
 
 start() {
 	printf 'Starting %s: ' "$DAEMON"
-	# The Xbox dashboard runs instead when the image has it (package/xbcompat).
-	if [ -x /usr/libexec/dashboard ] && [ "$(/usr/libexec/dashboard)" != theseus ]; then
+	if [ "$(/usr/libexec/dashboard)" != xbox ]; then
 		echo "skipped (dashboard is $(/usr/libexec/dashboard))"
 		return 0
 	fi
 	start-stop-daemon -S -q -b -m -p "$PIDFILE" -x /bin/sh \
-		-- -c "exec /usr/libexec/theseus-session >$LOGFILE 2>&1"
+		-- -c "exec /usr/libexec/xbox-session >>$LOGFILE 2>&1"
 	status=$?
 	if [ "$status" -eq 0 ]; then
 		echo "OK"
@@ -30,7 +30,7 @@ stop() {
 	# The session loop first, so it doesn't start the dashboard again.
 	start-stop-daemon -K -q -p "$PIDFILE"
 	status=$?
-	killall -q theseus
+	killall -q xbcompat
 	rm -f "$PIDFILE"
 	if [ "$status" -eq 0 ]; then
 		echo "OK"
@@ -45,6 +45,7 @@ case "$1" in
 		"$1";;
 	restart|reload)
 		stop
+		sleep 1
 		start;;
 	*)
 		echo "Usage: $0 {start|stop|restart}"

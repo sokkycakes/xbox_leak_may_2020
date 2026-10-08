@@ -174,6 +174,19 @@ void NTAPI HalReturnToFirmware(ULONG Routine)
     const char *path = LaunchDataPage ? (const char *)LaunchDataPage + 8 : NULL;
     if (Routine == 2 && path && path[0]) relaunch(path);
     xlog("HalReturnToFirmware(%u): title asked to reboot or return to the dashboard", Routine);
+    if (LaunchDataPage && *(ULONG *)LaunchDataPage /* dwLaunchDataType */) {
+        /* XLaunchNewImage(NULL, data): the dashboard gets the launch data
+           (LDT_LAUNCH_DASHBOARD, e.g. "open the Memory screen"). Whoever
+           starts the dashboard next passes it on with --launch-data. */
+        char page[4096];
+        snprintf(page, sizeof(page), "%s/.dashlaunch", fs_hdd_root());
+        FILE *f = fopen(page, "wb");
+        if (f) {
+            fwrite(LaunchDataPage, 1, 4096, f);
+            fclose(f);
+            xlog("dashboard launch data saved to %s", page);
+        }
+    }
     exit(0);
 }
 

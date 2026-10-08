@@ -1,0 +1,29 @@
+# Sourced by xbox-boot and xbox-session: the environment xbcompat runs in.
+# /opt/xbcompat is a 32-bit tree with its own loader and libraries; these
+# point its glvnd, Mesa and python at that tree.
+
+X=/opt/xbcompat
+export LD_LIBRARY_PATH=$X/lib
+export LIBGL_DRIVERS_PATH=$X/lib/dri GBM_DRIVERS_PATH=$X/lib/dri
+export __EGL_VENDOR_LIBRARY_FILENAMES=$X/share/glvnd/egl_vendor.d/50_mesa.json
+# Titles the dashboard launches come back through xbrun.py, which builds
+# their library map first.
+export PYTHONHOME=$X PYTHONDONTWRITEBYTECODE=1
+export XBCOMPAT_BIN=$X/bin/xbcompat XBSYMDB_CLI=$X/tools/XbSymbolDatabaseCLI
+export XBCOMPAT_LAUNCHER="$X/bin/python3 $X/tools/xbrun.py"
+
+# The display mode bootani uses (KMS_MODE=WxH), straight through KMSDRM.
+# shellcheck source=/dev/null
+[ -r /etc/default/kms ] && . /etc/default/kms
+export KMS_MODE
+export SDL_VIDEODRIVER=kmsdrm SDL_AUDIODRIVER=alsa
+export HOME=/root
+
+# Same sound output bootani picks: the ALSA default (card 0, device 0) if
+# it exists, otherwise the first HDMI/DisplayPort output of the Intel HD
+# Audio card, the usual case on the Chromebox.
+if [ -z "$AUDIODEV" ] && ! grep -q '^00-00:.*playback' /proc/asound/pcm 2>/dev/null; then
+	if aplay -L 2>/dev/null | grep -q '^hdmi:CARD=PCH,DEV=0$'; then
+		export AUDIODEV=hdmi:CARD=PCH,DEV=0
+	fi
+fi

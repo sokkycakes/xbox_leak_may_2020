@@ -29,8 +29,8 @@ Usage: sion COMMAND
   persist PATH...        keep files across reboots: copies them into
                          /data/overlay, which is copied over / at every boot
   overlay list|clear     show or empty /data/overlay
-  restart theseus|net|ssh
-  logs [sion|theseus|bootani|messages|dmesg]
+  restart dashboard|xbox|theseus|net|ssh
+  logs [sion|xbox|xbox-session|theseus|bootani|messages|dmesg]
   esp mount|umount       mount the boot stick's EFI partition on /boot
 
 A new image boots once on trial. It's kept when SSH (and the dashboard, if
@@ -177,7 +177,13 @@ healthy() {
 	if [ "$SSH" != no ]; then
 		pidof sshd > /dev/null || return 1
 	fi
-	if [ -x /etc/init.d/S99theseus ] && [ -x /opt/theseus/theseus ]; then
+	dash=theseus
+	[ -x /usr/libexec/dashboard ] && dash=$(/usr/libexec/dashboard)
+	if [ "$dash" = xbox ]; then
+		# xbcompat keeps its pid when the dashboard starts a game.
+		pid=$(pidof xbcompat) || return 1
+		[ "$pid" = "$last_pid" ] || { last_pid=$pid; return 1; }
+	elif [ -x /etc/init.d/S99theseus ] && [ -x /opt/theseus/theseus ]; then
 		pid=$(pidof theseus) || return 1
 		[ "$pid" = "$last_pid" ] || { last_pid=$pid; return 1; }
 	fi
@@ -281,9 +287,21 @@ cmd_overlay() {
 cmd_restart() {
 	case "$1" in
 		theseus) /etc/init.d/S99theseus restart ;;
+		dashboard)
+			if [ -x /etc/init.d/S98xbox ] && [ "$(/usr/libexec/dashboard)" = xbox ]; then
+				/etc/init.d/S98xbox restart
+			else
+				/etc/init.d/S99theseus restart
+			fi ;;
+		xbox)
+			# Also after Theseus took over from a failing Xbox dashboard.
+			[ -x /etc/init.d/S98xbox ] || die "this image has no Xbox dashboard"
+			rm -f /var/run/xbox/dash-failed
+			[ "$(/usr/libexec/dashboard)" = xbox ] && /etc/init.d/S99theseus stop > /dev/null
+			/etc/init.d/S98xbox restart ;;
 		net) /etc/init.d/S41sion-net restart ;;
 		ssh) /etc/init.d/S50sshd restart ;;
-		*) die "restart theseus|net|ssh" ;;
+		*) die "restart dashboard|xbox|theseus|net|ssh" ;;
 	esac
 }
 

@@ -1,0 +1,24 @@
+#!/bin/sh
+#
+# The boot animation: the Xbox's own (ani2's Bootscreen.xbe) under xbcompat.
+# S00bootani runs this in bootani's place, under bootani's pid file, so
+# whatever waits for the boot animation waits for this. If xbcompat can't
+# start (no GPU it can use, a broken bundle), bootani plays instead.
+#
+
+. /usr/lib/xbox/xbox-env
+# shellcheck source=/dev/null
+[ -r /etc/default/bootani ] && . /etc/default/bootani
+
+# Its own throwaway disk: the animation ends by asking for the dashboard
+# with an "invalid title" note, which the real dashboard mustn't see.
+mkdir -p /var/run/xbox/boot-hdd
+start=$(cut -d. -f1 /proc/uptime)
+"$X/bin/xbcompat" --hle "$X/boot/Bootscreen.map" --hdd /var/run/xbox/boot-hdd "$X/boot/Bootscreen.xbe"
+rc=$?
+if [ "$rc" -ne 0 ] && [ $(( $(cut -d. -f1 /proc/uptime) - start )) -lt 5 ] && [ -x /usr/bin/bootani ]; then
+	echo "xbox-boot: xbcompat exited with $rc; playing bootani instead"
+	# shellcheck disable=SC2086
+	exec /usr/bin/bootani $BOOTANI_ARGS
+fi
+exit 0

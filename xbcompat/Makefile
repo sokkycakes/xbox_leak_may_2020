@@ -4,9 +4,11 @@ CFLAGS  ?= -O2 -g
 override CFLAGS += -m32 -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-format-truncation -fno-pie \
            -mstackrealign -fno-omit-frame-pointer -D_FILE_OFFSET_BITS=64
 override LDFLAGS += -m32 -no-pie
-PKGCFG   = PKG_CONFIG_PATH=/usr/lib/i386-linux-gnu/pkgconfig pkg-config
-override CFLAGS += $(shell $(PKGCFG) --cflags sdl2 gl)
-LDLIBS  += $(shell $(PKGCFG) --libs sdl2 gl) -lpthread -lm
+PKGCFG  ?= PKG_CONFIG_PATH=/usr/lib/i386-linux-gnu/pkgconfig pkg-config
+# GL=opengl links glvnd's libOpenGL, with no GLX (KMSDRM systems, see tools/sion).
+GL      ?= gl
+override CFLAGS += $(shell $(PKGCFG) --cflags sdl2 $(GL))
+LDLIBS  += $(shell $(PKGCFG) --libs sdl2 $(GL)) -lpthread -lm
 
 LEAK    ?= ../xbox_leak_may_2020/xbox trunk/xbox
 KERNSRC  = src/kernel/ke.c src/kernel/ob.c src/kernel/io.c src/kernel/rtl.c src/kernel/misc.c \

@@ -13,6 +13,36 @@ screen, with no X11 or Wayland.
   as an initramfs, so the GPU driver, its firmware and bootani are all there
   before any disk is touched.
 
+## The Xbox's own boot animation and dashboard (xbcompat)
+
+With `package/xbcompat` (on in `sion_bootani_defconfig`), the Sion boots the
+way an Xbox does, with the leak's own programs run by xbcompat (`xbcompat/`
+in this repository), straight on KMSDRM:
+
+- `S00bootani` plays the original boot animation, ani2's `Bootscreen.xbe`,
+  through `/usr/libexec/xbox-boot`. If xbcompat can't start, bootani plays
+  instead. `BOOT_ANIMATION=bootani` in `/etc/default/bootani` always plays
+  bootani.
+- `S98xbox` then runs the dashboard, `xboxdash.xbe`, through
+  `/usr/libexec/xbox-session`. A game it starts replaces it in the same
+  process; when the game quits (or asks for the dashboard with launch data),
+  the dashboard comes back, as the Xbox rebooted into it. The Xbox hard disk
+  is `/data/xbox/hdd` (E: is `partition1`, with saves and `E:\Games`), and
+  an extracted game disc in `/data/xbox/disc` is in the tray. The log is
+  `/var/log/xbox.log` (the previous run's in `xbox.log.1`).
+- `DASHBOARD=theseus` (in `/etc/default/dashboard`, or `sion/sion.conf` on
+  the stick) runs Theseus instead. Theseus also takes over by itself if the
+  Xbox dashboard fails to start three times; `sion restart xbox` tries it
+  again.
+- xbcompat runs 32-bit x86 code, so it brings its own 32-bit userspace in
+  `/opt/xbcompat` (glibc and loader, SDL2 with `patches/sdl2/`, Mesa iris and
+  softpipe without LLVM, glvnd, python3 for its title tools; about 200 MB).
+  `xbcompat/tools/sion/bundle.sh` builds that tree and the two titles (with
+  the leak's compilers under Wine) into `xbcompat-sion.tar.gz`, which the
+  package unpacks; `BR2_PACKAGE_XBCOMPAT_BUNDLE` points at it.
+- The Xbox drew into a 640x480 back buffer that its video encoder stretched
+  over the TV signal; xbcompat does the same over the 720x480 mode.
+
 ## The dashboard after the animation
 
 When bootani finishes, [Theseus](https://github.com/MrMilenko/Theseus) (TeamUIX's
