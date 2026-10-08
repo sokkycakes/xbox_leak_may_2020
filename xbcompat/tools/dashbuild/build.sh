@@ -4,6 +4,11 @@
 # and stage an xbcompat hard disk for it.
 #
 #   tools/dashbuild/build.sh [WORK]     (default WORK=/tmp/xbdash)
+#   NEWGAMES=DIR tools/dashbuild/build.sh [WORK]
+#
+# NEWGAMES is the March 2001 dashboard's Games scene (TDATA\fffe0000\NewGames
+# on that recovery disc).  With it the Games screen is that scene, packed
+# into NewGames.xip; without it the Games screen is built on Settings home.
 #   tools/dashbuild/run.sh   [WORK] [xbrun options...]
 #
 # Needs wine + wine32 (apt: libgd3:i386 first, then wine wine32:i386).
@@ -49,6 +54,20 @@ timeout 600 wine "$WORK/xb/public/mstools/vc70/link.exe" /nologo -subsystem:xbox
 rm -rf "$WORK/dash"
 cp -r "$WORK/xb/private/ui/dash" "$WORK/dash"
 python3 "$HERE/games/patch_dash.py" "$WORK/dash"
+XIPS=Games2.xip
+if [ -n "$NEWGAMES" ]; then
+    cp -r "$NEWGAMES" "$WORK/dash/NewGames"
+    cp "$WORK/dash/GameHilite_01.bmp" "$HERE/games/newgames.xap" "$WORK/dash/NewGames/"
+    mv "$WORK/dash/NewGames/newgames.xap" "$WORK/dash/games.xap"
+    (
+        cd "$WORK/dash/NewGames"
+        # the panel image as an XPR texture, then the scene packed like mkxips.cmd does
+        printf 'Texture PanelTex\n{\n    Source 1gamespanel.tga\n    Format D3DFMT_A8R8G8B8\n    Width 512\n    Height 512\n    Levels 1\n}\n' > panel.rdf
+        timeout 120 wine "$WORK/xb/public/idw/bundler.exe" panel.rdf -o 1gamespanel.xbx | tr -d '\r'
+        timeout 300 wine "$WORK/xb/private/ui/XIP/obj/i386/xip.exe" -q -m -i GameHilite_01.bmp ..\\NewGames.xip default.xap | tr -d '\r'
+    )
+    XIPS="$XIPS NewGames.xip"
+fi
 (
     cd "$WORK/dash"
     E="python3 $HERE/games/xipedit.py"
@@ -59,7 +78,7 @@ python3 "$HERE/games/patch_dash.py" "$WORK/dash"
         Keyboard.xip JKeyboard.xip mainmenu5.xip Memory_Files2.xip Memory2.xip Message.xip music_copy3.xip \
         Music_PlayEdit2.xip music2.xip Settings_Clock.xip settings_language.xip settings_list.xip \
         settings_panel.xip settings_parental.xip settings_timezone.xip settings_video.xip settings3.xip \
-        Games2.xip > /dev/null
+        $XIPS > /dev/null
 )
 
 D="$W\\dash"

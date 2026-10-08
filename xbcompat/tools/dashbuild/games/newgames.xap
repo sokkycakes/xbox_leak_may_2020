@@ -1,0 +1,309 @@
+//
+// The Games area on the March 2001 dashboard's own Games scene (NewGames,
+// from the recovery disc's TDATA\fffe0000\NewGames, packed into
+// NewGames.xip by build.sh).  The list logic follows that dashboard's
+// games.xap, with xbcompat's GameCollection (E:\Games\<folder>\default.xbe)
+// in place of its TitleCollection, and A launching the selected game.
+//
+
+var titleScroll;
+var titleSelect;
+var titleButton;
+var titleCount;
+
+DEF theGameCollection GameCollection
+{
+}
+
+function GetTitleList()
+{
+    titleCount = theGameCollection.Scan();
+
+    var str = titleCount + " ";
+    if (titleCount == 1)
+        str = str + theTranslator.Translate("ITEM");
+    else
+        str = str + theTranslator.Translate("ITEMS");
+
+    theGamesMenu.children[0].children[0].New__text_games01.text = str;
+
+    UpdateTitleListText();
+}
+
+function UpdateTitleListText()
+{
+    var c = theGamesMenu.children[0].children[0].MenuItems;
+
+    for (var i = 0; i < 8; i = i + 1)
+    {
+        if (titleScroll + i >= titleCount)
+        {
+            c.children[i].children[0].geometry.text = "";
+        }
+        else
+        {
+            var str = theGameCollection.GetGameName(titleScroll + i);
+            c.children[i].children[0].geometry.text = str.substr(0, 60);
+        }
+    }
+}
+
+function UpdateTitleInfo()
+{
+    var str;
+
+    if (titleSelect == -1)
+        str = "No games found";
+    else
+        str = "*" + theGameCollection.GetGameName(titleSelect) + "*\r" + "ID " + theGameCollection.GetGameTitleID(titleSelect);
+
+    theGamesMenu.children[0].children[0].GameMetaText.text = str;
+    theGamesMenu.children[0].children[0].TitleImageShape.visible = false;
+}
+
+function AdjustTitleScroll()
+{
+    theGamesMenu.children[0].children[0].GM_L1_morearrow_up.visible = (titleScroll > 0);
+    theGamesMenu.children[0].children[0].GM_L1_morearrow_down.visible = (titleCount - titleScroll > 8);
+}
+
+function UpdateTitleList()
+{
+    var c = theGamesMenu.children[0].children[0];
+
+    c.GM_L1_menubutton_07a.visible = (titleCount > 0);
+    c.GM_L1_menubutton_02.visible = (titleCount > 1);
+    c.GM_L1_menubutton_03.visible = (titleCount > 2);
+    c.GM_L1_menubutton_04.visible = (titleCount > 3);
+    c.GM_L1_menubutton_05.visible = (titleCount > 4);
+    c.GM_L1_menubutton_06.visible = (titleCount > 5);
+    c.GM_L1_menubutton_01.visible = (titleCount > 6);
+    c.GM_L1_menubutton_08.visible = (titleCount > 7);
+
+    c.GM_L1_menubutton_07a.children[0].appearance.material.name = "FlatSurfaces";
+    c.GM_L1_menubutton_02.children[0].appearance.material.name = "FlatSurfaces";
+    c.GM_L1_menubutton_03.children[0].appearance.material.name = "FlatSurfaces";
+    c.GM_L1_menubutton_04.children[0].appearance.material.name = "FlatSurfaces";
+    c.GM_L1_menubutton_05.children[0].appearance.material.name = "FlatSurfaces";
+    c.GM_L1_menubutton_06.children[0].appearance.material.name = "FlatSurfaces";
+    c.GM_L1_menubutton_01.children[0].appearance.material.name = "FlatSurfaces";
+    c.GM_L1_menubutton_08.children[0].appearance.material.name = "FlatSurfaces";
+
+    c.txtItem1.appearance.name = "NavType";
+    c.txtItem2.appearance.name = "NavType";
+    c.txtItem3.appearance.name = "NavType";
+    c.txtItem4.appearance.name = "NavType";
+    c.txtItem5.appearance.name = "NavType";
+    c.txtItem6.appearance.name = "NavType";
+    c.txtItem7.appearance.name = "NavType";
+    c.txtItem8.appearance.name = "NavType";
+
+    if (titleButton == 0)
+    {
+        c.GM_L1_menubutton_07a.children[0].appearance.material.name = "GameHilite";
+        c.txtItem1.appearance.name = "HilightedType";
+    }
+    else if (titleButton == 1)
+    {
+        c.GM_L1_menubutton_02.children[0].appearance.material.name = "GameHilite";
+        c.txtItem2.appearance.name = "HilightedType";
+    }
+    else if (titleButton == 2)
+    {
+        c.GM_L1_menubutton_03.children[0].appearance.material.name = "GameHilite";
+        c.txtItem3.appearance.name = "HilightedType";
+    }
+    else if (titleButton == 3)
+    {
+        c.GM_L1_menubutton_04.children[0].appearance.material.name = "GameHilite";
+        c.txtItem4.appearance.name = "HilightedType";
+    }
+    else if (titleButton == 4)
+    {
+        c.GM_L1_menubutton_05.children[0].appearance.material.name = "GameHilite";
+        c.txtItem5.appearance.name = "HilightedType";
+    }
+    else if (titleButton == 5)
+    {
+        c.GM_L1_menubutton_06.children[0].appearance.material.name = "GameHilite";
+        c.txtItem6.appearance.name = "HilightedType";
+    }
+    else if (titleButton == 6)
+    {
+        c.GM_L1_menubutton_01.children[0].appearance.material.name = "GameHilite";
+        c.txtItem7.appearance.name = "HilightedType";
+    }
+    else if (titleButton == 7)
+    {
+        c.GM_L1_menubutton_08.children[0].appearance.material.name = "GameHilite";
+        c.txtItem8.appearance.name = "HilightedType";
+    }
+
+    AdjustTitleScroll();
+    UpdateTitleInfo();
+}
+
+function ResetTitleList()
+{
+    titleScroll = 0;
+    GetTitleList();
+
+    if (titleCount == 0)
+    {
+        titleButton = -1;
+        titleSelect = -1;
+    }
+    else
+    {
+        titleButton = 0;
+        titleSelect = 0;
+    }
+
+    UpdateTitleList();
+}
+
+DEF theGamesMenu Level
+{
+    archive "NewGames.xip"
+
+    children
+    [
+        Inline
+        {
+            url "NewGames/default.xap"
+
+            function onLoad()
+            {
+                children[0].G_L1_select_pod_HL.visible = false;
+                children[0].G_L1_back_pod_HL.visible = false;
+                ResetTitleList();
+            }
+        }
+    ]
+
+    // The cell wall every other screen sits in (the March level had none),
+    // centred on the scene in front of the camera.
+    shell Transform
+    {
+        scale 75 75 75
+        translation -182.0 25.0 -150.0
+        children
+        [
+            Waver
+            {
+                rpm 0.75
+                children
+                [
+                    Shape
+                    {
+                        appearance Appearance
+                        {
+                            material MaxMaterial { name "InnerWall_01" }
+                            texture ImageTexture { alpha true url "cellwall.bmp" }
+                        }
+                        geometry Mesh { url "Inner_cell-FACES.xm" }
+                    }
+                    Shape
+                    {
+                        appearance MaxMaterial { name "InnerWall_02" }
+                        geometry Sphere
+                    }
+                ]
+            }
+        ]
+    }
+
+    path Viewpoint
+    {
+        position -163.300003 23.120001 -121.699997
+        orientation -0.175400 -0.983000 -0.054950 -0.617100
+        fieldOfView 1.4
+        jump false
+    }
+
+    control Joystick
+    {
+        function OnADown()
+        {
+            theGamesMenu.children[0].children[0].G_L1_select_pod_HL.visible = true;
+
+            if (titleSelect < 0)
+                return;
+
+            PlaySoundA();
+            theGamesSubMenuIn.Play();
+            EnableInput(false);
+            theGameCollection.LaunchGame(titleSelect);
+        }
+
+        function OnAUp()
+        {
+            theGamesMenu.children[0].children[0].G_L1_select_pod_HL.visible = false;
+        }
+
+        function OnBDown()
+        {
+            theGamesMenu.children[0].children[0].G_L1_back_pod_HL.visible = true;
+            PlaySoundB();
+            theMainMenu.GoBackTo();
+            theGamesMenuOut.Play();
+        }
+
+        function OnBUp()
+        {
+            theGamesMenu.children[0].children[0].G_L1_back_pod_HL.visible = false;
+        }
+
+        function OnMoveUp()
+        {
+            if (titleSelect <= 0)
+                return;
+
+            PlaySoundMenuChange();
+            titleSelect = titleSelect - 1;
+
+            if (titleButton == 0)
+            {
+                titleScroll = titleScroll - 1;
+                UpdateTitleListText();
+            }
+            else
+            {
+                titleButton = titleButton - 1;
+            }
+
+            UpdateTitleList();
+        }
+
+        function OnMoveDown()
+        {
+            if (titleSelect == titleCount - 1)
+                return;
+
+            PlaySoundMenuChange();
+            titleSelect = titleSelect + 1;
+
+            if (titleButton == 7)
+            {
+                titleScroll = titleScroll + 1;
+                UpdateTitleListText();
+            }
+            else
+            {
+                titleButton = titleButton + 1;
+            }
+
+            UpdateTitleList();
+        }
+    }
+
+    function OnActivate()
+    {
+        if (children[0].children.length() > 0)
+        {
+            children[0].children[0].G_L1_select_pod_HL.visible = false;
+            children[0].children[0].G_L1_back_pod_HL.visible = false;
+            ResetTitleList();
+        }
+    }
+}
