@@ -22,11 +22,13 @@ XB="$W\\xb"
 # GuidDef.h defines `one`, which main.cpp uses as a variable name.
 sed 's/\bone\b/fOne/g' "$WORK/xb/private/ui/xapp/main.cpp" > "$WORK/patch/main.cpp"
 
-for f in $(cat "$HERE/sources.txt"); do
+G=$(echo "Z:$HERE/games" | tr / '\\')    # the Games area added to the dashboard
+for f in $(cat "$HERE/sources.txt") GameCollection.cpp; do
     o="$WORK/obj/${f%.cpp}.obj"
-    [ -s "$o" ] && continue
+    [ -s "$o" ] && [ "$o" -nt "$HERE/games/$f" ] && continue
     src=$f; dir="$WORK/xb/private/ui/xapp"
     [ "$f" = main.cpp ] && src="$W\\patch\\main.cpp"
+    [ "$f" = GameCollection.cpp ] && src="$G\\GameCollection.cpp"
     echo "cc $f"
     WORK="$WORK" XB="$XB" CC_DIR="$dir" python3 "$HERE/cc.py" "$src" -D_AUDIO -D_CDPLAYER
 done
@@ -42,7 +44,25 @@ timeout 600 wine "$WORK/xb/public/mstools/vc70/link.exe" /nologo -subsystem:xbox
   "$L\\d3d8.lib" "$L\\d3dx8.lib" "$L\\xgraphics.lib" "$L\\dsound.lib" "$L\\xapilib.lib" \
   "$P\\xapilibp.lib" "$P\\dashrecovery.lib" "$L\\libcmt.lib" "$L\\libcp.lib" "$L\\xboxkrnl.lib" | tr -d '\r'
 
-D="$XB\\private\\ui\\dash"
+# The dashboard's data with the Games area: patched scripts edited into the
+# XIP archives, and a new signature table for them (the XBE's XIPS section).
+rm -rf "$WORK/dash"
+cp -r "$WORK/xb/private/ui/dash" "$WORK/dash"
+python3 "$HERE/games/patch_dash.py" "$WORK/dash"
+(
+    cd "$WORK/dash"
+    E="python3 $HERE/games/xipedit.py"
+    $E default.xip default.xip default.xap=default.xap games.xap=games.xap
+    $E mainmenu5.xip mainmenu5.xip default.xap=MainMenu5/default.xap
+    $E music2.xip Games2.xip default.xap=Games2/default.xap
+    timeout 120 wine "$WORK/xb/private/ui/xipsign/obj/i386/xipsign.exe" obj\\xipsums.bin default.xip dvd.xip \
+        Keyboard.xip JKeyboard.xip mainmenu5.xip Memory_Files2.xip Memory2.xip Message.xip music_copy3.xip \
+        Music_PlayEdit2.xip music2.xip Settings_Clock.xip settings_language.xip settings_list.xip \
+        settings_panel.xip settings_parental.xip settings_timezone.xip settings_video.xip settings3.xip \
+        Games2.xip > /dev/null
+)
+
+D="$W\\dash"
 ins=""
 for l in english:English japanese:Japanese german:German french:French spanish:Spanish italian:Italian; do
     ins="$ins /INSERTFILE:$D\\${l%%:*}.txt,${l##*:}Xlate,N"
@@ -56,7 +76,8 @@ timeout 300 wine "$WORK/xb/public/idw/imagebld.exe" /TESTID:0xFFFE0000 /TESTRATI
 # The dashboard lives on partition 2 (its Y: drive) next to its XIPs and fonts.
 R="$WORK/run"
 mkdir -p "$R/disc" "$R"/hdd/partition{1,2,3,4,5}
-cp -u "$WORK"/xb/private/ui/dash/*.xip "$WORK"/xb/private/ui/dash/*.xtf "$R/hdd/partition2/"
-cp -ru "$WORK/xb/private/ui/dash/Audio" "$WORK/xb/private/ui/dash/Fonts" "$R/hdd/partition2/" 2>/dev/null || true
+cp "$WORK"/dash/*.xip "$WORK"/dash/*.xtf "$R/hdd/partition2/"
+cp -ru "$WORK/dash/Audio" "$WORK/dash/Fonts" "$R/hdd/partition2/" 2>/dev/null || true
+mkdir -p "$R/hdd/partition1/Games"   # E:\Games: one folder per game, each with its default.xbe
 cp xboxdash.xbe "$R/hdd/partition2/"
 echo "built $WORK/xboxdash.xbe; run it with $HERE/run.sh $WORK"

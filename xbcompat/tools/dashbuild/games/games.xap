@@ -1,0 +1,254 @@
+//
+// The Games area: titles installed on the hard disk under E:\Games.
+// Not part of Microsoft's dashboard; added by xbcompat's dashbuild.  The
+// screen reuses the Music list scene (Games2 is a copy of Music2).
+//
+
+var gamesCount;
+var gamesScroll;
+var gamesSelect;
+var gamesButton;
+
+DEF theGameCollection GameCollection
+{
+}
+
+function FillGamesList()
+{
+    var c = theGamesMenu.children[0].children[0];
+
+    gamesCount = theGameCollection.Scan();
+
+    if (gamesCount == 1)
+        c.MusicCountText.text = gamesCount + " " + theTranslator.Translate("ITEM");
+    else
+        c.MusicCountText.text = gamesCount + " " + theTranslator.Translate("ITEMS");
+
+    if (gamesSelect >= gamesCount)
+    {
+        gamesScroll = 0;
+        gamesSelect = 0;
+        gamesButton = 0;
+    }
+
+    UpdateGamesList();
+}
+
+function UpdateGamesMetaData()
+{
+    var c = theGamesMenu.children[0].children[0];
+
+    if (gamesCount == 0)
+    {
+        c.MusicType.text = "";
+        c.TrackNum.text = "No games found";
+        c.TimeNum.text = "E:\\GAMES";
+        return;
+    }
+
+    c.MusicType.text = theTranslator.Translate("GAMES");
+    c.TrackNum.text = theGameCollection.GetGameFolder(gamesSelect);
+    c.TimeNum.text = "ID " + theGameCollection.GetGameTitleID(gamesSelect);
+}
+
+function UpdateGamesList()
+{
+    var c = theGamesMenu.children[0].children[0];
+
+    for (var i = 0; i < 8; i = i + 1)
+    {
+        var nGame = gamesScroll + i;
+
+        if (nGame >= gamesCount)
+        {
+            c.MenuButtons.children[i].visible = false;
+        }
+        else
+        {
+            c.MenuButtons.children[i].children[1].children[0].geometry.text = theGameCollection.GetGameName(nGame);
+            c.MenuButtons.children[i].visible = true;
+
+            if (i == gamesButton)
+            {
+                if (i == 0)
+                    c.MU_morearrow_up.children[0].appearance.material.name = "HilightedType";
+                else
+                    c.MU_morearrow_up.children[0].appearance.material.name = "NavType";
+
+                if (i == 7)
+                    c.MU_morearrow_down.children[0].appearance.material.name = "HilightedType";
+                else
+                    c.MU_morearrow_down.children[0].appearance.material.name = "NavType";
+
+                c.MenuButtons.children[i].children[0].children[0].appearance.material.name = "GameHilite";
+                c.MenuButtons.children[i].children[0].children[0].appearance.texture.url = "GameHilite_01.bmp";
+                c.MenuButtons.children[i].children[1].children[0].appearance.name = "HilightedType";
+            }
+            else
+            {
+                c.MenuButtons.children[i].children[0].children[0].appearance.material.name = "GameHilite";
+                c.MenuButtons.children[i].children[0].children[0].appearance.texture.url = "outline.tga";
+                c.MenuButtons.children[i].children[1].children[0].appearance.name = "NavType";
+            }
+        }
+    }
+
+    c.MU_morearrow_down.visible = (gamesCount - gamesScroll > 8);
+    c.MU_morearrow_up.visible = (gamesScroll > 0);
+
+    UpdateGamesMetaData();
+}
+
+DEF theGamesMenu Level
+{
+    archive "Games2.xip"
+
+    children
+    [
+        Inline
+        {
+            url "Games2/default.xap"
+
+            function onLoad()
+            {
+                gamesScroll = 0;
+                gamesSelect = 0;
+                gamesButton = 0;
+                FillGamesList();
+            }
+        }
+    ]
+
+    shell Transform
+    {
+        scale 21.504 21.504 21.504
+        translation -44.599998 54.270000 -186.500000
+        children
+        [
+            Waver
+            {
+                rpm 0.75
+                children
+                [
+                    Shape
+                    {
+                        appearance Appearance
+                        {
+                            material MaxMaterial
+                            {
+                                name "InnerWall_01"
+                            }
+                            texture ImageTexture
+                            {
+                                alpha true
+                                url "cellwall.bmp"
+                            }
+                        }
+                        geometry Mesh { url "Inner_cell-FACES.xm" }
+                    }
+                    Shape
+                    {
+                        appearance Appearance
+                        {
+                            material MaxMaterial
+                            {
+                                name "InnerWall_02"
+                            }
+                        }
+                        geometry Sphere
+                        {
+                            radius 1.0
+                        }
+                    }
+                ]
+            }
+        ]
+    }
+
+    tunnel Transform
+    {
+        children
+        [
+            Shape
+            {
+                appearance Appearance { material MaxMaterial { name "Tubes" } }
+                geometry Mesh { url "Music/Tunnel_01-FACES.xm" }
+            }
+        ]
+    }
+
+    path Viewpoint
+    {
+        fieldOfView 1.287000
+        orientation 0.015660 0.999900 0.001474 -0.187700
+        position -47.840000 53.889999 -172.199997
+        jump false
+    }
+
+    control Joystick
+    {
+        function OnADown()
+        {
+            var c = theGamesMenu.children[0].children[0];
+            c.MU_select_pod_HL.children[0].appearance.material.param = 1;
+
+            PlaySoundA();
+
+            if (gamesCount > 0)
+            {
+                EnableInput(false);
+                theGameCollection.LaunchGame(gamesSelect);
+            }
+        }
+
+        function OnBDown()
+        {
+            var c = theGamesMenu.children[0].children[0];
+            c.MU_back_pod_HL.children[0].appearance.material.param = 1;
+
+            PlaySoundB();
+
+            theMainMenu.GoBackTo();
+            theGamesMenuOut.Play();
+        }
+
+        function OnMoveUp()
+        {
+            if (gamesSelect <= 0)
+                return;
+
+            PlaySoundMenuChange();
+
+            gamesSelect = gamesSelect - 1;
+            if (gamesButton == 0)
+                gamesScroll = gamesScroll - 1;
+            else
+                gamesButton = gamesButton - 1;
+
+            UpdateGamesList();
+        }
+
+        function OnMoveDown()
+        {
+            if (gamesSelect >= gamesCount - 1)
+                return;
+
+            PlaySoundMenuChange();
+
+            gamesSelect = gamesSelect + 1;
+            if (gamesButton == 7)
+                gamesScroll = gamesScroll + 1;
+            else
+                gamesButton = gamesButton + 1;
+
+            UpdateGamesList();
+        }
+    }
+
+    function OnActivate()
+    {
+        EnableAmbientAudio();
+        if (children[0].children.length() > 0)
+            FillGamesList();
+    }
+}
