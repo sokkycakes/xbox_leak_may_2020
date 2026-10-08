@@ -372,6 +372,21 @@ static void debug_dump_draw(void)
     save_screenshot(path);
 }
 
+/* Debug aid: XBCOMPAT_DUMP_TEXTURES=dir saves every 2D texture as it is
+   uploaded, as dir/tex_<data>_<format>_<n>.bmp. */
+static void debug_dump_texture(GLenum target, ULONG data, ULONG fmt, ULONG w, ULONG h)
+{
+    static const char *dir; static int checked, n;
+    if (!checked) { dir = getenv("XBCOMPAT_DUMP_TEXTURES"); checked = 1; }
+    if (!dir || target != GL_TEXTURE_2D) return;
+    SDL_Surface *s = SDL_CreateRGBSurfaceWithFormat(0, w, h, 32, SDL_PIXELFORMAT_ARGB8888);
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_BGRA, GL_UNSIGNED_BYTE, s->pixels);
+    char path[512];
+    snprintf(path, sizeof path, "%s/tex_%08x_%02x_%04d.bmp", dir, data, fmt, n++);
+    SDL_SaveBMP(s, path);
+    SDL_FreeSurface(s);
+}
+
 /* The title wrote the back buffer through LockRect (XFONT text, software
    effects): put its memory back on screen before GL draws over it. */
 static void (APIENTRY *p_glWindowPos2i)(GLint, GLint);
@@ -965,6 +980,7 @@ static GLuint texture_for(D3DPixelContainer *t)
         upload_image(GL_TEXTURE_2D, fmt, w, h, pitch, src);
     }
     TRACE("D3D: uploaded %ux%u texture format %#x%s", w, h, fmt, target == GL_TEXTURE_CUBE_MAP ? " (cube)" : "");
+    debug_dump_texture(target, t->res.Data, fmt, w, h);
 
     tex_entry *e = malloc(sizeof(*e));
     *e = (tex_entry){ t->res.Data, t->Format, t->Size, id, target, tex_cache };
@@ -2987,8 +3003,14 @@ static void NTAPI D3DSurface_LockRect(D3DSurface *s, ULONG *locked, const LONG *
         if (!(flags & 0x10 /* D3DLOCK_READONLY */)) d3d.bb_cpu_dirty = true;
     }
     if (s->Parent && !(flags & 0x80)) tex_invalidate(s->Parent->res.Data);
+    ULONG fmt = (s->Format >> 8) & 0xFF, offset = rect ? rect[1] * pitch + rect[0] * (pitch / w) : 0;
+    if (fmt == 0x0C || fmt == 0x0E || fmt == 0x0F) {   /* rows of 4x4 blocks, as in lock_level */
+        ULONG block = fmt == 0x0C ? 8 : 16;
+        pitch = ((w + 3) / 4) * block;
+        offset = rect ? (rect[1] / 4) * pitch + (rect[0] / 4) * block : 0;
+    }
     locked[0] = pitch;
-    locked[1] = (s->Data | CONTIG_BASE) + (rect ? rect[1] * pitch + rect[0] * (pitch / w) : 0);
+    locked[1] = (s->Data | CONTIG_BASE) + offset;
 }
 
 static LONG NTAPI D3DDevice_CreateImageSurface(UINT_ w, UINT_ h, ULONG fmt, D3DSurface **pp)
@@ -3162,11 +3184,20 @@ static void lock_level(D3DPixelContainer *t, ULONG face, ULONG level, ULONG *loc
     bool linear;
     int bits = format_bits((t->Format >> 8) & 0xFF, &linear);
     for (ULONG i = 0; i < level; i++) { if (w > 1) w >>= 1; if (h > 1) h >>= 1; }
-    if (!linear) pitch = w * bits / 8;
+    ULONG fmt = (t->Format >> 8) & 0xFF, offset = rect ? rect[1] * pitch + rect[0] * bits / 8 : 0;
+    if (fmt == 0x0C || fmt == 0x0E || fmt == 0x0F) {
+        /* Compressed levels are rows of 4x4 blocks; the pitch is one such row
+           (PixelJar: Width * 2 for DXT1, Width * 4 otherwise). */
+        ULONG block = fmt == 0x0C ? 8 : 16;
+        pitch = ((w + 3) / 4) * block;
+        offset = rect ? (rect[1] / 4) * pitch + (rect[0] / 4) * block : 0;
+    } else if (!linear) {
+        pitch = w * bits / 8;
+        offset = rect ? rect[1] * pitch + rect[0] * bits / 8 : 0;
+    }
     if (!(flags & 0x80)) tex_invalidate(t->res.Data);
     locked[0] = pitch;
-    locked[1] = (t->res.Data | CONTIG_BASE) + level_offset(t, level) + face * cube_face_bytes(t) +
-                (rect ? rect[1] * pitch + rect[0] * bits / 8 : 0);
+    locked[1] = (t->res.Data | CONTIG_BASE) + level_offset(t, level) + face * cube_face_bytes(t) + offset;
 }
 
 static void NTAPI D3DTexture_LockRect(D3DPixelContainer *t, UINT_ level, ULONG *locked, const LONG *rect, ULONG flags)
