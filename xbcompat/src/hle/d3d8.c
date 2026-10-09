@@ -590,6 +590,7 @@ static void NTAPI D3DDevice_Clear(ULONG Count, const D3DRECT *pRects, ULONG Flag
         return;
     }
     TRACE("D3D: Clear(%u rects, flags %#x, color %#x, z %g)", Count, Flags, Color, Z);
+    flush_cpu_backbuffer();   /* earlier CPU writes go under the clear, not over it at Present */
     GLbitfield mask = 0;
     if (Flags & 0xF0) {
         glClearColor(((Color >> 16) & 255) / 255.0f, ((Color >> 8) & 255) / 255.0f, (Color & 255) / 255.0f,
@@ -3578,8 +3579,12 @@ static void NTAPI D3DSurface_LockRect(D3DSurface *s, ULONG *locked, const LONG *
 {
     ULONG w, h, pitch;
     container_size((D3DPixelContainer *)s, &w, &h, &pitch);
-    if (s == d3d.backbuffer) {
-        /* Hand out the real pixels: read the frame back. */
+    if (s == d3d.backbuffer && !d3d.bb_cpu_dirty) {
+        /* Hand out the real pixels: read the frame back.  Not while memory
+           holds writes from an earlier lock: GL hasn't seen them yet (a draw
+           flushes them first), so memory is already the newest frame, and
+           reading GL back would erase them.  XFONT locks once per TextOut,
+           so every string but a frame's last went missing. */
         uint8_t *px = (uint8_t *)(s->Data | CONTIG_BASE);
         uint8_t *tmp = malloc(w * h * 4);
         backbuffer_read_begin(GL_COLOR_BUFFER_BIT);
@@ -3587,8 +3592,8 @@ static void NTAPI D3DSurface_LockRect(D3DSurface *s, ULONG *locked, const LONG *
         backbuffer_read_end();
         for (ULONG y = 0; y < h; y++) memcpy(px + y * pitch, tmp + (h - 1 - y) * w * 4, w * 4);
         free(tmp);
-        if (!(flags & 0x10 /* D3DLOCK_READONLY */)) d3d.bb_cpu_dirty = true;
     }
+    if (s == d3d.backbuffer && !(flags & 0x10 /* D3DLOCK_READONLY */)) d3d.bb_cpu_dirty = true;
     if (s->Parent && !(flags & 0x80)) tex_invalidate(s->Parent->res.Data);
     ULONG fmt = (s->Format >> 8) & 0xFF, offset = rect ? rect[1] * pitch + rect[0] * (pitch / w) : 0;
     if (fmt == 0x0C || fmt == 0x0E || fmt == 0x0F) {   /* rows of 4x4 blocks, as in lock_level */
