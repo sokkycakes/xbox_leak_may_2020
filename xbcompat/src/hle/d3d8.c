@@ -499,8 +499,12 @@ static void save_screenshot(const char *path)
 /* Debug aid: XBCOMPAT_DUMP_DRAWS=dir saves the current target after every
    draw of one frame (XBCOMPAT_DUMP_FRAME, default the first) as
    dir/drawNNN.bmp. */
+/* Work counted for XBCOMPAT_LOG_FPS: what a slow frame spends its time on. */
+static struct { unsigned draws, uploads, readbacks, shaders; } stats;
+
 static void debug_dump_draw(void)
 {
+    stats.draws++;
     static const char *dir; static int checked, n; static ULONG frame;
     if (!checked) {
         dir = getenv("XBCOMPAT_DUMP_DRAWS");
@@ -620,7 +624,10 @@ static void log_fps(void)
     if (!since) since = now;
     frames++;
     if (now - since >= 5000) {
-        xlog("D3D: %.1f fps", frames * 1000.0 / (double)(now - since));
+        xlog("D3D: %.1f fps; per frame %u draws, %u texture uploads, %u readbacks, %u shader compiles",
+             frames * 1000.0 / (double)(now - since), stats.draws / frames, stats.uploads / frames,
+             stats.readbacks / frames, stats.shaders / frames);
+        memset(&stats, 0, sizeof(stats));
         since = now;
         frames = 0;
     }
@@ -1210,6 +1217,7 @@ static void (APIENTRY *p_glBindFramebuffer)(GLenum, GLuint);   /* loaded with th
    memory (top row first), the way the NV2A keeps them in RAM. */
 static void readback_surface(D3DSurface *s, bool depth)
 {
+    stats.readbacks++;
     ULONG w, h, pitch;
     container_size((D3DPixelContainer *)s, &w, &h, &pitch);
     if (w > (ULONG)d3d.width) w = d3d.width;
@@ -1265,6 +1273,7 @@ static GLuint texture_for(D3DPixelContainer *t)
     } else {
         upload_image(GL_TEXTURE_2D, fmt, w, h, pitch, src);
     }
+    stats.uploads++;
     TRACE("D3D: uploaded %ux%u texture format %#x%s", w, h, fmt, target == GL_TEXTURE_CUBE_MAP ? " (cube)" : "");
     debug_dump_texture(target, t->res.Data, fmt, w, h);
 
@@ -1966,6 +1975,7 @@ static GLuint compile_shader(GLenum kind, const char *src)
     TRACE("D3D: compiling %s shader %u", kind == GL_VERTEX_SHADER ? "vertex" : "fragment", sh);
     p_glShaderSource(sh, 1, &src, NULL);
     p_glCompileShader(sh);
+    stats.shaders++;
     GLint ok = 0;
     p_glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
     if (!ok) {
@@ -3624,6 +3634,7 @@ static GLuint surface_rt_texture(D3DSurface *s, ULONG w, ULONG h)
 static bool readback_rt_surface(D3DSurface *s)
 {
     if (s->Parent || s == d3d.backbuffer) return false;
+    stats.readbacks++;
     for (tex_entry *e = tex_cache; e; e = e->next) {
         if (e->data != s->Data || e->format != s->Format || e->size != s->Size) continue;
         ULONG w, h, pitch;
