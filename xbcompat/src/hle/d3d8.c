@@ -27,6 +27,7 @@
 
 /* Set at device creation: see rgba_colors. */
 static bool rgba_vertex_colors;
+static bool vc4;   /* the Raspberry Pi's GPU */
 
 typedef ULONG UINT_;
 
@@ -355,7 +356,8 @@ static LONG NTAPI Direct3D_CreateDevice(UINT_ Adapter, ULONG DeviceType, PVOID p
        converts them on every draw, and that path crashes in vc4 (indexed
        draws from client arrays). Swizzle them ourselves instead. */
     const char *renderer = (const char *)glGetString(GL_RENDERER);
-    rgba_vertex_colors = (renderer && strstr(renderer, "VC4")) || getenv("XBCOMPAT_RGBA_VERTEX_COLORS");
+    vc4 = renderer && strstr(renderer, "VC4");
+    rgba_vertex_colors = vc4 || getenv("XBCOMPAT_RGBA_VERTEX_COLORS");
 
     for (int i = 0; i < 10; i++) identity(&d3d.transforms[i]);
     d3d.viewport = (D3DVIEWPORT8){ 0, 0, d3d.width, d3d.height, 0, 1 };
@@ -3193,8 +3195,13 @@ static void create_window_framebuffer(void)
     window_fb.blit = SDL_GL_GetProcAddress("glBlitFramebuffer");
     if (!p_glGenFramebuffers || !window_fb.blit) return;
     window_fb.samples = multisample_samples(d3d.multisample_type, &window_fb.soft);
+    /* On VC4, 4x multisampling cost two thirds of the dashboard's frame
+       rate (3 fps against 10): draw single-sampled but keep the title's
+       soft downsample filter, which carries most of its look. */
+    bool keep_soft = vc4 && !getenv("XBCOMPAT_MSAA");
+    if (vc4) window_fb.samples = 1;
     window_fb.samples = env_int("XBCOMPAT_MSAA", window_fb.samples);
-    if (window_fb.samples <= 1) window_fb.samples = 1, window_fb.soft = 0;
+    if (window_fb.samples <= 1) window_fb.samples = 1, window_fb.soft = keep_soft ? window_fb.soft : 0;
     GLint max = 0;
     glGetIntegerv(GL_MAX_SAMPLES, &max);
     if (window_fb.samples > max) window_fb.samples = max > 1 ? max : 1;
