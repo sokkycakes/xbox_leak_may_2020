@@ -246,7 +246,7 @@ static int show(const uint8_t *px, uint32_t w, uint32_t h)
 static void take_over(const uint8_t *px, uint32_t w, uint32_t h, int wait_ms)
 {
     if (set_master(wait_ms)) {
-        say("the display is still someone else's");
+        if (state != WAIT) say("the display is someone else's; waiting for it");
         state = WAIT;
         return;
     }
