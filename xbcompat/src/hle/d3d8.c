@@ -350,6 +350,9 @@ static LONG NTAPI Direct3D_CreateDevice(UINT_ Adapter, ULONG DeviceType, PVOID p
     for (int i = 0; i < 10; i++) identity(&d3d.transforms[i]);
     d3d.viewport = (D3DVIEWPORT8){ 0, 0, d3d.width, d3d.height, 0, 1 };
     default_render_states();
+    /* The library's device init turns the z test on when it made a depth
+       buffer (dxgcreate.cpp); Torque titles (Marble Blast) never set it. */
+    RS(D3DRS_ZENABLE) = pp->EnableAutoDepthStencil ? 1 /* D3DZB_TRUE */ : 0;
     d3d.material[0][0] = d3d.material[0][1] = d3d.material[0][2] = d3d.material[0][3] = 1;
     d3d.back_material[0][0] = d3d.back_material[0][1] = d3d.back_material[0][2] = d3d.back_material[0][3] = 1;
     d3d.device_refs = 1;
