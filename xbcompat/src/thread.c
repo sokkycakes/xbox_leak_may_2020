@@ -172,7 +172,7 @@ typedef ULONG (NTAPI *start_fn)(PVOID);
 typedef void (NTAPI *system_fn)(PVOID, PVOID);
 
 static pthread_mutex_t start_lock = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t start_cond = PTHREAD_COND_INITIALIZER;
+static pthread_cond_t start_cond XBC_COND_ALIGN = PTHREAD_COND_INITIALIZER;
 
 static void *thread_main(void *arg)
 {

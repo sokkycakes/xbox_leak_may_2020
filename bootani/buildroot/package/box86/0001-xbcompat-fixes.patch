@@ -10,6 +10,8 @@ Subject: [PATCH] Fixes for running xbcompat (i386) under box86
 - __isoc23_sscanf maps to the va_list scanf (was the varargs one, which
   smashed the stack).
 - SDL2: wrap SDL_GetTicks64 and the virtual joystick calls.
+- Take SIGSEGV/SIGBUS/SIGILL back from native libraries (SDL's evdev
+  keyboard code) when the x86 program sets a handler for one.
 
 diff --git a/src/custommem.c b/src/custommem.c
 index a8cdfd1..e0cb8ae 100644
@@ -84,6 +86,50 @@ index 654d196..af308cc 100755
          SUPER()
      }
      #undef GO
+diff --git a/src/libtools/signals.c b/src/libtools/signals.c
+index a995f27..91e2e90 100755
+--- a/src/libtools/signals.c
++++ b/src/libtools/signals.c
+@@ -807,6 +807,18 @@ static pthread_mutex_t mutex_dynarec_prot = PTHREAD_ERRORCHECK_MUTEX_INITIALIZER
+ extern int box86_quit;
+ extern int box86_exit_code;
+ 
++void my_box86signalhandler(int32_t sig, siginfo_t* info, void * ucntx);
++// A native library (SDL's evdev keyboard code) may have taken one of these
++// over, and re-raises what it catches, hiding the real fault and breaking
++// the dynarec's own SIGSEGV use: take it back when the x86 side sets one.
++static void reinstall_box86_handler(int signum)
++{
++    struct sigaction action = {0};
++    action.sa_flags = SA_SIGINFO | SA_RESTART | SA_NODEFER;
++    action.sa_sigaction = my_box86signalhandler;
++    sigaction(signum, &action, NULL);
++}
++
+ void my_box86signalhandler(int32_t sig, siginfo_t* info, void * ucntx)
+ {
+     // sig==SIGSEGV || sig==SIGBUS || sig==SIGILL here!
+@@ -1162,8 +1174,10 @@ EXPORT sighandler_t my_signal(x86emu_t* emu, int signum, sighandler_t handler)
+     my_context->is_sigaction[signum] = 0;
+     my_context->restorer[signum] = 0;
+     my_context->onstack[signum] = 0;
+-    if(signum==SIGSEGV || signum==SIGBUS || signum==SIGILL)
++    if(signum==SIGSEGV || signum==SIGBUS || signum==SIGILL) {
++        reinstall_box86_handler(signum);
+         return 0;
++    }
+     if(handler!=NULL && handler!=(sighandler_t)1) {
+         struct sigaction newact = {0};
+         struct sigaction oldact = {0};
+@@ -1216,6 +1230,8 @@ int EXPORT my_sigaction(x86emu_t* emu, int signum, const x86_sigaction_t *act, x
+     int ret = 0;
+     if(signum!=SIGSEGV && signum!=SIGBUS && signum!=SIGILL)
+         sigaction(signum, act?&newact:NULL, oldact?&old:NULL);
++    else if(act)
++        reinstall_box86_handler(signum);
+     if(oldact) {
+         oldact->sa_flags = old.sa_flags;
+         oldact->sa_mask = old.sa_mask;
 diff --git a/src/wrapped/wrappedlibc.c b/src/wrapped/wrappedlibc.c
 index fa6dc2e..536a218 100755
 --- a/src/wrapped/wrappedlibc.c
