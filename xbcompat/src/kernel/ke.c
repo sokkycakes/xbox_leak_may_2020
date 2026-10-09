@@ -8,10 +8,14 @@
  * concept.
  */
 #define _GNU_SOURCE
+#include <elf.h>
 #include <errno.h>
 #include <sched.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/auxv.h>
+#include <sys/mman.h>
+#include <sys/prctl.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -77,6 +81,119 @@ ULONGLONG NTAPI KeQueryPerformanceCounter(void)
 ULONGLONG NTAPI KeQueryPerformanceFrequency(void)
 {
     return XBOX_PERF_FREQ;
+}
+
+/* ---- the CPU's time stamp counter -------------------------------------
+
+   Titles time frames with rdtsc and take it to tick at the Xbox CPU's
+   733 MHz: XAPI's QueryPerformanceCounter is a bare rdtsc and its
+   QueryPerformanceFrequency returns 733333333.  On the host it ticks at the
+   host's rate (2.1 GHz here), so frame timers saw time pass up to several
+   times too fast: the ATG samples showed 28 fps while running at 60, and
+   games that move by elapsed time ran that much faster.
+
+   So guest threads run with the time stamp counter disabled
+   (PR_SET_TSC), and the fault handler answers each rdtsc with the guest
+   clock at 733 MHz, counted from when xbcompat started as an Xbox counts
+   from power-on.  glibc's clock_gettime and gettimeofday read the counter
+   inside the vDSO, which would fault too (and in SDL's handlers while SDL
+   holds them), so those vDSO entries are pointed at the plain system calls
+   first.  If any of that is refused, the counter stays the host's.
+   XBCOMPAT_HOST_TSC=1 keeps the host's counter on purpose. */
+
+#define XBOX_TSC_FREQ 733333333ULL
+
+static bool tsc_trapped;
+
+static void __attribute__((naked, used)) sys_clock_gettime(void)
+{
+    __asm__("push %ebx\n\tmov 8(%esp), %ebx\n\tmov 12(%esp), %ecx\n\t"
+            "mov $265, %eax\n\tint $0x80\n\tpop %ebx\n\tret");
+}
+
+static void __attribute__((naked, used)) sys_clock_gettime64(void)
+{
+    __asm__("push %ebx\n\tmov 8(%esp), %ebx\n\tmov 12(%esp), %ecx\n\t"
+            "mov $403, %eax\n\tint $0x80\n\tpop %ebx\n\tret");
+}
+
+static void __attribute__((naked, used)) sys_gettimeofday(void)
+{
+    __asm__("push %ebx\n\tmov 8(%esp), %ebx\n\tmov 12(%esp), %ecx\n\t"
+            "mov $78, %eax\n\tint $0x80\n\tpop %ebx\n\tret");
+}
+
+/* Point the vDSO's clock functions at system calls that don't read the
+   counter.  Returns false if the vDSO can't be found or written. */
+static bool vdso_use_syscalls(void)
+{
+    uint8_t *base = (uint8_t *)getauxval(AT_SYSINFO_EHDR);
+    if (!base) return true;   /* no vDSO: glibc already makes system calls */
+    Elf32_Ehdr *eh = (Elf32_Ehdr *)base;
+    Elf32_Phdr *ph = (Elf32_Phdr *)(base + eh->e_phoff);
+    Elf32_Addr bias = 0, lo = ~0u, hi = 0;
+    for (int i = 0; i < eh->e_phnum; i++)
+        if (ph[i].p_type == PT_LOAD) {
+            if (ph[i].p_vaddr < lo) lo = ph[i].p_vaddr;
+            if (ph[i].p_vaddr + ph[i].p_memsz > hi) hi = ph[i].p_vaddr + ph[i].p_memsz;
+        }
+    if (lo == ~0u) return false;
+    bias = (Elf32_Addr)base - lo;
+    Elf32_Shdr *sh = (Elf32_Shdr *)(base + eh->e_shoff);
+    Elf32_Sym *syms = NULL;
+    const char *strs = NULL;
+    unsigned nsyms = 0;
+    for (int i = 0; i < eh->e_shnum; i++)
+        if (sh[i].sh_type == SHT_DYNSYM) {
+            syms = (Elf32_Sym *)(base + sh[i].sh_offset);
+            nsyms = sh[i].sh_size / sizeof(Elf32_Sym);
+            strs = (const char *)(base + sh[sh[i].sh_link].sh_offset);
+        }
+    if (!syms) return false;
+
+    static const struct { const char *name; void (*to)(void); } redirects[] = {
+        { "__vdso_clock_gettime", sys_clock_gettime },
+        { "__vdso_clock_gettime64", sys_clock_gettime64 },
+        { "__vdso_gettimeofday", sys_gettimeofday },
+    };
+    uintptr_t page = sysconf(_SC_PAGESIZE);
+    uintptr_t start = (bias + lo) & ~(page - 1), end = (bias + hi + page - 1) & ~(page - 1);
+    if (mprotect((void *)start, end - start, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) return false;
+    for (unsigned i = 0; i < nsyms; i++) {
+        if (ELF32_ST_TYPE(syms[i].st_info) != STT_FUNC || !syms[i].st_value) continue;
+        for (size_t j = 0; j < sizeof redirects / sizeof redirects[0]; j++) {
+            if (strcmp(strs + syms[i].st_name, redirects[j].name)) continue;
+            uint8_t *at = (uint8_t *)(bias + syms[i].st_value);
+            int32_t rel = (int32_t)((uintptr_t)redirects[j].to - (uintptr_t)(at + 5));
+            at[0] = 0xE9;   /* jmp rel32 */
+            memcpy(at + 1, &rel, 4);
+        }
+    }
+    mprotect((void *)start, end - start, PROT_READ | PROT_EXEC);
+    return true;
+}
+
+static void tsc_init(void)
+{
+    const char *e = getenv("XBCOMPAT_HOST_TSC");
+    if (e && *e && *e != '0') return;
+    if (!vdso_use_syscalls()) { xlog("rdtsc: the vDSO can't be patched; titles see the host's counter"); return; }
+    /* Try it on this thread; guest threads turn it on in thread_trap_tsc. */
+    if (prctl(PR_SET_TSC, PR_TSC_SIGSEGV, 0, 0, 0) != 0) { xlog("rdtsc: PR_SET_TSC refused; titles see the host's counter"); return; }
+    prctl(PR_SET_TSC, PR_TSC_ENABLE, 0, 0, 0);
+    tsc_trapped = true;
+}
+
+void thread_trap_tsc(void)
+{
+    if (tsc_trapped) prctl(PR_SET_TSC, PR_TSC_SIGSEGV, 0, 0, 0);
+}
+
+/* The counter a guest rdtsc reads: 733 MHz since xbcompat started. */
+ULONGLONG ke_guest_tsc(void)
+{
+    ULONGLONG t = mono_100ns() - boot_mono;   /* 100 ns units */
+    return t / 10000000ULL * XBOX_TSC_FREQ + t % 10000000ULL * XBOX_TSC_FREQ / 10000000ULL;
 }
 
 /* Absolute deadline (CLOCK_REALTIME based timespec) for a Ke timeout. */
@@ -546,6 +663,7 @@ void timers_init(void)
     pthread_cond_init(&dpc_cond, &ca);
     pthread_condattr_destroy(&ca);
     boot_mono = mono_100ns();
+    tsc_init();
     pthread_t t;
     pthread_create(&t, NULL, dpc_thread, NULL);
     pthread_detach(t);

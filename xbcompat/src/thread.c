@@ -64,6 +64,7 @@ xthread *thread_current(void)
 /* Build the guest-visible KPCR/ETHREAD for the calling host thread. */
 static void attach(xthread *t)
 {
+    thread_trap_tsc();
     KPCR *pcr = t->pcr;
     memset(pcr, 0, sizeof(*pcr));
     pcr->NtTib.ExceptionList = (PVOID)-1;

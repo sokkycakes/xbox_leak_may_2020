@@ -82,6 +82,8 @@ NTSTATUS wait_objects(ULONG count, PVOID objects[], int wait_any,
 void timers_init(void);
 void ke_frame_presented(void);   /* XBCOMPAT_FIXED_FPS clock step */
 ULONGLONG system_time_now(void);   /* 100 ns units since 1601 */
+ULONGLONG ke_guest_tsc(void);      /* what a guest rdtsc reads */
+void thread_trap_tsc(void);        /* make this thread's rdtsc fault into ke_guest_tsc */
 
 /* ---- handles ---------------------------------------------------------- */
 

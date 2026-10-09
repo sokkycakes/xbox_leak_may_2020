@@ -56,11 +56,25 @@ static bool privileged_insn(greg_t *r)
     return false;
 }
 
+/* rdtsc and rdtscp, which fault on guest threads (ke.c: thread_trap_tsc). */
+static bool read_tsc(greg_t *r)
+{
+    const uint8_t *ip = (const uint8_t *)r[REG_EIP];
+    int len = ip[0] == 0x0F && ip[1] == 0x31 ? 2 : ip[0] == 0x0F && ip[1] == 0x01 && ip[2] == 0xF9 ? 3 : 0;
+    if (!len) return false;
+    ULONGLONG t = ke_guest_tsc();
+    r[REG_EAX] = (ULONG)t;
+    r[REG_EDX] = (ULONG)(t >> 32);
+    if (len == 3) r[REG_ECX] = 0;   /* rdtscp's processor id */
+    r[REG_EIP] += len;
+    return true;
+}
+
 static void crash_handler(int sig, siginfo_t *si, void *uc_)
 {
     ucontext_t *uc = uc_;
     greg_t *r = uc->uc_mcontext.gregs;
-    if (sig == SIGSEGV && (debug_service(r) || privileged_insn(r))) return;
+    if (sig == SIGSEGV && (read_tsc(r) || debug_service(r) || privileged_insn(r))) return;
     if (sig == SIGTRAP) {
         /* int 3 (DbgBreakPoint and friends): nobody is listening, carry on. */
         xlog("breakpoint at eip=%08x ignored", r[REG_EIP]);
