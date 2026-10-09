@@ -272,39 +272,86 @@ static bool try_mount(disc *d, const char *dev)
 }
 
 /* What's on the medium at `path` (an image file or a drive with a disc). */
+/* Sector 32 of the disc as the log shows it, to tell what was burned. */
+static void log_sector32(disc *d, const char *how)
+{
+    uint8_t b[24];
+    d->base = 0;
+    if (!disc_read_raw(d, b, sizeof(b), 32 * SECTOR)) {
+        xlog("DVD: sector 32 can't be read %s: %s", how, strerror(errno));
+        return;
+    }
+    char hex[80], txt[32];
+    for (int i = 0; i < 24; i++) {
+        snprintf(hex + i * 3, 4, "%02x ", b[i]);
+        txt[i] = isprint(b[i]) ? b[i] : '.';
+    }
+    txt[24] = 0;
+    xlog("DVD: sector 32 %s: %s|%s|", how, hex, txt);
+}
+
+/* Look for XDVDFS at the start and at a pressed disc's game partition, read
+   through the block device and then with SG_IO (which doesn't depend on
+   the capacity the block device has settled on yet). */
+static bool find_xdvdfs(disc *d, bool drive)
+{
+    for (int sg = 0; sg <= (drive ? 1 : 0); sg++) {
+        d->sg = sg;
+        if (has_xdvdfs(d, 0) || has_xdvdfs(d, XGD1_BASE)) return true;
+    }
+    d->sg = false;
+    return false;
+}
+
+/* What's on the medium at `path` (an image file or a drive with a disc). */
 static disc *probe(const char *path, bool drive)
 {
     disc *d = calloc(1, sizeof(*d));
     pthread_mutex_init(&d->lock, NULL);
     d->kind = DISC_BAD;
+    if (drive) {
+        /* A plain open checks the disc and sets the device's capacity (an
+           O_NONBLOCK open doesn't); closing it again leaves the tray free. */
+        int t = open(path, O_RDONLY);
+        if (t >= 0) close(t);
+    }
     d->fd = open(path, O_RDONLY | (drive ? O_NONBLOCK : 0));
     if (d->fd < 0) {
         xlog("DVD: cannot open %s: %s", path, strerror(errno));
         return d;
     }
-    if (has_xdvdfs(d, 0)) {
+    /* A drive that has just closed its tray can say the disc is ready
+       before the first reads work: give it a few tries. */
+    bool found = false;
+    for (int tries = 0; tries < (drive ? 6 : 1) && !(found = find_xdvdfs(d, drive)); tries++) {
+        if (drive) {
+            struct timespec ts = { 2, 0 };
+            nanosleep(&ts, NULL);
+            int t = open(path, O_RDONLY);
+            if (t >= 0) close(t);
+        }
+    }
+    if (found) {
         d->kind = DISC_XDVDFS;
-        xlog("DVD: %s is an Xbox disc (XDVDFS)", path);
+        xlog("DVD: %s is an Xbox disc (XDVDFS%s%s)", path, d->base ? ", pressed-disc layout" : "",
+             d->sg ? ", read with SG_IO" : "");
         return d;
     }
-    if (has_xdvdfs(d, XGD1_BASE)) {
-        d->kind = DISC_XDVDFS;
-        xlog("DVD: %s is an Xbox game disc (its game partition is readable)", path);
-        return d;
-    }
+    log_sector32(d, "through the block device");
     if (drive) {
+        d->sg = true;
+        log_sector32(d, "with SG_IO");
         /* Kreon firmware: "set lock state" to Xtreme unlock, which shows
            the game partition of a pressed disc.  Other drives refuse it. */
         uint8_t cdb[12] = { 0xFF, 0x08, 0x01, 0x11, 0x01 };
         if (sg_cmd(d->fd, cdb, sizeof(cdb), NULL, 0)) {
-            d->sg = true;
             if (has_xdvdfs(d, XGD1_BASE)) {
                 d->kind = DISC_XDVDFS;
                 xlog("DVD: %s is a pressed Xbox game disc, unlocked by the drive's Kreon firmware", path);
                 return d;
             }
-            d->sg = false;
         }
+        d->sg = false;
         d->base = 0;
         if (try_mount(d, path) && dir_has_xbe(d->dir)) {
             d->kind = DISC_DIR;
