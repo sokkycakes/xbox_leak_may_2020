@@ -39,6 +39,8 @@ stop() {
 		sleep 0.3
 	done
 	killall -q -9 xbcompat
+	# The display keeper last: with it gone the console gets the display.
+	killall -q xbox-av
 	rm -f "$PIDFILE"
 	if [ "$status" -eq 0 ]; then
 		echo "OK"

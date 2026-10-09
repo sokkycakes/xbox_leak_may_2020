@@ -324,6 +324,7 @@ static LONG NTAPI Direct3D_CreateDevice(UINT_ Adapter, ULONG DeviceType, PVOID p
     xlog("D3D: CreateDevice %ux%u, format %#x, depth %s, multisample %#x", d3d.width, d3d.height,
          pp->BackBufferFormat, pp->EnableAutoDepthStencil ? "yes" : "no", pp->MultiSampleType);
 
+    av_title_starting();
     if (SDL_Init(SDL_INIT_VIDEO) != 0) fatal("SDL_Init: %s", SDL_GetError());
     install_fault_handlers();
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
@@ -425,6 +426,7 @@ static void (APIENTRY *p_glActiveTexture)(GLenum);
 static void draw_window_pixels(const uint8_t *tmp);
 static void present_overlay(void);
 static void restore_overlay(void);
+static LONG NTAPI D3DDevice_PersistDisplay(void);
 
 static void flush_cpu_backbuffer(void)
 {
@@ -557,6 +559,9 @@ static ULONG NTAPI D3DDevice_Swap(ULONG Flags)
     install_fault_handlers();
     if (g_exit_after_frames && (int)d3d.frame >= g_exit_after_frames) {
         xlog("D3D: %u frames presented, exiting", d3d.frame);
+        /* Leave the way a title does: XBCOMPAT_PERSIST=1 persists the frame first. */
+        if (getenv("XBCOMPAT_PERSIST")) D3DDevice_PersistDisplay();
+        av_hand_over();
         exit(0);
     }
     return d3d.frame;
@@ -5053,7 +5058,34 @@ static void NTAPI Direct3D_SetPushBufferSize(ULONG size, ULONG kickoff) { (void)
 static ULONG NTAPI D3DDevice_AddRef(void) { return ++d3d.device_refs; }
 static ULONG NTAPI D3DDevice_Release(void) { return d3d.device_refs > 1 ? --d3d.device_refs : 1; }
 static void NTAPI D3DDevice_GetDirect3D(PVOID *pp) { *pp = direct3d_object; }
-static LONG NTAPI D3DDevice_PersistDisplay(void) { return D3D_OK; }
+/* Leave the frame on screen for the next title (see kernel/av.c): what
+   Present would put on screen now, including anything drawn since the last
+   Present (ani2 draws the Microsoft logo into the front buffer and then
+   persists it). */
+static LONG NTAPI D3DDevice_PersistDisplay(void)
+{
+    if (!d3d.window) return D3DERR_INVALIDCALL;
+    flush_cpu_backbuffer();
+    int w = window_fb.fbo ? window_fb.w : (int)d3d.width, h = window_fb.fbo ? window_fb.h : (int)d3d.height;
+    uint8_t *px = malloc((size_t)w * h * 4), *flipped = malloc((size_t)w * h * 4);
+    if (!px || !flipped) { free(px); free(flipped); return D3DERR_INVALIDCALL; }
+    if (window_fb.fbo) {
+        present_window_framebuffer();
+        window_fb.bind(GL_READ_FRAMEBUFFER, 0);
+    } else {
+        backbuffer_read_begin(GL_COLOR_BUFFER_BIT);
+    }
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(0, 0, w, h, GL_BGRA, GL_UNSIGNED_BYTE, px);
+    if (window_fb.fbo) restore_window_framebuffer();
+    else backbuffer_read_end();
+    for (int y = 0; y < h; y++) memcpy(flipped + (size_t)y * w * 4, px + (size_t)(h - 1 - y) * w * 4, (size_t)w * 4);
+    av_persist(flipped, w, h);
+    free(px);
+    free(flipped);
+    xlog("D3D: PersistDisplay kept a %dx%d frame", w, h);
+    return D3D_OK;
+}
 
 /* Nothing survives a reboot here; hand out the back buffer so the title has a surface to read. */
 static LONG NTAPI D3DDevice_GetPersistedSurface(D3DSurface **pp)

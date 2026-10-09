@@ -172,6 +172,7 @@ static void relaunch(const char *path)
 void NTAPI HalReturnToFirmware(ULONG Routine)
 {
     const char *path = LaunchDataPage ? (const char *)LaunchDataPage + 8 : NULL;
+    av_hand_over();
     if (Routine == 2 && path && path[0]) relaunch(path);
     xlog("HalReturnToFirmware(%u): title asked to reboot or return to the dashboard", Routine);
     if (LaunchDataPage && *(ULONG *)LaunchDataPage /* dwLaunchDataType */) {
@@ -193,6 +194,7 @@ void NTAPI HalReturnToFirmware(ULONG Routine)
 void NTAPI HalInitiateShutdown(void)
 {
     xlog("HalInitiateShutdown");
+    av_hand_over();
     exit(0);
 }
 

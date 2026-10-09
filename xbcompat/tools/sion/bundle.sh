@@ -11,6 +11,7 @@
 # (bootani/buildroot/package/xbcompat) into /opt/xbcompat:
 #
 #   bin/xbcompat          xbcompat, built against the SDL2 below (GL=opengl)
+#   bin/xbox-av           holds the picture between titles (tools/sion/av)
 #   bin/xbrun             runs a title the way tools/xbrun.py does: builds its
 #                         library map first (so the dashboard can launch games)
 #   lib/                  glibc, SDL2 (KMSDRM, ALSA, udev; with the Sion's
@@ -142,6 +143,8 @@ echo "== assemble $OUT"
 rm -rf "$WORK/opt"
 mkdir -p "$OUT/bin" "$OUT/lib/dri" "$OUT/tools" "$OUT/boot" "$OUT/share/glvnd/egl_vendor.d" "$OUT/cache/xbcompat"
 cp "$WORK/xbcompat-build/xbcompat" "$OUT/bin/"
+# The display keeper, a static 64-bit program like the Sion's own.
+gcc -O2 -Wall -static -s -o "$OUT/bin/xbox-av" "$HERE/av/xbox-av.c"
 cp "$STAGE/XbSymbolDatabaseCLI" "$OUT/tools/"
 cp "$STAGE/usr/lib/libSDL2-2.0.so.0" "$STAGE"/usr/lib/libEGL_mesa.so.0 "$STAGE"/usr/lib/libgbm.so.1 \
    "$STAGE"/usr/lib/libglapi.so.0 "$OUT/lib/"
