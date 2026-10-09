@@ -37,6 +37,9 @@ void xlog(const char *fmt, ...)
     va_end(ap);
 }
 
+void install_fault_handlers(void) {}
+ULONG d3d_frame_count(void) { return 0; }
+
 void fatal(const char *fmt, ...)
 {
     va_list ap;
@@ -446,6 +449,81 @@ static void test_virtual_spec(void)
     force_sync();
 }
 
+/* An original Xbox pad laid out the way xpad reports it (10 buttons in key
+   code order with Black on b2 and White on b5, X Y Z RX RY RZ, one hat),
+   through the mapping xbcompat gives such pads. */
+static void test_original_pad(void)
+{
+    static const struct { int flags, buttons, axes, hats; } layouts[] = {
+        { 0, 10, 6, 1 },                                        /* Duke, Controller S */
+        { OG_DPAD_BUTTONS, 14, 6, 0 },                          /* dance pads */
+        { OG_DPAD_BUTTONS | OG_TRIGGER_BUTTONS | OG_NO_STICKS, 16, 0, 0 },
+    };
+    for (unsigned l = 0; l < sizeof(layouts) / sizeof(layouts[0]); l++) {
+        reset_hle();
+        XInitDevices(0, NULL);
+        SDL_VirtualJoystickDesc desc;
+        SDL_zero(desc);
+        desc.version = SDL_VIRTUAL_JOYSTICK_DESC_VERSION;
+        desc.type = SDL_JOYSTICK_TYPE_UNKNOWN;     /* no automatic virtual mapping */
+        desc.naxes = layouts[l].axes;
+        desc.nbuttons = layouts[l].buttons;
+        desc.nhats = layouts[l].hats;
+        desc.vendor_id = 0x045e;
+        desc.product_id = 0x0287;
+        desc.name = "Microsoft Xbox Controller S";
+        int index = SDL_JoystickAttachVirtualEx(&desc);
+        CHECK(index >= 0);
+        SDL_JoystickGUID guid = SDL_JoystickGetDeviceGUID(index);
+        guid.data[2] = guid.data[3] = 0;
+        char g[33], m[512];
+        SDL_JoystickGetGUIDString(guid, g, sizeof(g));
+        original_pad_mapping(g, layouts[l].flags, m, sizeof(m));
+        CHECK(SDL_GameControllerAddMapping(m) >= 0);
+        CHECK(SDL_IsGameController(index));
+        char *used = SDL_GameControllerMappingForDeviceIndex(index);
+        CHECK(used && strstr(used, "Xbox Controller (original)"));
+        SDL_free(used);
+        force_sync();
+        HANDLE h = XInputOpen(&fake_gamepad, 0, XDEVICE_NO_SLOT, NULL);
+        CHECK(h != NULL);
+        SDL_Joystick *js = SDL_JoystickFromInstanceID(xi.port[0].instance);
+        CHECK(js != NULL);
+        if (!js) continue;
+
+        bool dpad_buttons = layouts[l].flags & OG_DPAD_BUTTONS;
+        bool trig_buttons = layouts[l].flags & OG_TRIGGER_BUTTONS;
+        int back = trig_buttons ? 8 : 6;
+        SDL_JoystickSetVirtualButton(js, 2, 1);                 /* BTN_C: Black */
+        SDL_JoystickSetVirtualButton(js, 5, 1);                 /* BTN_Z: White */
+        SDL_JoystickSetVirtualButton(js, 0, 1);                 /* BTN_A */
+        SDL_JoystickSetVirtualButton(js, back + 1, 1);          /* BTN_START */
+        SDL_JoystickSetVirtualButton(js, back + 3, 1);          /* BTN_THUMBR */
+        if (dpad_buttons) SDL_JoystickSetVirtualButton(js, back + 4, 1);   /* BTN_DPAD_UP */
+        else SDL_JoystickSetVirtualHat(js, 0, SDL_HAT_UP);
+        if (trig_buttons) SDL_JoystickSetVirtualButton(js, 6, 1);          /* BTN_TL2 */
+        else {
+            SDL_JoystickSetVirtualAxis(js, 2, 32767);           /* ABS_Z */
+            SDL_JoystickSetVirtualAxis(js, 5, SDL_JOYSTICK_AXIS_MIN);   /* ABS_RZ at rest is 0 */
+        }
+        if (!(layouts[l].flags & OG_NO_STICKS)) SDL_JoystickSetVirtualAxis(js, 3, 20000);  /* ABS_RX */
+        XINPUT_STATE st;
+        settle(js, h);
+        CHECK(XInputGetState(h, &st) == ERROR_SUCCESS);
+        CHECK(st.Gamepad.bAnalogButtons[XINPUT_GAMEPAD_BLACK] == 255);
+        CHECK(st.Gamepad.bAnalogButtons[XINPUT_GAMEPAD_WHITE] == 255);
+        CHECK(st.Gamepad.bAnalogButtons[XINPUT_GAMEPAD_A] == 255);
+        CHECK(st.Gamepad.bAnalogButtons[XINPUT_GAMEPAD_B] == 0 && st.Gamepad.bAnalogButtons[XINPUT_GAMEPAD_X] == 0);
+        CHECK(st.Gamepad.bAnalogButtons[XINPUT_GAMEPAD_LEFT_TRIGGER] == 255);
+        CHECK(st.Gamepad.bAnalogButtons[XINPUT_GAMEPAD_RIGHT_TRIGGER] == 0);
+        CHECK(st.Gamepad.wButtons == (XINPUT_GAMEPAD_START | XINPUT_GAMEPAD_RIGHT_THUMB | XINPUT_GAMEPAD_DPAD_UP));
+        CHECK(st.Gamepad.sThumbRX == ((layouts[l].flags & OG_NO_STICKS) ? 0 : 20000));
+        XInputClose(h);
+        SDL_JoystickDetachVirtual(index);
+        force_sync();
+    }
+}
+
 int main(void)
 {
     make_type_info(fake_gamepad_ti, XID_TYPE_GAMEPAD, 4, &fake_gamepad);
@@ -463,6 +541,7 @@ int main(void)
     test_controller();
     test_prealloc();
     test_virtual_spec();
+    test_original_pad();
 
     printf("xinput_test: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
