@@ -21,6 +21,7 @@
 
 #include "../xbcompat.h"
 #include "hle.h"
+#include "../cpu.h"
 #include "nv2a_shaders.h"
 
 typedef ULONG UINT_;
@@ -554,7 +555,11 @@ static ULONG NTAPI D3DDevice_Swap(ULONG Flags)
     pace_present();
     if (d3d.vblank_callback) {
         ULONG data[3] = { d3d.frame, d3d.frame, 1 /* D3DVBLANK_SWAPDONE */ };
+#ifdef XBC_TRANSLATED
+        CPU_CALL(d3d.vblank_callback, CONV_CDECL, (uint32_t)data);
+#else
         ((void (CDECLAPI *)(ULONG *))d3d.vblank_callback)(data);
+#endif
     }
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
@@ -4150,8 +4155,12 @@ static void NTAPI D3DDevice_GetScissors(ULONG *Count, ULONG *Exclusive, D3DRECT 
 static void run_callbacks(void)
 {
     for (unsigned i = 0; i < d3d.ncallbacks; i++) {
+#ifdef XBC_TRANSLATED
+        CPU_CALL(d3d.callbacks[i].fn, CONV_CDECL, (uint32_t)d3d.callbacks[i].ctx);
+#else
         void (CDECLAPI *fn)(ULONG) = d3d.callbacks[i].fn;
         fn(d3d.callbacks[i].ctx);
+#endif
     }
     d3d.ncallbacks = 0;
 }

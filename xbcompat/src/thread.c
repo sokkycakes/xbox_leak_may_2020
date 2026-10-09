@@ -4,7 +4,9 @@
  * host C library uses GS for its own TLS on i386, so FS is ours.
  */
 #define _GNU_SOURCE
+#if defined(__i386__)
 #include <asm/ldt.h>
+#endif
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,12 +14,14 @@
 #include <unistd.h>
 
 #include "xbcompat.h"
+#include "cpu.h"
 
 static pthread_key_t current_key;
 static pthread_mutex_t ldt_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint8_t ldt_used[8192];
 static LONG next_thread_id = 1;
 
+#ifdef XBC_NATIVE
 static int ldt_alloc(void *base, uint32_t limit)
 {
     pthread_mutex_lock(&ldt_lock);
@@ -55,6 +59,10 @@ static void load_fs(int idx)
     uint16_t sel = (uint16_t)((idx << 3) | 7);   /* LDT, RPL 3 */
     __asm__ volatile("movw %0, %%fs" : : "r"(sel));
 }
+#else
+/* Translated guest code gets its fs base from the CPU emulator. */
+static void ldt_free(int idx) { (void)idx; }
+#endif
 
 xthread *thread_current(void)
 {
@@ -65,6 +73,13 @@ xthread *thread_current(void)
 static void attach(xthread *t)
 {
     thread_trap_tsc();
+#ifdef XBC_TRANSLATED
+    /* Guest code runs on a stack of its own in guest memory, as roomy as the
+       host stacks the native build gives guest threads. */
+    size_t guest_stack_size = t->stack_size * 4;
+    if (guest_stack_size < (1u << 20)) guest_stack_size = 1u << 20;
+    void *guest_stack = arena_alloc(guest_stack_size, 1);
+#endif
     KPCR *pcr = t->pcr;
     memset(pcr, 0, sizeof(*pcr));
     pcr->NtTib.ExceptionList = (PVOID)-1;
@@ -83,14 +98,22 @@ static void attach(xthread *t)
         pcr->NtTib.StackBase = (char *)t->tls_block + top + 16;
         t->ethread.Tcb.TlsData = (char *)pcr->NtTib.StackBase - t->tls_size;
     } else {
+#ifdef XBC_NATIVE
         pcr->NtTib.StackBase = (PVOID)((uintptr_t)__builtin_frame_address(0) & ~15u);
+#else
+        pcr->NtTib.StackBase = (char *)guest_stack + guest_stack_size;
+#endif
     }
     pcr->NtTib.StackLimit = (char *)pcr->NtTib.StackBase - t->stack_size;
     t->ethread.Tcb.StackBase = pcr->NtTib.StackBase;
     t->ethread.Tcb.StackLimit = pcr->NtTib.StackLimit;
 
+#ifdef XBC_NATIVE
     t->ldt_index = ldt_alloc(pcr, sizeof(*pcr) - 1);
     load_fs(t->ldt_index);
+#else
+    cpu_thread_attach(pcr, guest_stack, (char *)guest_stack + guest_stack_size);
+#endif
     pthread_setspecific(current_key, t);
 }
 
@@ -143,10 +166,17 @@ static void *thread_main(void *arg)
     if (setjmp(t->exit_jmp) == 0) {
         TRACE("thread %u starting at %p", (unsigned)(ULONG_PTR)t->ethread.UniqueThread,
               t->start_routine);
+#ifdef XBC_TRANSLATED
+        if (t->system_routine)
+            CPU_CALL(t->system_routine, CONV_STD, (uint32_t)t->start_routine, (uint32_t)t->start_context);
+        else
+            CPU_CALL(t->start_routine, CONV_STD, (uint32_t)t->start_context);
+#else
         if (t->system_routine)
             ((system_fn)t->system_routine)(t->start_routine, t->start_context);
         else
             ((start_fn)t->start_routine)(t->start_context);
+#endif
         t->ethread.ExitStatus = STATUS_SUCCESS;
     }
     /* Returned or PsTerminateSystemThread'ed: signal the thread object. */
@@ -158,6 +188,9 @@ static void *thread_main(void *arg)
     disp_signal_all();
     pthread_mutex_unlock(&g_disp_lock);
     ldt_free(t->ldt_index);
+#ifdef XBC_TRANSLATED
+    cpu_thread_detach();
+#endif
     return NULL;
 }
 

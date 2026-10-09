@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "../xbcompat.h"
+#include "../cpu.h"
 
 /* ---- memory ----------------------------------------------------------- */
 
@@ -361,6 +362,7 @@ typedef struct REGISTRATION {
 #define EXCEPTION_EXIT_UNWIND    0x04
 #define END_OF_CHAIN             ((REGISTRATION *)-1)
 
+#ifdef XBC_NATIVE
 static REGISTRATION *seh_head(void)
 {
     REGISTRATION *r;
@@ -372,6 +374,22 @@ static void seh_set_head(REGISTRATION *r)
 {
     __asm__ volatile("movl %0, %%fs:0" : : "r"(r));
 }
+
+#define CALL_HANDLER(r, rec, ctx, disp) (r)->Handler(rec, r, ctx, disp)
+#else
+static REGISTRATION *seh_head(void)
+{
+    return (REGISTRATION *)thread_current()->pcr->NtTib.ExceptionList;
+}
+
+static void seh_set_head(REGISTRATION *r)
+{
+    thread_current()->pcr->NtTib.ExceptionList = (PVOID)r;
+}
+
+#define CALL_HANDLER(r, rec, ctx, disp) \
+    (ULONG)CPU_CALL((r)->Handler, CONV_CDECL, (uint32_t)(rec), (uint32_t)(r), (uint32_t)(ctx), (uint32_t)(disp))
+#endif
 
 /* An i386 CONTEXT is 0x2CC bytes; handlers only look at a few registers. */
 typedef struct { ULONG raw[0x2CC / 4]; } CONTEXT;
@@ -385,7 +403,7 @@ void NTAPI RtlRaiseException(EXCEPTION_RECORD *rec)
          rec->NumberParameters);
     for (REGISTRATION *r = seh_head(); r && r != END_OF_CHAIN; r = r->Next) {
         PVOID dispatcher = NULL;
-        ULONG disp = r->Handler(rec, r, &ctx, &dispatcher);
+        ULONG disp = CALL_HANDLER(r, rec, &ctx, &dispatcher);
         if (disp == 0 /* ExceptionContinueExecution */) {
             if (rec->ExceptionFlags & EXCEPTION_NONCONTINUABLE)
                 fatal("handler tried to continue a noncontinuable exception %#x", rec->ExceptionCode);
@@ -413,7 +431,7 @@ void NTAPI RtlUnwind(REGISTRATION *TargetFrame, PVOID TargetIp, EXCEPTION_RECORD
     REGISTRATION *r = seh_head();
     while (r && r != END_OF_CHAIN && r != TargetFrame) {
         PVOID dispatcher = NULL;
-        r->Handler(rec, r, &ctx, &dispatcher);
+        CALL_HANDLER(r, rec, &ctx, &dispatcher);
         r = r->Next;
         seh_set_head(r);
     }
@@ -564,6 +582,33 @@ int CDECLAPI RtlSnprintf(char *buf, size_t size, const char *fmt, ...)
     va_end(ap);
     return (size_t)n >= size ? -1 : n;
 }
+
+#ifdef XBC_TRANSLATED
+static uint64_t xa_RtlSprintf_varargs(struct xa_frame *f)
+{
+    return (uint32_t)xa_format((char *)(uintptr_t)f->stack[0], 1 << 20, (const char *)(uintptr_t)f->stack[1],
+                               f->stack + 2);
+}
+
+static uint64_t xa_RtlSnprintf_varargs(struct xa_frame *f)
+{
+    size_t size = f->stack[1];
+    char tmp[4096];
+    int n = xa_format(tmp, sizeof(tmp), (const char *)(uintptr_t)f->stack[2], f->stack + 3);
+    if (size) {
+        size_t c = (size_t)n < size ? (size_t)n + 1 : size;
+        memcpy((char *)(uintptr_t)f->stack[0], tmp, c);
+        if ((size_t)n >= size) ((char *)(uintptr_t)f->stack[0])[size - 1] = 0;
+    }
+    return (uint32_t)((size_t)n >= size ? -1 : n);
+}
+
+static const struct xa_entry sprintf_entries[] = {
+    { (void *)RtlSprintf, xa_RtlSprintf_varargs, CONV_CDECL, "RtlSprintf" },
+    { (void *)RtlSnprintf, xa_RtlSnprintf_varargs, CONV_CDECL, "RtlSnprintf" },
+};
+__attribute__((constructor)) static void sprintf_register(void) { xa_register(sprintf_entries, 2); }
+#endif
 
 int CDECLAPI RtlVsprintf(char *buf, const char *fmt, va_list ap)
 {

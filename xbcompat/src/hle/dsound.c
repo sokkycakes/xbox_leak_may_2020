@@ -46,6 +46,7 @@
 
 #include "../xbcompat.h"
 #include "hle.h"
+#include "../cpu.h"
 
 typedef int32_t HRESULT;
 
@@ -358,6 +359,7 @@ static void NTAPI hdr_dtor(void *self) { (void)self; }
 static ULONG NTAPI Obj_AddRef(void *self);
 static ULONG NTAPI Obj_Release(void *self);
 static void *refhdr_vtbl[3] = { (void *)hdr_dtor, (void *)Obj_AddRef, (void *)Obj_Release };
+static void guest_vtbls(void);
 
 static void registry_add(int kind, void *obj, uint32_t p)
 {
@@ -1071,7 +1073,11 @@ static void deliver(const struct ds_done *list, DWORD n)
         const struct ds_done *d = &list[i];
         if (d->xmp.pdwCompletedSize) *d->xmp.pdwCompletedSize = d->xmp.dwMaxSize;
         if (d->xmp.pdwStatus) *d->xmp.pdwStatus = d->status;
+#ifdef XBC_TRANSLATED
+        if (d->cb) CPU_CALL(d->cb, CONV_STD, (uint32_t)d->ctx, (uint32_t)d->xmp.pContext, d->status);
+#else
         if (d->cb) d->cb(d->ctx, d->xmp.pContext, d->status);
+#endif
         else if (d->xmp.pContext) NtSetEvent((HANDLE)d->xmp.pContext, NULL);
     }
 }
@@ -1388,6 +1394,7 @@ static struct ds_object *ds_create_locked(void)
     struct ds_object *d = pool_alloc(sizeof(*d));
     if (!d) return NULL;
     d->valid_vptr = 0; d->valid_sig = 0x444E5344; /* 'DSND' */
+    guest_vtbls();
     d->hdr.vtbl = refhdr_vtbl; d->hdr.refs = 1;
     d->speaker_config = g.override_speaker != 0xFFFFFFFFu ? g.override_speaker : 0;
     for (int i = 0; i < DSMIXBIN_COUNT; i++) d->mixbin_headroom[i] = i == DSMIXBIN_SUBMIX ? 0 : 1;
@@ -1494,6 +1501,7 @@ static HRESULT buffer_create_locked(const DSBUFFERDESC *desc, uint32_t *pp)
     struct ds_buffer *b = pool_alloc(sizeof(*b));
     if (!b) { ds_release_ref_locked(ds); return DSERR_OUTOFMEMORY; }
     b->valid_vptr = 0; b->valid_sig = 0x20425344; /* 'DSB ' */
+    guest_vtbls();
     b->hdr.vtbl = refhdr_vtbl; b->hdr.refs = 1;
     voice_init(&b->v, DS_BUFFER, b, desc->dwFlags, &fmt, mask);
     if (!submix && desc->lpMixBins) {
@@ -1566,6 +1574,7 @@ static HRESULT stream_create_locked(const DSSTREAMDESC *desc, uint32_t *pp)
     if (!ds) return DSERR_OUTOFMEMORY;
     struct ds_stream *s = pool_alloc(sizeof(*s));
     if (!s) { ds_release_ref_locked(ds); return DSERR_OUTOFMEMORY; }
+    guest_vtbls();
     s->vtbl = stream_vtbl;
     s->hdr_rel.vtbl = s->hdr_dbg.vtbl = refhdr_vtbl;
     s->hdr_rel.refs = s->hdr_dbg.refs = 1;
@@ -2142,6 +2151,7 @@ static HRESULT wave_create(const char *name, HANDLE h, const WAVEFORMATEX **ppfm
     if (!ppxmo || (!name && !h) || (name && h)) return DSERR_INVALIDPARAM;
     struct ds_wavexmo *w = calloc(1, sizeof(*w));
     if (!w) return DSERR_OUTOFMEMORY;
+    guest_vtbls();
     w->vtbl = wave_vtbl; w->refs = 1;
     if (name) { if (xfile_open(&w->f, name, O_RDONLY) < 0) { free(w); return DSERR_INVALIDPARAM; } }
     else { w->f.fd = -1; w->f.h = h; w->f.own = false; }
@@ -2233,6 +2243,7 @@ static HRESULT NTAPI XFileCreateMediaObject(const char *name, DWORD access, DWOR
     }
     struct ds_filexmo *f = calloc(1, sizeof(*f));
     if (!f) return DSERR_OUTOFMEMORY;
+    guest_vtbls();
     f->vtbl = file_vtbl; f->refs = 1;
     if (xfile_open(&f->f, name, flags) < 0) { free(f); return DSERR_INVALIDPARAM; }
     *ppxmo = f;
@@ -2244,6 +2255,7 @@ static HRESULT NTAPI XFileCreateMediaObjectEx(HANDLE h, void **ppxmo)
     if (!h || !ppxmo) return DSERR_INVALIDPARAM;
     struct ds_filexmo *f = calloc(1, sizeof(*f));
     if (!f) return DSERR_OUTOFMEMORY;
+    guest_vtbls();
     f->vtbl = file_vtbl; f->refs = 1; f->f.fd = -1; f->f.h = h; f->f.own = false;
     *ppxmo = f;
     return DS_OK;
@@ -3124,6 +3136,22 @@ static void *file_vtbl[9] = {
     (void *)File_AddRef, (void *)File_Release, (void *)File_GetInfo, (void *)File_GetStatus, (void *)File_Process,
     (void *)File_Discontinuity, (void *)File_Flush, (void *)File_Seek, (void *)File_GetLength,
 };
+
+/* The guest calls these objects' methods through the vtables: give it
+   addresses it can call (cpu.h; nothing to do on x86). */
+static void guest_vtbls_once(void)
+{
+    cpu_guest_table(refhdr_vtbl, 3);
+    cpu_guest_table(stream_vtbl, 7);
+    cpu_guest_table(wave_vtbl, 11);
+    cpu_guest_table(file_vtbl, 9);
+}
+
+static void guest_vtbls(void)
+{
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+    pthread_once(&once, guest_vtbls_once);
+}
 
 /* ---- function table ------------------------------------------------------------------------- */
 

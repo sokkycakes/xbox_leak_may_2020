@@ -6,6 +6,7 @@
 #include <sys/mman.h>
 
 #include "xbcompat.h"
+#include "cpu.h"
 
 /* Entry point and kernel thunk pointers are XOR-scrambled with a key that
    depends on how the image was signed. */
@@ -28,6 +29,7 @@ void xbe_reload_section(ULONG va, ULONG raw_offset, ULONG raw_size, ULONG virtua
         virtual_size > raw_size)
         memset((uint8_t *)va + raw_size, 0, virtual_size - raw_size);
     fclose(f);
+    cpu_code_changed(va, virtual_size);
 }
 
 void xbe_load(const char *path, xbe_image *img)

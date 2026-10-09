@@ -17,9 +17,22 @@
  * stack 4-byte aligned, while GCC-built host libraries (SDL, Mesa) use SSE
  * spills that assume 16, so every entry point from the guest realigns.
  */
+#if defined(__i386__)
 #define NTAPI __attribute__((stdcall, force_align_arg_pointer))
 #define FASTCALL __attribute__((fastcall, force_align_arg_pointer))
 #define CDECLAPI __attribute__((cdecl, force_align_arg_pointer))
+#elif defined(XBC_GEN)
+/* tools/gen_adapters.py finds the guest-callable functions by these. */
+#define NTAPI __xbc_conv_std
+#define FASTCALL __xbc_conv_fast
+#define CDECLAPI __xbc_conv_cdecl
+#else
+/* Other hosts run guest code in a CPU emulator (cpu.h): the guest reaches
+   these functions through generated adapters, which apply the convention. */
+#define NTAPI
+#define FASTCALL
+#define CDECLAPI
+#endif
 
 typedef uint8_t UCHAR, BOOLEAN, KIRQL, KPROCESSOR_MODE;
 typedef int8_t CHAR, CCHAR, SCHAR;

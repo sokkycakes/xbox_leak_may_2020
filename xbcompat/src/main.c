@@ -13,6 +13,7 @@
 #include <unistd.h>
 
 #include "xbcompat.h"
+#include "cpu.h"
 
 void misc_init(void);
 
@@ -20,6 +21,7 @@ int g_screenshot_frame = 60;
 const char *g_screenshot_path;
 int g_exit_after_frames;
 
+#ifdef XBC_NATIVE
 /* int 2Dh is the kernel debugger service (DebugService in the NT CRT):
    eax = service, ecx/edx = arguments, followed by an int 3 that the kernel
    skips when it handles the request.  xapilib's OutputDebugString uses it. */
@@ -98,6 +100,31 @@ static void crash_handler(int sig, siginfo_t *si, void *uc_)
     for (int i = 0; i < n; i++) xlog("  #%d %s", i, names ? names[i] : "?");
     _exit(128 + sig);
 }
+#else
+/* Guest code runs in the CPU emulator, which reports its own faults
+   (cpu_unicorn.c); a signal here is a host crash, possibly while the
+   emulator was touching guest memory for the guest. */
+static void crash_handler(int sig, siginfo_t *si, void *uc_)
+{
+    ucontext_t *uc = uc_;
+    xlog("fatal signal %d (%s) accessing %p", sig, strsignal(sig), si->si_addr);
+#if defined(__arm__)
+    xlog("  pc=%08lx lr=%08lx sp=%08lx", (unsigned long)uc->uc_mcontext.arm_pc,
+         (unsigned long)uc->uc_mcontext.arm_lr, (unsigned long)uc->uc_mcontext.arm_sp);
+    Dl_info info;
+    if (dladdr((void *)uc->uc_mcontext.arm_pc, &info) && info.dli_fname)
+        xlog("  pc is in %s %s", info.dli_fname, info.dli_sname ? info.dli_sname : "");
+#else
+    (void)uc;
+#endif
+    cpu_dump_guest();
+    void *frames[32];
+    int n = backtrace(frames, 32);
+    char **names = backtrace_symbols(frames, n);
+    for (int i = 0; i < n; i++) xlog("  #%d %s", i, names ? names[i] : "?");
+    _exit(128 + sig);
+}
+#endif
 
 /* Guest faults xbcompat answers itself (DbgPrint's int 2Dh, privileged
    instructions, int 3) arrive as these signals. SDL's console keyboard on
@@ -120,7 +147,11 @@ static ULONG NTAPI run_entry_point(PVOID entry)
 {
     /* The kernel calls the XBE entry point as a plain cdecl function on its
        initialization thread, then terminates that thread. */
+#ifdef XBC_TRANSLATED
+    CPU_CALL0(entry, CONV_CDECL);
+#else
     ((void (CDECLAPI *)(void))entry)();
+#endif
     return 0;
 }
 
@@ -200,6 +231,9 @@ int main(int argc, char **argv)
     install_fault_handlers();
 
     mem_init();
+#ifdef XBC_TRANSLATED
+    cpu_init();
+#endif
     thread_init_main();
     timers_init();
     misc_init();

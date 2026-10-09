@@ -70,6 +70,7 @@
 
 #include "../xbcompat.h"
 #include "hle.h"
+#include "../cpu.h"
 
 /* ---- XDK definitions (public/xdk/inc/xbox.h, winerror.h) ------------- */
 
@@ -216,7 +217,7 @@ static struct {
     unsigned default_handles;                   /* from the guest GamepadTypeInfo, else 4 */
     XPP_DEVICE_TYPE *gamepad, *keyboard, *ir, *mu;   /* guest tables, NULL = unknown */
     ULONG *init_flag;                           /* guest _XPP_XInitDevicesHasBeenCalled */
-    void (__attribute__((stdcall)) *set_last_error)(ULONG);   /* guest _SetLastError@4 */
+    void (NTAPI *set_last_error)(ULONG);   /* guest _SetLastError@4 */
     xi_port port[XI_PORTS];
     uint64_t last_sync_us;
     uint64_t enum_done_us;                      /* devices show up from here on */
@@ -806,7 +807,11 @@ static bool handle_connected(const xi_handle *d)
 
 static void set_last_error(ULONG code)
 {
+#ifdef XBC_TRANSLATED
+    if (xi.set_last_error) CPU_CALL(xi.set_last_error, CONV_STD, code);
+#else
     if (xi.set_last_error) xi.set_last_error(code);
+#endif
 }
 
 /* ---- feedback completion (the DPC thread plays the USB controller) ------ */

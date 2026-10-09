@@ -20,6 +20,7 @@
 #include <unistd.h>
 
 #include "../xbcompat.h"
+#include "../cpu.h"
 
 pthread_mutex_t g_disp_lock = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t g_disp_cond;
@@ -105,6 +106,8 @@ ULONGLONG NTAPI KeQueryPerformanceFrequency(void)
 
 static bool tsc_trapped;
 
+#ifdef XBC_NATIVE
+
 static void __attribute__((naked, used)) sys_clock_gettime(void)
 {
     __asm__("push %ebx\n\tmov 8(%esp), %ebx\n\tmov 12(%esp), %ecx\n\t"
@@ -183,6 +186,12 @@ static void tsc_init(void)
     prctl(PR_SET_TSC, PR_TSC_ENABLE, 0, 0, 0);
     tsc_trapped = true;
 }
+
+#else
+/* Translated guest code: the CPU emulator answers every rdtsc with
+   ke_guest_tsc() (cpu_unicorn.c), so there is nothing to set up. */
+static void tsc_init(void) {}
+#endif
 
 void thread_trap_tsc(void)
 {
@@ -428,6 +437,7 @@ LONG NTAPI KeReleaseMutant(KMUTANT *Mutant, LONG Increment, BOOLEAN Abandoned, B
 
 /* ---- IRQL ------------------------------------------------------------- */
 
+#ifdef XBC_NATIVE
 static inline KIRQL get_irql(void)
 {
     KIRQL v;
@@ -439,6 +449,19 @@ static inline void set_irql(KIRQL v)
 {
     __asm__ volatile("movb %0, %%fs:0x24" : : "q"(v));
 }
+#else
+static inline KIRQL get_irql(void)
+{
+    xthread *t = thread_current();
+    return t ? t->pcr->Irql : 0;
+}
+
+static inline void set_irql(KIRQL v)
+{
+    xthread *t = thread_current();
+    if (t) t->pcr->Irql = v;
+}
+#endif
 
 KIRQL NTAPI KeGetCurrentIrql(void) { return get_irql(); }
 KIRQL FASTCALL KfRaiseIrql(KIRQL NewIrql) { KIRQL o = get_irql(); set_irql(NewIrql); return o; }
@@ -631,7 +654,12 @@ static void *dpc_thread(void *arg)
             if (!d) continue;
             d->Inserted = 0;
             pthread_mutex_unlock(&dpc_lock);
+#ifdef XBC_TRANSLATED
+            CPU_CALL(d->DeferredRoutine, CONV_STD, (uint32_t)d, (uint32_t)d->DeferredContext,
+                     (uint32_t)d->SystemArgument1, (uint32_t)d->SystemArgument2);
+#else
             ((dpc_fn)d->DeferredRoutine)(d, d->DeferredContext, d->SystemArgument1, d->SystemArgument2);
+#endif
             pthread_mutex_lock(&dpc_lock);
         }
 
@@ -695,7 +723,11 @@ BOOLEAN NTAPI KeDisconnectInterrupt(PVOID Interrupt) { (void)Interrupt; return 1
 BOOLEAN NTAPI KeSynchronizeExecution(PVOID Interrupt, BOOLEAN (NTAPI *Routine)(PVOID), PVOID Context)
 {
     (void)Interrupt;
+#ifdef XBC_TRANSLATED
+    return (BOOLEAN)CPU_CALL(Routine, CONV_STD, (uint32_t)Context);
+#else
     return Routine(Context);
+#endif
 }
 
 /* ---- threads: priority and APC bits the guest pokes at -------------- */
