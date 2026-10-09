@@ -13,6 +13,14 @@ var gamesSelect;
 var gamesButton;
 var gamesRows;
 
+var nPendingGame;
+
+// Called by the dashboard's launcher once the Xbox logo is up (default.xap).
+function LaunchPendingGame()
+{
+    theGameCollection.LaunchGame(nPendingGame);
+}
+
 DEF theGameCollection GameCollection
 {
 }
@@ -173,7 +181,8 @@ DEF theGamesMenu Level
             {
                 theGamesSubMenuIn.Play();
                 EnableInput(false);
-                theGameCollection.LaunchGame(gamesSelect);
+                nPendingGame = gamesSelect;
+                LaunchGameWithLogo();
             }
         }
 
