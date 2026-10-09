@@ -176,6 +176,7 @@ BOOLEAN NTAPI KeRemoveQueueDpc(KDPC *Dpc);
 #define XI_PORTS        4
 #define XI_HANDLE_MAGIC 0x504E4958u             /* 'XINP' */
 #define XI_SYNC_US      4000                    /* hotplug poll rate limit */
+#define XI_ENUM_MS      500                     /* USB enumeration after XInitDevices */
 #define XI_FEEDBACK_US  2000                    /* output report "transfer time" */
 #define XI_RUMBLE_MS    30000                   /* the motors run until the title changes them; SDL caps at 30 s, re-armed on every XInputSetState */
 #define XI_MAX_PENDING  16
@@ -218,6 +219,7 @@ static struct {
     void (__attribute__((stdcall)) *set_last_error)(ULONG);   /* guest _SetLastError@4 */
     xi_port port[XI_PORTS];
     uint64_t last_sync_us;
+    uint64_t enum_done_us;                      /* devices show up from here on */
     xi_pending pending[XI_MAX_PENDING];
     int virtual_index;                          /* XBCOMPAT_VIRTUAL_PAD joystick, or -1 */
 } xi = { .lock = PTHREAD_MUTEX_INITIALIZER, .default_handles = 4, .virtual_index = -1 };
@@ -489,6 +491,7 @@ static void sync_devices(bool force)
     if (!xi.inited || !xi.sdl_ready) return;
     if (!force && t - xi.last_sync_us < XI_SYNC_US) return;
     xi.last_sync_us = t;
+    if (t < xi.enum_done_us) return;            /* the USB stack is still enumerating */
 
     SDL_GameControllerUpdate();
     for (unsigned i = 0; i < XI_PORTS; i++)
@@ -885,7 +888,14 @@ static void NTAPI XInitDevices(ULONG dwPreallocTypeCount, XDEVICE_PREALLOC_TYPE 
     if (xi.init_flag) *xi.init_flag = 1;
     xi.inited = true;
     xlog("XInput: XInitDevices: %u gamepad handle(s) available", xi.remaining);
-    sync_devices(true);                         /* the title's next call is XGetDevices */
+    /* XInitDevices only starts the USB host (USBD_Init); devices plugged in
+       at boot are enumerated afterwards and reach the title as insertions,
+       so an XGetDevices right after it sees none.  Titles that set a player
+       up only on an insertion (Orbz) otherwise ask for the pad to be
+       reconnected.  XBCOMPAT_ENUM_MS changes the delay (0: none). */
+    const char *e = getenv("XBCOMPAT_ENUM_MS");
+    xi.enum_done_us = now_us() + 1000ull * (e && *e ? (unsigned)atoi(e) : XI_ENUM_MS);
+    sync_devices(true);
     pthread_mutex_unlock(&xi.lock);
 }
 
