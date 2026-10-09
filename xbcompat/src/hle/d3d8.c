@@ -22,6 +22,7 @@
 
 #include "../xbcompat.h"
 #include "hle.h"
+#include "../cpu.h"
 #include "nv2a_shaders.h"
 
 typedef ULONG UINT_;
@@ -413,7 +414,11 @@ static void d3d_vblank(void)
     }
     if (cb) {
         ULONG data[3] = { n, d3d.frame, flags };
+#ifdef XBC_TRANSLATED
+        CPU_CALL(cb, CONV_CDECL, (uint32_t)data);
+#else
         ((void (CDECLAPI *)(ULONG *))cb)(data);
+#endif
     }
 }
 
@@ -726,7 +731,11 @@ static ULONG NTAPI D3DDevice_Swap(ULONG Flags)
         ULONG vb = d3d.vblank_count, missed = vb - d3d.vblank_at_swap > 1 ? vb - d3d.vblank_at_swap - 1 : 0;
         ULONG data[5] = { d3d.frame, vb, missed, 0, 16667 };
         d3d.vblank_at_swap = vb;
+#ifdef XBC_TRANSLATED
+        CPU_CALL(swap_cb, CONV_CDECL, (uint32_t)data);
+#else
         ((void (CDECLAPI *)(ULONG *))swap_cb)(data);
+#endif
     }
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
@@ -4482,8 +4491,12 @@ static void NTAPI D3DDevice_GetScissors(ULONG *Count, ULONG *Exclusive, D3DRECT 
 static void run_callbacks(void)
 {
     for (unsigned i = 0; i < d3d.ncallbacks; i++) {
+#ifdef XBC_TRANSLATED
+        CPU_CALL(d3d.callbacks[i].fn, CONV_CDECL, (uint32_t)d3d.callbacks[i].ctx);
+#else
         void (CDECLAPI *fn)(ULONG) = d3d.callbacks[i].fn;
         fn(d3d.callbacks[i].ctx);
+#endif
     }
     d3d.ncallbacks = 0;
 }

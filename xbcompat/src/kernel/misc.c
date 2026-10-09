@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 #include "../xbcompat.h"
+#include "../cpu.h"
 
 int xvsnprintf(char *out, size_t size, const char *fmt, va_list ap);
 
@@ -54,6 +55,25 @@ ULONG CDECLAPI DbgPrint(const char *fmt, ...)
     xlog("[guest] %s", buf);
     return 0;
 }
+
+#ifdef XBC_TRANSLATED
+/* The guest's variadic arguments are x86 stack words, which a host va_list
+   can't describe: format them from the stack. */
+static uint64_t xa_DbgPrint_varargs(struct xa_frame *f)
+{
+    char buf[2048];
+    xa_format(buf, sizeof(buf), (const char *)(uintptr_t)f->stack[0], f->stack + 1);
+    size_t n = strlen(buf);
+    while (n && (buf[n - 1] == '\n' || buf[n - 1] == '\r')) buf[--n] = 0;
+    xlog("[guest] %s", buf);
+    return 0;
+}
+
+static const struct xa_entry dbgprint_entry[] = {
+    { (void *)DbgPrint, xa_DbgPrint_varargs, CONV_CDECL, "DbgPrint" },
+};
+__attribute__((constructor)) static void dbgprint_register(void) { xa_register(dbgprint_entry, 1); }
+#endif
 
 void NTAPI DbgBreakPoint(void) { xlog("DbgBreakPoint (ignored)"); }
 void NTAPI DbgBreakPointWithStatus(ULONG st) { xlog("DbgBreakPointWithStatus(%#x) (ignored)", st); }
@@ -177,6 +197,9 @@ void NTAPI HalReturnToFirmware(ULONG Routine)
     av_hand_over();
     if (Routine == 2 && path && path[0]) relaunch(path);
     xlog("HalReturnToFirmware(%u): title asked to reboot or return to the dashboard", Routine);
+#ifdef XBC_TRANSLATED
+    if (Routine == 4 /* HalFatalErrorRebootRoutine */) cpu_dump_guest();
+#endif
     if (LaunchDataPage && *(ULONG *)LaunchDataPage /* dwLaunchDataType */) {
         /* XLaunchNewImage(NULL, data): the dashboard gets the launch data
            (LDT_LAUNCH_DASHBOARD, e.g. "open the Memory screen"). Whoever

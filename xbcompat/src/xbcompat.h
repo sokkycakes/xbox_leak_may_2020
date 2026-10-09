@@ -25,6 +25,7 @@ void fatal(const char *fmt, ...) __attribute__((format(printf, 1, 2), noreturn))
  * Guest address space layout inside the 32-bit host process:
  *   0x00010000 .. 0x04000000  XBE image (headers at 0x10000)
  *   0x10000000 .. 0x50000000  NtAllocateVirtualMemory arena, thread stacks, pool
+ *                             (0x40000000 on ARM)
  *   0x80000000 .. 0x88000000  "physical" contiguous memory, VA = 0x80000000 | PA
  * Xbox code tests the top address bit to tell contiguous memory apart, so
  * nothing the guest can see is allowed to live at or above 0x80000000 except
@@ -32,7 +33,13 @@ void fatal(const char *fmt, ...) __attribute__((format(printf, 1, 2), noreturn))
  */
 #define IMAGE_REGION_END   0x04000000u
 #define ARENA_BASE         0x10000000u
+#if defined(__i386__) && !defined(XBC_SMALL_ARENA)
 #define ARENA_END          0x50000000u
+#else
+/* 32-bit ARM: QEMU's user-mode emulator (used for testing) maps the
+   program's libraries from 0x40000000; 768 MB is plenty for a 64 MB console. */
+#define ARENA_END          0x40000000u
+#endif
 #define CONTIG_BASE        0x80000000u
 #define CONTIG_SIZE        0x08000000u   /* 128 MB, devkit sized */
 

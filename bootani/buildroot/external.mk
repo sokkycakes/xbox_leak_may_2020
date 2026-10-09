@@ -25,3 +25,14 @@ endef
 ifeq ($(BR2_PACKAGE_THESEUS),y)
 SDL2_MIXER_CONF_OPTS += --enable-music-mp3 --enable-music-mp3-drmp3
 endif
+
+# Raspberry Pi: SDL's off-screen driver, so xbcompat still runs (and takes
+# screenshots) where there is no display device, such as in QEMU.
+ifeq ($(BR2_arm),y)
+SDL2_CONF_OPTS += --enable-video-offscreen
+# Desktop GL over EGL (through glvnd's libOpenGL), as on the Sion: buildroot
+# only offers SDL's OpenGL with X11, and without it SDL hands out GLES
+# contexts, which xbcompat's fixed-function GL can't use.
+SDL2_CONF_OPTS += --enable-video-opengl
+SDL2_DEPENDENCIES += libglvnd
+endif

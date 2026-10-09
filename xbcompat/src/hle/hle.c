@@ -14,6 +14,7 @@
 
 #include "../xbcompat.h"
 #include "hle.h"
+#include "../cpu.h"
 
 /* regs: where each argument arrives when some come in registers ("eax,s,ecx":
    the first in eax, the second on the stack, the third in ecx), from an LTCG
@@ -66,6 +67,19 @@ static void CDECLAPI trap(const char *name, void *return_address)
     fatal("guest called %s from %p, which is not implemented yet", name, return_address);
 }
 
+#ifdef XBC_TRANSLATED
+static void *make_trap(const char *name)
+{
+    char *msg;
+    if (asprintf(&msg, "%s, which is not implemented yet", name) < 0) fatal("out of memory");
+    return (void *)(uintptr_t)cpu_guest_trap(msg);
+}
+
+static void *make_reg_thunk(const char *spec, void *target)
+{
+    return (void *)(uintptr_t)cpu_guest_entry_regs(target, spec);
+}
+#else
 static uint8_t *code_page, *code_cur;
 
 static void *alloc_code(size_t n)
@@ -128,6 +142,7 @@ static void *make_reg_thunk(const char *spec, void *target)
     else *c++ = 0xC3;
     return code;
 }
+#endif
 
 static void write_jmp(ULONG at, void *target)
 {
@@ -217,6 +232,8 @@ void hle_patch(xbe_image *img, const char *mapfile)
         if (impl && syms[i].regs) {
             impl = make_reg_thunk(syms[i].regs, impl);
             if (!impl) xlog("HLE: cannot read the argument registers of %s (%s)", syms[i].name, syms[i].regs);
+        } else if (impl) {
+            impl = (void *)(uintptr_t)cpu_guest_entry(impl);
         }
         if (impl) {
             write_jmp(syms[i].va, impl);

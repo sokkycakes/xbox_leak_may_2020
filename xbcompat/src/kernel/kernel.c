@@ -5,6 +5,7 @@
 
 #include "../xbcompat.h"
 #include "exports.h"
+#include "../cpu.h"
 
 static const struct kexport *find_export(unsigned ordinal)
 {
@@ -30,6 +31,15 @@ static void CDECLAPI unimplemented(unsigned ordinal, void *return_address)
           kernel_export_name(ordinal), return_address);
 }
 
+#ifdef XBC_TRANSLATED
+static void *make_stub(unsigned ordinal)
+{
+    char *msg;
+    if (asprintf(&msg, "unimplemented kernel export %u (%s)", ordinal, kernel_export_name(ordinal)) < 0)
+        fatal("out of memory");
+    return (void *)(uintptr_t)cpu_guest_trap(msg);
+}
+#else
 /* Each missing export gets a tiny trampoline that reports which one it was:
      push [esp]; push ordinal; mov eax, unimplemented; call eax */
 static void *make_stub(unsigned ordinal)
@@ -52,6 +62,7 @@ static void *make_stub(unsigned ordinal)
     cur += 16;
     return s;
 }
+#endif
 
 void kernel_resolve_imports(xbe_image *img)
 {
@@ -61,7 +72,9 @@ void kernel_resolve_imports(xbe_image *img)
         unsigned ordinal = *thunk & 0x7FFFFFFF;
         const struct kexport *e = find_export(ordinal);
         if (e && e->address) {
-            *thunk = (ULONG)e->address;
+            /* Functions are called through their guest entry; data exports
+               are used where they are. */
+            *thunk = e->is_data ? (ULONG)(uintptr_t)e->address : cpu_guest_entry(e->address);
         } else {
             missing++;
             xlog("kernel import %u (%s) is not implemented", ordinal, e ? e->name : "unknown");
