@@ -173,28 +173,45 @@ static bool has_xdvdfs(disc *d, uint64_t base)
 /* ---- XDVDFS directories ------------------------------------------------------------------- */
 
 /* A directory is a binary tree of entries: left and right child offsets (in
-   dwords, 0 = none), start sector, size, attributes, name length, name. */
-static void walk(const uint8_t *tab, uint32_t size, uint32_t off, int depth,
-                 struct dvd_node *out, int *n, int max)
+   dwords, 0 = none), start sector, size, attributes, name length, name.
+   Microsoft's tools balance the tree, but images made by other tools may
+   chain every entry down one side (Phantom Dust's Sound directory is about
+   90 deep), so the walk keeps its own stack: titles' threads have small ones. */
+static void walk(const uint8_t *tab, uint32_t size, struct dvd_node *out, int *n, int max)
 {
-    if (depth > 64 || off + 14 > size || *n >= max) return;
-    const uint8_t *e = tab + off;
-    uint16_t left, right;
-    memcpy(&left, e, 2);
-    memcpy(&right, e + 2, 2);
-    if (left == 0xFFFF && right == 0xFFFF) return;   /* padding: an empty directory */
-    uint8_t namelen = e[13];
-    if (!namelen || off + 14 + namelen > size) return;
-    if (left) walk(tab, size, left * 4u, depth + 1, out, n, max);
-    if (*n < max) {
+    uint32_t *stack = malloc(sizeof(uint32_t) * (max + 1));
+    int sp = 0, steps = 0;
+    uint32_t off = 0;
+    bool have = true;               /* off is a subtree to descend into */
+    while ((have || sp) && *n < max && steps++ < 4 * max) {
+        if (have) {
+            const uint8_t *e = tab + off;
+            uint16_t left;
+            if (off + 14 > size || e[13] == 0 || off + 14 + e[13] > size ||
+                (e[0] == 0xFF && e[1] == 0xFF && e[2] == 0xFF && e[3] == 0xFF)) {
+                have = false;       /* padding (an empty directory) or a bad offset */
+                continue;
+            }
+            if (sp > max) break;
+            stack[sp++] = off;
+            memcpy(&left, e, 2);
+            have = left != 0;
+            off = left * 4u;
+            continue;
+        }
+        const uint8_t *e = tab + (off = stack[--sp]);
+        uint16_t right;
         struct dvd_node *k = &out[(*n)++];
         memset(k, 0, sizeof(*k));
         memcpy(&k->sector, e + 4, 4);
         memcpy(&k->size, e + 8, 4);
         k->attr = e[12];
-        k->name = strndup((const char *)e + 14, namelen);
+        k->name = strndup((const char *)e + 14, e[13]);
+        memcpy(&right, e + 2, 2);
+        have = right != 0;
+        off = right * 4u;
     }
-    if (right) walk(tab, size, right * 4u, depth + 1, out, n, max);
+    free(stack);
 }
 
 /* Called with the disc's lock held. */
@@ -212,7 +229,7 @@ static void load_dir(struct dvd_node *dn)
     }
     int max = dn->size / 16 + 1;
     dn->kids = calloc(max, sizeof(*dn->kids));
-    walk(tab, dn->size, 0, 0, dn->kids, &dn->nkids, max);
+    walk(tab, dn->size, dn->kids, &dn->nkids, max);
     for (int i = 0; i < dn->nkids; i++) dn->kids[i].disc = dn->disc;
     free(tab);
 }

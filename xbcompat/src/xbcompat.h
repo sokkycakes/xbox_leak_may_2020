@@ -62,6 +62,8 @@ typedef struct xthread {
     SIZE_T stack_size;
     PVOID system_routine, start_routine, start_context;
     jmp_buf exit_jmp;
+    struct { PVOID routine, ctx, arg1, arg2; } apc[64];  /* user APCs, run by alertable waits */
+    int napc;
 } xthread;
 
 void thread_init_main(void);
@@ -71,6 +73,10 @@ xthread *thread_create(SIZE_T stack_size, SIZE_T tls_size, PVOID system_routine,
 /* Attach a host thread (e.g. the DPC thread) to a guest KPCR so guest code can run on it. */
 xthread *thread_adopt_host(const char *name);
 void thread_exit(NTSTATUS status) __attribute__((noreturn));
+/* Queue a user APC (routine(ctx, arg1, arg2)) on the current thread; the
+   next alertable wait runs it and returns STATUS_USER_APC. */
+void apc_queue_user(PVOID routine, PVOID ctx, PVOID arg1, PVOID arg2);
+bool apc_deliver_user(void);
 
 /* ---- dispatcher objects ---------------------------------------------- */
 
@@ -81,6 +87,8 @@ NTSTATUS wait_objects(ULONG count, PVOID objects[], int wait_any,
                       BOOLEAN alertable, LARGE_INTEGER *timeout);
 void timers_init(void);
 void ke_frame_presented(void);   /* XBCOMPAT_FIXED_FPS clock step */
+/* Run on the DPC thread at every 60 Hz vertical blank, when set. */
+extern void (*g_vblank_hook)(void);
 ULONGLONG system_time_now(void);   /* 100 ns units since 1601 */
 ULONGLONG ke_guest_tsc(void);      /* what a guest rdtsc reads */
 void thread_trap_tsc(void);        /* make this thread's rdtsc fault into ke_guest_tsc */
