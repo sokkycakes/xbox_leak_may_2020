@@ -20,12 +20,14 @@ define XBCOMPAT_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/xbox-session $(TARGET_DIR)/usr/libexec/xbox-session
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/xbox-env $(TARGET_DIR)/usr/lib/xbox/xbox-env
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/dashboard $(TARGET_DIR)/usr/libexec/dashboard
+	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/../../../../xbcompat/tools/sion/cards/sion-cards $(TARGET_DIR)/usr/sbin/sion-cards
 	mkdir -p $(TARGET_DIR)/etc/default
 	echo 'DASHBOARD="$(call qstrip,$(BR2_PACKAGE_XBCOMPAT_DASHBOARD))"' > $(TARGET_DIR)/etc/default/dashboard
 endef
 
 define XBCOMPAT_INSTALL_INIT_SYSV
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/S98xbox $(TARGET_DIR)/etc/init.d/S98xbox
+	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/../../../../xbcompat/tools/sion/cards/S35cards $(TARGET_DIR)/etc/init.d/S35cards
 endef
 
 define XBCOMPAT_LINUX_CONFIG_FIXUPS
