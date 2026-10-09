@@ -144,6 +144,9 @@ static struct {
     struct { ULONG count; ULONG exclusive; D3DRECT rects[8]; } scissors;
     float screen_offset[2];
     float backbuffer_scale[2];
+    ULONG multisample_type;      /* D3DPRESENT_PARAMETERS.MultiSampleType */
+    ULONG flicker_filter;        /* SetFlickerFilter level, 0 (off) to 5 */
+    bool soft_display;           /* SetSoftDisplayFilter (the encoder's luma filter) */
     ULONG constant_mode;
     float vs_const[192][4];      /* vertex shader constants, hardware numbering */
     float ps_const[16][4];
@@ -205,6 +208,8 @@ static void create_device_surfaces(ULONG format, ULONG depth_format);
 static void create_window_framebuffer(void);
 static void present_window_framebuffer(void);
 static void restore_window_framebuffer(void);
+static void backbuffer_read_begin(GLbitfield mask);
+static void backbuffer_read_end(void);
 static void run_callbacks(void);
 
 static ULONG direct3d_object[4];
@@ -313,8 +318,11 @@ static LONG NTAPI Direct3D_CreateDevice(UINT_ Adapter, ULONG DeviceType, PVOID p
 {
     d3d.width = pp->BackBufferWidth ? pp->BackBufferWidth : 640;
     d3d.height = pp->BackBufferHeight ? pp->BackBufferHeight : 480;
-    xlog("D3D: CreateDevice %ux%u, format %#x, depth %s", d3d.width, d3d.height, pp->BackBufferFormat,
-         pp->EnableAutoDepthStencil ? "yes" : "no");
+    d3d.multisample_type = pp->MultiSampleType;
+    d3d.flicker_filter = 5;   /* what the Xbox's device init sets */
+    d3d.soft_display = false;
+    xlog("D3D: CreateDevice %ux%u, format %#x, depth %s, multisample %#x", d3d.width, d3d.height,
+         pp->BackBufferFormat, pp->EnableAutoDepthStencil ? "yes" : "no", pp->MultiSampleType);
 
     if (SDL_Init(SDL_INIT_VIDEO) != 0) fatal("SDL_Init: %s", SDL_GetError());
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
@@ -363,7 +371,9 @@ static void save_screenshot(const char *path)
 {
     int w = d3d.width, h = d3d.height;
     uint8_t *px = malloc(w * h * 4);
+    backbuffer_read_begin(GL_COLOR_BUFFER_BIT);
     glReadPixels(0, 0, w, h, GL_BGRA, GL_UNSIGNED_BYTE, px);
+    backbuffer_read_end();
     SDL_Surface *s = SDL_CreateRGBSurfaceWithFormat(0, w, h, 32, SDL_PIXELFORMAT_ARGB8888);
     for (int y = 0; y < h; y++)
         memcpy((uint8_t *)s->pixels + y * s->pitch, px + (h - 1 - y) * w * 4, w * 4);
@@ -1073,11 +1083,11 @@ static void readback_surface(D3DSurface *s, bool depth)
     if (h > (ULONG)d3d.height) h = d3d.height;
     uint8_t *px = (uint8_t *)(s->Data | CONTIG_BASE);
     uint8_t *tmp = malloc(w * h * 4);
-    if (p_glBindFramebuffer) p_glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+    backbuffer_read_begin(depth ? GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT : GL_COLOR_BUFFER_BIT);
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
     if (depth) glReadPixels(0, 0, w, h, 0x84F9 /* GL_DEPTH_STENCIL */, 0x84FA /* GL_UNSIGNED_INT_24_8 */, tmp);
     else glReadPixels(0, 0, w, h, GL_BGRA, GL_UNSIGNED_BYTE, tmp);
-    if (p_glBindFramebuffer) p_glBindFramebuffer(GL_READ_FRAMEBUFFER, d3d.rt_texture ? d3d.fbo : 0);
+    backbuffer_read_end();
     ULONG row = pitch < w * 4 ? pitch : w * 4;
     for (ULONG y = 0; y < h; y++) memcpy(px + y * pitch, tmp + (h - 1 - y) * w * 4, row);
     free(tmp);
@@ -1559,8 +1569,10 @@ static void NTAPI D3DDevice_SetMaterial(const float *m)
 static void NTAPI D3DDevice_BlockUntilIdle(void) { run_callbacks(); }
 static void NTAPI D3DDevice_BlockUntilVerticalBlank(void) { wait_vblank(); }
 static BOOLEAN NTAPI D3DDevice_IsBusy(void) { return 0; }
-static void NTAPI D3DDevice_SetFlickerFilter(ULONG v) { (void)v; }
-static void NTAPI D3DDevice_SetSoftDisplayFilter(ULONG v) { (void)v; }
+/* The video encoder's filters, applied when the frame goes to the screen
+   (present_window_framebuffer). */
+static void NTAPI D3DDevice_SetFlickerFilter(ULONG v) { d3d.flicker_filter = v > 5 ? 5 : v; }
+static void NTAPI D3DDevice_SetSoftDisplayFilter(ULONG v) { d3d.soft_display = v != 0; }
 
 /* ---- drawing ---------------------------------------------------------- */
 
@@ -3002,18 +3014,36 @@ static void load_fbo_functions(void)
 #undef LOAD
 }
 
-/* A window that isn't the back buffer's size: KMSDRM always makes the window
-   the display mode, so a 640x480 back buffer meets a 720x480 NTSC screen.
-   The back buffer is then a framebuffer object of the size the title asked
-   for, standing in for framebuffer 0 everywhere, and Present stretches it
-   over the whole window, as the Xbox's video encoder stretched its 640x480
-   frame across the NTSC signal. */
+/* The back buffer is a framebuffer object of the size the title asked for,
+   standing in for framebuffer 0 everywhere, and Present draws it over the
+   whole window the way the Xbox's video encoder put the frame on the TV:
+   KMSDRM always makes the window the display mode, so a 640x480 back buffer
+   meets a 720x480 NTSC screen and is stretched across it.
+
+   The back buffer is multisampled when the title asked for antialiasing
+   (D3DPRESENT_PARAMETERS.MultiSampleType: the dashboard asks for 4 samples
+   with a gaussian filter), and Present approximates the downsample filter
+   and the encoder's flicker filter (SetFlickerFilter, 5 unless the title
+   changes it) with a small blur. XBCOMPAT_MSAA=n forces n samples (0 or 1
+   turns antialiasing and its blur off); XBCOMPAT_FLICKER=0..5 forces the
+   flicker filter level. */
 #ifndef GL_DRAW_FRAMEBUFFER
 #define GL_DRAW_FRAMEBUFFER 0x8CA9
 #endif
+#ifndef GL_MAX_SAMPLES
+#define GL_MAX_SAMPLES 0x8D57
+#endif
+#ifndef GL_CLAMP_TO_EDGE
+#define GL_CLAMP_TO_EDGE 0x812F
+#endif
 static struct {
-    GLuint fbo;
-    int w, h;
+    GLuint fbo;                  /* the back buffer (multisampled when samples > 1) */
+    GLuint resolve;              /* single-sample copy of a multisampled back buffer */
+    GLuint tex;                  /* the finished frame: resolve's (or fbo's) color */
+    int w, h, samples;
+    float soft;                  /* weight of each neighbour in the downsample filter */
+    GLuint prog;
+    GLint u_tex, u_step, u_weight;
     void (APIENTRY *bind)(GLenum, GLuint);
     void (APIENTRY *blit)(GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield, GLenum);
 } window_fb;
@@ -3023,22 +3053,85 @@ static void APIENTRY bind_framebuffer(GLenum target, GLuint fb)
     window_fb.bind(target, fb ? fb : window_fb.fbo);
 }
 
+static int env_int(const char *name, int fallback)
+{
+    const char *e = getenv(name);
+    return e && *e ? atoi(e) : fallback;
+}
+
+/* Samples and downsample softness for an Xbox D3DMULTISAMPLE_TYPE: the low
+   two nibbles are the sample grid (0x22 = 2x2), the next one the filter
+   (0 linear, 1 quincunx, 2 gaussian). */
+static int multisample_samples(ULONG type, float *soft)
+{
+    int n = (type & 0xF) * ((type >> 4) & 0xF);
+    *soft = n > 1 && ((type >> 8) & 0xF) ? 0.125f : 0.0f;
+    return n > 1 ? n : 1;
+}
+
+static GLuint make_renderbuffer(int samples, GLenum format, int w, int h)
+{
+    static void (APIENTRY *storage_ms)(GLenum, GLsizei, GLenum, GLsizei, GLsizei);
+    if (!storage_ms) storage_ms = SDL_GL_GetProcAddress("glRenderbufferStorageMultisample");
+    GLuint rb;
+    p_glGenRenderbuffers(1, &rb);
+    p_glBindRenderbuffer(GL_RENDERBUFFER, rb);
+    if (samples > 1 && storage_ms) storage_ms(GL_RENDERBUFFER, samples, format, w, h);
+    else p_glRenderbufferStorage(GL_RENDERBUFFER, format, w, h);
+    return rb;
+}
+
+/* A framebuffer with a color texture (and depth/stencil) of the back buffer's size. */
+static GLuint make_texture_framebuffer(GLuint *tex)
+{
+    GLuint fb;
+    glGenTextures(1, tex);
+    glBindTexture(GL_TEXTURE_2D, *tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, d3d.width, d3d.height, 0, GL_BGRA, GL_UNSIGNED_BYTE, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    p_glGenFramebuffers(1, &fb);
+    p_glBindFramebuffer(GL_FRAMEBUFFER, fb);
+    p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, *tex, 0);
+    p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER,
+                                make_renderbuffer(1, GL_DEPTH24_STENCIL8, d3d.width, d3d.height));
+    return fb;
+}
+
 static void create_window_framebuffer(void)
 {
     SDL_GL_GetDrawableSize(d3d.window, &window_fb.w, &window_fb.h);
-    if ((window_fb.w == d3d.width && window_fb.h == d3d.height) || !p_glGenFramebuffers) return;
     window_fb.blit = SDL_GL_GetProcAddress("glBlitFramebuffer");
-    if (!window_fb.blit) return;
-    GLuint rb[2];
-    p_glGenRenderbuffers(2, rb);
-    p_glBindRenderbuffer(GL_RENDERBUFFER, rb[0]);
-    p_glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, d3d.width, d3d.height);
-    p_glBindRenderbuffer(GL_RENDERBUFFER, rb[1]);
-    p_glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, d3d.width, d3d.height);
-    p_glGenFramebuffers(1, &window_fb.fbo);
-    p_glBindFramebuffer(GL_FRAMEBUFFER, window_fb.fbo);
-    p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rb[0]);
-    p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, rb[1]);
+    if (!p_glGenFramebuffers || !window_fb.blit) return;
+    window_fb.samples = multisample_samples(d3d.multisample_type, &window_fb.soft);
+    window_fb.samples = env_int("XBCOMPAT_MSAA", window_fb.samples);
+    if (window_fb.samples <= 1) window_fb.samples = 1, window_fb.soft = 0;
+    GLint max = 0;
+    glGetIntegerv(GL_MAX_SAMPLES, &max);
+    if (window_fb.samples > max) window_fb.samples = max > 1 ? max : 1;
+
+    window_fb.resolve = make_texture_framebuffer(&window_fb.tex);
+    if (window_fb.samples > 1) {
+        p_glGenFramebuffers(1, &window_fb.fbo);
+        p_glBindFramebuffer(GL_FRAMEBUFFER, window_fb.fbo);
+        p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER,
+                                    make_renderbuffer(window_fb.samples, GL_RGBA8, d3d.width, d3d.height));
+        p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER,
+                                    make_renderbuffer(window_fb.samples, GL_DEPTH24_STENCIL8, d3d.width, d3d.height));
+        if (p_glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+            xlog("D3D: no %d-sample back buffer, drawing without antialiasing", window_fb.samples);
+            window_fb.samples = 1;
+            window_fb.soft = 0;
+        }
+    }
+    if (window_fb.samples <= 1) {
+        window_fb.fbo = window_fb.resolve;
+        window_fb.resolve = 0;
+        p_glBindFramebuffer(GL_FRAMEBUFFER, window_fb.fbo);
+    }
     if (p_glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
         xlog("D3D: no back buffer framebuffer, drawing %dx%d into the corner of a %dx%d window", d3d.width,
              d3d.height, window_fb.w, window_fb.h);
@@ -3049,18 +3142,134 @@ static void create_window_framebuffer(void)
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
     window_fb.bind = p_glBindFramebuffer;
     p_glBindFramebuffer = bind_framebuffer;
-    xlog("D3D: %dx%d back buffer stretched over a %dx%d window", d3d.width, d3d.height, window_fb.w, window_fb.h);
+    xlog("D3D: %dx%d back buffer (%d sample%s) stretched over a %dx%d window", d3d.width, d3d.height,
+         window_fb.samples, window_fb.samples > 1 ? "s" : "", window_fb.w, window_fb.h);
+}
+
+/* Bring a multisampled back buffer's samples down into the resolve framebuffer. */
+static void resolve_window_framebuffer(GLbitfield mask)
+{
+    if (!window_fb.resolve) return;
+    GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
+    glDisable(GL_SCISSOR_TEST);
+    window_fb.bind(GL_READ_FRAMEBUFFER, window_fb.fbo);
+    window_fb.bind(GL_DRAW_FRAMEBUFFER, window_fb.resolve);
+    window_fb.blit(0, 0, d3d.width, d3d.height, 0, 0, d3d.width, d3d.height, mask, GL_NEAREST);
+    window_fb.bind(GL_DRAW_FRAMEBUFFER, d3d.rt_texture ? d3d.fbo : window_fb.fbo);
+    if (scissor) glEnable(GL_SCISSOR_TEST);
+}
+
+/* Point GL_READ_FRAMEBUFFER at the back buffer's pixels for glReadPixels
+   (GL can't read a multisampled buffer directly). */
+static void backbuffer_read_begin(GLbitfield mask)
+{
+    if (!window_fb.fbo) {
+        if (p_glBindFramebuffer) p_glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+        return;
+    }
+    resolve_window_framebuffer(mask);
+    window_fb.bind(GL_READ_FRAMEBUFFER, window_fb.resolve ? window_fb.resolve : window_fb.fbo);
+}
+
+static void backbuffer_read_end(void)
+{
+    if (p_glBindFramebuffer) p_glBindFramebuffer(GL_READ_FRAMEBUFFER, d3d.rt_texture ? d3d.fbo : 0);
+}
+
+static const char present_vs[] =
+    "#version 120\n"
+    "varying vec2 uv;\n"
+    "void main() { uv = gl_Vertex.xy * 0.5 + 0.5; gl_Position = gl_Vertex; }\n";
+/* A 3x3 tap filter, separable: each axis weighs its neighbours by weight. */
+static const char present_fs[] =
+    "#version 120\n"
+    "uniform sampler2D tex;\n"
+    "uniform vec2 texel, weight;\n"
+    "varying vec2 uv;\n"
+    "void main() {\n"
+    "    vec3 kx = vec3(weight.x, 1.0 - 2.0 * weight.x, weight.x);\n"
+    "    vec3 ky = vec3(weight.y, 1.0 - 2.0 * weight.y, weight.y);\n"
+    "    vec3 c = vec3(0.0);\n"
+    "    for (int y = 0; y < 3; y++)\n"
+    "        for (int x = 0; x < 3; x++)\n"
+    "            c += kx[x] * ky[y] * texture2D(tex, uv + vec2(float(x - 1), float(y - 1)) * texel).rgb;\n"
+    "    gl_FragColor = vec4(c, 1.0);\n"
+    "}\n";
+
+static bool present_program(void)
+{
+    static bool failed;
+    if (window_fb.prog || failed || !p_glCreateProgram) return window_fb.prog != 0;
+    GLuint vs = compile_shader(GL_VERTEX_SHADER, present_vs), fs = compile_shader(GL_FRAGMENT_SHADER, present_fs);
+    GLuint prog = vs && fs ? p_glCreateProgram() : 0;
+    GLint ok = 0;
+    if (prog) {
+        p_glAttachShader(prog, vs);
+        p_glAttachShader(prog, fs);
+        p_glLinkProgram(prog);
+        p_glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+    }
+    if (vs) p_glDeleteShader(vs);
+    if (fs) p_glDeleteShader(fs);
+    if (!ok) {
+        xlog("D3D: no present filter program, the frame goes out unfiltered");
+        if (prog) p_glDeleteProgram(prog);
+        failed = true;
+        return false;
+    }
+    window_fb.prog = prog;
+    window_fb.u_tex = p_glGetUniformLocation(prog, "tex");
+    window_fb.u_step = p_glGetUniformLocation(prog, "texel");
+    window_fb.u_weight = p_glGetUniformLocation(prog, "weight");
+    return true;
 }
 
 static void present_window_framebuffer(void)
 {
     if (!window_fb.fbo) return;
-    GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
-    glDisable(GL_SCISSOR_TEST);
-    window_fb.bind(GL_READ_FRAMEBUFFER, window_fb.fbo);
-    window_fb.bind(GL_DRAW_FRAMEBUFFER, 0);
-    window_fb.blit(0, 0, d3d.width, d3d.height, 0, 0, window_fb.w, window_fb.h, GL_COLOR_BUFFER_BIT, GL_LINEAR);
-    if (scissor) glEnable(GL_SCISSOR_TEST);
+    resolve_window_framebuffer(GL_COLOR_BUFFER_BIT);
+    static int flicker_override = -2;
+    if (flicker_override == -2) flicker_override = env_int("XBCOMPAT_FLICKER", -1);
+    int flicker = flicker_override >= 0 ? flicker_override : (int)d3d.flicker_filter;
+    if (flicker > 5) flicker = 5;
+    /* Flicker filter 5 blends each line with the ones above and below it
+       1:2:1; the soft display (luma) filter softens along the line. */
+    float wx = window_fb.soft + (d3d.soft_display ? 0.125f : 0.0f);
+    float wy = window_fb.soft + flicker * 0.05f;
+    if (wy > 0.3f) wy = 0.3f;
+
+    if ((wx <= 0 && wy <= 0) || !present_program()) {
+        GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
+        glDisable(GL_SCISSOR_TEST);
+        window_fb.bind(GL_READ_FRAMEBUFFER, window_fb.resolve ? window_fb.resolve : window_fb.fbo);
+        window_fb.bind(GL_DRAW_FRAMEBUFFER, 0);
+        window_fb.blit(0, 0, d3d.width, d3d.height, 0, 0, window_fb.w, window_fb.h, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+        if (scissor) glEnable(GL_SCISSOR_TEST);
+        return;
+    }
+
+    GLint prev_prog = 0;
+    glGetIntegerv(GL_CURRENT_PROGRAM, &prev_prog);
+    glPushAttrib(GL_ALL_ATTRIB_BITS);
+    window_fb.bind(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, window_fb.w, window_fb.h);
+    glDisable(GL_SCISSOR_TEST); glDisable(GL_DEPTH_TEST); glDisable(GL_STENCIL_TEST); glDisable(GL_BLEND);
+    glDisable(GL_ALPHA_TEST); glDisable(GL_CULL_FACE); glDisable(GL_COLOR_LOGIC_OP);
+    for (int i = 0; i < 6; i++) glDisable(GL_CLIP_PLANE0 + i);
+    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    p_glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, window_fb.tex);
+    p_glUseProgram(window_fb.prog);
+    p_glUniform1i(window_fb.u_tex, 0);
+    float step[2] = { 1.0f / d3d.width, 1.0f / d3d.height }, weight[2] = { wx, wy };
+    p_glUniform2fv(window_fb.u_step, 1, step);
+    p_glUniform2fv(window_fb.u_weight, 1, weight);
+    glBegin(GL_TRIANGLE_STRIP);
+    glVertex2f(-1, -1); glVertex2f(1, -1); glVertex2f(-1, 1); glVertex2f(1, 1);
+    glEnd();
+    p_glUseProgram(prev_prog);
+    glPopAttrib();
 }
 
 static void restore_window_framebuffer(void)
@@ -3370,7 +3579,9 @@ static void NTAPI D3DSurface_LockRect(D3DSurface *s, ULONG *locked, const LONG *
         /* Hand out the real pixels: read the frame back. */
         uint8_t *px = (uint8_t *)(s->Data | CONTIG_BASE);
         uint8_t *tmp = malloc(w * h * 4);
+        backbuffer_read_begin(GL_COLOR_BUFFER_BIT);
         glReadPixels(0, 0, w, h, GL_BGRA, GL_UNSIGNED_BYTE, tmp);
+        backbuffer_read_end();
         for (ULONG y = 0; y < h; y++) memcpy(px + y * pitch, tmp + (h - 1 - y) * w * 4, w * 4);
         free(tmp);
         if (!(flags & 0x10 /* D3DLOCK_READONLY */)) d3d.bb_cpu_dirty = true;
@@ -3996,7 +4207,9 @@ static void present_overlay(void)
     if (r.right <= r.left || r.bottom <= r.top || d.right <= d.left || d.bottom <= d.top) return;
     if (p_glBindFramebuffer) p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
     overlay.saved = malloc(w * h * 4);
+    backbuffer_read_begin(GL_COLOR_BUFFER_BIT);
     glReadPixels(0, 0, w, h, GL_BGRA, GL_UNSIGNED_BYTE, overlay.saved);
+    backbuffer_read_end();
     uint8_t *px = malloc(w * h * 4);
     memcpy(px, overlay.saved, w * h * 4);
     bool uyvy = fmt == 0x25;
