@@ -88,6 +88,10 @@ void thread_exit(NTSTATUS status) __attribute__((noreturn));
 /* ---- dispatcher objects ---------------------------------------------- */
 
 extern pthread_mutex_t g_disp_lock;
+/* Condition variables 8-byte aligned, as the ARM C library expects: under
+   box86 (Raspberry Pi) they go to it as they are, and i386 only aligns
+   them to 4, which a 64-bit kernel answers with SIGBUS. */
+#define XBC_COND_ALIGN __attribute__((aligned(8)))
 /* Call with g_disp_lock held after changing an object's SignalState: wakes
    the threads waiting on it (disp_signal_all: every waiting thread). */
 void disp_signal(void *object);

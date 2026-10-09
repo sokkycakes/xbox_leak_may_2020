@@ -342,7 +342,7 @@ static struct {
     volatile int stopping;
     /* ACCURATENOTIFY completions */
     int cthread_started;
-    pthread_cond_t ccond;
+    pthread_cond_t ccond XBC_COND_ALIGN;
     struct ds_done *acc; DWORD nacc, acc_cap;
     DWORD mem_allocated;
     /* statistics, logged at exit */

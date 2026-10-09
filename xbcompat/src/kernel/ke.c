@@ -29,7 +29,7 @@ pthread_mutex_t g_disp_lock = PTHREAD_MUTEX_INITIALIZER;
    broadcast woke every waiting thread on every event, timer and semaphore:
    thousands of wakeups a second, which a Raspberry Pi feels). */
 struct disp_waiter {
-    pthread_cond_t cv;
+    pthread_cond_t cv XBC_COND_ALIGN;
     ULONG count;
     PVOID *objects;
     struct disp_waiter *next;
@@ -640,7 +640,7 @@ typedef struct timer_node {
 } timer_node;
 
 static pthread_mutex_t dpc_lock = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t dpc_cond;
+static pthread_cond_t dpc_cond XBC_COND_ALIGN;
 static KDPC *dpc_queue[256];
 static unsigned dpc_head, dpc_tail;
 static timer_node *timers;
