@@ -138,7 +138,10 @@ static bool disc_read_raw(disc *d, void *buf, size_t len, uint64_t off)
         uint32_t lba = off / SECTOR, skip = off % SECTOR;
         uint32_t count = (skip + len + SECTOR - 1) / SECTOR;
         if (count > 32) count = 32;
-        if (!sg_read(d->fd, bounce, lba, count)) return false;
+        if (!sg_read(d->fd, bounce, lba, count)) {
+            xlog("DVD: the drive failed to read %u sectors at LBA %u", count, lba);
+            return false;
+        }
         size_t n = count * SECTOR - skip;
         if (n > len) n = len;
         memcpy(buf, bounce + skip, n);
