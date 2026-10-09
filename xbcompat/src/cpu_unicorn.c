@@ -89,6 +89,7 @@ static unsigned stub_new(const struct xa_entry *e, void *ctx)
     pthread_mutex_lock(&stub_lock);
     if (nstubs == STUB_COUNT) fatal("out of guest stubs");
     unsigned i = nstubs++;
+    if (getenv("XBCOMPAT_LOG_STUBS")) xlog("stub %u %08x %s", i, (uint32_t)(uintptr_t)stub_page + 2 * i, e->name ? e->name : "?");
     stubs[i].e = e;
     stubs[i].ctx = ctx;
     /* The kernel's interlocked operations change guest memory that guest
@@ -570,6 +571,9 @@ void cpu_dump_guest(void)
     xlog("  guest eip=%08x eax=%08x ebx=%08x ecx=%08x edx=%08x esi=%08x edi=%08x ebp=%08x esp=%08x",
          rd(uc, UC_X86_REG_EIP), rd(uc, UC_X86_REG_EAX), rd(uc, UC_X86_REG_EBX), rd(uc, UC_X86_REG_ECX),
          rd(uc, UC_X86_REG_EDX), rd(uc, UC_X86_REG_ESI), rd(uc, UC_X86_REG_EDI), rd(uc, UC_X86_REG_EBP), esp);
+    unsigned si;
+    if (is_stub(rd(uc, UC_X86_REG_EIP), &si))
+        xlog("  in host function %s", stubs[si].e->name ? stubs[si].e->name : "?");
     if (esp > 0x10000) {
         const uint32_t *sp = (const uint32_t *)(uintptr_t)esp;
         xlog("  guest stack: %08x %08x %08x %08x %08x %08x %08x %08x", sp[0], sp[1], sp[2], sp[3], sp[4],
