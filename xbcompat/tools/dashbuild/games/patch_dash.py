@@ -211,4 +211,71 @@ pod = ("DEF GamesPod Transform\n{\n"
 g = sub1(g, "DEF orb_and_arm Transform", pod + "DEF orb_and_arm Transform")
 wr("Games2/default.xap", g)
 shutil.copy(os.path.join(here, "games.xap"), os.path.join(dash, "games.xap"))
+
+# ---- Memory: installed games and downloads --------------------------------
+# The hard disk's titles also list their downloads and the games installed
+# from the Games screen (TitleCollection.cpp, from memory.patch); deleting
+# one of those asks about a game, not a saved game.
+m = rd("memory3.xap")
+m = sub1(m, '''        else
+        {
+            msg = "ConfirmDeleteSave";
+        }''', '''        else if (theFilesMenu.children[0].children[0].theSavedGameGrid.IsGameSelected())
+        {
+            msg = "ConfirmDeleteGame";
+        }
+        else
+        {
+            msg = "ConfirmDeleteSave";
+        }''')
+# A title's count says how many games and how many saves it holds.  (Its
+# variables are declared at the top: one declared in a block is not seen
+# after it.)
+m = sub1(m, '''            var nCount = c.theSavedGameGrid.GetSavedGameCount(nTitle);
+            var strType;
+''', '''            var nCount = c.theSavedGameGrid.GetSavedGameCount(nTitle);
+            var strType;
+            var nGames = 0;
+            var strCount;
+            var strGames;
+''')
+m = sub1(m, '''            else
+            {
+                if (nCount == 1)
+                    strType = "save";
+                else
+                    strType = "saves";
+            }
+            c.MetaLine2.text = nCount + " " + theTranslator.Translate(strType);
+            c.MetaLine2a.text = nCount + " " + theTranslator.Translate(strType);''', '''            else
+            {
+                nGames = c.theSavedGameGrid.GetGameCount(nTitle);
+                nCount = nCount - nGames;
+                if (nCount == 1)
+                    strType = "save";
+                else
+                    strType = "saves";
+            }
+            strCount = nCount + " " + theTranslator.Translate(strType);
+            if (nGames > 0)
+            {
+                if (nGames == 1)
+                    strGames = nGames + " " + theTranslator.Translate("game");
+                else
+                    strGames = nGames + " " + theTranslator.Translate("games");
+                if (nCount > 0)
+                    strCount = strGames + ", " + strCount;
+                else
+                    strCount = strGames;
+            }
+            c.MetaLine2.text = strCount;
+            c.MetaLine2a.text = strCount;''')
+wr("memory3.xap", m)
+for lang in ["english", "japanese", "german", "french", "spanish", "italian"]:
+    p = os.path.join(dash, lang + ".txt")
+    t = open(p, "rb").read().decode("utf-16")
+    line = next(l for l in t.split("\r\n") if l.startswith("ConfirmDeleteSave="))
+    if "ConfirmDeleteGame=" not in t:
+        t = t.replace(line, line + '\r\nConfirmDeleteGame="Are you sure you want to permanently delete this game?"', 1)
+    open(p, "wb").write(t.encode("utf-16"))
 print("patched", dash)
