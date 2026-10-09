@@ -154,6 +154,9 @@ static bool vdso_use_syscalls(void)
     uint8_t *base = (uint8_t *)getauxval(AT_SYSINFO_EHDR);
     if (!base) return true;   /* no vDSO: glibc already makes system calls */
     Elf32_Ehdr *eh = (Elf32_Ehdr *)base;
+    /* Under box86 (x86 on ARM) this is the ARM kernel's vDSO, which the
+       ARM C library calls: never write x86 jumps into it. */
+    if (eh->e_machine != EM_386) return false;
     Elf32_Phdr *ph = (Elf32_Phdr *)(base + eh->e_phoff);
     Elf32_Addr bias = 0, lo = ~0u, hi = 0;
     for (int i = 0; i < eh->e_phnum; i++)

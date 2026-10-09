@@ -15,6 +15,7 @@
 #define _GNU_SOURCE
 #include <GL/gl.h>
 #include <SDL.h>
+#include <errno.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -381,6 +382,22 @@ static LONG NTAPI Direct3D_CreateDevice(UINT_ Adapter, ULONG DeviceType, PVOID p
 
 /* ---- present and clears ---------------------------------------------- */
 
+/* A 32-bit BMP of BGRA pixels, bottom row first as GL reads them. Written
+   by hand: SDL_SaveBMP's RWops crash under box86 (x86 on a Raspberry Pi). */
+static int write_bmp(const char *path, int w, int h, const uint8_t *px)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f) return -1;
+    uint32_t size = (uint32_t)w * h * 4;
+    uint8_t hdr[54] = { 'B', 'M' };
+    uint32_t v[] = { 54 + size, 0, 54, 40, (uint32_t)w, (uint32_t)h };
+    memcpy(hdr + 2, v, sizeof v);
+    hdr[26] = 1; hdr[28] = 32;
+    memcpy(hdr + 34, &size, 4);
+    int ok = fwrite(hdr, 1, 54, f) == 54 && fwrite(px, 1, size, f) == size;
+    return (fclose(f) == 0 && ok) ? 0 : -1;
+}
+
 static void save_screenshot(const char *path)
 {
     int w = d3d.width, h = d3d.height;
@@ -388,12 +405,8 @@ static void save_screenshot(const char *path)
     backbuffer_read_begin(GL_COLOR_BUFFER_BIT);
     glReadPixels(0, 0, w, h, GL_BGRA, GL_UNSIGNED_BYTE, px);
     backbuffer_read_end();
-    SDL_Surface *s = SDL_CreateRGBSurfaceWithFormat(0, w, h, 32, SDL_PIXELFORMAT_ARGB8888);
-    for (int y = 0; y < h; y++)
-        memcpy((uint8_t *)s->pixels + y * s->pitch, px + (h - 1 - y) * w * 4, w * 4);
-    if (SDL_SaveBMP(s, path) != 0) xlog("screenshot failed: %s", SDL_GetError());
+    if (write_bmp(path, w, h, px) != 0) xlog("screenshot failed: %s", strerror(errno));
     else xlog("D3D: saved frame %u to %s", d3d.frame, path);
-    SDL_FreeSurface(s);
     free(px);
 }
 
@@ -575,7 +588,7 @@ static ULONG NTAPI D3DDevice_Swap(ULONG Flags)
     while (SDL_PollEvent(&e)) {
         if (e.type == SDL_QUIT) {
             xlog("window closed");
-            exit(0);
+            xbc_exit(0);
         }
     }
     /* A keyboard plugged in mid-game makes SDL take the fault signals back. */
@@ -585,7 +598,7 @@ static ULONG NTAPI D3DDevice_Swap(ULONG Flags)
         /* Leave the way a title does: XBCOMPAT_PERSIST=1 persists the frame first. */
         if (getenv("XBCOMPAT_PERSIST")) D3DDevice_PersistDisplay();
         av_hand_over();
-        exit(0);
+        xbc_exit(0);
     }
     return d3d.frame;
 }

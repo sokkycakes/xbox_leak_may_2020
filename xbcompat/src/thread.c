@@ -22,6 +22,7 @@ static uint8_t ldt_used[8192];
 static LONG next_thread_id = 1;
 
 #ifdef XBC_NATIVE
+#define BOX86_LDT_ENTRY 0x1fff
 static int ldt_alloc(void *base, uint32_t limit)
 {
     pthread_mutex_lock(&ldt_lock);
@@ -42,13 +43,25 @@ static int ldt_alloc(void *base, uint32_t limit)
         .seg_not_present = 0,
         .useable = 1,
     };
-    if (syscall(SYS_modify_ldt, 1, &d, sizeof(d)) != 0)
-        fatal("modify_ldt: %s", strerror(errno));
+    if (syscall(SYS_modify_ldt, 1, &d, sizeof(d)) != 0) {
+        if (errno != ENOSYS) fatal("modify_ldt: %s", strerror(errno));
+        /* box86 (x86 on 32-bit ARM, e.g. a Raspberry Pi) has only Wine's
+           modify_ldt (0x11), and keeps a base per thread for each entry:
+           every thread uses the one entry with its own PCR. */
+        pthread_mutex_lock(&ldt_lock);
+        ldt_used[idx] = 0;
+        pthread_mutex_unlock(&ldt_lock);
+        d.entry_number = BOX86_LDT_ENTRY;
+        if (syscall(SYS_modify_ldt, 0x11, &d, sizeof(d)) != 0)
+            fatal("modify_ldt: %s", strerror(errno));
+        return BOX86_LDT_ENTRY;
+    }
     return idx;
 }
 
 static void ldt_free(int idx)
 {
+    if (idx == BOX86_LDT_ENTRY) return;
     pthread_mutex_lock(&ldt_lock);
     ldt_used[idx] = 0;
     pthread_mutex_unlock(&ldt_lock);

@@ -1,0 +1,136 @@
+From: xbcompat <xbcompat@localhost>
+Subject: [PATCH] Fixes for running xbcompat (i386) under box86
+
+- modify_ldt: allocate the per-thread key of the right entry, not entry-7.
+- rdtsc: BOX86_TSC_HZ makes the TSC tick at a fixed rate (the Xbox's
+  733 MHz), so titles that time themselves with rdtsc run at speed.
+- mmap: treat MAP_FIXED_NOREPLACE like MAP_FIXED for the address check.
+- BOX86_LOWEST: keep box86's own allocations above a given address, out
+  of the range xbcompat reserves for the guest.
+- __isoc23_sscanf maps to the va_list scanf (was the varargs one, which
+  smashed the stack).
+- SDL2: wrap SDL_GetTicks64 and the virtual joystick calls.
+
+diff --git a/src/custommem.c b/src/custommem.c
+index a8cdfd1..e0cb8ae 100644
+--- a/src/custommem.c
++++ b/src/custommem.c
+@@ -1056,8 +1056,21 @@ int getMmapped(uintptr_t addr)
+ }
+ 
+ 
+-#define LOWEST (void*)0x10000
+-#define MEDIAN (void*)0x40000000
++// BOX86_LOWEST (hex): the lowest address box86 picks for its own memory,
++// for programs that need the space below it for themselves (xbcompat keeps
++// 0x10000-0x50000000 for the Xbox's memory).
++static uintptr_t lowest_addr(void)
++{
++    static uintptr_t lowest = 0;
++    if(!lowest) {
++        const char* e = getenv("BOX86_LOWEST");
++        lowest = e?strtoul(e, NULL, 16):0;
++        if(lowest<0x10000) lowest = 0x10000;
++    }
++    return lowest;
++}
++#define LOWEST ((void*)lowest_addr())
++#define MEDIAN ((void*)(lowest_addr()>0x40000000?lowest_addr():0x40000000))
+ static void* findBlockHinted(void* hint, size_t size, uintptr_t mask)
+ {
+     // first, check if program break as changed
+@@ -1098,6 +1111,7 @@ void* find32bitBlockElf(size_t size, int mainbin, uintptr_t mask)
+ {
+     static void* startingpoint = (void*)0x60000000;
+     void* mainaddr = (void*)0x30000000;
++    if((uintptr_t)mainaddr<(uintptr_t)LOWEST) mainaddr = LOWEST;
+     void* ret = findBlockHinted(mainbin?mainaddr:startingpoint, size, mask);
+     if(!ret) ret = findBlockHinted(LOWEST, size, mask);
+     if(!mainbin)
+diff --git a/src/emu/x86emu.c b/src/emu/x86emu.c
+index 04788bb..57f45bc 100755
+--- a/src/emu/x86emu.c
++++ b/src/emu/x86emu.c
+@@ -514,7 +514,19 @@ uint64_t ReadTSC(x86emu_t* emu)
+ #endif
+     // fall back to gettime...
+ #ifndef NOGETCLOCK
++    // BOX86_TSC_HZ: the rate the counter ticks at (the program's idea of
++    // its CPU clock, e.g. 733333333 for an Xbox); the fine clock, as
++    // programs time frames with it.  Unset: nanoseconds, coarse clock.
++    static uint64_t hz = (uint64_t)-1;
++    if(hz==(uint64_t)-1) {
++        const char* e = getenv("BOX86_TSC_HZ");
++        hz = e?strtoull(e, NULL, 10):0;
++    }
+     struct timespec ts;
++    if(hz) {
++        clock_gettime(CLOCK_MONOTONIC, &ts);
++        return (uint64_t)(ts.tv_sec) * hz + (uint64_t)ts.tv_nsec * hz / 1000000000LL;
++    }
+     clock_gettime(CLOCK_MONOTONIC_COARSE, &ts);
+     return (uint64_t)(ts.tv_sec) * 1000000000LL + ts.tv_nsec;
+ #else
+diff --git a/src/emu/x86tls.c b/src/emu/x86tls.c
+index 654d196..af308cc 100755
+--- a/src/emu/x86tls.c
++++ b/src/emu/x86tls.c
+@@ -148,7 +148,7 @@ EXPORT uint32_t my_modify_ldt(x86emu_t* emu, int op, thread_area_t* td, int size
+     my_context->segtls[idx].limit = td->limit;
+     my_context->segtls[idx].present = td->base_addr?1:0;
+     #define GO(A) case A:	pthread_once(&thread_key_once##A, thread_key_alloc##A); break;
+-    switch (idx-7) {
++    switch (idx) {
+         SUPER()
+     }
+     #undef GO
+diff --git a/src/wrapped/wrappedlibc.c b/src/wrapped/wrappedlibc.c
+index fa6dc2e..536a218 100755
+--- a/src/wrapped/wrappedlibc.c
++++ b/src/wrapped/wrappedlibc.c
+@@ -3100,7 +3100,7 @@ EXPORT void* my_mmap(x86emu_t* emu, void *addr, unsigned long length, int prot,
+     #ifdef NOALIGN
+     void* new_addr = addr;
+     #else
+-    void* new_addr = (flags&MAP_FIXED)?addr:(addr?findBlockNearHint(addr, length, 0):find32bitBlock(length));
++    void* new_addr = (flags&(MAP_FIXED|0x100000/*MAP_FIXED_NOREPLACE*/))?addr:(addr?findBlockNearHint(addr, length, 0):find32bitBlock(length));
+     #endif
+     void* ret = mmap(new_addr, length, prot, flags, fd, offset);
+     #ifndef NOALIGN
+@@ -3168,7 +3168,7 @@ EXPORT void* my_mmap64(x86emu_t* emu, void *addr, unsigned long length, int prot
+     #ifdef NOALIGN
+     void* new_addr = addr;
+     #else
+-    void* new_addr = (flags&MAP_FIXED)?addr:(addr?findBlockNearHint(addr, length, 0):find32bitBlock(length));
++    void* new_addr = (flags&(MAP_FIXED|0x100000/*MAP_FIXED_NOREPLACE*/))?addr:(addr?findBlockNearHint(addr, length, 0):find32bitBlock(length));
+     #endif
+     void* ret = mmap64(new_addr, length, prot, flags, fd, offset);
+     #ifndef NOALIGN
+diff --git a/src/wrapped/wrappedlibc_private.h b/src/wrapped/wrappedlibc_private.h
+index 86833cb..500c69b 100755
+--- a/src/wrapped/wrappedlibc_private.h
++++ b/src/wrapped/wrappedlibc_private.h
+@@ -926,7 +926,7 @@ GO(__isoc99_vsscanf, iFppp)
+ // __isoc99_vswscanf
+ // __isoc99_vwscanf
+ // __isoc99_wscanf
+-GO2(__isoc23_sscanf, iFppV, __isoc99_sscanf)
++GO2(__isoc23_sscanf, iFppV, __isoc99_vsscanf)
+ #endif
+ GO(isprint, iFi)
+ // __isprint_l
+diff --git a/src/wrapped/wrappedsdl2_private.h b/src/wrapped/wrappedsdl2_private.h
+index de86232..b4ad2f8 100755
+--- a/src/wrapped/wrappedsdl2_private.h
++++ b/src/wrapped/wrappedsdl2_private.h
+@@ -249,6 +249,10 @@ GO(SDL_GetTextureColorMod, iFpppp)
+ GO(SDL_GetThreadID, uFp)
+ GO(SDL_GetThreadName, pFp)
+ GO(SDL_GetTicks, uFv)
++GO(SDL_GetTicks64, UFv)
++GO(SDL_JoystickAttachVirtual, iFiiii)
++GO(SDL_JoystickSetVirtualAxis, iFpii)
++GO(SDL_JoystickSetVirtualButton, iFpii)
+ GO(SDL_GetTouchDevice, uFi)
+ GO(SDL_GetTouchDeviceType, iFi)
+ GO(SDL_GetTouchFinger, pFui)
