@@ -252,37 +252,10 @@ static NTSTATUS consume(DISPATCHER_HEADER *h, KTHREAD *self)
     return STATUS_SUCCESS;
 }
 
-void apc_queue_user(PVOID routine, PVOID ctx, PVOID arg1, PVOID arg2)
-{
-    xthread *xt = thread_current();
-    if (!xt || xt->napc == (int)(sizeof xt->apc / sizeof xt->apc[0])) {
-        xlog("user APC %p dropped", routine);
-        return;
-    }
-    xt->apc[xt->napc].routine = routine;
-    xt->apc[xt->napc].ctx = ctx;
-    xt->apc[xt->napc].arg1 = arg1;
-    xt->apc[xt->napc].arg2 = arg2;
-    xt->napc++;
-}
-
-bool apc_deliver_user(void)
-{
-    xthread *xt = thread_current();
-    if (!xt || !xt->napc) return false;
-    /* Oldest first; a routine may queue more (another ReadFileEx), which run too. */
-    while (xt->napc) {
-        __typeof__(xt->apc[0]) a = xt->apc[0];
-        memmove(&xt->apc[0], &xt->apc[1], --xt->napc * sizeof a);
-        ((void (NTAPI *)(PVOID, PVOID, PVOID))a.routine)(a.ctx, a.arg1, a.arg2);
-    }
-    return true;
-}
-
 NTSTATUS wait_objects(ULONG count, PVOID objects[], int wait_any,
                       BOOLEAN alertable, LARGE_INTEGER *timeout)
 {
-    if (alertable && apc_deliver_user()) return STATUS_USER_APC;
+    (void)alertable;
     xthread *xt = thread_current();
     KTHREAD *self = xt ? &xt->ethread.Tcb : NULL;
     struct timespec dl;
@@ -344,8 +317,7 @@ NTSTATUS NTAPI KeWaitForMultipleObjects(ULONG Count, PVOID Object[], ULONG WaitT
 NTSTATUS NTAPI KeDelayExecutionThread(KPROCESSOR_MODE WaitMode, BOOLEAN Alertable,
                                       LARGE_INTEGER *Interval)
 {
-    (void)WaitMode;
-    if (Alertable && apc_deliver_user()) return STATUS_USER_APC;
+    (void)WaitMode; (void)Alertable;
     LONGLONG t = Interval->QuadPart;
     ULONGLONG rel = t < 0 ? (ULONGLONG)-t : (t > (LONGLONG)system_time_now() ? t - system_time_now() : 0);
     if (rel == 0) {
@@ -607,8 +579,6 @@ BOOLEAN NTAPI KeCancelTimer(KTIMER *Timer)
 
 typedef void (NTAPI *dpc_fn)(KDPC *, PVOID, PVOID, PVOID);
 
-void (*g_vblank_hook)(void);
-
 /* The DPC thread: fires timers, runs DPCs and keeps KeTickCount moving. */
 static void *dpc_thread(void *arg)
 {
@@ -653,15 +623,6 @@ static void *dpc_thread(void *arg)
                 *pp = n->next;
                 free(n);
             }
-        }
-
-        /* The vertical blank interrupt's DPC, at 60 Hz of this clock. */
-        static ULONGLONG next_vblank;
-        if (g_vblank_hook && now >= next_vblank) {
-            next_vblank = next_vblank && now - next_vblank < 1000000 ? next_vblank + 166667 : now + 166667;
-            pthread_mutex_unlock(&dpc_lock);
-            g_vblank_hook();
-            pthread_mutex_lock(&dpc_lock);
         }
 
         /* Run DPCs with the lock dropped: they may queue more. */

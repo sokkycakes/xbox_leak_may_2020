@@ -44,16 +44,6 @@ ARGS_FIX = {
                                        "psh pVertexStreamZeroData, psh VertexStreamZeroStride",
 }
 
-# Functions XbSymbolDatabase has no signature for in some builds, as byte
-# patterns (Python regex over the image) with their argument lists.
-EXTRA_SIGS = {
-    # 5849 LTCG (Phantom Dust): g_pDevice in esi, Handle - 1 in edi, the
-    # program copy unless the device's flags have bit 4.
-    "D3DDevice_LoadVertexShader": ("psh Handle, psh Address", re.compile(
-        rb"\x53\x55\x56\x8B\x35....\x57\x8B\x7C\x24\x14\x8B\xEE\x8A\x45\x08\x4F"
-        rb"\xA8\x10\x75\x0B\x8B\x4C\x24\x18\x8B\xC7\xE8", re.S)),
-}
-
 LINE = re.compile(r"^(\w+?)__(FUN|VAR)__(?:(\w+?)__)?(\w+)(?:\((.*)\))? = (0x[0-9a-fA-F]+)$")
 
 
@@ -71,22 +61,6 @@ def xbe_reader(path):
                 return d[raw + va - sva: raw + min(va - sva + n, rs)]
         return b""
     return read
-
-
-def find_extra(path, found):
-    """Add EXTRA_SIGS matches (in executable sections) that the scanner missed."""
-    import struct
-    d = open(path, "rb").read()
-    u32 = lambda o: struct.unpack_from("<I", d, o)[0]
-    base, nsec, sh = u32(0x104), u32(0x11C), u32(0x120)
-    secs = [struct.unpack_from("<6I", d, sh - base + i * 56) for i in range(nsec)]
-    for name, (args, pat) in EXTRA_SIGS.items():
-        if name in found:
-            continue
-        hits = [sva + m.start() - raw for flags, sva, _, raw, rs, _ in secs if flags & 4
-                for m in pat.finditer(d, raw, raw + rs)]
-        if len(hits) == 1:
-            found[name] = ("FUN", "stdcall", args, hits[0], "D3D8")
 
 
 def index_data_global(read, set_indices):
@@ -175,8 +149,6 @@ def main():
             if name in ARGS_FIX:
                 conv, args = "stdcall", ARGS_FIX[name]
             found.setdefault(name, (kind, conv, args, int(va, 16), lib))
-
-    find_extra(a.xbe, found)
 
     lines, skipped = [], []
     for name in sorted(host_names(a.binary)):
