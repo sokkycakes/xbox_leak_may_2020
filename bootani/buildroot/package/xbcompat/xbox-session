@@ -54,6 +54,14 @@ for f in "$X"/cache/xbcompat/*.json; do
 done
 export XDG_CACHE_HOME=$XB/cache
 
+# KMS allows one master: wait for anything else on the display (Theseus,
+# when "sion restart xbox" takes over from it) to be gone.
+for _ in $(seq 1 50); do
+	pidof theseus > /dev/null || break
+	sleep 0.2
+done
+killall -q -9 theseus
+
 quick_fails=0
 while true; do
 	# Launch data a game left for the dashboard (XLaunchNewImage(NULL, data)).
@@ -85,5 +93,5 @@ while true; do
 	else
 		quick_fails=0
 	fi
-	sleep 1
+	sleep 2
 done

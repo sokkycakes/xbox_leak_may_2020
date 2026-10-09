@@ -328,7 +328,7 @@ static LONG NTAPI Direct3D_CreateDevice(UINT_ Adapter, ULONG DeviceType, PVOID p
        buffer is stretched over it (create_window_framebuffer). */
     Uint32 flags = SDL_WINDOW_OPENGL;
     const char *driver = SDL_GetCurrentVideoDriver();
-    if ((driver && !strcmp(driver, "kmsdrm")) || getenv("XBCOMPAT_FULLSCREEN")) flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
+    if ((driver && !strcasecmp(driver, "kmsdrm")) || getenv("XBCOMPAT_FULLSCREEN")) flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
     d3d.window = SDL_CreateWindow("xbcompat", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                                   d3d.width, d3d.height, flags);
     if (!d3d.window) fatal("SDL_CreateWindow: %s", SDL_GetError());

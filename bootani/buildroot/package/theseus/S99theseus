@@ -31,6 +31,12 @@ stop() {
 	start-stop-daemon -K -q -p "$PIDFILE"
 	status=$?
 	killall -q theseus
+	# The display is free only once it's gone (KMS allows one master).
+	for _ in 1 2 3 4 5 6 7 8 9 10; do
+		pidof theseus > /dev/null || break
+		sleep 0.3
+	done
+	killall -q -9 theseus
 	rm -f "$PIDFILE"
 	if [ "$status" -eq 0 ]; then
 		echo "OK"
