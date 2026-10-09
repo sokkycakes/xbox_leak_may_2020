@@ -477,10 +477,15 @@ static bool unpaced(void)
     return u;
 }
 
+/* SDL_Delay takes whole milliseconds; rounding down woke wait_vblank up to
+   1 ms before the blank, and the next call then counted that same blank
+   again, so a title looping on BlockUntilVerticalBlank saw several blanks
+   per 60th of a second (Ms. Pac-Man's game logic ran 4-5x too fast). */
 static void sleep_until(Uint64 t)
 {
-    Uint64 now = SDL_GetPerformanceCounter();
-    if (t > now) SDL_Delay((Uint32)((t - now) * 1000 / SDL_GetPerformanceFrequency()));
+    Uint64 freq = SDL_GetPerformanceFrequency(), now;
+    while ((now = SDL_GetPerformanceCounter()) < t)
+        SDL_Delay((Uint32)(((t - now) * 1000 + freq - 1) / freq));
 }
 
 static void wait_vblank(void)
