@@ -10,6 +10,7 @@ load_conf
 EFI_DIR=EFI/sion
 CURRENT=EFI/BOOT/BOOTX64.EFI
 TRIAL_LABEL="Sion trial"
+BOOT_LABEL="Sion"
 # How long a trial image gets to come up before the machine goes back to
 # the previous one, and how long it has to stay up before it's kept.
 TRIAL_TIMEOUT=${TRIAL_TIMEOUT:-300}
@@ -26,6 +27,7 @@ Usage: sion COMMAND
                            firmware that can't boot an entry once)
       --sha256 HASH        refuse FILE unless it has this SHA-256
   rollback [--no-reboot] swap back to the previous image
+  reboot                 reboot into this stick, whatever the boot order says
   persist PATH...        keep files across reboots: copies them into
                          /data/overlay, which is copied over / at every boot
   overlay list|clear     show or empty /data/overlay
@@ -60,8 +62,13 @@ is_efi_image() {
 	[ "$(dd if="$1" bs=1 skip="$off" count=4 2>/dev/null | od -An -tx1 | tr -d ' ')" = 50450000 ]
 }
 
+# Boot entries with this label: "Boot0007* Sion trial<TAB>HD(...)" -> 0007
+entries_labeled() {
+	efibootmgr 2>/dev/null | sed -n "s/^Boot\([0-9A-Fa-f]\{4\}\)\*\{0,1\} $1\(	.*\)\{0,1\}\$/\1/p"
+}
+
 trial_entries() {
-	efibootmgr 2>/dev/null | sed -n "s/^Boot\([0-9A-Fa-f]\{4\}\)\*\{0,1\} $TRIAL_LABEL\(	.*\)\{0,1\}\$/\1/p"
+	entries_labeled "$TRIAL_LABEL"
 }
 
 drop_trial_entries() {
@@ -152,6 +159,39 @@ cmd_update() {
 	else
 		echo "installed; the next boot tries it once (reboot when ready)"
 	fi
+}
+
+# Reboots into this boot disk's current image, whatever the firmware's boot
+# order says, through a "Sion" boot entry (made on first use) and BootNext.
+cmd_reboot() {
+	mount_efivars || die "no UEFI variables"
+	if efibootmgr | grep -q '^BootNext:'; then
+		echo "the next boot is already set ($(efibootmgr | sed -n 's/^BootNext: //p')), e.g. a trial image; keeping it"
+	else
+		esp=$(find_esp) || die "boot EFI partition not found"
+		puuid=$(blkid -s PARTUUID -o value "$esp")
+		entry=
+		# Reuse an entry only if it points at this partition (the stick may
+		# have been rewritten, which gives it a new PARTUUID).
+		for e in $(entries_labeled "$BOOT_LABEL"); do
+			if [ -n "$puuid" ] && efibootmgr -v | grep "^Boot$e" | grep -qi "$puuid"; then
+				entry=$e
+			else
+				efibootmgr -q -b "$e" -B
+			fi
+		done
+		if [ -z "$entry" ]; then
+			efibootmgr -q -C -d "$(part_disk "$esp")" -p "$(part_num "$esp")" \
+				-L "$BOOT_LABEL" -l '\EFI\BOOT\BOOTX64.EFI' || die "creating the boot entry failed"
+			entry=$(entries_labeled "$BOOT_LABEL" | head -n1)
+			[ -n "$entry" ] || die "the boot entry didn't stick"
+		fi
+		efibootmgr -q -n "$entry" || die "setting BootNext failed"
+		log "rebooting into Boot$entry ($esp)"
+	fi
+	echo "rebooting"
+	sync
+	( sleep 1; reboot ) > /dev/null 2>&1 &
 }
 
 cmd_rollback() {
@@ -313,6 +353,7 @@ case "$cmd" in
 	status) cmd_status ;;
 	update) cmd_update "$@" ;;
 	rollback) cmd_rollback "$@" ;;
+	reboot) cmd_reboot ;;
 	boot-check) cmd_boot_check ;;
 	persist) cmd_persist "$@" ;;
 	overlay) cmd_overlay "$@" ;;

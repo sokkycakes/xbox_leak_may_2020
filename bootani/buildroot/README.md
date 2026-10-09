@@ -87,6 +87,9 @@ reachable for testing and lets it take new images safely:
   `EFI/sion/failed.efi`. `sion rollback` swaps back by hand; `--direct`
   replaces the image without a trial boot, for firmware that can't do
   `BootNext`. `sion/logs/update.txt` on the stick records each step.
+- **Rebooting.** `sion reboot` boots this stick again even when the
+  firmware's boot order starts another OS first: it adds a `Sion` boot
+  entry for the stick (once) and points `BootNext` at it.
 
 From a PC on the same network (Windows has `ssh` and `scp` built in):
 
