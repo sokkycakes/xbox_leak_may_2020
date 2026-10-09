@@ -1,6 +1,14 @@
 config BR2_PACKAGE_XBCOMPAT
 	bool "xbcompat (Xbox boot animation and dashboard)"
-	depends on BR2_x86_64 # runs 32-bit x86 code: needs IA32 emulation
+	# x86_64: runs the 32-bit x86 code natively (IA32 emulation).
+	# arm: 32-bit ARM (Raspberry Pi), runs it in Unicorn.
+	depends on BR2_x86_64 || BR2_arm
+	select BR2_PACKAGE_UNICORN if BR2_arm
+	select BR2_PACKAGE_SDL2 if BR2_arm
+	select BR2_PACKAGE_SDL2_KMSDRM if BR2_arm
+	select BR2_PACKAGE_SDL2_OPENGLES if BR2_arm
+	select BR2_PACKAGE_LIBGLVND if BR2_arm
+	select BR2_PACKAGE_HOST_PYTHON3 if BR2_arm
 	help
 	  The original Xbox boot animation (the leak's ani2) and
 	  dashboard (xboxdash.xbe), run by xbcompat, the compatibility
@@ -18,12 +26,25 @@ config BR2_PACKAGE_XBCOMPAT
 	  by xbcompat/tools/sion/bundle.sh into a tarball, which this
 	  package unpacks into /opt/xbcompat.
 
+	  On 32-bit ARM, xbcompat is built here from xbcompat/ in
+	  this repository, and the titles come from a tarball made
+	  by xbcompat/tools/pi/titles.sh.
+
 if BR2_PACKAGE_XBCOMPAT
 
 config BR2_PACKAGE_XBCOMPAT_BUNDLE
 	string "bundle"
+	depends on BR2_x86_64
 	help
 	  Path to xbcompat-sion.tar.gz from xbcompat/tools/sion/bundle.sh.
+
+config BR2_PACKAGE_XBCOMPAT_TITLES
+	string "titles"
+	depends on BR2_arm
+	help
+	  Path to xbcompat-titles.tar.gz from xbcompat/tools/pi/titles.sh:
+	  the boot animation, the dashboard's partition and their
+	  library maps, unpacked into /opt/xbcompat.
 
 config BR2_PACKAGE_XBCOMPAT_DASHBOARD
 	string "dashboard at boot"

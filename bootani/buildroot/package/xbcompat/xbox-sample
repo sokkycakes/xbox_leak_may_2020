@@ -1,0 +1,24 @@
+#!/bin/sh
+#
+# Runs one of the XDK samples in /opt/xbcompat/samples in the dashboard's
+# place: xbox-sample with no name lists them. The dashboard comes back with
+# "/etc/init.d/S98xbox start".
+#
+# usage: xbox-sample [NAME [xbcompat options...]]
+
+. /usr/lib/xbox/xbox-env
+S=$X/samples
+if [ -z "$1" ]; then
+	ls "$S"
+	exit 0
+fi
+name=$1
+shift
+[ -r "$S/$name/default.xbe" ] || { echo "no sample $name in $S"; exit 1; }
+/etc/init.d/S98xbox stop > /dev/null 2>&1
+mkdir -p /var/run/xbox/sample-hdd
+# Off screen (no display device), its frames go to /var/log/xbox-shots.
+shots=${XBOX_SHOT_ARGS:+--screenshot /var/log/xbox-shots/$name%d.bmp --shot-frame 60}
+# shellcheck disable=SC2086
+exec "$X/bin/xbcompat" --hle "$S/$name/xbcompat.map" --hdd /var/run/xbox/sample-hdd $shots "$@" \
+	"$S/$name/default.xbe"

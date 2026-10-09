@@ -1,0 +1,15 @@
+# Raspberry Pi 3, 3B+, Zero 2 W, 4 and 5: the Raspberry Pi Foundation's own
+# 64-bit kernel (kernel8.img, 4K pages) running this image's 32-bit (armhf)
+# userspace, as Raspberry Pi OS 32-bit does. xbcompat is a 32-bit program
+# with the Xbox's memory layout, which needs the whole 4 GB a 32-bit process
+# gets under a 64-bit kernel.
+arm_64bit=1
+kernel=kernel8.img
+
+# The GPU through KMS (vc4 display, v3d 3D on the Pi 4 and 5).
+dtoverlay=vc4-kms-v3d
+max_framebuffers=2
+disable_overscan=1
+
+# Serial console on the GPIO header (and on QEMU's first UART).
+enable_uart=1

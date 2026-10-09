@@ -3,20 +3,41 @@
 # point its glvnd, Mesa and python at that tree.
 
 X=/opt/xbcompat
-export LD_LIBRARY_PATH=$X/lib
-export LIBGL_DRIVERS_PATH=$X/lib/dri GBM_DRIVERS_PATH=$X/lib/dri
-export __EGL_VENDOR_LIBRARY_FILENAMES=$X/share/glvnd/egl_vendor.d/50_mesa.json
-# Titles the dashboard launches come back through xbrun.py, which builds
-# their library map first.
-export PYTHONHOME=$X PYTHONDONTWRITEBYTECODE=1
-export XBCOMPAT_BIN=$X/bin/xbcompat XBSYMDB_CLI=$X/tools/XbSymbolDatabaseCLI
-export XBCOMPAT_LAUNCHER="$X/bin/python3 $X/tools/xbrun.py"
+if [ -d $X/lib ]; then
+	# The Sion's bundle: a 32-bit userspace of its own.
+	export LD_LIBRARY_PATH=$X/lib
+	export LIBGL_DRIVERS_PATH=$X/lib/dri GBM_DRIVERS_PATH=$X/lib/dri
+	export __EGL_VENDOR_LIBRARY_FILENAMES=$X/share/glvnd/egl_vendor.d/50_mesa.json
+fi
+export XBCOMPAT_BIN=$X/bin/xbcompat
+if [ -x $X/bin/python3 ]; then
+	# Titles the dashboard launches come back through xbrun.py, which builds
+	# their library map first.
+	export PYTHONHOME=$X PYTHONDONTWRITEBYTECODE=1
+	export XBSYMDB_CLI=$X/tools/XbSymbolDatabaseCLI
+	export XBCOMPAT_LAUNCHER="$X/bin/python3 $X/tools/xbrun.py"
+fi
 
 # The display mode bootani uses (KMS_MODE=WxH), straight through KMSDRM.
 # shellcheck source=/dev/null
 [ -r /etc/default/kms ] && . /etc/default/kms
 export KMS_MODE
 export SDL_VIDEODRIVER=kmsdrm SDL_AUDIODRIVER=alsa
+# No display device (a QEMU Raspberry Pi has no GPU): draw off screen, and
+# keep a screenshot every 60 frames in /var/log/xbox-shots to look at.
+for _ in $(seq 1 50); do
+	ls /dev/dri/card* > /dev/null 2>&1 && break
+	sleep 0.2   # the GPU driver is a module udev may still be loading
+done
+if ! ls /dev/dri/card* > /dev/null 2>&1; then
+	export SDL_VIDEODRIVER=offscreen
+	mkdir -p /var/log/xbox-shots
+	XBOX_SHOT_ARGS="--screenshot /var/log/xbox-shots/dash%d.bmp --shot-frame 60"
+	XBOX_BOOT_SHOT_ARGS="--screenshot /var/log/xbox-shots/boot%d.bmp --shot-frame 30"
+	# Emulated, the animation takes far longer than on hardware.
+	: "${XBOX_BOOT_TIMEOUT:=1800}"
+	export XBOX_BOOT_TIMEOUT
+fi
 export HOME=/root
 
 # Same sound output bootani picks: the ALSA default (card 0, device 0) if

@@ -17,7 +17,7 @@
  * stack 4-byte aligned, while GCC-built host libraries (SDL, Mesa) use SSE
  * spills that assume 16, so every entry point from the guest realigns.
  */
-#if defined(__i386__)
+#if defined(__i386__) && !defined(XBC_FORCE_TRANSLATED)
 #define NTAPI __attribute__((stdcall, force_align_arg_pointer))
 #define FASTCALL __attribute__((fastcall, force_align_arg_pointer))
 #define CDECLAPI __attribute__((cdecl, force_align_arg_pointer))

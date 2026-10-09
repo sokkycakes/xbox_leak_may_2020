@@ -13,6 +13,13 @@
  * the other way push the arguments and a return address just past the stub
  * page, and run the engine until it gets there.  Host code may call the guest
  * from inside a host function the guest called; Unicorn allows the nesting.
+ *
+ * Guest code runs on one CPU at a time, as on the Xbox.  Unicorn translates
+ * the guest's lock-prefixed instructions as plain loads and stores, so two
+ * engines running guest code at once would break the guest's own locks.  A
+ * thread holds the guest CPU while its engine runs and lets go whenever the
+ * guest calls the host (which may block); a thread that keeps it for longer
+ * than a time slice while others wait is stopped and queues behind them.
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -20,6 +27,7 @@
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <unicorn/unicorn.h>
@@ -27,7 +35,8 @@
 #include "xbcompat.h"
 #include "cpu.h"
 
-#define STUB_MAX   0xF000u            /* stub page: offsets 0..STUB_MAX-1 are stubs */
+#define STUB_MAX   0xF000u            /* stub page: offsets 0..STUB_MAX-1 hold stubs */
+#define STUB_COUNT (STUB_MAX / 2)     /* every other byte: see cpu_call */
 #define STUB_PAGE  0x10000u
 #define RET_OFFSET 0xFF00u            /* cpu_call's return address, outside the hook range */
 #define GUEST_STACK_DEFAULT (256u << 10)
@@ -69,7 +78,7 @@ struct stub {
 };
 
 static uint8_t *stub_page;
-static struct stub stubs[STUB_MAX];
+static struct stub stubs[STUB_COUNT];
 static unsigned nstubs;
 static pthread_mutex_t stub_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint32_t ret_addr;
@@ -77,7 +86,7 @@ static uint32_t ret_addr;
 static unsigned stub_new(const struct xa_entry *e, void *ctx)
 {
     pthread_mutex_lock(&stub_lock);
-    if (nstubs == STUB_MAX) fatal("out of guest stubs");
+    if (nstubs == STUB_COUNT) fatal("out of guest stubs");
     unsigned i = nstubs++;
     stubs[i].e = e;
     stubs[i].ctx = ctx;
@@ -85,13 +94,13 @@ static unsigned stub_new(const struct xa_entry *e, void *ctx)
     return i;
 }
 
-static uint32_t stub_addr(unsigned i) { return (uint32_t)(uintptr_t)stub_page + i; }
+static uint32_t stub_addr(unsigned i) { return (uint32_t)(uintptr_t)stub_page + 2 * i; }
 
 static bool is_stub(uint32_t a, unsigned *idx)
 {
     uint32_t base = (uint32_t)(uintptr_t)stub_page;
-    if (!stub_page || a < base || a >= base + nstubs) return false;
-    if (idx) *idx = a - base;
+    if (!stub_page || a < base || a >= base + 2 * nstubs || (a - base) & 1) return false;
+    if (idx) *idx = (a - base) / 2;
     return true;
 }
 
@@ -173,7 +182,71 @@ struct cpu_thread {
     uint32_t stack_top;        /* guest stack for calls at depth 0 */
     unsigned gen;              /* code generation the engine's translations match */
     bool stop_pending;
+    bool preempted;            /* stopped at the end of its time slice */
 };
+
+/* The guest CPU: a FIFO ticket lock, so a preempted thread queues behind the
+   ones waiting. */
+#define TIME_SLICE_US 4000
+static struct {
+    pthread_mutex_t m;
+    pthread_cond_t c;
+    unsigned next, serving, waiting;
+    struct cpu_thread *holder;
+    uint64_t since;
+} gcpu = { PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0, 0, 0, NULL, 0 };
+
+static uint64_t now_us(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
+}
+
+static int gcpu_off = -1;   /* XBCOMPAT_GUEST_SMP=1: no guest CPU lock (diagnosis) */
+
+static void guest_enter(struct cpu_thread *t)
+{
+    if (gcpu_off < 0) gcpu_off = getenv("XBCOMPAT_GUEST_SMP") != NULL;
+    if (gcpu_off) return;
+    pthread_mutex_lock(&gcpu.m);
+    unsigned me = gcpu.next++;
+    if (me != gcpu.serving) {
+        gcpu.waiting++;
+        while (gcpu.serving != me) pthread_cond_wait(&gcpu.c, &gcpu.m);
+        gcpu.waiting--;
+    }
+    gcpu.holder = t;
+    gcpu.since = now_us();
+    pthread_mutex_unlock(&gcpu.m);
+}
+
+static void guest_leave(struct cpu_thread *t)
+{
+    if (gcpu_off) return;
+    pthread_mutex_lock(&gcpu.m);
+    gcpu.holder = NULL;
+    t->preempted = false;
+    gcpu.serving++;
+    if (gcpu.waiting) pthread_cond_broadcast(&gcpu.c);
+    pthread_mutex_unlock(&gcpu.m);
+}
+
+static void *preempt_thread(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        usleep(1000);
+        pthread_mutex_lock(&gcpu.m);
+        struct cpu_thread *h = gcpu.holder;
+        if (gcpu.waiting && h && !h->preempted && now_us() - gcpu.since > TIME_SLICE_US) {
+            h->preempted = true;
+            uc_emu_stop(h->uc);
+        }
+        pthread_mutex_unlock(&gcpu.m);
+    }
+    return NULL;
+}
 
 static __thread struct cpu_thread *cur;
 static volatile unsigned code_gen;
@@ -209,6 +282,11 @@ static struct cpu_thread *thread_engine(void)
     uint32_t cr0 = rd(t->uc, UC_X86_REG_CR0), cr4 = rd(t->uc, UC_X86_REG_CR4);
     wr(t->uc, UC_X86_REG_CR0, (cr0 & ~4u) | 2u);
     wr(t->uc, UC_X86_REG_CR4, cr4 | 0x600u);
+    /* All floating point exceptions masked, as a Linux thread starts (the
+       native build's guest threads inherit that): the MSVC CRT raises
+       STATUS_FLOAT_* for any it finds unmasked. */
+    wr(t->uc, UC_X86_REG_FPCW, 0x37F);
+    wr(t->uc, UC_X86_REG_MXCSR, 0x1F80);
     uc_hook h;
     uint32_t base = (uint32_t)(uintptr_t)stub_page;
     check(uc_hook_add(t->uc, &h, UC_HOOK_CODE, hook_stub, t, base, base + STUB_MAX - 1), "stub hook");
@@ -318,6 +396,9 @@ static void hook_stub(uc_engine *uc, uint64_t address, uint32_t size, void *user
     (void)size;
     struct cpu_thread *t = user;
     unsigned idx;
+    /* An odd address is just past a stub whose hlt ran without this hook
+       (see cpu_call): that stub is the call. */
+    if ((address - (uint32_t)(uintptr_t)stub_page) & 1) address--;
     if (!is_stub((uint32_t)address, &idx)) fatal("guest jumped into the stub page at %#x", (unsigned)address);
     const struct stub *s = &stubs[idx];
     uint32_t esp = rd(uc, UC_X86_REG_ESP);
@@ -329,7 +410,9 @@ static void hook_stub(uc_engine *uc, uint64_t address, uint32_t size, void *user
         f.edx = rd(uc, UC_X86_REG_EDX);
     }
     uint32_t pop = 0;
+    guest_leave(t);
     uint64_t r = run_entry(s, &f, &pop, uc);
+    guest_enter(t);
     if (f.fp) push_st0(uc, f.fret);
     else {
         wr(uc, UC_X86_REG_EAX, (uint32_t)r);
@@ -467,20 +550,28 @@ uint64_t cpu_call(uint32_t fn, int conv, int n, const uint32_t *args)
     t->depth++;
     for (;;) {
         if (t->depth == 1) sync_code(t);
+        guest_enter(t);
         uc_err err = uc_emu_start(uc, pc, ret_addr, 0, 0);
+        guest_leave(t);
         pc = rd(uc, UC_X86_REG_EIP);
         if (err != UC_ERR_OK) {
             cpu_dump_guest();
             fatal("guest code at %08x failed: %s", pc, uc_strerror(err));
         }
         if (pc == ret_addr) break;
+        /* Unicorn skips code hooks once a stop is requested, so a stub
+           reached just then runs as the hlt it is.  Stubs sit at even
+           offsets, so the eip past that hlt is odd: go back and call it. */
+        uint32_t base = (uint32_t)(uintptr_t)stub_page;
+        if (pc > base && pc <= base + 2 * nstubs && ((pc - base) & 1)) { pc--; continue; }
         if (t->stop_pending) { t->stop_pending = false; uc_ctl_flush_tb(uc); t->gen = code_gen; continue; }
         if (*(const uint8_t *)(uintptr_t)pc == 0xF4) {   /* hlt: wait for an interrupt */
             usleep(1000);
             pc++;
             continue;
         }
-        /* Stopped by a nested call's uc_emu_stop or similar: carry on. */
+        /* Preempted, or stopped by a nested call's uc_emu_stop: carry on
+           (behind any thread waiting for the guest CPU). */
     }
     t->depth--;
     uint64_t r = rd(uc, UC_X86_REG_EAX) | (uint64_t)rd(uc, UC_X86_REG_EDX) << 32;
@@ -493,6 +584,8 @@ void cpu_init(void)
     stub_page = arena_alloc(STUB_PAGE, 1);
     memset(stub_page, 0xF4, STUB_PAGE);   /* hlt */
     ret_addr = (uint32_t)(uintptr_t)stub_page + RET_OFFSET;
+    pthread_t pt;
+    if (pthread_create(&pt, NULL, preempt_thread, NULL) == 0) pthread_detach(pt);
     xlog("cpu: x86 guest code runs in Unicorn %s (%zu host functions)", uc_version(NULL, NULL) ? "2" : "?",
          nentries);
 }

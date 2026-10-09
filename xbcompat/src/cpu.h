@@ -24,7 +24,7 @@
 #include <stdint.h>
 #include <string.h>
 
-#if defined(__i386__)
+#if defined(__i386__) && !defined(XBC_FORCE_TRANSLATED)
 #define XBC_NATIVE 1
 #else
 #define XBC_TRANSLATED 1

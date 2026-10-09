@@ -15,7 +15,8 @@
 mkdir -p /var/run/xbox/boot-hdd
 xbox_av_start
 start=$(cut -d. -f1 /proc/uptime)
-"$X/bin/xbcompat" --hle "$X/boot/Bootscreen.map" --hdd /var/run/xbox/boot-hdd "$X/boot/Bootscreen.xbe" &
+# shellcheck disable=SC2086
+"$X/bin/xbcompat" --hle "$X/boot/Bootscreen.map" --hdd /var/run/xbox/boot-hdd $XBOX_BOOT_SHOT_ARGS "$X/boot/Bootscreen.xbe" &
 pid=$!
 trap 'kill -KILL $pid 2>/dev/null' TERM INT
 # The animation lasts about 9 seconds; a stalled GPU mustn't keep the
