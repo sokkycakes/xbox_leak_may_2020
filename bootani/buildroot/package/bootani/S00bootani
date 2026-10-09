@@ -23,6 +23,15 @@ if [ -x /usr/libexec/xbox-boot ] && [ "$BOOT_ANIMATION" != bootani ]; then
 fi
 
 start() {
+	# The Xbox's display keeper (xbox-av, see package/xbcompat) before
+	# anything else: black in the session's mode, and the console never
+	# drawn again. Only for the Xbox animation: bootani needs the display
+	# to itself.
+	if [ "$CMD" = /usr/libexec/xbox-boot ]; then
+		# shellcheck source=/dev/null
+		. /usr/lib/xbox/xbox-env
+		xbox_av_start
+	fi
 	printf 'Starting %s: ' "$DAEMON"
 	# Through a shell so its messages land in $LOGFILE; exec keeps the pid.
 	start-stop-daemon -S -q -b -m -p "$PIDFILE" -x /bin/sh \

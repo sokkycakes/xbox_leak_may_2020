@@ -5,4 +5,4 @@ CONFIG_SND_HDA_CODEC_REALTEK=y
 CONFIG_CMDLINE_BOOL=y
 # Legacy HD Audio driver for the HDMI output (the headphone jack is on an I2S
 # codec that needs the audio DSP, which this image leaves out).
-CONFIG_CMDLINE="console=tty1 quiet loglevel=3 video=720x480@60 snd_intel_dspcfg.dsp_driver=1 i915.fastboot=1"
+CONFIG_CMDLINE="console=tty1 quiet loglevel=3 vt.global_cursor_default=0 video=720x480@60 snd_intel_dspcfg.dsp_driver=1 i915.fastboot=1"
