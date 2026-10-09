@@ -524,6 +524,26 @@ static void test_original_pad(void)
     }
 }
 
+/* A pad plugged in at boot is enumerated after XInitDevices: the title's
+   first XGetDevices sees nothing, then the pad arrives as an insertion. */
+static void test_boot_enumeration(void)
+{
+    reset_hle();
+    setenv("XBCOMPAT_ENUM_MS", "60", 1);
+    int index = attach_virtual_pad(NULL);
+    XInitDevices(0, NULL);
+    ULONG ins = 0, rem = 0;
+    CHECK(XGetDevices(&fake_gamepad) == 0);
+    CHECK(XGetDeviceChanges(&fake_gamepad, &ins, &rem) == 0);
+    SDL_Delay(80);
+    force_sync();
+    CHECK(XGetDeviceChanges(&fake_gamepad, &ins, &rem) == 1 && ins == 1 && rem == 0);
+    CHECK(XGetDevices(&fake_gamepad) == 1);
+    setenv("XBCOMPAT_ENUM_MS", "0", 1);
+    SDL_JoystickDetachVirtual(index);
+    force_sync();
+}
+
 int main(void)
 {
     make_type_info(fake_gamepad_ti, XID_TYPE_GAMEPAD, 4, &fake_gamepad);
@@ -534,6 +554,7 @@ int main(void)
     fake_xid_table[3] = (ULONG)fake_keyboard_ti;
     g_log = stderr;
     setenv("XBCOMPAT_NO_KBD_PAD", "1", 1);
+    setenv("XBCOMPAT_ENUM_MS", "0", 1);         /* devices at once, except in test_boot_enumeration */
 
     test_layouts();
     test_mu();
@@ -542,6 +563,7 @@ int main(void)
     test_prealloc();
     test_virtual_spec();
     test_original_pad();
+    test_boot_enumeration();
 
     printf("xinput_test: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
