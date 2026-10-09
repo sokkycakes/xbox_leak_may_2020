@@ -20,6 +20,7 @@ void misc_init(void);
 int g_screenshot_frame = 60;
 const char *g_screenshot_path;
 int g_exit_after_frames;
+volatile unsigned g_guest_traps;
 
 #ifdef XBC_NATIVE
 /* int 2Dh is the kernel debugger service (DebugService in the NT CRT):
@@ -71,8 +72,6 @@ static bool read_tsc(greg_t *r)
     r[REG_EIP] += len;
     return true;
 }
-
-volatile unsigned g_guest_traps;
 
 static void crash_handler(int sig, siginfo_t *si, void *uc_)
 {
