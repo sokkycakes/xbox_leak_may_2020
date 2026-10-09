@@ -14,8 +14,19 @@
 # with an "invalid title" note, which the real dashboard mustn't see.
 mkdir -p /var/run/xbox/boot-hdd
 start=$(cut -d. -f1 /proc/uptime)
-"$X/bin/xbcompat" --hle "$X/boot/Bootscreen.map" --hdd /var/run/xbox/boot-hdd "$X/boot/Bootscreen.xbe"
+"$X/bin/xbcompat" --hle "$X/boot/Bootscreen.map" --hdd /var/run/xbox/boot-hdd "$X/boot/Bootscreen.xbe" &
+pid=$!
+trap 'kill -KILL $pid 2>/dev/null' TERM INT
+# The animation lasts about 9 seconds; a stalled GPU mustn't keep the
+# dashboard off the screen for longer than XBOX_BOOT_TIMEOUT.
+(
+	sleep "${XBOX_BOOT_TIMEOUT:-40}"
+	kill -TERM "$pid" 2>/dev/null && sleep 2 && kill -KILL "$pid" 2>/dev/null
+) &
+watchdog=$!
+wait "$pid"
 rc=$?
+kill "$watchdog" 2>/dev/null
 if [ "$rc" -ne 0 ] && [ $(( $(cut -d. -f1 /proc/uptime) - start )) -lt 5 ] && [ -x /usr/bin/bootani ]; then
 	echo "xbox-boot: xbcompat exited with $rc; playing bootani instead"
 	# shellcheck disable=SC2086

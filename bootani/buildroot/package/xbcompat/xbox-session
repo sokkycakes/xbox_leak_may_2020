@@ -28,8 +28,9 @@ fi
 
 # The Xbox's hard disk, kept on /data when there is one:
 #   partition1  E: saves (UDATA, TDATA) and installed games (E:\Games)
-#   partition2  C: the dashboard, linked from the image, so an image update
-#               brings its dashboard along
+#   partition2  C: the dashboard: a link to the image's copy, so an image
+#               update brings its dashboard along (one link for the whole
+#               partition; with a link per file the dashboard crashes)
 #   partition3-5  X: Y: Z: title caches
 # The DVD drive (D: for the dashboard) is $XB/disc: put an extracted game
 # disc there; empty is an empty tray.
@@ -40,11 +41,12 @@ else
 	echo "no /data: the Xbox hard disk is in RAM and lasts until reboot"
 fi
 HDD=$XB/hdd
-for p in 1 2 3 4 5; do mkdir -p "$HDD/partition$p"; done
-mkdir -p "$XB/disc" "$XB/cache/xbcompat" /var/run/xbox
-for f in "$X"/dash/*; do
-	ln -sfn "$f" "$HDD/partition2/"
-done
+for p in 1 3 4 5; do mkdir -p "$HDD/partition$p"; done
+mkdir -p "$HDD/partition1/Games" "$XB/disc" "$XB/cache/xbcompat" /var/run/xbox
+if [ -d "$HDD/partition2" ] && [ ! -L "$HDD/partition2" ]; then
+	mv "$HDD/partition2" "$HDD/partition2.old.$$"
+fi
+ln -sfn "$X/dash" "$HDD/partition2"
 # Signatures for XDK 4400 titles, made at bundle time from the leak's
 # libraries; the maps xbrun.py makes for other titles land beside them.
 for f in "$X"/cache/xbcompat/*.json; do

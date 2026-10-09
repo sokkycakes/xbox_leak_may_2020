@@ -322,8 +322,15 @@ static LONG NTAPI Direct3D_CreateDevice(UINT_ Adapter, ULONG DeviceType, PVOID p
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
     SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+    /* KMSDRM switches the display to the mode closest to a window's size
+       (640x480 when the display has it). A fullscreen-desktop window keeps
+       the display's own mode (KMS_MODE, e.g. 720x480 NTSC), and the back
+       buffer is stretched over it (create_window_framebuffer). */
+    Uint32 flags = SDL_WINDOW_OPENGL;
+    const char *driver = SDL_GetCurrentVideoDriver();
+    if ((driver && !strcmp(driver, "kmsdrm")) || getenv("XBCOMPAT_FULLSCREEN")) flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
     d3d.window = SDL_CreateWindow("xbcompat", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                                  d3d.width, d3d.height, SDL_WINDOW_OPENGL);
+                                  d3d.width, d3d.height, flags);
     if (!d3d.window) fatal("SDL_CreateWindow: %s", SDL_GetError());
     d3d.gl = SDL_GL_CreateContext(d3d.window);
     if (!d3d.gl) fatal("SDL_GL_CreateContext: %s", SDL_GetError());

@@ -101,6 +101,7 @@ Environment variables:
 | `XBCOMPAT_PSH_DUMP=1` | Log each translated pixel shader. |
 | `XBCOMPAT_VSH_DUMP=DIR` | Write each vertex program and its GLSL to DIR. |
 | `XBCOMPAT_FIXED_FPS=N` | Advance the guest clock 1/N s per frame instead of following the wall clock, so frame K shows the moment K/N s. Audio still plays in real time. |
+| `XBCOMPAT_FULLSCREEN=1` | Open the window fullscreen at the desktop's mode and stretch the back buffer over it (always on with SDL's KMSDRM driver). |
 
 When a title quits to the dashboard with launch data (`XLaunchNewImage(NULL,
 data)`), xbcompat saves the page as `.dashlaunch` in the hard disk directory,
