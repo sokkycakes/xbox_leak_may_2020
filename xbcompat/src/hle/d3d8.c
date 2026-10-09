@@ -698,6 +698,12 @@ static ULONG NTAPI D3DDevice_Swap(ULONG Flags)
     (void)Flags;
     flush_cpu_backbuffer();
     d3d.frame++;
+    {
+        /* Debug aid: XBCOMPAT_TRACE_FRAME=n turns --trace on for frame n only. */
+        static long trace_frame = -2;
+        if (trace_frame == -2) { const char *e = getenv("XBCOMPAT_TRACE_FRAME"); trace_frame = e ? atol(e) : -1; }
+        if (trace_frame >= 0) g_trace = (long)d3d.frame == trace_frame;
+    }
     ke_frame_presented();
     run_callbacks();
     present_overlay();
@@ -1666,12 +1672,25 @@ static void NTAPI D3DDevice_SetViewport(const D3DVIEWPORT8 *v)
     d3d.scissors.count = 0;   /* the library's SetViewport ends with SetScissors(0, 0, NULL) */
 }
 
-/* The NV097 method each simple state from D3DRS_ZFUNC to
-   D3DRS_SOLIDOFFSETENABLE writes; their values go to the GPU unchanged. */
+/* The NV097 method each simple state (D3DRS_PSALPHAINPUTS0 to
+   D3DRS_SOLIDOFFSETENABLE) writes, the library's D3DSIMPLERENDERSTATEENCODE
+   (public/xdk/inc/d3d8.h); their values go to the GPU unchanged. */
 static const USHORT simple_state_method[] = {
-    0x354, 0x33C, 0x304, 0x300, 0x340, 0x344, 0x348, 0x35C, 0x310, 0x37C, 0x358, 0x370, 0x374,
-    0x364, 0x368, 0x36C, 0x360, 0x350, 0x34C, 0x9F8, 0x384, 0x388, 0x318, 0x31C, 0x320,
+    0x260, 0x264, 0x268, 0x26C, 0x270, 0x274, 0x278, 0x27C,                     /* 0: PS alpha inputs */
+    0x288, 0x28C,                                                               /* PS final combiner inputs */
+    0xA60, 0xA64, 0xA68, 0xA6C, 0xA70, 0xA74, 0xA78, 0xA7C,                     /* 10: PS constants 0 */
+    0xA80, 0xA84, 0xA88, 0xA8C, 0xA90, 0xA94, 0xA98, 0xA9C,                     /* 18: PS constants 1 */
+    0xAA0, 0xAA4, 0xAA8, 0xAAC, 0xAB0, 0xAB4, 0xAB8, 0xABC,                     /* 26: PS alpha outputs */
+    0xAC0, 0xAC4, 0xAC8, 0xACC, 0xAD0, 0xAD4, 0xAD8, 0xADC,                     /* 34: PS RGB inputs */
+    0x17F8, 0x1E20, 0x1E24,                                                     /* compare mode, final constants */
+    0x1E40, 0x1E44, 0x1E48, 0x1E4C, 0x1E50, 0x1E54, 0x1E58, 0x1E5C,             /* 45: PS RGB outputs */
+    0x1E60, 0x1D90, 0x1E74, 0x1E78,                                             /* combiner count .. input texture */
+    0x354, 0x33C, 0x304, 0x300, 0x340, 0x344, 0x348, 0x35C, 0x310, 0x37C, 0x358,  /* 57: D3DRS_ZFUNC .. */
+    0x374, 0x378, 0x364, 0x368, 0x36C, 0x360, 0x350, 0x34C, 0x9F8, 0x384, 0x388,  /* 68: STENCILZFAIL .. */
+    0x330, 0x334, 0x338,                                                        /* 79: .. SOLIDOFFSETENABLE */
 };
+
+static bool pb_render_state(ULONG m, ULONG d);
 
 static void FASTCALL SetRenderState_Simple(ULONG Method, ULONG Value)
 {
@@ -1679,15 +1698,25 @@ static void FASTCALL SetRenderState_Simple(ULONG Method, ULONG Value)
        itself, but LTCG builds can drop or defer that store; record it from
        the method too. */
     Method &= 0x1FFC;
-    for (unsigned i = 0; i < sizeof(simple_state_method) / sizeof(simple_state_method[0]); i++)
-        if (simple_state_method[i] == Method) { RS(D3DRS_ZFUNC + i) = Value; return; }
+    if (pb_render_state(Method, Value)) return;
+    static ULONG seen[16];
+    static unsigned nseen;
+    unsigned i = 0;
+    while (i < nseen && seen[i] != Method) i++;
+    if (i == nseen && nseen < 16) {
+        seen[nseen++] = Method;
+        xlog("D3D: SetRenderState_Simple method %#x is not supported", Method);
+    }
 }
 
-/* A render state method LTCG code wrote into the push buffer itself. */
+/* A render state method LTCG code wrote into the push buffer itself, or
+   handed to SetRenderState_Simple. */
 static bool pb_render_state(ULONG m, ULONG d)
 {
+    /* Phantom Dust keeps its own render state cache and sets the pixel
+       shader constants (its menu, HUD and dialog colors) this way. */
     for (unsigned i = 0; i < sizeof(simple_state_method) / sizeof(simple_state_method[0]); i++)
-        if (simple_state_method[i] == m) { RS(D3DRS_ZFUNC + i) = d; return true; }
+        if (simple_state_method[i] == m) { RS(i) = d; return true; }
     if (m == 0x30C) {   /* NV097_SET_DEPTH_TEST_ENABLE */
         RS(D3DRS_ZENABLE) = d ? (RS(D3DRS_ZENABLE) ? RS(D3DRS_ZENABLE) : 1) : 0;
         return true;
@@ -2651,6 +2680,16 @@ static void draw_programmable_(vshader *sh, ULONG PrimitiveType, const UCHAR *up
           RS(D3DRS_SRCBLEND), RS(D3DRS_DESTBLEND), RS(D3DRS_ALPHATESTENABLE), RS(D3DRS_COLORWRITEENABLE),
           RS(D3DRS_STENCILENABLE), d3d.viewport.X, d3d.viewport.Y, d3d.viewport.Width, d3d.viewport.Height,
           d3d.viewport.MinZ, d3d.viewport.MaxZ);
+    if (g_trace && d3d.pixel_shader)
+        xlog("D3D:   ps constants c0 %08x %08x c1 %08x %08x, mapping %08x %08x", RS(D3DRS_PSCONSTANT0_0),
+             RS(D3DRS_PSCONSTANT0_0 + 1), RS(D3DRS_PSCONSTANT1_0), RS(D3DRS_PSCONSTANT1_0 + 1),
+             ((const ULONG *)d3d.pixel_shader)[57], ((const ULONG *)d3d.pixel_shader)[58]);
+    if (g_trace)
+        for (int st = 0; st < 4; st++) {
+            const D3DPixelContainer *t = (const D3DPixelContainer *)d3d.textures[st];
+            if (t) xlog("D3D:   stage %d texture %p data %#x format %#x size %#x", st, (void *)t, t->res.Data,
+                        t->Format, t->Size);
+        }
     upload_constants(sh, e);
     ULONG lo, hi = vertex_range(first, count, indices, &lo);
     bind_attributes(sh, up, up_stride, lo, hi);
@@ -4646,11 +4685,26 @@ static void NTAPI D3DDevice_CreatePixelShader(const ULONG *def, ULONG *handle)
     *handle = (ULONG)copy;
 }
 
-/* Load a D3DPIXELSHADERDEF into the render states. */
-static void set_pixel_shader_def(const ULONG *def)
+/* Load a D3DPIXELSHADERDEF into the render states.  `obj` is the title's
+   { RefCount, D3DOwned, pPSDef } shader object for it, if it passed one.
+   The 5849 CDevice points m_pPixelShader (device+0x784) at the current
+   object, and LTCG titles inline SetPixelShaderConstant, which finds the
+   constant mapping through it: without it Phantom Dust's menu frames,
+   dialog boxes and button glyphs got no color constant and drew nothing. */
+static void set_pixel_shader_def(const ULONG *def, ULONG *obj)
 {
+    TRACE("D3D: pixel shader %p", (void *)def);
     if (d3d.recording) { ULONG h = (ULONG)def; pb_record(OP_PIXEL_SHADER, &h, 4); }
     d3d.pixel_shader = (ULONG)def;
+    if (device_layout_5849 && d3d.device) {
+        static ULONG *user;   /* the device's m_UserPixelShader */
+        if (def && !obj) {
+            if (!user) user = pool_alloc(16);
+            user[0] = 1; user[1] = 0; user[2] = (ULONG)def;
+            obj = user;
+        }
+        d3d.device[0x784 / 4] = def ? (ULONG)obj : 0;
+    }
     if (!def) return;
     memcpy(d3d.render_state, def, D3DRS_PS_MAX * 4);
     RS(D3DRS_PSTEXTUREMODES) = def[54];
@@ -4661,9 +4715,12 @@ static void NTAPI D3DDevice_SetPixelShader(ULONG handle)
     const ULONG *def = (const ULONG *)handle;
     /* A title that builds its own shader objects (LTCG, no CreatePixelShader
        to replace) passes the library's { RefCount, D3DOwned, pPSDef }. */
-    if (def && !pool_owns(def) && def[0] < 0x10000 && def[1] <= 1 && def[2] >= 0x10000)
+    ULONG *obj = NULL;
+    if (def && !pool_owns(def) && def[0] < 0x10000 && def[1] <= 1 && def[2] >= 0x10000) {
+        obj = (ULONG *)def;
         def = (const ULONG *)def[2];
-    set_pixel_shader_def(def);
+    }
+    set_pixel_shader_def(def, obj);
 }
 
 /* The library points its own shader object at the title's definition; the
@@ -4673,7 +4730,7 @@ static void NTAPI D3DDevice_SetPixelShader(ULONG handle)
    not be taken for one. */
 static void NTAPI D3DDevice_SetPixelShaderProgram(const ULONG *def)
 {
-    set_pixel_shader_def(def);
+    set_pixel_shader_def(def, NULL);
 }
 
 static void NTAPI D3DDevice_GetPixelShader(ULONG *handle) { *handle = d3d.pixel_shader; }
@@ -4704,6 +4761,8 @@ static void NTAPI D3DDevice_SetPixelShaderConstant(ULONG Register, const float *
 {
     if (d3d.recording) { ULONG h[2] = { Register, count }; pb_record2(OP_PS_CONST, h, 8, data, count * 16); }
     const ULONG *def = (const ULONG *)d3d.pixel_shader;
+    TRACE("D3D: SetPixelShaderConstant(%u, %g %g %g %g, %u) with shader %p", Register, data[0], data[1], data[2],
+          data[3], count, (void *)def);
     for (ULONG i = 0; i < count && Register < 16; i++, Register++, data += 4) {
         memcpy(d3d.ps_const[Register], data, 16);
         if (!def) continue;
@@ -5222,7 +5281,7 @@ static void pb_run(D3DPushBuffer *b, D3DFixup *fx, int depth)
             imm_flush(a[0]);
             break;
         }
-        case OP_PIXEL_SHADER: set_pixel_shader_def((const ULONG *)a[0]); break;
+        case OP_PIXEL_SHADER: set_pixel_shader_def((const ULONG *)a[0], NULL); break;
         case OP_PS_CONST: D3DDevice_SetPixelShaderConstant(a[0], (const float *)(a + 2), a[1]); break;
         case OP_VS_INPUT: D3DDevice_SetVertexShaderInput(a[0], a[1], a + 2); break;
         case OP_RENDER_TARGET: D3DDevice_SetRenderTarget((D3DSurface *)a[0], (D3DSurface *)a[1]); break;
