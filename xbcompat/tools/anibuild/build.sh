@@ -34,9 +34,11 @@ for f in $SRCS; do
     [ -s "$o" ] && continue
     echo "cc $f"
     src=$f; [ "$f" = DEV.C ] && src="$W\\patch\\DEV.C"
-    # NOT_UNICODE=1 in app/sources: no -DUNICODE.
+    # NOT_UNICODE=1 in app/sources: no -DUNICODE. FINAL_BUILD, as the boot
+    # ROM's copy has it (defines.h): play once and return instead of looping,
+    # and leave out the dev build's input and placement tools.
     WORK="$WORK" XB="$XB" CC_DIR="$ANI" CC_INC="$INC" CC_NO_UNICODE=1 \
-        python3 "$HERE/../dashbuild/cc.py" "$src" -DBINARY_RESOURCE
+        python3 "$HERE/../dashbuild/cc.py" "$src" -DBINARY_RESOURCE -DFINAL_BUILD
 done
 
 L="$XB\\public\\xdk\\lib"
