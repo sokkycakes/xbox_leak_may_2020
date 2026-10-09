@@ -189,6 +189,11 @@ void thread_trap_tsc(void)
     if (tsc_trapped) prctl(PR_SET_TSC, PR_TSC_SIGSEGV, 0, 0, 0);
 }
 
+void thread_untrap_tsc(void)
+{
+    if (tsc_trapped) prctl(PR_SET_TSC, PR_TSC_ENABLE, 0, 0, 0);
+}
+
 /* The counter a guest rdtsc reads: 733 MHz since xbcompat started. */
 ULONGLONG ke_guest_tsc(void)
 {

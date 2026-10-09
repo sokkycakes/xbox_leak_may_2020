@@ -165,6 +165,7 @@ static void relaunch(const char *path)
     xlog("XLaunchNewImage: %s (D: %s)", img, dpath);
     if (g_log) fflush(g_log);
     fflush(stderr);
+    thread_untrap_tsc();   /* the trap survives exec: python and the next xbcompat would fault */
     execvp(args[0], args);
     xlog("relaunch failed: %s", strerror(errno));
 }
