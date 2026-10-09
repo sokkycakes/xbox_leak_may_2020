@@ -496,6 +496,7 @@ static bool unpaced(void)
 static void sleep_until(Uint64 t)
 {
     Uint64 freq = SDL_GetPerformanceFrequency(), now;
+    cpu_block();
     while ((now = SDL_GetPerformanceCounter()) < t)
         SDL_Delay((Uint32)(((t - now) * 1000 + freq - 1) / freq));
 }
@@ -557,6 +558,7 @@ static ULONG NTAPI D3DDevice_Swap(ULONG Flags)
         save_screenshot(g_screenshot_path);
     }
     present_window_framebuffer();
+    cpu_block();
     SDL_GL_SwapWindow(d3d.window);
     restore_window_framebuffer();
     restore_overlay();

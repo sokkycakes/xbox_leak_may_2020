@@ -193,7 +193,7 @@ static void *thread_main(void *arg)
     pthread_mutex_lock(&g_disp_lock);
     t->ethread.Tcb.HasTerminated = 1;
     t->ethread.Tcb.Header.SignalState = 1;
-    disp_signal_all();
+    disp_signal(&t->ethread.Tcb.Header);
     pthread_mutex_unlock(&g_disp_lock);
     ldt_free(t->ldt_index);
 #ifdef XBC_TRANSLATED

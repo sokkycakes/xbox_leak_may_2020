@@ -199,6 +199,8 @@ struct cpu_thread {
     unsigned ticket;
     uint64_t wait_since;
     bool granted;
+    int in_host;         /* in host calls made from guest code (hook_stub) */
+    pthread_cond_t cv;   /* signaled when granted: only the new holder wakes */
     struct cpu_thread *next;
 };
 
@@ -213,11 +215,11 @@ struct cpu_thread {
 #define STARVE_US 100000
 static struct {
     pthread_mutex_t m;
-    pthread_cond_t c;
     struct cpu_thread *holder, *reserved, *waiters;
     unsigned next_ticket;
     uint64_t since;
-} gcpu = { PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, NULL, NULL, NULL, 0, 0 };
+    uint64_t host_since;   /* when the holder entered its current host call */
+} gcpu = { PTHREAD_MUTEX_INITIALIZER, NULL, NULL, NULL, 0, 0, 0 };
 
 static uint64_t now_us(void)
 {
@@ -251,6 +253,10 @@ static void guest_enter(struct cpu_thread *t)
     if (gcpu_off) return;
     int prio = thread_guest_priority();
     pthread_mutex_lock(&gcpu.m);
+    if (gcpu.holder == t) {   /* kept through a host call */
+        pthread_mutex_unlock(&gcpu.m);
+        return;
+    }
     t->prio = prio;
     if (gcpu.holder || gcpu.reserved || gcpu.waiters) {
         t->ticket = gcpu.next_ticket++;
@@ -264,9 +270,9 @@ static void guest_enter(struct cpu_thread *t)
             *b = w->next;
             w->granted = true;
             gcpu.reserved = w;
-            pthread_cond_broadcast(&gcpu.c);
+            if (w != t) pthread_cond_signal(&w->cv);
         }
-        while (!t->granted) pthread_cond_wait(&gcpu.c, &gcpu.m);
+        while (!t->granted) pthread_cond_wait(&t->cv, &gcpu.m);
         gcpu.reserved = NULL;
     }
     gcpu.holder = t;
@@ -274,10 +280,27 @@ static void guest_enter(struct cpu_thread *t)
     pthread_mutex_unlock(&gcpu.m);
 }
 
+/* Give up the CPU, to the best waiter if any (gcpu.m held). */
+static void release_locked(void)
+{
+    gcpu.holder = NULL;
+    if (gcpu.waiters) {
+        struct cpu_thread **b = best_waiter(now_us()), *w = *b;
+        *b = w->next;
+        w->granted = true;
+        gcpu.reserved = w;
+        pthread_cond_signal(&w->cv);
+    }
+}
+
 static void guest_leave(struct cpu_thread *t)
 {
     if (gcpu_off) return;
     pthread_mutex_lock(&gcpu.m);
+    if (gcpu.holder != t) {   /* released during a host call (cpu_block) */
+        pthread_mutex_unlock(&gcpu.m);
+        return;
+    }
     gcpu.holder = NULL;
     t->preempted = false;
     if (gcpu.waiters) {
@@ -285,8 +308,46 @@ static void guest_leave(struct cpu_thread *t)
         *b = w->next;
         w->granted = true;
         gcpu.reserved = w;
-        pthread_cond_broadcast(&gcpu.c);
+        pthread_cond_signal(&w->cv);
     }
+    pthread_mutex_unlock(&gcpu.m);
+}
+
+/* Host calls from guest code keep the guest CPU: handing it over on every
+   call cost a thread switch per D3D call whenever another thread wanted
+   it.  A call that blocks gives it up (cpu_block); one that runs long
+   without saying so loses it to the watchdog after HOST_GRACE_US. */
+#define HOST_GRACE_US 2000
+
+static __thread struct cpu_thread *cur;
+
+static void host_enter(struct cpu_thread *t)
+{
+    if (gcpu_off) return;
+    pthread_mutex_lock(&gcpu.m);
+    if (!t->in_host++) gcpu.host_since = now_us();
+    pthread_mutex_unlock(&gcpu.m);
+}
+
+static void maybe_yield(struct cpu_thread *t);
+
+static void host_leave(struct cpu_thread *t)
+{
+    if (gcpu_off) return;
+    pthread_mutex_lock(&gcpu.m);
+    t->in_host--;
+    bool lost = gcpu.holder != t;
+    pthread_mutex_unlock(&gcpu.m);
+    if (lost) guest_enter(t);
+    else maybe_yield(t);
+}
+
+void cpu_block(void)
+{
+    struct cpu_thread *t = cur;
+    if (gcpu_off || !t) return;
+    pthread_mutex_lock(&gcpu.m);
+    if (gcpu.holder == t && t->in_host) release_locked();
     pthread_mutex_unlock(&gcpu.m);
 }
 
@@ -321,11 +382,14 @@ static void *preempt_thread(void *arg)
     (void)arg;
     if (getenv("XBCOMPAT_NO_PREEMPT")) return NULL;
     for (;;) {
-        usleep(10000);
+        usleep(1000);
         pthread_mutex_lock(&gcpu.m);
         struct cpu_thread *h = gcpu.holder;
         uint64_t now = now_us();
-        if (h && !h->preempted && gcpu.waiters && now - gcpu.since > LAST_RESORT_US) {
+        if (h && h->in_host && gcpu.waiters && now - gcpu.host_since > HOST_GRACE_US) {
+            /* Not running guest code: nothing to stop, just take it. */
+            release_locked();
+        } else if (h && !h->in_host && !h->preempted && gcpu.waiters && now - gcpu.since > LAST_RESORT_US) {
             h->preempted = true;
             uc_emu_stop(h->uc);
         }
@@ -359,6 +423,7 @@ static struct cpu_thread *thread_engine(void)
 {
     if (cur) return cur;
     struct cpu_thread *t = calloc(1, sizeof(*t));
+    pthread_cond_init(&t->cv, NULL);
     check(uc_open(UC_ARCH_X86, UC_MODE_32, &t->uc), "open");
     /* The Xbox CPU is a Pentium III (Coppermine): MMX and SSE, no SSE2. */
     uc_ctl_set_cpu_model(t->uc, UC_CPU_X86_PENTIUM3);
@@ -493,9 +558,9 @@ static void hook_stub(uc_engine *uc, uint64_t address, uint32_t size, void *user
         f.edx = rd(uc, UC_X86_REG_EDX);
     }
     uint32_t pop = 0;
-    if (!s->hold) guest_leave(t);
+    if (!s->hold) host_enter(t);
     uint64_t r = run_entry(s, &f, &pop, uc);
-    if (!s->hold) guest_enter(t);
+    if (!s->hold) host_leave(t);
     if (f.fp) push_st0(uc, f.fret);
     else {
         wr(uc, UC_X86_REG_EAX, (uint32_t)r);

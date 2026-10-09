@@ -82,8 +82,10 @@ void thread_exit(NTSTATUS status) __attribute__((noreturn));
 /* ---- dispatcher objects ---------------------------------------------- */
 
 extern pthread_mutex_t g_disp_lock;
-extern pthread_cond_t g_disp_cond;
-void disp_signal_all(void);  /* call with g_disp_lock held after changing a SignalState */
+/* Call with g_disp_lock held after changing an object's SignalState: wakes
+   the threads waiting on it (disp_signal_all: every waiting thread). */
+void disp_signal(void *object);
+void disp_signal_all(void);
 NTSTATUS wait_objects(ULONG count, PVOID objects[], int wait_any,
                       BOOLEAN alertable, LARGE_INTEGER *timeout);
 void timers_init(void);
