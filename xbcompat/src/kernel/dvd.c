@@ -862,8 +862,9 @@ void dvd_title_started(const char *xbe_host_path)
    only run from an Xbox game disc asks the drive (MODE SENSE, page 0x3E)
    whether it has authenticated the disc; a title that hears no goes back to
    the dashboard.  A PC drive can't do the Xbox drive's challenge and
-   response, so any disc in the tray is reported as authenticated.  Other
-   commands get no data, as before. */
+   response, so the disc is always reported as authenticated, also with the
+   tray empty: titles installed on the hard disk run without their disc.
+   Other commands get no data, as before. */
 NTSTATUS dvd_scsi_pass_through(void *in, ULONG inlen)
 {
     struct {
@@ -875,7 +876,6 @@ NTSTATUS dvd_scsi_pass_through(void *in, ULONG inlen)
         UCHAR Cdb[16];
     } *pt = in;
     if (!pt || inlen < sizeof(*pt)) return STATUS_INVALID_PARAMETER;
-    if (dvd_tray_empty()) return STATUS_NO_MEDIA_IN_DEVICE;
     uint8_t *buf = pt->DataBuffer;
     ULONG len = pt->DataTransferLength;
     if (buf && len) memset(buf, 0, len);
