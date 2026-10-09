@@ -30,12 +30,31 @@ patch_src() { # file (as sources.txt spells it) sed-script
     sed "$2" "$WORK/xb/private/ui/xapp/$(ls "$WORK/xb/private/ui/xapp" | grep -ix "$1")" > "$WORK/patch/$1.new"
     cmp -s "$WORK/patch/$1.new" "$WORK/patch/$1" && rm -f "$WORK/patch/$1.new" || mv "$WORK/patch/$1.new" "$WORK/patch/$1"
 }
+# Apply a patch from games/ to xapp sources (LF line ends), as patch_src does.
+patch_srcs() { # patch-file file...
+    mkdir -p "$WORK/patch/new"
+    for f in "${@:2}"; do tr -d '\r' < "$WORK/xb/private/ui/xapp/$f" > "$WORK/patch/new/$f"; done
+    (cd "$WORK/patch/new" && patch -s -p1 < "$1") || exit 1
+    for f in "${@:2}"; do
+        cmp -s "$WORK/patch/new/$f" "$WORK/patch/$f" || mv "$WORK/patch/new/$f" "$WORK/patch/$f"
+    done
+    rm -rf "$WORK/patch/new"
+}
 # GuidDef.h defines `one`, which main.cpp uses as a variable name.
 patch_src main.cpp 's/\bone\b/fOne/g'
 # A game disc in the tray at startup waits in the Games screen's top slot
 # instead of rebooting into the game (Microsoft's dashboard only ran with a
 # game disc in when a game had sent it there).
 patch_src Disc.cpp 's/theApp.m_bHasLaunchData || g_nDiscType == DISC_VIDEO/theApp.m_bHasLaunchData || g_nDiscType == DISC_TITLE || g_nDiscType == DISC_VIDEO/'
+# The Memory screen lists each title's downloads (Xbox Live Arcade games) and
+# the games installed from the Games screen next to its saves.  The patched
+# TitleCollection.h sits beside the two patched sources, the only ones built
+# with it (CTitleArray itself keeps its layout).
+patch_srcs "$HERE/games/memory.patch" TitleCollection.h TitleCollection.cpp SavedGameGrid.cpp
+# A source compiled from the patch folder is rebuilt when its header changes.
+for f in TitleCollection.cpp SavedGameGrid.cpp; do
+    [ "$WORK/patch/TitleCollection.h" -nt "$WORK/patch/$f" ] && touch "$WORK/patch/$f"
+done
 
 G=$(echo "Z:$HERE/games" | tr / '\\')    # the Games area added to the dashboard
 for f in $(cat "$HERE/sources.txt") GameCollection.cpp; do
@@ -90,7 +109,7 @@ fi
 (
     cd "$WORK/dash"
     E="python3 $HERE/games/xipedit.py"
-    $E default.xip default.xip default.xap=default.xap games.xap=games.xap
+    $E default.xip default.xip default.xap=default.xap games.xap=games.xap memory3.xap=memory3.xap
     $E mainmenu5.xip mainmenu5.xip default.xap=MainMenu5/default.xap
     $E settings3.xip Games2.xip default.xap=Games2/default.xap
     timeout 120 wine "$WORK/xb/private/ui/xipsign/obj/i386/xipsign.exe" obj\\xipsums.bin default.xip dvd.xip \
