@@ -162,6 +162,7 @@ ssize_t dvd_read(dvd_node *n, void *buf, size_t len, uint64_t off);
 ssize_t dvd_read_volume(void *buf, size_t len, uint64_t off);
 bool dvd_extract(dvd_node *n, char *host, size_t hostlen);
 void dvd_title_started(const char *xbe_host_path);
+NTSTATUS dvd_scsi_pass_through(void *in, ULONG inlen);
 
 /* ---- title launches (XLaunchNewImage) --------------------------------- */
 
