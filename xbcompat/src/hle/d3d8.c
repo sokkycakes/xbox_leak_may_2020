@@ -147,6 +147,9 @@ static struct {
     ULONG multisample_type;      /* D3DPRESENT_PARAMETERS.MultiSampleType */
     ULONG flicker_filter;        /* SetFlickerFilter level, 0 (off) to 5 */
     bool soft_display;           /* SetSoftDisplayFilter (the encoder's luma filter) */
+    unsigned char gamma[3][256]; /* SetGammaRamp: red, green, blue (D3DGAMMARAMP) */
+    bool gamma_set;              /* the ramp isn't the identity */
+    bool gamma_dirty;            /* the ramp changed since Present last loaded it */
     ULONG constant_mode;
     float vs_const[192][4];      /* vertex shader constants, hardware numbering */
     float ps_const[16][4];
@@ -207,6 +210,7 @@ static void load_shader_functions(void);
 static void create_device_surfaces(ULONG format, ULONG depth_format);
 static void create_window_framebuffer(void);
 static void present_window_framebuffer(void);
+static void gamma_identity(void);
 static void restore_window_framebuffer(void);
 static void backbuffer_read_begin(GLbitfield mask);
 static void backbuffer_read_end(void);
@@ -321,6 +325,7 @@ static LONG NTAPI Direct3D_CreateDevice(UINT_ Adapter, ULONG DeviceType, PVOID p
     d3d.multisample_type = pp->MultiSampleType;
     d3d.flicker_filter = 5;   /* what the Xbox's device init sets */
     d3d.soft_display = false;
+    gamma_identity();
     xlog("D3D: CreateDevice %ux%u, format %#x, depth %s, multisample %#x", d3d.width, d3d.height,
          pp->BackBufferFormat, pp->EnableAutoDepthStencil ? "yes" : "no", pp->MultiSampleType);
 
@@ -379,6 +384,9 @@ static void save_screenshot(const char *path)
     backbuffer_read_begin(GL_COLOR_BUFFER_BIT);
     glReadPixels(0, 0, w, h, GL_BGRA, GL_UNSIGNED_BYTE, px);
     backbuffer_read_end();
+    if (d3d.gamma_set)   /* as the TV shows it */
+        for (int i = 0; i < w * h; i++)
+            for (int c = 0; c < 3; c++) px[i * 4 + c] = d3d.gamma[2 - c][px[i * 4 + c]];
     SDL_Surface *s = SDL_CreateRGBSurfaceWithFormat(0, w, h, 32, SDL_PIXELFORMAT_ARGB8888);
     for (int y = 0; y < h; y++)
         memcpy((uint8_t *)s->pixels + y * s->pitch, px + (h - 1 - y) * w * 4, w * 4);
@@ -3060,7 +3068,8 @@ static struct {
     int w, h, samples;
     float soft;                  /* weight of each neighbour in the downsample filter */
     GLuint prog;
-    GLint u_tex, u_step, u_weight;
+    GLint u_tex, u_step, u_weight, u_lut, u_gamma;
+    GLuint lut;                  /* the gamma ramp as a 256x1 texture */
     void (APIENTRY *bind)(GLenum, GLuint);
     void (APIENTRY *blit)(GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield, GLenum);
 } window_fb;
@@ -3200,8 +3209,9 @@ static const char present_vs[] =
 /* A 3x3 tap filter, separable: each axis weighs its neighbours by weight. */
 static const char present_fs[] =
     "#version 120\n"
-    "uniform sampler2D tex;\n"
+    "uniform sampler2D tex, lut;\n"
     "uniform vec2 texel, weight;\n"
+    "uniform float gamma;\n"
     "varying vec2 uv;\n"
     "void main() {\n"
     "    vec3 kx = vec3(weight.x, 1.0 - 2.0 * weight.x, weight.x);\n"
@@ -3210,6 +3220,11 @@ static const char present_fs[] =
     "    for (int y = 0; y < 3; y++)\n"
     "        for (int x = 0; x < 3; x++)\n"
     "            c += kx[x] * ky[y] * texture2D(tex, uv + vec2(float(x - 1), float(y - 1)) * texel).rgb;\n"
+    "    if (gamma > 0.5) {\n"
+    "        vec3 i = clamp(c, 0.0, 1.0) * (255.0 / 256.0) + 0.5 / 256.0;\n"
+    "        c = vec3(texture2D(lut, vec2(i.r, 0.5)).r, texture2D(lut, vec2(i.g, 0.5)).g,\n"
+    "                 texture2D(lut, vec2(i.b, 0.5)).b);\n"
+    "    }\n"
     "    gl_FragColor = vec4(c, 1.0);\n"
     "}\n";
 
@@ -3238,6 +3253,8 @@ static bool present_program(void)
     window_fb.u_tex = p_glGetUniformLocation(prog, "tex");
     window_fb.u_step = p_glGetUniformLocation(prog, "texel");
     window_fb.u_weight = p_glGetUniformLocation(prog, "weight");
+    window_fb.u_lut = p_glGetUniformLocation(prog, "lut");
+    window_fb.u_gamma = p_glGetUniformLocation(prog, "gamma");
     return true;
 }
 
@@ -3255,7 +3272,7 @@ static void present_window_framebuffer(void)
     float wy = window_fb.soft + flicker * 0.05f;
     if (wy > 0.3f) wy = 0.3f;
 
-    if ((wx <= 0 && wy <= 0) || !present_program()) {
+    if ((wx <= 0 && wy <= 0 && !d3d.gamma_set) || !present_program()) {
         GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
         glDisable(GL_SCISSOR_TEST);
         window_fb.bind(GL_READ_FRAMEBUFFER, window_fb.resolve ? window_fb.resolve : window_fb.fbo);
@@ -3282,6 +3299,33 @@ static void present_window_framebuffer(void)
     float step[2] = { 1.0f / d3d.width, 1.0f / d3d.height }, weight[2] = { wx, wy };
     p_glUniform2fv(window_fb.u_step, 1, step);
     p_glUniform2fv(window_fb.u_weight, 1, weight);
+    p_glUniform1f(window_fb.u_gamma, d3d.gamma_set ? 1.0f : 0.0f);
+    if (d3d.gamma_set) {
+        p_glActiveTexture(GL_TEXTURE1);
+        if (!window_fb.lut) {
+            glGenTextures(1, &window_fb.lut);
+            glBindTexture(GL_TEXTURE_2D, window_fb.lut);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            d3d.gamma_dirty = true;
+        }
+        glBindTexture(GL_TEXTURE_2D, window_fb.lut);
+        if (d3d.gamma_dirty) {
+            unsigned char rgb[256][3];
+            for (int i = 0; i < 256; i++)
+                rgb[i][0] = d3d.gamma[0][i], rgb[i][1] = d3d.gamma[1][i], rgb[i][2] = d3d.gamma[2][i];
+            GLint align;
+            glGetIntegerv(GL_UNPACK_ALIGNMENT, &align);
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, 256, 1, 0, GL_RGB, GL_UNSIGNED_BYTE, rgb);
+            glPixelStorei(GL_UNPACK_ALIGNMENT, align);
+            d3d.gamma_dirty = false;
+        }
+        p_glUniform1i(window_fb.u_lut, 1);
+        p_glActiveTexture(GL_TEXTURE0);
+    }
     glBegin(GL_TRIANGLE_STRIP);
     glVertex2f(-1, -1); glVertex2f(1, -1); glVertex2f(-1, 1); glVertex2f(1, 1);
     glEnd();
@@ -4178,8 +4222,28 @@ static void NTAPI D3DDevice_KickPushBuffer(void) {}
 static ULONG NTAPI D3DDevice_InsertFence(void) { return ++d3d.frame * 0 + 1; }
 static BOOLEAN NTAPI D3DDevice_IsFencePending(ULONG f) { (void)f; return 0; }
 static void NTAPI D3DDevice_BlockOnFence(ULONG f) { (void)f; }
-static void NTAPI D3DDevice_SetGammaRamp(ULONG flags, const void *ramp) { (void)flags; (void)ramp; }
-static void NTAPI D3DDevice_GetGammaRamp(USHORT *ramp) { for (int i = 0; i < 768; i++) ramp[i] = (i % 256) * 257; }
+/* The ramp the video DAC applied on the Xbox (the dashboard's screen saver
+   dims the screen with it); Present applies it. */
+static void gamma_identity(void)
+{
+    for (int c = 0; c < 3; c++)
+        for (int i = 0; i < 256; i++) d3d.gamma[c][i] = (unsigned char)i;
+    d3d.gamma_set = false;
+    d3d.gamma_dirty = true;
+}
+
+static void NTAPI D3DDevice_SetGammaRamp(ULONG flags, const unsigned char *ramp)
+{
+    (void)flags;
+    memcpy(d3d.gamma, ramp, sizeof d3d.gamma);
+    d3d.gamma_set = false;
+    for (int c = 0; c < 3; c++)
+        for (int i = 0; i < 256; i++)
+            if (d3d.gamma[c][i] != i) d3d.gamma_set = true;
+    d3d.gamma_dirty = true;
+}
+
+static void NTAPI D3DDevice_GetGammaRamp(unsigned char *ramp) { memcpy(ramp, d3d.gamma, sizeof d3d.gamma); }
 /* The video overlay: the NV2A scales a YUY2 surface onto the screen as it
    is scanned out, over the frame buffer or only where the frame buffer holds
    the color key.  It never touches the frame buffer, so present_overlay()

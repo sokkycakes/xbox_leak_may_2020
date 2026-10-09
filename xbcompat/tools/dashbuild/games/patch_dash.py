@@ -10,6 +10,11 @@
 - Games2/: the Settings home scene with a GAMES heading.  It was modelled
   as the Games screen (S_Home_text_games rows, S_Home_GameModule pods).
 - games.xap: the area script (from this folder).
+- The screen saver from Theseus's UIX-style dashboard: after five idle
+  minutes on the main menu the pods and button hint fade out, the ring
+  drifts to one of three camera angles and the cell wall spins faster
+  (MainMenu5's scene is wrapped in theMainMenuLevel for it).  Elsewhere the
+  screen dims, as Microsoft's dashboard did.
 """
 import math, os, re, shutil, sys
 
@@ -62,6 +67,9 @@ pod = pod[:pod.rindex(old_t)] + "translation %f %f 101.900002" % (x * cs - y * s
     pod[pod.rindex(old_t) + len(old_t):]
 games_pod = pod + "\n\t\t\t\t"
 mm = mm[:start] + games_pod + mm[start:]
+# The whole scene in one transform, so the screen saver can move it.
+first = mm.index("DEF ring Transform")
+mm = mm[:first] + "DEF theMainMenuLevel Transform\n{\n    children\n    [\n" + mm[first:].rstrip() + "\n    ]\n}\n"
 wr("MainMenu5/default.xap", mm)
 
 # ---- main menu logic ------------------------------------------------------
@@ -162,6 +170,102 @@ d = sub1(d, "DEF theLauncherLevel Level", '''function LaunchGameWithLogo()
 }
 
 DEF theLauncherLevel Level''')
+
+# ---- screen saver (Theseus's UIX-style one) -------------------------------
+d = sub1(d, '''    function OnStart()
+    {
+        theScreen.brightness = 0.1;
+    }
+
+    function OnEnd()
+    {
+        theScreen.brightness = 1;
+    }''', '''    function OnStart()
+    {
+        theScreen.brightness = 0.1;
+        StartScreenSaverView();
+    }
+
+    function OnEnd()
+    {
+        theScreen.brightness = 1;
+        StopScreenSaverView();
+    }''')
+d = sub1(d, "    path Viewpoint\n    {\n        fieldOfView 1.300000\n        orientation -0.177400 -0.983500",
+         "    path DEF theMainMenuViewpoint Viewpoint\n    {\n        fieldOfView 1.300000\n        orientation -0.177400 -0.983500")
+d = sub1(d, "            Waver\n            {\n                rpm 0.75",
+         "            DEF theMainMenuWaver Waver\n            {\n                rpm 0.75")
+d = sub1(d, "var g_bLaunchGame;", "var g_bLaunchGame;\nvar g_bScreenSaverView;\nvar g_nScreenSaverStir;")
+d = sub1(d, "    g_bLaunchGame = false;", "    g_bLaunchGame = false;\n    g_bScreenSaverView = false;\n    g_nScreenSaverStir = 0;")
+d = sub1(d, """    var a = (nCurMainMenuItem - 1) * 0.45;
+""", """    var a = (nCurMainMenuItem - 1) * 0.45;
+    g_nScreenSaverStir = g_nScreenSaverStir + nCurMainMenuItem + 2;
+""")
+d = d.rstrip() + '''
+
+////////////////////////////////////////////////////////////////////////////
+// Screen saver view (from Theseus's UIX-style dashboard): on the main menu
+// the pods and the button hint fade out, the ring drifts slowly to one of
+// three angles under a wider, lower camera, and the cell wall spins faster.
+
+function StartScreenSaverView()
+{
+    if (theMainMenuViewpoint.isBound)
+    {
+        var c = theMainMenu.children[0].children[0];
+        // Math.random starts the same way every boot: moving round the
+        // menu stirs it, so the first screen saver isn't always the same.
+        var x = g_nScreenSaverStir + Math.floor(Math.random() * 3);
+        x = x - Math.floor(x / 3) * 3;
+        c.theMenuItems.SetAlpha(0);
+        c.select.SetAlpha(0);
+        c.theMainMenuLevel.fade = 100;
+        if (x == 0)
+        {
+            c.theMainMenuLevel.SetTranslation(30, -104, 4);
+        }
+        else if (x == 1)
+        {
+            c.theMainMenuLevel.SetTranslation(74, -46, -14);
+            c.theMainMenuLevel.SetRotation(-0.0006, 0, 0.00005, 0.314159);
+        }
+        else
+        {
+            c.theMainMenuLevel.SetTranslation(-24, -36, -262);
+            c.theMainMenuLevel.SetRotation(-0.001, 0.0003, 0.0003, 0.314159);
+        }
+        theMainMenuWaver.rpm = 2.25;
+        theScreen.brightness = 0.8;
+        theMainMenuAlternateViewpoint.isBound = true;
+        g_bScreenSaverView = true;
+    }
+}
+
+function StopScreenSaverView()
+{
+    if (g_bScreenSaverView)
+    {
+        var c = theMainMenu.children[0].children[0];
+        g_bScreenSaverView = false;
+        c.theMainMenuLevel.fade = 0.25;
+        c.theMainMenuLevel.SetRotation(0, 0, 0, 0);
+        c.theMainMenuLevel.SetTranslation(0, 0, 0);
+        c.theMenuItems.SetAlpha(1);
+        c.select.SetAlpha(1);
+        theMainMenuWaver.rpm = 0.75;
+        if (theMainMenuAlternateViewpoint.isBound)
+            theMainMenuViewpoint.isBound = true;
+    }
+}
+
+DEF theMainMenuAlternateViewpoint Viewpoint
+{
+    fieldOfView 1.755000
+    orientation -0.177400 -1.983500 -0.036250 -0.045440
+    position -15.180000 -112.299999 174.300003
+    jump false
+}
+'''
 wr("default.xap", d)
 
 # ---- the Games screen -----------------------------------------------------
