@@ -46,6 +46,9 @@ patch_src main.cpp 's/\bone\b/fOne/g'
 # instead of rebooting into the game (Microsoft's dashboard only ran with a
 # game disc in when a game had sent it there).
 patch_src Disc.cpp 's/theApp.m_bHasLaunchData || g_nDiscType == DISC_VIDEO/theApp.m_bHasLaunchData || g_nDiscType == DISC_TITLE || g_nDiscType == DISC_VIDEO/'
+# A viewpoint a Level binds reads isBound true, as one bound from script does
+# (the screen saver asks whether the main menu's camera is the current one).
+patch_src Viewpoint.cpp 's/^\(\s*\)theApp.m_pViewpoint = this;/&\n\1m_isBound = true;/'
 # The Memory screen lists each title's downloads (Xbox Live Arcade games) and
 # the games installed from the Games screen next to its saves.  The patched
 # TitleCollection.h sits beside the two patched sources, the only ones built

@@ -211,6 +211,7 @@ int main(int argc, char **argv)
     fs_init(xbe, hdd, g_dvd_root, g_dvd_drive);
     launch_init(argc, argv, d_path, launch_data, xbe_rel);
     kernel_resolve_imports(&img);
+    reset_init(((XBE_CERTIFICATE *)img.header->Certificate)->TitleID);
     hle_patch(&img, hle);
 
     thread_create(img.header->SizeOfStackCommit, 0, NULL, (PVOID)run_entry_point,

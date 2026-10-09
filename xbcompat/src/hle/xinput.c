@@ -785,6 +785,33 @@ static void sample(xi_handle *h, const xi_port *p, bool force)
     }
 }
 
+/*
+ * L + R + Back + Start on any pad (Q + E + Escape + Backspace on the
+ * keyboard pad) goes back to the dashboard, the in-game reset modded Xboxes
+ * had (kernel/reset.c). It fires when the last of the four goes down, so a
+ * combo still held from the title before doesn't reset this one.
+ */
+void xinput_check_reset_combo(void)
+{
+    static bool was_held = true;
+    if (!reset_enabled() || !xi.inited || !xi.sdl_ready) return;
+    bool held = false;
+    pthread_mutex_lock(&xi.lock);
+    for (unsigned i = 0; i < XI_PORTS && !held; i++) {
+        const xi_port *p = &xi.port[i];
+        if (!p->connected) continue;
+        XINPUT_GAMEPAD g;
+        read_port(p, &g);
+        held = (g.wButtons & (XINPUT_GAMEPAD_BACK | XINPUT_GAMEPAD_START)) ==
+                   (XINPUT_GAMEPAD_BACK | XINPUT_GAMEPAD_START) &&
+               g.bAnalogButtons[XINPUT_GAMEPAD_LEFT_TRIGGER] >= 128 &&
+               g.bAnalogButtons[XINPUT_GAMEPAD_RIGHT_TRIGGER] >= 128;
+    }
+    pthread_mutex_unlock(&xi.lock);
+    if (held && !was_held) reset_request("L + R + Back + Start");
+    was_held = held;
+}
+
 /* ---- handles ------------------------------------------------------------ */
 
 static xi_handle *check_handle(HANDLE h, const char *api)
