@@ -33,6 +33,8 @@
  * shoulders (right = Black, left = White) are 255 when pressed, triggers are
  * axis >> 7, the sticks are passed through with Y negated (up = +32767, the
  * sign ATG code and xemu use), rumble goes to SDL_GameControllerRumble.
+ * Original Xbox pads get a mapping of their own (map_original_pad) that puts
+ * Black and White on those shoulders.
  * Controllers take the lowest free port in the order SDL lists them.
  *
  * Keyboard fallback: when no game controller is attached (and a window
@@ -376,6 +378,111 @@ static bool any_controller(void)
  * (rate limited) from every API entry so hotplug works without the event
  * pump, which belongs to D3DDevice_Swap.
  */
+/*
+ * Original Xbox controllers on Linux.  The kernel's xpad driver gives an
+ * XTYPE_XBOX pad (Duke, Controller S and the third-party pads in its table,
+ * through a breakaway-cable USB adapter) the keys A B C X Y Z Select Start
+ * ThumbL ThumbR, with Black on BTN_C and White on BTN_Z, a d-pad hat and the
+ * triggers on ABS_Z/ABS_RZ.  SDL's database only knows a few versions of
+ * 045e:0202/0285/0289, and its automatic evdev mapping has no place for
+ * BTN_C/BTN_Z, so every other original pad came up without Black and White.
+ * This adds the mapping for each device in xpad's XTYPE_XBOX table, and for
+ * "Generic X-Box pad" devices with the original pad's 10 buttons, 6 axes and
+ * one hat.  Button and axis numbers follow SDL's evdev order (key code, then
+ * ABS code), which shifts on the dance pads xpad gives d-pad and trigger
+ * buttons.  The face buttons stay digital: xpad reports their pressure byte
+ * as a key, so the title sees 0 or 255.
+ */
+enum { OG_DPAD_BUTTONS = 1, OG_TRIGGER_BUTTONS = 2, OG_NO_STICKS = 4 };
+
+/* The SDL mapping for an XTYPE_XBOX pad with xpad's mapping flags. */
+static void original_pad_mapping(const char *guid, int flags, char *m, size_t size)
+{
+    int b = 6, a = 0, n;
+    n = snprintf(m, size, "%s,Xbox Controller (original),a:b0,b:b1,rightshoulder:b2,"
+                 "x:b3,y:b4,leftshoulder:b5,", guid);
+    if (flags & OG_TRIGGER_BUTTONS) {
+        n += snprintf(m + n, size - n, "lefttrigger:b%d,righttrigger:b%d,", b, b + 1);
+        b += 2;
+    }
+    n += snprintf(m + n, size - n, "back:b%d,start:b%d,leftstick:b%d,rightstick:b%d,",
+                  b, b + 1, b + 2, b + 3);
+    b += 4;
+    if (flags & OG_DPAD_BUTTONS)
+        n += snprintf(m + n, size - n, "dpup:b%d,dpdown:b%d,dpleft:b%d,dpright:b%d,",
+                      b, b + 1, b + 2, b + 3);
+    else
+        n += snprintf(m + n, size - n, "dpup:h0.1,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,");
+    /* ABS_X, ABS_Y, ABS_Z (left trigger), ABS_RX, ABS_RY, ABS_RZ (right trigger) */
+    if (!(flags & OG_NO_STICKS)) n += snprintf(m + n, size - n, "leftx:a%d,lefty:a%d,", a, a + 1), a += 2;
+    if (!(flags & OG_TRIGGER_BUTTONS)) n += snprintf(m + n, size - n, "lefttrigger:a%d,", a++);
+    if (!(flags & OG_NO_STICKS)) n += snprintf(m + n, size - n, "rightx:a%d,righty:a%d,", a, a + 1), a += 2;
+    if (!(flags & OG_TRIGGER_BUTTONS)) snprintf(m + n, size - n, "righttrigger:a%d,", a++);
+}
+
+#ifdef __linux__
+
+static const struct { Uint16 vendor, product; Uint8 flags; } og_pads[] = {
+    { 0x044f, 0x0f00, 0 }, { 0x044f, 0x0f03, 0 }, { 0x044f, 0x0f07, 0 }, { 0x044f, 0x0f10, 0 },
+    { 0x045e, 0x0202, 0 }, { 0x045e, 0x0285, 0 }, { 0x045e, 0x0287, 0 }, { 0x045e, 0x0288, 0 },
+    { 0x045e, 0x0289, 0 }, { 0x046d, 0xca84, 0 }, { 0x046d, 0xca88, 0 }, { 0x046d, 0xca8a, 0 },
+    { 0x05fd, 0x1007, 0 }, { 0x05fd, 0x107a, 0 }, { 0x05fe, 0x3030, 0 }, { 0x05fe, 0x3031, 0 },
+    { 0x062a, 0x0020, 0 }, { 0x062a, 0x0033, 0 }, { 0x06a3, 0x0200, 0 }, { 0x06a3, 0x0201, 0 },
+    { 0x0738, 0x4506, 0 }, { 0x0738, 0x4516, 0 }, { 0x0738, 0x4520, 0 }, { 0x0738, 0x4522, 0 },
+    { 0x0738, 0x4526, 0 }, { 0x0738, 0x4530, 0 }, { 0x0738, 0x4536, 0 }, { 0x0738, 0x4540, 1 },
+    { 0x0738, 0x4556, 0 }, { 0x0738, 0x4586, 0 }, { 0x0738, 0x4588, 0 }, { 0x0738, 0x45ff, 1 },
+    { 0x0738, 0x4743, 1 }, { 0x0738, 0x6040, 1 }, { 0x0c12, 0x0005, 0 }, { 0x0c12, 0x8801, 0 },
+    { 0x0c12, 0x8802, 0 }, { 0x0c12, 0x8809, 7 }, { 0x0c12, 0x880a, 0 }, { 0x0c12, 0x8810, 0 },
+    { 0x0c12, 0x9902, 0 }, { 0x0d2f, 0x0002, 1 }, { 0x0e4c, 0x1097, 0 }, { 0x0e4c, 0x1103, 2 },
+    { 0x0e4c, 0x2390, 0 }, { 0x0e4c, 0x3510, 0 }, { 0x0e6f, 0x0003, 0 }, { 0x0e6f, 0x0005, 0 },
+    { 0x0e6f, 0x0006, 0 }, { 0x0e6f, 0x0008, 0 }, { 0x0e8f, 0x0201, 0 }, { 0x0e8f, 0x3008, 0 },
+    { 0x0f30, 0x010b, 0 }, { 0x0f30, 0x0202, 0 }, { 0x0f30, 0x8888, 0 }, { 0x102c, 0xff0c, 0 },
+    { 0x12ab, 0x8809, 1 }, { 0x1430, 0x8888, 1 }, { 0x3767, 0x0101, 0 }, { 0xffff, 0xffff, 0 }
+};
+
+static void map_original_pad(int j)
+{
+    static SDL_JoystickGUID done[16];
+    static unsigned ndone;
+    SDL_JoystickGUID guid = SDL_JoystickGetDeviceGUID(j);
+    guid.data[2] = guid.data[3] = 0;            /* mappings never carry the name CRC */
+    for (unsigned i = 0; i < ndone; i++)
+        if (!memcmp(&done[i], &guid, sizeof(guid))) return;
+    if (guid.data[0] != 0x03 || guid.data[1] != 0) return;      /* USB only */
+
+    Uint16 vendor = SDL_JoystickGetDeviceVendor(j), product = SDL_JoystickGetDeviceProduct(j);
+    int flags = -1;
+    for (unsigned i = 0; i < sizeof(og_pads) / sizeof(og_pads[0]) && flags < 0; i++)
+        if (og_pads[i].vendor == vendor && og_pads[i].product == product) flags = og_pads[i].flags;
+    if (flags < 0) {
+        const char *name = SDL_JoystickNameForIndex(j);
+        if (!name || !strstr(name, "Generic X-Box pad")) return;
+        SDL_Joystick *js = SDL_JoystickOpen(j);   /* a generic 360 pad has 11 buttons */
+        if (!js) return;
+        bool og = SDL_JoystickNumButtons(js) == 10 && SDL_JoystickNumAxes(js) == 6 &&
+                  SDL_JoystickNumHats(js) == 1;
+        SDL_JoystickClose(js);
+        if (!og) {
+            if (ndone < sizeof(done) / sizeof(done[0])) done[ndone++] = guid;
+            return;
+        }
+        flags = 0;
+    }
+
+    char g[33], m[512];
+    SDL_JoystickGetGUIDString(guid, g, sizeof(g));
+    original_pad_mapping(g, flags, m, sizeof(m));
+    if (SDL_GameControllerAddMapping(m) < 0)
+        xlog("XInput: original Xbox pad %04x:%04x: SDL_GameControllerAddMapping: %s",
+             vendor, product, SDL_GetError());
+    else
+        xlog("XInput: original Xbox pad %04x:%04x mapped (Black, White on the shoulders)", vendor, product);
+    if (ndone < sizeof(done) / sizeof(done[0])) done[ndone++] = guid;
+}
+#else
+static void map_original_pad(int j) { (void)j; }
+#endif
+
 static void sync_devices(bool force)
 {
     uint64_t t = now_us();
@@ -389,9 +496,10 @@ static void sync_devices(bool force)
 
     int n = SDL_NumJoysticks();
     for (int j = 0; j < n; j++) {
-        if (!SDL_IsGameController(j)) continue;
         SDL_JoystickID id = SDL_JoystickGetDeviceInstanceID(j);
         if (id < 0 || port_of_instance(id) >= 0) continue;
+        map_original_pad(j);
+        if (!SDL_IsGameController(j)) continue;
         if (xi.port[0].kbd) remove_port(0);     /* a real controller takes port 0 */
         int free = -1;
         for (unsigned i = 0; i < XI_PORTS && free < 0; i++)
