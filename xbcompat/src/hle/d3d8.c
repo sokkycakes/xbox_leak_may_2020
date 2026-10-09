@@ -1760,6 +1760,12 @@ static void apply_render_states(bool pretransformed, bool has_normal)
         glDisable(GL_DEPTH_TEST);
     }
     glDepthMask(RS(D3DRS_ZWRITEENABLE) ? GL_TRUE : GL_FALSE);
+    {
+        /* D3DCOLORWRITEENABLE_BLUE/GREEN/RED/ALPHA are bytes 0-3 (stencil
+           shadow volumes draw with all four off). */
+        ULONG cw = RS(D3DRS_COLORWRITEENABLE);
+        glColorMask(!!(cw & 0xFF0000), !!(cw & 0xFF00), !!(cw & 0xFF), !!(cw & 0xFF000000));
+    }
     if (RS(D3DRS_SOLIDOFFSETENABLE)) {
         /* The offset counts steps of the Xbox depth format; GL's of a 24-bit buffer. */
         glEnable(GL_POLYGON_OFFSET_FILL);
