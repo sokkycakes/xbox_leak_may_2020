@@ -6,8 +6,14 @@
 arm_64bit=1
 kernel=kernel8.img
 
-# The GPU through KMS (vc4 display, v3d 3D on the Pi 4 and 5).
-dtoverlay=vc4-kms-v3d
+# The GPU through KMS (vc4 display, v3d 3D on the Pi 4 and 5), with the
+# composite output on the 3.5 mm jack as well as HDMI. The picture goes to
+# HDMI when a screen is plugged in there, otherwise to composite (NTSC).
+dtoverlay=vc4-kms-v3d,composite
+# Pi 4 and 5 only: composite costs them some HDMI clock speed.
+enable_tvout=1
+# Analog sound on the 3.5 mm jack, for a TV on composite.
+dtparam=audio=on
 max_framebuffers=2
 disable_overscan=1
 

@@ -40,6 +40,17 @@ if ! ls /dev/dri/card* > /dev/null 2>&1; then
 fi
 export HOME=/root
 
+# Raspberry Pi: sound goes where the picture does, HDMI when a screen is
+# plugged in there, otherwise the 3.5 mm jack beside composite.
+if [ -z "$AUDIODEV" ] && grep -q '^ *[0-9]* \[Headphones' /proc/asound/cards 2>/dev/null; then
+	if grep -qx connected /sys/class/drm/card*-HDMI-A-1/status 2>/dev/null &&
+	   grep -q '^ *[0-9]* \[vc4hdmi' /proc/asound/cards; then
+		export AUDIODEV=hdmi:CARD=vc4hdmi,DEV=0
+	else
+		export AUDIODEV=plughw:CARD=Headphones,DEV=0
+	fi
+fi
+
 # Same sound output bootani picks: the ALSA default (card 0, device 0) if
 # it exists, otherwise the first HDMI/DisplayPort output of the Intel HD
 # Audio card, the usual case on the Chromebox.
