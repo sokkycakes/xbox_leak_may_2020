@@ -955,6 +955,8 @@ NTSTATUS NTAPI NtDeviceIoControlFile(HANDLE FileHandle, HANDLE Event, PVOID ApcR
         ((UCHAR *)Out)[26] = 1;  /* RecognizedPartition */
         return complete(Event, ApcRoutine, ApcContext, iosb, STATUS_SUCCESS, 32);
     }
+    case 0x4D014:     /* IOCTL_SCSI_PASS_THROUGH_DIRECT: XAPI's disc authentication check */
+        return complete(Event, ApcRoutine, ApcContext, iosb, dvd_scsi_pass_through(In, InLen), 0);
     case 0x24800:     /* IOCTL_CDROM_CHECK_VERIFY: is there a disc in the tray? */
         return complete(Event, ApcRoutine, ApcContext, iosb, dvd_check_verify(), 0);
     case 0x24000:     /* IOCTL_CDROM_READ_TOC: the DVD directory is a data disc, never audio */
