@@ -141,7 +141,10 @@ static void usage(void)
             "  --shot-frame N     which frame --screenshot captures (every Nth when FILE has %%d)\n"
             "  --frames N   exit after presenting N frames\n"
             "  --log FILE   write the log to FILE instead of stderr\n"
-            "  --dvd DIR    directory backing the DVD drive (default: the XBE's directory)\n"
+            "  --dvd DIR    directory backing the DVD drive (default: the XBE's directory),\n"
+            "               or an Xbox disc image (XISO), or an optical drive (/dev/sr0)\n"
+            "  --dvd-drive DEV  an optical drive whose disc is the tray while the drive is\n"
+            "               plugged in (discs can go in and out while titles run)\n"
             "  --card DIR   the game card (Kazeta cart media); default: the first card\n"
             "               with a .kzi or .kzp under /media or /run/media\n"
             "  --d-path P, --xbe-path P, --launch-data FILE\n"
@@ -150,7 +153,7 @@ static void usage(void)
     exit(2);
 }
 
-char *g_dvd_root;
+char *g_dvd_root, *g_dvd_drive;
 
 int main(int argc, char **argv)
 {
@@ -161,6 +164,7 @@ int main(int argc, char **argv)
         { "frames", required_argument, 0, 'f' }, { "dvd", required_argument, 0, 'v' },
         { "d-path", required_argument, 0, 'D' }, { "launch-data", required_argument, 0, 'L' },
         { "xbe-path", required_argument, 0, 'X' }, { "card", required_argument, 0, 'c' },
+        { "dvd-drive", required_argument, 0, 'R' },
         { 0, 0, 0, 0 },
     };
     const char *hle = NULL, *hdd = NULL, *d_path = NULL, *launch_data = NULL, *xbe_rel = NULL;
@@ -179,6 +183,7 @@ int main(int argc, char **argv)
         case 'L': launch_data = optarg; break;
         case 'X': xbe_rel = optarg; break;
         case 'c': fs_set_card(optarg); break;
+        case 'R': g_dvd_drive = optarg; break;
         default: usage();
         }
     }
@@ -201,7 +206,7 @@ int main(int argc, char **argv)
 
     xbe_image img;
     xbe_load(xbe, &img);
-    fs_init(xbe, hdd, g_dvd_root);
+    fs_init(xbe, hdd, g_dvd_root, g_dvd_drive);
     launch_init(argc, argv, d_path, launch_data, xbe_rel);
     kernel_resolve_imports(&img);
     hle_patch(&img, hle);

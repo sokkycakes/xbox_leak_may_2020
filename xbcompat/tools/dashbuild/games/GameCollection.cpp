@@ -42,6 +42,7 @@ struct GAMEINFO
 };
 
 extern const TCHAR* g_szSelTitleImage;  // MaxMat.cpp: the "SelectedIcon" material's image
+extern void TitleArray_GamesChanged();  // TitleCollection.cpp: the hard disk's titles are out of date
 
 static GAMEINFO* c_rgGames = NULL;
 static int c_nGameCount = 0;
@@ -194,15 +195,18 @@ static bool EndsWith(const CHAR* sz, const CHAR* szEnd)
     return cch >= cchEnd && _stricmp(sz + cch - cchEnd, szEnd) == 0;
 }
 
-// The carts' file names on the game card, to notice it changing.
+// The DVD tray's state and the carts' file names on the game card, to
+// notice either changing (a disc going in or out of a USB DVD drive).
 static void GetCardSignature(CHAR* szSig, int cchSig)
 {
-    szSig[0] = 0;
+    ULONG TrayState = 0;
+    HalReadSMCTrayState(&TrayState, NULL);
+    _snprintf(szSig, cchSig, "%02x|", TrayState & 0x70);
     WIN32_FIND_DATAA fd;
     HANDLE hFind = FindFirstFileA("CARD0:\\*", &fd);
     if (hFind == INVALID_HANDLE_VALUE)
         return;
-    int cch = 0;
+    int cch = strlen(szSig);
     do
     {
         int cchName = strlen(fd.cFileName);
@@ -669,29 +673,21 @@ CStrObject* CGameCollection::GetSavedGames(int nGame)
     return new CStrObject(sz);
 }
 
-// Points the "SelectedIcon" material at the game's title image, copied out of
-// its XBE into T:\GameImages (the dashboard's own title data), or at the
-// Xbox logo when it has none.  Returns whether the game has its own image.
-int CGameCollection::SelectGameImage(int nGame)
+// Copies a game's title image out of its XBE into T:\GameImages (the
+// dashboard's own title data), unless it is there already.
+static bool CacheTitleImage(const CHAR* szPath, const GAMEINFO* pGame, CHAR* szCache)
 {
-    static TCHAR szImage [MAX_PATH];
-    g_szSelTitleImage = _T("xboxlogo128.xbx");
-
-    if (nGame < 0 || nGame >= c_nGameCount || c_rgGames[nGame].m_dwImageSize == 0)
-        return 0;
-
-    const GAMEINFO* pGame = &c_rgGames[nGame];
-    CHAR szCache [MAX_PATH];
     CreateDirectoryA("T:\\GameImages", NULL);
     sprintf(szCache, "T:\\GameImages\\%08X%08X.xbx", pGame->m_dwTitleID, pGame->m_dwTimeDate);
 
     if (GetFileAttributesA(szCache) == (DWORD)-1)
     {
-        CHAR szPath [MAX_PATH];
-        GetXbePath(nGame, szPath);
+        if (pGame->m_dwImageSize == 0)
+            return false;
+
         HANDLE hFile = CreateFileA(szPath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
         if (hFile == INVALID_HANDLE_VALUE)
-            return 0;
+            return false;
 
         bool bOK = false;
         BYTE* pb = new BYTE [pGame->m_dwImageSize];
@@ -712,8 +708,49 @@ int CGameCollection::SelectGameImage(int nGame)
         delete [] pb;
         CloseHandle(hFile);
         if (!bOK)
-            return 0;
+            return false;
     }
+
+    return true;
+}
+
+// For the Memory screen (TitleCollection.cpp): an installed game's title ID,
+// build time and name, and its cached title image.
+bool ReadXbeTitleInfo(const CHAR* szXbe, DWORD* pdwTitleID, DWORD* pdwTimeDate, WCHAR* szName /*[41]*/)
+{
+    GAMEINFO game;
+    ZeroMemory(&game, sizeof (game));
+    if (!ReadXbeTitle(szXbe, &game))
+        return false;
+
+    *pdwTitleID = game.m_dwTitleID;
+    *pdwTimeDate = game.m_dwTimeDate;
+    CopyMemory(szName, game.m_szName, sizeof (game.m_szName));
+    return true;
+}
+
+bool CacheXbeTitleImage(const CHAR* szXbe, CHAR* szCache /*[MAX_PATH]*/)
+{
+    GAMEINFO game;
+    ZeroMemory(&game, sizeof (game));
+    return ReadXbeTitle(szXbe, &game) && CacheTitleImage(szXbe, &game, szCache);
+}
+
+// Points the "SelectedIcon" material at the game's title image, or at the
+// Xbox logo when it has none.  Returns whether the game has its own image.
+int CGameCollection::SelectGameImage(int nGame)
+{
+    static TCHAR szImage [MAX_PATH];
+    g_szSelTitleImage = _T("xboxlogo128.xbx");
+
+    if (nGame < 0 || nGame >= c_nGameCount || c_rgGames[nGame].m_dwImageSize == 0)
+        return 0;
+
+    CHAR szPath [MAX_PATH];
+    CHAR szCache [MAX_PATH];
+    GetXbePath(nGame, szPath);
+    if (!CacheTitleImage(szPath, &c_rgGames[nGame], szCache))
+        return 0;
 
     _stprintf(szImage, _T("%hs"), szCache);
     g_szSelTitleImage = szImage;
@@ -1035,6 +1072,7 @@ void CGameCollection::Advance(float nSeconds)
     CloseHandle(c_install.m_hThread);
     c_install.m_hThread = NULL;
     Scan();
+    TitleArray_GamesChanged();  // the Memory screen lists it now (or what a failed install left)
     if (c_install.m_bNoSpace || c_install.m_bFailed)
         CallFunction(this, _T("OnInstallError"));
     else

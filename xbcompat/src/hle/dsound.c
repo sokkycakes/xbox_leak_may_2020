@@ -1905,17 +1905,26 @@ static HRESULT NTAPI DS_CommitEffectData(void *self)
 
 /* ---- files (host side) -------------------------------------------------------------------- */
 
-struct ds_xfile { int fd; HANDLE h; };
+struct ds_xfile { int fd; HANDLE h; bool own; };
 
 static int xfile_open(struct ds_xfile *f, const char *name, int flags)
 {
-    f->fd = -1; f->h = NULL;
+    f->fd = -1; f->h = NULL; f->own = false;
     if (!name) return -1;
     OBJECT_STRING s = { (USHORT)strlen(name), (USHORT)(strlen(name) + 1), (char *)name };
     OBJECT_ATTRIBUTES oa = { NULL, &s, 0 };
     char host[1024]; int is_dev;
     NTSTATUS st = fs_translate(&oa, host, sizeof(host), &is_dev);
     if (!NT_SUCCESS(st)) { xlog("DSound: cannot resolve %s (%#x)", name, st); return -1; }
+    if (is_dev == 3) {
+        /* On an Xbox disc (kernel/dvd.c): read it through a handle. */
+        extern NTSTATUS NTAPI NtOpenFile(HANDLE *, ACCESS_MASK, OBJECT_ATTRIBUTES *, IO_STATUS_BLOCK *, ULONG, ULONG);
+        IO_STATUS_BLOCK iosb;
+        st = NtOpenFile(&f->h, 0x80000000 /* GENERIC_READ */, &oa, &iosb, 1, 0x60 /* sync, non-directory */);
+        if (!NT_SUCCESS(st)) { f->h = NULL; xlog("DSound: cannot open %s (%#x)", name, st); return -1; }
+        f->own = true;
+        return 0;
+    }
     f->fd = open(host, flags, 0644);
     if (f->fd < 0) { xlog("DSound: cannot open %s (%s)", name, host); return -1; }
     return 0;
@@ -1924,7 +1933,8 @@ static int xfile_open(struct ds_xfile *f, const char *name, int flags)
 static void xfile_close(struct ds_xfile *f)
 {
     if (f->fd >= 0) close(f->fd);
-    f->fd = -1; f->h = NULL;
+    if (f->own && f->h) handle_close(f->h);
+    f->fd = -1; f->h = NULL; f->own = false;
 }
 
 static ssize_t xfile_pread(struct ds_xfile *f, void *buf, size_t n, uint64_t off)
@@ -2134,7 +2144,7 @@ static HRESULT wave_create(const char *name, HANDLE h, const WAVEFORMATEX **ppfm
     if (!w) return DSERR_OUTOFMEMORY;
     w->vtbl = wave_vtbl; w->refs = 1;
     if (name) { if (xfile_open(&w->f, name, O_RDONLY) < 0) { free(w); return DSERR_INVALIDPARAM; } }
-    else { w->f.fd = -1; w->f.h = h; }
+    else { w->f.fd = -1; w->f.h = h; w->f.own = false; }
     HRESULT hr = wave_parse(w);
     if (hr != DS_OK) { xfile_close(&w->f); free(w); return hr; }
     if (ppfmt) *ppfmt = (const WAVEFORMATEX *)w->fmt;
@@ -2234,7 +2244,7 @@ static HRESULT NTAPI XFileCreateMediaObjectEx(HANDLE h, void **ppxmo)
     if (!h || !ppxmo) return DSERR_INVALIDPARAM;
     struct ds_filexmo *f = calloc(1, sizeof(*f));
     if (!f) return DSERR_OUTOFMEMORY;
-    f->vtbl = file_vtbl; f->refs = 1; f->f.fd = -1; f->f.h = h;
+    f->vtbl = file_vtbl; f->refs = 1; f->f.fd = -1; f->f.h = h; f->f.own = false;
     *ppxmo = f;
     return DS_OK;
 }

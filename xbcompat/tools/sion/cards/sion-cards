@@ -122,6 +122,8 @@ while true; do
 	for d in /sys/class/block/*; do
 		disk=${d##*/}
 		[ -e "$d/partition" ] && continue
+		# An optical drive is the Xbox's DVD drive: xbcompat reads its discs.
+		case $disk in sr*) continue ;; esac
 		removable "$disk" || continue
 		boot_disk "$disk" && continue
 		# A card reader with no card in it reports size 0.

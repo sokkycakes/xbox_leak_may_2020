@@ -114,11 +114,31 @@ void object_release(xobject *obj);
 
 /* ---- files ------------------------------------------------------------ */
 
-void fs_init(const char *xbe_path, const char *hdd_root, const char *dvd_root);
+void fs_init(const char *xbe_path, const char *hdd_root, const char *dvd_root, const char *dvd_drive);
 NTSTATUS fs_host_path(const char *xpath, char *host, size_t hostlen);
 const char *fs_hdd_root(void);
 void fs_set_card(const char *dir);
 void install_fault_handlers(void);
+
+/* ---- the DVD drive and its tray (kernel/dvd.c) ------------------------ */
+
+typedef struct dvd_node dvd_node;
+struct stat;
+void dvd_init(const char *src, const char *drive);
+bool dvd_is_media(void);
+const char *dvd_host_dir(void);
+ULONG dvd_tray_state(void);
+bool dvd_tray_empty(void);
+NTSTATUS dvd_check_verify(void);
+NTSTATUS dvd_lookup(const char *rest, dvd_node **out);
+bool dvd_node_is_dir(const dvd_node *n);
+const char *dvd_node_name(const dvd_node *n);
+void dvd_stat(const dvd_node *n, struct stat *sb);
+dvd_node *dvd_child(dvd_node *n, int i);
+ssize_t dvd_read(dvd_node *n, void *buf, size_t len, uint64_t off);
+ssize_t dvd_read_volume(void *buf, size_t len, uint64_t off);
+bool dvd_extract(dvd_node *n, char *host, size_t hostlen);
+void dvd_title_started(const char *xbe_host_path);
 
 /* ---- title launches (XLaunchNewImage) --------------------------------- */
 

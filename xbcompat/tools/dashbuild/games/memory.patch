@@ -1,0 +1,706 @@
+diff -u a/SavedGameGrid.cpp b/SavedGameGrid.cpp
+--- a/SavedGameGrid.cpp	2026-10-09 06:14:31.717378647 +0000
++++ b/SavedGameGrid.cpp	2026-10-09 06:29:51.276461190 +0000
+@@ -127,6 +127,8 @@
+ 	int GetTitleCount();
+ 	int CanCopy();
+ 	int IsSoundtrackSelected();
++	int IsGameSelected();
++	int GetGameCount(int nTitle);
+ 	int IsDevUnitReady(int nUnit);
+ 
+ protected:
+@@ -247,6 +249,8 @@
+ 	NODE_FUN_SII(GetSavedGamePath)
+ 	NODE_FUN_IV(CanCopy)
+ 	NODE_FUN_IV(IsSoundtrackSelected)
++	NODE_FUN_IV(IsGameSelected)
++	NODE_FUN_II(GetGameCount)
+ 	NODE_FUN_II(IsDevUnitReady)
+ 	NODE_FUN_IV(GetTitleCount)
+ 	NODE_FUN_SV(GetUpdateString)
+@@ -1532,6 +1536,11 @@
+ 	if (!GetSavedGamePath(szSavedGamePath, m_curTitle, m_curSavedGame))
+ 		return new CStrObject; // empty string
+ 
++	// A download or an installed game
++	TCHAR szItemName [64];
++	if (g_titles[m_curDevUnit].GetSavedGameName(m_curTitle, m_curSavedGame, szItemName, countof(szItemName)))
++		return new CStrObject(szItemName);
++
+ 	MakePath(szSavedGamePath, szSavedGamePath, szSaveDataXBX);
+ 
+ 	TCHAR szSaveName [64];
+@@ -1632,9 +1641,7 @@
+         return false;
+     }
+ 
+-	MakePath(szBuf, g_titles[m_curDevUnit].GetUData(), GetTitleID2(nTitle));
+-	MakePath(szBuf, szBuf, GetSavedGameID2(nTitle, nSavedGame));
+-	return true;
++	return g_titles[m_curDevUnit].GetSavedGamePath(nTitle, nSavedGame, szBuf);
+ }
+ 
+ CStrObject* CSavedGameGrid::GetSavedGamePath(int nTitle, int nSavedGame)
+@@ -1808,6 +1815,17 @@
+             // Strip off low word so that it contains only publisher ID
+             szPublisherID[4] = 0;
+ 
++            // Delete the games installed from the Games screen listed under it
++            int nSavedGameCount = g_titles[p->m_curDevUnit].GetSavedGameCount(p->m_curTitle);
++            for (int i = 0; i < nSavedGameCount; i += 1)
++            {
++                if ((g_titles[p->m_curDevUnit].GetSavedGameKind(p->m_curTitle, i) & SAVEFLAG_GAME) != 0 &&
++                    g_titles[p->m_curDevUnit].GetSavedGamePath(p->m_curTitle, i, szBuf))
++                {
++                    theGameCopier.DeleteDirectory(szBuf);
++                }
++            }
++
+             g_titles[p->m_curDevUnit].RemoveTitle(p->m_curTitle);
+ 
+             // Delete shared publisher directory if it was the last title from this publisher
+@@ -1913,6 +1931,9 @@
+ 	if (m_curTitle < 0 || IsSoundtrackSelected())
+ 		return false; // can't copy devices or soundtracks
+ 
++	if (IsGameSelected())
++		return false; // downloads and installed games stay on the hard disk
++
+ 	TCHAR szSavedGamePath [MAX_PATH];
+ 
+ 	if (m_curSavedGame < 0 || !GetSavedGamePath(szSavedGamePath, m_curTitle, m_curSavedGame))
+@@ -1944,6 +1965,31 @@
+ 	return (m_nSoundtrackTitle >= 0 && m_curTitle == m_nSoundtrackTitle);
+ }
+ 
++// A download or a game installed from the Games screen, not a save.
++int CSavedGameGrid::IsGameSelected()
++{
++	if (m_curTitle < 0 || m_curSavedGame < 0 || IsSoundtrackSelected())
++		return false;
++
++	return g_titles[m_curDevUnit].GetSavedGameKind(m_curTitle, m_curSavedGame) != 0;
++}
++
++// How many of a title's items are downloads or installed games.
++int CSavedGameGrid::GetGameCount(int nTitle)
++{
++	if (nTitle < 0 || (m_nSoundtrackTitle >= 0 && nTitle >= m_nSoundtrackTitle))
++		return 0;
++
++	int nGames = 0;
++	int nSavedGameCount = GetSavedGameCount(nTitle);
++	for (int i = 0; i < nSavedGameCount; i += 1)
++	{
++		if (g_titles[m_curDevUnit].GetSavedGameKind(nTitle, i) != 0)
++			nGames += 1;
++	}
++	return nGames;
++}
++
+ int CSavedGameGrid::IsDevUnitReady(int nUnit)
+ {
+     return !g_titles[nUnit].IsDirty();
+diff -u a/TitleCollection.cpp b/TitleCollection.cpp
+--- a/TitleCollection.cpp	2026-10-09 06:14:31.713062946 +0000
++++ b/TitleCollection.cpp	2026-10-09 06:29:51.280395133 +0000
+@@ -33,6 +33,204 @@
+ 
+ 
+ ////////////////////////////////////////////////////////////////////////////
++// xbcompat's dashbuild: on the hard disk the Memory screen also lists what
++// takes up room besides saves, the way later Xbox dashboards did: the content
++// a title downloaded (TDATA\<title>\$C\<content>, e.g. each Xbox Live Arcade
++// game under Xbox Live Arcade) and the games installed from the Games screen
++// (c:\Games\<folder>, under the title their XBE names).  Each is an item next
++// to the title's saves and can be deleted there.
++
++// GameCollection.cpp
++extern bool ReadXbeTitleInfo(const CHAR* szXbe, DWORD* pdwTitleID, DWORD* pdwTimeDate, WCHAR* szName /*[41]*/);
++extern bool CacheXbeTitleImage(const CHAR* szXbe, CHAR* szCache /*[MAX_PATH]*/);
++
++#define MAX_INSTALLED_GAMES 256
++
++struct INSTALLEDGAME
++{
++	CHAR m_szFolder[64];		// c:\Games\<m_szFolder>
++	CHAR m_szXbe[64];			// its XBE
++	TCHAR m_szOwner[16];		// the title it is listed under
++	WCHAR m_szName[41];
++	DWORD m_dwTitleID;
++	DWORD m_dwTimeDate;
++	FILETIME m_ft;
++};
++
++static INSTALLEDGAME* c_rgInstalled = NULL;
++static int c_nInstalled = 0;
++
++// Titles whose only data are downloads and have no TitleMeta.xbx of their own.
++static const struct { const TCHAR* szID; const TCHAR* szName; } c_rgKnownTitles [] =
++{
++	{ _T("4d5300c8"), _T("Xbox Live Arcade") },
++};
++
++static void ScanInstalledGames()
++{
++	if (c_rgInstalled == NULL)
++		c_rgInstalled = new INSTALLEDGAME [MAX_INSTALLED_GAMES];
++	c_nInstalled = 0;
++
++	WIN32_FIND_DATAA fd;
++	HANDLE hFind = FindFirstFileA("c:\\Games\\*", &fd);
++	if (hFind == INVALID_HANDLE_VALUE)
++		return;
++
++	do
++	{
++		if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == '.' ||
++			strlen(fd.cFileName) >= sizeof (c_rgInstalled[0].m_szFolder))
++			continue;
++
++		INSTALLEDGAME* pGame = &c_rgInstalled[c_nInstalled];
++		ZeroMemory(pGame, sizeof (INSTALLEDGAME));
++		strcpy(pGame->m_szFolder, fd.cFileName);
++		strcpy(pGame->m_szXbe, "default.xbe");
++		pGame->m_ft = fd.ftLastWriteTime;
++
++		// default.xbe, or else the folder's one XBE (as the Games screen does)
++		CHAR szPath [MAX_PATH];
++		sprintf(szPath, "c:\\Games\\%s\\default.xbe", fd.cFileName);
++		if (GetFileAttributesA(szPath) == (DWORD)-1)
++		{
++			WIN32_FIND_DATAA fdXbe;
++			sprintf(szPath, "c:\\Games\\%s\\*.xbe", fd.cFileName);
++			HANDLE hXbe = FindFirstFileA(szPath, &fdXbe);
++			if (hXbe == INVALID_HANDLE_VALUE)
++				continue;
++			lstrcpynA(pGame->m_szXbe, fdXbe.cFileName, sizeof (pGame->m_szXbe));
++			FindClose(hXbe);
++		}
++		sprintf(szPath, "c:\\Games\\%s\\%s", fd.cFileName, pGame->m_szXbe);
++		if (!ReadXbeTitleInfo(szPath, &pGame->m_dwTitleID, &pGame->m_dwTimeDate, pGame->m_szName))
++			continue;
++
++		if (pGame->m_szName[0] == 0)
++		{
++			for (int i = 0; i < 40 && fd.cFileName[i]; i += 1)
++				pGame->m_szName[i] = fd.cFileName[i], pGame->m_szName[i + 1] = 0;
++		}
++		_stprintf(pGame->m_szOwner, _T("%08x"), pGame->m_dwTitleID);
++		c_nInstalled += 1;
++	}
++	while (c_nInstalled < MAX_INSTALLED_GAMES && FindNextFileA(hFind, &fd));
++
++	FindClose(hFind);
++}
++
++static INSTALLEDGAME* FindInstalledGame(const TCHAR* szFolder)
++{
++	CHAR sz [64];
++	Ansi(sz, szFolder, countof(sz));
++	for (int i = 0; i < c_nInstalled; i += 1)
++	{
++		if (_stricmp(c_rgInstalled[i].m_szFolder, sz) == 0)
++			return &c_rgInstalled[i];
++	}
++	return NULL;
++}
++
++// Whether TDATA\<szTitleID> holds any downloads ($C\<content> folders).
++static bool HasContent(const TCHAR* szTData, const TCHAR* szTitleID)
++{
++	TCHAR szWild [MAX_PATH];
++	MakePath(szWild, szTData, szTitleID);
++	MakePath(szWild, szWild, _T("$C\\*.*"));
++
++	CHAR szBuf [MAX_PATH];
++	Ansi(szBuf, szWild, countof(szBuf));
++	WIN32_FIND_DATAA fd;
++	HANDLE hFind = FindFirstFileA(szBuf, &fd);
++	if (hFind == INVALID_HANDLE_VALUE)
++		return false;
++
++	bool bFound = false;
++	do
++	{
++		if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 && fd.cFileName[0] != '.')
++			bFound = true;
++	}
++	while (!bFound && FindNextFileA(hFind, &fd));
++	FindClose(hFind);
++	return bFound;
++}
++
++// The Name= of a ContentMeta.xbx: an "XCSF" header (its size at 0x18) whose
++// title metadata (offset and size at 0x34) is UTF-16 text in TitleMeta.xbx
++// form, one [section] per language: [default] Name="..." [FR] Name="..."
++static bool ReadContentName(const TCHAR* szContentDir, TCHAR* szName, int cchName)
++{
++	TCHAR szPath [MAX_PATH];
++	MakePath(szPath, szContentDir, _T("ContentMeta.xbx"));
++	CHAR szBuf [MAX_PATH];
++	Ansi(szBuf, szPath, countof(szBuf));
++
++	HANDLE hFile = CreateFileA(szBuf, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
++	if (hFile == INVALID_HANDLE_VALUE)
++		return false;
++
++	BYTE rgb [4096];
++	DWORD cb = 0;
++	BOOL bRead = ReadFile(hFile, rgb, sizeof (rgb), &cb, NULL);
++	CloseHandle(hFile);
++	if (!bRead || cb < 0x3C || *(DWORD*)(rgb + 0x14) != 'FSCX')
++		return false;
++
++	DWORD dwOffset = *(DWORD*)(rgb + 0x34);
++	DWORD dwSize = *(DWORD*)(rgb + 0x38);
++	if (dwOffset >= cb || dwSize > cb - dwOffset || dwSize < 4)
++		return false;
++
++	const WCHAR* pch = (const WCHAR*)(rgb + dwOffset);
++	const WCHAR* pchLim = pch + dwSize / sizeof (WCHAR);
++	if (*pch == 0xFEFF)
++		pch += 1;
++
++	TCHAR szLang [MAX_LANGUAGE_CODE_LEN];
++	GetLanguageCode(szLang);
++
++	bool bFound = false;
++	bool bDefault = false, bLang = false;
++	while (pch < pchLim && *pch != 0)
++	{
++		// one line
++		const WCHAR* pchEnd = pch;
++		while (pchEnd < pchLim && *pchEnd != 0 && *pchEnd != '\r' && *pchEnd != '\n')
++			pchEnd += 1;
++
++		int cch = pchEnd - pch;
++		if (cch > 2 && pch[0] == '[' && pch[cch - 1] == ']')
++		{
++			bDefault = (cch == 9 && _wcsnicmp(pch + 1, L"default", 7) == 0);
++			bLang = ((int)_tcslen(szLang) == cch - 2 && _wcsnicmp(pch + 1, szLang, cch - 2) == 0);
++		}
++		else if ((bDefault || bLang) && cch > 5 && _wcsnicmp(pch, L"Name=", 5) == 0 && (bLang || !bFound))
++		{
++			const WCHAR* pchValue = pch + 5;
++			const WCHAR* pchValueEnd = pchEnd;
++			if (pchValueEnd - pchValue >= 2 && *pchValue == '"' && pchValueEnd[-1] == '"')
++				pchValue += 1, pchValueEnd -= 1;
++
++			int n = pchValueEnd - pchValue;
++			if (n > cchName - 1)
++				n = cchName - 1;
++			CopyMemory(szName, pchValue, n * sizeof (WCHAR));
++			szName[n] = 0;
++			bFound = n > 0;
++			if (bFound && bLang)
++				break;
++		}
++
++		pch = pchEnd;
++		while (pch < pchLim && (*pch == '\r' || *pch == '\n'))
++			pch += 1;
++	}
++
++	return bFound;
++}
++
++////////////////////////////////////////////////////////////////////////////
+ 
+ CTitleArray g_titles [9];
+ 
+@@ -42,6 +240,12 @@
+ 	// NOTE: Memory units will be set as they are mounted...
+ }
+ 
++// The Games screen installed a game: list the hard disk's titles again.
++void TitleArray_GamesChanged()
++{
++	g_titles[8].DeleteAll(false);
++}
++
+ CTitleArray::CTitleArray()
+ {
+     InitializeCriticalSection(&m_RootLock);
+@@ -99,7 +303,7 @@
+ 	return _tcsicmp(pTitle1->m_szName, pTitle2->m_szName);
+ }
+ 
+-void CTitleArray::AddTitle(const TCHAR* szTitleID)
++void CTitleArray::AddTitle(const TCHAR* szTitleID, const TCHAR* szFallbackName /*= NULL*/)
+ {
+ 	TCHAR szXbxFile[MAX_PATH];
+     TCHAR szTranslate[MAX_TRANSLATE_LEN];
+@@ -115,9 +319,37 @@
+ 	bool broken = false;
+ 	if (!settings.Open(szXbxFile) || !settings.GetValue(szLanguageCode, _T("TitleName"), szTitleName, countof(szTitleName)))
+ 	{
+-		TRACE(_T("\002Broken Game: title id: %s\n"), szTitleID);
+-		_tcscpy(szTitleName, Translate(_T("Broken Game"), szTranslate));
+-		broken = true;
++		// A title with only downloads or an installed game: its TDATA
++		// TitleMeta.xbx, the installed game's own name, or a known name.
++		CSettingsFile tdata;
++		if (m_szRoot[0] == 'c')
++		{
++			MakePath(szXbxFile, GetTData(), szTitleID);
++			MakePath(szXbxFile, szXbxFile, szTitleDataXBX);
++		}
++		if (m_szRoot[0] == 'c' && tdata.Open(szXbxFile) && tdata.GetValue(szLanguageCode, _T("TitleName"), szTitleName, countof(szTitleName)))
++		{
++		}
++		else if (szFallbackName != NULL)
++		{
++			lstrcpyn(szTitleName, szFallbackName, countof(szTitleName));
++		}
++		else
++		{
++			szTitleName[0] = 0;
++			for (int i = 0; i < countof(c_rgKnownTitles); i += 1)
++			{
++				if (_tcsicmp(szTitleID, c_rgKnownTitles[i].szID) == 0)
++					_tcscpy(szTitleName, c_rgKnownTitles[i].szName);
++			}
++
++			if (szTitleName[0] == 0)
++			{
++				TRACE(_T("\002Broken Game: title id: %s\n"), szTitleID);
++				_tcscpy(szTitleName, Translate(_T("Broken Game"), szTranslate));
++				broken = true;
++			}
++		}
+ 	}
+ 
+ 	if (m_nTitleCount == m_nTitleAlloc)
+@@ -205,6 +437,55 @@
+ 
+ 	FindClose(hFind);
+ 
++	if (m_szRoot[0] == 'c')
++	{
++		// Titles with downloads but no saves...
++		MakePath(szFileName, GetTData(), _T("*.*"));
++		Ansi(szBuf, szFileName, countof (szBuf));
++		hFind = FindFirstFile(szBuf, &fd);
++		if (hFind != INVALID_HANDLE_VALUE)
++		{
++			do
++			{
++				if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
++					continue;
++
++				Unicode(szFileName, fd.cFileName, countof(szFileName));
++				if (_tcsicmp(szFileName, _T("fffe0000")) == 0 || FindTitle(szFileName) != -1 ||
++					!HasContent(GetTData(), szFileName))
++					continue;
++
++				AddTitle(szFileName);
++			}
++			while (FindNextFile(hFind, &fd));
++			FindClose(hFind);
++		}
++
++		// ...and the games installed from the Games screen, each under its
++		// own title, or the title of the same name (an installer disc has
++		// its own title ID, as the Xbox Live Arcade disc does), or as a
++		// title of its own.
++		ScanInstalledGames();
++		for (int i = 0; i < c_nInstalled; i += 1)
++		{
++			INSTALLEDGAME* pGame = &c_rgInstalled[i];
++			if (FindTitle(pGame->m_szOwner) != -1)
++				continue;
++
++			for (int nTitle = 0; nTitle < m_nTitleCount; nTitle += 1)
++			{
++				if (_tcsicmp(m_rgtitle[nTitle].m_szName, pGame->m_szName) == 0)
++				{
++					_tcscpy(pGame->m_szOwner, m_rgtitle[nTitle].m_szID);
++					break;
++				}
++			}
++
++			if (FindTitle(pGame->m_szOwner) == -1)
++				AddTitle(pGame->m_szOwner, pGame->m_szName);
++		}
++	}
++
+ 	qsort(m_rgtitle, m_nTitleCount, sizeof (CTitle), SortTitleCompare);
+ 
+     // Enumerate saved game count
+@@ -216,7 +497,7 @@
+         CSave* rgsaves = new CSave [MAX_SAVED_GAMES];
+         nSavedGameCount =
+ 
+-        m_rgtitle[i].m_nSavedGameCount = ScanSavedGames(GetUData(), m_rgtitle[i].m_szID, rgsaves, NULL);
++        m_rgtitle[i].m_nSavedGameCount = ScanTitle(i, rgsaves, NULL);
+         m_rgtitle[i].m_rgsaves = new CSave [nSavedGameCount];
+         CopyMemory(m_rgtitle[i].m_rgsaves, rgsaves, sizeof (CSave) * nSavedGameCount);
+         delete [] rgsaves;
+@@ -272,7 +553,12 @@
+ 		{
+ 			CSave* rgsaves = new CSave [MAX_SAVED_GAMES];
+ 
+-			nSavedGameCount = ScanSavedGames(GetUData(), m_rgtitle[nTitle].m_szID, rgsaves, hCancelEvent);
++			nSavedGameCount = ScanTitle(nTitle, rgsaves, hCancelEvent);
++			if (nSavedGameCount < 0)
++			{
++				delete [] rgsaves;
++				return 0;	// cancelled; scan again next time
++			}
+ 
+ 			m_rgtitle[nTitle].m_nSavedGameCount = nSavedGameCount;
+ 			m_rgtitle[nTitle].m_rgsaves = new CSave [nSavedGameCount];
+@@ -460,6 +746,17 @@
+ 		m_rgtitle[nTitle].m_nTotalBlocks = ComputeTitleTotalBlocks(GetUData(), m_rgtitle[nTitle].m_szID, hCancelEvent);
+ 		if (m_szRoot[0] == 'c' && m_rgtitle[nTitle].m_nTotalBlocks >= 0)
+ 			m_rgtitle[nTitle].m_nTotalBlocks += ComputeTitleTotalBlocks(GetTData(), m_rgtitle[nTitle].m_szID, hCancelEvent);
++
++		// and the games installed from the Games screen
++		int nSavedGameCount = GetSavedGameCount(nTitle, hCancelEvent);
++		for (int i = 0; i < nSavedGameCount && m_rgtitle[nTitle].m_nTotalBlocks >= 0; i += 1)
++		{
++			TCHAR szPath [MAX_PATH];
++			if ((GetSavedGameKind(nTitle, i) & SAVEFLAG_GAME) == 0 || !GetSavedGamePath(nTitle, i, szPath))
++				continue;
++			int nBlocks = GetDirectoryBlocks(szPath, BLOCK_SIZE, true, hCancelEvent);
++			m_rgtitle[nTitle].m_nTotalBlocks = (nBlocks < 0) ? -1 : m_rgtitle[nTitle].m_nTotalBlocks + nBlocks;
++		}
+ 	}
+ 
+ 	return m_rgtitle[nTitle].m_nTotalBlocks;
+@@ -515,6 +812,135 @@
+ 
+ bool InitSave(CSave* pSave, const TCHAR* szRoot, const TCHAR* szTitleID, const TCHAR* szSaveDirName, FILETIME saveTime);
+ 
++static int __cdecl SortItemCompare(const void *elem1, const void *elem2)
++{
++	// Installed games first, then downloads, then saves; newest first in each
++	const CSave* pSave1 = (const CSave*)elem1;
++	const CSave* pSave2 = (const CSave*)elem2;
++	int nKind1 = (pSave1->m_dwFlags & SAVEFLAG_GAME) ? 0 : (pSave1->m_dwFlags & SAVEFLAG_CONTENT) ? 1 : 2;
++	int nKind2 = (pSave2->m_dwFlags & SAVEFLAG_GAME) ? 0 : (pSave2->m_dwFlags & SAVEFLAG_CONTENT) ? 1 : 2;
++	if (nKind1 != nKind2)
++		return nKind1 - nKind2;
++	return CompareFileTime(&pSave2->m_filetime, &pSave1->m_filetime);
++}
++
++// A title's saves, plus on the hard disk its downloads and installed games.
++int CTitleArray::ScanTitle(int nTitle, CSave* rgsaves /*[MAX_SAVED_GAMES]*/, HANDLE hCancelEvent)
++{
++	const TCHAR* szTitleID = m_rgtitle[nTitle].m_szID;
++	int nCount = ScanSavedGames(GetUData(), szTitleID, rgsaves, hCancelEvent);
++	if (nCount < 0 || m_szRoot[0] != 'c')
++		return nCount;
++
++	int nSaves = nCount;
++
++	// BLOCK: downloads in TDATA\<title>\$C
++	{
++		TCHAR szWild [MAX_PATH];
++		MakePath(szWild, GetTData(), szTitleID);
++		MakePath(szWild, szWild, _T("$C\\*.*"));
++
++		CHAR szBuf [MAX_PATH];
++		Ansi(szBuf, szWild, countof(szBuf));
++		WIN32_FIND_DATAA fd;
++		HANDLE hFind = FindFirstFileA(szBuf, &fd);
++		if (hFind != INVALID_HANDLE_VALUE)
++		{
++			do
++			{
++				if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 || fd.cFileName[0] == '.' ||
++					nCount == MAX_SAVED_GAMES)
++					continue;
++
++				TCHAR szName [MAX_PATH];
++				Unicode(szName, fd.cFileName, countof(szName));
++				if (!InitSave(&rgsaves[nCount], GetTData(), szTitleID, szName, fd.ftLastWriteTime))
++					continue;
++				rgsaves[nCount].m_dwFlags |= SAVEFLAG_CONTENT;
++				nCount += 1;
++			}
++			while (FindNextFileA(hFind, &fd));
++			FindClose(hFind);
++		}
++	}
++
++	// BLOCK: games installed from the Games screen
++	for (int i = 0; i < c_nInstalled && nCount < MAX_SAVED_GAMES; i += 1)
++	{
++		if (_tcsicmp(c_rgInstalled[i].m_szOwner, szTitleID) != 0)
++			continue;
++
++		TCHAR szName [64];
++		Unicode(szName, c_rgInstalled[i].m_szFolder, countof(szName));
++		if (!InitSave(&rgsaves[nCount], GetUData(), szTitleID, szName, c_rgInstalled[i].m_ft))
++			continue;
++		rgsaves[nCount].m_dwFlags |= SAVEFLAG_GAME;
++		nCount += 1;
++	}
++
++	if (nCount > nSaves)
++		qsort(rgsaves, nCount, sizeof (CSave), SortItemCompare);
++
++	return nCount;
++}
++
++DWORD CTitleArray::GetSavedGameKind(int nTitle, int nSavedGame)
++{
++	if (m_bDirty || nTitle < 0 || nTitle >= m_nTitleCount || nSavedGame < 0 || nSavedGame >= m_rgtitle[nTitle].m_nSavedGameCount)
++		return 0;
++
++	return m_rgtitle[nTitle].m_rgsaves[nSavedGame].m_dwFlags & (SAVEFLAG_CONTENT | SAVEFLAG_GAME);
++}
++
++// The folder that holds a save, a download or an installed game.
++bool CTitleArray::GetSavedGamePath(int nTitle, int nSavedGame, TCHAR* szPath/*[MAX_PATH]*/)
++{
++	if (nTitle < 0 || nTitle >= m_nTitleCount || nSavedGame < 0 || nSavedGame >= GetSavedGameCount(nTitle))
++		return false;
++
++	DWORD dwKind = GetSavedGameKind(nTitle, nSavedGame);
++	const TCHAR* szDirName = m_rgtitle[nTitle].m_rgsaves[nSavedGame].GetDirName();
++	if (dwKind & SAVEFLAG_GAME)
++	{
++		MakePath(szPath, _T("c:\\Games"), szDirName);
++	}
++	else if (dwKind & SAVEFLAG_CONTENT)
++	{
++		MakePath(szPath, GetTData(), m_rgtitle[nTitle].m_szID);
++		MakePath(szPath, szPath, _T("$C"));
++		MakePath(szPath, szPath, szDirName);
++	}
++	else
++	{
++		MakePath(szPath, GetUData(), m_rgtitle[nTitle].m_szID);
++		MakePath(szPath, szPath, szDirName);
++	}
++	return true;
++}
++
++// The name of a download or an installed game; false for a save (its name
++// is in its SaveMeta.xbx).
++bool CTitleArray::GetSavedGameName(int nTitle, int nSavedGame, TCHAR* szName, int cchName)
++{
++	DWORD dwKind = GetSavedGameKind(nTitle, nSavedGame);
++	if (dwKind & SAVEFLAG_GAME)
++	{
++		INSTALLEDGAME* pGame = FindInstalledGame(GetSavedGameID(nTitle, nSavedGame));
++		lstrcpyn(szName, pGame != NULL ? pGame->m_szName : GetSavedGameID(nTitle, nSavedGame), cchName);
++		return true;
++	}
++
++	if (dwKind & SAVEFLAG_CONTENT)
++	{
++		TCHAR szPath [MAX_PATH];
++		if (!GetSavedGamePath(nTitle, nSavedGame, szPath) || !ReadContentName(szPath, szName, cchName))
++			lstrcpyn(szName, GetSavedGameID(nTitle, nSavedGame), cchName);
++		return true;
++	}
++
++	return false;
++}
++
+ int ScanSavedGames(const TCHAR* szRoot, const TCHAR* szTitleID, CSave* rgsaves /*[MAX_SAVED_GAMES]*/, HANDLE hCancelEvent)
+ {
+     if (hCancelEvent && WaitForSingleObject(hCancelEvent, 0) == WAIT_OBJECT_0)
+@@ -628,6 +1054,55 @@
+ 	ASSERT(nTitle >= 0 && nTitle < m_nTitleCount);
+ 	ASSERT(nSavedGame >= 0 && nSavedGame < GetSavedGameCount(nTitle));
+ 
++	// A download's ContentImage.xbx; an installed game's title image, copied
++	// out of its XBE as the Games screen does.
++	DWORD dwKind = GetSavedGameKind(nTitle, nSavedGame);
++	if (dwKind != 0)
++	{
++		CSave* pSave = &m_rgtitle[nTitle].m_rgsaves[nSavedGame];
++		if (dwKind & SAVEFLAG_CONTENT)
++		{
++			GetSavedGamePath(nTitle, nSavedGame, szPath);
++			MakePath(szPath, szPath, _T("ContentImage.xbx"));
++			if ((pSave->m_dwFlags & SAVEFLAG_UNKIMAGE) != 0)
++			{
++				pSave->m_dwFlags &= ~SAVEFLAG_UNKIMAGE;
++				if (DoesFileExist(szPath))
++					pSave->m_dwFlags |= SAVEFLAG_HASIMAGE;
++			}
++		}
++		else
++		{
++			INSTALLEDGAME* pGame = FindInstalledGame(pSave->GetDirName());
++			CHAR szCache [MAX_PATH];
++			szCache[0] = 0;
++			if (pGame != NULL)
++				sprintf(szCache, "T:\\GameImages\\%08X%08X.xbx", pGame->m_dwTitleID, pGame->m_dwTimeDate);
++			if ((pSave->m_dwFlags & SAVEFLAG_UNKIMAGE) != 0)
++			{
++				pSave->m_dwFlags &= ~SAVEFLAG_UNKIMAGE;
++				CHAR szXbe [MAX_PATH];
++				if (pGame != NULL)
++				{
++					sprintf(szXbe, "c:\\Games\\%s\\%s", pGame->m_szFolder, pGame->m_szXbe);
++					if (CacheXbeTitleImage(szXbe, szCache))
++						pSave->m_dwFlags |= SAVEFLAG_HASIMAGE;
++				}
++			}
++			Unicode(szPath, szCache, MAX_PATH);
++		}
++
++		if ((pSave->m_dwFlags & SAVEFLAG_HASIMAGE) == 0)
++		{
++#ifdef COOL_XDASH
++			_tcscpy(szPath, _T("xboxlogo64.xbx.cool"));
++#else
++			_tcscpy(szPath, _T("xboxlogo64.xbx"));
++#endif
++		}
++		return;
++	}
++
+ 	if ((m_rgtitle[nTitle].m_rgsaves[nSavedGame].m_dwFlags & SAVEFLAG_UNKIMAGE) != 0)
+ 	{
+ 		m_rgtitle[nTitle].m_rgsaves[nSavedGame].m_dwFlags &= ~SAVEFLAG_UNKIMAGE;
+diff -u a/TitleCollection.h b/TitleCollection.h
+--- a/TitleCollection.h	2026-10-09 06:14:31.708890911 +0000
++++ b/TitleCollection.h	2026-10-09 06:14:31.711140856 +0000
+@@ -26,7 +26,7 @@
+ struct CSave
+ {
+ //	DWORD m_dwID;
+-	TCHAR m_szDirName[16];
++	TCHAR m_szDirName[64];	// a save's folder, a content ID, or an installed game's folder
+ 	FILETIME m_filetime;
+ 	DWORD m_dwFlags;
+ 
+@@ -36,6 +36,8 @@
+ 
+ #define SAVEFLAG_HASIMAGE	0x00000001
+ #define SAVEFLAG_UNKIMAGE	0x00000002
++#define SAVEFLAG_CONTENT	0x00000004	// TDATA\<title>\$C\<content>: a download (an Xbox Live Arcade game)
++#define SAVEFLAG_GAME		0x00000008	// c:\Games\<folder>: a game installed from the Games screen
+ 
+ class CTitle
+ {
+@@ -78,6 +80,10 @@
+ 	const TCHAR* GetTData() const;
+ 	const TCHAR* GetUData() const;
+ 
++	DWORD GetSavedGameKind(int nTitle, int nSavedGame);
++	bool GetSavedGamePath(int nTitle, int nSavedGame, TCHAR* szPath/*[MAX_PATH]*/);
++	bool GetSavedGameName(int nTitle, int nSavedGame, TCHAR* szName, int cchName);
++
+ 	void RemoveTitle(int nTitle);
+ 	void RemoveSavedGame(int nTitle, int nSavedGame);
+ 	void RemoveSavedGame(const TCHAR* szTitleID, const TCHAR* szDirName);
+@@ -85,7 +91,8 @@
+ 
+ protected:
+ 	int FindTitle(const TCHAR* szTitleID);
+-	void AddTitle(const TCHAR* szTitleID);
++	void AddTitle(const TCHAR* szTitleID, const TCHAR* szFallbackName = NULL);
++	int ScanTitle(int nTitle, CSave* rgsaves /*[MAX_SAVED_GAMES]*/, HANDLE hCancelEvent);
+ 
+ 	TCHAR m_szRoot [4];
+ 	bool m_bDirty;
