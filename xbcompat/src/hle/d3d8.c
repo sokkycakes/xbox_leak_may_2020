@@ -4646,27 +4646,34 @@ static void NTAPI D3DDevice_CreatePixelShader(const ULONG *def, ULONG *handle)
     *handle = (ULONG)copy;
 }
 
-static void NTAPI D3DDevice_SetPixelShader(ULONG handle)
+/* Load a D3DPIXELSHADERDEF into the render states. */
+static void set_pixel_shader_def(const ULONG *def)
 {
-    if (d3d.recording) pb_record(OP_PIXEL_SHADER, &handle, 4);
-    d3d.pixel_shader = handle;
-    if (!handle) return;
-    const ULONG *def = (const ULONG *)handle;
-    /* A title that builds its own shader objects (LTCG, no CreatePixelShader
-       to replace) passes the library's { RefCount, D3DOwned, pPSDef }. */
-    if (!pool_owns(def) && def[0] < 0x10000 && def[1] <= 1 && def[2] >= 0x10000) {
-        def = (const ULONG *)def[2];
-        d3d.pixel_shader = (ULONG)def;
-    }
+    if (d3d.recording) { ULONG h = (ULONG)def; pb_record(OP_PIXEL_SHADER, &h, 4); }
+    d3d.pixel_shader = (ULONG)def;
+    if (!def) return;
     memcpy(d3d.render_state, def, D3DRS_PS_MAX * 4);
     RS(D3DRS_PSTEXTUREMODES) = def[54];
 }
 
+static void NTAPI D3DDevice_SetPixelShader(ULONG handle)
+{
+    const ULONG *def = (const ULONG *)handle;
+    /* A title that builds its own shader objects (LTCG, no CreatePixelShader
+       to replace) passes the library's { RefCount, D3DOwned, pPSDef }. */
+    if (def && !pool_owns(def) && def[0] < 0x10000 && def[1] <= 1 && def[2] >= 0x10000)
+        def = (const ULONG *)def[2];
+    set_pixel_shader_def(def);
+}
+
 /* The library points its own shader object at the title's definition; the
-   definition is used in place, and NULL turns pixel shaders off. */
+   definition is used in place, and NULL turns pixel shaders off.  It is a
+   definition, never a shader object: one whose first combiner dwords look
+   like { RefCount, D3DOwned, pointer } (Phantom Dust's attack effects) must
+   not be taken for one. */
 static void NTAPI D3DDevice_SetPixelShaderProgram(const ULONG *def)
 {
-    D3DDevice_SetPixelShader((ULONG)def);
+    set_pixel_shader_def(def);
 }
 
 static void NTAPI D3DDevice_GetPixelShader(ULONG *handle) { *handle = d3d.pixel_shader; }
@@ -5215,7 +5222,7 @@ static void pb_run(D3DPushBuffer *b, D3DFixup *fx, int depth)
             imm_flush(a[0]);
             break;
         }
-        case OP_PIXEL_SHADER: D3DDevice_SetPixelShader(a[0]); break;
+        case OP_PIXEL_SHADER: set_pixel_shader_def((const ULONG *)a[0]); break;
         case OP_PS_CONST: D3DDevice_SetPixelShaderConstant(a[0], (const float *)(a + 2), a[1]); break;
         case OP_VS_INPUT: D3DDevice_SetVertexShaderInput(a[0], a[1], a + 2); break;
         case OP_RENDER_TARGET: D3DDevice_SetRenderTarget((D3DSurface *)a[0], (D3DSurface *)a[1]); break;
