@@ -23,11 +23,32 @@
 #include "../cpu.h"
 
 pthread_mutex_t g_disp_lock = PTHREAD_MUTEX_INITIALIZER;
-pthread_cond_t g_disp_cond;
+
+/* Threads blocked in wait_objects, each on its own condition variable, so
+   signaling an object wakes only the threads waiting on it (one shared
+   broadcast woke every waiting thread on every event, timer and semaphore:
+   thousands of wakeups a second, which a Raspberry Pi feels). */
+struct disp_waiter {
+    pthread_cond_t cv;
+    ULONG count;
+    PVOID *objects;
+    struct disp_waiter *next;
+};
+static struct disp_waiter *disp_waiters;
+
+void disp_signal(void *object)
+{
+    for (struct disp_waiter *w = disp_waiters; w; w = w->next)
+        for (ULONG i = 0; i < w->count; i++)
+            if (w->objects[i] == object) {
+                pthread_cond_signal(&w->cv);
+                break;
+            }
+}
 
 void disp_signal_all(void)
 {
-    pthread_cond_broadcast(&g_disp_cond);
+    for (struct disp_waiter *w = disp_waiters; w; w = w->next) pthread_cond_signal(&w->cv);
 }
 
 /* ---- time ------------------------------------------------------------- */
@@ -133,6 +154,9 @@ static bool vdso_use_syscalls(void)
     uint8_t *base = (uint8_t *)getauxval(AT_SYSINFO_EHDR);
     if (!base) return true;   /* no vDSO: glibc already makes system calls */
     Elf32_Ehdr *eh = (Elf32_Ehdr *)base;
+    /* Under box86 (x86 on ARM) this is the ARM kernel's vDSO, which the
+       ARM C library calls: never write x86 jumps into it. */
+    if (eh->e_machine != EM_386) return false;
     Elf32_Phdr *ph = (Elf32_Phdr *)(base + eh->e_phoff);
     Elf32_Addr bias = 0, lo = ~0u, hi = 0;
     for (int i = 0; i < eh->e_phnum; i++)
@@ -322,6 +346,9 @@ static void apc_drain(xthread *t, bool user)
         }
         pthread_mutex_unlock(&g_disp_lock);
         apc_run(a);
+        /* The routine took the guest CPU (translated builds); a wait that
+           goes on blocking must not keep it. */
+        cpu_block();
         pthread_mutex_lock(&g_disp_lock);
     }
 }
@@ -353,6 +380,16 @@ NTSTATUS wait_objects(ULONG count, PVOID objects[], int wait_any, KPROCESSOR_MOD
     bool poll = timeout && timeout->QuadPart == 0;
     NTSTATUS st;
 
+    static __thread struct disp_waiter me;
+    static __thread bool me_init;
+    if (!me_init) {
+        pthread_cond_init(&me.cv, NULL);   /* CLOCK_REALTIME, as deadline_from */
+        me_init = true;
+    }
+    me.count = count;
+    me.objects = objects;
+    bool listed = false;
+
     pthread_mutex_lock(&g_disp_lock);
     for (;;) {
         if (xt && xt->apc_head) apc_drain(xt, false);
@@ -382,14 +419,31 @@ NTSTATUS wait_objects(ULONG count, PVOID objects[], int wait_any, KPROCESSOR_MOD
             goto done;
         }
         if (poll) { st = STATUS_TIMEOUT; goto done; }
-        int rc = has_dl ? pthread_cond_timedwait(&g_disp_cond, &g_disp_lock, &dl)
-                        : pthread_cond_wait(&g_disp_cond, &g_disp_lock);
-        if (rc == ETIMEDOUT) {
+        if (!listed) {
+            cpu_block();
+            me.next = disp_waiters;
+            disp_waiters = &me;
+            listed = true;
+        }
+        /* A second at most between looks, in case something changed a
+           SignalState without disp_signal. */
+        struct timespec cap;
+        clock_gettime(CLOCK_REALTIME, &cap);
+        cap.tv_sec += 1;
+        bool capped = !has_dl || cap.tv_sec < dl.tv_sec || (cap.tv_sec == dl.tv_sec && cap.tv_nsec < dl.tv_nsec);
+        int rc = pthread_cond_timedwait(&me.cv, &g_disp_lock, capped ? &cap : &dl);
+        if (rc == ETIMEDOUT && !capped) {
             /* One last look: the signal may have raced the timeout. */
             poll = true;
         }
     }
 done:
+    if (listed)
+        for (struct disp_waiter **w = &disp_waiters; *w; w = &(*w)->next)
+            if (*w == &me) {
+                *w = me.next;
+                break;
+            }
     pthread_mutex_unlock(&g_disp_lock);
     return st;
 }
@@ -421,6 +475,7 @@ NTSTATUS NTAPI KeDelayExecutionThread(KPROCESSOR_MODE WaitMode, BOOLEAN Alertabl
     }
     LONGLONG t = Interval->QuadPart;
     ULONGLONG rel = t < 0 ? (ULONGLONG)-t : (t > (LONGLONG)system_time_now() ? t - system_time_now() : 0);
+    cpu_block();
     if (rel == 0) {
         sched_yield();
     } else {
@@ -453,7 +508,7 @@ LONG NTAPI KeSetEvent(KEVENT *Event, LONG Increment, BOOLEAN Wait)
     pthread_mutex_lock(&g_disp_lock);
     LONG old = Event->Header.SignalState;
     Event->Header.SignalState = 1;
-    disp_signal_all();
+    disp_signal(Event);
     pthread_mutex_unlock(&g_disp_lock);
     return old;
 }
@@ -475,7 +530,7 @@ LONG NTAPI KePulseEvent(KEVENT *Event, LONG Increment, BOOLEAN Wait)
     pthread_mutex_lock(&g_disp_lock);
     LONG old = Event->Header.SignalState;
     Event->Header.SignalState = 1;
-    disp_signal_all();
+    disp_signal(Event);
     pthread_mutex_unlock(&g_disp_lock);
     if (Event->Header.Type == EventNotificationObject) {
         sched_yield();
@@ -496,7 +551,7 @@ LONG NTAPI KeReleaseSemaphore(KSEMAPHORE *Semaphore, LONG Increment, LONG Adjust
     pthread_mutex_lock(&g_disp_lock);
     LONG old = Semaphore->Header.SignalState;
     Semaphore->Header.SignalState += Adjustment;
-    disp_signal_all();
+    disp_signal(Semaphore);
     pthread_mutex_unlock(&g_disp_lock);
     return old;
 }
@@ -522,7 +577,7 @@ LONG NTAPI KeReleaseMutant(KMUTANT *Mutant, LONG Increment, BOOLEAN Abandoned, B
     }
     if (Mutant->Header.SignalState > 0)
         Mutant->OwnerThread = NULL;
-    disp_signal_all();
+    disp_signal(Mutant);
     pthread_mutex_unlock(&g_disp_lock);
     return old;
 }
@@ -716,7 +771,7 @@ static void *dpc_thread(void *arg)
             KTIMER *t = n->timer;
             pthread_mutex_lock(&g_disp_lock);
             t->Header.SignalState = 1;
-            disp_signal_all();
+            disp_signal(t);
             pthread_mutex_unlock(&g_disp_lock);
             if (t->Dpc) {
                 KDPC *d = t->Dpc;
@@ -798,7 +853,6 @@ void timers_init(void)
     }
     pthread_condattr_t ca;
     pthread_condattr_init(&ca);
-    pthread_cond_init(&g_disp_cond, &ca);          /* CLOCK_REALTIME deadlines */
     pthread_condattr_setclock(&ca, CLOCK_MONOTONIC);
     pthread_cond_init(&dpc_cond, &ca);
     pthread_condattr_destroy(&ca);
@@ -912,5 +966,6 @@ void NTAPI KeBugCheckEx(ULONG Code, ULONG_PTR P1, ULONG_PTR P2, ULONG_PTR P3, UL
 void NTAPI KeStallExecutionProcessor(ULONG MicroSeconds)
 {
     struct timespec ts = { MicroSeconds / 1000000, (MicroSeconds % 1000000) * 1000 };
+    cpu_block();
     nanosleep(&ts, NULL);
 }

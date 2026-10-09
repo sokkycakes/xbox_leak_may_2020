@@ -1383,7 +1383,7 @@ static void audio_start(void)
         pthread_create(&t, NULL, clock_thread, NULL);
         pthread_detach(t);
     }
-    atexit(audio_stop);
+    xbc_at_exit(audio_stop);
 }
 
 /* ---- the DirectSound object -------------------------------------------------- */

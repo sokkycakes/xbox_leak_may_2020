@@ -123,12 +123,18 @@ int thread_guest_priority(void);
 void cpu_code_changed(uint32_t addr, uint32_t len);
 /* For crash reports: the guest registers of this thread, if it is in guest code. */
 void cpu_dump_guest(void);
+/* Host code called from the guest is about to block (a wait, a sleep, the
+   vblank): let other threads run guest code meanwhile.  The thread keeps
+   the guest CPU through host calls otherwise, so that short ones (most
+   D3D and kernel calls) don't hand it around. */
+void cpu_block(void);
 
 #else  /* XBC_NATIVE */
 
 static inline uint32_t cpu_guest_entry(void *fn) { return (uint32_t)fn; }
 static inline void cpu_guest_table(void **tbl, size_t n) { (void)tbl; (void)n; }
 static inline void cpu_code_changed(uint32_t addr, uint32_t len) { (void)addr; (void)len; }
+static inline void cpu_block(void) {}
 
 #endif
 

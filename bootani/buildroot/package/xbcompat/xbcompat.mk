@@ -35,6 +35,25 @@ define XBCOMPAT_BUILD_CMDS
 		LEAK="$(XBCOMPAT_LEAK)" BUILD=build-buildroot build-buildroot/xbcompat
 endef
 
+ifeq ($(BR2_PACKAGE_BOX86),y)
+# box86 runs the i386 build, compiled by the build machine's own 32-bit x86
+# gcc, SDL2 and GL (gcc-multilib, libsdl2-dev:i386, libgl-dev:i386): box86
+# hands its libc, SDL2 and GL calls to the Pi's native libraries.
+XBCOMPAT_DEPENDENCIES += box86
+define XBCOMPAT_BUILD_X86
+	$(MAKE) -C $(@D) TARGET=i386 CC=/usr/bin/gcc CFLAGS="-O2 -g -fno-stack-protector" \
+		PKGCFG="PKG_CONFIG_PATH=/usr/lib/i386-linux-gnu/pkgconfig /usr/bin/pkg-config" \
+		LEAK="$(XBCOMPAT_LEAK)" BUILD=build-x86 build-x86/xbcompat
+endef
+XBCOMPAT_POST_BUILD_HOOKS += XBCOMPAT_BUILD_X86
+define XBCOMPAT_INSTALL_X86
+	$(INSTALL) -D -m 0755 $(@D)/build-x86/xbcompat $(TARGET_DIR)/opt/xbcompat/bin/xbcompat.x86
+	mv $(TARGET_DIR)/opt/xbcompat/bin/xbcompat $(TARGET_DIR)/opt/xbcompat/bin/xbcompat.arm
+	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/xbcompat-launch $(TARGET_DIR)/opt/xbcompat/bin/xbcompat
+endef
+XBCOMPAT_POST_INSTALL_TARGET_HOOKS += XBCOMPAT_INSTALL_X86
+endif
+
 define XBCOMPAT_INSTALL_TARGET_CMDS
 	test -r "$(XBCOMPAT_TITLES)" || { echo "BR2_PACKAGE_XBCOMPAT_TITLES: run xbcompat/tools/pi/titles.sh and point this at its xbcompat-titles.tar.gz"; exit 1; }
 	rm -rf $(TARGET_DIR)/opt/xbcompat

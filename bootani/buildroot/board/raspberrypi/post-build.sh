@@ -19,3 +19,15 @@ echo '/dev/mmcblk0p3 /data ext4 defaults,noatime,nofail 0 2' >> "$TARGET_DIR"/et
 # The display mode everything uses: NTSC 720x480, as on the Sion.
 mkdir -p "$TARGET_DIR"/etc/default
 echo 'KMS_MODE=720x480' > "$TARGET_DIR"/etc/default/kms
+
+# The network address on the login screen and the console, so there's
+# something to ssh to without looking it up on the router.
+mkdir -p "$TARGET_DIR"/usr/share/udhcpc/default.script.d
+cat > "$TARGET_DIR"/usr/share/udhcpc/default.script.d/show-address <<'HOOK'
+#!/bin/sh
+case "$1" in bound|renew) ;; *) exit 0;; esac
+printf 'xbcompat on Raspberry Pi\nssh root@%s (password xbox)\n\n' "$ip" > /etc/issue
+printf '\n%s: ssh root@%s\n' "$(hostname)" "$ip" > /dev/tty1 2>/dev/null
+exit 0
+HOOK
+chmod +x "$TARGET_DIR"/usr/share/udhcpc/default.script.d/show-address

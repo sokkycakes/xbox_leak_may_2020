@@ -17,6 +17,11 @@ extern volatile ULONG *g_apu_sample_counter;   /* the APU's 48 kHz counter, or N
 
 void xlog(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void fatal(const char *fmt, ...) __attribute__((format(printf, 1, 2), noreturn));
+/* Leave the process: runs the xbc_at_exit hooks and ends without exit()'s
+   C library teardown, which races the guest threads still running (and
+   crashes under box86). */
+void xbc_at_exit(void (*fn)(void));
+void xbc_exit(int code) __attribute__((noreturn));
 #define TRACE(...) do { if (g_trace) xlog(__VA_ARGS__); } while (0)
 
 /* ---- memory ----------------------------------------------------------- */
@@ -83,8 +88,10 @@ void thread_exit(NTSTATUS status) __attribute__((noreturn));
 /* ---- dispatcher objects ---------------------------------------------- */
 
 extern pthread_mutex_t g_disp_lock;
-extern pthread_cond_t g_disp_cond;
-void disp_signal_all(void);  /* call with g_disp_lock held after changing a SignalState */
+/* Call with g_disp_lock held after changing an object's SignalState: wakes
+   the threads waiting on it (disp_signal_all: every waiting thread). */
+void disp_signal(void *object);
+void disp_signal_all(void);
 /* A user-mode alertable wait (mode 1) runs the thread's queued APCs and
    returns STATUS_USER_APC. */
 NTSTATUS wait_objects(ULONG count, PVOID objects[], int wait_any, KPROCESSOR_MODE mode,

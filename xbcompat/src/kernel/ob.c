@@ -11,6 +11,7 @@
 #include <string.h>
 #include <strings.h>
 
+#include "../cpu.h"
 #include "../xbcompat.h"
 
 #define MAX_HANDLES 4096
@@ -404,6 +405,7 @@ NTSTATUS NTAPI NtDuplicateObject(HANDLE Source, HANDLE *Target, ULONG Options)
 
 NTSTATUS NTAPI NtYieldExecution(void)
 {
+    cpu_block();
     sched_yield();
     return STATUS_SUCCESS;
 }

@@ -1,0 +1,15 @@
+#!/bin/sh
+# Runs the Xbox code with box86 (an x86-to-ARM recompiler, running the i386
+# xbcompat) when it is installed, else with the Unicorn build. XBOX_CPU in
+# /etc/default/xbox picks one: box86 or unicorn.
+[ -r /etc/default/xbox ] && . /etc/default/xbox
+D=${0%/*}
+if [ "${XBOX_CPU:-box86}" = box86 ] && [ -x /usr/bin/box86 ] && [ -x "$D/xbcompat.x86" ]; then
+	# The guest owns 0x10000000-0x50000000; box86 keeps its own memory
+	# above it. rdtsc ticks at the Xbox's 733 MHz. The Pi's desktop GL is
+	# glvnd's libOpenGL (no GLX).
+	export BOX86_LOWEST=50000000 BOX86_TSC_HZ=733333333 BOX86_LIBGL=libOpenGL.so.0
+	export BOX86_NOBANNER=1 BOX86_LOG=${BOX86_LOG:-0}
+	exec /usr/bin/box86 "$D/xbcompat.x86" "$@"
+fi
+exec "$D/xbcompat.arm" "$@"
