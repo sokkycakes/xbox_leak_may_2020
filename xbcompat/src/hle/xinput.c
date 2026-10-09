@@ -633,7 +633,11 @@ static void read_port(const xi_port *p, XINPUT_GAMEPAD *g)
 {
     memset(g, 0, sizeof(*g));
     if (p->kbd) { read_keyboard(g); read_script(g); }
-    else if (p->gc) read_controller(p->gc, g);
+    else if (p->gc) {
+        read_controller(p->gc, g);
+        /* The keyboard keeps working beside a controller in port 0. */
+        if (p == &xi.port[0] && !xi.kbd_disabled) read_keyboard(g);
+    }
 }
 
 /*
