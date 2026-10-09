@@ -173,28 +173,45 @@ static bool has_xdvdfs(disc *d, uint64_t base)
 /* ---- XDVDFS directories ------------------------------------------------------------------- */
 
 /* A directory is a binary tree of entries: left and right child offsets (in
-   dwords, 0 = none), start sector, size, attributes, name length, name. */
-static void walk(const uint8_t *tab, uint32_t size, uint32_t off, int depth,
-                 struct dvd_node *out, int *n, int max)
+   dwords, 0 = none), start sector, size, attributes, name length, name.
+   Microsoft's tools balance the tree, but images made by other tools may
+   chain every entry down one side (Phantom Dust's Sound directory is about
+   90 deep), so the walk keeps its own stack: titles' threads have small ones. */
+static void walk(const uint8_t *tab, uint32_t size, struct dvd_node *out, int *n, int max)
 {
-    if (depth > 64 || off + 14 > size || *n >= max) return;
-    const uint8_t *e = tab + off;
-    uint16_t left, right;
-    memcpy(&left, e, 2);
-    memcpy(&right, e + 2, 2);
-    if (left == 0xFFFF && right == 0xFFFF) return;   /* padding: an empty directory */
-    uint8_t namelen = e[13];
-    if (!namelen || off + 14 + namelen > size) return;
-    if (left) walk(tab, size, left * 4u, depth + 1, out, n, max);
-    if (*n < max) {
+    uint32_t *stack = malloc(sizeof(uint32_t) * (max + 1));
+    int sp = 0, steps = 0;
+    uint32_t off = 0;
+    bool have = true;               /* off is a subtree to descend into */
+    while ((have || sp) && *n < max && steps++ < 4 * max) {
+        if (have) {
+            const uint8_t *e = tab + off;
+            uint16_t left;
+            if (off + 14 > size || e[13] == 0 || off + 14 + e[13] > size ||
+                (e[0] == 0xFF && e[1] == 0xFF && e[2] == 0xFF && e[3] == 0xFF)) {
+                have = false;       /* padding (an empty directory) or a bad offset */
+                continue;
+            }
+            if (sp > max) break;
+            stack[sp++] = off;
+            memcpy(&left, e, 2);
+            have = left != 0;
+            off = left * 4u;
+            continue;
+        }
+        const uint8_t *e = tab + (off = stack[--sp]);
+        uint16_t right;
         struct dvd_node *k = &out[(*n)++];
         memset(k, 0, sizeof(*k));
         memcpy(&k->sector, e + 4, 4);
         memcpy(&k->size, e + 8, 4);
         k->attr = e[12];
-        k->name = strndup((const char *)e + 14, namelen);
+        k->name = strndup((const char *)e + 14, e[13]);
+        memcpy(&right, e + 2, 2);
+        have = right != 0;
+        off = right * 4u;
     }
-    if (right) walk(tab, size, right * 4u, depth + 1, out, n, max);
+    free(stack);
 }
 
 /* Called with the disc's lock held. */
@@ -212,7 +229,7 @@ static void load_dir(struct dvd_node *dn)
     }
     int max = dn->size / 16 + 1;
     dn->kids = calloc(max, sizeof(*dn->kids));
-    walk(tab, dn->size, 0, 0, dn->kids, &dn->nkids, max);
+    walk(tab, dn->size, dn->kids, &dn->nkids, max);
     for (int i = 0; i < dn->nkids; i++) dn->kids[i].disc = dn->disc;
     free(tab);
 }
@@ -272,39 +289,86 @@ static bool try_mount(disc *d, const char *dev)
 }
 
 /* What's on the medium at `path` (an image file or a drive with a disc). */
+/* Sector 32 of the disc as the log shows it, to tell what was burned. */
+static void log_sector32(disc *d, const char *how)
+{
+    uint8_t b[24];
+    d->base = 0;
+    if (!disc_read_raw(d, b, sizeof(b), 32 * SECTOR)) {
+        xlog("DVD: sector 32 can't be read %s: %s", how, strerror(errno));
+        return;
+    }
+    char hex[80], txt[32];
+    for (int i = 0; i < 24; i++) {
+        snprintf(hex + i * 3, 4, "%02x ", b[i]);
+        txt[i] = isprint(b[i]) ? b[i] : '.';
+    }
+    txt[24] = 0;
+    xlog("DVD: sector 32 %s: %s|%s|", how, hex, txt);
+}
+
+/* Look for XDVDFS at the start and at a pressed disc's game partition, read
+   through the block device and then with SG_IO (which doesn't depend on
+   the capacity the block device has settled on yet). */
+static bool find_xdvdfs(disc *d, bool drive)
+{
+    for (int sg = 0; sg <= (drive ? 1 : 0); sg++) {
+        d->sg = sg;
+        if (has_xdvdfs(d, 0) || has_xdvdfs(d, XGD1_BASE)) return true;
+    }
+    d->sg = false;
+    return false;
+}
+
+/* What's on the medium at `path` (an image file or a drive with a disc). */
 static disc *probe(const char *path, bool drive)
 {
     disc *d = calloc(1, sizeof(*d));
     pthread_mutex_init(&d->lock, NULL);
     d->kind = DISC_BAD;
+    if (drive) {
+        /* A plain open checks the disc and sets the device's capacity (an
+           O_NONBLOCK open doesn't); closing it again leaves the tray free. */
+        int t = open(path, O_RDONLY);
+        if (t >= 0) close(t);
+    }
     d->fd = open(path, O_RDONLY | (drive ? O_NONBLOCK : 0));
     if (d->fd < 0) {
         xlog("DVD: cannot open %s: %s", path, strerror(errno));
         return d;
     }
-    if (has_xdvdfs(d, 0)) {
+    /* A drive that has just closed its tray can say the disc is ready
+       before the first reads work: give it a few tries. */
+    bool found = false;
+    for (int tries = 0; tries < (drive ? 6 : 1) && !(found = find_xdvdfs(d, drive)); tries++) {
+        if (drive) {
+            struct timespec ts = { 2, 0 };
+            nanosleep(&ts, NULL);
+            int t = open(path, O_RDONLY);
+            if (t >= 0) close(t);
+        }
+    }
+    if (found) {
         d->kind = DISC_XDVDFS;
-        xlog("DVD: %s is an Xbox disc (XDVDFS)", path);
+        xlog("DVD: %s is an Xbox disc (XDVDFS%s%s)", path, d->base ? ", pressed-disc layout" : "",
+             d->sg ? ", read with SG_IO" : "");
         return d;
     }
-    if (has_xdvdfs(d, XGD1_BASE)) {
-        d->kind = DISC_XDVDFS;
-        xlog("DVD: %s is an Xbox game disc (its game partition is readable)", path);
-        return d;
-    }
+    log_sector32(d, "through the block device");
     if (drive) {
+        d->sg = true;
+        log_sector32(d, "with SG_IO");
         /* Kreon firmware: "set lock state" to Xtreme unlock, which shows
            the game partition of a pressed disc.  Other drives refuse it. */
         uint8_t cdb[12] = { 0xFF, 0x08, 0x01, 0x11, 0x01 };
         if (sg_cmd(d->fd, cdb, sizeof(cdb), NULL, 0)) {
-            d->sg = true;
             if (has_xdvdfs(d, XGD1_BASE)) {
                 d->kind = DISC_XDVDFS;
                 xlog("DVD: %s is a pressed Xbox game disc, unlocked by the drive's Kreon firmware", path);
                 return d;
             }
-            d->sg = false;
         }
+        d->sg = false;
         d->base = 0;
         if (try_mount(d, path) && dir_has_xbe(d->dir)) {
             d->kind = DISC_DIR;

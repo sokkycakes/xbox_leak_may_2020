@@ -212,9 +212,14 @@ for xbe, name in ((out + "/boot/Bootscreen.xbe", "Bootscreen.map"), (out + "/das
     m = xbrun.make_map(xbe)
     shutil.copy(m, os.path.join(os.path.dirname(xbe), name))
     os.remove(m)
-for libs in (["d3d8"], ["d3d8", "dsound"], ["d3d8", "xapilib"], ["d3d8", "dsound", "xapilib"],
-             ["d3d8d"], ["d3d8d", "dsoundd"], ["d3d8d", "xapilibd"], ["d3d8d", "dsoundd", "xapilibd"]):
-    xbrun.signatures(libs)
+# Every combination, not only those with D3D8: the XBLA disc's CDXU/reboot.xbe
+# links XAPILIB alone, and with no signatures for that it failed to start.
+import itertools
+for suffix in ("", "d"):
+    names = [n + suffix for n in ("d3d8", "dsound", "xapilib")]
+    for k in (1, 2, 3):
+        for libs in itertools.combinations(names, k):
+            xbrun.signatures(list(libs))
 EOF
 
 cat > "$OUT/bin/xbrun" <<'EOF'
