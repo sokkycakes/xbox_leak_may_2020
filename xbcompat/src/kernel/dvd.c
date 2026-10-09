@@ -263,9 +263,11 @@ static bool mt_unlock(disc *d, const char *path)
     bool stock = lba == XGD1_STOCK_LAST && !memcmp(cap, xgd1_cap_stock, 3) && !memcmp(geo, xgd1_geo_stock, 3);
     bool live = !memcmp(cap, xgd1_cap_live, 3) && !memcmp(geo, xgd1_geo_live, 3);
     if (!stock && !live) {
-        xlog("DVD: %s (LG %s %s) has a disc that isn't a pressed XGD1 Xbox disc it can unlock "
-             "(last LBA %u, capacity %02x%02x%02x, geometry %02x%02x%02x)", path, m->model, m->rev,
-             lba, cap[0], cap[1], cap[2], geo[0], geo[1], geo[2]);
+        if (lba == XGD1_STOCK_LAST)   /* other discs (burned ones) aren't its business */
+                xlog("DVD: %s (LG %s %s) has a disc the size of a pressed Xbox disc's video partition, "
+                 "but its drive values aren't the ones xbcompat knows (capacity %02x%02x%02x, "
+                 "geometry %02x%02x%02x)", path, m->model, m->rev,
+                 cap[0], cap[1], cap[2], geo[0], geo[1], geo[2]);
         return false;
     }
     if (stock && !(mt_ram_write(d->fd, m->cap, xgd1_cap_live) && mt_ram_write(d->fd, m->geo, xgd1_geo_live))) {
@@ -275,6 +277,7 @@ static bool mt_unlock(disc *d, const char *path)
         return false;
     }
     d->mt = m;
+    d->sg = true;   /* the block device still has the stock capacity */
     if (last_lba(d->fd, &lba) && lba == XGD1_LIVE_LAST && has_xdvdfs(d, XGD1_BASE)) {
         xlog("DVD: %s is a pressed Xbox game disc, %s by the drive's RAM (LG %s %s)", path,
              stock ? "unlocked" : "still unlocked", m->model, m->rev);
@@ -462,6 +465,15 @@ static disc *probe(const char *path, bool drive)
         xlog("DVD: cannot open %s: %s", path, strerror(errno));
         return d;
     }
+    /* A pressed disc in an LG drive xbcompat can unlock: do that first,
+       rather than waiting out the retries below. */
+    if (drive && mt_unlock(d, path)) {
+        d->kind = DISC_XDVDFS;
+        return d;
+    }
+    mt_restore(d);
+    d->base = 0;
+    d->sg = false;
     /* A drive that has just closed its tray can say the disc is ready
        before the first reads work: give it a few tries. */
     bool found = false;
@@ -493,6 +505,7 @@ static disc *probe(const char *path, bool drive)
                 return d;
             }
         }
+        /* Once more, in case the drive wasn't ready for it above. */
         if (mt_unlock(d, path)) {
             d->kind = DISC_XDVDFS;
             return d;
