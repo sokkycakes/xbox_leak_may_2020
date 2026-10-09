@@ -19,6 +19,14 @@ var bToGamesFromDetails;
 var bInDetails;
 var installName;
 
+var nPendingGame;
+
+// Called by the dashboard's launcher once the Xbox logo is up (default.xap).
+function LaunchPendingGame()
+{
+    theGameCollection.LaunchGame(nPendingGame);
+}
+
 DEF theGameCollection GameCollection
 {
     function OnInstallProgress()
@@ -718,7 +726,8 @@ DEF theTitleMenu Level
                 PlaySoundA();
                 theGamesSubMenuIn.Play();
                 EnableInput(false);
-                theGameCollection.LaunchGame(curTitle);
+                nPendingGame = curTitle;
+                LaunchGameWithLogo();
             }
             else if (nCurTitleMenuItem == nItemInstall)
             {

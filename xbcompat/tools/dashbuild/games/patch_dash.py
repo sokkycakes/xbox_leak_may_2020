@@ -145,6 +145,23 @@ d = sub1(d, '''            if (nCurMainMenuItem == 0)
                 theGamesMenuIn.Play();
                 GoToMemory();''')
 d = sub1(d, "            if (nCurMainMenuItem > 0)", "            if (nCurMainMenuItem > -1)")
+# Launching a game goes through theLauncherLevel, as a disc launch does: the
+# Xbox logo goes up, and after a moment the dashboard persists it and
+# reboots into the game, so the logo stays on screen until the game draws.
+d = sub1(d, "var g_bAboutToReboot;", "var g_bAboutToReboot;\nvar g_bLaunchGame;")
+d = sub1(d, "    g_bAboutToReboot = false;", "    g_bAboutToReboot = false;\n    g_bLaunchGame = false;")
+d = sub1(d, '''            else
+                theDiscDrive.LaunchDisc();  // This will boot to title/dashboard or DVD player''', '''            else if (g_bLaunchGame)
+                theGamesInline.children[0].LaunchPendingGame();
+            else
+                theDiscDrive.LaunchDisc();  // This will boot to title/dashboard or DVD player''')
+d = sub1(d, "DEF theLauncherLevel Level", '''function LaunchGameWithLogo()
+{
+    g_bLaunchGame = true;
+    theLauncherLevel.GoTo();
+}
+
+DEF theLauncherLevel Level''')
 wr("default.xap", d)
 
 # ---- the Games screen -----------------------------------------------------

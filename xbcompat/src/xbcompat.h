@@ -125,6 +125,12 @@ void install_fault_handlers(void);
 void launch_init(int argc, char **argv, const char *d_path, const char *launch_data_file, const char *xbe_rel);
 NTSTATUS fs_translate(const OBJECT_ATTRIBUTES *oa, char *host, size_t hostlen, int *is_device);
 
+/* ---- the picture across title switches (kernel/av.c) ------------------ */
+
+void av_title_starting(void);
+void av_persist(const unsigned char *px, unsigned w, unsigned h);
+void av_hand_over(void);
+
 /* ---- loader ----------------------------------------------------------- */
 
 typedef struct {

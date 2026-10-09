@@ -27,3 +27,17 @@ if [ -z "$AUDIODEV" ] && ! grep -q '^00-00:.*playback' /proc/asound/pcm 2>/dev/n
 		export AUDIODEV=hdmi:CARD=PCH,DEV=0
 	fi
 fi
+
+# The display keeper (xbox-av): like the Xbox's kernel, it keeps the picture
+# on the TV between titles (the frame a title persisted, or black), so a
+# launch never shows the Linux console or changes the video mode.
+export XBOX_AV_SOCKET=/var/run/xbox-av.sock
+xbox_av_start() {
+	[ -x "$X/bin/xbox-av" ] || return 0
+	pidof xbox-av > /dev/null && [ -S "$XBOX_AV_SOCKET" ] && return 0
+	setsid "$X/bin/xbox-av" >> /var/log/xbox-av.log 2>&1 < /dev/null &
+	for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+		[ -S "$XBOX_AV_SOCKET" ] && break
+		sleep 0.1
+	done
+}

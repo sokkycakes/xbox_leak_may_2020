@@ -13,6 +13,7 @@
 # Its own throwaway disk: the animation ends by asking for the dashboard
 # with an "invalid title" note, which the real dashboard mustn't see.
 mkdir -p /var/run/xbox/boot-hdd
+xbox_av_start
 start=$(cut -d. -f1 /proc/uptime)
 "$X/bin/xbcompat" --hle "$X/boot/Bootscreen.map" --hdd /var/run/xbox/boot-hdd "$X/boot/Bootscreen.xbe" &
 pid=$!

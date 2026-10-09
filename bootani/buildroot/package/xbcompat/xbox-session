@@ -17,6 +17,10 @@ FAILED=/var/run/xbox/dash-failed
 # shellcheck source=/dev/null
 [ -r /etc/default/xbox ] && . /etc/default/xbox
 
+# Hold the display between titles from here on (see xbox-env). Started
+# before bootani is done, so its exit doesn't hand the screen to the console.
+xbox_av_start
+
 # The boot animation owns the display until its last frame; KMS allows one
 # master.
 if [ -r "$BOOTANI_PIDFILE" ]; then
@@ -87,6 +91,7 @@ while true; do
 		if [ "$quick_fails" -ge 3 ]; then
 			echo "the dashboard failed to start 3 times; starting Theseus (log: $LOG)"
 			touch "$FAILED"
+			killall -q xbox-av
 			[ -x /etc/init.d/S99theseus ] && /etc/init.d/S99theseus start
 			exit 1
 		fi
