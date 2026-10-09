@@ -62,6 +62,7 @@ typedef struct xthread {
     SIZE_T stack_size;
     PVOID system_routine, start_routine, start_context;
     jmp_buf exit_jmp;
+    struct xapc *apc_head, *apc_tail;   /* queued APCs, under g_disp_lock */
 } xthread;
 
 void thread_init_main(void);
@@ -77,9 +78,16 @@ void thread_exit(NTSTATUS status) __attribute__((noreturn));
 extern pthread_mutex_t g_disp_lock;
 extern pthread_cond_t g_disp_cond;
 void disp_signal_all(void);  /* call with g_disp_lock held after changing a SignalState */
-NTSTATUS wait_objects(ULONG count, PVOID objects[], int wait_any,
+/* A user-mode alertable wait (mode 1) runs the thread's queued APCs and
+   returns STATUS_USER_APC. */
+NTSTATUS wait_objects(ULONG count, PVOID objects[], int wait_any, KPROCESSOR_MODE mode,
                       BOOLEAN alertable, LARGE_INTEGER *timeout);
+/* Queue an APC to t: routine(ctx, arg1, arg2), stdcall.  kapc, when set, is
+   the guest's KAPC (KeInsertQueueApc); its KernelRoutine runs first. */
+void apc_queue(xthread *t, PVOID routine, PVOID ctx, PVOID arg1, PVOID arg2, KAPC *kapc);
+ULONG NTAPI RtlNtStatusToDosError(NTSTATUS st);
 void timers_init(void);
+extern void (*g_vblank_hook)(void);   /* run 60 times a second on the DPC thread */
 void ke_frame_presented(void);   /* XBCOMPAT_FIXED_FPS clock step */
 ULONGLONG system_time_now(void);   /* 100 ns units since 1601 */
 ULONGLONG ke_guest_tsc(void);      /* what a guest rdtsc reads */

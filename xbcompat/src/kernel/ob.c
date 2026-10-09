@@ -192,11 +192,10 @@ static NTSTATUS handle_to_waitable(HANDLE h, PVOID *out)
 NTSTATUS NTAPI NtWaitForSingleObjectEx(HANDLE Handle, KPROCESSOR_MODE WaitMode, BOOLEAN Alertable,
                                        LARGE_INTEGER *Timeout)
 {
-    (void)WaitMode;
     PVOID obj;
     NTSTATUS st = handle_to_waitable(Handle, &obj);
     if (!NT_SUCCESS(st)) return st;
-    return wait_objects(1, &obj, 1, Alertable, Timeout);
+    return wait_objects(1, &obj, 1, WaitMode, Alertable, Timeout);
 }
 
 NTSTATUS NTAPI NtWaitForSingleObject(HANDLE Handle, BOOLEAN Alertable, LARGE_INTEGER *Timeout)
@@ -208,14 +207,13 @@ NTSTATUS NTAPI NtWaitForMultipleObjectsEx(ULONG Count, HANDLE Handles[], ULONG W
                                           KPROCESSOR_MODE WaitMode, BOOLEAN Alertable,
                                           LARGE_INTEGER *Timeout)
 {
-    (void)WaitMode;
     PVOID objs[64];
     if (Count > 64) return STATUS_INVALID_PARAMETER;
     for (ULONG i = 0; i < Count; i++) {
         NTSTATUS st = handle_to_waitable(Handles[i], &objs[i]);
         if (!NT_SUCCESS(st)) return st;
     }
-    return wait_objects(Count, objs, WaitType == 1, Alertable, Timeout);
+    return wait_objects(Count, objs, WaitType == 1, WaitMode, Alertable, Timeout);
 }
 
 NTSTATUS NTAPI NtSignalAndWaitForSingleObjectEx(HANDLE Signal, HANDLE Wait, KPROCESSOR_MODE Mode,
@@ -483,8 +481,9 @@ NTSTATUS NTAPI NtSetInformationThread(HANDLE h, ULONG Class, PVOID Info, ULONG L
 
 NTSTATUS NTAPI NtQueueApcThread(HANDLE h, PVOID Routine, PVOID Ctx, PVOID Arg1, PVOID Arg2)
 {
-    (void)h; (void)Ctx; (void)Arg1; (void)Arg2;
-    xlog("NtQueueApcThread(%p): APCs are not delivered", Routine);
+    xobject *o = handle_lookup(h);
+    if (!o || o->kind != OBJ_THREAD) return STATUS_INVALID_HANDLE;
+    apc_queue(o->thread, Routine, Ctx, Arg1, Arg2, NULL);
     return STATUS_SUCCESS;
 }
 

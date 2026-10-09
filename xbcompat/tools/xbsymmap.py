@@ -44,6 +44,70 @@ ARGS_FIX = {
                                        "psh pVertexStreamZeroData, psh VertexStreamZeroStride",
 }
 
+# Functions XbSymbolDatabase does not find (or names wrongly) in some LTCG
+# builds, recognised by their code instead: (map name, byte pattern with
+# '.' for the addresses the linker filled in).  A match replaces whatever
+# the scanner put at that address.
+EXTRA_SIGS = [
+    # 5849 LTCG (Phantom Dust).  LoadVertexShader(Handle, Address).
+    ("_D3DDevice_LoadVertexShader@8",
+     rb"\x53\x55\x56\x8b\x35....\x57\x8b\x7c\x24\x14\x8b\xee\x8a\x45\x08\x4f\xa8\x10\x75\x0b"),
+    # SetPixelShaderProgram(pPSDef): wraps the definition in the device's own
+    # pixel shader object and calls SetPixelShader (below) with it.
+    ("_D3DDevice_SetPixelShaderProgram@4",
+     rb"\x8b\x54\x24\x04\x85\xd2\x8b\x0d....\x74.\x8d\x81\x24\x09\x00\x00\xc7\x00\x01\x00\x00\x00"),
+    # SetPixelShader with the handle in eax.
+    ("_D3DDevice_SetPixelShader@4 regs=eax",
+     rb"\x51\x85\xc0\x53\x8b\x1d....\x8b\x8b\x84\x07\x00\x00\x89\x4c\x24\x04\x89\x83\x84\x07\x00\x00"),
+    # BeginVisibilityTest: NV097_CLEAR_REPORT_VALUE + SET_ZPASS_PIXEL_COUNT_ENABLE.
+    ("_D3DDevice_BeginVisibilityTest@0",
+     rb"\x56\x8b\x35....\x8b\x06\x3b\x46\x04\x72.\xa1....\x8b\xc8\xd1\xe9\x51\xe8....\xc7\x00\xc8\x17\x08\x00"),
+    # The miniport's gamma ramp upload to the DAC (miniport in eax), where
+    # an inlined SetGammaRamp jumps after copying the ramp into the device.
+    ("_D3D_DacProgramGammaRamp@4 regs=eax",
+     rb"\x8b\x08\x56\xbe\x00\xff\xff\xff\xc6\x81\xc8\x13\x68\x00\x00"),
+    # The lazy state flush (D3D__DirtyFlags -> push buffer from the CDevice
+    # fields) that LTCG library code calls before drawing; it computes from
+    # device state xbcompat keeps elsewhere.
+    ("_D3D_LazySetState@0",
+     rb"\x53\x8b\x1d....\xf6\xc7\x01\x56\x8b\x35....\x74\x05\xe8"),
+    # BeginPush with the dword count in esi; returns where to write.
+    ("_D3DDevice_BeginPushLTCG@4 regs=esi",
+     rb"\xa1....\x6a\x00\x50\xe8....\x8b\x0d....\x8b\x01\x8b\x49\x04\x8d\x54\xb0\x04"),
+]
+
+
+def extra_sigs(xbe_path):
+    """{va: map line} for EXTRA_SIGS found in the XBE's sections."""
+    import struct
+    d = open(xbe_path, "rb").read()
+    u32 = lambda o: struct.unpack_from("<I", d, o)[0]
+    base, nsec, sh = u32(0x104), u32(0x11C), u32(0x120)
+    out = {}
+    for i in range(nsec):
+        _, va, _, raw, rs, _ = struct.unpack_from("<6I", d, sh - base + i * 56)
+        body = d[raw:raw + rs]
+        for name, pat in EXTRA_SIGS:
+            for m in re.finditer(pat, body, re.S):
+                parts = name.split(" ", 1)
+                out[va + m.start()] = f"{parts[0]} {va + m.start():#x}" + (f" {parts[1]}" if len(parts) > 1 else "")
+    return out
+
+
+def section_range(xbe_path, want):
+    """(start, end) of the XBE section named `want`, or None."""
+    import struct
+    d = open(xbe_path, "rb").read()
+    u32 = lambda o: struct.unpack_from("<I", d, o)[0]
+    base, nsec, sh = u32(0x104), u32(0x11C), u32(0x120)
+    for i in range(nsec):
+        _, va, vs, _, _, name_va = struct.unpack_from("<6I", d, sh - base + i * 56)
+        name = d[name_va - base:d.index(b"\0", name_va - base)]
+        if name.decode("latin-1") == want:
+            return va, va + vs
+    return None
+
+
 LINE = re.compile(r"^(\w+?)__(FUN|VAR)__(?:(\w+?)__)?(\w+)(?:\((.*)\))? = (0x[0-9a-fA-F]+)$")
 
 
@@ -142,10 +206,17 @@ def main():
 
     out = subprocess.run([a.cli, a.xbe, "-e"], check=True, capture_output=True, text=True).stdout
     found = {}   # undecorated name -> (kind, conv, args, va)
+    # With the library in a D3D section of its own, a D3D function the scanner
+    # places elsewhere is title code that matched a signature (Phantom Dust's
+    # matrix multiply passes for an LTCG MultiplyTransform).
+    d3d_section = section_range(a.xbe, "D3D")
     for line in out.splitlines():
         m = LINE.match(line.strip())
         if m:
             lib, kind, conv, name, args, va = m.groups()
+            if (d3d_section and kind == "FUN" and lib.startswith("D3D8")
+                    and not d3d_section[0] <= int(va, 16) < d3d_section[1]):
+                continue
             if name in ARGS_FIX:
                 conv, args = "stdcall", ARGS_FIX[name]
             found.setdefault(name, (kind, conv, args, int(va, 16), lib))
@@ -195,6 +266,10 @@ def main():
             continue
         if fconv == "fastcall":
             lines.append(f"@{name}@{stack + 4 * len(regs)} {va:#x}")
+        elif name.startswith("CDevice_") and fconv == "stdcall":
+            # Device internals an LTCG title calls itself (SetStateVB flushes
+            # lazy state into the push buffer from the real CDevice).
+            lines.append(f"_{re.sub(r'_[0-9]+$', '', name)}@{stack} {va:#x}")
         elif re.match(r"^(D3D|IDirect|Direct|XAudio|XWave|XFile)", name):
             lines.append(f"_{name}@{stack}{'_' + '_'.join(regs) if regs else ''} {va:#x}")
     # Render states with symbols of their own place the title's state layout.
@@ -210,6 +285,14 @@ def main():
             for alias in aliases:
                 lines.append(f"{alias} {found[key][3]:#x} data")
 
+    # Struct member offsets the library records (where LTCG code keeps the
+    # vertical blank callbacks and the current vertex shader in the device).
+    for name, (kind, _, _, va, lib) in sorted(found.items()):
+        if kind == "VAR" and name.endswith("_OFFSET") and lib.startswith("D3D8"):
+            lines.append(f"_D3D_{name} {va:#x} data")
+    extra = extra_sigs(a.xbe)
+    if extra:
+        lines = [l for l in lines if int(l.split()[1], 16) not in extra] + sorted(extra.values())
     text = "\n".join(lines) + "\n"
     if a.output:
         open(a.output, "w").write(text)

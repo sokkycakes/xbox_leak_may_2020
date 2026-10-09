@@ -354,5 +354,6 @@ typedef struct {
 #define STATUS_UNRECOGNIZED_VOLUME      ((NTSTATUS)0xC000014F)
 
 #define NT_SUCCESS(s) ((NTSTATUS)(s) >= 0)
+#define NT_ERROR(s)   ((ULONG)(s) >> 30 == 3)
 
 #endif
