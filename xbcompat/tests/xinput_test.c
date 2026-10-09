@@ -39,6 +39,10 @@ void xlog(const char *fmt, ...)
 
 void install_fault_handlers(void) {}
 ULONG d3d_frame_count(void) { return 0; }
+static bool reset_on = true;
+static int resets;
+bool reset_enabled(void) { return reset_on; }
+void reset_request(const char *why) { (void)why; resets++; }
 
 void fatal(const char *fmt, ...)
 {
@@ -396,6 +400,41 @@ static void test_controller(void)
     CHECK(XGetDevices(&fake_gamepad) == 0);
 }
 
+/* L + R + Back + Start: one reset when the last button goes down, none
+   for a combo already held, none while resets are off (the dashboard). */
+static void test_reset_combo(void)
+{
+    reset_hle();
+    XInitDevices(0, NULL);
+    int index = attach_virtual_pad(NULL);
+    SDL_Joystick *js = SDL_JoystickOpen(index);
+    force_sync();
+    resets = 0;
+    SDL_JoystickSetVirtualButton(js, SDL_CONTROLLER_BUTTON_BACK, 1);
+    SDL_JoystickSetVirtualButton(js, SDL_CONTROLLER_BUTTON_START, 1);
+    SDL_JoystickSetVirtualAxis(js, SDL_CONTROLLER_AXIS_TRIGGERLEFT, 32767);
+    settle(js, NULL);
+    xinput_check_reset_combo();
+    CHECK(resets == 0);                         /* three of four */
+    SDL_JoystickSetVirtualAxis(js, SDL_CONTROLLER_AXIS_TRIGGERRIGHT, 32767);
+    settle(js, NULL);
+    xinput_check_reset_combo();
+    CHECK(resets == 1);
+    xinput_check_reset_combo();
+    CHECK(resets == 1);                         /* still held */
+    SDL_JoystickSetVirtualButton(js, SDL_CONTROLLER_BUTTON_START, 0);
+    settle(js, NULL);
+    xinput_check_reset_combo();
+    SDL_JoystickSetVirtualButton(js, SDL_CONTROLLER_BUTTON_START, 1);
+    settle(js, NULL);
+    reset_on = false;
+    xinput_check_reset_combo();
+    CHECK(resets == 1);
+    reset_on = true;
+    SDL_JoystickClose(js);
+    SDL_JoystickDetachVirtual(index);
+}
+
 static void test_prealloc(void)
 {
     /* A list without the gamepad type leaves it no handles (XID_Init). */
@@ -560,6 +599,7 @@ int main(void)
     test_mu();
     test_no_devices();
     test_controller();
+    test_reset_combo();
     test_prealloc();
     test_virtual_spec();
     test_original_pad();

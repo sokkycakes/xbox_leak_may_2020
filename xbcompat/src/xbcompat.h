@@ -160,6 +160,14 @@ void av_title_starting(void);
 void av_persist(const unsigned char *px, unsigned w, unsigned h);
 void av_hand_over(void);
 
+/* ---- soft reset to the dashboard (kernel/reset.c) --------------------- */
+
+void reset_init(ULONG title_id);
+bool reset_enabled(void);
+void reset_request(const char *why);
+void reset_check(void);
+void xinput_check_reset_combo(void);
+
 /* ---- loader ----------------------------------------------------------- */
 
 typedef struct {

@@ -701,6 +701,8 @@ static ULONG NTAPI D3DDevice_Swap(ULONG Flags)
     }
     /* A keyboard plugged in mid-game makes SDL take the fault signals back. */
     install_fault_handlers();
+    xinput_check_reset_combo();
+    reset_check();
     if (g_exit_after_frames && (int)d3d.frame >= g_exit_after_frames) {
         xlog("D3D: %u frames presented, exiting", d3d.frame);
         /* Leave the way a title does: XBCOMPAT_PERSIST=1 persists the frame first. */
