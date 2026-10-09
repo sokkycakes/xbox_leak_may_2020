@@ -208,7 +208,7 @@ typedef struct {                                /* an XInputSetState in flight *
 
 static struct {
     pthread_mutex_t lock;
-    bool inited, bound, sdl_ready, kbd_disabled, adopted;
+    bool inited, bound, sdl_ready, kbd_disabled, adopted, log_input;
     unsigned remaining;                         /* gamepad handles left (bRemainingHandles) */
     unsigned default_handles;                   /* from the guest GamepadTypeInfo, else 4 */
     XPP_DEVICE_TYPE *gamepad, *keyboard, *ir, *mu;   /* guest tables, NULL = unknown */
@@ -519,6 +519,8 @@ static void init_sdl(void)
     xi.sdl_ready = true;
     const char *e = getenv("XBCOMPAT_NO_KBD_PAD");
     xi.kbd_disabled = e && *e && *e != '0';
+    e = getenv("XBCOMPAT_LOG_INPUT");               /* log every change in a report */
+    xi.log_input = e && *e && *e != '0';
     e = getenv("XBCOMPAT_VIRTUAL_PAD");
     if (e && *e && *e != '0') xi.virtual_index = attach_virtual_pad(e);
     xlog("XInput: SDL game controllers ready, %d joystick(s) present, keyboard pad %s",
@@ -654,7 +656,13 @@ static void sample(xi_handle *h, const xi_port *p, bool force)
     uint64_t interval = (h->pp.bInputInterval ? h->pp.bInputInterval : 1) * 1000ull;
     uint64_t elapsed = t - h->sampled_us;
     if (!force && elapsed < interval) return;
+    XINPUT_GAMEPAD before = h->last;
     read_port(p, &h->last);
+    if (xi.log_input && memcmp(&before, &h->last, sizeof(before)))
+        xlog("XInput: port %u: buttons %#06x, A %u B %u X %u Y %u, left stick %d,%d",
+             h->port, h->last.wButtons, h->last.bAnalogButtons[XINPUT_GAMEPAD_A],
+             h->last.bAnalogButtons[XINPUT_GAMEPAD_B], h->last.bAnalogButtons[XINPUT_GAMEPAD_X],
+             h->last.bAnalogButtons[XINPUT_GAMEPAD_Y], h->last.sThumbLX, h->last.sThumbLY);
     if (force) {
         h->sampled_us = t;
         h->packet++;

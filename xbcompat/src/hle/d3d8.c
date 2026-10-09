@@ -479,9 +479,28 @@ static void wait_vblank(void)
     sleep_until(base + ((now - base) / period + 1) * period);
 }
 
+/* XBCOMPAT_LOG_FPS: log the frame rate every 5 seconds. */
+static void log_fps(void)
+{
+    static int on = -1;
+    static Uint64 since;
+    static unsigned frames;
+    if (on < 0) { const char *e = getenv("XBCOMPAT_LOG_FPS"); on = e && *e && *e != '0'; }
+    if (!on) return;
+    Uint64 now = SDL_GetTicks64();
+    if (!since) since = now;
+    frames++;
+    if (now - since >= 5000) {
+        xlog("D3D: %.1f fps", frames * 1000.0 / (double)(now - since));
+        since = now;
+        frames = 0;
+    }
+}
+
 static void pace_present(void)
 {
     static Uint64 next;
+    log_fps();
     if (unpaced()) return;
     Uint64 now = SDL_GetPerformanceCounter(), period = SDL_GetPerformanceFrequency() / 60;
     if (!next || now > next + period) next = now;   /* first frame, or fell behind: resync */
