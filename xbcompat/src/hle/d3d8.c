@@ -508,11 +508,27 @@ static struct { unsigned draws, uploads, readbacks, shaders; } stats;
    XBCOMPAT_PROFILE_SYNC=1 each draw also waits for the GPU), push buffer
    replay (draws included), present + buffer swap, and pacing sleep. */
 static struct { Uint64 draw, drain, swap, pace; } prof;
-static int prof_sync = -1;
+static int prof_on = -1, prof_sync;
+
+/* XBCOMPAT_LOG_FPS is set: count and time the frame's work. */
+static bool profiling(void)
+{
+    if (prof_on < 0) {
+        const char *e = getenv("XBCOMPAT_LOG_FPS"), *s = getenv("XBCOMPAT_PROFILE_SYNC");
+        prof_on = e && *e && *e != '0';
+        prof_sync = s && *s && *s != '0';
+    }
+    return prof_on;
+}
+
+static Uint64 prof_draw_begin(void)
+{
+    return profiling() ? SDL_GetPerformanceCounter() : 0;
+}
 
 static void prof_draw_end(Uint64 t0)
 {
-    if (prof_sync < 0) { const char *e = getenv("XBCOMPAT_PROFILE_SYNC"); prof_sync = e && *e && *e != '0'; }
+    if (!t0) return;
     if (prof_sync) glFinish();
     prof.draw += SDL_GetPerformanceCounter() - t0;
 }
@@ -631,11 +647,9 @@ static void wait_vblank(void)
 /* XBCOMPAT_LOG_FPS: log the frame rate every 5 seconds. */
 static void log_fps(void)
 {
-    static int on = -1;
     static Uint64 since;
     static unsigned frames;
-    if (on < 0) { const char *e = getenv("XBCOMPAT_LOG_FPS"); on = e && *e && *e != '0'; }
-    if (!on) return;
+    if (!profiling()) return;
     Uint64 now = SDL_GetTicks64();
     if (!since) since = now;
     frames++;
@@ -650,7 +664,7 @@ static void log_fps(void)
         xlog("D3D: per frame %.1f ms: %.1f draws, %.1f push buffer (draws included), %.1f present+swap, "
              "%.1f pacing, %.1f rest (game code)%s", total, prof.draw * ms, prof.drain * ms, prof.swap * ms,
              prof.pace * ms, total - (prof.draw + prof.swap + prof.pace) * ms - (prof.drain > prof.draw ? (prof.drain - prof.draw) * ms : 0),
-             prof_sync > 0 ? " [GPU synced per draw]" : "");
+             prof_sync ? " [GPU synced per draw]" : "");
         memset(&prof, 0, sizeof(prof));
         memset(&stats, 0, sizeof(stats));
         since = now;
@@ -2506,11 +2520,17 @@ static void end_program(program_entry *e)
 }
 
 /* GL has no signed 11:11:10 vertex format, so NORMPACKED3 attributes are
-   unpacked to float3 for the vertices a draw reads (one buffer per register). */
-static const float *unpack_normpacked3(int slot, const UCHAR *src, ULONG stride, ULONG n)
+   unpacked to float3 for the vertices lo..hi-1 a draw reads (one buffer per
+   register). The result is addressed from vertex 0, like `src`: only
+   lo..hi-1 of it is valid. An indexed draw of a few vertices out of a large
+   buffer (Phantom Dust's arenas: 4 indices around vertex 55000) unpacks
+   just those, not everything below them. */
+static const float *unpack_normpacked3(int slot, const UCHAR *src, ULONG stride, ULONG lo, ULONG hi)
 {
     static float *buf[16];
     static ULONG cap[16];
+    ULONG n = hi > lo ? hi - lo : 0;
+    src += lo * stride;
     if (n > cap[slot]) {
         free(buf[slot]);
         cap[slot] = n + 1024;
@@ -2524,23 +2544,27 @@ static const float *unpack_normpacked3(int slot, const UCHAR *src, ULONG stride,
         o[1] = ((int32_t)(v << 10) >> 21) / 1023.0f;
         o[2] = ((int32_t)v >> 22) / 511.0f;
     }
-    return buf[slot];
+    return (const float *)((uintptr_t)buf[slot] - (uintptr_t)lo * 12);
 }
 
-/* How many vertices from the start of the streams a draw reads. */
-static ULONG vertex_limit(ULONG first, ULONG count, const USHORT *indices)
+/* The vertices a draw reads: lo up to (not including) the returned end. */
+static ULONG vertex_range(ULONG first, ULONG count, const USHORT *indices, ULONG *lo)
 {
-    if (!indices) return first + count;
-    ULONG m = 0;
-    for (ULONG i = 0; i < count; i++)
-        if (indices[first + i] >= m) m = indices[first + i] + 1u;
+    if (!indices) { *lo = first; return first + count; }
+    ULONG m = 0, l = 0xFFFF;
+    for (ULONG i = 0; i < count; i++) {
+        ULONG x = indices[first + i];
+        if (x >= m) m = x + 1u;
+        if (x < l) l = x;
+    }
+    *lo = count ? l : 0;
     return m;
 }
 
 /* Bind the generic attribute arrays of a declared vertex layout.  `up` is
    the user-pointer data for stream 0 (DrawVerticesUP), else streams come
    from SetStreamSource. */
-static void bind_attributes(const vshader *sh, const UCHAR *up, ULONG up_stride, ULONG first_vertex, ULONG nverts)
+static void bind_attributes(const vshader *sh, const UCHAR *up, ULONG up_stride, ULONG lo, ULONG hi)
 {
     for (int r = 0; r < 16; r++) {
         const vattr *a = &sh->attr[r];
@@ -2564,12 +2588,12 @@ static void bind_attributes(const vshader *sh, const UCHAR *up, ULONG up_stride,
         p_glEnableVertexAttribArray(r);
         if ((a->type & 0xF) == 6) {
             p_glVertexAttribPointer(r, 3, GL_FLOAT, GL_FALSE, 12,
-                                    unpack_normpacked3(r, base + a->offset + first_vertex * stride, stride, nverts));
+                                    unpack_normpacked3(r, base + a->offset, stride, lo, hi));
             continue;
         }
         /* D3DCOLOR is stored B, G, R, A and reaches the shader as (R, G, B, A). */
         p_glVertexAttribPointer(r, a->type == 0x40 ? GL_BGRA : a->components, a->gl_type, a->normalized, stride,
-                                base + a->offset + first_vertex * stride);
+                                base + a->offset);
     }
 }
 
@@ -2618,7 +2642,8 @@ static void draw_programmable_(vshader *sh, ULONG PrimitiveType, const UCHAR *up
           RS(D3DRS_STENCILENABLE), d3d.viewport.X, d3d.viewport.Y, d3d.viewport.Width, d3d.viewport.Height,
           d3d.viewport.MinZ, d3d.viewport.MaxZ);
     upload_constants(sh, e);
-    bind_attributes(sh, up, up_stride, 0, vertex_limit(first, count, indices));
+    ULONG lo, hi = vertex_range(first, count, indices, &lo);
+    bind_attributes(sh, up, up_stride, lo, hi);
     if (indices)
         glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, indices + first);
     else
@@ -2665,11 +2690,12 @@ static void draw_declared_(const vshader *sh, ULONG PrimitiveType, const UCHAR *
         const UCHAR *b; ULONG s;
         STREAM(&sh->attr[2], b, s);
         glEnableClientState(GL_NORMAL_ARRAY);
-        if ((sh->attr[2].type & 0xF) == 6)
-            glNormalPointer(GL_FLOAT, 12, unpack_normpacked3(2, b + sh->attr[2].offset, s,
-                                                             vertex_limit(first, count, indices)));
-        else
+        if ((sh->attr[2].type & 0xF) == 6) {
+            ULONG lo, hi = vertex_range(first, count, indices, &lo);
+            glNormalPointer(GL_FLOAT, 12, unpack_normpacked3(2, b + sh->attr[2].offset, s, lo, hi));
+        } else {
             glNormalPointer(sh->attr[2].gl_type, s, b + sh->attr[2].offset);
+        }
     } else {
         glDisableClientState(GL_NORMAL_ARRAY);
     }
@@ -2737,7 +2763,7 @@ static void draw_declared_(const vshader *sh, ULONG PrimitiveType, const UCHAR *
 static void draw_programmable(vshader *sh, ULONG PrimitiveType, const UCHAR *up, ULONG up_stride, ULONG first,
                               ULONG count, const USHORT *indices)
 {
-    Uint64 t0 = SDL_GetPerformanceCounter();
+    Uint64 t0 = prof_draw_begin();
     draw_programmable_(sh, PrimitiveType, up, up_stride, first, count, indices);
     prof_draw_end(t0);
 }
@@ -2745,7 +2771,7 @@ static void draw_programmable(vshader *sh, ULONG PrimitiveType, const UCHAR *up,
 static void draw_declared(const vshader *sh, ULONG PrimitiveType, const UCHAR *up, ULONG up_stride, ULONG first,
                           ULONG count, const USHORT *indices)
 {
-    Uint64 t0 = SDL_GetPerformanceCounter();
+    Uint64 t0 = prof_draw_begin();
     draw_declared_(sh, PrimitiveType, up, up_stride, first, count, indices);
     prof_draw_end(t0);
 }
@@ -5363,9 +5389,9 @@ static void pusher_drain(void)
         ULONG h = n;
         pb_record2(OP_RAW, &h, 4, pusher_buf, n * 4);
     } else {
-        Uint64 t0 = SDL_GetPerformanceCounter();
+        Uint64 t0 = prof_draw_begin();
         pb_interpret(pusher_buf, n);
-        prof.drain += SDL_GetPerformanceCounter() - t0;
+        if (t0) prof.drain += SDL_GetPerformanceCounter() - t0;
     }
     dev[0] = (ULONG)pusher_buf;
     busy = false;
