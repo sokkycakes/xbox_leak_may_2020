@@ -148,15 +148,16 @@ static void relaunch(const char *path)
     }
     for (int i = 1; i < saved_argc - 1 && n < 48; i++) {
         const char *a = saved_argv[i];
-        if (!strcmp(a, "--hle") || !strcmp(a, "--dvd") || !strcmp(a, "--d-path") || !strcmp(a, "--launch-data") ||
+        if (!strcmp(a, "--hle") || !strcmp(a, "--dvd") || !strcmp(a, "--dvd-drive") || !strcmp(a, "--d-path") || !strcmp(a, "--launch-data") ||
             !strcmp(a, "--xbe-path")) {
             i++;
             continue;
         }
         args[n++] = saved_argv[i];
     }
-    extern char *g_dvd_root;
+    extern char *g_dvd_root, *g_dvd_drive;
     if (g_dvd_root) { args[n++] = "--dvd"; args[n++] = g_dvd_root; }
+    if (g_dvd_drive) { args[n++] = "--dvd-drive"; args[n++] = g_dvd_drive; }
     args[n++] = "--d-path"; args[n++] = dpath;
     args[n++] = "--xbe-path"; args[n++] = rel;
     args[n++] = "--launch-data"; args[n++] = page;
@@ -225,30 +226,17 @@ NTSTATUS NTAPI HalWriteSMBusValue(UCHAR Address, UCHAR Command, BOOLEAN WriteWor
     return STATUS_SUCCESS;
 }
 
-/* An empty --dvd directory is an empty tray (the dashboard otherwise
-   reports an unrecognized disc); anything else is a detected disc. */
-bool dvd_tray_empty(void)
+NTSTATUS NTAPI HalReadSMCTrayState(ULONG *State, ULONG *Count)
 {
-    extern char *g_dvd_root;
-    static int empty = -1;
-    if (empty < 0) {
-        empty = 0;
-        DIR *d = g_dvd_root ? opendir(g_dvd_root) : NULL;
-        if (d) {
-            struct dirent *e;
-            empty = 1;
-            while ((e = readdir(d)))
-                if (strcmp(e->d_name, ".") && strcmp(e->d_name, "..")) { empty = 0; break; }
-            closedir(d);
-        }
+    static ULONG last, changes;
+    *State = dvd_tray_state();   /* SMC_TRAY_STATE_*: open, no media, media detected */
+    if (*State != last) {
+        last = *State;
+        changes++;
+        xlog("HalReadSMCTrayState: %#x", *State);
     }
-    return empty;
-}
-
-void NTAPI HalReadSMCTrayState(ULONG *State, ULONG *Count)
-{
-    *State = dvd_tray_empty() ? 0x40 /* no media */ : 0x60; /* media detected */
-    if (Count) *Count = 1;
+    if (Count) *Count = changes;
+    return STATUS_SUCCESS;
 }
 
 void NTAPI HalWriteSMCScratchRegister(ULONG v) { (void)v; }

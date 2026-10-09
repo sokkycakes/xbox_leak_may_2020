@@ -194,15 +194,18 @@ static bool EndsWith(const CHAR* sz, const CHAR* szEnd)
     return cch >= cchEnd && _stricmp(sz + cch - cchEnd, szEnd) == 0;
 }
 
-// The carts' file names on the game card, to notice it changing.
+// The DVD tray's state and the carts' file names on the game card, to
+// notice either changing (a disc going in or out of a USB DVD drive).
 static void GetCardSignature(CHAR* szSig, int cchSig)
 {
-    szSig[0] = 0;
+    ULONG TrayState = 0;
+    HalReadSMCTrayState(&TrayState, NULL);
+    _snprintf(szSig, cchSig, "%02x|", TrayState & 0x70);
     WIN32_FIND_DATAA fd;
     HANDLE hFind = FindFirstFileA("CARD0:\\*", &fd);
     if (hFind == INVALID_HANDLE_VALUE)
         return;
-    int cch = 0;
+    int cch = strlen(szSig);
     do
     {
         int cchName = strlen(fd.cFileName);

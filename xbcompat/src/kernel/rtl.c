@@ -332,6 +332,10 @@ ULONG NTAPI RtlNtStatusToDosError(NTSTATUS st)
     case STATUS_DIRECTORY_NOT_EMPTY: return 145;
     case STATUS_NOT_IMPLEMENTED: return 1;
     case STATUS_UNRECOGNIZED_VOLUME: return 1005;
+    case 0xC0000010: return 1;                      /* STATUS_INVALID_DEVICE_REQUEST: ERROR_INVALID_FUNCTION */
+    case 0xC0000013: return 21;                     /* STATUS_NO_MEDIA_IN_DEVICE: ERROR_NOT_READY */
+    case 0xC0000014: return 1785;                   /* STATUS_UNRECOGNIZED_MEDIA: ERROR_UNRECOGNIZED_MEDIA */
+    case 0xC00000A2: return 19;                     /* STATUS_MEDIA_WRITE_PROTECTED: ERROR_WRITE_PROTECT */
     default: return 317;                            /* ERROR_MR_MID_NOT_FOUND */
     }
 }

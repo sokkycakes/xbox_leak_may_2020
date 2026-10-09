@@ -14,6 +14,7 @@ FAILED=/var/run/xbox/dash-failed
 
 . /usr/lib/xbox/xbox-env
 # XBOX_ARGS: more xbcompat options for the dashboard (e.g. --trace).
+# XBOX_DVD_DRIVE: the optical drive that is the Xbox's DVD drive (/dev/sr0).
 # shellcheck source=/dev/null
 [ -r /etc/default/xbox ] && . /etc/default/xbox
 
@@ -36,8 +37,10 @@ fi
 #               update brings its dashboard along (one link for the whole
 #               partition; with a link per file the dashboard crashes)
 #   partition3-5  X: Y: Z: title caches
-# The DVD drive (D: for the dashboard) is $XB/disc: put an extracted game
-# disc there; empty is an empty tray.
+# The DVD drive (D: for the dashboard) is a USB DVD drive while one is
+# plugged in ($XBOX_DVD_DRIVE): discs go in and come out while the dashboard
+# or a game runs. Without a drive it is $XB/disc: put an extracted game disc
+# there; empty is an empty tray.
 if mountpoint -q /data; then
 	XB=/data/xbox
 else
@@ -79,6 +82,7 @@ while true; do
 	echo "$(date '+%F %T') starting the dashboard${launch:+ with launch data}"
 	# shellcheck disable=SC2086
 	"$X/bin/xbcompat" --hle "$X/dash/xboxdash.map" --hdd "$HDD" --dvd "$XB/disc" \
+		--dvd-drive "${XBOX_DVD_DRIVE:-/dev/sr0}" \
 		--d-path '\Device\CdRom0' --xbe-path xboxdash.xbe $launch $XBOX_ARGS \
 		"$HDD/partition2/xboxdash.xbe" > "$LOG" 2>&1
 	rc=$?
