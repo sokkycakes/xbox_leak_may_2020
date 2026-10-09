@@ -17,6 +17,8 @@ override CFLAGS += -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-format-tr
 # alignment hint, and guest structures are often only 4-aligned (MSVC's stack),
 # which faults (SIGBUS) under a 64-bit kernel.  VFP-only code has no hints.
 override CFLAGS += -mfpu=vfpv4
+# char is signed on x86 (and in the Xbox code xbcompat mirrors), unsigned on ARM.
+override CFLAGS += -fsigned-char
 override LDFLAGS += -no-pie -Wl,-Ttext-segment=0x60000000
 PKGCFG  ?= PKG_CONFIG_PATH= PKG_CONFIG_LIBDIR=/usr/lib/arm-linux-gnueabihf/pkgconfig pkg-config
 BUILD   ?= build-armhf

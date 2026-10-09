@@ -116,6 +116,9 @@ void cpu_init(void);
 /* This host thread runs guest code with fs:0 at pcr, on the guest stack [limit, base). */
 void cpu_thread_attach(void *pcr, void *stack_limit, void *stack_base);
 void cpu_thread_detach(void);
+/* The current thread's scheduling priority (thread.c): its KTHREAD's, or
+   above any thread's for host threads calling the guest (DPCs, callbacks). */
+int thread_guest_priority(void);
 /* Host code rewrote guest code in [addr, addr+len) (section loads). */
 void cpu_code_changed(uint32_t addr, uint32_t len);
 /* For crash reports: the guest registers of this thread, if it is in guest code. */

@@ -33,7 +33,7 @@ void fatal(const char *fmt, ...) __attribute__((format(printf, 1, 2), noreturn))
  */
 #define IMAGE_REGION_END   0x04000000u
 #define ARENA_BASE         0x10000000u
-#if defined(__i386__)
+#if defined(__i386__) && !defined(XBC_SMALL_ARENA)
 #define ARENA_END          0x50000000u
 #else
 /* 32-bit ARM: QEMU's user-mode emulator (used for testing) maps the

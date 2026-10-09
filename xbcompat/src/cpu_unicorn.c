@@ -6,8 +6,8 @@
  * one to one, so guest memory, the XBE image and host data the guest is
  * handed (kernel data exports, D3D state) are all where the guest expects.
  *
- * Host functions are reached through stubs: a 64 KB page of hlt bytes whose
- * offsets index the stub table.  A code hook over that page performs the call
+ * Host functions are reached through stubs: a 64 KB page whose even offsets
+ * index the stub table, each holding a jmp to itself (see cpu_init).  A code hook over that page performs the call
  * (arguments read by the function's adapter), sets eax/edx, pops the
  * arguments as the callee would, and resumes at the return address.  Calls
  * the other way push the arguments and a return address just past the stub
@@ -36,7 +36,7 @@
 #include "cpu.h"
 
 #define STUB_MAX   0xF000u            /* stub page: offsets 0..STUB_MAX-1 hold stubs */
-#define STUB_COUNT (STUB_MAX / 2)     /* every other byte: see cpu_call */
+#define STUB_COUNT (STUB_MAX / 2)     /* every other byte: see cpu_init */
 #define STUB_PAGE  0x10000u
 #define RET_OFFSET 0xFF00u            /* cpu_call's return address, outside the hook range */
 #define GUEST_STACK_DEFAULT (256u << 10)
@@ -75,6 +75,7 @@ struct stub {
     int8_t spec[16];           /* register index (UC order below) or -1 for the next stack word */
     int spec_stack;            /* stack words the spec consumes */
     void *ctx;
+    bool hold;                 /* runs holding the guest CPU (see hook_stub) */
 };
 
 static uint8_t *stub_page;
@@ -90,6 +91,12 @@ static unsigned stub_new(const struct xa_entry *e, void *ctx)
     unsigned i = nstubs++;
     stubs[i].e = e;
     stubs[i].ctx = ctx;
+    /* The kernel's interlocked operations change guest memory that guest
+       code also changes with lock-prefixed instructions, which Unicorn does
+       not make atomic: they run holding the guest CPU, so no guest code runs
+       in between.  They never block. */
+    stubs[i].hold = e->name && (!strncmp(e->name, "Interlocked", 11) || !strncmp(e->name, "ExInterlocked", 13) ||
+                                !strncmp(e->name, "ExfInterlocked", 14));
     pthread_mutex_unlock(&stub_lock);
     return i;
 }
@@ -183,18 +190,33 @@ struct cpu_thread {
     unsigned gen;              /* code generation the engine's translations match */
     bool stop_pending;
     bool preempted;            /* stopped at the end of its time slice */
+    /* The last stub call this thread completed: eip there, and esp and eip
+       after it (see cpu_call). */
+    uint32_t done_stub, done_esp, done_ret;
+    /* waiting for the guest CPU */
+    int prio;
+    unsigned ticket;
+    uint64_t wait_since;
+    bool granted;
+    struct cpu_thread *next;
 };
 
-/* The guest CPU: a FIFO ticket lock, so a preempted thread queues behind the
-   ones waiting. */
+/* The guest CPU goes to the waiting thread of highest priority, first come
+   first served among equals, as the Xbox's scheduler would pick it: titles
+   count on a low-priority thread never running in the middle of a
+   higher-priority one.  A thread kept waiting for STARVE_US gets its turn
+   anyway, so a spinning thread can't hold everyone else off for good.  The
+   holder is preempted after its time slice only for a waiter that would
+   outrank it. */
 #define TIME_SLICE_US 4000
+#define STARVE_US 100000
 static struct {
     pthread_mutex_t m;
     pthread_cond_t c;
-    unsigned next, serving, waiting;
-    struct cpu_thread *holder;
+    struct cpu_thread *holder, *reserved, *waiters;
+    unsigned next_ticket;
     uint64_t since;
-} gcpu = { PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0, 0, 0, NULL, 0 };
+} gcpu = { PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, NULL, NULL, NULL, 0, 0 };
 
 static uint64_t now_us(void)
 {
@@ -203,18 +225,48 @@ static uint64_t now_us(void)
     return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
 }
 
+static int effective_prio(const struct cpu_thread *w, uint64_t now)
+{
+    return now - w->wait_since > STARVE_US ? 64 : w->prio;
+}
+
+/* The waiter that gets the CPU next (gcpu.m held). */
+static struct cpu_thread **best_waiter(uint64_t now)
+{
+    struct cpu_thread **best = NULL;
+    for (struct cpu_thread **w = &gcpu.waiters; *w; w = &(*w)->next) {
+        if (!best) { best = w; continue; }
+        int a = effective_prio(*w, now), b = effective_prio(*best, now);
+        if (a > b || (a == b && (int)((*w)->ticket - (*best)->ticket) < 0)) best = w;
+    }
+    return best;
+}
+
 static int gcpu_off = -1;   /* XBCOMPAT_GUEST_SMP=1: no guest CPU lock (diagnosis) */
 
 static void guest_enter(struct cpu_thread *t)
 {
     if (gcpu_off < 0) gcpu_off = getenv("XBCOMPAT_GUEST_SMP") != NULL;
     if (gcpu_off) return;
+    int prio = thread_guest_priority();
     pthread_mutex_lock(&gcpu.m);
-    unsigned me = gcpu.next++;
-    if (me != gcpu.serving) {
-        gcpu.waiting++;
-        while (gcpu.serving != me) pthread_cond_wait(&gcpu.c, &gcpu.m);
-        gcpu.waiting--;
+    t->prio = prio;
+    if (gcpu.holder || gcpu.reserved || gcpu.waiters) {
+        t->ticket = gcpu.next_ticket++;
+        t->wait_since = now_us();
+        t->granted = false;
+        t->next = gcpu.waiters;
+        gcpu.waiters = t;
+        if (!gcpu.holder && !gcpu.reserved) {
+            /* The CPU is free: hand it to whoever ranks first, maybe us. */
+            struct cpu_thread **b = best_waiter(t->wait_since), *w = *b;
+            *b = w->next;
+            w->granted = true;
+            gcpu.reserved = w;
+            pthread_cond_broadcast(&gcpu.c);
+        }
+        while (!t->granted) pthread_cond_wait(&gcpu.c, &gcpu.m);
+        gcpu.reserved = NULL;
     }
     gcpu.holder = t;
     gcpu.since = now_us();
@@ -227,19 +279,52 @@ static void guest_leave(struct cpu_thread *t)
     pthread_mutex_lock(&gcpu.m);
     gcpu.holder = NULL;
     t->preempted = false;
-    gcpu.serving++;
-    if (gcpu.waiting) pthread_cond_broadcast(&gcpu.c);
+    if (gcpu.waiters) {
+        struct cpu_thread **b = best_waiter(now_us()), *w = *b;
+        *b = w->next;
+        w->granted = true;
+        gcpu.reserved = w;
+        pthread_cond_broadcast(&gcpu.c);
+    }
     pthread_mutex_unlock(&gcpu.m);
+}
+
+/* Switching threads: the holder yields to an outranking waiter at the next
+   host call (hook_stub) or rdtsc (hook_rdtsc) once its time slice is up.
+   Stopping an engine from outside (uc_emu_stop) to switch at any
+   instruction corrupts guest state now and then (seen as heap corruption
+   in the dashboard), so this thread does that only as a last resort, for a
+   holder that has gone LAST_RESORT_US without either while others wait. */
+#define LAST_RESORT_US 200000
+
+static bool should_yield(void)
+{
+    if (!gcpu.waiters) return false;   /* unlocked peek; rechecked below */
+    pthread_mutex_lock(&gcpu.m);
+    uint64_t now = now_us();
+    bool y = gcpu.waiters && now - gcpu.since > TIME_SLICE_US &&
+             effective_prio(*best_waiter(now), now) >= gcpu.holder->prio;
+    pthread_mutex_unlock(&gcpu.m);
+    return y;
+}
+
+static void maybe_yield(struct cpu_thread *t)
+{
+    if (gcpu_off || !should_yield()) return;
+    guest_leave(t);
+    guest_enter(t);
 }
 
 static void *preempt_thread(void *arg)
 {
     (void)arg;
+    if (getenv("XBCOMPAT_NO_PREEMPT")) return NULL;
     for (;;) {
-        usleep(1000);
+        usleep(10000);
         pthread_mutex_lock(&gcpu.m);
         struct cpu_thread *h = gcpu.holder;
-        if (gcpu.waiting && h && !h->preempted && now_us() - gcpu.since > TIME_SLICE_US) {
+        uint64_t now = now_us();
+        if (h && !h->preempted && gcpu.waiters && now - gcpu.since > LAST_RESORT_US) {
             h->preempted = true;
             uc_emu_stop(h->uc);
         }
@@ -396,9 +481,6 @@ static void hook_stub(uc_engine *uc, uint64_t address, uint32_t size, void *user
     (void)size;
     struct cpu_thread *t = user;
     unsigned idx;
-    /* An odd address is just past a stub whose hlt ran without this hook
-       (see cpu_call): that stub is the call. */
-    if ((address - (uint32_t)(uintptr_t)stub_page) & 1) address--;
     if (!is_stub((uint32_t)address, &idx)) fatal("guest jumped into the stub page at %#x", (unsigned)address);
     const struct stub *s = &stubs[idx];
     uint32_t esp = rd(uc, UC_X86_REG_ESP);
@@ -410,9 +492,9 @@ static void hook_stub(uc_engine *uc, uint64_t address, uint32_t size, void *user
         f.edx = rd(uc, UC_X86_REG_EDX);
     }
     uint32_t pop = 0;
-    guest_leave(t);
+    if (!s->hold) guest_leave(t);
     uint64_t r = run_entry(s, &f, &pop, uc);
-    guest_enter(t);
+    if (!s->hold) guest_enter(t);
     if (f.fp) push_st0(uc, f.fret);
     else {
         wr(uc, UC_X86_REG_EAX, (uint32_t)r);
@@ -420,6 +502,9 @@ static void hook_stub(uc_engine *uc, uint64_t address, uint32_t size, void *user
     }
     wr(uc, UC_X86_REG_ESP, esp + 4 + pop);
     wr(uc, UC_X86_REG_EIP, f.ret);
+    t->done_stub = (uint32_t)address;
+    t->done_esp = esp + 4 + pop;
+    t->done_ret = f.ret;
     if (t->gen != code_gen) {
         /* Code was rewritten (a section load): drop our translations
            before running any more of it. */
@@ -461,7 +546,8 @@ static void hook_intr(uc_engine *uc, uint32_t intno, void *user)
 
 static int hook_rdtsc(uc_engine *uc, void *user)
 {
-    (void)user;
+    /* Titles poll the counter while they wait: a good place to switch. */
+    maybe_yield(user);
     ULONGLONG v = ke_guest_tsc();
     wr(uc, UC_X86_REG_EAX, (uint32_t)v);
     wr(uc, UC_X86_REG_EDX, (uint32_t)(v >> 32));
@@ -489,6 +575,17 @@ void cpu_dump_guest(void)
         xlog("  guest stack: %08x %08x %08x %08x %08x %08x %08x %08x", sp[0], sp[1], sp[2], sp[3], sp[4],
              sp[5], sp[6], sp[7]);
     }
+    /* Return addresses along the ebp chain (code built with frame pointers). */
+    uint32_t ebp = rd(uc, UC_X86_REG_EBP);
+    char chain[160];
+    int n = 0;
+    for (int i = 0; i < 8 && ebp > 0x10000 && ebp < 0xF0000000u && !(ebp & 3) && n < (int)sizeof(chain) - 10; i++) {
+        const uint32_t *fp = (const uint32_t *)(uintptr_t)ebp;
+        n += snprintf(chain + n, sizeof(chain) - n, " %08x", fp[1]);
+        if (fp[0] <= ebp) break;
+        ebp = fp[0];
+    }
+    if (n) xlog("  guest callers:%s", chain);
 }
 
 /* ---- host -> guest ----------------------------------------------------- */
@@ -558,12 +655,17 @@ uint64_t cpu_call(uint32_t fn, int conv, int n, const uint32_t *args)
             cpu_dump_guest();
             fatal("guest code at %08x failed: %s", pc, uc_strerror(err));
         }
+        /* A stop requested while a stub's hook ran (preemption, or the code
+           change above) leaves eip back on the stub, though the call is
+           done and esp already past it: a new call to it would have its
+           arguments below.  Carry on from the return address instead of
+           calling it twice. */
+        if (pc == t->done_stub && rd(uc, UC_X86_REG_ESP) == t->done_esp) {
+            pc = t->done_ret;
+            wr(uc, UC_X86_REG_EIP, pc);
+        }
+        t->done_stub = 0;
         if (pc == ret_addr) break;
-        /* Unicorn skips code hooks once a stop is requested, so a stub
-           reached just then runs as the hlt it is.  Stubs sit at even
-           offsets, so the eip past that hlt is odd: go back and call it. */
-        uint32_t base = (uint32_t)(uintptr_t)stub_page;
-        if (pc > base && pc <= base + 2 * nstubs && ((pc - base) & 1)) { pc--; continue; }
         if (t->stop_pending) { t->stop_pending = false; uc_ctl_flush_tb(uc); t->gen = code_gen; continue; }
         if (*(const uint8_t *)(uintptr_t)pc == 0xF4) {   /* hlt: wait for an interrupt */
             usleep(1000);
@@ -582,7 +684,13 @@ uint64_t cpu_call(uint32_t fn, int conv, int n, const uint32_t *args)
 void cpu_init(void)
 {
     stub_page = arena_alloc(STUB_PAGE, 1);
-    memset(stub_page, 0xF4, STUB_PAGE);   /* hlt */
+    /* Each stub is "jmp $" (EB FE).  Unicorn skips code hooks once a stop
+       is requested (preemption, below), so a stub can be reached without
+       its hook running: the jmp keeps eip on the stub until the engine
+       stops, and the call happens when the thread resumes there.  The
+       rest of the page, cpu_call's return address included, is hlt. */
+    memset(stub_page, 0xF4, STUB_PAGE);
+    for (unsigned i = 0; i < STUB_MAX; i += 2) { stub_page[i] = 0xEB; stub_page[i + 1] = 0xFE; }
     ret_addr = (uint32_t)(uintptr_t)stub_page + RET_OFFSET;
     pthread_t pt;
     if (pthread_create(&pt, NULL, preempt_thread, NULL) == 0) pthread_detach(pt);

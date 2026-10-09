@@ -197,6 +197,9 @@ void NTAPI HalReturnToFirmware(ULONG Routine)
     av_hand_over();
     if (Routine == 2 && path && path[0]) relaunch(path);
     xlog("HalReturnToFirmware(%u): title asked to reboot or return to the dashboard", Routine);
+#ifdef XBC_TRANSLATED
+    if (Routine == 4 /* HalFatalErrorRebootRoutine */) cpu_dump_guest();
+#endif
     if (LaunchDataPage && *(ULONG *)LaunchDataPage /* dwLaunchDataType */) {
         /* XLaunchNewImage(NULL, data): the dashboard gets the launch data
            (LDT_LAUNCH_DASHBOARD, e.g. "open the Memory screen"). Whoever

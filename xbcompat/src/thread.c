@@ -134,6 +134,14 @@ static xthread *thread_alloc(SIZE_T stack_size, SIZE_T tls_size)
     return t;
 }
 
+#ifdef XBC_TRANSLATED
+int thread_guest_priority(void)
+{
+    xthread *t = thread_current();
+    return t ? t->ethread.Tcb.Priority : 32;
+}
+#endif
+
 void thread_init_main(void)
 {
     pthread_key_create(&current_key, NULL);

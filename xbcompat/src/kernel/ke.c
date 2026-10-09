@@ -737,6 +737,10 @@ LONG NTAPI KeSetBasePriorityThread(KTHREAD *Thread, LONG Increment)
     LONG old = Thread->BasePriority;
     TRACE("KeSetBasePriorityThread(%p, %d)", (void *)Thread, (int)Increment);
     Thread->BasePriority = (SCHAR)(8 + Increment);
+    /* The thread runs at its new base priority (no boosts here). Increments
+       of +-16 saturate (THREAD_PRIORITY_TIME_CRITICAL, _IDLE). */
+    LONG p = 8 + Increment;
+    Thread->Priority = (SCHAR)(p < 1 ? 1 : p > 31 ? 31 : p);
     return old - 8;
 }
 
