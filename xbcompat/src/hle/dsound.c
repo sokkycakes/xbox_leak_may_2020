@@ -1206,6 +1206,7 @@ static void audio_start(void)
             xlog("DSound: SDL audio init failed: %s", SDL_GetError());
             continue;
         }
+        install_fault_handlers();
         g.dev = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
         if (!g.dev) xlog("DSound: cannot open audio device (%s): %s", SDL_GetCurrentAudioDriver() ?
                          SDL_GetCurrentAudioDriver() : "no driver", SDL_GetError());
