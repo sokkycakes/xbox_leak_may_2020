@@ -215,6 +215,8 @@ static void present_window_framebuffer(void);
 static void restore_window_framebuffer(void);
 static void backbuffer_read_begin(GLbitfield mask);
 static void backbuffer_read_end(void);
+static GLuint cur_program;   /* the GL program bound for draws (see use_program) */
+static void program_off(void);
 static GLuint backbuffer_copy_texture(ULONG data, ULONG w, ULONG h);
 static void run_callbacks(void);
 static void pusher_drain(void);
@@ -563,6 +565,7 @@ static void draw_window_pixels(const uint8_t *tmp)
     if (!p_glWindowPos2i) p_glWindowPos2i = SDL_GL_GetProcAddress("glWindowPos2i");
     if (!p_glWindowPos2i) return;
     ULONG w = d3d.width, h = d3d.height;
+    program_off();
     glPushAttrib(GL_ALL_ATTRIB_BITS);
     for (int u = 3; u >= 0; u--) {
         p_glActiveTexture(GL_TEXTURE0 + u);
@@ -2139,6 +2142,7 @@ typedef struct program_entry {
     GLint loc_c, loc_flip_y;
     GLint loc_tex[4], loc_cube[4], loc_vol[4], loc_tex_scale, loc_c0, loc_c1, loc_fc0, loc_fc1,
           loc_bump_env, loc_bump_lum;
+    float (*last_c)[4];   /* the constants last uploaded to this program */
     struct program_entry *next;
 } program_entry;
 
@@ -2153,8 +2157,10 @@ static void NTAPI D3DDevice_DeleteVertexShader(ULONG handle)
         for (program_entry **pp = &programs; *pp;) {
             program_entry *e = *pp;
             if (e->vs != sh->vs) { pp = &e->next; continue; }
+            if (e->prog && e->prog == cur_program) program_off();
             if (e->prog) p_glDeleteProgram(e->prog);
             *pp = e->next;
+            free(e->last_c);
             free(e);
         }
         p_glDeleteShader(sh->vs);
@@ -2440,6 +2446,14 @@ static void upload_ps_uniforms(const program_entry *e)
     apply_shader_textures(e);
 }
 
+/* Fixed-function GL work (draws without shaders, glDrawPixels) needs
+   program 0; draws leave their program bound. */
+static void program_off(void)
+{
+    if (cur_program) p_glUseProgram(0);
+    cur_program = 0;
+}
+
 /* Select the program for a draw: `vs` is the vertex shader object (0 for
    fixed function); the fragment side follows the title's pixel shader.
    Returns false when the draw must be skipped (a shader failed), else sets
@@ -2452,10 +2466,13 @@ static bool use_program(GLuint vs, program_entry **out)
         fs = fragment_shader_object();
         if (!fs) return false;
     }
-    if (!vs && !fs) return true;
+    if (!vs && !fs) { program_off(); return true; }
     program_entry *e = program_for(vs, fs);
     if (!e->prog) return false;
-    p_glUseProgram(e->prog);
+    /* The program stays bound after the draw: consecutive draws with the
+       same program (most of a frame) skip the switch. */
+    if (cur_program != e->prog) p_glUseProgram(e->prog);
+    cur_program = e->prog;
     if (fs) upload_ps_uniforms(e);
     *out = e;
     return true;
@@ -2463,7 +2480,7 @@ static bool use_program(GLuint vs, program_entry **out)
 
 static void end_program(program_entry *e)
 {
-    if (e) p_glUseProgram(0);
+    (void)e;
 }
 
 /* GL has no signed 11:11:10 vertex format, so NORMPACKED3 attributes are
@@ -2539,7 +2556,7 @@ static void unbind_attributes(void)
     for (int r = 0; r < 16; r++) p_glDisableVertexAttribArray(r);
 }
 
-static void upload_constants(const vshader *sh, const program_entry *e)
+static void upload_constants(const vshader *sh, program_entry *e)
 {
     float c[192][4];
     memcpy(c, d3d.vs_const, sizeof(c));
@@ -2553,7 +2570,12 @@ static void upload_constants(const vshader *sh, const program_entry *e)
     c[59][0] = v->X + sx + d3d.screen_offset[0];
     c[59][1] = v->Y - sy + d3d.screen_offset[1];
     c[59][2] = d3d.zscale * v->MinZ; c[59][3] = 0;
-    if (e->loc_c >= 0) p_glUniform4fv(e->loc_c, 192, &c[0][0]);
+    /* Most draws repeat the previous upload; skip the driver round trip. */
+    if (e->loc_c >= 0 && (!e->last_c || memcmp(e->last_c, c, sizeof(c)))) {
+        if (!e->last_c) e->last_c = malloc(sizeof(c));
+        memcpy(e->last_c, c, sizeof(c));
+        p_glUniform4fv(e->loc_c, 192, &c[0][0]);
+    }
     if (e->loc_flip_y >= 0) p_glUniform1f(e->loc_flip_y, d3d.rt_texture ? -1.0f : 1.0f);
 }
 
