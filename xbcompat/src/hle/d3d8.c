@@ -504,6 +504,18 @@ static void save_screenshot(const char *path)
    dir/drawNNN.bmp. */
 /* Work counted for XBCOMPAT_LOG_FPS: what a slow frame spends its time on. */
 static struct { unsigned draws, uploads, readbacks, shaders; } stats;
+/* Host time per frame, in performance-counter ticks: draws (with
+   XBCOMPAT_PROFILE_SYNC=1 each draw also waits for the GPU), push buffer
+   replay (draws included), present + buffer swap, and pacing sleep. */
+static struct { Uint64 draw, drain, swap, pace; } prof;
+static int prof_sync = -1;
+
+static void prof_draw_end(Uint64 t0)
+{
+    if (prof_sync < 0) { const char *e = getenv("XBCOMPAT_PROFILE_SYNC"); prof_sync = e && *e && *e != '0'; }
+    if (prof_sync) glFinish();
+    prof.draw += SDL_GetPerformanceCounter() - t0;
+}
 
 static void debug_dump_draw(void)
 {
@@ -633,6 +645,13 @@ static void log_fps(void)
              frames * 1000.0 / (double)(now - since), stats.draws / frames, stats.uploads / frames,
              stats.readbacks / frames, stats.shaders / frames, (g_guest_traps - traps) / frames);
         traps = g_guest_traps;
+        double ms = 1000.0 / (double)SDL_GetPerformanceFrequency() / frames;
+        double total = (double)(now - since) / frames;
+        xlog("D3D: per frame %.1f ms: %.1f draws, %.1f push buffer (draws included), %.1f present+swap, "
+             "%.1f pacing, %.1f rest (game code)%s", total, prof.draw * ms, prof.drain * ms, prof.swap * ms,
+             prof.pace * ms, total - (prof.draw + prof.swap + prof.pace) * ms - (prof.drain > prof.draw ? (prof.drain - prof.draw) * ms : 0),
+             prof_sync > 0 ? " [GPU synced per draw]" : "");
+        memset(&prof, 0, sizeof(prof));
         memset(&stats, 0, sizeof(stats));
         since = now;
         frames = 0;
@@ -647,6 +666,7 @@ static void pace_present(void)
     Uint64 now = SDL_GetPerformanceCounter(), period = SDL_GetPerformanceFrequency() / 60;
     if (!next || now > next + period) next = now;   /* first frame, or fell behind: resync */
     sleep_until(next);
+    prof.pace += SDL_GetPerformanceCounter() - now;
     next += period;
 }
 
@@ -669,9 +689,11 @@ static ULONG NTAPI D3DDevice_Swap(ULONG Flags)
     } else if (g_screenshot_path && (int)d3d.frame == g_screenshot_frame) {
         save_screenshot(g_screenshot_path);
     }
+    Uint64 t0 = SDL_GetPerformanceCounter();
     present_window_framebuffer();
     SDL_GL_SwapWindow(d3d.window);
     restore_window_framebuffer();
+    prof.swap += SDL_GetPerformanceCounter() - t0;
     restore_overlay();
     pace_present();
     d3d.swapped = 1;
@@ -2580,8 +2602,8 @@ static void upload_constants(const vshader *sh, program_entry *e)
 }
 
 /* Draw with a programmable vertex shader: generic attributes + GLSL. */
-static void draw_programmable(vshader *sh, ULONG PrimitiveType, const UCHAR *up, ULONG up_stride, ULONG first,
-                              ULONG count, const USHORT *indices)
+static void draw_programmable_(vshader *sh, ULONG PrimitiveType, const UCHAR *up, ULONG up_stride, ULONG first,
+                               ULONG count, const USHORT *indices)
 {
     GLuint vs = vertex_shader_object(sh);
     if (!vs) return;
@@ -2623,8 +2645,8 @@ static void secondary_color(bool lit, const void *ptr, GLint size, GLenum type, 
 }
 
 /* A declaration without a program: fixed function with a custom layout. */
-static void draw_declared(const vshader *sh, ULONG PrimitiveType, const UCHAR *up, ULONG up_stride, ULONG first,
-                          ULONG count, const USHORT *indices)
+static void draw_declared_(const vshader *sh, ULONG PrimitiveType, const UCHAR *up, ULONG up_stride, ULONG first,
+                           ULONG count, const USHORT *indices)
 {
     const vattr *pos = &sh->attr[0];
     if (pos->stream < 0) return;
@@ -2710,6 +2732,22 @@ static void draw_declared(const vshader *sh, ULONG PrimitiveType, const UCHAR *u
     else
         glDrawArrays(gl_primitive(PrimitiveType), first, count);
     end_program(e);
+}
+
+static void draw_programmable(vshader *sh, ULONG PrimitiveType, const UCHAR *up, ULONG up_stride, ULONG first,
+                              ULONG count, const USHORT *indices)
+{
+    Uint64 t0 = SDL_GetPerformanceCounter();
+    draw_programmable_(sh, PrimitiveType, up, up_stride, first, count, indices);
+    prof_draw_end(t0);
+}
+
+static void draw_declared(const vshader *sh, ULONG PrimitiveType, const UCHAR *up, ULONG up_stride, ULONG first,
+                          ULONG count, const USHORT *indices)
+{
+    Uint64 t0 = SDL_GetPerformanceCounter();
+    draw_declared_(sh, PrimitiveType, up, up_stride, first, count, indices);
+    prof_draw_end(t0);
 }
 
 static void draw(ULONG PrimitiveType, const UCHAR *base, ULONG stride, ULONG first, ULONG count,
@@ -5325,7 +5363,9 @@ static void pusher_drain(void)
         ULONG h = n;
         pb_record2(OP_RAW, &h, 4, pusher_buf, n * 4);
     } else {
+        Uint64 t0 = SDL_GetPerformanceCounter();
         pb_interpret(pusher_buf, n);
+        prof.drain += SDL_GetPerformanceCounter() - t0;
     }
     dev[0] = (ULONG)pusher_buf;
     busy = false;
