@@ -24,6 +24,9 @@
 #include "../cpu.h"
 #include "nv2a_shaders.h"
 
+/* Set at device creation: see rgba_colors. */
+static bool rgba_vertex_colors;
+
 typedef ULONG UINT_;
 
 #define D3D_OK 0
@@ -347,6 +350,11 @@ static LONG NTAPI Direct3D_CreateDevice(UINT_ Adapter, ULONG DeviceType, PVOID p
     if (!d3d.gl) fatal("SDL_GL_CreateContext: %s", SDL_GetError());
     SDL_GL_SetSwapInterval(1);
     xlog("D3D: OpenGL %s on %s", glGetString(GL_VERSION), glGetString(GL_RENDERER));
+    /* The Raspberry Pi's VC4 can't fetch B,G,R,A vertex colors; Mesa then
+       converts them on every draw, and that path crashes in vc4 (indexed
+       draws from client arrays). Swizzle them ourselves instead. */
+    const char *renderer = (const char *)glGetString(GL_RENDERER);
+    rgba_vertex_colors = (renderer && strstr(renderer, "VC4")) || getenv("XBCOMPAT_RGBA_VERTEX_COLORS");
 
     for (int i = 0; i < 10; i++) identity(&d3d.transforms[i]);
     d3d.viewport = (D3DVIEWPORT8){ 0, 0, d3d.width, d3d.height, 0, 1 };
@@ -2336,6 +2344,28 @@ static const float *unpack_normpacked3(int slot, const UCHAR *src, ULONG stride,
     return buf[slot];
 }
 
+/* D3DCOLOR vertex data (B, G, R, A bytes) copied out as R, G, B, A for GL
+   drivers without BGRA vertex fetch (see rgba_vertex_colors): `n` entries
+   from `src`, tightly packed (stride 4). */
+static const void *rgba_colors(int slot, const UCHAR *src, ULONG stride, ULONG n)
+{
+    static uint8_t *buf[20];
+    static ULONG cap[20];
+    if (n > cap[slot]) {
+        free(buf[slot]);
+        cap[slot] = n + 1024;
+        buf[slot] = malloc(cap[slot] * 4);
+    }
+    uint8_t *o = buf[slot];
+    for (ULONG i = 0; i < n; i++, src += stride, o += 4) {
+        o[0] = src[2];
+        o[1] = src[1];
+        o[2] = src[0];
+        o[3] = src[3];
+    }
+    return buf[slot];
+}
+
 /* How many vertices from the start of the streams a draw reads. */
 static ULONG vertex_limit(ULONG first, ULONG count, const USHORT *indices)
 {
@@ -2377,6 +2407,11 @@ static void bind_attributes(const vshader *sh, const UCHAR *up, ULONG up_stride,
             continue;
         }
         /* D3DCOLOR is stored B, G, R, A and reaches the shader as (R, G, B, A). */
+        if (a->type == 0x40 && rgba_vertex_colors) {
+            p_glVertexAttribPointer(r, 4, GL_UNSIGNED_BYTE, GL_TRUE, 4,
+                                    rgba_colors(4 + r, base + a->offset + first_vertex * stride, stride, nverts));
+            continue;
+        }
         p_glVertexAttribPointer(r, a->type == 0x40 ? GL_BGRA : a->components, a->gl_type, a->normalized, stride,
                                 base + a->offset + first_vertex * stride);
     }
@@ -2482,7 +2517,10 @@ static void draw_declared(const vshader *sh, ULONG PrimitiveType, const UCHAR *u
         const UCHAR *b; ULONG s;
         STREAM(&sh->attr[3], b, s);
         glEnableClientState(GL_COLOR_ARRAY);
-        if (sh->attr[3].gl_type == GL_UNSIGNED_BYTE)
+        if (sh->attr[3].type == 0x40 && rgba_vertex_colors)
+            glColorPointer(4, GL_UNSIGNED_BYTE, 4,
+                           rgba_colors(0, b + sh->attr[3].offset, s, vertex_limit(first, count, indices)));
+        else if (sh->attr[3].gl_type == GL_UNSIGNED_BYTE)
             glColorPointer(sh->attr[3].type == 0x40 ? GL_BGRA : 4, GL_UNSIGNED_BYTE, s, b + sh->attr[3].offset);
         else
             glColorPointer(sh->attr[3].components, sh->attr[3].gl_type, s, b + sh->attr[3].offset);
@@ -2496,8 +2534,11 @@ static void draw_declared(const vshader *sh, ULONG PrimitiveType, const UCHAR *u
         const UCHAR *b; ULONG s;
         STREAM(&sh->attr[4], b, s);
         const vattr *a = &sh->attr[4];
-        secondary_color(lit, b + a->offset, a->type == 0x40 ? GL_BGRA : 3,
-                        a->gl_type, s);
+        if (a->type == 0x40 && rgba_vertex_colors)
+            secondary_color(lit, rgba_colors(1, b + a->offset, s, vertex_limit(first, count, indices)), 3,
+                            GL_UNSIGNED_BYTE, 4);
+        else
+            secondary_color(lit, b + a->offset, a->type == 0x40 ? GL_BGRA : 3, a->gl_type, s);
     } else {
         secondary_color(lit, NULL, 0, 0, 0);
     }
@@ -2561,7 +2602,11 @@ static void draw(ULONG PrimitiveType, const UCHAR *base, ULONG stride, ULONG fir
     bool lit = glIsEnabled(GL_LIGHTING);
     if (l.diffuse_off >= 0 && (!lit || RS(D3DRS_COLORVERTEX))) {
         glEnableClientState(GL_COLOR_ARRAY);
-        glColorPointer(GL_BGRA, GL_UNSIGNED_BYTE, stride, base + l.diffuse_off);
+        if (rgba_vertex_colors)
+            glColorPointer(4, GL_UNSIGNED_BYTE, 4,
+                           rgba_colors(0, base + l.diffuse_off, stride, vertex_limit(first, count, indices)));
+        else
+            glColorPointer(GL_BGRA, GL_UNSIGNED_BYTE, stride, base + l.diffuse_off);
         if (lit) {
             glEnable(GL_COLOR_MATERIAL);
             glColorMaterial(GL_FRONT_AND_BACK, GL_DIFFUSE);
@@ -2571,7 +2616,11 @@ static void draw(ULONG PrimitiveType, const UCHAR *base, ULONG stride, ULONG fir
         glDisable(GL_COLOR_MATERIAL);
         glColor4f(1, 1, 1, 1);
     }
-    secondary_color(lit, l.specular_off >= 0 ? base + l.specular_off : NULL, GL_BGRA, GL_UNSIGNED_BYTE, stride);
+    if (rgba_vertex_colors && l.specular_off >= 0)
+        secondary_color(lit, rgba_colors(1, base + l.specular_off, stride, vertex_limit(first, count, indices)), 3,
+                        GL_UNSIGNED_BYTE, 4);
+    else
+        secondary_color(lit, l.specular_off >= 0 ? base + l.specular_off : NULL, GL_BGRA, GL_UNSIGNED_BYTE, stride);
     unsigned units = d3d.pixel_shader ? 0xF : apply_textures();
     for (int u = 0; u < 4; u++) {
         ULONG tci = TSS(u, D3DTSS_TEXCOORDINDEX) & 0xFFFF;
