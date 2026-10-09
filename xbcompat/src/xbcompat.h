@@ -91,6 +91,7 @@ extern void (*g_vblank_hook)(void);   /* run 60 times a second on the DPC thread
 void ke_frame_presented(void);   /* XBCOMPAT_FIXED_FPS clock step */
 ULONGLONG system_time_now(void);   /* 100 ns units since 1601 */
 ULONGLONG ke_guest_tsc(void);      /* what a guest rdtsc reads */
+extern volatile unsigned g_guest_traps;   /* faults answered for the guest (rdtsc etc.), for XBCOMPAT_LOG_FPS */
 void thread_trap_tsc(void);        /* make this thread's rdtsc fault into ke_guest_tsc */
 void thread_untrap_tsc(void);      /* back to the host's counter, before exec */
 

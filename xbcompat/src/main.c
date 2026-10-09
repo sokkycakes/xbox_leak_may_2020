@@ -70,11 +70,13 @@ static bool read_tsc(greg_t *r)
     return true;
 }
 
+volatile unsigned g_guest_traps;
+
 static void crash_handler(int sig, siginfo_t *si, void *uc_)
 {
     ucontext_t *uc = uc_;
     greg_t *r = uc->uc_mcontext.gregs;
-    if (sig == SIGSEGV && (read_tsc(r) || debug_service(r) || privileged_insn(r))) return;
+    if (sig == SIGSEGV && (read_tsc(r) || debug_service(r) || privileged_insn(r))) { g_guest_traps++; return; }
     if (sig == SIGTRAP) {
         /* int 3 (DbgBreakPoint and friends): nobody is listening, carry on. */
         xlog("breakpoint at eip=%08x ignored", r[REG_EIP]);

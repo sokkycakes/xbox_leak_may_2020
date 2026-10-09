@@ -215,6 +215,7 @@ static void present_window_framebuffer(void);
 static void restore_window_framebuffer(void);
 static void backbuffer_read_begin(GLbitfield mask);
 static void backbuffer_read_end(void);
+static GLuint backbuffer_copy_texture(ULONG data, ULONG w, ULONG h);
 static void run_callbacks(void);
 static void pusher_drain(void);
 static void pusher_init(ULONG *dev);
@@ -624,9 +625,11 @@ static void log_fps(void)
     if (!since) since = now;
     frames++;
     if (now - since >= 5000) {
-        xlog("D3D: %.1f fps; per frame %u draws, %u texture uploads, %u readbacks, %u shader compiles",
+        static unsigned traps;
+        xlog("D3D: %.1f fps; per frame %u draws, %u texture uploads, %u readbacks, %u shader compiles, %u guest traps",
              frames * 1000.0 / (double)(now - since), stats.draws / frames, stats.uploads / frames,
-             stats.readbacks / frames, stats.shaders / frames);
+             stats.readbacks / frames, stats.shaders / frames, (g_guest_traps - traps) / frames);
+        traps = g_guest_traps;
         memset(&stats, 0, sizeof(stats));
         since = now;
         frames = 0;
@@ -1242,6 +1245,14 @@ static GLuint texture_for(D3DPixelContainer *t)
     ULONG va = t->res.Data | CONTIG_BASE;
     bool on_color = d3d.backbuffer && va == (d3d.backbuffer->Data | CONTIG_BASE) && t != (D3DPixelContainer *)d3d.backbuffer;
     bool on_depth = d3d.depth && va == (d3d.depth->Data | CONTIG_BASE) && t != (D3DPixelContainer *)d3d.depth;
+    if (on_color) {
+        /* A 32-bit view of the back buffer (Phantom Dust filters the frame
+           through three every frame): copy it on the GPU, no readback. */
+        ULONG fmt = (t->Format >> 8) & 0xFF, w, h, pitch;
+        container_size(t, &w, &h, &pitch);
+        GLuint id = fmt == 0x12 || fmt == 0x1E ? backbuffer_copy_texture(t->res.Data, w, h) : 0;
+        if (id) return id;
+    }
     if (on_color || on_depth) {
         readback_surface(on_color ? d3d.backbuffer : d3d.depth, on_depth);
         tex_invalidate(t->res.Data);
@@ -3343,6 +3354,39 @@ static void backbuffer_read_begin(GLbitfield mask)
 static void backbuffer_read_end(void)
 {
     if (p_glBindFramebuffer) p_glBindFramebuffer(GL_READ_FRAMEBUFFER, d3d.rt_texture ? d3d.fbo : 0);
+}
+
+/* A GL texture holding the back buffer's current pixels, top row first like
+   an upload of its memory would, for a linear 32-bit texture header over
+   it.  0 when the window has no framebuffer object to blit from. */
+static GLuint backbuffer_copy_texture(ULONG data, ULONG w, ULONG h)
+{
+    static struct { ULONG data, w, h; GLuint tex; } slot[8];
+    static GLuint fb;
+    if (!window_fb.fbo || !window_fb.blit || w > (ULONG)d3d.width || h > (ULONG)d3d.height) return 0;
+    unsigned i = 0;
+    while (i < 8 && slot[i].tex && !(slot[i].data == data && slot[i].w == w && slot[i].h == h)) i++;
+    if (i == 8) i = data % 8;
+    if (!slot[i].tex || slot[i].data != data || slot[i].w != w || slot[i].h != h) {
+        if (!slot[i].tex) glGenTextures(1, &slot[i].tex);
+        glBindTexture(GL_TEXTURE_2D, slot[i].tex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_BGRA, GL_UNSIGNED_BYTE, NULL);
+        slot[i].data = data; slot[i].w = w; slot[i].h = h;
+    }
+    if (!fb) p_glGenFramebuffers(1, &fb);
+    GLint draw = 0;
+    glGetIntegerv(0x8CA6 /* GL_DRAW_FRAMEBUFFER_BINDING */, &draw);
+    backbuffer_read_begin(GL_COLOR_BUFFER_BIT);
+    window_fb.bind(0x8CA9 /* GL_DRAW_FRAMEBUFFER */, fb);
+    p_glFramebufferTexture2D(0x8CA9, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, slot[i].tex, 0);
+    GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
+    glDisable(GL_SCISSOR_TEST);
+    window_fb.blit(0, 0, w, h, 0, h, w, 0, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    if (scissor) glEnable(GL_SCISSOR_TEST);
+    window_fb.bind(0x8CA9, draw);
+    backbuffer_read_end();
+    stats.readbacks++;
+    return slot[i].tex;
 }
 
 static const char present_vs[] =
