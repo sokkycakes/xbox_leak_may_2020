@@ -516,6 +516,7 @@ static void init_sdl(void)
     }
     if (SDL_InitSubSystem(SDL_INIT_HAPTIC) != 0)
         xlog("XInput: SDL_InitSubSystem(HAPTIC): %s", SDL_GetError());
+    install_fault_handlers();
     xi.sdl_ready = true;
     const char *e = getenv("XBCOMPAT_NO_KBD_PAD");
     xi.kbd_disabled = e && *e && *e != '0';

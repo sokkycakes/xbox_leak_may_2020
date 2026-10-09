@@ -85,6 +85,23 @@ static void crash_handler(int sig, siginfo_t *si, void *uc_)
     _exit(128 + sig);
 }
 
+/* Guest faults xbcompat answers itself (DbgPrint's int 2Dh, privileged
+   instructions, int 3) arrive as these signals. SDL's console keyboard on
+   KMSDRM installs its own handlers for them when its video subsystem starts,
+   and they end the process on the first DbgPrint of a debug build, so every
+   SDL_Init/SDL_InitSubSystem is followed by another call to this. */
+void install_fault_handlers(void)
+{
+    struct sigaction sa = { 0 };
+    sa.sa_sigaction = crash_handler;
+    sa.sa_flags = SA_SIGINFO;
+    sigaction(SIGSEGV, &sa, NULL);
+    sigaction(SIGILL, &sa, NULL);
+    sigaction(SIGFPE, &sa, NULL);
+    sigaction(SIGBUS, &sa, NULL);
+    sigaction(SIGTRAP, &sa, NULL);
+}
+
 static ULONG NTAPI run_entry_point(PVOID entry)
 {
     /* The kernel calls the XBE entry point as a plain cdecl function on its
@@ -161,14 +178,7 @@ int main(int argc, char **argv)
         hdd = hddbuf;
     }
 
-    struct sigaction sa = { 0 };
-    sa.sa_sigaction = crash_handler;
-    sa.sa_flags = SA_SIGINFO;
-    sigaction(SIGSEGV, &sa, NULL);
-    sigaction(SIGILL, &sa, NULL);
-    sigaction(SIGFPE, &sa, NULL);
-    sigaction(SIGBUS, &sa, NULL);
-    sigaction(SIGTRAP, &sa, NULL);
+    install_fault_handlers();
 
     mem_init();
     thread_init_main();

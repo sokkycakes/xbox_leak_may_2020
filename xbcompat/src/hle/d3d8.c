@@ -325,6 +325,7 @@ static LONG NTAPI Direct3D_CreateDevice(UINT_ Adapter, ULONG DeviceType, PVOID p
          pp->BackBufferFormat, pp->EnableAutoDepthStencil ? "yes" : "no", pp->MultiSampleType);
 
     if (SDL_Init(SDL_INIT_VIDEO) != 0) fatal("SDL_Init: %s", SDL_GetError());
+    install_fault_handlers();
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
@@ -552,6 +553,8 @@ static ULONG NTAPI D3DDevice_Swap(ULONG Flags)
             exit(0);
         }
     }
+    /* A keyboard plugged in mid-game makes SDL take the fault signals back. */
+    install_fault_handlers();
     if (g_exit_after_frames && (int)d3d.frame >= g_exit_after_frames) {
         xlog("D3D: %u frames presented, exiting", d3d.frame);
         exit(0);
