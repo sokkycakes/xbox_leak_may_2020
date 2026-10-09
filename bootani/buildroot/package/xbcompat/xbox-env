@@ -40,14 +40,29 @@ if ! ls /dev/dri/card* > /dev/null 2>&1; then
 fi
 export HOME=/root
 
-# Raspberry Pi: sound goes where the picture does, HDMI when a screen is
-# plugged in there, otherwise the 3.5 mm jack beside composite.
-if [ -z "$AUDIODEV" ] && grep -q '^ *[0-9]* \[Headphones' /proc/asound/cards 2>/dev/null; then
-	if grep -qx connected /sys/class/drm/card*-HDMI-A-1/status 2>/dev/null &&
-	   grep -q '^ *[0-9]* \[vc4hdmi' /proc/asound/cards; then
-		export AUDIODEV=hdmi:CARD=vc4hdmi,DEV=0
-	else
-		export AUDIODEV=plughw:CARD=Headphones,DEV=0
+# Raspberry Pi: the picture and sound go to HDMI when a screen is plugged in
+# there, otherwise to composite and the 3.5 mm jack. A TV on composite
+# can't be detected (the connector says "unknown"), and SDL only uses
+# connected outputs, so composite is switched on by hand when HDMI is empty.
+if grep -q 'Raspberry Pi' /proc/device-tree/model 2>/dev/null; then
+	pi_hdmi=
+	grep -qx connected /sys/class/drm/card*-HDMI-A-1/status 2>/dev/null && pi_hdmi=1
+	if [ -z "$pi_hdmi" ]; then
+		for s in /sys/class/drm/card*-Composite-1/status; do
+			[ -w "$s" ] && echo on > "$s" 2>/dev/null
+		done
+	fi
+	# The sound modules can still be loading this early in boot.
+	for _ in $(seq 1 50); do
+		grep -q '^ *[0-9]* \[Headphones' /proc/asound/cards 2>/dev/null && break
+		sleep 0.1
+	done
+	if [ -z "$AUDIODEV" ]; then
+		if [ -n "$pi_hdmi" ] && grep -q '^ *[0-9]* \[vc4hdmi' /proc/asound/cards; then
+			export AUDIODEV=hdmi:CARD=vc4hdmi,DEV=0
+		elif grep -q '^ *[0-9]* \[Headphones' /proc/asound/cards; then
+			export AUDIODEV=plughw:CARD=Headphones,DEV=0
+		fi
 	fi
 fi
 
