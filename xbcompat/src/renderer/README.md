@@ -33,8 +33,14 @@ Use BOX86_LIBGL=libOpenGL.so.0 when launching the x86 client or smoke test on
 that image. The x86 client can retain its default GL=gl linkage: Box86 wraps
 that import using the native OpenGL library selected by BOX86_LIBGL.
 
-Stock Box86 does not know this custom library. Add its wrapper to a separate
-Box86 checkout and build that copy:
+Stock Box86 does not know this custom library and also needs the existing
+xbcompat Pi fixes for guest memory placement, TLS, timing and SDL signals.
+Apply the repository's Pi patch to a separate Box86 checkout before adding
+the renderer wrapper (paths below assume the xbcompat/ working directory):
+
+    git -C /path/to/box86 apply "$PWD/../bootani/buildroot/package/box86/0001-xbcompat-fixes.patch"
+
+Then add the wrapper and build that copy:
 
     python3 tools/box86-renderer/install.py /path/to/box86
     cmake -S /path/to/box86 -B /path/to/box86-build \
@@ -124,4 +130,43 @@ filter keep their GPU cost.
 - Raspberry Pi 3: the same display-free Box86/ARM integration test passed with
   the libOpenGL backend. The running dashboard was not restarted.
 
-Dashboard rendering on VC4 and before/after FPS remain unmeasured.
+The follow-up dashboard measurements below supersede that initial limitation.
+
+## Raspberry Pi dashboard test (2026-10-10 UTC)
+
+The native dashboard boots and renders on VC4. The first launch with only
+upstream Box86 failed to reserve the guest memory range. Applying the existing
+Pi patch above fixed that; the smoke test alone did not expose this prerequisite.
+
+Both comparison executables were built from this branch with the same i386
+compiler: the default built-in renderer versus RENDERER=native. Both used the
+same renderer-enabled Box86 plus the existing Pi patch. The installed runtime
+was also checked separately and produced 24.0 FPS in the main menu at 4x MSAA.
+
+Pi 3 Model B, armhf userspace, VC4, composite 720x480, 640x480 backbuffer;
+original Box86 dynarec settings and ALSA settings retained. The animated main
+menu reported 109 draws throughout each measured interval. Each run started
+fresh; initial startup intervals were excluded. Samples are five-second log
+averages (30–50 seconds per run), including one frame-600 screenshot. Menu
+selection/animation phase was not locked; these are short practical comparisons,
+not a statistically controlled benchmark. Temperature stayed around 77–78 C.
+
+| MSAA | Renderer | Samples | FPS | Draw ms | GL calls ms | Present ms | Other ms |
+|---|---|---:|---:|---:|---:|---:|---:|
+| 4x | Built-in | 7 | 23.99 | 18.44 | 3.49 | 16.67 | 6.64 |
+| 4x | Native ARM | 10 | 24.50 | 14.61 | 3.36 | 17.31 | 8.91 |
+| Off (1x) | Built-in | 6 | 29.08 | 17.83 | 3.37 | 10.23 | 6.32 |
+| Off (1x) | Native ARM | 8 | 29.76 | 13.91 | 3.30 | 11.23 | 8.48 |
+
+Native draw time fell roughly 21–22%, but measured FPS improved only 2–3%.
+The extra time in “other” and presentation offsets most of the draw savings.
+These counters do not identify that extra time precisely; profiling the bridge
+and guest-side entry/return paths is the next step before attempting batching.
+The native ARM library mapping was verified in /proc, and a captured native
+main-menu image was visually checked against the original. Input/menu coverage,
+title launching, long-session stability and audio are not established by this test.
+
+The Pi was left running the isolated native test at the original 4x setting.
+Installed binaries and boot configuration were not replaced. A reboot returns
+to the installed runtime. The temporary test directory and logs are
+/tmp/xbcompat-native-test.if8zCJ; they are not persistent across reboot.
