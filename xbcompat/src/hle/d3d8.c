@@ -4617,6 +4617,39 @@ static void NTAPI D3DDevice_GetRenderTarget(D3DSurface **pp)
 static GLuint texture_for(D3DPixelContainer *t);
 static ULONG cube_face_bytes(D3DPixelContainer *t);
 
+
+/* Packed color transfer descriptors. These describe byte layout, not a
+   colorspace conversion. Only directly representable color formats belong
+   here; palette, bump, video and floating depth need separate semantics. */
+static bool surface_color_transfer(ULONG fmt, GLenum *format, GLenum *type, unsigned *bytes)
+{
+    *bytes = 4;
+    switch (fmt) {
+    case 0x06: case 0x07: case 0x12: case 0x1E:
+        *format = GL_BGRA; *type = GL_UNSIGNED_BYTE; return true;
+    case 0x3A: case 0x3F:
+        *format = GL_RGBA; *type = GL_UNSIGNED_BYTE; return true;
+    case 0x3B: case 0x40:
+        *format = GL_BGRA; *type = GL_UNSIGNED_INT_8_8_8_8; return true;
+    case 0x3C: case 0x41:
+        *format = GL_RGBA; *type = GL_UNSIGNED_INT_8_8_8_8; return true;
+    }
+    *bytes = 2;
+    switch (fmt) {
+    case 0x05: case 0x11:
+        *format = GL_RGB; *type = GL_UNSIGNED_SHORT_5_6_5; return true;
+    case 0x02: case 0x03: case 0x10: case 0x1C:
+        *format = GL_BGRA; *type = GL_UNSIGNED_SHORT_1_5_5_5_REV; return true;
+    case 0x04: case 0x1D:
+        *format = GL_BGRA; *type = GL_UNSIGNED_SHORT_4_4_4_4_REV; return true;
+    case 0x38: case 0x3D:
+        *format = GL_RGBA; *type = GL_UNSIGNED_SHORT_5_5_5_1; return true;
+    case 0x39: case 0x3E:
+        *format = GL_RGBA; *type = GL_UNSIGNED_SHORT_4_4_4_4; return true;
+    default: return false;
+    }
+}
+
 /* The GL texture behind a standalone render target surface, kept in the
    texture cache under the surface's own memory so destroy_resource frees it. */
 static GLuint surface_rt_texture(D3DSurface *s, ULONG w, ULONG h)
@@ -4630,26 +4663,16 @@ static GLuint surface_rt_texture(D3DSurface *s, ULONG w, ULONG h)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
     ULONG fmt = (s->Format >> 8) & 0xFF;
-    const uint8_t *pixels = NULL;
-    uint8_t *rows = NULL;
-    if ((fmt == 0x06 || fmt == 0x07 || fmt == 0x12 || fmt == 0x1E) &&
-        w && h && w <= SIZE_MAX / h / 4) {
+    GLenum transfer_format, transfer_type;
+    unsigned bytes;
+    if (surface_color_transfer(fmt, &transfer_format, &transfer_type, &bytes)) {
         ULONG sw, sh, pitch;
         container_size((D3DPixelContainer *)s, &sw, &sh, &pitch);
-        rows = malloc((size_t)w * h * 4);
-        if (rows) {
-            pixels = (const uint8_t *)(s->Data | CONTIG_BASE);
-            if (s->Size) {
-                for (ULONG y = 0; y < h; y++) memcpy(rows + y * w * 4, pixels + y * pitch, w * 4);
-            } else {
-                unswizzle(pixels, rows, w, h, 4);
-            }
-            pixels = rows;
-        }
+        upload_image3(GL_TEXTURE_2D, 0, fmt, w, h, 1, pitch,
+                      (const uint8_t *)(s->Data | CONTIG_BASE));
+    } else {
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_BGRA, GL_UNSIGNED_BYTE, NULL);
     }
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_BGRA, GL_UNSIGNED_BYTE, pixels);
-    free(rows);
     tex_entry *e = malloc(sizeof(*e));
     *e = (tex_entry){ s->Data, s->Format, s->Size, 0, id, GL_TEXTURE_2D, tex_cache };
     tex_cache = e;
@@ -4687,24 +4710,25 @@ static bool readback_rt_surface(D3DSurface *s)
 {
     if (s == d3d.backbuffer) return false;
     ULONG fmt = (s->Format >> 8) & 0xFF, level;
-    /* Other formats need their own packed readback. */
-    if (fmt != 0x06 && fmt != 0x07 && fmt != 0x12 && fmt != 0x1E) return false;
+    GLenum transfer_format, transfer_type;
+    unsigned bytes;
+    if (!surface_color_transfer(fmt, &transfer_format, &transfer_type, &bytes)) return false;
     GLenum face;
     tex_entry *e = surface_image(s, &face, &level);
     if (!e) return false;
     ULONG w, h, pitch;
     container_size((D3DPixelContainer *)s, &w, &h, &pitch);
-    if (!w || !h || w > SIZE_MAX / h / 4) return false;
-    uint8_t *tmp = malloc((size_t)w * h * 4);
+    if (!w || !h || w > SIZE_MAX / h / bytes) return false;
+    uint8_t *tmp = malloc((size_t)w * h * bytes);
     if (!tmp) return false;
     uint8_t *px = (uint8_t *)(s->Data | CONTIG_BASE);
     glBindTexture(e->target, e->id);
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
-    glGetTexImage(face, level, GL_BGRA, GL_UNSIGNED_BYTE, tmp);
+    glGetTexImage(face, level, transfer_format, transfer_type, tmp);
     if (s->Size) {
-        for (ULONG y = 0; y < h; y++) memcpy(px + y * pitch, tmp + y * w * 4, w * 4);
+        for (ULONG y = 0; y < h; y++) memcpy(px + y * pitch, tmp + y * w * bytes, w * bytes);
     } else {
-        swizzle(tmp, w * 4, px, w, h, 4);
+        swizzle(tmp, w * bytes, px, w, h, bytes);
     }
     free(tmp);
     stats.readbacks++;
@@ -4948,11 +4972,12 @@ static void NTAPI D3DDevice_CopyRects(D3DSurface *src, const LONG *rects, UINT_ 
     GLenum face;
     ULONG level;
     tex_entry *e = dst == d3d.backbuffer ? NULL : surface_image(dst, &face, &level);
-    bool bgra = dst_fmt == 0x06 || dst_fmt == 0x07 || dst_fmt == 0x12 || dst_fmt == 0x1E;
-    if (e && bgra) {
+    GLenum transfer_format, transfer_type;
+    unsigned transfer_bytes;
+    if (e && surface_color_transfer(dst_fmt, &transfer_format, &transfer_type, &transfer_bytes)) {
         glBindTexture(e->target, e->id);
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-        glTexSubImage2D(face, level, 0, 0, dw, dh, GL_BGRA, GL_UNSIGNED_BYTE, dest_rows);
+        glTexSubImage2D(face, level, 0, 0, dw, dh, transfer_format, transfer_type, dest_rows);
     } else if (dst->Parent) {
         tex_invalidate(dst->Parent->res.Data);
     }

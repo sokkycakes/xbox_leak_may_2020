@@ -829,6 +829,51 @@ int main(int argc, char **argv)
             puts("renderer mip targets: 2D/cube level-one attachment, viewport and sibling preservation passed");
         }
 
+
+        /* Packed render-target readback must use the source's native layout.
+         * Partial updates preserve a cached destination's untouched GPU pixels. */
+        {
+            static const unsigned formats[][2] = {
+                {0x05,0x11},{0x02,0x10},{0x03,0x1c},{0x04,0x1d},
+                {0x38,0x3d},{0x39,0x3e},{0x3a,0x3f},{0x3b,0x40},{0x3c,0x41}
+            };
+            uint32_t saved_rs[256], saved_tss[128];
+            memcpy(saved_rs,render_states,sizeof saved_rs);
+            memcpy(saved_tss,texture_states,sizeof saved_tss);
+            set_ps(control_ps); set_vs(0x144);
+            render_states[59] = render_states[60] = render_states[82] = 0;
+            render_states[92] = render_states[124] = 0;
+            texture_states[3] = texture_states[4] = 1;
+            texture_states[5] = texture_states[9] = texture_states[11] = 0;
+            for (unsigned f = 0; f < sizeof formats/sizeof formats[0]; f++) {
+                void *src_tex = create_tex(8,8,1,1,0,formats[f][0],3), *src_view = NULL;
+                void *dst_tex = create_tex(8,8,1,1,0,formats[f][1],3), *dst_view = NULL;
+                assert(surface(src_tex,0,&src_view) == 0 && surface(dst_tex,0,&dst_view) == 0);
+                set_tex(0,NULL);
+                set_rt(src_view,NULL); clear(0,NULL,0xf0,0xffff0000,1,0);
+                set_rt(dst_view,NULL); clear(0,NULL,0xf0,0xff0000ff,1,0);
+                set_rt(back,NULL);
+                LONG rect[4] = {0,0,4,8}, point[2] = {0,0};
+                copy_rects(src_view,rect,1,dst_view,point);
+                set_tex(0,dst_tex);
+                for (unsigned side = 0; side < 2; side++) {
+                    for (int i = 0; i < 3; i++) {
+                        textured[i].u = side ? 6 : 2;
+                        textured[i].v = 4;
+                    }
+                    clear(0,NULL,0xf0,0xff000000,1,0);
+                    draw(5,3,textured,sizeof textured[0]);
+                    glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                    assert(pixel[side ? 2 : 0] > 240);
+                    assert(pixel[side ? 0 : 2] < 8 && pixel[1] < 8 && pixel[3] > 240);
+                }
+            }
+            set_ps(0); set_tex(0,tex);
+            memcpy(render_states,saved_rs,sizeof saved_rs);
+            memcpy(texture_states,saved_tss,sizeof saved_tss);
+            puts("renderer packed copies: nine 16/32-bit layouts and partial cached destinations passed");
+        }
+
         /* Compressed volume uploads decode the packed slab order before GL.
          * The selected blocks distinguish XY tiles, slices within a slab,
          * and the second slab. Minification then selects an authored mip. */
