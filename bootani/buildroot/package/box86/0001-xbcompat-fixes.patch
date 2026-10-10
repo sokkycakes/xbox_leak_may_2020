@@ -12,6 +12,8 @@ Subject: [PATCH] Fixes for running xbcompat (i386) under box86
 - SDL2: wrap SDL_GetTicks64 and the virtual joystick calls.
 - Take SIGSEGV/SIGBUS/SIGILL back from native libraries (SDL's evdev
   keyboard code) when the x86 program sets a handler for one.
+- BOX86_PROFILE=FILE: a native sampling profiler (recompiled x86 vs native
+  code per library and function, per thread), rewritten every 5 s.
 
 diff --git a/src/custommem.c b/src/custommem.c
 index a8cdfd1..e0cb8ae 100644
@@ -87,10 +89,18 @@ index 654d196..af308cc 100755
      }
      #undef GO
 diff --git a/src/libtools/signals.c b/src/libtools/signals.c
-index a995f27..91e2e90 100755
+index a995f27..b3be0ee 100755
 --- a/src/libtools/signals.c
 +++ b/src/libtools/signals.c
-@@ -807,6 +807,18 @@ static pthread_mutex_t mutex_dynarec_prot = PTHREAD_ERRORCHECK_MUTEX_INITIALIZER
+@@ -33,6 +33,7 @@
+ #ifdef DYNAREC
+ #include "dynablock.h"
+ #include "../dynarec/dynablock_private.h"
++int prof_owns_sigprof(void);
+ #include "dynarec_arm.h"
+ #endif
+ 
+@@ -807,6 +808,18 @@ static pthread_mutex_t mutex_dynarec_prot = PTHREAD_ERRORCHECK_MUTEX_INITIALIZER
  extern int box86_quit;
  extern int box86_exit_code;
  
@@ -109,7 +119,7 @@ index a995f27..91e2e90 100755
  void my_box86signalhandler(int32_t sig, siginfo_t* info, void * ucntx)
  {
      // sig==SIGSEGV || sig==SIGBUS || sig==SIGILL here!
-@@ -1162,8 +1174,10 @@ EXPORT sighandler_t my_signal(x86emu_t* emu, int signum, sighandler_t handler)
+@@ -1162,8 +1175,10 @@ EXPORT sighandler_t my_signal(x86emu_t* emu, int signum, sighandler_t handler)
      my_context->is_sigaction[signum] = 0;
      my_context->restorer[signum] = 0;
      my_context->onstack[signum] = 0;
@@ -121,7 +131,16 @@ index a995f27..91e2e90 100755
      if(handler!=NULL && handler!=(sighandler_t)1) {
          struct sigaction newact = {0};
          struct sigaction oldact = {0};
-@@ -1216,6 +1230,8 @@ int EXPORT my_sigaction(x86emu_t* emu, int signum, const x86_sigaction_t *act, x
+@@ -1183,6 +1198,8 @@ int EXPORT my_sigaction(x86emu_t* emu, int signum, const x86_sigaction_t *act, x
+         errno = EINVAL;
+         return -1;
+     }
++    if(signum==SIGPROF && prof_owns_sigprof())
++        return 0;
+     
+     if(signum==SIGSEGV && emu->context->no_sigsegv)
+         return 0;
+@@ -1216,6 +1233,8 @@ int EXPORT my_sigaction(x86emu_t* emu, int signum, const x86_sigaction_t *act, x
      int ret = 0;
      if(signum!=SIGSEGV && signum!=SIGBUS && signum!=SIGILL)
          sigaction(signum, act?&newact:NULL, oldact?&old:NULL);
@@ -130,6 +149,147 @@ index a995f27..91e2e90 100755
      if(oldact) {
          oldact->sa_flags = old.sa_flags;
          oldact->sa_mask = old.sa_mask;
+@@ -1469,8 +1488,140 @@ static void atfork_child_dynarec_prot(void)
+     #endif
+ }
+ #endif
++// BOX86_PROFILE=FILE: a sampling profiler that runs entirely natively (no x86
++// signal handler is involved, so it can't upset the x86 program). SIGPROF
++// fires every 2 ms of process CPU time on whichever thread is using it; the
++// handler counts the x86 address when the thread is in recompiled code, and
++// the native address otherwise. A native thread rewrites FILE every 5 s.
++#include <dlfcn.h>
++#include <sys/time.h>
++typedef struct { uint32_t key, count; } prof_slot_t;
++#define PROF_SLOTS 65536
++static prof_slot_t prof_x86[PROF_SLOTS], prof_nat[PROF_SLOTS], prof_tid[256];
++static uint32_t prof_total, prof_dropped;
++static const char* prof_path;
++static void prof_count(prof_slot_t* t, unsigned n, uint32_t key)
++{
++    unsigned h = (key * 2654435761u) & (n - 1);
++    for (unsigned i = 0; i < n; i++, h = (h + 1) & (n - 1)) {
++        uint32_t k = t[h].key;
++        if (k == key || (k == 0 && __sync_bool_compare_and_swap(&t[h].key, 0, key))) {
++            __sync_fetch_and_add(&t[h].count, 1);
++            return;
++        }
++    }
++    __sync_fetch_and_add(&prof_dropped, 1);
++}
++static void prof_handler(int sig, siginfo_t* info, void* ucntx)
++{
++    (void)sig; (void)info;
++    ucontext_t* p = (ucontext_t*)ucntx;
++    int saved = errno;
++#ifdef __arm__
++    uintptr_t pc = p->uc_mcontext.arm_pc;
++#else
++    uintptr_t pc = p->uc_mcontext.gregs[REG_EIP];
++#endif
++#ifdef DYNAREC
++    dynablock_t* db = FindDynablockFromNativeAddress((void*)pc);
++    if (db) prof_count(prof_x86, PROF_SLOTS, getX86Address(db, pc) ?: 1);
++    else
++#endif
++        prof_count(prof_nat, PROF_SLOTS, pc ?: 1);
++    prof_count(prof_tid, 256, (uint32_t)syscall(SYS_gettid));
++    __sync_fetch_and_add(&prof_total, 1);
++    errno = saved;
++}
++static int prof_cmp(const void* a, const void* b)
++{
++    const prof_slot_t *x = a, *y = b;
++    return x->count < y->count ? 1 : x->count > y->count ? -1 : 0;
++}
++static int prof_sorted(prof_slot_t* t, int n, prof_slot_t* out)
++{
++    int used = 0;
++    for (int i = 0; i < n; i++) if (t[i].count) out[used++] = t[i];
++    qsort(out, used, sizeof(prof_slot_t), prof_cmp);
++    return used;
++}
++static void prof_dump(void)
++{
++    static prof_slot_t tmp[PROF_SLOTS];
++    char path[512];
++    snprintf(path, sizeof(path), "%s.tmp", prof_path);
++    FILE* f = fopen(path, "w");
++    if (!f) return;
++    uint32_t n = prof_total ? prof_total : 1;
++    fprintf(f, "%u samples (1 per 2 ms of CPU), %u dropped\n\nthreads:\n", prof_total, prof_dropped);
++    int used = prof_sorted(prof_tid, 256, tmp);
++    for (int i = 0; i < used; i++) {
++        char cp[64], name[32] = "?";
++        snprintf(cp, sizeof(cp), "/proc/self/task/%u/comm", tmp[i].key);
++        FILE* c = fopen(cp, "r");
++        if (c) { if (fgets(name, sizeof(name), c)) name[strcspn(name, "\n")] = 0; fclose(c); }
++        fprintf(f, "%6.2f%%  %u %s\n", 100.0 * tmp[i].count / n, tmp[i].key, name);
++    }
++    // native code, summed per library and per function
++    used = prof_sorted(prof_nat, PROF_SLOTS, tmp);
++    uint64_t x86sum = 0;
++    for (int i = 0; i < PROF_SLOTS; i++) x86sum += prof_x86[i].count;
++    fprintf(f, "\nrecompiled x86 code: %.2f%%\n\nnative code by library:\n", 100.0 * x86sum / n);
++    struct { const char* lib; uint32_t count; } libs[64]; int nlibs = 0;
++    struct { const char* lib; const char* fn; uintptr_t base; uint32_t count; } fns[512]; int nfns = 0;
++    for (int i = 0; i < used; i++) {
++        Dl_info di; const char* lib = "?"; const char* fn = "?"; uintptr_t base = tmp[i].key;
++        if (dladdr((void*)(uintptr_t)tmp[i].key, &di)) {
++            if (di.dli_fname) lib = di.dli_fname;
++            if (di.dli_sname) { fn = di.dli_sname; base = (uintptr_t)di.dli_saddr; }
++        }
++        int j;
++        for (j = 0; j < nlibs && strcmp(libs[j].lib, lib); j++);
++        if (j == nlibs && nlibs < 64) { libs[nlibs].lib = lib; libs[nlibs].count = 0; nlibs++; }
++        if (j < nlibs) libs[j].count += tmp[i].count;
++        for (j = 0; j < nfns && !(fns[j].base == base && !strcmp(fns[j].lib, lib)); j++);
++        if (j == nfns && nfns < 512) { fns[nfns].lib = lib; fns[nfns].fn = fn; fns[nfns].base = base; fns[nfns].count = 0; nfns++; }
++        if (j < nfns) fns[j].count += tmp[i].count;
++    }
++    for (int a = 0; a < nlibs; a++) for (int b = a + 1; b < nlibs; b++)
++        if (libs[b].count > libs[a].count) { __typeof__(libs[0]) t = libs[a]; libs[a] = libs[b]; libs[b] = t; }
++    for (int a = 0; a < nlibs; a++) fprintf(f, "%6.2f%%  %s\n", 100.0 * libs[a].count / n, libs[a].lib);
++    for (int a = 0; a < nfns; a++) for (int b = a + 1; b < nfns; b++)
++        if (fns[b].count > fns[a].count) { __typeof__(fns[0]) t = fns[a]; fns[a] = fns[b]; fns[b] = t; }
++    fprintf(f, "\nnative functions:\n");
++    for (int a = 0; a < nfns && a < 60; a++)
++        fprintf(f, "%6.2f%%  %s (%s) %p\n", 100.0 * fns[a].count / n, fns[a].fn, fns[a].lib, (void*)fns[a].base);
++    used = prof_sorted(prof_x86, PROF_SLOTS, tmp);
++    fprintf(f, "\nx86 addresses:\n");
++    for (int i = 0; i < used && i < 150; i++)
++        fprintf(f, "%6.2f%%  %08x\n", 100.0 * tmp[i].count / n, tmp[i].key);
++    fclose(f);
++    rename(path, prof_path);
++}
++static void* prof_writer(void* a)
++{
++    (void)a;
++    for (;;) { sleep(5); prof_dump(); }
++    return NULL;
++}
++static void prof_init(void)
++{
++    prof_path = getenv("BOX86_PROFILE");
++    if (!prof_path || !*prof_path) return;
++    struct sigaction sa = {0};
++    sa.sa_sigaction = prof_handler;
++    sa.sa_flags = SA_SIGINFO | SA_RESTART;
++    sigaction(SIGPROF, &sa, NULL);
++    struct itimerval it = { {0, 2000}, {0, 2000} };
++    setitimer(ITIMER_PROF, &it, NULL);
++    pthread_t t;
++    pthread_create(&t, NULL, prof_writer, NULL);
++    pthread_detach(t);
++}
++int prof_owns_sigprof(void) { return prof_path != NULL; }
++
+ void init_signal_helper(box86context_t* context)
+ {
++    prof_init();
+     // setup signal handling
+     for(int i=0; i<=MAX_SIGNAL; ++i) {
+         context->signals[i] = 1;    // SIG_DFL
 diff --git a/src/wrapped/wrappedlibc.c b/src/wrapped/wrappedlibc.c
 index fa6dc2e..536a218 100755
 --- a/src/wrapped/wrappedlibc.c

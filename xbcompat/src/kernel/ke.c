@@ -310,7 +310,7 @@ NTSTATUS wait_objects(ULONG count, PVOID objects[], int wait_any,
        stopped: on the Xbox it is a low-priority thread that only gets idle
        time, here it took a whole core (and the dispatcher lock) from the
        render thread, ~250000 waits a second. Past 64 such waits in a row,
-       each one first gives up the CPU for a millisecond. */
+       each one first gives up the CPU for a while. */
     static __thread unsigned spins;
     bool spin_hit = false;
 
@@ -366,8 +366,10 @@ done:
     pthread_mutex_unlock(&g_disp_lock);
     if (listed) spins = 0;
     else if (spin_hit && !poll && ++spins > 64) {
+        /* The dashboard runs dozens of these threads, one per sound
+           stream: after a while, back off to 10 ms. */
         cpu_block();
-        usleep(1000);
+        usleep(spins > 256 ? 10000 : 1000);
     }
     return st;
 }
