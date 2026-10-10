@@ -458,11 +458,7 @@ char *vsh_translate(const uint32_t *code, unsigned count)
 
         /* Both units read their inputs before either writes. */
         bool have_t = false, have_u = false;
-        if (in->mac == MAC_ARL) {
-            sb_put(&e.b, "  A0 = int(floor(");
-            emit_operand(&e, in, &in->a, 1);
-            sb_put(&e.b, " + 0.001));\n");
-        } else if (in->mac != MAC_NOP) {
+        if (in->mac != MAC_NOP && in->mac != MAC_ARL) {
             sb_put(&e.b, "  t = ");
             emit_mac_expr(&e, in);
             sb_put(&e.b, ";\n");
@@ -473,6 +469,12 @@ char *vsh_translate(const uint32_t *code, unsigned count)
             emit_ilu_expr(&e, in);
             sb_put(&e.b, ";\n");
             have_u = true;
+        }
+        /* ARL is a write too: its paired ILU must read the previous A0. */
+        if (in->mac == MAC_ARL) {
+            sb_put(&e.b, "  A0 = int(floor(");
+            emit_operand(&e, in, &in->a, 1);
+            sb_put(&e.b, " + 0.001));\n");
         }
         char rbuf[8];
         if (have_t && mac_writes_temp(in)) {
