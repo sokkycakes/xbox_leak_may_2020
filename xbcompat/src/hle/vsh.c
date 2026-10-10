@@ -342,7 +342,8 @@ static const char *const prologue =
     "#version 120\n"
     "/* NV2A vertex program, translated by xbcompat */\n"
     "uniform vec4 c[192];\n"
-    "uniform float flip_y;\n";
+    "uniform float flip_y;\n"
+    "uniform vec4 vp_scale, vp_offset;\n";
 
 static const char *const helpers =
     "\n"
@@ -498,10 +499,10 @@ char *vsh_translate(const uint32_t *code, unsigned count)
        into (0, 0, 0, 0). */
     sb_put(&e.b,
            "\n"
-           "  vec3 vs_n = oPos.xyz - c[59].xyz;\n"
-           "  vs_n.x = (c[58].x != 0.0) ? vs_n.x / c[58].x : 0.0;\n"
-           "  vs_n.y = (c[58].y != 0.0) ? vs_n.y / c[58].y : 0.0;\n"
-           "  vs_n.z = (c[58].z != 0.0) ? vs_n.z / c[58].z : 0.0;\n"
+           "  vec3 vs_n = oPos.xyz - vp_offset.xyz;\n"
+           "  vs_n.x = (vp_scale.x != 0.0) ? vs_n.x / vp_scale.x : 0.0;\n"
+           "  vs_n.y = (vp_scale.y != 0.0) ? vs_n.y / vp_scale.y : 0.0;\n"
+           "  vs_n.z = (vp_scale.z != 0.0) ? vs_n.z / vp_scale.z : 0.0;\n"
            "  float vs_w = (oPos.w >= 0.0) ? clamp(oPos.w, 5.42101086e-20, 1.84467441e19)\n"
            "                               : clamp(oPos.w, -1.84467441e19, -5.42101086e-20);\n"
            "  gl_Position = vec4(vs_n.x, vs_n.y * flip_y, 2.0 * vs_n.z - 1.0, 1.0) * vs_w;\n"

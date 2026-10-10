@@ -1709,12 +1709,34 @@ static void NTAPI D3DDevice_SetTransform(ULONG State, const D3DMATRIX *m)
     if (State < 10) d3d.transforms[State] = *m;
 }
 
+/* The viewport scale and offset the library writes to
+   NV097_SET_VIEWPORT_SCALE/OFFSET, which take a program's oPos back from
+   screen space.  The library also keeps them in the reserved constants
+   c[-38] / c[-37] (slots 58 and 59).  With 96 constants a title can't reach
+   those slots, so draws simply refill them; in the 192 constant modes the
+   library writes them only at SetViewport and the title may overwrite them
+   afterwards (Half-Life 2 keeps bone matrices there), so draws must not. */
+static void viewport_constants(float vp[2][4])
+{
+    const D3DVIEWPORT8 *v = &d3d.viewport;
+    float sx = 0.5f * v->Width, sy = -0.5f * v->Height;
+    vp[0][0] = sx; vp[0][1] = sy; vp[0][2] = d3d.zscale * (v->MaxZ - v->MinZ); vp[0][3] = 0;
+    vp[1][0] = v->X + sx + d3d.screen_offset[0];
+    vp[1][1] = v->Y - sy + d3d.screen_offset[1];
+    vp[1][2] = d3d.zscale * v->MinZ; vp[1][3] = 0;
+}
+
 static void NTAPI D3DDevice_SetViewport(const D3DVIEWPORT8 *v)
 {
     if (d3d.recording) { ULONG has = v != NULL; pb_record2(OP_VIEWPORT, &has, 4, v, v ? sizeof(*v) : 0); }
     if (v) d3d.viewport = *v;
     else d3d.viewport = (D3DVIEWPORT8){ 0, 0, d3d.width, d3d.height, 0, 1 };
     d3d.scissors.count = 0;   /* the library's SetViewport ends with SetScissors(0, 0, NULL) */
+    if (!(d3d.constant_mode & 0x10)) {   /* D3DSCM_NORESERVEDCONSTANTS */
+        float vp[2][4];
+        viewport_constants(vp);
+        memcpy(d3d.vs_const[58], vp, sizeof(vp));
+    }
 }
 
 /* The NV097 method each simple state (D3DRS_PSALPHAINPUTS0 to
@@ -2274,7 +2296,7 @@ static LONG NTAPI D3DDevice_CreateVertexShader(const ULONG *decl, const ULONG *f
    (0 = fixed function for that stage) with its uniform locations. */
 typedef struct program_entry {
     GLuint vs, fs, prog;
-    GLint loc_c, loc_flip_y;
+    GLint loc_c, loc_flip_y, loc_vp_scale, loc_vp_offset;
     GLint loc_tex[4], loc_cube[4], loc_vol[4], loc_tex_scale, loc_c0, loc_c1, loc_fc0, loc_fc1,
           loc_bump_env, loc_bump_lum;
     float (*last_c)[4];   /* the constants last uploaded to this program */
@@ -2409,6 +2431,15 @@ static GLuint vertex_shader_object(vshader *sh)
         sh->failed = true;
         return 0;
     }
+    if (getenv("XBCOMPAT_VSH_DUMP")) {
+        /* Debug aid: the declaration that goes with each dumped program. */
+        char line[512]; int n = 0;
+        for (int r = 0; r < 16; r++)
+            if (sh->attr[r].stream >= 0)
+                n += snprintf(line + n, sizeof line - n, " v%d=s%d+%u:%#x", r, sh->attr[r].stream,
+                              sh->attr[r].offset, sh->attr[r].type);
+        xlog("D3D: vertex program %u instructions, inputs%s", sh->ninstr, line);
+    }
     sh->vs = compile_shader(GL_VERTEX_SHADER, src);
     free(src);
     if (!sh->vs) sh->failed = true;
@@ -2427,6 +2458,8 @@ static program_entry *program_for(GLuint vs, GLuint fs)
 #define U(name) p_glGetUniformLocation(e->prog, name)
         e->loc_c = U("c");
         e->loc_flip_y = U("flip_y");
+        e->loc_vp_scale = U("vp_scale");
+        e->loc_vp_offset = U("vp_offset");
         static const char *tex[] = { "tex0", "tex1", "tex2", "tex3" }, *cube[] = { "cube0", "cube1", "cube2", "cube3" },
                           *vol[] = { "vol0", "vol1", "vol2", "vol3" };
         for (int i = 0; i < 4; i++) {
@@ -2740,14 +2773,11 @@ static void upload_constants(const vshader *sh, program_entry *e)
     memcpy(c, d3d.vs_const, sizeof(c));
     for (unsigned i = 0; i < sh->nconsts; i++)
         if (sh->const_slots[i] < 192) memcpy(c[sh->const_slots[i]], sh->consts[i], 16);
-    /* c[58] / c[59]: the viewport scale and offset the program's epilogue
-       uses (what the library writes to NV097_SET_VIEWPORT_SCALE/OFFSET). */
-    const D3DVIEWPORT8 *v = &d3d.viewport;
-    float sx = 0.5f * v->Width, sy = -0.5f * v->Height;
-    c[58][0] = sx; c[58][1] = sy; c[58][2] = d3d.zscale * (v->MaxZ - v->MinZ); c[58][3] = 0;
-    c[59][0] = v->X + sx + d3d.screen_offset[0];
-    c[59][1] = v->Y - sy + d3d.screen_offset[1];
-    c[59][2] = d3d.zscale * v->MinZ; c[59][3] = 0;
+    /* The program's epilogue takes the viewport from its own uniforms;
+       c[58] / c[59] are the title's in the 192 constant modes. */
+    float vp[2][4];
+    viewport_constants(vp);
+    if ((d3d.constant_mode & 0xF) == 0) memcpy(c[58], vp, sizeof(vp));
     /* Most draws repeat the previous upload; skip the driver round trip. */
     if (e->loc_c >= 0 && (!e->last_c || memcmp(e->last_c, c, sizeof(c)))) {
         if (!e->last_c) e->last_c = malloc(sizeof(c));
@@ -2755,6 +2785,8 @@ static void upload_constants(const vshader *sh, program_entry *e)
         p_glUniform4fv(e->loc_c, 192, &c[0][0]);
     }
     if (e->loc_flip_y >= 0) p_glUniform1f(e->loc_flip_y, d3d.rt_texture ? -1.0f : 1.0f);
+    if (e->loc_vp_scale >= 0) p_glUniform4fv(e->loc_vp_scale, 1, vp[0]);
+    if (e->loc_vp_offset >= 0) p_glUniform4fv(e->loc_vp_offset, 1, vp[1]);
 }
 
 /* Draw with a programmable vertex shader: generic attributes + GLSL. */
@@ -4522,7 +4554,11 @@ static void NTAPI D3DDevice_GetVertexShaderConstant(LONG Register, float *data, 
     for (ULONG i = 0; i < count; i++) memcpy(data + i * 4, d3d.vs_const[constant_slot(Register + i)], 16);
 }
 
-static void NTAPI D3DDevice_SetShaderConstantMode(ULONG mode) { d3d.constant_mode = mode; }
+static void NTAPI D3DDevice_SetShaderConstantMode(ULONG mode)
+{
+    if (mode != d3d.constant_mode) xlog("D3D: shader constant mode %#x", mode);
+    d3d.constant_mode = mode;
+}
 static void NTAPI D3DDevice_GetShaderConstantMode(ULONG *mode) { *mode = d3d.constant_mode; }
 
 static void NTAPI D3DDevice_GetProjectionViewportMatrix(D3DMATRIX *out)

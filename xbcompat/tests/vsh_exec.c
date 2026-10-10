@@ -349,6 +349,10 @@ int main(int argc, char **argv)
         if (loc >= 0) p_glUniform4fv(loc, 192, &m.c[0][0]);
         loc = p_glGetUniformLocation(prog, "flip_y");
         if (loc >= 0) p_glUniform1f(loc, flip);
+        loc = p_glGetUniformLocation(prog, "vp_scale");
+        if (loc >= 0) p_glUniform4fv(loc, 1, m.c[58]);
+        loc = p_glGetUniformLocation(prog, "vp_offset");
+        if (loc >= 0) p_glUniform4fv(loc, 1, m.c[59]);
         p_glBindBuffer(GLE_ARRAY_BUFFER, abo);
         p_glBufferData(GLE_ARRAY_BUFFER, nverts * sizeof(*attrs), attrs, GLE_STATIC_DRAW);
         for (int i = 0; i < 16; i++) {

@@ -26,15 +26,17 @@
  * Conventions of the generated GLSL:
  *   attribute vec4 v0 .. v15      vertex registers, bound to locations 0..15
  *   uniform vec4 c[192]           constant registers in hardware numbering
- *                                 (title register r lives in c[r + 96];
- *                                 c[58] / c[59] are the viewport scale and
- *                                 offset the real library keeps there:
+ *                                 (title register r lives in c[r + 96])
+ *   uniform vec4 vp_scale, vp_offset  the viewport scale and offset the
+ *                                 library writes to NV097_SET_VIEWPORT_*:
  *                                 scale = (W/2, -H/2, zscale*(maxZ-minZ), 0),
- *                                 offset = (X + W/2, Y + H/2, zscale*minZ, 0))
+ *                                 offset = (X + W/2, Y + H/2, zscale*minZ, 0)
+ *                                 (the library also keeps them in c[58] /
+ *                                 c[59], which 192 constant titles may reuse)
  *   uniform float flip_y          1.0, or -1.0 when rendering into a texture
  *   gl_Position                   oPos converted back to OpenGL clip space:
- *                                   vec3 n = (oPos.xyz - c[59].xyz) / c[58].xyz;
- *                                   (guard c[58].z == 0: n.z = 0)
+ *                                   vec3 n = (oPos.xyz - vp_offset.xyz) / vp_scale.xyz;
+ *                                   (guard vp_scale.z == 0: n.z = 0)
  *                                   gl_Position = vec4(n.x, n.y * flip_y,
  *                                                      2.0 * n.z - 1.0, 1.0) * oPos.w;
  *   gl_FrontColor / gl_FrontSecondaryColor      oD0 / oD1 (clamped to 0..1)

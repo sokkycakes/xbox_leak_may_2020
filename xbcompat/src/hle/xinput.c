@@ -63,6 +63,8 @@
  * down a menu at frame 1500 and presses A at frame 1530.  A "p2" in front of
  * the button ("2000:p2start") presses it on a second scripted pad, which is
  * plugged into port 1 when the script names one (split-screen menus).
+ * "lsup", "lsdown", "lsleft", "lsright" and the same with "rs" push a stick
+ * all the way while they are held.
  */
 #define _GNU_SOURCE
 #include <SDL.h>
@@ -753,6 +755,17 @@ static void read_script(XINPUT_GAMEPAD *g, unsigned port)
         for (int i = 0; i < 8; i++) {
             if (!strcmp(name, analog[i])) g->bAnalogButtons[analog_idx[i]] = 255;
             if (!strcmp(name, digital[i])) g->wButtons |= digital_bit[i];
+        }
+        /* Sticks pushed all the way: lsup lsdown lsleft lsright, rs... likewise. */
+        if (name[1] == 's' && (name[0] == 'l' || name[0] == 'r')) {
+            bool right = name[0] == 'r';
+            const char *dir = name + 2;
+            SHORT v = !strcmp(dir, "up") || !strcmp(dir, "right") ? 32767 : -32768;
+            if (!strcmp(dir, "up") || !strcmp(dir, "down")) {
+                if (right) g->sThumbRY = v; else g->sThumbLY = v;
+            } else if (!strcmp(dir, "left") || !strcmp(dir, "right")) {
+                if (right) g->sThumbRX = v; else g->sThumbLX = v;
+            }
         }
     }
 }
