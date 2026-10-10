@@ -7,7 +7,11 @@
 #if defined(__i386__)
 #include <asm/ldt.h>
 #endif
+#include <dlfcn.h>
 #include <errno.h>
+#include <signal.h>
+#include <time.h>
+#include <ucontext.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/syscall.h>
@@ -169,6 +173,7 @@ static void *thread_main(void *arg)
     pthread_mutex_lock(&start_lock);
     while (t->ethread.Tcb.SuspendCount > 0)
         pthread_cond_wait(&start_cond, &start_lock);
+    t->started = true;
     pthread_mutex_unlock(&start_lock);
 
     if (setjmp(t->exit_jmp) == 0) {
@@ -229,9 +234,113 @@ xthread *thread_create(SIZE_T stack_size, SIZE_T tls_size, PVOID system_routine,
 void thread_resume(xthread *t)
 {
     pthread_mutex_lock(&start_lock);
-    if (t->ethread.Tcb.SuspendCount > 0)
-        t->ethread.Tcb.SuspendCount--;
+    if (t->ethread.Tcb.SuspendCount > 0 &&
+        __atomic_sub_fetch(&t->ethread.Tcb.SuspendCount, 1, __ATOMIC_SEQ_CST) == 0)
+        __atomic_add_fetch(&t->resume_gen, 1, __ATOMIC_SEQ_CST);
     pthread_cond_broadcast(&start_cond);
+    pthread_mutex_unlock(&start_lock);
+}
+
+/* NtSuspendThread.  A thread suspending itself waits here until resumed.
+   Another thread is stopped with a signal, but only while it runs guest
+   code: parked inside xbcompat or a host library it could hold a lock its
+   suspender needs (the log, GL, the dispatcher), so the request is repeated
+   until it lands in guest code, the way the Xbox kernel only suspends at
+   its next return to the title.  A thread blocked in a kernel wait counts
+   as stopped at once and parks on its way out of the wait. */
+#define SIG_SUSPEND (SIGRTMIN + 4)
+
+static void suspend_handler(int sig, siginfo_t *si, void *uc_)
+{
+    (void)sig; (void)si;
+    xthread *t = thread_current();
+    if (!t) return;
+#ifdef XBC_NATIVE
+    ucontext_t *uc = uc_;
+    greg_t ip = uc->uc_mcontext.gregs[REG_EIP];
+    if ((ULONG)ip < XBE_BASE || (ULONG)ip >= IMAGE_REGION_END) {
+        t->suspend_ip = (ULONG)ip;
+        return;
+    }
+#else
+    (void)uc_;
+    return;
+#endif
+    int saved = errno;
+    __atomic_store_n(&t->parked, 1, __ATOMIC_SEQ_CST);
+    struct timespec ms = { 0, 1000000 };
+    int gen = __atomic_load_n(&t->resume_gen, __ATOMIC_SEQ_CST);
+    while (__atomic_load_n(&t->ethread.Tcb.SuspendCount, __ATOMIC_SEQ_CST) > 0 &&
+           __atomic_load_n(&t->resume_gen, __ATOMIC_SEQ_CST) == gen)
+        nanosleep(&ms, NULL);
+    __atomic_store_n(&t->parked, 0, __ATOMIC_SEQ_CST);
+    errno = saved;
+}
+
+static void suspend_install(void)
+{
+    struct sigaction sa = { 0 };
+    sa.sa_sigaction = suspend_handler;
+    sa.sa_flags = SA_SIGINFO | SA_RESTART;
+    sigaction(SIG_SUSPEND, &sa, NULL);
+}
+
+ULONG thread_suspend(xthread *t)
+{
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+    pthread_once(&once, suspend_install);
+
+    pthread_mutex_lock(&start_lock);
+    ULONG prev = t->ethread.Tcb.SuspendCount;
+    if (t->ethread.Tcb.HasTerminated || prev >= 127) {
+        pthread_mutex_unlock(&start_lock);
+        return prev;
+    }
+    __atomic_add_fetch(&t->ethread.Tcb.SuspendCount, 1, __ATOMIC_SEQ_CST);
+    if (t == thread_current()) {
+        /* Stopped: a suspend from elsewhere only counts.  Run again once a
+           resume brings the count to 0, even if another suspend follows
+           before this thread gets to look. */
+        __atomic_store_n(&t->in_wait, 1, __ATOMIC_SEQ_CST);
+        int gen = t->resume_gen;
+        while (t->ethread.Tcb.SuspendCount > 0 && t->resume_gen == gen)
+            pthread_cond_wait(&start_cond, &start_lock);
+        pthread_mutex_unlock(&start_lock);
+        thread_wait_end(t);
+        return prev;
+    }
+    bool started = t->started;
+    pthread_mutex_unlock(&start_lock);
+    if (prev > 0 || !started) return prev;   /* already stopped, or not yet running */
+    if (__atomic_load_n(&t->in_wait, __ATOMIC_SEQ_CST)) return prev;
+
+    /* Ask until it parks, it is resumed meanwhile, or it ends. */
+    struct timespec ms = { 0, 1000000 };
+    for (int i = 0; i < 10000; i++) {
+        if (__atomic_load_n(&t->parked, __ATOMIC_SEQ_CST)) return prev;
+        if (__atomic_load_n(&t->in_wait, __ATOMIC_SEQ_CST)) return prev;
+        if (__atomic_load_n(&t->ethread.Tcb.SuspendCount, __ATOMIC_SEQ_CST) == 0) return prev;
+        if (t->ethread.Tcb.HasTerminated) return prev;
+        if (i % 4 == 0) pthread_kill(t->host, SIG_SUSPEND);
+        nanosleep(&ms, NULL);
+    }
+    Dl_info info;
+    const char *where = dladdr((void *)t->suspend_ip, &info) && info.dli_sname ? info.dli_sname : "?";
+    xlog("NtSuspendThread: thread %u never reached guest code to be suspended (last at %#x, %s)",
+         (unsigned)(ULONG_PTR)t->ethread.UniqueThread, t->suspend_ip, where);
+    return prev;
+}
+
+/* Leaving a kernel wait: stop here if NtSuspendThread came meanwhile. */
+void thread_wait_end(xthread *t)
+{
+    if (!t) return;
+    __atomic_store_n(&t->in_wait, 0, __ATOMIC_SEQ_CST);
+    if (__atomic_load_n(&t->ethread.Tcb.SuspendCount, __ATOMIC_SEQ_CST) == 0) return;
+    pthread_mutex_lock(&start_lock);
+    int gen = t->resume_gen;
+    while (t->ethread.Tcb.SuspendCount > 0 && t->resume_gen == gen)
+        pthread_cond_wait(&start_cond, &start_lock);
     pthread_mutex_unlock(&start_lock);
 }
 

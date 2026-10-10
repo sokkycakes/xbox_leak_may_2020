@@ -353,6 +353,7 @@ NTSTATUS wait_objects(ULONG count, PVOID objects[], int wait_any, KPROCESSOR_MOD
     bool poll = timeout && timeout->QuadPart == 0;
     NTSTATUS st;
 
+    if (xt) __atomic_store_n(&xt->in_wait, 1, __ATOMIC_SEQ_CST);
     pthread_mutex_lock(&g_disp_lock);
     for (;;) {
         if (xt && xt->apc_head) apc_drain(xt, false);
@@ -391,6 +392,7 @@ NTSTATUS wait_objects(ULONG count, PVOID objects[], int wait_any, KPROCESSOR_MOD
     }
 done:
     pthread_mutex_unlock(&g_disp_lock);
+    thread_wait_end(xt);
     return st;
 }
 
@@ -422,10 +424,14 @@ NTSTATUS NTAPI KeDelayExecutionThread(KPROCESSOR_MODE WaitMode, BOOLEAN Alertabl
     LONGLONG t = Interval->QuadPart;
     ULONGLONG rel = t < 0 ? (ULONGLONG)-t : (t > (LONGLONG)system_time_now() ? t - system_time_now() : 0);
     if (rel == 0) {
+        if (xt) __atomic_store_n(&xt->in_wait, 1, __ATOMIC_SEQ_CST);
         sched_yield();
+        thread_wait_end(xt);
     } else {
         struct timespec ts = { rel / 10000000ULL, (rel % 10000000ULL) * 100 };
+        if (xt) __atomic_store_n(&xt->in_wait, 1, __ATOMIC_SEQ_CST);
         while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {}
+        thread_wait_end(xt);
     }
     return STATUS_SUCCESS;
 }
