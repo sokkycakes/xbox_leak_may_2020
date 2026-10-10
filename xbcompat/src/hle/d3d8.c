@@ -580,9 +580,16 @@ static Uint64 prof_draw_begin(void)
     return profiling() ? SDL_GetPerformanceCounter() : 0;
 }
 
+/* Draws and clears that reached the device's own depth buffer, so a
+   texture header over its memory knows when to read the GPU's copy back. */
+static unsigned long depth_gpu_writes;
+/* The depth memory's hash and depth_gpu_writes when they last agreed. */
+static struct { uint64_t hash; unsigned long writes; } zsync;
+
 static void debug_dump_draw(void)
 {
     stats.draws++;
+    if (d3d.target_depth && d3d.target_depth == d3d.depth) depth_gpu_writes++;
     static const char *dir; static int checked, n; static ULONG frame;
     if (!checked) {
         dir = getenv("XBCOMPAT_DUMP_DRAWS");
@@ -865,6 +872,7 @@ static void NTAPI D3DDevice_Clear(ULONG Count, const D3DRECT *pRects, ULONG Flag
         return;
     }
     TRACE_ALL("D3D: Clear(%u rects, flags %#x, color %#x, z %g)", Count, Flags, Color, Z);
+    if ((Flags & 3) && d3d.target_depth && d3d.target_depth == d3d.depth) depth_gpu_writes++;
     flush_cpu_backbuffer();   /* earlier CPU writes go under the clear, not over it at Present */
     GLbitfield mask = 0;
     if (Flags & 0xF0) {
@@ -1430,6 +1438,22 @@ static void readback_surface(D3DSurface *s, bool depth)
     free(tmp);
 }
 
+/* FNV-1a over the device depth buffer's visible rows. */
+static uint64_t depth_memory_hash(void)
+{
+    ULONG w, h, pitch;
+    container_size((D3DPixelContainer *)d3d.depth, &w, &h, &pitch);
+    if (w > (ULONG)d3d.width) w = d3d.width;
+    if (h > (ULONG)d3d.height) h = d3d.height;
+    const uint8_t *px = (const uint8_t *)(d3d.depth->Data | CONTIG_BASE);
+    uint64_t x = 0xcbf29ce484222325ull;
+    for (ULONG y = 0; y < h; y++) {
+        const uint64_t *row = (const uint64_t *)(px + y * pitch);
+        for (ULONG i = 0; i < w * 4 / 8; i++) x = (x ^ row[i]) * 0x100000001b3ull;
+    }
+    return x;
+}
+
 static GLuint texture_for(D3DPixelContainer *t)
 {
     /* A texture header over the back buffer or the depth buffer (titles
@@ -1446,9 +1470,29 @@ static GLuint texture_for(D3DPixelContainer *t)
         GLuint id = fmt == 0x12 || fmt == 0x1E ? backbuffer_copy_texture(t->res.Data, w, h) : 0;
         if (id) return id;
     }
-    if (on_color || on_depth) {
-        readback_surface(on_color ? d3d.backbuffer : d3d.depth, on_depth);
+    if (on_color) {
+        readback_surface(d3d.backbuffer, false);
         tex_invalidate(t->res.Data);
+    }
+    if (on_depth) {
+        /* The depth buffer's memory is the GPU's only while the GPU wrote it
+           last.  Splinter Cell decodes its loading screens into that memory
+           with the CPU between levels and draws them from a header over it;
+           reading the GPU's depth back would overwrite the picture (a flat
+           yellow or green screen).  So read back only when the GPU has
+           drawn into it since the last sync and the CPU has not changed the
+           memory since then. */
+        uint64_t h = depth_memory_hash();
+        if (h != zsync.hash) {
+            zsync.hash = h;
+            zsync.writes = depth_gpu_writes;
+            tex_invalidate(t->res.Data);
+        } else if (zsync.writes != depth_gpu_writes) {
+            readback_surface(d3d.depth, true);
+            zsync.hash = depth_memory_hash();
+            zsync.writes = depth_gpu_writes;
+            tex_invalidate(t->res.Data);
+        }
     }
     static int nocache = -1;
     if (nocache < 0) nocache = getenv("XBCOMPAT_NO_TEXCACHE") != NULL;
@@ -4768,6 +4812,8 @@ static void create_device_surfaces(ULONG format, ULONG depth_format)
     d3d.depth = new_linear_surface(depth_format ? depth_format : 0x2A, d3d.width, d3d.height);
     d3d.zscale = depth_format == 0x2C || depth_format == 0x2D || depth_format == 0x30 || depth_format == 0x31
                      ? 65535.0f : 16777215.0f;
+    zsync.hash = depth_memory_hash();
+    zsync.writes = depth_gpu_writes;
     d3d.target = d3d.backbuffer;
     d3d.target_depth = d3d.depth;
     internal_addref_surface(d3d.target);
