@@ -52,6 +52,10 @@ if grep -q 'Raspberry Pi' /proc/device-tree/model 2>/dev/null; then
 			[ -w "$s" ] && echo on > "$s" 2>/dev/null
 		done
 	fi
+	# The analog jack's driver hangs off the firmware (vchiq) bus, which
+	# nothing here coldplugs: without loading it the only card is HDMI,
+	# which fails (error 524) with no HDMI screen.
+	modprobe -q snd_bcm2835 2>/dev/null
 	# The sound modules can still be loading this early in boot.
 	for _ in $(seq 1 50); do
 		grep -q '^ *[0-9]* \[Headphones' /proc/asound/cards 2>/dev/null && break
