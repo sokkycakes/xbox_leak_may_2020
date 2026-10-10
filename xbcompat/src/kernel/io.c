@@ -30,6 +30,7 @@
 #include <unistd.h>
 
 #include "../xbcompat.h"
+#include "../cpu.h"
 
 #define STATUS_NO_MEDIA_IN_DEVICE       ((NTSTATUS)0xC0000013)
 #define STATUS_MEDIA_WRITE_PROTECTED    ((NTSTATUS)0xC00000A2)
@@ -524,7 +525,11 @@ void NTAPI NtUserIoApcDispatcher(PVOID ApcContext, IO_STATUS_BLOCK *iosb, ULONG 
     if (NT_ERROR(iosb->Status)) err = RtlNtStatusToDosError(iosb->Status);
     else n = (ULONG)iosb->Information;
     /* The status block is OVERLAPPED.Internal, the structure's first field. */
+#ifdef XBC_TRANSLATED
+    CPU_CALL(ApcContext, CONV_STD, err, n, (uint32_t)iosb);
+#else
     ((void (NTAPI *)(ULONG, ULONG, PVOID))ApcContext)(err, n, iosb);
+#endif
 }
 
 /* Empty a formatted volume's host directory (but not the directory itself). */
@@ -950,6 +955,8 @@ NTSTATUS NTAPI NtDeviceIoControlFile(HANDLE FileHandle, HANDLE Event, PVOID ApcR
         ((UCHAR *)Out)[26] = 1;  /* RecognizedPartition */
         return complete(Event, ApcRoutine, ApcContext, iosb, STATUS_SUCCESS, 32);
     }
+    case 0x4D014:     /* IOCTL_SCSI_PASS_THROUGH_DIRECT: XAPI's disc authentication check */
+        return complete(Event, ApcRoutine, ApcContext, iosb, dvd_scsi_pass_through(In, InLen), 0);
     case 0x24800:     /* IOCTL_CDROM_CHECK_VERIFY: is there a disc in the tray? */
         return complete(Event, ApcRoutine, ApcContext, iosb, dvd_check_verify(), 0);
     case 0x24000:     /* IOCTL_CDROM_READ_TOC: the DVD directory is a data disc, never audio */

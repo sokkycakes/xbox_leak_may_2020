@@ -17,6 +17,11 @@ extern volatile ULONG *g_apu_sample_counter;   /* the APU's 48 kHz counter, or N
 
 void xlog(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void fatal(const char *fmt, ...) __attribute__((format(printf, 1, 2), noreturn));
+/* Leave the process: runs the xbc_at_exit hooks and ends without exit()'s
+   C library teardown, which races the guest threads still running (and
+   crashes under box86). */
+void xbc_at_exit(void (*fn)(void));
+void xbc_exit(int code) __attribute__((noreturn));
 #define TRACE(...) do { if (g_trace) xlog(__VA_ARGS__); } while (0)
 
 /* ---- memory ----------------------------------------------------------- */
@@ -25,6 +30,7 @@ void fatal(const char *fmt, ...) __attribute__((format(printf, 1, 2), noreturn))
  * Guest address space layout inside the 32-bit host process:
  *   0x00010000 .. 0x04000000  XBE image (headers at 0x10000)
  *   0x10000000 .. 0x50000000  NtAllocateVirtualMemory arena, thread stacks, pool
+ *                             (0x40000000 on ARM)
  *   0x80000000 .. 0x88000000  "physical" contiguous memory, VA = 0x80000000 | PA
  * Xbox code tests the top address bit to tell contiguous memory apart, so
  * nothing the guest can see is allowed to live at or above 0x80000000 except
@@ -32,7 +38,13 @@ void fatal(const char *fmt, ...) __attribute__((format(printf, 1, 2), noreturn))
  */
 #define IMAGE_REGION_END   0x04000000u
 #define ARENA_BASE         0x10000000u
+#if defined(__i386__) && !defined(XBC_SMALL_ARENA)
 #define ARENA_END          0x50000000u
+#else
+/* 32-bit ARM: QEMU's user-mode emulator (used for testing) maps the
+   program's libraries from 0x40000000; 768 MB is plenty for a 64 MB console. */
+#define ARENA_END          0x40000000u
+#endif
 #define CONTIG_BASE        0x80000000u
 #define CONTIG_SIZE        0x08000000u   /* 128 MB, devkit sized */
 
@@ -76,8 +88,14 @@ void thread_exit(NTSTATUS status) __attribute__((noreturn));
 /* ---- dispatcher objects ---------------------------------------------- */
 
 extern pthread_mutex_t g_disp_lock;
-extern pthread_cond_t g_disp_cond;
-void disp_signal_all(void);  /* call with g_disp_lock held after changing a SignalState */
+/* Condition variables 8-byte aligned, as the ARM C library expects: under
+   box86 (Raspberry Pi) they go to it as they are, and i386 only aligns
+   them to 4, which a 64-bit kernel answers with SIGBUS. */
+#define XBC_COND_ALIGN __attribute__((aligned(8)))
+/* Call with g_disp_lock held after changing an object's SignalState: wakes
+   the threads waiting on it (disp_signal_all: every waiting thread). */
+void disp_signal(void *object);
+void disp_signal_all(void);
 /* A user-mode alertable wait (mode 1) runs the thread's queued APCs and
    returns STATUS_USER_APC. */
 NTSTATUS wait_objects(ULONG count, PVOID objects[], int wait_any, KPROCESSOR_MODE mode,
@@ -128,6 +146,8 @@ NTSTATUS fs_host_path(const char *xpath, char *host, size_t hostlen);
 const char *fs_hdd_root(void);
 void fs_set_card(const char *dir);
 void install_fault_handlers(void);
+void prof_init(void);   /* XBCOMPAT_PROFILE=FILE, see prof.c */
+void prof_thread_start(void);
 
 /* ---- the DVD drive and its tray (kernel/dvd.c) ------------------------ */
 
@@ -148,6 +168,7 @@ ssize_t dvd_read(dvd_node *n, void *buf, size_t len, uint64_t off);
 ssize_t dvd_read_volume(void *buf, size_t len, uint64_t off);
 bool dvd_extract(dvd_node *n, char *host, size_t hostlen);
 void dvd_title_started(const char *xbe_host_path);
+NTSTATUS dvd_scsi_pass_through(void *in, ULONG inlen);
 
 /* ---- title launches (XLaunchNewImage) --------------------------------- */
 

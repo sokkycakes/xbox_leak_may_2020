@@ -12,9 +12,11 @@
  *     out while a title runs, the way the Xbox's SMC reports its tray.
  *
  * A disc in the drive is read as XDVDFS straight from the device: burned
- * XISO discs have it at the start; pressed discs (XGD1) only show it to
- * drives with Kreon firmware, which xbcompat unlocks and then reads with
- * SG_IO past the capacity the drive first reported.  A disc that isn't
+ * XISO discs have it at the start; pressed discs (XGD1) only show their
+ * game partition to a drive that has been unlocked: one with Kreon
+ * firmware, or one of the stock LG drives below whose RAM xbcompat can
+ * change the way GDOX does.  Either way it is then read with SG_IO past the
+ * capacity the drive first reported.  A disc that isn't
  * XDVDFS but has an ISO 9660 file system with a default.xbe at its root
  * is mounted (as root) and served as a directory.  Anything else is an
  * unrecognized disc, as the dashboard calls it.
@@ -68,6 +70,7 @@ typedef struct disc {
     int kind;
     int fd;                 /* XDVDFS source; -1 once the disc is gone */
     bool sg;                /* read with SG_IO (an unlocked pressed disc) */
+    const struct mt_drive *mt;  /* unlocked through this drive's RAM; undone when it goes */
     uint64_t base;          /* byte offset of the XDVDFS volume */
     LONGLONG time;          /* the volume's FILETIME */
     struct dvd_node root;
@@ -170,6 +173,130 @@ static bool has_xdvdfs(disc *d, uint64_t base)
     return true;
 }
 
+/* ---- stock LG drives (MediaTek MT1887) ------------------------------------------------------ */
+
+/* The approach of GDOX (github.com/korzewarrior/gdox, CC0): these drives
+   take a diagnostic command (F1) that reads and writes bytes of their RAM.
+   Two 3-byte fields there hold the disc's capacity and layer geometry as the
+   drive worked them out from a pressed Xbox disc's video partition.  Writing
+   the values for the whole disc makes the drive read its game partition with
+   ordinary READ commands.  Only RAM changes, never the firmware: a power cycle
+   or a new disc clears it, and xbcompat writes the stock values back when the
+   disc comes out.  Only exact models and firmware revisions, and only XGD1
+   discs (the first, 6992-sector video partition): the addresses differ
+   between models. */
+struct mt_drive {
+    const char *model, *rev;            /* INQUIRY product and revision */
+    uint16_t cap, geo;                  /* RAM addresses of the two fields */
+};
+
+static const struct mt_drive mt_drives[] = {
+    { "DVDRAM GP50NB40", "1.01", 0x8a39, 0x8be2 },    /* checked on the Sion */
+    { "DVDRAM GP63EX70", "RF02", 0x8538, 0x8be2 },    /* from GDOX */
+    { "DVDRAM GP65NB60", "PB00", 0x8a37, 0x8be2 },    /* from GDOX */
+};
+
+static const uint8_t xgd1_cap_stock[3] = { 0x03, 0x1b, 0x4f }, xgd1_cap_live[3] = { 0x3d, 0x4d, 0x4f };
+static const uint8_t xgd1_geo_stock[3] = { 0x03, 0x1a, 0xaf }, xgd1_geo_live[3] = { 0x20, 0x33, 0xaf };
+#define XGD1_STOCK_LAST 6991u
+#define XGD1_LIVE_LAST  3820879u
+
+static bool mt_ram_read(int fd, unsigned addr, uint8_t v[3])
+{
+    for (int i = 0; i < 3; i++) {
+        uint8_t cdb[10] = { 0xF1, 0x02, 0, 0, (addr + i) >> 8, (addr + i) & 0xff, 0x01 }, r[4];
+        if (!sg_cmd(fd, cdb, sizeof(cdb), r, sizeof(r))) return false;
+        v[i] = r[3];
+    }
+    return true;
+}
+
+static bool mt_ram_write(int fd, unsigned addr, const uint8_t v[3])
+{
+    bool ok = true;
+    for (int i = 0; i < 3; i++) {
+        uint8_t cdb[10] = { 0xF1, 0x01, 0, 0, (addr + i) >> 8, (addr + i) & 0xff, 0, 0, 0, v[i] };
+        ok &= sg_cmd(fd, cdb, sizeof(cdb), NULL, 0);
+    }
+    return ok;
+}
+
+static bool last_lba(int fd, uint32_t *lba)
+{
+    for (int tries = 0; tries < 10; tries++) {
+        uint8_t cdb[10] = { 0x25 /* READ CAPACITY(10) */ }, b[8];
+        if (sg_cmd(fd, cdb, sizeof(cdb), b, sizeof(b))) {
+            *lba = (uint32_t)b[0] << 24 | b[1] << 16 | b[2] << 8 | b[3];
+            return true;
+        }
+        struct timespec ts = { 0, 300 * 1000 * 1000 };
+        nanosleep(&ts, NULL);
+    }
+    return false;
+}
+
+static const struct mt_drive *mt_find(int fd)
+{
+    uint8_t cdb[6] = { 0x12 /* INQUIRY */, 0, 0, 0, 36 }, b[36];
+    if (!sg_cmd(fd, cdb, sizeof(cdb), b, sizeof(b)) || memcmp(b + 8, "HL-DT-ST", 8)) return NULL;
+    for (size_t i = 0; i < sizeof(mt_drives) / sizeof(mt_drives[0]); i++) {
+        const struct mt_drive *m = &mt_drives[i];
+        size_t l = strlen(m->model);
+        if (!memcmp(b + 16, m->model, l) && (l == 16 || b[16 + l] == ' ') && !memcmp(b + 32, m->rev, 4))
+            return m;
+    }
+    return NULL;
+}
+
+/* Unlock a pressed XGD1 disc in a drive from mt_drives, or find it still
+   unlocked from before (a title started from the dashboard, say). */
+static bool mt_unlock(disc *d, const char *path)
+{
+    const struct mt_drive *m = mt_find(d->fd);
+    uint8_t cap[3], geo[3];
+    uint32_t lba;
+    if (!m) return false;
+    if (!last_lba(d->fd, &lba) || !mt_ram_read(d->fd, m->cap, cap) || !mt_ram_read(d->fd, m->geo, geo)) {
+        xlog("DVD: %s (LG %s %s) didn't answer the unlock's first reads", path, m->model, m->rev);
+        return false;
+    }
+    bool stock = lba == XGD1_STOCK_LAST && !memcmp(cap, xgd1_cap_stock, 3) && !memcmp(geo, xgd1_geo_stock, 3);
+    bool live = !memcmp(cap, xgd1_cap_live, 3) && !memcmp(geo, xgd1_geo_live, 3);
+    if (!stock && !live) {
+        if (lba == XGD1_STOCK_LAST)   /* other discs (burned ones) aren't its business */
+                xlog("DVD: %s (LG %s %s) has a disc the size of a pressed Xbox disc's video partition, "
+                 "but its drive values aren't the ones xbcompat knows (capacity %02x%02x%02x, "
+                 "geometry %02x%02x%02x)", path, m->model, m->rev,
+                 cap[0], cap[1], cap[2], geo[0], geo[1], geo[2]);
+        return false;
+    }
+    if (stock && !(mt_ram_write(d->fd, m->cap, xgd1_cap_live) && mt_ram_write(d->fd, m->geo, xgd1_geo_live))) {
+        xlog("DVD: %s (LG %s %s) refused the unlock", path, m->model, m->rev);
+        mt_ram_write(d->fd, m->geo, xgd1_geo_stock);
+        mt_ram_write(d->fd, m->cap, xgd1_cap_stock);
+        return false;
+    }
+    d->mt = m;
+    d->sg = true;   /* the block device still has the stock capacity */
+    if (last_lba(d->fd, &lba) && lba == XGD1_LIVE_LAST && has_xdvdfs(d, XGD1_BASE)) {
+        xlog("DVD: %s is a pressed Xbox game disc, %s by the drive's RAM (LG %s %s)", path,
+             stock ? "unlocked" : "still unlocked", m->model, m->rev);
+        return true;
+    }
+    xlog("DVD: %s (LG %s %s) was unlocked but its game partition can't be read; putting it back", path,
+         m->model, m->rev);
+    return false;
+}
+
+/* Put the drive's RAM back the way it found it (the opposite order). */
+static void mt_restore(disc *d)
+{
+    if (!d->mt || d->fd < 0) return;
+    bool ok = mt_ram_write(d->fd, d->mt->geo, xgd1_geo_stock) && mt_ram_write(d->fd, d->mt->cap, xgd1_cap_stock);
+    xlog("DVD: %s the drive's stock disc values", ok ? "restored" : "couldn't restore (a new disc or a replug clears them)");
+    d->mt = NULL;
+}
+
 /* ---- XDVDFS directories ------------------------------------------------------------------- */
 
 /* A directory is a binary tree of entries: left and right child offsets (in
@@ -240,6 +367,7 @@ static void disc_drop(disc *d)
 {
     if (!d) return;
     pthread_mutex_lock(&d->lock);
+    mt_restore(d);
     if (d->fd >= 0) close(d->fd);
     d->fd = -1;
     if (d->mounted_here) umount2(d->dir, MNT_DETACH);
@@ -337,6 +465,15 @@ static disc *probe(const char *path, bool drive)
         xlog("DVD: cannot open %s: %s", path, strerror(errno));
         return d;
     }
+    /* A pressed disc in an LG drive xbcompat can unlock: do that first,
+       rather than waiting out the retries below. */
+    if (drive && mt_unlock(d, path)) {
+        d->kind = DISC_XDVDFS;
+        return d;
+    }
+    mt_restore(d);
+    d->base = 0;
+    d->sg = false;
     /* A drive that has just closed its tray can say the disc is ready
        before the first reads work: give it a few tries. */
     bool found = false;
@@ -368,6 +505,12 @@ static disc *probe(const char *path, bool drive)
                 return d;
             }
         }
+        /* Once more, in case the drive wasn't ready for it above. */
+        if (mt_unlock(d, path)) {
+            d->kind = DISC_XDVDFS;
+            return d;
+        }
+        mt_restore(d);
         d->sg = false;
         d->base = 0;
         if (try_mount(d, path) && dir_has_xbe(d->dir)) {
@@ -379,7 +522,8 @@ static disc *probe(const char *path, bool drive)
         d->mounted_here = false;
         d->dir[0] = 0;
         xlog("DVD: the disc in %s isn't one xbcompat can play. A pressed Xbox game disc only shows "
-             "its game to a drive with Kreon firmware; burned XISO discs work in any drive.", path);
+             "its game to a drive with Kreon firmware or an LG drive xbcompat can unlock; burned XISO "
+             "discs work in any drive.", path);
     } else {
         xlog("DVD: %s has no Xbox file system", path);
     }
@@ -481,6 +625,8 @@ static void poll_drive(void)
 
 static void *poll_thread(void *arg)
 {
+    pthread_setname_np(pthread_self(), "dvd-poll");
+    prof_thread_start();
     (void)arg;
     for (;;) {
         struct timespec ts = { 0, 500 * 1000 * 1000 };
@@ -713,3 +859,43 @@ void dvd_title_started(const char *xbe_host_path)
     }
     pthread_mutex_unlock(&g_lock);
 }
+
+/* IOCTL_SCSI_PASS_THROUGH_DIRECT.  XAPI's start-up check for titles that may
+   only run from an Xbox game disc asks the drive (MODE SENSE, page 0x3E)
+   whether it has authenticated the disc; a title that hears no goes back to
+   the dashboard.  A PC drive can't do the Xbox drive's challenge and
+   response, so any disc in the tray is reported as authenticated.  Other
+   commands get no data, as before. */
+NTSTATUS dvd_scsi_pass_through(void *in, ULONG inlen)
+{
+    struct {
+        USHORT Length;
+        UCHAR ScsiStatus, PathId, TargetId, Lun, CdbLength, SenseInfoLength, DataIn;
+        ULONG DataTransferLength, TimeOutValue;
+        PVOID DataBuffer;
+        ULONG SenseInfoOffset;
+        UCHAR Cdb[16];
+    } *pt = in;
+    if (!pt || inlen < sizeof(*pt)) return STATUS_INVALID_PARAMETER;
+    if (dvd_tray_empty()) return STATUS_NO_MEDIA_IN_DEVICE;
+    uint8_t *buf = pt->DataBuffer;
+    ULONG len = pt->DataTransferLength;
+    if (buf && len) memset(buf, 0, len);
+    pt->ScsiStatus = 0;
+    if (pt->Cdb[0] == 0x5A /* MODE SENSE(10) */ && (pt->Cdb[2] & 0x3F) == 0x3E && buf) {
+        /* MODE_PARAMETER_HEADER10, then DVDX2_AUTHENTICATION_PAGE. */
+        uint8_t page[8 + 20] = { 0, sizeof(page) - 2 };
+        page[8] = 0x3E;                 /* PageCode */
+        page[9] = 20 - 2;               /* PageLength */
+        page[10] = 1;                   /* PartitionArea: the game partition */
+        page[11] = 1;                   /* CDFValid */
+        page[12] = 1;                   /* Authentication: done */
+        page[13] = 0x01;                /* DiscCategoryAndVersion */
+        memcpy(buf, page, len < sizeof(page) ? len : sizeof(page));
+        static bool told;
+        if (!told) xlog("DVD: told the title its disc is an authenticated Xbox game disc");
+        told = true;
+    }
+    return STATUS_SUCCESS;
+}
+

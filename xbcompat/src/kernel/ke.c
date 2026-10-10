@@ -20,13 +20,35 @@
 #include <unistd.h>
 
 #include "../xbcompat.h"
+#include "../cpu.h"
 
 pthread_mutex_t g_disp_lock = PTHREAD_MUTEX_INITIALIZER;
-pthread_cond_t g_disp_cond;
+
+/* Threads blocked in wait_objects, each on its own condition variable, so
+   signaling an object wakes only the threads waiting on it (one shared
+   broadcast woke every waiting thread on every event, timer and semaphore:
+   thousands of wakeups a second, which a Raspberry Pi feels). */
+struct disp_waiter {
+    pthread_cond_t cv XBC_COND_ALIGN;
+    ULONG count;
+    PVOID *objects;
+    struct disp_waiter *next;
+};
+static struct disp_waiter *disp_waiters;
+
+void disp_signal(void *object)
+{
+    for (struct disp_waiter *w = disp_waiters; w; w = w->next)
+        for (ULONG i = 0; i < w->count; i++)
+            if (w->objects[i] == object) {
+                pthread_cond_signal(&w->cv);
+                break;
+            }
+}
 
 void disp_signal_all(void)
 {
-    pthread_cond_broadcast(&g_disp_cond);
+    for (struct disp_waiter *w = disp_waiters; w; w = w->next) pthread_cond_signal(&w->cv);
 }
 
 /* ---- time ------------------------------------------------------------- */
@@ -105,6 +127,8 @@ ULONGLONG NTAPI KeQueryPerformanceFrequency(void)
 
 static bool tsc_trapped;
 
+#ifdef XBC_NATIVE
+
 static void __attribute__((naked, used)) sys_clock_gettime(void)
 {
     __asm__("push %ebx\n\tmov 8(%esp), %ebx\n\tmov 12(%esp), %ecx\n\t"
@@ -130,6 +154,9 @@ static bool vdso_use_syscalls(void)
     uint8_t *base = (uint8_t *)getauxval(AT_SYSINFO_EHDR);
     if (!base) return true;   /* no vDSO: glibc already makes system calls */
     Elf32_Ehdr *eh = (Elf32_Ehdr *)base;
+    /* Under box86 (x86 on ARM) this is the ARM kernel's vDSO, which the
+       ARM C library calls: never write x86 jumps into it. */
+    if (eh->e_machine != EM_386) return false;
     Elf32_Phdr *ph = (Elf32_Phdr *)(base + eh->e_phoff);
     Elf32_Addr bias = 0, lo = ~0u, hi = 0;
     for (int i = 0; i < eh->e_phnum; i++)
@@ -183,6 +210,12 @@ static void tsc_init(void)
     prctl(PR_SET_TSC, PR_TSC_ENABLE, 0, 0, 0);
     tsc_trapped = true;
 }
+
+#else
+/* Translated guest code: the CPU emulator answers every rdtsc with
+   ke_guest_tsc() (cpu_unicorn.c), so there is nothing to set up. */
+static void tsc_init(void) {}
+#endif
 
 void thread_trap_tsc(void)
 {
@@ -275,9 +308,19 @@ static void apc_run(xapc *a)
         KAPC *k = a->kapc;
         k->Inserted = 0;
         /* The kernel routine may free the KAPC and may change what runs next. */
+#ifdef XBC_TRANSLATED
+        if (k->KernelRoutine)
+            CPU_CALL(k->KernelRoutine, CONV_STD, (uint32_t)k, (uint32_t)&routine, (uint32_t)&ctx,
+                     (uint32_t)&a1, (uint32_t)&a2);
+#else
         if (k->KernelRoutine) ((kernel_routine)k->KernelRoutine)(k, &routine, &ctx, &a1, &a2);
+#endif
     }
+#ifdef XBC_TRANSLATED
+    if (routine) CPU_CALL(routine, CONV_STD, (uint32_t)ctx, (uint32_t)a1, (uint32_t)a2);
+#else
     if (routine) ((normal_routine)routine)(ctx, a1, a2);
+#endif
     free(a);
 }
 
@@ -303,6 +346,9 @@ static void apc_drain(xthread *t, bool user)
         }
         pthread_mutex_unlock(&g_disp_lock);
         apc_run(a);
+        /* The routine took the guest CPU (translated builds); a wait that
+           goes on blocking must not keep it. */
+        cpu_block();
         pthread_mutex_lock(&g_disp_lock);
     }
 }
@@ -334,6 +380,24 @@ NTSTATUS wait_objects(ULONG count, PVOID objects[], int wait_any, KPROCESSOR_MOD
     bool poll = timeout && timeout->QuadPart == 0;
     NTSTATUS st;
 
+    static __thread struct disp_waiter me;
+    static __thread bool me_init;
+    if (!me_init) {
+        pthread_cond_init(&me.cv, NULL);   /* CLOCK_REALTIME, as deadline_from */
+        me_init = true;
+    }
+    me.count = count;
+    me.objects = objects;
+    bool listed = false;
+    /* A loop that waits on a manual-reset event nobody resets never blocks.
+       The dashboard's audio stream thread does that while its stream is
+       stopped: on the Xbox it is a low-priority thread that only gets idle
+       time, here it took a whole core (and the dispatcher lock) from the
+       render thread, ~250000 waits a second. Past 64 such waits in a row,
+       each one first gives up the CPU for a while. */
+    static __thread unsigned spins;
+    bool spin_hit = false;
+
     pthread_mutex_lock(&g_disp_lock);
     for (;;) {
         if (xt && xt->apc_head) apc_drain(xt, false);
@@ -341,6 +405,7 @@ NTSTATUS wait_objects(ULONG count, PVOID objects[], int wait_any, KPROCESSOR_MOD
             for (ULONG i = 0; i < count; i++) {
                 DISPATCHER_HEADER *h = objects[i];
                 if (object_signaled(h, self)) {
+                    if (h->Type == EventNotificationObject) spin_hit = true;
                     st = consume(h, self);
                     st = st == STATUS_ABANDONED ? (NTSTATUS)(STATUS_ABANDONED + i) : (NTSTATUS)i;
                     goto done;
@@ -363,15 +428,39 @@ NTSTATUS wait_objects(ULONG count, PVOID objects[], int wait_any, KPROCESSOR_MOD
             goto done;
         }
         if (poll) { st = STATUS_TIMEOUT; goto done; }
-        int rc = has_dl ? pthread_cond_timedwait(&g_disp_cond, &g_disp_lock, &dl)
-                        : pthread_cond_wait(&g_disp_cond, &g_disp_lock);
-        if (rc == ETIMEDOUT) {
+        if (!listed) {
+            cpu_block();
+            me.next = disp_waiters;
+            disp_waiters = &me;
+            listed = true;
+        }
+        /* A second at most between looks, in case something changed a
+           SignalState without disp_signal. */
+        struct timespec cap;
+        clock_gettime(CLOCK_REALTIME, &cap);
+        cap.tv_sec += 1;
+        bool capped = !has_dl || cap.tv_sec < dl.tv_sec || (cap.tv_sec == dl.tv_sec && cap.tv_nsec < dl.tv_nsec);
+        int rc = pthread_cond_timedwait(&me.cv, &g_disp_lock, capped ? &cap : &dl);
+        if (rc == ETIMEDOUT && !capped) {
             /* One last look: the signal may have raced the timeout. */
             poll = true;
         }
     }
 done:
+    if (listed)
+        for (struct disp_waiter **w = &disp_waiters; *w; w = &(*w)->next)
+            if (*w == &me) {
+                *w = me.next;
+                break;
+            }
     pthread_mutex_unlock(&g_disp_lock);
+    if (listed) spins = 0;
+    else if (spin_hit && !poll && ++spins > 64) {
+        /* The dashboard runs dozens of these threads, one per sound
+           stream: after a while, back off to 10 ms. */
+        cpu_block();
+        usleep(spins > 256 ? 10000 : 1000);
+    }
     return st;
 }
 
@@ -402,6 +491,7 @@ NTSTATUS NTAPI KeDelayExecutionThread(KPROCESSOR_MODE WaitMode, BOOLEAN Alertabl
     }
     LONGLONG t = Interval->QuadPart;
     ULONGLONG rel = t < 0 ? (ULONGLONG)-t : (t > (LONGLONG)system_time_now() ? t - system_time_now() : 0);
+    cpu_block();
     if (rel == 0) {
         sched_yield();
     } else {
@@ -434,7 +524,7 @@ LONG NTAPI KeSetEvent(KEVENT *Event, LONG Increment, BOOLEAN Wait)
     pthread_mutex_lock(&g_disp_lock);
     LONG old = Event->Header.SignalState;
     Event->Header.SignalState = 1;
-    disp_signal_all();
+    disp_signal(Event);
     pthread_mutex_unlock(&g_disp_lock);
     return old;
 }
@@ -456,7 +546,7 @@ LONG NTAPI KePulseEvent(KEVENT *Event, LONG Increment, BOOLEAN Wait)
     pthread_mutex_lock(&g_disp_lock);
     LONG old = Event->Header.SignalState;
     Event->Header.SignalState = 1;
-    disp_signal_all();
+    disp_signal(Event);
     pthread_mutex_unlock(&g_disp_lock);
     if (Event->Header.Type == EventNotificationObject) {
         sched_yield();
@@ -477,7 +567,7 @@ LONG NTAPI KeReleaseSemaphore(KSEMAPHORE *Semaphore, LONG Increment, LONG Adjust
     pthread_mutex_lock(&g_disp_lock);
     LONG old = Semaphore->Header.SignalState;
     Semaphore->Header.SignalState += Adjustment;
-    disp_signal_all();
+    disp_signal(Semaphore);
     pthread_mutex_unlock(&g_disp_lock);
     return old;
 }
@@ -503,13 +593,14 @@ LONG NTAPI KeReleaseMutant(KMUTANT *Mutant, LONG Increment, BOOLEAN Abandoned, B
     }
     if (Mutant->Header.SignalState > 0)
         Mutant->OwnerThread = NULL;
-    disp_signal_all();
+    disp_signal(Mutant);
     pthread_mutex_unlock(&g_disp_lock);
     return old;
 }
 
 /* ---- IRQL ------------------------------------------------------------- */
 
+#ifdef XBC_NATIVE
 static inline KIRQL get_irql(void)
 {
     KIRQL v;
@@ -521,6 +612,19 @@ static inline void set_irql(KIRQL v)
 {
     __asm__ volatile("movb %0, %%fs:0x24" : : "q"(v));
 }
+#else
+static inline KIRQL get_irql(void)
+{
+    xthread *t = thread_current();
+    return t ? t->pcr->Irql : 0;
+}
+
+static inline void set_irql(KIRQL v)
+{
+    xthread *t = thread_current();
+    if (t) t->pcr->Irql = v;
+}
+#endif
 
 KIRQL NTAPI KeGetCurrentIrql(void) { return get_irql(); }
 KIRQL FASTCALL KfRaiseIrql(KIRQL NewIrql) { KIRQL o = get_irql(); set_irql(NewIrql); return o; }
@@ -552,7 +656,7 @@ typedef struct timer_node {
 } timer_node;
 
 static pthread_mutex_t dpc_lock = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t dpc_cond;
+static pthread_cond_t dpc_cond XBC_COND_ALIGN;
 static KDPC *dpc_queue[256];
 static unsigned dpc_head, dpc_tail;
 static timer_node *timers;
@@ -666,6 +770,8 @@ void (*g_vblank_hook)(void);
 /* The DPC thread: fires timers, runs DPCs and keeps KeTickCount moving. */
 static void *dpc_thread(void *arg)
 {
+    pthread_setname_np(pthread_self(), "dpc");
+    prof_thread_start();
     (void)arg;
     thread_adopt_host("dpc");
     set_irql(2);
@@ -683,7 +789,7 @@ static void *dpc_thread(void *arg)
             KTIMER *t = n->timer;
             pthread_mutex_lock(&g_disp_lock);
             t->Header.SignalState = 1;
-            disp_signal_all();
+            disp_signal(t);
             pthread_mutex_unlock(&g_disp_lock);
             if (t->Dpc) {
                 KDPC *d = t->Dpc;
@@ -728,7 +834,12 @@ static void *dpc_thread(void *arg)
             if (!d) continue;
             d->Inserted = 0;
             pthread_mutex_unlock(&dpc_lock);
+#ifdef XBC_TRANSLATED
+            CPU_CALL(d->DeferredRoutine, CONV_STD, (uint32_t)d, (uint32_t)d->DeferredContext,
+                     (uint32_t)d->SystemArgument1, (uint32_t)d->SystemArgument2);
+#else
             ((dpc_fn)d->DeferredRoutine)(d, d->DeferredContext, d->SystemArgument1, d->SystemArgument2);
+#endif
             pthread_mutex_lock(&dpc_lock);
         }
 
@@ -760,7 +871,6 @@ void timers_init(void)
     }
     pthread_condattr_t ca;
     pthread_condattr_init(&ca);
-    pthread_cond_init(&g_disp_cond, &ca);          /* CLOCK_REALTIME deadlines */
     pthread_condattr_setclock(&ca, CLOCK_MONOTONIC);
     pthread_cond_init(&dpc_cond, &ca);
     pthread_condattr_destroy(&ca);
@@ -792,7 +902,11 @@ BOOLEAN NTAPI KeDisconnectInterrupt(PVOID Interrupt) { (void)Interrupt; return 1
 BOOLEAN NTAPI KeSynchronizeExecution(PVOID Interrupt, BOOLEAN (NTAPI *Routine)(PVOID), PVOID Context)
 {
     (void)Interrupt;
+#ifdef XBC_TRANSLATED
+    return (BOOLEAN)CPU_CALL(Routine, CONV_STD, (uint32_t)Context);
+#else
     return Routine(Context);
+#endif
 }
 
 /* ---- threads: priority and APC bits the guest pokes at -------------- */
@@ -802,6 +916,10 @@ LONG NTAPI KeSetBasePriorityThread(KTHREAD *Thread, LONG Increment)
     LONG old = Thread->BasePriority;
     TRACE("KeSetBasePriorityThread(%p, %d)", (void *)Thread, (int)Increment);
     Thread->BasePriority = (SCHAR)(8 + Increment);
+    /* The thread runs at its new base priority (no boosts here). Increments
+       of +-16 saturate (THREAD_PRIORITY_TIME_CRITICAL, _IDLE). */
+    LONG p = 8 + Increment;
+    Thread->Priority = (SCHAR)(p < 1 ? 1 : p > 31 ? 31 : p);
     return old - 8;
 }
 
@@ -866,5 +984,6 @@ void NTAPI KeBugCheckEx(ULONG Code, ULONG_PTR P1, ULONG_PTR P2, ULONG_PTR P3, UL
 void NTAPI KeStallExecutionProcessor(ULONG MicroSeconds)
 {
     struct timespec ts = { MicroSeconds / 1000000, (MicroSeconds % 1000000) * 1000 };
+    cpu_block();
     nanosleep(&ts, NULL);
 }

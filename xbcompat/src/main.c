@@ -13,13 +13,16 @@
 #include <unistd.h>
 
 #include "xbcompat.h"
+#include "cpu.h"
 
 void misc_init(void);
 
 int g_screenshot_frame = 60;
 const char *g_screenshot_path;
 int g_exit_after_frames;
+volatile unsigned g_guest_traps;
 
+#ifdef XBC_NATIVE
 /* int 2Dh is the kernel debugger service (DebugService in the NT CRT):
    eax = service, ecx/edx = arguments, followed by an int 3 that the kernel
    skips when it handles the request.  xapilib's OutputDebugString uses it. */
@@ -70,8 +73,6 @@ static bool read_tsc(greg_t *r)
     return true;
 }
 
-volatile unsigned g_guest_traps;
-
 static void crash_handler(int sig, siginfo_t *si, void *uc_)
 {
     ucontext_t *uc = uc_;
@@ -100,6 +101,44 @@ static void crash_handler(int sig, siginfo_t *si, void *uc_)
     for (int i = 0; i < n; i++) xlog("  #%d %s", i, names ? names[i] : "?");
     _exit(128 + sig);
 }
+#else
+/* Guest code runs in the CPU emulator, which reports its own faults
+   (cpu_unicorn.c); a signal here is a host crash, possibly while the
+   emulator was touching guest memory for the guest. */
+static void crash_handler(int sig, siginfo_t *si, void *uc_)
+{
+    ucontext_t *uc = uc_;
+    xlog("fatal signal %d (%s) accessing %p", sig, strsignal(sig), si->si_addr);
+#if defined(__arm__)
+    xlog("  pc=%08lx lr=%08lx sp=%08lx", (unsigned long)uc->uc_mcontext.arm_pc,
+         (unsigned long)uc->uc_mcontext.arm_lr, (unsigned long)uc->uc_mcontext.arm_sp);
+    Dl_info info;
+    if (dladdr((void *)uc->uc_mcontext.arm_pc, &info) && info.dli_fname)
+        xlog("  pc is in %s %s +%#lx", info.dli_fname, info.dli_sname ? info.dli_sname : "",
+             (unsigned long)((uintptr_t)uc->uc_mcontext.arm_pc - (uintptr_t)info.dli_fbase));
+    /* Libraries like Mesa have no unwind tables: list the return addresses
+       left on the stack instead, as library offsets to look up later. */
+    const uintptr_t *sp = (const uintptr_t *)uc->uc_mcontext.arm_sp;
+    for (int i = 0, n = 0; i < 512 && n < 24; i++) {
+        if (!(sp[i] & 1) && (sp[i] & 3)) continue;   /* code addresses: ARM (4-aligned) or Thumb (odd) */
+        if (dladdr((void *)sp[i], &info) && info.dli_fname && info.dli_fbase) {
+            const char *f = strrchr(info.dli_fname, '/');
+            xlog("  stack[%d] %s+%#lx %s", i, f ? f + 1 : info.dli_fname,
+                 (unsigned long)(sp[i] - (uintptr_t)info.dli_fbase), info.dli_sname ? info.dli_sname : "");
+            n++;
+        }
+    }
+#else
+    (void)uc;
+#endif
+    cpu_dump_guest();
+    void *frames[32];
+    int n = backtrace(frames, 32);
+    char **names = backtrace_symbols(frames, n);
+    for (int i = 0; i < n; i++) xlog("  #%d %s", i, names ? names[i] : "?");
+    _exit(128 + sig);
+}
+#endif
 
 /* Guest faults xbcompat answers itself (DbgPrint's int 2Dh, privileged
    instructions, int 3) arrive as these signals. SDL's console keyboard on
@@ -122,7 +161,11 @@ static ULONG NTAPI run_entry_point(PVOID entry)
 {
     /* The kernel calls the XBE entry point as a plain cdecl function on its
        initialization thread, then terminates that thread. */
+#ifdef XBC_TRANSLATED
+    CPU_CALL0(entry, CONV_CDECL);
+#else
     ((void (CDECLAPI *)(void))entry)();
+#endif
     return 0;
 }
 
@@ -200,8 +243,12 @@ int main(int argc, char **argv)
     }
 
     install_fault_handlers();
+    prof_init();
 
     mem_init();
+#ifdef XBC_TRANSLATED
+    cpu_init();
+#endif
     thread_init_main();
     timers_init();
     misc_init();

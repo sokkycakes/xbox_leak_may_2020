@@ -4,7 +4,9 @@
  * host C library uses GS for its own TLS on i386, so FS is ours.
  */
 #define _GNU_SOURCE
+#if defined(__i386__)
 #include <asm/ldt.h>
+#endif
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,12 +14,15 @@
 #include <unistd.h>
 
 #include "xbcompat.h"
+#include "cpu.h"
 
 static pthread_key_t current_key;
 static pthread_mutex_t ldt_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint8_t ldt_used[8192];
 static LONG next_thread_id = 1;
 
+#ifdef XBC_NATIVE
+#define BOX86_LDT_ENTRY 0x1fff
 static int ldt_alloc(void *base, uint32_t limit)
 {
     pthread_mutex_lock(&ldt_lock);
@@ -38,13 +43,25 @@ static int ldt_alloc(void *base, uint32_t limit)
         .seg_not_present = 0,
         .useable = 1,
     };
-    if (syscall(SYS_modify_ldt, 1, &d, sizeof(d)) != 0)
-        fatal("modify_ldt: %s", strerror(errno));
+    if (syscall(SYS_modify_ldt, 1, &d, sizeof(d)) != 0) {
+        if (errno != ENOSYS) fatal("modify_ldt: %s", strerror(errno));
+        /* box86 (x86 on 32-bit ARM, e.g. a Raspberry Pi) has only Wine's
+           modify_ldt (0x11), and keeps a base per thread for each entry:
+           every thread uses the one entry with its own PCR. */
+        pthread_mutex_lock(&ldt_lock);
+        ldt_used[idx] = 0;
+        pthread_mutex_unlock(&ldt_lock);
+        d.entry_number = BOX86_LDT_ENTRY;
+        if (syscall(SYS_modify_ldt, 0x11, &d, sizeof(d)) != 0)
+            fatal("modify_ldt: %s", strerror(errno));
+        return BOX86_LDT_ENTRY;
+    }
     return idx;
 }
 
 static void ldt_free(int idx)
 {
+    if (idx == BOX86_LDT_ENTRY) return;
     pthread_mutex_lock(&ldt_lock);
     ldt_used[idx] = 0;
     pthread_mutex_unlock(&ldt_lock);
@@ -55,6 +72,10 @@ static void load_fs(int idx)
     uint16_t sel = (uint16_t)((idx << 3) | 7);   /* LDT, RPL 3 */
     __asm__ volatile("movw %0, %%fs" : : "r"(sel));
 }
+#else
+/* Translated guest code gets its fs base from the CPU emulator. */
+static void ldt_free(int idx) { (void)idx; }
+#endif
 
 xthread *thread_current(void)
 {
@@ -65,6 +86,13 @@ xthread *thread_current(void)
 static void attach(xthread *t)
 {
     thread_trap_tsc();
+#ifdef XBC_TRANSLATED
+    /* Guest code runs on a stack of its own in guest memory, as roomy as the
+       host stacks the native build gives guest threads. */
+    size_t guest_stack_size = t->stack_size * 4;
+    if (guest_stack_size < (1u << 20)) guest_stack_size = 1u << 20;
+    void *guest_stack = arena_alloc(guest_stack_size, 1);
+#endif
     KPCR *pcr = t->pcr;
     memset(pcr, 0, sizeof(*pcr));
     pcr->NtTib.ExceptionList = (PVOID)-1;
@@ -83,14 +111,22 @@ static void attach(xthread *t)
         pcr->NtTib.StackBase = (char *)t->tls_block + top + 16;
         t->ethread.Tcb.TlsData = (char *)pcr->NtTib.StackBase - t->tls_size;
     } else {
+#ifdef XBC_NATIVE
         pcr->NtTib.StackBase = (PVOID)((uintptr_t)__builtin_frame_address(0) & ~15u);
+#else
+        pcr->NtTib.StackBase = (char *)guest_stack + guest_stack_size;
+#endif
     }
     pcr->NtTib.StackLimit = (char *)pcr->NtTib.StackBase - t->stack_size;
     t->ethread.Tcb.StackBase = pcr->NtTib.StackBase;
     t->ethread.Tcb.StackLimit = pcr->NtTib.StackLimit;
 
+#ifdef XBC_NATIVE
     t->ldt_index = ldt_alloc(pcr, sizeof(*pcr) - 1);
     load_fs(t->ldt_index);
+#else
+    cpu_thread_attach(pcr, guest_stack, (char *)guest_stack + guest_stack_size);
+#endif
     pthread_setspecific(current_key, t);
 }
 
@@ -111,6 +147,14 @@ static xthread *thread_alloc(SIZE_T stack_size, SIZE_T tls_size)
     return t;
 }
 
+#ifdef XBC_TRANSLATED
+int thread_guest_priority(void)
+{
+    xthread *t = thread_current();
+    return t ? t->ethread.Tcb.Priority : 32;
+}
+#endif
+
 void thread_init_main(void)
 {
     pthread_key_create(&current_key, NULL);
@@ -128,11 +172,16 @@ typedef ULONG (NTAPI *start_fn)(PVOID);
 typedef void (NTAPI *system_fn)(PVOID, PVOID);
 
 static pthread_mutex_t start_lock = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t start_cond = PTHREAD_COND_INITIALIZER;
+static pthread_cond_t start_cond XBC_COND_ALIGN = PTHREAD_COND_INITIALIZER;
 
 static void *thread_main(void *arg)
 {
     xthread *t = arg;
+    /* Named by start address, to find a busy thread in top -H or /proc. */
+    char name[16];
+    snprintf(name, sizeof name, "x%08x", (unsigned)(uintptr_t)t->start_routine);
+    pthread_setname_np(pthread_self(), name);
+    prof_thread_start();
     attach(t);
 
     pthread_mutex_lock(&start_lock);
@@ -143,10 +192,17 @@ static void *thread_main(void *arg)
     if (setjmp(t->exit_jmp) == 0) {
         TRACE("thread %u starting at %p", (unsigned)(ULONG_PTR)t->ethread.UniqueThread,
               t->start_routine);
+#ifdef XBC_TRANSLATED
+        if (t->system_routine)
+            CPU_CALL(t->system_routine, CONV_STD, (uint32_t)t->start_routine, (uint32_t)t->start_context);
+        else
+            CPU_CALL(t->start_routine, CONV_STD, (uint32_t)t->start_context);
+#else
         if (t->system_routine)
             ((system_fn)t->system_routine)(t->start_routine, t->start_context);
         else
             ((start_fn)t->start_routine)(t->start_context);
+#endif
         t->ethread.ExitStatus = STATUS_SUCCESS;
     }
     /* Returned or PsTerminateSystemThread'ed: signal the thread object. */
@@ -155,9 +211,12 @@ static void *thread_main(void *arg)
     pthread_mutex_lock(&g_disp_lock);
     t->ethread.Tcb.HasTerminated = 1;
     t->ethread.Tcb.Header.SignalState = 1;
-    disp_signal_all();
+    disp_signal(&t->ethread.Tcb.Header);
     pthread_mutex_unlock(&g_disp_lock);
     ldt_free(t->ldt_index);
+#ifdef XBC_TRANSLATED
+    cpu_thread_detach();
+#endif
     return NULL;
 }
 

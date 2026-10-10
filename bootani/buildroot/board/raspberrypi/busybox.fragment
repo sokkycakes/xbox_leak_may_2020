@@ -1,0 +1,2 @@
+# Lets "tar -xzf" unpack the push tarballs.
+CONFIG_FEATURE_SEAMLESS_GZ=y
