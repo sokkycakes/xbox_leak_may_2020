@@ -371,6 +371,8 @@ int main(int argc, char **argv)
                     clear(0,NULL,0xf3,0xff000000,1,0);draw(6,4,vertices,sizeof vertices[0]);
                     glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
                     unsigned color=colors[expected[test]];
+                    if (pixel[0] != ((color>>16)&255) || pixel[1] != ((color>>8)&255) || pixel[2] != (color&255))
+                        fprintf(stderr,"projection fragment %u flags %x: %u %u %u expected %08x\\n",fragment,flags[test],pixel[0],pixel[1],pixel[2],color);
                     assert(abs((int)pixel[0]-(int)((color>>16)&255))<8);
                     assert(abs((int)pixel[1]-(int)((color>>8)&255))<8);
                     assert(abs((int)pixel[2]-(int)(color&255))<8);

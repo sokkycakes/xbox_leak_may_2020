@@ -236,6 +236,7 @@ static void backbuffer_read_end(void);
 static GLuint cur_program;   /* the GL program bound for draws (see use_program) */
 static bool ff_lighting_candidate, ff_primary_present, ff_secondary_present;
 static unsigned ff_weight_components;
+static bool ff_pretransformed;
 static void program_off(void);
 static GLuint backbuffer_copy_texture(ULONG data, ULONG w, ULONG h);
 static void run_callbacks(void);
@@ -2066,6 +2067,9 @@ static void apply_render_states(bool pretransformed, bool has_normal)
 {
     ff_lighting_candidate = !pretransformed && ((has_normal && RS(D3DRS_LIGHTING)) || RS(118));
     ff_weight_components = 0;
+    ff_pretransformed = pretransformed;
+    for (int i = 0; i < 4; i++)
+        if (TSS(i, 21 /* TEXTURETRANSFORMFLAGS */) & 0xFF) ff_lighting_candidate = true;
     if (!pretransformed)
         for (int i = 0; i < 4; i++) {
             ULONG gen = TSS(i, D3DTSS_TEXCOORDINDEX) >> 16;
@@ -2483,7 +2487,7 @@ static LONG NTAPI D3DDevice_CreateVertexShader(const ULONG *decl, const ULONG *f
    (0 = fixed function for that stage) with its uniform locations. */
 typedef struct program_entry {
     GLuint vs, fs, prog;
-    GLint loc_ff_lighting, loc_fog_vertex_mode, loc_ff_transform;
+    GLint loc_ff_lighting, loc_fog_vertex_mode, loc_ff_transform, loc_ff_texcount;
     GLint loc_c, loc_flip_y, loc_vp_scale, loc_vp_offset, loc_wdepth;
     GLint loc_tex[4], loc_cube[4], loc_vol[4], loc_tex_scale, loc_c0, loc_c1, loc_fc0, loc_fc1,
           loc_bump_env, loc_bump_lum, loc_eye_vector, loc_key_color;
@@ -2686,6 +2690,7 @@ static program_entry *program_for(GLuint vs, GLuint fs)
         e->loc_bump_lum = U("bump_lum");
         e->loc_ff_lighting = U("ff_lighting");
         e->loc_ff_transform = U("ff_transform");
+        e->loc_ff_texcount = U("ff_texcount");
         e->loc_fog_vertex_mode = U("fog_vertex_mode");
         e->loc_eye_vector = U("eye_vector");
         e->loc_key_color = U("key_color");
@@ -2955,7 +2960,15 @@ static void upload_fixed_lighting(const program_entry *e)
     ULONG blend = RS(118 /* VERTEXBLEND */);
     state[7][0] = blend ? (blend + 3) / 2 : 0;
     state[7][1] = blend & 1; /* odd modes generate the final weight */
-    state[7][2] = !RS(D3DRS_LIGHTING);
+    state[7][2] = ff_pretransformed || !RS(D3DRS_LIGHTING);
+    if (e->loc_ff_texcount >= 0) {
+        float counts[4];
+        for (int i = 0; i < 4; i++) {
+            ULONG flags = TSS(i, 21 /* TEXTURETRANSFORMFLAGS */);
+            counts[i] = (float)(flags & 0xFF) * ((flags & 0x100) ? 1 : -1);
+        }
+        p_glUniform4fv(e->loc_ff_texcount, 1, counts);
+    }
     for (int i = 0; i < 4; i++) state[8][i] = TSS(i, D3DTSS_TEXCOORDINDEX) >> 16;
     if (blend && e->loc_ff_transform >= 0) {
         float transform[28][4] = {{0}};
