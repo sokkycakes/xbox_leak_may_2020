@@ -2886,6 +2886,7 @@ static void program_off(void)
 {
     if (cur_program) p_glUseProgram(0);
     cur_program = 0;
+    glDisable(GL_VERTEX_PROGRAM_POINT_SIZE);
 }
 
 
@@ -2979,6 +2980,11 @@ static bool use_program(GLuint vs, program_entry **out)
         fs = fragment_shader_object();
         if (!fs) return false;
     }
+    /* NV2A programmable oPts is selected only with point parameters enabled.
+       Fixed-function attenuation remains owned by the fixed-function path.
+       Synchronize on every draw, including cached program reuse and VS -> FF. */
+    if (vs && RS(D3DRS_POINTSCALEENABLE)) glEnable(GL_VERTEX_PROGRAM_POINT_SIZE);
+    else glDisable(GL_VERTEX_PROGRAM_POINT_SIZE);
     if (!vs) vs = fixed_lighting_shader();
     if (!vs && !fs) { program_off(); return true; }
     program_entry *e = program_for(vs, fs);

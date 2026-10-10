@@ -635,6 +635,77 @@ int main(int argc, char **argv)
             puts("renderer point sprites: pixel-shader stage-3 coordinates enable and disable passed");
         }
 
+
+        /* nv2a-vertex-spec: point parameters select shader oPts, otherwise
+         * POINTSIZE controls the rasterizer. Exercise cached-program reuse,
+         * both pixel paths, and return to fixed-function vertices. */
+        {
+            uint32_t saved_rs[256], saved_tss[128];
+            memcpy(saved_rs,render_states,sizeof saved_rs);
+            memcpy(saved_tss,texture_states,sizeof saved_tss);
+            LONG (NTAPI *create_vshader)(const ULONG *,const ULONG *,ULONG *,ULONG) =
+                find("_D3DDevice_CreateVertexShader@16");
+            void (NTAPI *delete_vshader)(ULONG) = find("_D3DDevice_DeleteVertexShader@4");
+            static const ULONG decl[] = {
+                0x20000000, 0x40420000, 0x40120001, 0x40420002, 0xffffffff
+            };
+            /* MOV oPos,v0; MOV oPts.x,v1.x; MOV oD0,v2. */
+            static const ULONG function[] = {
+                0x00032078,
+                0,0x0020001b,0x08000000,0x0000f800,
+                0,0x00200200,0x08000000,0x00008830,
+                0,0x0020041b,0x08000000,0x0000f819
+            };
+            ULONG point_vs = 0, point_ps = 0, def[60] = {0};
+            assert(create_vshader(decl,function,&point_vs,0) == 0 && point_vs);
+            def[8] = 4; def[9] = 0x14u << 8; /* explicit final V0 */
+            create_ps(def,&point_ps);
+            assert(point_ps);
+            render_states[59] = render_states[60] = render_states[82] = 0;
+            render_states[92] = render_states[93] = render_states[124] = 0;
+            render_states[67] = 0xffffffffu;
+            render_states[106] = 0x40800000u; /* register size 4 */
+            render_states[107] = 0x3f800000u;
+            render_states[113] = 0x427c0000u; /* 63 */
+            render_states[108] = 0;
+            render_states[110] = 0x3f800000u;
+            render_states[111] = render_states[112] = 0;
+            for (int s = 0; s < 4; s++) {
+                set_tex(s,NULL);
+                texture_states[s*32+12] = 1;
+            }
+            struct { float position[4], size, color[4]; } point =
+                {{32,32,0.5f,1},16,{1,1,1,1}};
+            struct vertex fixed_point = {32,32,0.5f,1,0xffffffffu};
+            for (int pixel_path = 0; pixel_path < 2; pixel_path++) {
+                set_ps(pixel_path ? point_ps : 0);
+                for (int pass = 0; pass < 4; pass++) {
+                    render_states[109] = pass == 1 || pass == 3;
+                    set_vs(point_vs);
+                    clear(0,NULL,0xf3,0xff000000,1.0f,0);
+                    draw(1,1,&point,sizeof point);
+                    glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                    assert(pixel[0] > 240);
+                    glReadPixels(38,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                    assert((pixel[0] > 240) == (pass == 1 || pass == 3));
+                }
+                /* Switch to XYZRHW and restore the register-size state. */
+                render_states[109] = 0;
+                set_vs(0x44);
+                clear(0,NULL,0xf3,0xff000000,1.0f,0);
+                draw(1,1,&fixed_point,sizeof fixed_point);
+                glReadPixels(38,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                assert(pixel[0] < 8);
+            }
+            set_ps(0);
+            set_vs(0x144);
+            delete_vshader(point_vs);
+            set_tex(0,tex);
+            memcpy(render_states,saved_rs,sizeof saved_rs);
+            memcpy(texture_states,saved_tss,sizeof saved_tss);
+            puts("renderer programmable points: oPts selection, toggles and fixed-function return passed");
+        }
+
         /* Compressed volume uploads decode the packed slab order before GL.
          * The selected blocks distinguish XY tiles, slices within a slab,
          * and the second slab. Minification then selects an authored mip. */
