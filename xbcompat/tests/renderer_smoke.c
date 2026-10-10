@@ -745,6 +745,79 @@ int main(int argc, char **argv)
         }
 
 
+        /* Logical constant endpoints and NORESERVEDCONSTANTS are independent
+         * of the low mode bits. Viewport updates and draws must both honor it. */
+        {
+            LONG (NTAPI *create_vshader)(const ULONG *,const ULONG *,ULONG *,ULONG) =
+                find("_D3DDevice_CreateVertexShader@16");
+            void (NTAPI *delete_vshader)(ULONG) = find("_D3DDevice_DeleteVertexShader@4");
+            void (NTAPI *set_mode)(ULONG) = find("_D3DDevice_SetShaderConstantMode@4");
+            void (NTAPI *get_mode)(ULONG *) = find("_D3DDevice_GetShaderConstantMode@4");
+            void (NTAPI *set_constant)(LONG,const float *,ULONG) = find("_D3DDevice_SetVertexShaderConstant@12");
+            void (NTAPI *get_constant)(LONG,float *,ULONG) = find("_D3DDevice_GetVertexShaderConstant@12");
+            void (NTAPI *set_viewport)(const void *) = find("_D3DDevice_SetViewport@4");
+            void (NTAPI *get_viewport)(void *) = find("_D3DDevice_GetViewport@4");
+            struct { ULONG x,y,w,h; float min,max; } viewport;
+            ULONG old_mode;
+            uint32_t saved_rs[256],saved_tss[128];
+            memcpy(saved_rs,render_states,sizeof saved_rs);
+            memcpy(saved_tss,texture_states,sizeof saved_tss);
+            get_mode(&old_mode); get_viewport(&viewport);
+            const LONG registers[4] = {-96,0,95,-38};
+            float saved[4][4],reserved[2][4];
+            for (int i=0;i<4;i++) get_constant(registers[i],saved[i],1);
+            get_constant(-38,&reserved[0][0],2);
+            const float green[4] = {0,1,0,1};
+            const ULONG decl[] = {0x20000000,0x40420000,0xffffffff};
+            ULONG shaders[4];
+            for (int i=0;i<4;i++) {
+                /* MOV oPos,v0; MOV oD0,c[physical slot]. */
+                ULONG code[] = {0x00022078,
+                    0,0x0020001b,0x08000000,0x0000f800,
+                    0,0x0020001b | ((registers[i]+96)<<13),0x0c000000,0x0000f819};
+                assert(create_vshader(decl,code,&shaders[i],0)==0 && shaders[i]);
+            }
+            ULONG def[60]={0},constant_ps=0;
+            def[8]=4;def[9]=0x14u<<8;
+            create_ps(def,&constant_ps);set_ps(constant_ps);
+            render_states[59]=render_states[60]=render_states[82]=0;
+            render_states[92]=render_states[93]=render_states[109]=render_states[124]=0;
+            render_states[67]=0xffffffffu;
+            render_states[106]=0x40800000u;
+            for(int unit=0;unit<4;unit++){set_tex(unit,NULL);texture_states[unit*32+12]=1;}
+            const float vertex[4]={32,32,.5f,1};
+            for(ULONG mode=0;mode<3;mode++) {
+                set_mode(mode|0x10);
+                ULONG actual;get_mode(&actual);assert(actual==(mode|0x10));
+                for(int i=0;i<4;i++) set_constant(registers[i],green,1);
+                set_viewport(&viewport);
+                for(int i=0;i<4;i++) {
+                    float value[4];get_constant(registers[i],value,1);
+                    assert(!memcmp(value,green,sizeof value));
+                    set_vs(shaders[i]);
+                    clear(0,NULL,0xf3,0xff000000,1,0);
+                    draw(1,1,vertex,sizeof vertex);
+                    glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                    assert(pixel[0]<8 && pixel[1]>240 && pixel[2]<8 && pixel[3]>240);
+                }
+                set_mode(mode);
+                set_viewport(&viewport);
+                float value[4];get_constant(-38,value,1);
+                assert(value[0]==viewport.w*.5f && value[1]==-(float)viewport.h*.5f);
+                get_constant(-37,value,1);
+                assert(value[0]==viewport.x+viewport.w*.5f && value[1]==viewport.y+viewport.h*.5f);
+            }
+            set_mode(old_mode);set_viewport(&viewport);
+            for(int i=0;i<4;i++)set_constant(registers[i],saved[i],1);
+            set_constant(-38,&reserved[0][0],2);
+            set_ps(0);set_vs(0x144);
+            for(int i=0;i<4;i++)delete_vshader(shaders[i]);
+            set_tex(0,tex);
+            memcpy(render_states,saved_rs,sizeof saved_rs);
+            memcpy(texture_states,saved_tss,sizeof saved_tss);
+            puts("renderer constants: endpoints, three modes and reserved viewport toggles passed");
+        }
+
         /* Programmable fog is evaluated before interpolation. Literal endpoint
          * factors separate exp/interpolate from interpolate/exp, and distinguish
          * unclamped vertex factors from early [0,1] clamping. */

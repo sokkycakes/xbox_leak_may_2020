@@ -3412,7 +3412,7 @@ static void upload_constants(const vshader *sh, program_entry *e)
        c[58] / c[59] are the title's in the 192 constant modes. */
     float vp[2][4];
     viewport_constants(vp);
-    if ((d3d.constant_mode & 0xF) == 0) memcpy(c[58], vp, sizeof(vp));
+    if ((d3d.constant_mode & 0x1F) == 0) memcpy(c[58], vp, sizeof(vp));
     /* Upload only the registers that changed since this program last drew:
        most draws change a few matrices, and every uniform call costs (all
        192 is 3 KB, through box86 and Mesa on a Raspberry Pi). */
