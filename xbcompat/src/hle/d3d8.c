@@ -2479,10 +2479,19 @@ static bool conv_sampled_same(const UCHAR *copy, const UCHAR *cur, size_t len, s
     size_t units = (len - size) / step + 1;
     for (size_t i = 0; i <= 32; i++) {
         size_t off = (i == 32 ? units - 1 : units * i / 32) * step;
-        uint32_t x = 0, y = 0;
-        memcpy(&x, copy + off, size);
-        memcpy(&y, cur + off, size);
-        if (x != y) return false;
+        /* Fixed-size copies compile to single loads (a variable size made
+           byte loops). */
+        if (size == 2) {
+            uint16_t x, y;
+            memcpy(&x, copy + off, 2);
+            memcpy(&y, cur + off, 2);
+            if (x != y) return false;
+        } else {
+            uint32_t x, y;
+            memcpy(&x, copy + off, 4);
+            memcpy(&y, cur + off, 4);
+            if (x != y) return false;
+        }
     }
     return true;
 }
@@ -2670,6 +2679,9 @@ static const void *rgba_colors(const UCHAR *src, ULONG stride, vrange r, GLuint 
 /* Bind the generic attribute arrays of a declared vertex layout.  `up` is
    the user-pointer data for stream 0 (DrawVerticesUP), else streams come
    from SetStreamSource. */
+/* Set by draw(): the `up` pointer of this draw is stream 0's vertex buffer. */
+static bool up_is_vb;
+
 static void bind_attributes(const vshader *sh, const UCHAR *up, ULONG up_stride, ULONG first_vertex, ULONG first,
                             ULONG count, const USHORT *indices)
 {
@@ -2713,7 +2725,7 @@ static void bind_attributes(const vshader *sh, const UCHAR *up, ULONG up_stride,
         }
         const UCHAR *ptr = base + a->offset + first_vertex * stride;
         GLuint buf = 0;
-        if (base != up && !first_vertex) {
+        if ((base != up || up_is_vb) && !first_vertex) {
             vrange v = VERTS;
             if (v.hi > v.lo) buf = stream_buffer(base, stride, v, (size_t)(v.hi - 1) * stride + a->offset + a->bytes);
         }
@@ -2925,13 +2937,17 @@ static void draw_declared_(const vshader *sh, ULONG PrimitiveType, const UCHAR *
     end_program(e);
 }
 
+/* `vb`: base is stream 0's vertex buffer (plus the base vertex), not
+   title memory passed to a ...UP draw, so it can be kept in a GL buffer. */
 static void draw(ULONG PrimitiveType, const UCHAR *base, ULONG stride, ULONG first, ULONG count,
-                 const USHORT *indices)
+                 const USHORT *indices, bool vb)
 {
     if (d3d.vertex_shader & 1) {
         vshader *sh = (vshader *)(d3d.vertex_shader & ~1u);
+        up_is_vb = vb;
         if (sh->code) draw_programmable(sh, PrimitiveType, base, stride, first, count, indices);
         else draw_declared(sh, PrimitiveType, base, stride, first, count, indices);
+        up_is_vb = false;
         return;
     }
     fvf_layout l = parse_fvf(d3d.vertex_shader);
@@ -3349,7 +3365,7 @@ static void NTAPI D3DDevice_DrawVertices(ULONG PrimitiveType, UINT_ StartVertex,
     if (d3d.recording) { ULONG a[3] = { PrimitiveType, StartVertex, VertexCount }; pb_record(OP_DRAW, a, sizeof(a)); return; }
     D3DResource *vb = d3d.streams[0].vb;
     if (!vb) return;
-    draw(PrimitiveType, resource_data(vb), d3d.streams[0].stride, StartVertex, VertexCount, NULL);
+    draw(PrimitiveType, resource_data(vb), d3d.streams[0].stride, StartVertex, VertexCount, NULL, true);
 }
 
 static void NTAPI D3DDevice_DrawVerticesUP(ULONG PrimitiveType, UINT_ VertexCount, const void *pData,
@@ -3360,7 +3376,7 @@ static void NTAPI D3DDevice_DrawVerticesUP(ULONG PrimitiveType, UINT_ VertexCoun
         pb_record2(OP_DRAW_UP, h, sizeof(h), pData, VertexCount * Stride);
         return;
     }
-    draw(PrimitiveType, pData, Stride, 0, VertexCount, NULL);
+    draw(PrimitiveType, pData, Stride, 0, VertexCount, NULL, false);
 }
 
 static void NTAPI D3DDevice_DrawIndexedVertices(ULONG PrimitiveType, UINT_ VertexCount, const USHORT *pIndexData)
@@ -3373,7 +3389,7 @@ static void NTAPI D3DDevice_DrawIndexedVertices(ULONG PrimitiveType, UINT_ Verte
     D3DResource *vb = d3d.streams[0].vb;
     if (!vb) return;
     const UCHAR *base = (const UCHAR *)resource_data(vb) + d3d.base_vertex_index * d3d.streams[0].stride;
-    draw(PrimitiveType, base, d3d.streams[0].stride, 0, VertexCount, pIndexData);
+    draw(PrimitiveType, base, d3d.streams[0].stride, 0, VertexCount, pIndexData, true);
 }
 
 static void NTAPI D3DDevice_DrawIndexedVerticesUP(ULONG PrimitiveType, UINT_ VertexCount, const USHORT *pIndexData,
@@ -3391,7 +3407,7 @@ static void NTAPI D3DDevice_DrawIndexedVerticesUP(ULONG PrimitiveType, UINT_ Ver
         free(h);
         return;
     }
-    draw(PrimitiveType, pVertexData, Stride, 0, VertexCount, pIndexData);
+    draw(PrimitiveType, pVertexData, Stride, 0, VertexCount, pIndexData, false);
 }
 
 static void NTAPI D3DDevice_SetIndices(D3DResource *ib, UINT_ BaseVertexIndex)
@@ -5392,11 +5408,11 @@ static void pb_interpret(const ULONG *p, unsigned n)
                             }
                         } else {
                             stride = parse_fvf(d3d.vertex_shader).stride;
-                            if (stride) draw(prim, inline_buf, stride, 0, inline_n / stride, NULL);
+                            if (stride) draw(prim, inline_buf, stride, 0, inline_n / stride, NULL, false);
                         }
                     } else if (elems_n) {
                         D3DResource *vb = d3d.streams[0].vb;
-                        if (vb) draw(prim, resource_data(vb), d3d.streams[0].stride, 0, elems_n, elems);
+                        if (vb) draw(prim, resource_data(vb), d3d.streams[0].stride, 0, elems_n, elems, true);
                     } else {
                         imm_flush(prim);
                     }
@@ -5404,7 +5420,7 @@ static void pb_interpret(const ULONG *p, unsigned n)
                 }
             } else if (m == 0x1810) {   /* NV097_DRAW_ARRAYS: count-1 << 24 | start */
                 D3DResource *vb = d3d.streams[0].vb;
-                if (vb) draw(prim, resource_data(vb), d3d.streams[0].stride, d & 0xFFFFFF, (d >> 24) + 1, NULL);
+                if (vb) draw(prim, resource_data(vb), d3d.streams[0].stride, d & 0xFFFFFF, (d >> 24) + 1, NULL, true);
             } else if (m == 0x1800 || m == 0x1808) {   /* NV097_ARRAY_ELEMENT16 / 32 */
                 if (elems_n + 2 > elems_cap) {
                     elems_cap = (elems_n + 2) * 2;
