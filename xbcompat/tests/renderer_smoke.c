@@ -294,6 +294,101 @@ int main(int argc, char **argv)
         texture_states[9] = texture_states[11] = 0;
         texture_states[5] = 2;
         puts("renderer shader controls: cached kill/key toggles and key uniform updates passed");
+        /* Flat strips/fans use the completing vertex's color, while texture
+         * coordinates still interpolate across each primitive. */
+        {
+            uint32_t saved_rs[256],saved_tss[128];
+            memcpy(saved_rs,render_states,sizeof saved_rs);memcpy(saved_tss,texture_states,sizeof saved_tss);
+            render_states[66]=GL_FLAT;render_states[59]=render_states[60]=0;
+            render_states[82]=render_states[92]=render_states[93]=render_states[124]=0;
+            render_states[67]=0xffffffffu;render_states[128]=1;
+            for(int unit=0;unit<4;unit++){set_tex(unit,NULL);texture_states[unit*32+12]=1;}
+            set_ps(0);set_vs(0x144);
+            struct tex_vertex strip[4]={
+                {4,4,.5f,1,0xffff0000,0,0},{60,4,.5f,1,0xff00ff00,1,0},
+                {4,60,.5f,1,0xff0000ff,0,0},{60,60,.5f,1,0xffffffff,1,0}
+            };
+            struct tex_vertex fan[4]={strip[0],strip[1],strip[3],strip[2]};
+            fan[2].color=0xff0000ff;fan[3].color=0xffffffff;
+            for(unsigned kind=0;kind<2;kind++){
+                clear(0,NULL,0xf3,0xff000000,1,0);
+                draw(kind?7:6,4,kind?fan:strip,sizeof strip[0]);
+                glReadPixels(kind?48:16,48,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                assert(pixel[0]<8 && pixel[1]<8 && pixel[2]>240);
+                glReadPixels(kind?16:48,16,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                assert(pixel[0]>240 && pixel[1]>240 && pixel[2]>240);
+            }
+            void *gradient=create_tex(4,1,1,1,0,6,3);ULONG locked[2];
+            lock_tex(gradient,0,locked,NULL,0);
+            const uint32_t colors[4]={0xffff0000,0xff00ff00,0xff0000ff,0xffffffff};
+            memcpy((void *)locked[1],colors,sizeof colors);set_tex(0,gradient);
+            texture_states[12]=texture_states[16]=2;texture_states[14]=texture_states[18]=2;
+            texture_states[0]=texture_states[1]=3;texture_states[3]=texture_states[4]=1;
+            texture_states[5]=texture_states[6]=texture_states[7]=texture_states[21]=0;texture_states[28]=0;
+            for(unsigned kind=0;kind<2;kind++){
+                clear(0,NULL,0xf3,0xff000000,1,0);
+                draw(kind?7:6,4,kind?fan:strip,sizeof strip[0]);
+                glReadPixels(12,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                assert(pixel[0]>240 && pixel[1]<8 && pixel[2]<8);
+                glReadPixels(52,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                assert(pixel[0]>240 && pixel[1]>240 && pixel[2]>240);
+            }
+            set_tex(0,tex);memcpy(render_states,saved_rs,sizeof saved_rs);memcpy(texture_states,saved_tss,sizeof saved_tss);
+            puts("renderer flat primitives: strips/fans completing colors and independent texture interpolation passed");
+        }
+
+        /* Texture transform counts select a projection divisor, which must
+         * remain a varying until fragment sampling. Each texel has a literal
+         * color, avoiding comparison against the renderer's matrix code. */
+        {
+            void (NTAPI *set_transform)(ULONG,const void *)=find("_D3DDevice_SetTransform@8");
+            void (NTAPI *get_transform)(ULONG,void *)=find("_D3DDevice_GetTransform@8");
+            uint32_t saved_tss[128];float saved_matrix[16];
+            memcpy(saved_tss,texture_states,sizeof saved_tss);get_transform(2,saved_matrix);
+            void *projection_tex=create_tex(4,1,1,1,0,6,3);ULONG locked[2];
+            lock_tex(projection_tex,0,locked,NULL,0);
+            const uint32_t colors[4]={0xffff0000,0xff00ff00,0xff0000ff,0xffffffff};
+            memcpy((void *)locked[1],colors,sizeof colors);
+            set_tex(0,projection_tex);set_vs(0x20144); /* four input components */
+            texture_states[0]=texture_states[1]=3;
+            texture_states[3]=texture_states[4]=1;
+            texture_states[5]=texture_states[6]=texture_states[7]=0;
+            texture_states[9]=texture_states[11]=0;texture_states[28]=0;
+            float matrix[16]={2,0,0,0,0,2,0,0,0,0,1,0,0,0,0,1};
+            set_transform(2,matrix);
+            struct {float p[4];uint32_t color;float uv[4];} vertices[4]={
+                {{4,4,.5f,1},0xffffffff,{.1875f,.375f,.5f,.75f}},
+                {{60,4,.5f,1},0xffffffff,{.1875f,.375f,.5f,.75f}},
+                {{4,60,.5f,1},0xffffffff,{.1875f,.375f,.5f,.75f}},
+                {{60,60,.5f,1},0xffffffff,{.1875f,.375f,.5f,.75f}}
+            };
+            const unsigned flags[7]={1,2,3,4,0x102,0x103,0x104};
+            const unsigned expected[7]={1,1,1,1,2,3,2};
+            for(unsigned fragment=0;fragment<2;fragment++){
+                set_ps(fragment?control_ps:0);
+                for(unsigned test=0;test<7;test++){
+                    texture_states[21]=flags[test];
+                    clear(0,NULL,0xf3,0xff000000,1,0);draw(6,4,vertices,sizeof vertices[0]);
+                    glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                    unsigned color=colors[expected[test]];
+                    assert(abs((int)pixel[0]-(int)((color>>16)&255))<8);
+                    assert(abs((int)pixel[1]-(int)((color>>8)&255))<8);
+                    assert(abs((int)pixel[2]-(int)(color&255))<8);
+                }
+                matrix[0]=matrix[5]=1;set_transform(2,matrix);
+                texture_states[21]=0x104;
+                for(int i=0;i<4;i++){vertices[i].uv[0]=.5f;vertices[i].uv[3]=(i&1)?2:.5f;}
+                clear(0,NULL,0xf3,0xff000000,1,0);draw(6,4,vertices,sizeof vertices[0]);
+                glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                assert(pixel[0]<8 && pixel[1]>240 && pixel[2]<8);
+                matrix[0]=matrix[5]=2;set_transform(2,matrix);
+                for(int i=0;i<4;i++){vertices[i].uv[0]=.1875f;vertices[i].uv[3]=.75f;}
+            }
+            set_transform(2,saved_matrix);set_ps(0);set_vs(0x144);set_tex(0,tex);
+            memcpy(texture_states,saved_tss,sizeof saved_tss);
+            puts("renderer projection: COUNT1-4, selected divisors and interpolation before divide passed");
+        }
+
         /* Raw NV097 eye methods must survive capture/apply and recorded
          * push replay. Deliberately leave device-pusher writes pending at
          * capture, so stale CPU snapshots cannot accidentally pass. */
