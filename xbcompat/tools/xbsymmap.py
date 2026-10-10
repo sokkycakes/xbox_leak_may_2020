@@ -36,6 +36,23 @@ STACK_FIX = {
     "D3DDevice_GetPixelShader": 4,      # (pHandle)
 }
 
+# Functions whose argument count changed between XDK builds while
+# XbSymbolDatabase keeps one list: the stack bytes each build may pop, told
+# apart by which `ret n` comes first in the function.  4928's
+# D3D_GetAdapterModeCount(Adapter) pops 4 (Splinter Cell), later builds'
+# (Adapter, Format) pop 8.
+STACK_PROBE = {
+    "D3D_GetAdapterModeCount": (4, 8),
+}
+
+
+def probe_stack(read, va, choices):
+    code = read(va, 0x200)
+    hits = [(code.find(bytes((0xC2, n, 0))), n) for n in choices]
+    hits = [h for h in hits if h[0] >= 0]
+    return min(hits)[1] if hits else None
+
+
 # Argument lists XbSymbolDatabase gets wrong: these take every argument on the
 # stack (the function overwrites the register it names before reading it).
 ARGS_FIX = {
@@ -230,6 +247,8 @@ def main():
         kind, fconv, args, va, _ = found[key]
         stack, regs = parse_args_list(args)
         stack = STACK_FIX.get(key, stack)
+        if key in STACK_PROBE:
+            stack = probe_stack(xbe_reader(a.xbe), va, STACK_PROBE[key]) or stack
         if fconv == "thiscall" and conv == "stdcall" and nbytes is None:
             # A C++ __stdcall member pushes `this`; the scanner names it a thiscall
             # only when the library passes it in ecx.

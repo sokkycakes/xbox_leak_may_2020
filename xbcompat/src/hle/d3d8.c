@@ -6356,6 +6356,7 @@ const struct hle_func d3d8_funcs[] = {
     F("_D3D_GetDeviceCaps@12", Direct3D_GetDeviceCaps),
     F("_D3D_CheckDeviceFormat@24", Direct3D_CheckDeviceFormat),
     F("_D3D_GetAdapterModeCount@8", D3D_GetAdapterModeCount2),
+    F("_D3D_GetAdapterModeCount@4", Direct3D_GetAdapterModeCount),   /* 4928: (Adapter) only */
     F("_D3D_GetAdapterDisplayMode@8", Direct3D_GetAdapterDisplayMode),
     F("_D3D_EnumAdapterModes@12", Direct3D_EnumAdapterModes),
     F("_D3D_GetAdapterIdentifier@12", Direct3D_GetAdapterIdentifier),
