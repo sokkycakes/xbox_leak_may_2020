@@ -140,7 +140,8 @@ def main():
     ap.add_argument("-o", "--output")
     a = ap.parse_args()
 
-    out = subprocess.run([a.cli, a.xbe, "-e"], check=True, capture_output=True, text=True).stdout
+    out = subprocess.run([a.cli, a.xbe, "-e"], check=True, capture_output=True,
+                         text=True, timeout=120).stdout
     found = {}   # undecorated name -> (kind, conv, args, va)
     for line in out.splitlines():
         m = LINE.match(line.strip())

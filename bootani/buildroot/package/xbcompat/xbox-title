@@ -1,5 +1,5 @@
 #!/bin/sh
-# XLaunchNewImage entry point on images without Python/signature scanning.
+# XLaunchNewImage entry point: prepared maps or native on-demand scanning.
 # Each executable needs its own precomputed map; never inherit a title's map.
 [ $# -gt 0 ] || { echo "xbox-title: missing XBE path" >&2; exit 64; }
 image=$1
@@ -19,6 +19,21 @@ if [ -z "$map" ] && [ "${image##*/}" = default.xbe ] && [ -s "${image%/*}/xbcomp
 	map=${image%/*}/xbcompat.map
 fi
 if [ -z "$map" ]; then
+	python=
+	for candidate in "${XBCOMPAT_MAP_PYTHON:-/usr/bin/python3}" /opt/xbcompat/map-python/bin/python3; do
+		if [ -x "$candidate" ]; then python=$candidate; break; fi
+	done
+	tool=${XBCOMPAT_MAP_TOOL:-/opt/xbcompat/tools/xbrun.py}
+	cli=${XBSYMDB_CLI:-/opt/xbcompat/tools/XbSymbolDatabaseCLI}
+	if [ -n "$python" ] && [ -r "$tool" ] && [ -x "$cli" ]; then
+		echo "xbox-title: preparing HLE map for $image" >&2
+		map=$(XBSYMDB_CLI="$cli" "$python" "$tool" --map-only "$image") || exit 78
+		# An empty path means a kernel-only title with no libraries to replace.
+		[ -z "$map" ] || [ -s "$map" ] || { echo "xbox-title: invalid generated map: $map" >&2; exit 78; }
+		export XBCOMPAT_LAUNCHER=${XBCOMPAT_LAUNCHER:-$0}
+		[ -z "$map" ] || set -- --hle "$map" "$@"
+		exec "${XBCOMPAT_BIN:-/opt/xbcompat/bin/xbcompat}" "$@" "$image"
+	fi
 	echo "xbox-title: no HLE map for $image (SHA-1 $digest)." >&2
 	echo "Prepare its map with tools/pi/cache-map.py; refusing to run unpatched Xbox hardware code." >&2
 	exit 78

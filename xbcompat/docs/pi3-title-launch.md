@@ -1,7 +1,7 @@
-# Pi title handoff and precomputed HLE maps
+# Pi title handoff and automatic HLE maps
 
-The ARM Pi image does not include the Python/xbrun signature scanner. Before
-this fix, Dashboard `XLaunchNewImage` discarded the Dashboard HLE map and
+The original ARM Pi image omitted the Python/xbrun signature scanner. Before
+these fixes, Dashboard `XLaunchNewImage` discarded the Dashboard HLE map and
 re-executed xbcompat without a map for the selected game. Dolphin reached raw
 Xbox D3D hardware code, faulted at `0xfd001804`, and exited. A standalone test
 launch had no session supervisor, so this left the console visible.
@@ -17,7 +17,9 @@ is unavailable. The shell launcher looks for a map in this order:
    bundled sample layout. Keep this sidecar paired with its original executable.
 
 Checksums distinguish samples that share `default.xbe` and title ID `FFFF0000`.
-A missing or zero-byte map returns exit status 78 without running the guest.
+If no prepared map is available, the launcher now runs native Python and the
+ARM XbSymbolDatabase scanner through `xbrun.py --map-only`. The game runs only
+after successful map generation. Scanner errors return exit status 78.
 The existing `xbox-session` supervisor then starts the Dashboard again. This
 requires launching the session through `xbox-session`; directly running
 xbcompat has no automatic recovery. Systems with bundled Python retain their
@@ -39,8 +41,8 @@ python3 xbcompat/tools/pi/cache-map.py /path/to/default.xbe \
 scp ./title-maps/*.map root@PI:/data/xbox/cache/xbcompat/maps/
 ```
 
-The destination directory is created by `xbox-session`. Map generation runs on
-the host, not the Pi. `tools/pi/titles.sh` also packages checksum maps for its
+The destination directory is created by `xbox-session`. This host command remains available for preparing cards in advance.
+Ordinary card launches now generate missing maps directly on the Pi. `tools/pi/titles.sh` also packages checksum maps for its
 bundled samples, and the session seeds them into the writable cache. A map
 selects HLE replacements; it does not guarantee that every function a new game
 uses is implemented.
@@ -62,10 +64,46 @@ The existing restart loop handles title exits; forced-crash recovery was not
 separately exercised during this validation. Dashboard audio settings were
 retained.
 
-Nine host regression tests cover argument forwarding, paths with spaces,
-checksum isolation, sidecar selection, absent/empty maps, launcher overrides,
-and preparing a checksum map. Run them on Linux with:
+Seventeen host regression tests cover argument forwarding, paths with spaces,
+checksum isolation, sidecars, automatic scanning, failed/empty scans, kernel-only
+images, runtime identity, cache invalidation, and atomic publication. Run them on
+Linux with:
 
 ```sh
 python3 xbcompat/tests/title_launcher_test.py
+python3 xbcompat/tests/map_cache_test.py
 ```
+
+## Automatic scanning and Xbox Live Arcade
+
+The initial shell launcher fixed Dolphin by supplying a precomputed map, but
+Arcade still lacked one and returned status 78 before guest execution. The ARM
+image now packages native Python, the same pinned XbSymbolDatabase revision as
+the x86 bundle, the shared mapping scripts, and all bundled XDK 4400 signature
+sets. First launches can take tens of seconds to scan; subsequent launches use
+the generated cache. No download or compiler is needed on the Pi.
+
+The shell launcher runs the mapper as a subprocess, keeping its Python
+environment separate from the game. `XBCOMPAT_HLE_BINARY` names the actual
+runtime ELF; `XBCOMPAT_BIN` may name a shell wrapper invoking Box86. The normal
+Pi wrapper exports the selected ELF before running the Dashboard or a game.
+Custom wrappers must do the same. Generated maps are keyed by the complete XBE
+checksum plus runtime/scanner/adapter identity. XDK 4400 maps additionally
+track their signature data and scanner script. Only complete, nonempty maps
+are published atomically. The database scanner has a 120-second timeout.
+
+On the live Pi, native scanning generated 244 mappings for the Arcade disc
+menu. A 240-frame startup test rendered that menu with 4x MSAA and exited
+successfully. The subsequent user-driven session launched `content/default.xbe`
+(the Arcade application), returned to the disc menu, launched `CDXU/reboot.xbe`,
+and returned normally to the Dashboard. The reboot helper also validated the
+XDK 4400 signature path. Other disc executables are handled individually by the
+same automatic scanner; map generation alone does not establish gameplay
+compatibility for each one.
+
+The live deployment uses native Debian armhf Python 3.11 in the isolated
+`/opt/xbcompat/map-python` directory and a cross-compiled native scanner. Future
+images use Buildroot's native Python and scanner package. The scanner was
+cross-built and executed on the Pi; a complete replacement image was not built
+or reboot-tested in this validation. Existing native-renderer and Dashboard
+audio settings were retained.

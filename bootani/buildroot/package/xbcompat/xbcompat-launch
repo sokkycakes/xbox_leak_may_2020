@@ -17,6 +17,8 @@ if [ "${XBOX_CPU:-box86}" = box86 ] && [ -x /usr/bin/box86 ] && [ -x "$D/xbcompa
 	export BOX86_DYNAREC_CALLRET=${BOX86_DYNAREC_CALLRET:-1}
 	export BOX86_DYNAREC_SAFEFLAGS=${BOX86_DYNAREC_SAFEFLAGS:-0}
 	export BOX86_DYNAREC_FORWARD=${BOX86_DYNAREC_FORWARD:-1024}
+	export XBCOMPAT_HLE_BINARY="$D/xbcompat.x86"
 	exec /usr/bin/box86 "$D/xbcompat.x86" "$@"
 fi
+export XBCOMPAT_HLE_BINARY="$D/xbcompat.arm"
 exec "$D/xbcompat.arm" "$@"

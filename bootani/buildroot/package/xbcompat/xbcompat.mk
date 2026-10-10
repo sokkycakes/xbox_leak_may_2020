@@ -16,7 +16,7 @@ ifeq ($(BR2_arm),y)
 # and unpack the titles beside it. Same /opt/xbcompat layout as the Sion's.
 XBCOMPAT_SITE = $(BR2_EXTERNAL_BOOTANI_PATH)/../../xbcompat
 XBCOMPAT_SITE_METHOD = local
-XBCOMPAT_DEPENDENCIES = unicorn sdl2 mesa3d libglvnd host-python3 host-pkgconf
+XBCOMPAT_DEPENDENCIES = unicorn sdl2 mesa3d libglvnd python3 xbsymboldatabase host-python3 host-pkgconf
 XBCOMPAT_TITLES = $(call qstrip,$(BR2_PACKAGE_XBCOMPAT_TITLES))
 XBCOMPAT_LEAK = $(BR2_EXTERNAL_BOOTANI_PATH)/../../xbox_leak_may_2020/xbox trunk/xbox
 
@@ -59,6 +59,10 @@ define XBCOMPAT_INSTALL_TARGET_CMDS
 	rm -rf $(TARGET_DIR)/opt/xbcompat
 	mkdir -p $(TARGET_DIR)/opt/xbcompat
 	tar -C $(TARGET_DIR)/opt/xbcompat -xzf $(XBCOMPAT_TITLES)
+	for tool in xbrun.py xbedump.py findsigs.py mksigs.py xbsymmap.py pe2xbe.py; do \
+		$(INSTALL) -D -m 0644 $(@D)/tools/$$tool $(TARGET_DIR)/opt/xbcompat/tools/$$tool; \
+	done
+	ln -s /usr/bin/XbSymbolDatabaseCLI $(TARGET_DIR)/opt/xbcompat/tools/XbSymbolDatabaseCLI
 	$(INSTALL) -D -m 0755 $(@D)/build-buildroot/xbcompat $(TARGET_DIR)/opt/xbcompat/bin/xbcompat
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/xbox-boot $(TARGET_DIR)/usr/libexec/xbox-boot
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/xbox-session $(TARGET_DIR)/usr/libexec/xbox-session

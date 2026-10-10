@@ -96,6 +96,44 @@ class TitleLauncherTest(unittest.TestCase):
         self.env["XBCOMPAT_LAUNCHER"] = "/custom/launcher"
         self.assertEqual(json.loads(self.launch(image).stdout)["launcher"], "/custom/launcher")
 
+    def scanner(self, body):
+        tool = self.root / "map tool.py"
+        tool.write_text(body)
+        self.env["XBCOMPAT_MAP_TOOL"] = str(tool)
+        self.env["XBCOMPAT_MAP_PYTHON"] = "/usr/bin/python3"
+        self.env["XBSYMDB_CLI"] = str(self.binary)
+
+    def test_automatic_map_for_unprepared_title(self):
+        image = self.image("new card")
+        generated = self.root / "generated map"
+        generated.write_text("symbol 0x11000\n")
+        self.scanner("import sys\nassert sys.argv[1:]==" + repr(["--map-only", str(image)]) +
+                     "\nprint(" + repr(str(generated)) + ")\n")
+        result = self.launch(image, "--hdd", "/data/game saves")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["args"],
+                         ["--hle", str(generated), "--hdd", "/data/game saves", str(image)])
+
+    def test_failed_scanner_does_not_run_guest(self):
+        self.scanner("import sys\nprint('scanner failed',file=sys.stderr)\nsys.exit(1)\n")
+        result = self.launch(self.image())
+        self.assertEqual(result.returncode, 78)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("scanner failed", result.stderr)
+
+    def test_nonexistent_generated_map_does_not_run_guest(self):
+        self.scanner("print('/nonexistent/generated.map')\n")
+        result = self.launch(self.image())
+        self.assertEqual(result.returncode, 78)
+        self.assertEqual(result.stdout, "")
+
+    def test_kernel_only_title_needs_no_map(self):
+        self.scanner("# No replaced libraries.\n")
+        image = self.image()
+        result = self.launch(image)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["args"], [str(image)])
+
     def test_map_preparation_uses_entire_file_digest(self):
         image = self.image()
         source = self.root / "source.map"

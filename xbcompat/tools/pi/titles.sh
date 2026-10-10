@@ -16,7 +16,7 @@ xbc=$(dirname "$(dirname "$here")")
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-tar -C "$work" -xzf "$bundle" xbcompat/boot xbcompat/dash
+tar -C "$work" -xzf "$bundle" xbcompat/boot xbcompat/dash xbcompat/cache/xbcompat
 stage=$work/xbcompat
 while [ $# -gt 0 ] && [ "$1" != -- ]; do
 	for f in "$1"/*; do

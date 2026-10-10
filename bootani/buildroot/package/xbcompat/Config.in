@@ -3,12 +3,15 @@ config BR2_PACKAGE_XBCOMPAT
 	# x86_64: runs the 32-bit x86 code natively (IA32 emulation).
 	# arm: 32-bit ARM (Raspberry Pi), runs it in Unicorn.
 	depends on BR2_x86_64 || BR2_arm
+	depends on !BR2_arm || (BR2_USE_MMU && BR2_USE_WCHAR && BR2_TOOLCHAIN_HAS_THREADS && !BR2_STATIC_LIBS)
 	select BR2_PACKAGE_UNICORN if BR2_arm
 	select BR2_PACKAGE_SDL2 if BR2_arm
 	select BR2_PACKAGE_SDL2_KMSDRM if BR2_arm
 	select BR2_PACKAGE_SDL2_OPENGLES if BR2_arm
 	select BR2_PACKAGE_LIBGLVND if BR2_arm
 	select BR2_PACKAGE_HOST_PYTHON3 if BR2_arm
+	select BR2_PACKAGE_PYTHON3 if BR2_arm
+	select BR2_PACKAGE_XBSYMBOLDATABASE if BR2_arm
 	help
 	  The original Xbox boot animation (the leak's ani2) and
 	  dashboard (xboxdash.xbe), run by xbcompat, the compatibility
