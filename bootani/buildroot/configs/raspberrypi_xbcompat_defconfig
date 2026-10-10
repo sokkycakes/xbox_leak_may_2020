@@ -1,6 +1,7 @@
 # Raspberry Pi 3, 3B+, Zero 2 W and 4 (5 untested): the Xbox's boot animation
 # and dashboard under xbcompat, straight on KMSDRM, with the Xbox code run
-# by Unicorn (see xbcompat/src/cpu.h). A 32-bit (armhf) userspace, as
+# by Box86 with the renderer native on ARM (Unicorn remains a fallback).
+# A 32-bit (armhf) userspace, as
 # xbcompat needs, under the Raspberry Pi Foundation's 64-bit kernel.
 BR2_arm=y
 BR2_cortex_a53=y

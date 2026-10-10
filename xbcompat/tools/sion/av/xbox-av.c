@@ -33,6 +33,7 @@
  * KMS_MODE=WxH picks the mode the session starts in, as bootani does.
  */
 #define _GNU_SOURCE
+#define _FILE_OFFSET_BITS 64
 #include <drm/drm.h>
 #include <drm/drm_mode.h>
 #include <errno.h>

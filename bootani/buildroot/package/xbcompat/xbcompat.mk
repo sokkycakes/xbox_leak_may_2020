@@ -33,6 +33,8 @@ define XBCOMPAT_BUILD_CMDS
 		CROSS=$(TARGET_CROSS) CFLAGS="$(TARGET_CFLAGS) -O2 -g" GL=opengl \
 		PKGCFG="$(PKG_CONFIG_HOST_BINARY)" UNICORN=$(STAGING_DIR)/usr \
 		LEAK="$(XBCOMPAT_LEAK)" BUILD=build-buildroot build-buildroot/xbcompat
+	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) -O2 -Wall \
+		-o $(@D)/build-buildroot/xbox-av $(@D)/tools/sion/av/xbox-av.c
 endef
 
 ifeq ($(BR2_PACKAGE_BOX86),y)
@@ -44,10 +46,18 @@ define XBCOMPAT_BUILD_X86
 	$(MAKE) -C $(@D) TARGET=i386 CC=/usr/bin/gcc CFLAGS="-O2 -g -fno-stack-protector" \
 		PKGCFG="PKG_CONFIG_PATH=/usr/lib/i386-linux-gnu/pkgconfig /usr/bin/pkg-config" \
 		LEAK="$(XBCOMPAT_LEAK)" BUILD=build-x86 build-x86/xbcompat
+	$(MAKE) -C $(@D) TARGET=i386 RENDERER=native CC=/usr/bin/gcc CFLAGS="-O2 -g -fno-stack-protector" \
+		PKGCFG="PKG_CONFIG_PATH=/usr/lib/i386-linux-gnu/pkgconfig /usr/bin/pkg-config" \
+		LEAK="$(XBCOMPAT_LEAK)" BUILD=build-native-x86 build-native-x86/xbcompat
+	$(TARGET_MAKE_ENV) PATH=$(HOST_DIR)/bin:$$PATH $(MAKE) -C $(@D) -f tools/native-renderer.mk \
+		TARGET=armhf CC=$(TARGET_CC) CFLAGS="$(TARGET_CFLAGS) -O2 -g" GL=opengl \
+		PKGCFG="$(PKG_CONFIG_HOST_BINARY)" BUILD=build-native-arm
 endef
 XBCOMPAT_POST_BUILD_HOOKS += XBCOMPAT_BUILD_X86
 define XBCOMPAT_INSTALL_X86
 	$(INSTALL) -D -m 0755 $(@D)/build-x86/xbcompat $(TARGET_DIR)/opt/xbcompat/bin/xbcompat.x86
+	$(INSTALL) -D -m 0755 $(@D)/build-native-x86/xbcompat $(TARGET_DIR)/opt/xbcompat/bin/xbcompat-native.x86
+	$(INSTALL) -D -m 0755 $(@D)/build-native-arm/libxbcompat_renderer.so.1 $(TARGET_DIR)/opt/xbcompat/native/lib/libxbcompat_renderer.so.1
 	mv $(TARGET_DIR)/opt/xbcompat/bin/xbcompat $(TARGET_DIR)/opt/xbcompat/bin/xbcompat.arm
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/xbcompat-launch $(TARGET_DIR)/opt/xbcompat/bin/xbcompat
 endef
@@ -64,6 +74,7 @@ define XBCOMPAT_INSTALL_TARGET_CMDS
 	done
 	ln -s /usr/bin/XbSymbolDatabaseCLI $(TARGET_DIR)/opt/xbcompat/tools/XbSymbolDatabaseCLI
 	$(INSTALL) -D -m 0755 $(@D)/build-buildroot/xbcompat $(TARGET_DIR)/opt/xbcompat/bin/xbcompat
+	$(INSTALL) -D -m 0755 $(@D)/build-buildroot/xbox-av $(TARGET_DIR)/opt/xbcompat/bin/xbox-av
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/xbox-boot $(TARGET_DIR)/usr/libexec/xbox-boot
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/xbox-session $(TARGET_DIR)/usr/libexec/xbox-session
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/xbox-title $(TARGET_DIR)/usr/libexec/xbox-title

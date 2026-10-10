@@ -30,6 +30,7 @@
 #include <unistd.h>
 
 #include "../xbcompat.h"
+#include "../cpu.h"
 
 #define STATUS_NO_MEDIA_IN_DEVICE       ((NTSTATUS)0xC0000013)
 #define STATUS_MEDIA_WRITE_PROTECTED    ((NTSTATUS)0xC00000A2)
@@ -500,13 +501,35 @@ static xfile *file_of(HANDLE h)
 extern LONG NTAPI KeSetEvent(KEVENT *, LONG, BOOLEAN);
 extern NTSTATUS NTAPI NtSetEvent(HANDLE, LONG *);
 
-static NTSTATUS complete(HANDLE Event, PVOID ApcRoutine, IO_STATUS_BLOCK *iosb, NTSTATUS st, ULONG info)
+/* I/O finishes at once here.  As in IopCompleteRequest, a request that fails
+   without pending still writes the status block but signals nothing; any
+   other one sets the event and queues the caller's completion APC, which runs
+   at the thread's next alertable wait (ReadFileEx + SleepEx). */
+static NTSTATUS complete(HANDLE Event, PVOID ApcRoutine, PVOID ApcContext, IO_STATUS_BLOCK *iosb,
+                         NTSTATUS st, ULONG info)
 {
     iosb->Status = st;
     iosb->Information = info;
+    if (NT_ERROR(st)) return st;
     if (Event) NtSetEvent(Event, NULL);
-    if (ApcRoutine) xlog("I/O completion APC %p not delivered", ApcRoutine);
+    if (ApcRoutine) apc_queue(thread_current(), ApcRoutine, ApcContext, iosb, NULL, NULL);
     return st;
+}
+
+/* ReadFileEx/WriteFileEx pass this as the APC routine and their
+   LPOVERLAPPED_COMPLETION_ROUTINE as its context (io/misc.c). */
+void NTAPI NtUserIoApcDispatcher(PVOID ApcContext, IO_STATUS_BLOCK *iosb, ULONG Reserved)
+{
+    (void)Reserved;
+    ULONG err = 0, n = 0;
+    if (NT_ERROR(iosb->Status)) err = RtlNtStatusToDosError(iosb->Status);
+    else n = (ULONG)iosb->Information;
+    /* The status block is OVERLAPPED.Internal, the structure's first field. */
+#ifdef XBC_TRANSLATED
+    CPU_CALL(ApcContext, CONV_STD, err, n, (uint32_t)iosb);
+#else
+    ((void (NTAPI *)(ULONG, ULONG, PVOID))ApcContext)(err, n, iosb);
+#endif
 }
 
 /* Empty a formatted volume's host directory (but not the directory itself). */
@@ -520,7 +543,7 @@ static int remove_entry(const char *path, const struct stat *sb, int type, struc
 /* A partition opened as a volume has no backing file: sector reads return
    zeros and sector writes are dropped, except that rewriting the volume
    header of a cache partition (3 and up) is a format, which empties it. */
-static NTSTATUS volume_io(xfile *f, HANDLE Event, PVOID ApcRoutine, IO_STATUS_BLOCK *iosb, PVOID Buffer,
+static NTSTATUS volume_io(xfile *f, HANDLE Event, PVOID ApcRoutine, PVOID ApcContext, IO_STATUS_BLOCK *iosb, PVOID Buffer,
                           ULONG Length, LARGE_INTEGER *ByteOffset, bool write)
 {
     LONGLONG off = ByteOffset ? ByteOffset->QuadPart : f->pos;
@@ -533,7 +556,7 @@ static NTSTATUS volume_io(xfile *f, HANDLE Event, PVOID ApcRoutine, IO_STATUS_BL
         nftw(f->host, remove_entry, 16, FTW_DEPTH | FTW_PHYS);
     }
     f->pos = off + Length;
-    return complete(Event, ApcRoutine, iosb, STATUS_SUCCESS, Length);
+    return complete(Event, ApcRoutine, ApcContext, iosb, STATUS_SUCCESS, Length);
 }
 
 NTSTATUS NTAPI NtReadFile(HANDLE FileHandle, HANDLE Event, PVOID ApcRoutine, PVOID ApcContext,
@@ -545,21 +568,21 @@ NTSTATUS NTAPI NtReadFile(HANDLE FileHandle, HANDLE Event, PVOID ApcRoutine, PVO
         LONGLONG off = ByteOffset ? ByteOffset->QuadPart : f->pos;
         ssize_t n = f->is_device ? dvd_read_volume(Buffer, Length, off)
                   : f->dvd && !f->is_dir ? dvd_read(f->dvd, Buffer, Length, off) : -2;
-        if (n == -2) return complete(Event, ApcRoutine, iosb, STATUS_INVALID_DEVICE_REQUEST, 0);
-        if (n < 0) return complete(Event, ApcRoutine, iosb, STATUS_NO_MEDIA_IN_DEVICE, 0);
+        if (n == -2) return complete(Event, ApcRoutine, ApcContext, iosb, STATUS_INVALID_DEVICE_REQUEST, 0);
+        if (n < 0) return complete(Event, ApcRoutine, ApcContext, iosb, STATUS_NO_MEDIA_IN_DEVICE, 0);
         f->pos = off + n;
-        if (n == 0 && Length > 0) return complete(Event, ApcRoutine, iosb, STATUS_END_OF_FILE, 0);
-        complete(Event, ApcRoutine, iosb, STATUS_SUCCESS, (ULONG)n);
+        if (n == 0 && Length > 0) return complete(Event, ApcRoutine, ApcContext, iosb, STATUS_END_OF_FILE, 0);
+        complete(Event, ApcRoutine, ApcContext, iosb, STATUS_SUCCESS, (ULONG)n);
         return f->async ? STATUS_PENDING : STATUS_SUCCESS;
     }
-    if (f && f->fd < 0 && f->is_device) return volume_io(f, Event, ApcRoutine, iosb, Buffer, Length, ByteOffset, false);
+    if (f && f->fd < 0 && f->is_device) return volume_io(f, Event, ApcRoutine, ApcContext, iosb, Buffer, Length, ByteOffset, false);
     if (!f || f->fd < 0) return STATUS_INVALID_HANDLE;
     LONGLONG off = ByteOffset ? ByteOffset->QuadPart : f->pos;
     ssize_t n = pread(f->fd, Buffer, Length, off);
-    if (n < 0) return complete(Event, ApcRoutine, iosb, errno_status(errno), 0);
+    if (n < 0) return complete(Event, ApcRoutine, ApcContext, iosb, errno_status(errno), 0);
     f->pos = off + n;
-    if (n == 0 && Length > 0) return complete(Event, ApcRoutine, iosb, STATUS_END_OF_FILE, 0);
-    complete(Event, ApcRoutine, iosb, STATUS_SUCCESS, (ULONG)n);
+    if (n == 0 && Length > 0) return complete(Event, ApcRoutine, ApcContext, iosb, STATUS_END_OF_FILE, 0);
+    complete(Event, ApcRoutine, ApcContext, iosb, STATUS_SUCCESS, (ULONG)n);
     /* The read is done, but a handle opened for overlapped I/O reports it
        the way the disk driver would, as pending: titles wait on the I/O
        status block, and some only advance after an ERROR_IO_PENDING. */
@@ -571,14 +594,14 @@ NTSTATUS NTAPI NtWriteFile(HANDLE FileHandle, HANDLE Event, PVOID ApcRoutine, PV
 {
     (void)ApcContext;
     xfile *f = file_of(FileHandle);
-    if (f && f->is_dvd) return complete(Event, ApcRoutine, iosb, STATUS_MEDIA_WRITE_PROTECTED, 0);
-    if (f && f->fd < 0 && f->is_device) return volume_io(f, Event, ApcRoutine, iosb, Buffer, Length, ByteOffset, true);
+    if (f && f->is_dvd) return complete(Event, ApcRoutine, ApcContext, iosb, STATUS_MEDIA_WRITE_PROTECTED, 0);
+    if (f && f->fd < 0 && f->is_device) return volume_io(f, Event, ApcRoutine, ApcContext, iosb, Buffer, Length, ByteOffset, true);
     if (!f || f->fd < 0) return STATUS_INVALID_HANDLE;
     LONGLONG off = ByteOffset && ByteOffset->QuadPart >= 0 ? ByteOffset->QuadPart : f->pos;
     ssize_t n = pwrite(f->fd, Buffer, Length, off);
-    if (n < 0) return complete(Event, ApcRoutine, iosb, errno_status(errno), 0);
+    if (n < 0) return complete(Event, ApcRoutine, ApcContext, iosb, errno_status(errno), 0);
     f->pos = off + n;
-    complete(Event, ApcRoutine, iosb, STATUS_SUCCESS, (ULONG)n);
+    complete(Event, ApcRoutine, ApcContext, iosb, STATUS_SUCCESS, (ULONG)n);
     return f->async ? STATUS_PENDING : STATUS_SUCCESS;
 }
 
@@ -841,7 +864,7 @@ NTSTATUS NTAPI NtQueryDirectoryFile(HANDLE FileHandle, HANDLE Event, PVOID ApcRo
             stat(path, &sb);
         }
     }
-    if (!name) return complete(Event, ApcRoutine, iosb, STATUS_NO_MORE_FILES, 0);
+    if (!name) return complete(Event, ApcRoutine, ApcContext, iosb, STATUS_NO_MORE_FILES, 0);
 
     size_t namelen = strlen(name);
     struct dirinfo {
@@ -861,7 +884,7 @@ NTSTATUS NTAPI NtQueryDirectoryFile(HANDLE FileHandle, HANDLE Event, PVOID ApcRo
     d->FileAttributes = attributes_of(&sb);
     d->FileNameLength = namelen;
     memcpy(d->FileName, name, namelen);
-    return complete(Event, ApcRoutine, iosb, STATUS_SUCCESS,
+    return complete(Event, ApcRoutine, ApcContext, iosb, STATUS_SUCCESS,
                     offsetof(struct dirinfo, FileName) + namelen);
 }
 
@@ -918,7 +941,7 @@ NTSTATUS NTAPI NtDeviceIoControlFile(HANDLE FileHandle, HANDLE Event, PVOID ApcR
         ULONG *g = Out;
         g[0] = 0x100000; g[1] = 0;
         g[2] = 12; g[3] = 1; g[4] = 1; g[5] = Code == IOCTL_DISK_GET_DRIVE_GEOMETRY ? 512 : 2048;
-        return complete(Event, ApcRoutine, iosb, STATUS_SUCCESS, 24);
+        return complete(Event, ApcRoutine, ApcContext, iosb, STATUS_SUCCESS, 24);
     }
     case IOCTL_DISK_GET_PARTITION_INFO: {
         /* PARTITION_INFORMATION: StartingOffset, PartitionLength, HiddenSectors,
@@ -930,18 +953,20 @@ NTSTATUS NTAPI NtDeviceIoControlFile(HANDLE FileHandle, HANDLE Event, PVOID ApcR
         li[1].QuadPart = 750ULL << 20;
         ((UCHAR *)Out)[24] = 1;  /* PartitionType */
         ((UCHAR *)Out)[26] = 1;  /* RecognizedPartition */
-        return complete(Event, ApcRoutine, iosb, STATUS_SUCCESS, 32);
+        return complete(Event, ApcRoutine, ApcContext, iosb, STATUS_SUCCESS, 32);
     }
+    case 0x4D014:     /* IOCTL_SCSI_PASS_THROUGH_DIRECT: XAPI's disc authentication check */
+        return complete(Event, ApcRoutine, ApcContext, iosb, dvd_scsi_pass_through(In, InLen), 0);
     case 0x24800:     /* IOCTL_CDROM_CHECK_VERIFY: is there a disc in the tray? */
-        return complete(Event, ApcRoutine, iosb, dvd_check_verify(), 0);
+        return complete(Event, ApcRoutine, ApcContext, iosb, dvd_check_verify(), 0);
     case 0x24000:     /* IOCTL_CDROM_READ_TOC: the DVD directory is a data disc, never audio */
     case 0x2403E: {   /* IOCTL_CDROM_RAW_READ (audio sectors) */
-        return complete(Event, ApcRoutine, iosb,
+        return complete(Event, ApcRoutine, ApcContext, iosb,
                         dvd_tray_empty() ? STATUS_NO_MEDIA_IN_DEVICE : STATUS_INVALID_DEVICE_REQUEST, 0);
     }
     default:
         xlog("NtDeviceIoControlFile: IOCTL %#x not implemented, reporting success", Code);
-        return complete(Event, ApcRoutine, iosb, STATUS_SUCCESS, 0);
+        return complete(Event, ApcRoutine, ApcContext, iosb, STATUS_SUCCESS, 0);
     }
 }
 
@@ -951,7 +976,7 @@ NTSTATUS NTAPI NtFsControlFile(HANDLE FileHandle, HANDLE Event, PVOID ApcRoutine
 {
     (void)FileHandle; (void)ApcContext; (void)In; (void)InLen; (void)Out; (void)OutLen;
     TRACE("NtFsControlFile(%p, %#x)", FileHandle, Code);
-    return complete(Event, ApcRoutine, iosb, STATUS_SUCCESS, 0);
+    return complete(Event, ApcRoutine, ApcContext, iosb, STATUS_SUCCESS, 0);
 }
 
 NTSTATUS NTAPI IoDismountVolume(PVOID DeviceObject) { (void)DeviceObject; return STATUS_SUCCESS; }

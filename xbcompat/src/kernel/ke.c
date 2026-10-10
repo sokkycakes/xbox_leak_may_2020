@@ -285,10 +285,94 @@ static NTSTATUS consume(DISPATCHER_HEADER *h, KTHREAD *self)
     return STATUS_SUCCESS;
 }
 
-NTSTATUS wait_objects(ULONG count, PVOID objects[], int wait_any,
+/* ---- APCs ---------------------------------------------------------------
+   Each guest thread has one queue.  User-mode APCs (I/O completion routines,
+   QueueUserAPC) run when the thread enters a user-mode alertable wait, which
+   then returns STATUS_USER_APC (ke/wait.c TestForAlertPending).  Kernel-mode
+   APCs run at once on their own thread, or at the target's next wait. */
+
+typedef struct xapc {
+    struct xapc *next;
+    PVOID routine, ctx, arg1, arg2;
+    KAPC *kapc;
+    bool user;
+} xapc;
+
+typedef void (NTAPI *normal_routine)(PVOID, PVOID, PVOID);
+typedef void (NTAPI *kernel_routine)(KAPC *, PVOID *, PVOID *, PVOID *, PVOID *);
+
+static void apc_run(xapc *a)
+{
+    PVOID routine = a->routine, ctx = a->ctx, a1 = a->arg1, a2 = a->arg2;
+    if (a->kapc) {
+        KAPC *k = a->kapc;
+        k->Inserted = 0;
+        /* The kernel routine may free the KAPC and may change what runs next. */
+#ifdef XBC_TRANSLATED
+        if (k->KernelRoutine)
+            CPU_CALL(k->KernelRoutine, CONV_STD, (uint32_t)k, (uint32_t)&routine, (uint32_t)&ctx,
+                     (uint32_t)&a1, (uint32_t)&a2);
+#else
+        if (k->KernelRoutine) ((kernel_routine)k->KernelRoutine)(k, &routine, &ctx, &a1, &a2);
+#endif
+    }
+#ifdef XBC_TRANSLATED
+    if (routine) CPU_CALL(routine, CONV_STD, (uint32_t)ctx, (uint32_t)a1, (uint32_t)a2);
+#else
+    if (routine) ((normal_routine)routine)(ctx, a1, a2);
+#endif
+    free(a);
+}
+
+static bool apc_pending(xthread *t, bool user)
+{
+    for (xapc *a = t->apc_head; a; a = a->next)
+        if (a->user == user) return true;
+    return false;
+}
+
+/* Run t's queued APCs of one mode; called on t with g_disp_lock held, which
+   is dropped while each routine runs. */
+static void apc_drain(xthread *t, bool user)
+{
+    for (;;) {
+        xapc **pp = &t->apc_head, *a;
+        while ((a = *pp) && a->user != user) pp = &a->next;
+        if (!a) return;
+        *pp = a->next;
+        if (t->apc_tail == a) {
+            t->apc_tail = NULL;
+            for (xapc *p = t->apc_head; p; p = p->next) t->apc_tail = p;
+        }
+        pthread_mutex_unlock(&g_disp_lock);
+        apc_run(a);
+        /* The routine took the guest CPU (translated builds); a wait that
+           goes on blocking must not keep it. */
+        cpu_block();
+        pthread_mutex_lock(&g_disp_lock);
+    }
+}
+
+void apc_queue(xthread *t, PVOID routine, PVOID ctx, PVOID arg1, PVOID arg2, KAPC *kapc)
+{
+    xapc *a = calloc(1, sizeof(*a));
+    a->routine = routine; a->ctx = ctx; a->arg1 = arg1; a->arg2 = arg2; a->kapc = kapc;
+    a->user = kapc ? kapc->ApcMode == 1 : true;
+    if (!a->user && t == thread_current()) {
+        apc_run(a);
+        return;
+    }
+    pthread_mutex_lock(&g_disp_lock);
+    if (t->apc_tail) t->apc_tail->next = a; else t->apc_head = a;
+    t->apc_tail = a;
+    disp_signal_all();
+    pthread_mutex_unlock(&g_disp_lock);
+}
+
+NTSTATUS wait_objects(ULONG count, PVOID objects[], int wait_any, KPROCESSOR_MODE mode,
                       BOOLEAN alertable, LARGE_INTEGER *timeout)
 {
-    (void)alertable;
+    bool user_apcs = alertable && mode == 1;
     xthread *xt = thread_current();
     KTHREAD *self = xt ? &xt->ethread.Tcb : NULL;
     struct timespec dl;
@@ -316,6 +400,7 @@ NTSTATUS wait_objects(ULONG count, PVOID objects[], int wait_any,
 
     pthread_mutex_lock(&g_disp_lock);
     for (;;) {
+        if (xt && xt->apc_head) apc_drain(xt, false);
         if (wait_any) {
             for (ULONG i = 0; i < count; i++) {
                 DISPATCHER_HEADER *h = objects[i];
@@ -336,6 +421,11 @@ NTSTATUS wait_objects(ULONG count, PVOID objects[], int wait_any,
                 st = STATUS_SUCCESS;
                 goto done;
             }
+        }
+        if (user_apcs && xt && apc_pending(xt, true)) {
+            apc_drain(xt, true);
+            st = STATUS_USER_APC;
+            goto done;
         }
         if (poll) { st = STATUS_TIMEOUT; goto done; }
         if (!listed) {
@@ -377,8 +467,8 @@ done:
 NTSTATUS NTAPI KeWaitForSingleObject(PVOID Object, ULONG WaitReason, KPROCESSOR_MODE WaitMode,
                                      BOOLEAN Alertable, LARGE_INTEGER *Timeout)
 {
-    (void)WaitReason; (void)WaitMode;
-    return wait_objects(1, &Object, 1, Alertable, Timeout);
+    (void)WaitReason;
+    return wait_objects(1, &Object, 1, WaitMode, Alertable, Timeout);
 }
 
 NTSTATUS NTAPI KeWaitForMultipleObjects(ULONG Count, PVOID Object[], ULONG WaitType,
@@ -386,14 +476,19 @@ NTSTATUS NTAPI KeWaitForMultipleObjects(ULONG Count, PVOID Object[], ULONG WaitT
                                         BOOLEAN Alertable, LARGE_INTEGER *Timeout,
                                         KWAIT_BLOCK *WaitBlockArray)
 {
-    (void)WaitReason; (void)WaitMode; (void)WaitBlockArray;
-    return wait_objects(Count, Object, WaitType == 1 /* WaitAny */, Alertable, Timeout);
+    (void)WaitReason; (void)WaitBlockArray;
+    return wait_objects(Count, Object, WaitType == 1 /* WaitAny */, WaitMode, Alertable, Timeout);
 }
 
 NTSTATUS NTAPI KeDelayExecutionThread(KPROCESSOR_MODE WaitMode, BOOLEAN Alertable,
                                       LARGE_INTEGER *Interval)
 {
-    (void)WaitMode; (void)Alertable;
+    xthread *xt = thread_current();
+    if ((Alertable && WaitMode == 1) || (xt && xt->apc_head)) {
+        /* A wait on nothing: it ends at the interval or at an APC. */
+        NTSTATUS st = wait_objects(0, NULL, 1, WaitMode, Alertable, Interval);
+        return st == STATUS_TIMEOUT ? STATUS_SUCCESS : st;
+    }
     LONGLONG t = Interval->QuadPart;
     ULONGLONG rel = t < 0 ? (ULONGLONG)-t : (t > (LONGLONG)system_time_now() ? t - system_time_now() : 0);
     cpu_block();
@@ -670,6 +765,8 @@ BOOLEAN NTAPI KeCancelTimer(KTIMER *Timer)
 
 typedef void (NTAPI *dpc_fn)(KDPC *, PVOID, PVOID, PVOID);
 
+void (*g_vblank_hook)(void);
+
 /* The DPC thread: fires timers, runs DPCs and keeps KeTickCount moving. */
 static void *dpc_thread(void *arg)
 {
@@ -678,6 +775,7 @@ static void *dpc_thread(void *arg)
     (void)arg;
     thread_adopt_host("dpc");
     set_irql(2);
+    ULONGLONG next_vblank = 0;
     pthread_mutex_lock(&dpc_lock);
     for (;;) {
         ULONGLONG now = mono_100ns();
@@ -715,6 +813,19 @@ static void *dpc_thread(void *arg)
                 t->Header.Inserted = 0;
                 *pp = n->next;
                 free(n);
+            }
+        }
+
+        /* Vertical blanks, 60 a second. */
+        void (*vblank_hook)(void) = __atomic_load_n(&g_vblank_hook, __ATOMIC_ACQUIRE);
+        if (vblank_hook) {
+            if (!next_vblank) next_vblank = now;
+            if (now >= next_vblank) {
+                next_vblank += 166667;
+                if (next_vblank + 100 * 10000ULL < now) next_vblank = now + 166667;
+                pthread_mutex_unlock(&dpc_lock);
+                vblank_hook();
+                pthread_mutex_lock(&dpc_lock);
             }
         }
 
@@ -852,11 +963,12 @@ void NTAPI KeInitializeApc(KAPC *Apc, KTHREAD *Thread, PVOID KernelRoutine, PVOI
 BOOLEAN NTAPI KeInsertQueueApc(KAPC *Apc, PVOID Arg1, PVOID Arg2, LONG Increment)
 {
     (void)Increment;
-    /* APCs need the target thread to enter an alertable wait; run user APCs
-       immediately instead.  Good enough for completion callbacks. */
+    if (Apc->Inserted || !Apc->Thread) return 0;
     Apc->SystemArgument1 = Arg1;
     Apc->SystemArgument2 = Arg2;
-    xlog("KeInsertQueueApc: APC delivery is not implemented; dropping %p", (void *)Apc);
+    Apc->Inserted = 1;
+    xthread *t = (xthread *)((char *)Apc->Thread - offsetof(xthread, ethread.Tcb));
+    apc_queue(t, Apc->NormalRoutine, Apc->NormalContext, Arg1, Arg2, Apc);
     return 1;
 }
 

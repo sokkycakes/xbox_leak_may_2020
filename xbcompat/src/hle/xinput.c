@@ -60,7 +60,9 @@
  * headless runs that need to get through menus: "FRAME:BUTTON[/HOLD] ..."
  * (separated by spaces or commas), BUTTON being one of the names above and
  * HOLD the frames it stays down (default 6).  "1500:down 1530:a/10" moves
- * down a menu at frame 1500 and presses A at frame 1530.
+ * down a menu at frame 1500 and presses A at frame 1530.  A "p2" in front of
+ * the button ("2000:p2start") presses it on a second scripted pad, which is
+ * plugged into port 1 when the script names one (split-screen menus).
  */
 #define _GNU_SOURCE
 #include <SDL.h>
@@ -486,6 +488,15 @@ static void map_original_pad(int j)
 static void map_original_pad(int j) { (void)j; }
 #endif
 
+/* XBCOMPAT_INPUT_SCRIPT (see the top of the file), or NULL. */
+static const char *input_script(void)
+{
+    static const char *script;
+    static int checked;
+    if (!checked) { script = getenv("XBCOMPAT_INPUT_SCRIPT"); checked = 1; }
+    return script;
+}
+
 static void sync_devices(bool force)
 {
     uint64_t t = now_us();
@@ -520,6 +531,8 @@ static void sync_devices(bool force)
     bool want_kbd = !xi.kbd_disabled && !any_controller() && SDL_WasInit(SDL_INIT_VIDEO);
     if (want_kbd && !xi.port[0].connected) insert_port(0, NULL, -1, true);
     else if (!want_kbd && xi.port[0].kbd) remove_port(0);
+    if (want_kbd && input_script() && strstr(input_script(), ":p2") && !xi.port[1].connected)
+        insert_port(1, NULL, -1, true);
 }
 
 /*
@@ -714,20 +727,20 @@ static void read_controller(SDL_GameController *gc, XINPUT_GAMEPAD *g)
 }
 
 /* XBCOMPAT_INPUT_SCRIPT (see the top of the file). */
-static void read_script(XINPUT_GAMEPAD *g)
+static void read_script(XINPUT_GAMEPAD *g, unsigned port)
 {
-    static const char *script;
-    static int checked;
-    if (!checked) { script = getenv("XBCOMPAT_INPUT_SCRIPT"); checked = 1; }
+    const char *script = input_script();
     if (!script) return;
     ULONG now = d3d_frame_count();
     char buf[1024];
     snprintf(buf, sizeof buf, "%s", script);
     for (char *save, *tok = strtok_r(buf, " ,", &save); tok; tok = strtok_r(NULL, " ,", &save)) {
-        char name[16] = "";
+        char buf2[16] = "", *name = buf2;
         unsigned frame = 0, hold = 6;
-        if (sscanf(tok, "%u:%15[a-z]/%u", &frame, name, &hold) < 2) continue;
-        if (now < frame || now >= frame + hold) continue;
+        if (sscanf(tok, "%u:%15[a-z0-9]/%u", &frame, buf2, &hold) < 2) continue;
+        unsigned to = 0;
+        if (!strncmp(name, "p2", 2)) { to = 1; name += 2; }
+        if (to != port || now < frame || now >= frame + hold) continue;
         static const char *analog[] = { "a", "b", "x", "y", "black", "white", "lt", "rt" };
         static const int analog_idx[] = { XINPUT_GAMEPAD_A, XINPUT_GAMEPAD_B, XINPUT_GAMEPAD_X, XINPUT_GAMEPAD_Y,
                                           XINPUT_GAMEPAD_BLACK, XINPUT_GAMEPAD_WHITE,
@@ -747,7 +760,10 @@ static void read_script(XINPUT_GAMEPAD *g)
 static void read_port(const xi_port *p, XINPUT_GAMEPAD *g)
 {
     memset(g, 0, sizeof(*g));
-    if (p->kbd) { read_keyboard(g); read_script(g); }
+    if (p->kbd) {
+        if (p == &xi.port[0]) read_keyboard(g);
+        read_script(g, (unsigned)(p - xi.port));
+    }
     else if (p->gc) {
         read_controller(p->gc, g);
         /* The keyboard keeps working beside a controller in port 0. */
@@ -784,6 +800,33 @@ static void sample(xi_handle *h, const xi_port *p, bool force)
         h->packet += (ULONG)n;
         h->sampled_us += n * interval;
     }
+}
+
+/*
+ * L + R + Back + Start on any pad (Q + E + Escape + Backspace on the
+ * keyboard pad) goes back to the dashboard, the in-game reset modded Xboxes
+ * had (kernel/reset.c). It fires when the last of the four goes down, so a
+ * combo still held from the title before doesn't reset this one.
+ */
+void xinput_check_reset_combo(void)
+{
+    static bool was_held = true;
+    if (!reset_enabled() || !xi.inited || !xi.sdl_ready) return;
+    bool held = false;
+    pthread_mutex_lock(&xi.lock);
+    for (unsigned i = 0; i < XI_PORTS && !held; i++) {
+        const xi_port *p = &xi.port[i];
+        if (!p->connected) continue;
+        XINPUT_GAMEPAD g;
+        read_port(p, &g);
+        held = (g.wButtons & (XINPUT_GAMEPAD_BACK | XINPUT_GAMEPAD_START)) ==
+                   (XINPUT_GAMEPAD_BACK | XINPUT_GAMEPAD_START) &&
+               g.bAnalogButtons[XINPUT_GAMEPAD_LEFT_TRIGGER] >= 128 &&
+               g.bAnalogButtons[XINPUT_GAMEPAD_RIGHT_TRIGGER] >= 128;
+    }
+    pthread_mutex_unlock(&xi.lock);
+    if (held && !was_held) reset_request("L + R + Back + Start");
+    was_held = held;
 }
 
 /* ---- handles ------------------------------------------------------------ */

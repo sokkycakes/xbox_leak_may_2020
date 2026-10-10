@@ -20,6 +20,7 @@ void misc_init(void);
 int g_screenshot_frame = 60;
 const char *g_screenshot_path;
 int g_exit_after_frames;
+volatile unsigned g_guest_traps;
 
 #ifdef XBC_NATIVE
 /* int 2Dh is the kernel debugger service (DebugService in the NT CRT):
@@ -76,7 +77,7 @@ static void crash_handler(int sig, siginfo_t *si, void *uc_)
 {
     ucontext_t *uc = uc_;
     greg_t *r = uc->uc_mcontext.gregs;
-    if (sig == SIGSEGV && (read_tsc(r) || debug_service(r) || privileged_insn(r))) return;
+    if (sig == SIGSEGV && (read_tsc(r) || debug_service(r) || privileged_insn(r))) { g_guest_traps++; return; }
     if (sig == SIGTRAP) {
         /* int 3 (DbgBreakPoint and friends): nobody is listening, carry on. */
         xlog("breakpoint at eip=%08x ignored", r[REG_EIP]);
@@ -257,6 +258,7 @@ int main(int argc, char **argv)
     fs_init(xbe, hdd, g_dvd_root, g_dvd_drive);
     launch_init(argc, argv, d_path, launch_data, xbe_rel);
     kernel_resolve_imports(&img);
+    reset_init(((XBE_CERTIFICATE *)img.header->Certificate)->TitleID);
     hle_patch(&img, hle);
 
     thread_create(img.header->SizeOfStackCommit, 0, NULL, (PVOID)run_entry_point,

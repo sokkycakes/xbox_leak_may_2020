@@ -614,6 +614,7 @@ static int hook_rdtsc(uc_engine *uc, void *user)
 {
     /* Titles poll the counter while they wait: a good place to switch. */
     maybe_yield(user);
+    g_guest_traps++;
     ULONGLONG v = ke_guest_tsc();
     wr(uc, UC_X86_REG_EAX, (uint32_t)v);
     wr(uc, UC_X86_REG_EDX, (uint32_t)(v >> 32));

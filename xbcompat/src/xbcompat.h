@@ -74,6 +74,7 @@ typedef struct xthread {
     SIZE_T stack_size;
     PVOID system_routine, start_routine, start_context;
     jmp_buf exit_jmp;
+    struct xapc *apc_head, *apc_tail;   /* queued APCs, under g_disp_lock */
 } xthread;
 
 void thread_init_main(void);
@@ -95,12 +96,20 @@ extern pthread_mutex_t g_disp_lock;
    the threads waiting on it (disp_signal_all: every waiting thread). */
 void disp_signal(void *object);
 void disp_signal_all(void);
-NTSTATUS wait_objects(ULONG count, PVOID objects[], int wait_any,
+/* A user-mode alertable wait (mode 1) runs the thread's queued APCs and
+   returns STATUS_USER_APC. */
+NTSTATUS wait_objects(ULONG count, PVOID objects[], int wait_any, KPROCESSOR_MODE mode,
                       BOOLEAN alertable, LARGE_INTEGER *timeout);
+/* Queue an APC to t: routine(ctx, arg1, arg2), stdcall.  kapc, when set, is
+   the guest's KAPC (KeInsertQueueApc); its KernelRoutine runs first. */
+void apc_queue(xthread *t, PVOID routine, PVOID ctx, PVOID arg1, PVOID arg2, KAPC *kapc);
+ULONG NTAPI RtlNtStatusToDosError(NTSTATUS st);
 void timers_init(void);
+extern void (*g_vblank_hook)(void);   /* run 60 times a second on the DPC thread */
 void ke_frame_presented(void);   /* XBCOMPAT_FIXED_FPS clock step */
 ULONGLONG system_time_now(void);   /* 100 ns units since 1601 */
 ULONGLONG ke_guest_tsc(void);      /* what a guest rdtsc reads */
+extern volatile unsigned g_guest_traps;   /* faults answered for the guest (rdtsc etc.), for XBCOMPAT_LOG_FPS */
 void thread_trap_tsc(void);        /* make this thread's rdtsc fault into ke_guest_tsc */
 void thread_untrap_tsc(void);      /* back to the host's counter, before exec */
 
@@ -159,6 +168,7 @@ ssize_t dvd_read(dvd_node *n, void *buf, size_t len, uint64_t off);
 ssize_t dvd_read_volume(void *buf, size_t len, uint64_t off);
 bool dvd_extract(dvd_node *n, char *host, size_t hostlen);
 void dvd_title_started(const char *xbe_host_path);
+NTSTATUS dvd_scsi_pass_through(void *in, ULONG inlen);
 
 /* ---- title launches (XLaunchNewImage) --------------------------------- */
 
@@ -170,6 +180,14 @@ NTSTATUS fs_translate(const OBJECT_ATTRIBUTES *oa, char *host, size_t hostlen, i
 void av_title_starting(void);
 void av_persist(const unsigned char *px, unsigned w, unsigned h);
 void av_hand_over(void);
+
+/* ---- soft reset to the dashboard (kernel/reset.c) --------------------- */
+
+void reset_init(ULONG title_id);
+bool reset_enabled(void);
+void reset_request(const char *why);
+void reset_check(void);
+void xinput_check_reset_combo(void);
 
 /* ---- loader ----------------------------------------------------------- */
 

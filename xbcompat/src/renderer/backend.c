@@ -14,6 +14,8 @@ static int conventions[1024];
 static size_t nexports;
 int g_trace, g_screenshot_frame, g_exit_after_frames;
 const char *g_screenshot_path;
+volatile unsigned g_guest_traps;
+void (*g_vblank_hook)(void); /* Native hook, distinct from the x86 kernel thunk. */
 
 void xa_register(const struct xa_entry *tbl, size_t n)
 {
@@ -68,6 +70,11 @@ void xbr_control(uint32_t op, uint32_t *a)
     }
     case XBR_BIND_GLOBALS: d3d_bind_globals(); break;
     case XBR_FRAME_COUNT: a[0] = d3d_frame_count(); break;
+    case XBR_VBLANK: {
+        void (*hook)(void) = __atomic_load_n(&g_vblank_hook, __ATOMIC_ACQUIRE);
+        if (hook) hook();
+        break;
+    }
     default: abort();
     }
 }
@@ -92,7 +99,17 @@ void xbc_exit(int code)
     uint32_t a[] = {(uint32_t)code}; host_call(XBR_EXIT, a); abort();
 }
 #define SERVICE0(fn, op) void fn(void) { host_call(op, NULL); }
-SERVICE0(ke_frame_presented, XBR_FRAME_PRESENTED)
+void ke_frame_presented(void)
+{
+    uint32_t a[1] = {0}; host_call(XBR_FRAME_PRESENTED, a); g_guest_traps = a[0];
+}
+SERVICE0(xinput_check_reset_combo, XBR_RESET_COMBO)
+SERVICE0(reset_check, XBR_RESET_CHECK)
+LONG NTAPI KeSetEvent(KEVENT *event, LONG increment, BOOLEAN wait)
+{
+    uint32_t a[] = {(uint32_t)(uintptr_t)event, (uint32_t)increment, wait};
+    host_call(XBR_SET_EVENT, a); return (LONG)a[0];
+}
 SERVICE0(install_fault_handlers, XBR_FAULT_HANDLERS)
 SERVICE0(av_title_starting, XBR_AV_START)
 SERVICE0(av_hand_over, XBR_AV_HANDOVER)
