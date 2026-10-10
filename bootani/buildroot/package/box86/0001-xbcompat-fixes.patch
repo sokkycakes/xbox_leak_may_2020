@@ -89,7 +89,7 @@ index 654d196..af308cc 100755
      }
      #undef GO
 diff --git a/src/libtools/signals.c b/src/libtools/signals.c
-index a995f27..b3be0ee 100755
+index a995f27..ae530ff 100755
 --- a/src/libtools/signals.c
 +++ b/src/libtools/signals.c
 @@ -33,6 +33,7 @@
@@ -149,7 +149,7 @@ index a995f27..b3be0ee 100755
      if(oldact) {
          oldact->sa_flags = old.sa_flags;
          oldact->sa_mask = old.sa_mask;
-@@ -1469,8 +1488,140 @@ static void atfork_child_dynarec_prot(void)
+@@ -1469,8 +1488,141 @@ static void atfork_child_dynarec_prot(void)
      #endif
  }
  #endif
@@ -232,11 +232,12 @@ index a995f27..b3be0ee 100755
 +    for (int i = 0; i < PROF_SLOTS; i++) x86sum += prof_x86[i].count;
 +    fprintf(f, "\nrecompiled x86 code: %.2f%%\n\nnative code by library:\n", 100.0 * x86sum / n);
 +    struct { const char* lib; uint32_t count; } libs[64]; int nlibs = 0;
-+    struct { const char* lib; const char* fn; uintptr_t base; uint32_t count; } fns[512]; int nfns = 0;
++    struct { const char* lib; const char* fn; uintptr_t base, fbase; uint32_t count; } fns[512]; int nfns = 0;
 +    for (int i = 0; i < used; i++) {
-+        Dl_info di; const char* lib = "?"; const char* fn = "?"; uintptr_t base = tmp[i].key;
++        Dl_info di; const char* lib = "?"; const char* fn = "?"; uintptr_t base = tmp[i].key, fbase = 0;
 +        if (dladdr((void*)(uintptr_t)tmp[i].key, &di)) {
 +            if (di.dli_fname) lib = di.dli_fname;
++            fbase = (uintptr_t)di.dli_fbase;
 +            if (di.dli_sname) { fn = di.dli_sname; base = (uintptr_t)di.dli_saddr; }
 +        }
 +        int j;
@@ -244,7 +245,7 @@ index a995f27..b3be0ee 100755
 +        if (j == nlibs && nlibs < 64) { libs[nlibs].lib = lib; libs[nlibs].count = 0; nlibs++; }
 +        if (j < nlibs) libs[j].count += tmp[i].count;
 +        for (j = 0; j < nfns && !(fns[j].base == base && !strcmp(fns[j].lib, lib)); j++);
-+        if (j == nfns && nfns < 512) { fns[nfns].lib = lib; fns[nfns].fn = fn; fns[nfns].base = base; fns[nfns].count = 0; nfns++; }
++        if (j == nfns && nfns < 512) { fns[nfns].lib = lib; fns[nfns].fn = fn; fns[nfns].base = base; fns[nfns].fbase = fbase; fns[nfns].count = 0; nfns++; }
 +        if (j < nfns) fns[j].count += tmp[i].count;
 +    }
 +    for (int a = 0; a < nlibs; a++) for (int b = a + 1; b < nlibs; b++)
@@ -254,7 +255,7 @@ index a995f27..b3be0ee 100755
 +        if (fns[b].count > fns[a].count) { __typeof__(fns[0]) t = fns[a]; fns[a] = fns[b]; fns[b] = t; }
 +    fprintf(f, "\nnative functions:\n");
 +    for (int a = 0; a < nfns && a < 60; a++)
-+        fprintf(f, "%6.2f%%  %s (%s) %p\n", 100.0 * fns[a].count / n, fns[a].fn, fns[a].lib, (void*)fns[a].base);
++        fprintf(f, "%6.2f%%  %s (%s+0x%x)\n", 100.0 * fns[a].count / n, fns[a].fn, fns[a].lib, (unsigned)(fns[a].base - fns[a].fbase));
 +    used = prof_sorted(prof_x86, PROF_SLOTS, tmp);
 +    fprintf(f, "\nx86 addresses:\n");
 +    for (int i = 0; i < used && i < 150; i++)
