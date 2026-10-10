@@ -2466,7 +2466,7 @@ static LONG NTAPI D3DDevice_CreateVertexShader(const ULONG *decl, const ULONG *f
    (0 = fixed function for that stage) with its uniform locations. */
 typedef struct program_entry {
     GLuint vs, fs, prog;
-    GLint loc_ff_lighting;
+    GLint loc_ff_lighting, loc_fog_vertex_mode;
     GLint loc_c, loc_flip_y, loc_vp_scale, loc_vp_offset, loc_wdepth;
     GLint loc_tex[4], loc_cube[4], loc_vol[4], loc_tex_scale, loc_c0, loc_c1, loc_fc0, loc_fc1,
           loc_bump_env, loc_bump_lum, loc_eye_vector, loc_key_color;
@@ -2668,6 +2668,7 @@ static program_entry *program_for(GLuint vs, GLuint fs)
         e->loc_bump_env = U("bump_env");
         e->loc_bump_lum = U("bump_lum");
         e->loc_ff_lighting = U("ff_lighting");
+        e->loc_fog_vertex_mode = U("fog_vertex_mode");
         e->loc_eye_vector = U("eye_vector");
         e->loc_key_color = U("key_color");
 #undef U
@@ -2985,6 +2986,7 @@ static bool use_program(GLuint vs, program_entry **out)
        Synchronize on every draw, including cached program reuse and VS -> FF. */
     if (vs && RS(D3DRS_POINTSCALEENABLE)) glEnable(GL_VERTEX_PROGRAM_POINT_SIZE);
     else glDisable(GL_VERTEX_PROGRAM_POINT_SIZE);
+    bool programmable_vertex = vs != 0;
     if (!vs) vs = fixed_lighting_shader();
     if (!vs && !fs) { program_off(); return true; }
     program_entry *e = program_for(vs, fs);
@@ -2994,6 +2996,16 @@ static bool use_program(GLuint vs, program_entry **out)
     if (cur_program != e->prog) p_glUseProgram(e->prog);
     cur_program = e->prog;
     if (fs) upload_ps_uniforms(e);
+    if (e->loc_fog_vertex_mode >= 0) {
+        ULONG mode = RS(D3DRS_FOGTABLEMODE);
+        /* Only paired programmable stages share the factor convention.
+           Legacy vertex/fragment stages retain their coordinate convention.
+           Equal linear endpoints still require a parameter-generation oracle. */
+        bool factor = programmable_vertex && fs && RS(D3DRS_FOGENABLE)
+            && mode >= 1 && mode <= 3
+            && (mode != 3 || rs_float(D3DRS_FOGSTART) != rs_float(D3DRS_FOGEND));
+        p_glUniform1f(e->loc_fog_vertex_mode, factor ? mode : 0);
+    }
     upload_fixed_lighting(e);
     *out = e;
     return true;

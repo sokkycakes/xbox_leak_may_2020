@@ -700,6 +700,8 @@ char *psh_translate_ex(const uint32_t *rs, const psh_options *options)
     if (c->use_eye_vector) sb_cat(&out, "uniform vec4 eye_vector;\n");
     if (c->use_key_color) sb_cat(&out, "uniform vec4 key_color[4];\n");
 
+    if (c->use_fog) sb_cat(&out, "uniform float fog_vertex_mode;\n");
+
     /* helpers: signed interpretations of unsigned-normalised texels */
     if (c->use_snorm8[0])
         sb_cat(&out, "float snorm8_d3d(float x) { return (x * 255.0 - 128.0) / 127.0; }\n");
@@ -744,6 +746,8 @@ char *psh_translate_ex(const uint32_t *rs, const psh_options *options)
         else if (fog_mode == 2) f = "clamp(exp(-(gl_Fog.density * gl_FogFragCoord) * (gl_Fog.density * gl_FogFragCoord)), 0.0, 1.0)";
         else f = "clamp(gl_FogFragCoord, 0.0, 1.0)";
         sb_fmt(&out, "    vec4 fog = vec4(gl_Fog.color.rgb, %s);\n", f);
+        if (fog_enable)
+            sb_cat(&out, "    if (fog_vertex_mode != 0.0) fog.a = clamp(gl_FogFragCoord, 0.0, 1.0);\n");
     }
     sb_cat(&out, c->tex.s);
     sb_cat(&out, "    vec4 r0 = vec4(0.0, 0.0, 0.0, t0.a);\n    vec4 r1 = vec4(0.0);\n");

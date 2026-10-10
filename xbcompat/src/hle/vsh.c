@@ -343,6 +343,7 @@ static const char *const prologue =
     "/* NV2A vertex program, translated by xbcompat */\n"
     "uniform vec4 c[192];\n"
     "uniform float flip_y;\n"
+    "uniform float fog_vertex_mode;\n"
     "uniform vec4 vp_scale, vp_offset, wdepth;\n";
 
 static const char *const helpers =
@@ -518,7 +519,15 @@ char *vsh_translate(const uint32_t *code, unsigned count)
            "  gl_TexCoord[1] = oT1;\n"
            "  gl_TexCoord[2] = oT2;\n"
            "  gl_TexCoord[3] = oT3;\n"
-           "  gl_FogFragCoord = oFog.x;\n"
+           /* Preserve finite factors outside [0,1] until fragment use. */
+           "  float fog_factor = oFog.x;\n"
+           "  if (fog_vertex_mode == 1.0) fog_factor = exp(-gl_Fog.density * oFog.x);\n"
+           "  else if (fog_vertex_mode == 2.0) {\n"
+           "    float fd = gl_Fog.density * oFog.x;\n"
+           "    fog_factor = exp(-fd * fd);\n"
+           "  } else if (fog_vertex_mode == 3.0)\n"
+           "    fog_factor = (gl_Fog.end - oFog.x) * gl_Fog.scale;\n"
+           "  gl_FogFragCoord = fog_factor;\n"
            "  gl_PointSize = oPts.x;\n"
            "}\n");
 

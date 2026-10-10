@@ -706,6 +706,79 @@ int main(int argc, char **argv)
             puts("renderer programmable points: oPts selection, toggles and fixed-function return passed");
         }
 
+
+        /* Programmable fog is evaluated before interpolation. Literal endpoint
+         * factors separate exp/interpolate from interpolate/exp, and distinguish
+         * unclamped vertex factors from early [0,1] clamping. */
+        {
+            uint32_t saved_rs[256], saved_tss[128];
+            memcpy(saved_rs,render_states,sizeof saved_rs);
+            memcpy(saved_tss,texture_states,sizeof saved_tss);
+            LONG (NTAPI *create_vshader)(const ULONG *,const ULONG *,ULONG *,ULONG) =
+                find("_D3DDevice_CreateVertexShader@16");
+            void (NTAPI *delete_vshader)(ULONG) = find("_D3DDevice_DeleteVertexShader@4");
+            static const ULONG decl[] = {
+                0x20000000,0x40420000,0x40120001,0x40420002,0xffffffff
+            };
+            /* MOV oPos,v0; MOV oFog.y,v1.x; MOV oD0,v2.
+             * A non-X output mask still publishes the selected scalar. */
+            static const ULONG function[] = {
+                0x00032078,
+                0,0x0020001b,0x08000000,0x0000f800,
+                0,0x00200200,0x08000000,0x00004828,
+                0,0x0020041b,0x08000000,0x0000f819
+            };
+            ULONG fog_vs = 0, fog_ps = 0, def[60] = {0};
+            assert(create_vshader(decl,function,&fog_vs,0) == 0 && fog_vs);
+            def[8] = 0x13; def[9] = 0x14u << 8; /* FOG.a as RGB, V0.a */
+            create_ps(def,&fog_ps);
+            assert(fog_ps);
+            set_ps(fog_ps);
+            set_vs(fog_vs);
+            render_states[59] = render_states[60] = render_states[92] = 0;
+            render_states[93] = render_states[109] = render_states[124] = 0;
+            render_states[66] = GL_SMOOTH;
+            render_states[67] = 0xffffffffu;
+            render_states[82] = 1;
+            render_states[84] = 0; /* start 0 */
+            render_states[85] = render_states[86] = 0x3f800000u; /* end/density 1 */
+            for (int s = 0; s < 4; s++) {
+                set_tex(s,NULL);
+                texture_states[s*32+12] = 1;
+            }
+            struct fog_vertex { float position[4], fog, color[4]; } quad[] = {
+                {{4,4,0.5f,1},0,{1,1,1,1}}, {{60,4,0.5f,1},4,{1,1,1,1}},
+                {{4,60,0.5f,1},0,{1,1,1,1}}, {{60,60,0.5f,1},4,{1,1,1,1}}
+            };
+            static const float endpoints[3][2] = {
+                {1,0.018315639f}, {1,0.000000112535f}, {3,-1}
+            };
+            for (int mode = 1; mode <= 3; mode++) {
+                render_states[83] = mode;
+                for (int i = 0; i < 4; i++)
+                    quad[i].fog = mode == 3 ? ((i&1) ? 2 : -2) : ((i&1) ? 4 : 0);
+                clear(0,NULL,0xf3,0xff000000,1.0f,0);
+                draw(6,4,quad,sizeof quad[0]); /* triangle strip */
+                glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                float factor = endpoints[mode-1][0] * (1-28.5f/56)
+                             + endpoints[mode-1][1] * (28.5f/56);
+                int expected = (int)(factor * 255 + 0.5f);
+                /* Account for the renderer's half-pixel viewport convention. */
+                assert(abs((int)pixel[0]-expected) <= 12);
+                assert(abs((int)pixel[1]-expected) <= 12 && pixel[3] > 240);
+            }
+            render_states[82] = 0;
+            clear(0,NULL,0xf3,0xff000000,1.0f,0);
+            draw(6,4,quad,sizeof quad[0]);
+            glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+            assert(pixel[0] > 240 && pixel[1] > 240);
+            set_ps(0); set_vs(0x144); delete_vshader(fog_vs);
+            set_tex(0,tex);
+            memcpy(render_states,saved_rs,sizeof saved_rs);
+            memcpy(texture_states,saved_tss,sizeof saved_tss);
+            puts("renderer programmable fog: exponential interpolation, unclamped factors, masks and disable passed");
+        }
+
         /* Compressed volume uploads decode the packed slab order before GL.
          * The selected blocks distinguish XY tiles, slices within a slab,
          * and the second slab. Minification then selects an authored mip. */
