@@ -2388,8 +2388,13 @@ typedef struct { ULONG lo, hi; } vrange;
 
 /* Conversions and index scans are kept between draws: the dashboard draws
    the same large meshes every frame, and redoing them was most of its frame
-   under box86. An entry keeps a copy of the source bytes it was made from;
-   one memcmp (native and vectorized under box86) proves it still holds. */
+   under box86. An entry keeps a copy of the source bytes it was made from.
+   Comparing all of it on every draw still cost a fifth of the Pi's CPU (the
+   dashboard reads about 3 MB a frame), so a draw compares 33 samples spread
+   over the data and the whole copy is compared every CONV_FULL_EVERY frames:
+   a rewritten buffer is caught at once, a small edit to one within that
+   many frames. */
+#define CONV_FULL_EVERY 16
 enum { CONV_RANGE, CONV_NORMPACKED3, CONV_RGBA };
 typedef struct {
     const UCHAR *src;
@@ -2399,6 +2404,7 @@ typedef struct {
     size_t raw_len;
     UCHAR *out;                  /* converted vertex lo */
     unsigned used;               /* draw serial of the last use */
+    ULONG checked;               /* frame of the last full compare */
 } conv_entry;
 
 #define CONV_SLOTS 1024
@@ -2418,8 +2424,27 @@ static conv_entry *conv_find(const UCHAR *src, ULONG stride, ULONG kind, ULONG c
     if (!victim) victim = &conv_cache[h];   /* all eight in this draw: share the first */
     free(victim->raw);
     free(victim->out);
-    *victim = (conv_entry){ src, stride, kind, count, 0, 0, NULL, 0, NULL, 0 };
+    *victim = (conv_entry){ src, stride, kind, count, 0, 0, NULL, 0, NULL, 0, d3d.frame };
     return victim;
+}
+
+/* Whether `cur` still matches `copy`, `len` bytes of units `step` apart
+   whose first `size` bytes matter (see CONV_FULL_EVERY). */
+static bool conv_unchanged(conv_entry *e, const UCHAR *copy, const UCHAR *cur, size_t len, size_t step, size_t size)
+{
+    if (d3d.frame - e->checked >= CONV_FULL_EVERY) {
+        e->checked = d3d.frame;
+        return !memcmp(copy, cur, len);
+    }
+    size_t units = (len - size) / step + 1;
+    for (size_t i = 0; i <= 32; i++) {
+        size_t off = (i == 32 ? units - 1 : units * i / 32) * step;
+        uint32_t x = 0, y = 0;
+        memcpy(&x, copy + off, size);
+        memcpy(&y, cur + off, size);
+        if (x != y) return false;
+    }
+    return true;
 }
 
 static vrange vertex_range(ULONG first, ULONG count, const USHORT *indices)
@@ -2429,7 +2454,8 @@ static vrange vertex_range(ULONG first, ULONG count, const USHORT *indices)
     const USHORT *ix = indices + first;
     conv_entry *e = conv_find((const UCHAR *)ix, 2, CONV_RANGE, count);
     e->used = conv_serial;
-    if (e->raw && !memcmp(e->raw, ix, count * 2)) return (vrange){ e->lo, e->hi };
+    if (e->raw && conv_unchanged(e, e->raw, (const UCHAR *)ix, count * 2, 2, 2)) return (vrange){ e->lo, e->hi };
+    e->checked = d3d.frame;
     ULONG lo = 0xFFFF, hi = 0;
     for (ULONG i = 0; i < count; i++) {
         ULONG v = ix[i];
@@ -2457,8 +2483,9 @@ static const void *convert_cached(const UCHAR *src, ULONG stride, vrange r, ULON
     size_t len = (size_t)(r.hi - r.lo - 1) * stride + 4;   /* each vertex reads 4 bytes */
     if (e->out && r.lo >= e->lo && r.hi <= e->hi) {
         UCHAR *raw = e->raw + (size_t)(r.lo - e->lo) * stride;
-        if (memcmp(raw, from, len)) {
+        if (!conv_unchanged(e, raw, from, len, stride, 4)) {
             /* Rewritten (a dynamic buffer): convert the range again. */
+            e->checked = d3d.frame;
             memcpy(raw, from, len);
             conv(from, stride, r.hi - r.lo, e->out + (size_t)(r.lo - e->lo) * size);
         }
@@ -2480,6 +2507,7 @@ static const void *convert_cached(const UCHAR *src, ULONG stride, vrange r, ULON
     e->raw_len = len;
     e->lo = r.lo;
     e->hi = r.hi;
+    e->checked = d3d.frame;
     conv(from, stride, r.hi - r.lo, e->out);
     return e->out - (size_t)e->lo * size;
 }
