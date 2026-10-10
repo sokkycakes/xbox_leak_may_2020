@@ -1016,6 +1016,26 @@ int main(int argc, char **argv)
                     glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
                     assert(pixel[0]<8 && pixel[1]>240 && pixel[2]<8 && pixel[3]>240);
                 }
+                /* Interleave legacy and owned fixed-function vertex paths.
+                 * Neither may overwrite application constants or poison the
+                 * cached programmable upload when that program resumes. */
+                struct vertex fixed={32,32,.5f,1,0xffff0000};
+                for(int owned=0;owned<2;owned++){
+                    texture_states[21]=owned?2:0;
+                    set_vs(0x44);
+                    clear(0,NULL,0xf3,0xff000000,1,0);draw(1,1,&fixed,sizeof fixed);
+                    glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                    assert(pixel[0]>240 && pixel[1]<8 && pixel[2]<8);
+                    for(int i=0;i<4;i++){
+                        float value[4];get_constant(registers[i],value,1);
+                        assert(!memcmp(value,green,sizeof value));
+                    }
+                    set_vs(shaders[3]);
+                    clear(0,NULL,0xf3,0xff000000,1,0);draw(1,1,vertex,sizeof vertex);
+                    glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                    assert(pixel[0]<8 && pixel[1]>240 && pixel[2]<8);
+                }
+                texture_states[21]=0;
                 set_mode(mode);
                 set_viewport(&viewport);
                 float value[4];get_constant(-38,value,1);
@@ -1702,6 +1722,8 @@ int main(int argc, char **argv)
         {
             void (NTAPI *lock_volume)(void *,ULONG,ULONG *,const LONG *,ULONG) =
                 find("_D3DVolumeTexture_LockBox@20");
+            LONG (NTAPI *get_volume)(void *,ULONG,void **)=find("_D3DVolumeTexture_GetVolumeLevel@12");
+            void (NTAPI *lock_view)(void *,ULONG *,const LONG *,ULONG)=find("_D3DVolume_LockBox@16");
             ULONG volume_def[60] = {0}, volume_ps = 0;
             volume_def[8] = 8;
             volume_def[9] = 0x18u << 8;
@@ -1743,6 +1765,21 @@ int main(int argc, char **argv)
                         entry[color_offset] = endpoint & 255;
                         entry[color_offset+1] = endpoint >> 8;
                     }
+                }
+                /* Whole-origin boxes and volume views must address the same
+                 * authored mip storage, including a final partial block.
+                 * These checks make no claim about nonzero packed-slab origins. */
+                for(unsigned level=0;level<2;level++){
+                    ULONG whole[3],boxed[3],view_lock[3];void *view=NULL;
+                    lock_volume(volume_tex,level,whole,NULL,0x80);
+                    LONG box[6]={0,0,4,4,0,1};
+                    lock_volume(volume_tex,level,boxed,box,0x80);
+                    assert(whole[2]==boxed[2]);
+                    assert(whole[0]==(level?1u:2u)*block_bytes);
+                    assert(whole[1]==(level?1u:4u)*block_bytes);
+                    assert(get_volume(volume_tex,level,&view)==0 && view);
+                    lock_view(view,view_lock,box,0x80);
+                    assert(!memcmp(view_lock,boxed,sizeof boxed));
                 }
                 set_tex(0,volume_tex);
                 texture_states[5] = 0;
