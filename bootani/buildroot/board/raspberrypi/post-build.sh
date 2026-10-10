@@ -49,3 +49,8 @@ GETTY
 chmod +x "$TARGET_DIR"/usr/libexec/serial-getty
 grep -q serial-getty "$TARGET_DIR"/etc/inittab ||
 	sed -i '/GENERIC_SERIAL/a ::respawn:/usr/libexec/serial-getty' "$TARGET_DIR"/etc/inittab
+
+# Keep the Ethernet port eth0 even when cmdline.txt loses net.ifnames=0
+# (eudev would rename it enx<MAC>, and /etc/network/interfaces names eth0).
+mkdir -p "$TARGET_DIR"/etc/udev/rules.d
+ln -sf /dev/null "$TARGET_DIR"/etc/udev/rules.d/80-net-name-slot.rules
