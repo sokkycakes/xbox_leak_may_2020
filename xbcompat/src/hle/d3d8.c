@@ -2339,13 +2339,35 @@ static void end_program(program_entry *e)
     if (e) p_glUseProgram(0);
 }
 
+/* The vertices a draw reads: indices lo to hi - 1 of the streams. Titles
+   pack many meshes into one vertex buffer (the dashboard does), so
+   converting from vertex 0 would redo every earlier mesh on each draw. */
+typedef struct { ULONG lo, hi; } vrange;
+
+static vrange vertex_range(ULONG first, ULONG count, const USHORT *indices)
+{
+    if (!indices) return (vrange){ first, first + count };
+    if (!count) return (vrange){ 0, 0 };
+    ULONG lo = 0xFFFF, hi = 0;
+    for (ULONG i = 0; i < count; i++) {
+        ULONG v = indices[first + i];
+        if (v < lo) lo = v;
+        if (v >= hi) hi = v + 1;
+    }
+    return (vrange){ lo, hi };
+}
+
 /* GL has no signed 11:11:10 vertex format, so NORMPACKED3 attributes are
-   unpacked to float3 for the vertices a draw reads (one buffer per register). */
-static const float *unpack_normpacked3(int slot, const UCHAR *src, ULONG stride, ULONG n)
+   unpacked to float3 for the vertices a draw reads (one buffer per register).
+   `src` is vertex 0's; the result is indexed the same way (only r.lo to
+   r.hi - 1 are filled in). */
+static const float *unpack_normpacked3(int slot, const UCHAR *src, ULONG stride, vrange r)
 {
     static float *buf[16];
     static ULONG cap[16];
-    if (n > cap[slot]) {
+    ULONG n = r.hi - r.lo;
+    src += r.lo * stride;
+    if (n > cap[slot] || !buf[slot]) {
         free(buf[slot]);
         cap[slot] = n + 1024;
         buf[slot] = malloc(cap[slot] * 12);
@@ -2358,17 +2380,19 @@ static const float *unpack_normpacked3(int slot, const UCHAR *src, ULONG stride,
         o[1] = ((int32_t)(v << 10) >> 21) / 1023.0f;
         o[2] = ((int32_t)v >> 22) / 511.0f;
     }
-    return buf[slot];
+    return buf[slot] - (size_t)r.lo * 3;
 }
 
 /* D3DCOLOR vertex data (B, G, R, A bytes) copied out as R, G, B, A for GL
-   drivers without BGRA vertex fetch (see rgba_vertex_colors): `n` entries
-   from `src`, tightly packed (stride 4). */
-static const void *rgba_colors(int slot, const UCHAR *src, ULONG stride, ULONG n)
+   drivers without BGRA vertex fetch (see rgba_vertex_colors), tightly
+   packed (stride 4) and indexed like unpack_normpacked3's. */
+static const void *rgba_colors(int slot, const UCHAR *src, ULONG stride, vrange r)
 {
     static uint8_t *buf[20];
     static ULONG cap[20];
-    if (n > cap[slot]) {
+    ULONG n = r.hi - r.lo;
+    src += r.lo * stride;
+    if (n > cap[slot] || !buf[slot]) {
         free(buf[slot]);
         cap[slot] = n + 1024;
         buf[slot] = malloc(cap[slot] * 4);
@@ -2380,23 +2404,13 @@ static const void *rgba_colors(int slot, const UCHAR *src, ULONG stride, ULONG n
         o[2] = src[0];
         o[3] = src[3];
     }
-    return buf[slot];
-}
-
-/* How many vertices from the start of the streams a draw reads. */
-static ULONG vertex_limit(ULONG first, ULONG count, const USHORT *indices)
-{
-    if (!indices) return first + count;
-    ULONG m = 0;
-    for (ULONG i = 0; i < count; i++)
-        if (indices[first + i] >= m) m = indices[first + i] + 1u;
-    return m;
+    return buf[slot] - (size_t)r.lo * 4;
 }
 
 /* Bind the generic attribute arrays of a declared vertex layout.  `up` is
    the user-pointer data for stream 0 (DrawVerticesUP), else streams come
    from SetStreamSource. */
-static void bind_attributes(const vshader *sh, const UCHAR *up, ULONG up_stride, ULONG first_vertex, ULONG nverts)
+static void bind_attributes(const vshader *sh, const UCHAR *up, ULONG up_stride, ULONG first_vertex, vrange verts)
 {
     for (int r = 0; r < 16; r++) {
         const vattr *a = &sh->attr[r];
@@ -2420,13 +2434,13 @@ static void bind_attributes(const vshader *sh, const UCHAR *up, ULONG up_stride,
         p_glEnableVertexAttribArray(r);
         if ((a->type & 0xF) == 6) {
             p_glVertexAttribPointer(r, 3, GL_FLOAT, GL_FALSE, 12,
-                                    unpack_normpacked3(r, base + a->offset + first_vertex * stride, stride, nverts));
+                                    unpack_normpacked3(r, base + a->offset + first_vertex * stride, stride, verts));
             continue;
         }
         /* D3DCOLOR is stored B, G, R, A and reaches the shader as (R, G, B, A). */
         if (a->type == 0x40 && rgba_vertex_colors) {
             p_glVertexAttribPointer(r, 4, GL_UNSIGNED_BYTE, GL_TRUE, 4,
-                                    rgba_colors(4 + r, base + a->offset + first_vertex * stride, stride, nverts));
+                                    rgba_colors(4 + r, base + a->offset + first_vertex * stride, stride, verts));
             continue;
         }
         p_glVertexAttribPointer(r, a->type == 0x40 ? GL_BGRA : a->components, a->gl_type, a->normalized, stride,
@@ -2474,7 +2488,7 @@ static void draw_programmable(vshader *sh, ULONG PrimitiveType, const UCHAR *up,
           RS(D3DRS_STENCILENABLE), d3d.viewport.X, d3d.viewport.Y, d3d.viewport.Width, d3d.viewport.Height,
           d3d.viewport.MinZ, d3d.viewport.MaxZ);
     upload_constants(sh, e);
-    bind_attributes(sh, up, up_stride, 0, vertex_limit(first, count, indices));
+    bind_attributes(sh, up, up_stride, 0, vertex_range(first, count, indices));
     if (indices)
         glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, indices + first);
     else
@@ -2523,7 +2537,7 @@ static void draw_declared(const vshader *sh, ULONG PrimitiveType, const UCHAR *u
         glEnableClientState(GL_NORMAL_ARRAY);
         if ((sh->attr[2].type & 0xF) == 6)
             glNormalPointer(GL_FLOAT, 12, unpack_normpacked3(2, b + sh->attr[2].offset, s,
-                                                             vertex_limit(first, count, indices)));
+                                                             vertex_range(first, count, indices)));
         else
             glNormalPointer(sh->attr[2].gl_type, s, b + sh->attr[2].offset);
     } else {
@@ -2536,7 +2550,7 @@ static void draw_declared(const vshader *sh, ULONG PrimitiveType, const UCHAR *u
         glEnableClientState(GL_COLOR_ARRAY);
         if (sh->attr[3].type == 0x40 && rgba_vertex_colors)
             glColorPointer(4, GL_UNSIGNED_BYTE, 4,
-                           rgba_colors(0, b + sh->attr[3].offset, s, vertex_limit(first, count, indices)));
+                           rgba_colors(0, b + sh->attr[3].offset, s, vertex_range(first, count, indices)));
         else if (sh->attr[3].gl_type == GL_UNSIGNED_BYTE)
             glColorPointer(sh->attr[3].type == 0x40 ? GL_BGRA : 4, GL_UNSIGNED_BYTE, s, b + sh->attr[3].offset);
         else
@@ -2552,7 +2566,7 @@ static void draw_declared(const vshader *sh, ULONG PrimitiveType, const UCHAR *u
         STREAM(&sh->attr[4], b, s);
         const vattr *a = &sh->attr[4];
         if (a->type == 0x40 && rgba_vertex_colors)
-            secondary_color(lit, rgba_colors(1, b + a->offset, s, vertex_limit(first, count, indices)), 3,
+            secondary_color(lit, rgba_colors(1, b + a->offset, s, vertex_range(first, count, indices)), 3,
                             GL_UNSIGNED_BYTE, 4);
         else
             secondary_color(lit, b + a->offset, a->type == 0x40 ? GL_BGRA : 3, a->gl_type, s);
@@ -2621,7 +2635,7 @@ static void draw(ULONG PrimitiveType, const UCHAR *base, ULONG stride, ULONG fir
         glEnableClientState(GL_COLOR_ARRAY);
         if (rgba_vertex_colors)
             glColorPointer(4, GL_UNSIGNED_BYTE, 4,
-                           rgba_colors(0, base + l.diffuse_off, stride, vertex_limit(first, count, indices)));
+                           rgba_colors(0, base + l.diffuse_off, stride, vertex_range(first, count, indices)));
         else
             glColorPointer(GL_BGRA, GL_UNSIGNED_BYTE, stride, base + l.diffuse_off);
         if (lit) {
@@ -2634,7 +2648,7 @@ static void draw(ULONG PrimitiveType, const UCHAR *base, ULONG stride, ULONG fir
         glColor4f(1, 1, 1, 1);
     }
     if (rgba_vertex_colors && l.specular_off >= 0)
-        secondary_color(lit, rgba_colors(1, base + l.specular_off, stride, vertex_limit(first, count, indices)), 3,
+        secondary_color(lit, rgba_colors(1, base + l.specular_off, stride, vertex_range(first, count, indices)), 3,
                         GL_UNSIGNED_BYTE, 4);
     else
         secondary_color(lit, l.specular_off >= 0 ? base + l.specular_off : NULL, GL_BGRA, GL_UNSIGNED_BYTE, stride);
