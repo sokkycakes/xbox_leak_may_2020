@@ -29,6 +29,8 @@
 static bool rgba_vertex_colors;
 static bool vc4;   /* the Raspberry Pi's GPU */
 
+#include "glcache.h"
+
 typedef ULONG UINT_;
 
 #define D3D_OK 0
@@ -350,6 +352,7 @@ static LONG NTAPI Direct3D_CreateDevice(UINT_ Adapter, ULONG DeviceType, PVOID p
     if (!d3d.window) fatal("SDL_CreateWindow: %s", SDL_GetError());
     d3d.gl = SDL_GL_CreateContext(d3d.window);
     if (!d3d.gl) fatal("SDL_GL_CreateContext: %s", SDL_GetError());
+    gc_reset();
     SDL_GL_SetSwapInterval(1);
     xlog("D3D: OpenGL %s on %s", glGetString(GL_VERSION), glGetString(GL_RENDERER));
     /* The Raspberry Pi's VC4 can't fetch B,G,R,A vertex colors; Mesa then
@@ -552,9 +555,10 @@ static void log_fps(void)
     if (now - since >= 5000000000u) {
         double f = frames, ms = (now - since) / 1e6 / f;
         xlog("D3D: %.1f fps: %.1f ms a frame, %u draws %.1f ms (GL calls %.1f), present+swap %.1f ms, "
-             "pacing %.1f ms, other %.1f ms", 1000.0 / ms, ms, (unsigned)(n_draws / f), t_draw / 1e6 / f,
-             t_gl / 1e6 / f, t_present / 1e6 / f, t_pace / 1e6 / f,
-             ms - (t_draw + t_present + t_pace) / 1e6 / f);
+             "pacing %.1f ms, other %.1f ms; GL state calls %u, %u skipped", 1000.0 / ms, ms, (unsigned)(n_draws / f),
+             t_draw / 1e6 / f, t_gl / 1e6 / f, t_present / 1e6 / f, t_pace / 1e6 / f,
+             ms - (t_draw + t_present + t_pace) / 1e6 / f, (unsigned)(gc_calls / f), (unsigned)(gc_skipped / f));
+        gc_calls = gc_skipped = 0;
         since = now;
         frames = 0;
         t_draw = t_gl = t_present = t_pace = 0;
@@ -1439,9 +1443,16 @@ static unsigned apply_textures(void)
 static void apply_texture_transforms(unsigned units, const int tsize[4])
 {
     static const float sx[4] = { 1, 0, 0, 0 }, sy[4] = { 0, 1, 0, 0 }, sz[4] = { 0, 0, 1, 0 };
+    /* Eye-linear planes are given in eye space: set them under an identity
+       modelview (only then, as the push and pop cost calls every draw). */
+    bool eye = false;
+    for (int u = 0; u < 4; u++)
+        if (((units >> u) & 1) && (TSS(u, D3DTSS_TEXCOORDINDEX) >> 16) == 2) eye = true;
     glMatrixMode(GL_MODELVIEW);
-    glPushMatrix();
-    glLoadIdentity();   /* eye-linear planes are given in eye space */
+    if (eye) {
+        glPushMatrix();
+        glLoadIdentity();
+    }
     for (int u = 0; u < 4; u++) {
         p_glActiveTexture(GL_TEXTURE0 + u);
         ULONG gen = TSS(u, D3DTSS_TEXCOORDINDEX) >> 16, ttff = TSS(u, 21 /* TEXTURETRANSFORMFLAGS */);
@@ -1496,7 +1507,7 @@ static void apply_texture_transforms(unsigned units, const int tsize[4])
         glLoadMatrixf(&m[0][0]);
         glMatrixMode(GL_MODELVIEW);
     }
-    glPopMatrix();
+    if (eye) glPopMatrix();
     p_glActiveTexture(GL_TEXTURE0);
 }
 
@@ -1793,13 +1804,18 @@ static void apply_render_states(bool pretransformed, bool has_normal)
 
     if (pretransformed) {
         /* Screen-space vertices: map pixels (y down) and D3D's [0,1] z. */
+        /* glOrtho(0, w, h, 0, 0, -1) (0 and h swapped for a texture
+           target) and a translation by the viewport origin, loaded whole
+           so unchanged matrices cost no calls. */
+        float w = d3d.viewport.Width, h = d3d.viewport.Height, top = d3d.rt_texture ? h : 0, bottom = h - top;
+        float ortho[16] = { 2 / w, 0, 0, 0,  0, 2 / (top - bottom), 0, 0,  0, 0, 2, 0,
+                            -1, -(top + bottom) / (top - bottom), -1, 1 };
+        float move[16] = { 1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,
+                           -(float)d3d.viewport.X, -(float)d3d.viewport.Y, 0, 1 };
         glMatrixMode(GL_PROJECTION);
-        glLoadIdentity();
-        if (d3d.rt_texture) glOrtho(0, d3d.viewport.Width, 0, d3d.viewport.Height, 0, -1);
-        else glOrtho(0, d3d.viewport.Width, d3d.viewport.Height, 0, 0, -1);
+        glLoadMatrixf(ortho);
         glMatrixMode(GL_MODELVIEW);
-        glLoadIdentity();
-        glTranslatef(-(float)d3d.viewport.X, -(float)d3d.viewport.Y, 0);
+        glLoadMatrixf(move);
     } else {
         /* D3D row-vector matrices loaded as-is are the GL column-vector
            transforms.  D3D clip space has z in [0,w]; GL wants [-w,w]. */
@@ -2236,8 +2252,10 @@ static GLuint fragment_shader_object(void)
 {
     uint32_t key[64];
     fshader_key(key);
+    static fshader_entry *last;
+    if (last && gc_same(last->key, key, 64)) return last->fs;
     for (fshader_entry *e = fshaders; e; e = e->next)
-        if (!memcmp(e->key, key, sizeof(key))) return e->fs;
+        if (gc_same(e->key, key, 64)) return (last = e)->fs;
     fshader_entry *e = calloc(1, sizeof(*e));
     memcpy(e->key, key, sizeof(key));
     ULONG modes = RS(D3DRS_PSTEXTUREMODES);
@@ -2368,35 +2386,109 @@ static void end_program(program_entry *e)
    converting from vertex 0 would redo every earlier mesh on each draw. */
 typedef struct { ULONG lo, hi; } vrange;
 
+/* Conversions and index scans are kept between draws: the dashboard draws
+   the same large meshes every frame, and redoing them was most of its frame
+   under box86. An entry keeps a copy of the source bytes it was made from;
+   one memcmp (native and vectorized under box86) proves it still holds. */
+enum { CONV_RANGE, CONV_NORMPACKED3, CONV_RGBA };
+typedef struct {
+    const UCHAR *src;
+    ULONG stride, kind, count;   /* count: CONV_RANGE's index count */
+    ULONG lo, hi;                /* the vertices converted (CONV_RANGE: the result) */
+    UCHAR *raw;                  /* the source bytes, from vertex lo */
+    size_t raw_len;
+    UCHAR *out;                  /* converted vertex lo */
+    unsigned used;               /* draw serial of the last use */
+} conv_entry;
+
+#define CONV_SLOTS 1024
+static conv_entry conv_cache[CONV_SLOTS];
+static unsigned conv_serial;   /* bumped per draw: entries in use by this draw are not evicted */
+
+static conv_entry *conv_find(const UCHAR *src, ULONG stride, ULONG kind, ULONG count)
+{
+    unsigned h = ((uintptr_t)src * 2654435761u ^ stride * 40503u ^ kind ^ count * 97u) & (CONV_SLOTS - 1);
+    conv_entry *victim = NULL;
+    for (int i = 0; i < 8; i++) {
+        conv_entry *e = &conv_cache[(h + i) & (CONV_SLOTS - 1)];
+        if (e->src == src && e->stride == stride && e->kind == kind && e->count == count) return e;
+        if (!e->src) { if (!victim || victim->src) victim = e; continue; }
+        if (e->used != conv_serial && (!victim || (victim->src && e->used < victim->used))) victim = e;
+    }
+    if (!victim) victim = &conv_cache[h];   /* all eight in this draw: share the first */
+    free(victim->raw);
+    free(victim->out);
+    *victim = (conv_entry){ src, stride, kind, count, 0, 0, NULL, 0, NULL, 0 };
+    return victim;
+}
+
 static vrange vertex_range(ULONG first, ULONG count, const USHORT *indices)
 {
     if (!indices) return (vrange){ first, first + count };
     if (!count) return (vrange){ 0, 0 };
+    const USHORT *ix = indices + first;
+    conv_entry *e = conv_find((const UCHAR *)ix, 2, CONV_RANGE, count);
+    e->used = conv_serial;
+    if (e->raw && !memcmp(e->raw, ix, count * 2)) return (vrange){ e->lo, e->hi };
     ULONG lo = 0xFFFF, hi = 0;
     for (ULONG i = 0; i < count; i++) {
-        ULONG v = indices[first + i];
+        ULONG v = ix[i];
         if (v < lo) lo = v;
         if (v >= hi) hi = v + 1;
     }
+    if (!e->raw) e->raw = malloc(count * 2);
+    if (e->raw) memcpy(e->raw, ix, count * 2);
+    e->lo = lo;
+    e->hi = hi;
     return (vrange){ lo, hi };
 }
 
-/* GL has no signed 11:11:10 vertex format, so NORMPACKED3 attributes are
-   unpacked to float3 for the vertices a draw reads (one buffer per register).
-   `src` is vertex 0's; the result is indexed the same way (only r.lo to
-   r.hi - 1 are filled in). */
-static const float *unpack_normpacked3(int slot, const UCHAR *src, ULONG stride, vrange r)
+/* Convert vertices r.lo to r.hi - 1 of `src` (vertex 0's attribute, `stride`
+   apart) with `conv`, `size` bytes out per vertex; the result is indexed
+   like the source. */
+static const void *convert_cached(const UCHAR *src, ULONG stride, vrange r, ULONG kind, ULONG size,
+                                  void (*conv)(const UCHAR *, ULONG, ULONG, UCHAR *))
 {
-    static float *buf[16];
-    static ULONG cap[16];
-    ULONG n = r.hi - r.lo;
-    src += r.lo * stride;
-    if (n > cap[slot] || !buf[slot]) {
-        free(buf[slot]);
-        cap[slot] = n + 1024;
-        buf[slot] = malloc(cap[slot] * 12);
+    static UCHAR empty[16];
+    if (r.hi <= r.lo) return empty;
+    conv_entry *e = conv_find(src, stride, kind, 0);
+    e->used = conv_serial;
+    const UCHAR *from = src + (size_t)r.lo * stride;
+    size_t len = (size_t)(r.hi - r.lo - 1) * stride + 4;   /* each vertex reads 4 bytes */
+    if (e->out && r.lo >= e->lo && r.hi <= e->hi) {
+        UCHAR *raw = e->raw + (size_t)(r.lo - e->lo) * stride;
+        if (memcmp(raw, from, len)) {
+            /* Rewritten (a dynamic buffer): convert the range again. */
+            memcpy(raw, from, len);
+            conv(from, stride, r.hi - r.lo, e->out + (size_t)(r.lo - e->lo) * size);
+        }
+        return e->out - (size_t)e->lo * size;
     }
-    float *o = buf[slot];
+    /* Not covered yet: grow the entry to cover both ranges and convert it all. */
+    if (e->out) {
+        if (e->lo < r.lo) r.lo = e->lo;
+        if (e->hi > r.hi) r.hi = e->hi;
+        from = src + (size_t)r.lo * stride;
+        len = (size_t)(r.hi - r.lo - 1) * stride + 4;
+    }
+    free(e->raw);
+    free(e->out);
+    e->raw = malloc(len);
+    e->out = malloc((size_t)(r.hi - r.lo) * size);
+    if (!e->raw || !e->out) { free(e->raw); free(e->out); e->raw = e->out = NULL; return empty; }
+    memcpy(e->raw, from, len);
+    e->raw_len = len;
+    e->lo = r.lo;
+    e->hi = r.hi;
+    conv(from, stride, r.hi - r.lo, e->out);
+    return e->out - (size_t)e->lo * size;
+}
+
+/* GL has no signed 11:11:10 vertex format, so NORMPACKED3 attributes are
+   unpacked to float3. */
+static void conv_normpacked3(const UCHAR *src, ULONG stride, ULONG n, UCHAR *out)
+{
+    float *o = (float *)out;
     for (ULONG i = 0; i < n; i++, src += stride, o += 3) {
         uint32_t v;
         memcpy(&v, src, 4);
@@ -2404,38 +2496,40 @@ static const float *unpack_normpacked3(int slot, const UCHAR *src, ULONG stride,
         o[1] = ((int32_t)(v << 10) >> 21) / 1023.0f;
         o[2] = ((int32_t)v >> 22) / 511.0f;
     }
-    return buf[slot] - (size_t)r.lo * 3;
+}
+
+static const float *unpack_normpacked3(const UCHAR *src, ULONG stride, vrange r)
+{
+    return convert_cached(src, stride, r, CONV_NORMPACKED3, 12, conv_normpacked3);
 }
 
 /* D3DCOLOR vertex data (B, G, R, A bytes) copied out as R, G, B, A for GL
    drivers without BGRA vertex fetch (see rgba_vertex_colors), tightly
-   packed (stride 4) and indexed like unpack_normpacked3's. */
-static const void *rgba_colors(int slot, const UCHAR *src, ULONG stride, vrange r)
+   packed (stride 4). */
+static void conv_rgba(const UCHAR *src, ULONG stride, ULONG n, UCHAR *o)
 {
-    static uint8_t *buf[20];
-    static ULONG cap[20];
-    ULONG n = r.hi - r.lo;
-    src += r.lo * stride;
-    if (n > cap[slot] || !buf[slot]) {
-        free(buf[slot]);
-        cap[slot] = n + 1024;
-        buf[slot] = malloc(cap[slot] * 4);
-    }
-    uint8_t *o = buf[slot];
     for (ULONG i = 0; i < n; i++, src += stride, o += 4) {
         o[0] = src[2];
         o[1] = src[1];
         o[2] = src[0];
         o[3] = src[3];
     }
-    return buf[slot] - (size_t)r.lo * 4;
+}
+
+static const void *rgba_colors(const UCHAR *src, ULONG stride, vrange r)
+{
+    return convert_cached(src, stride, r, CONV_RGBA, 4, conv_rgba);
 }
 
 /* Bind the generic attribute arrays of a declared vertex layout.  `up` is
    the user-pointer data for stream 0 (DrawVerticesUP), else streams come
    from SetStreamSource. */
-static void bind_attributes(const vshader *sh, const UCHAR *up, ULONG up_stride, ULONG first_vertex, vrange verts)
+static void bind_attributes(const vshader *sh, const UCHAR *up, ULONG up_stride, ULONG first_vertex, ULONG first,
+                            ULONG count, const USHORT *indices)
 {
+    vrange verts = { 0, 0 };
+    bool have_range = false;
+#define VERTS (have_range ? verts : (have_range = true, verts = vertex_range(first, count, indices)))
     for (int r = 0; r < 16; r++) {
         const vattr *a = &sh->attr[r];
         if (a->stream < 0) {
@@ -2458,13 +2552,13 @@ static void bind_attributes(const vshader *sh, const UCHAR *up, ULONG up_stride,
         p_glEnableVertexAttribArray(r);
         if ((a->type & 0xF) == 6) {
             p_glVertexAttribPointer(r, 3, GL_FLOAT, GL_FALSE, 12,
-                                    unpack_normpacked3(r, base + a->offset + first_vertex * stride, stride, verts));
+                                    unpack_normpacked3(base + a->offset + first_vertex * stride, stride, VERTS));
             continue;
         }
         /* D3DCOLOR is stored B, G, R, A and reaches the shader as (R, G, B, A). */
         if (a->type == 0x40 && rgba_vertex_colors) {
             p_glVertexAttribPointer(r, 4, GL_UNSIGNED_BYTE, GL_TRUE, 4,
-                                    rgba_colors(4 + r, base + a->offset + first_vertex * stride, stride, verts));
+                                    rgba_colors(base + a->offset + first_vertex * stride, stride, VERTS));
             continue;
         }
         p_glVertexAttribPointer(r, a->type == 0x40 ? GL_BGRA : a->components, a->gl_type, a->normalized, stride,
@@ -2472,10 +2566,7 @@ static void bind_attributes(const vshader *sh, const UCHAR *up, ULONG up_stride,
     }
 }
 
-static void unbind_attributes(void)
-{
-    for (int r = 0; r < 16; r++) p_glDisableVertexAttribArray(r);
-}
+#undef VERTS
 
 static void upload_constants(const vshader *sh, program_entry *e)
 {
@@ -2501,9 +2592,11 @@ static void upload_constants(const vshader *sh, program_entry *e)
             goto uploaded;
         }
         if (e->last_c) {
-            while (lo < 192 && !memcmp(c[lo], e->last_c[lo], 16)) lo++;
+            /* Word compares, not memcmp: a call per register crosses into
+               native code under box86. */
+            while (lo < 192 && gc_same((const uint32_t *)c[lo], e->last_c[lo], 4)) lo++;
             if (lo == 192) goto uploaded;
-            while (!memcmp(c[hi], e->last_c[hi], 16)) hi--;
+            while (gc_same((const uint32_t *)c[hi], e->last_c[hi], 4)) hi--;
         } else {
             e->last_c = malloc(sizeof(c));
         }
@@ -2521,6 +2614,7 @@ static void draw_programmable(vshader *sh, ULONG PrimitiveType, const UCHAR *up,
                               ULONG count, const USHORT *indices)
 {
     n_draws++;
+    conv_serial++;
     TIMED(t_draw, draw_programmable_(sh, PrimitiveType, up, up_stride, first, count, indices));
 }
 
@@ -2540,10 +2634,11 @@ static void draw_programmable_(vshader *sh, ULONG PrimitiveType, const UCHAR *up
           RS(D3DRS_STENCILENABLE), d3d.viewport.X, d3d.viewport.Y, d3d.viewport.Width, d3d.viewport.Height,
           d3d.viewport.MinZ, d3d.viewport.MaxZ);
     upload_constants(sh, e);
-    bind_attributes(sh, up, up_stride, 0, vertex_range(first, count, indices));
+    bind_attributes(sh, up, up_stride, 0, first, count, indices);
     TIMED(t_gl, if (indices) glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, indices + first);
                 else glDrawArrays(gl_primitive(PrimitiveType), first, count));
-    unbind_attributes();
+    /* The generic arrays stay bound for the next programmable draw; the
+       fixed-function paths turn them off (gc_disable_attrib_arrays). */
     end_program(e);
     debug_dump_draw();
 }
@@ -2571,6 +2666,7 @@ static void draw_declared(const vshader *sh, ULONG PrimitiveType, const UCHAR *u
                           ULONG count, const USHORT *indices)
 {
     n_draws++;
+    conv_serial++;
     TIMED(t_draw, draw_declared_(sh, PrimitiveType, up, up_stride, first, count, indices));
 }
 
@@ -2587,6 +2683,7 @@ static void draw_declared_(const vshader *sh, ULONG PrimitiveType, const UCHAR *
     const UCHAR *base; ULONG stride;
     STREAM(pos, base, stride);
     bool pretransformed = pos->components == 4 && pos->gl_type == GL_FLOAT;
+    gc_disable_attrib_arrays();
     apply_render_states(pretransformed, sh->attr[2].stream >= 0);
     glEnableClientState(GL_VERTEX_ARRAY);
     glVertexPointer(pretransformed ? 3 : pos->components, pos->gl_type, stride, base + pos->offset);
@@ -2595,7 +2692,7 @@ static void draw_declared_(const vshader *sh, ULONG PrimitiveType, const UCHAR *
         STREAM(&sh->attr[2], b, s);
         glEnableClientState(GL_NORMAL_ARRAY);
         if ((sh->attr[2].type & 0xF) == 6)
-            glNormalPointer(GL_FLOAT, 12, unpack_normpacked3(2, b + sh->attr[2].offset, s,
+            glNormalPointer(GL_FLOAT, 12, unpack_normpacked3(b + sh->attr[2].offset, s,
                                                              vertex_range(first, count, indices)));
         else
             glNormalPointer(sh->attr[2].gl_type, s, b + sh->attr[2].offset);
@@ -2609,7 +2706,7 @@ static void draw_declared_(const vshader *sh, ULONG PrimitiveType, const UCHAR *
         glEnableClientState(GL_COLOR_ARRAY);
         if (sh->attr[3].type == 0x40 && rgba_vertex_colors)
             glColorPointer(4, GL_UNSIGNED_BYTE, 4,
-                           rgba_colors(0, b + sh->attr[3].offset, s, vertex_range(first, count, indices)));
+                           rgba_colors(b + sh->attr[3].offset, s, vertex_range(first, count, indices)));
         else if (sh->attr[3].gl_type == GL_UNSIGNED_BYTE)
             glColorPointer(sh->attr[3].type == 0x40 ? GL_BGRA : 4, GL_UNSIGNED_BYTE, s, b + sh->attr[3].offset);
         else
@@ -2625,7 +2722,7 @@ static void draw_declared_(const vshader *sh, ULONG PrimitiveType, const UCHAR *
         STREAM(&sh->attr[4], b, s);
         const vattr *a = &sh->attr[4];
         if (a->type == 0x40 && rgba_vertex_colors)
-            secondary_color(lit, rgba_colors(1, b + a->offset, s, vertex_range(first, count, indices)), 3,
+            secondary_color(lit, rgba_colors(b + a->offset, s, vertex_range(first, count, indices)), 3,
                             GL_UNSIGNED_BYTE, 4);
         else
             secondary_color(lit, b + a->offset, a->type == 0x40 ? GL_BGRA : 3, a->gl_type, s);
@@ -2677,6 +2774,8 @@ static void draw(ULONG PrimitiveType, const UCHAR *base, ULONG stride, ULONG fir
         return;
     }
     fvf_layout l = parse_fvf(d3d.vertex_shader);
+    conv_serial++;
+    gc_disable_attrib_arrays();
     apply_render_states(l.pretransformed, l.normal_off >= 0);
 
     glEnableClientState(GL_VERTEX_ARRAY);
@@ -2692,7 +2791,7 @@ static void draw(ULONG PrimitiveType, const UCHAR *base, ULONG stride, ULONG fir
         glEnableClientState(GL_COLOR_ARRAY);
         if (rgba_vertex_colors)
             glColorPointer(4, GL_UNSIGNED_BYTE, 4,
-                           rgba_colors(0, base + l.diffuse_off, stride, vertex_range(first, count, indices)));
+                           rgba_colors(base + l.diffuse_off, stride, vertex_range(first, count, indices)));
         else
             glColorPointer(GL_BGRA, GL_UNSIGNED_BYTE, stride, base + l.diffuse_off);
         if (lit) {
@@ -2705,7 +2804,7 @@ static void draw(ULONG PrimitiveType, const UCHAR *base, ULONG stride, ULONG fir
         glColor4f(1, 1, 1, 1);
     }
     if (rgba_vertex_colors && l.specular_off >= 0)
-        secondary_color(lit, rgba_colors(1, base + l.specular_off, stride, vertex_range(first, count, indices)), 3,
+        secondary_color(lit, rgba_colors(base + l.specular_off, stride, vertex_range(first, count, indices)), 3,
                         GL_UNSIGNED_BYTE, 4);
     else
         secondary_color(lit, l.specular_off >= 0 ? base + l.specular_off : NULL, GL_BGRA, GL_UNSIGNED_BYTE, stride);
@@ -4591,6 +4690,7 @@ static void imm_flush(ULONG prim)
     }
     bool pretransformed = sh ? sh->attr[0].components == 4 && sh->attr[0].gl_type == GL_FLOAT
                              : (d3d.vertex_shader & D3DFVF_POSITION_MASK) == D3DFVF_XYZRHW;
+    gc_disable_attrib_arrays();
     apply_render_states(pretransformed, imm.used[2]);
     bool lit = glIsEnabled(GL_LIGHTING);
     if (lit && imm.used[3] && RS(D3DRS_COLORVERTEX)) {
