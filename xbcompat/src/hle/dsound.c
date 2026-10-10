@@ -3114,7 +3114,10 @@ static HRESULT NTAPI Stream_FlushEx(void *self, uint32_t rt_lo, uint32_t rt_hi, 
 
 static HRESULT NTAPI Stream_Pause(void *self, DWORD pause)
 {
-    if (pause > 1) return DSERR_INVALIDPARAM;
+    /* DSSTREAMPAUSE_RESUME 0, DSSTREAMPAUSE_PAUSE 1, and in XDK 5xxx
+       DSSTREAMPAUSE_SYNCHPLAYBACK 2, which the XMV player uses to hold its
+       audio for SynchPlayback; that starts everything at once here. */
+    if (pause > 2) return DSERR_INVALIDPARAM;
     if (!stream_enter(self)) return DSERR_INVALIDPARAM;
     STREAM_ENTRY(s, self);
     s->paused = pause == 1;

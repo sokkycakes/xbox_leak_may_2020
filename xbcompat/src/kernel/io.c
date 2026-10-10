@@ -577,6 +577,7 @@ NTSTATUS NTAPI NtReadFile(HANDLE FileHandle, HANDLE Event, PVOID ApcRoutine, PVO
             return complete(Event, ApcRoutine, ApcContext, iosb, STATUS_NO_MEDIA_IN_DEVICE, 0);
         }
         f->pos = off + n;
+        TRACE("NtReadFile(%s, %#x at %#llx) = %#x", f->xbox, (unsigned)Length, (long long)off, (unsigned)n);
         if (n == 0 && Length > 0) {
             xlog("DVD: read of %s at %lld is past its end", f->xbox, (long long)off);
             return complete(Event, ApcRoutine, ApcContext, iosb, STATUS_END_OF_FILE, 0);
@@ -588,6 +589,7 @@ NTSTATUS NTAPI NtReadFile(HANDLE FileHandle, HANDLE Event, PVOID ApcRoutine, PVO
     if (!f || f->fd < 0) return STATUS_INVALID_HANDLE;
     LONGLONG off = ByteOffset ? ByteOffset->QuadPart : f->pos;
     ssize_t n = pread(f->fd, Buffer, Length, off);
+    TRACE("NtReadFile(%s, %#x at %#llx) = %#x", f->xbox, (unsigned)Length, (long long)off, (unsigned)n);
     if (n < 0) return complete(Event, ApcRoutine, ApcContext, iosb, errno_status(errno), 0);
     f->pos = off + n;
     if (n == 0 && Length > 0) return complete(Event, ApcRoutine, ApcContext, iosb, STATUS_END_OF_FILE, 0);
