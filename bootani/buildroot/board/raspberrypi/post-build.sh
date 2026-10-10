@@ -15,6 +15,8 @@ done
 mkdir -p "$TARGET_DIR"/data
 sed -i '/ \/data /d' "$TARGET_DIR"/etc/fstab
 echo '/dev/mmcblk0p3 /data ext4 defaults,noatime,nofail 0 2' >> "$TARGET_DIR"/etc/fstab
+# ...grown to fill the card at first boot.
+install -m 755 "$(dirname "$0")"/S03growdata "$TARGET_DIR"/etc/init.d/S03growdata
 
 # The display mode everything uses: NTSC 720x480, as on the Sion.
 mkdir -p "$TARGET_DIR"/etc/default
