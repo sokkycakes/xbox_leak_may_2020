@@ -478,6 +478,7 @@ static void draw_window_pixels(const uint8_t *tmp)
     if (!p_glWindowPos2i) return;
     ULONG w = d3d.width, h = d3d.height;
     glPushAttrib(GL_ALL_ATTRIB_BITS);
+    p_glUseProgram(0);   /* draws leave their program bound */
     for (int u = 3; u >= 0; u--) {
         p_glActiveTexture(GL_TEXTURE0 + u);
         glDisable(GL_TEXTURE_2D); glDisable(GL_TEXTURE_3D); glDisable(GL_TEXTURE_CUBE_MAP);
@@ -965,6 +966,7 @@ static void (APIENTRY *p_glGetQueryObjectuiv)(GLuint, GLenum, GLuint *);
 static void (APIENTRY *p_glPointParameterf)(GLenum, GLfloat);
 static void (APIENTRY *p_glUniform2fv)(GLint, GLsizei, const GLfloat *);
 static void (APIENTRY *p_glGenBuffers)(GLsizei, GLuint *);
+static void (APIENTRY *p_glGetActiveUniform)(GLuint, GLuint, GLsizei, GLsizei *, GLint *, GLenum *, char *);
 static void (APIENTRY *p_glDeleteBuffers)(GLsizei, const GLuint *);
 static void (APIENTRY *p_glBufferData)(GLenum, GLsizeiptr, const void *, GLenum);
 static void (APIENTRY *p_glBufferSubData)(GLenum, GLintptr, GLsizeiptr, const void *);
@@ -1405,11 +1407,15 @@ static unsigned apply_textures(void)
     bool ended = false;
     for (int s = 0; s < 4; s++) {
         p_glActiveTexture(GL_TEXTURE0 + s);
-        glDisable(GL_TEXTURE_2D);
-        glDisable(GL_TEXTURE_CUBE_MAP);
-        glDisable(GL_TEXTURE_3D);
         D3DPixelContainer *t = (D3DPixelContainer *)d3d.textures[s];
         bool sprite = s == 3 && RS(D3DRS_POINTSPRITEENABLE);   /* point sprites always use stage 3 */
+        /* Only the stage's own target stays on; switching the others off
+           rather than all three first keeps unchanged stages free of calls. */
+        bool used = !(TSS(s, D3DTSS_COLOROP) == 1 || (ended && !sprite));
+        GLenum want = !used ? 0 : t ? tex_target(t) : GL_TEXTURE_2D;
+        if (want != GL_TEXTURE_2D) glDisable(GL_TEXTURE_2D);
+        if (want != GL_TEXTURE_CUBE_MAP) glDisable(GL_TEXTURE_CUBE_MAP);
+        if (want != GL_TEXTURE_3D) glDisable(GL_TEXTURE_3D);
         glTexEnvi(GL_POINT_SPRITE, GL_COORD_REPLACE, sprite);
         TRACE("D3D: stage %d texture %p colorop %u(%u,%u) alphaop %u(%u,%u) tfactor %#x", s, (void *)t,
               TSS(s, D3DTSS_COLOROP), TSS(s, D3DTSS_COLORARG1), TSS(s, D3DTSS_COLORARG2), TSS(s, D3DTSS_ALPHAOP),
@@ -1889,7 +1895,7 @@ static void load_shader_functions(void)
     LOAD(glVertexAttribPointer); LOAD(glVertexAttrib4fv); LOAD(glActiveTexture); LOAD(glClientActiveTexture);
     LOAD(glMultiTexCoord4fv); LOAD(glUniform2fv); LOAD(glPointParameterfv); LOAD(glPointParameterf);
     LOAD(glSecondaryColorPointer);
-    LOAD(glGenBuffers); LOAD(glDeleteBuffers); LOAD(glBindBuffer); LOAD(glBufferData); LOAD(glBufferSubData);
+    LOAD(glGetActiveUniform); LOAD(glGenBuffers); LOAD(glDeleteBuffers); LOAD(glBindBuffer); LOAD(glBufferData); LOAD(glBufferSubData);
     LOAD(glGenQueries); LOAD(glBeginQuery); LOAD(glEndQuery); LOAD(glGetQueryObjectuiv);
 #undef LOAD
 }
@@ -2054,6 +2060,7 @@ typedef struct program_entry {
           loc_bump_env, loc_bump_lum;
     float (*last_c)[4];   /* the constants last uploaded to the program */
     bool c_partial;
+    int c_size;           /* active elements of c (the compiler drops unused trailing ones) */
     struct program_entry *next;
 } program_entry;
 
@@ -2170,7 +2177,23 @@ static program_entry *program_for(GLuint vs, GLuint fs)
         e->loc_c = U("c");
         /* Element i of c at loc_c + i, as Mesa lays arrays out: only then
            can part of it be uploaded on its own. */
-        e->c_partial = e->loc_c >= 0 && U("c[191]") == e->loc_c + 191;
+        e->c_size = 192;
+        if (e->loc_c >= 0 && p_glGetActiveUniform) {
+            GLint n = 0;
+            p_glGetProgramiv(e->prog, 0x8B86 /* GL_ACTIVE_UNIFORMS */, &n);
+            for (GLint i = 0; i < n; i++) {
+                char name[16];
+                GLint size = 0;
+                GLenum type = 0;
+                p_glGetActiveUniform(e->prog, i, sizeof name, NULL, &size, &type, name);
+                if (!strcmp(name, "c") || !strcmp(name, "c[0]")) { e->c_size = size < 192 ? size : 192; break; }
+            }
+        }
+        char last[16];
+        snprintf(last, sizeof last, "c[%d]", e->c_size - 1);
+        e->c_partial = e->loc_c >= 0 && U(last) == e->loc_c + e->c_size - 1;
+        TRACE("D3D: program %u: c has %d active elements, partial uploads %s", e->prog, e->c_size,
+              e->c_partial ? "on" : "off");
         e->loc_flip_y = U("flip_y");
         static const char *tex[] = { "tex0", "tex1", "tex2", "tex3" }, *cube[] = { "cube0", "cube1", "cube2", "cube3" },
                           *vol[] = { "vol0", "vol1", "vol2", "vol3" };
@@ -2372,7 +2395,7 @@ static bool use_program(GLuint vs, program_entry **out)
         fs = fragment_shader_object();
         if (!fs) return false;
     }
-    if (!vs && !fs) return true;
+    if (!vs && !fs) { p_glUseProgram(0); return true; }
     program_entry *e = program_for(vs, fs);
     if (!e->prog) return false;
     p_glUseProgram(e->prog);
@@ -2381,9 +2404,11 @@ static bool use_program(GLuint vs, program_entry **out)
     return true;
 }
 
+/* The program stays bound until a draw needs another (use_program binds 0
+   for fixed function), so back-to-back draws with one program switch nothing. */
 static void end_program(program_entry *e)
 {
-    if (e) p_glUseProgram(0);
+    (void)e;
 }
 
 /* The vertices a draw reads: indices lo to hi - 1 of the streams. Titles
@@ -2436,14 +2461,21 @@ static conv_entry *conv_find(const UCHAR *src, ULONG stride, ULONG kind, ULONG c
     return victim;
 }
 
-/* Whether `cur` still matches `copy`, `len` bytes of units `step` apart
-   whose first `size` bytes matter (see CONV_FULL_EVERY). */
-static bool conv_unchanged(conv_entry *e, const UCHAR *copy, const UCHAR *cur, size_t len, size_t step, size_t size)
+/* Whether the entry's whole copy is due for a full compare (see
+   CONV_FULL_EVERY). The full compare always covers the whole entry: draws
+   that read different parts of one buffer would otherwise keep pushing the
+   check off for the parts other draws read. */
+static bool conv_full_due(conv_entry *e)
 {
-    if (d3d.frame - e->checked >= CONV_FULL_EVERY) {
-        e->checked = d3d.frame;
-        return !memcmp(copy, cur, len);
-    }
+    if (d3d.frame - e->checked < CONV_FULL_EVERY) return false;
+    e->checked = d3d.frame;
+    return true;
+}
+
+/* Whether 33 samples spread over `len` bytes of units `step` apart (the
+   first `size` bytes of each) match `copy`. */
+static bool conv_sampled_same(const UCHAR *copy, const UCHAR *cur, size_t len, size_t step, size_t size)
+{
     size_t units = (len - size) / step + 1;
     for (size_t i = 0; i <= 32; i++) {
         size_t off = (i == 32 ? units - 1 : units * i / 32) * step;
@@ -2461,8 +2493,11 @@ static conv_entry *index_entry(const USHORT *ix, ULONG count, bool upload)
 {
     conv_entry *e = conv_find((const UCHAR *)ix, 2, CONV_RANGE, count);
     e->used = conv_serial;
-    bool same = e->raw && conv_unchanged(e, e->raw, (const UCHAR *)ix, count * 2, 2, 2);
-    if (!same) e->checked = d3d.frame;
+    bool same = false;
+    if (e->raw) {
+        if (conv_full_due(e)) same = !memcmp(e->raw, ix, count * 2);
+        else same = conv_sampled_same(e->raw, (const UCHAR *)ix, count * 2, 2, 2) || !memcmp(e->raw, ix, count * 2);
+    }
     if (upload && (!same || !e->buf)) {
         if (!e->buf) p_glGenBuffers(1, &e->buf);
         gc_bind_buffer(GL_ELEMENT_ARRAY_BUFFER, e->buf);
@@ -2490,8 +2525,17 @@ static vrange vertex_range(ULONG first, ULONG count, const USHORT *indices)
     return (vrange){ e->lo, e->hi };
 }
 
+/* Bring `len` bytes of a cached copy up to date with `src`; true if they
+   changed (the caller then redoes what it made from them). */
+static bool conv_refresh(UCHAR *copy, const UCHAR *src, size_t len)
+{
+    if (!memcmp(copy, src, len)) return false;
+    memcpy(copy, src, len);
+    return true;
+}
+
 /* A GL buffer holding a vertex stream from vertex 0 through the last byte
-   `need` a draw reads, current for vertices r.lo up (see CONV_FULL_EVERY).
+   `need` a draw reads (see CONV_FULL_EVERY for how it is kept current).
    Mesa would otherwise copy client-memory arrays into a new buffer on
    every draw. Returns 0 to draw from client memory instead. */
 static GLuint stream_buffer(const UCHAR *base, ULONG stride, vrange r, size_t need)
@@ -2499,15 +2543,13 @@ static GLuint stream_buffer(const UCHAR *base, ULONG stride, vrange r, size_t ne
     if (!p_glGenBuffers || r.hi <= r.lo || !stride) return 0;
     conv_entry *e = conv_find(base, stride, CONV_VBO, 0);
     e->used = conv_serial;
-    size_t from = (size_t)r.lo * stride;
     if (e->buf && need <= e->span) {
-        if (!conv_unchanged(e, e->raw + from, base + from, need - from, stride, 4)) {
-            e->checked = d3d.frame;
-            if (memcmp(e->raw + from, base + from, need - from)) {
-                memcpy(e->raw + from, base + from, need - from);
-                gc_bind_buffer(GL_ARRAY_BUFFER, e->buf);
-                p_glBufferSubData(GL_ARRAY_BUFFER, from, need - from, base + from);
-            }
+        size_t from = (size_t)r.lo * stride, to = need;
+        if (conv_full_due(e)) from = 0, to = e->span;
+        else if (conv_sampled_same(e->raw + from, base + from, to - from, stride, 4)) return e->buf;
+        if (conv_refresh(e->raw + from, base + from, to - from)) {
+            gc_bind_buffer(GL_ARRAY_BUFFER, e->buf);
+            p_glBufferSubData(GL_ARRAY_BUFFER, from, to - from, base + from);
         }
         return e->buf;
     }
@@ -2526,33 +2568,44 @@ static GLuint stream_buffer(const UCHAR *base, ULONG stride, vrange r, size_t ne
 
 /* Convert vertices r.lo to r.hi - 1 of `src` (vertex 0's attribute, `stride`
    apart) with `conv`, `size` bytes out per vertex; the result is indexed
-   like the source. */
+   like the source. With `buf`, also keep it in a GL buffer laid out the
+   same way from vertex 0 and return that in *buf (0 if there is none). */
 static const void *convert_cached(const UCHAR *src, ULONG stride, vrange r, ULONG kind, ULONG size,
-                                  void (*conv)(const UCHAR *, ULONG, ULONG, UCHAR *))
+                                  void (*conv)(const UCHAR *, ULONG, ULONG, UCHAR *), GLuint *buf)
 {
     static UCHAR empty[16];
+    if (buf) *buf = 0;
     if (r.hi <= r.lo) return empty;
     conv_entry *e = conv_find(src, stride, kind, 0);
     e->used = conv_serial;
-    const UCHAR *from = src + (size_t)r.lo * stride;
-    size_t len = (size_t)(r.hi - r.lo - 1) * stride + 4;   /* each vertex reads 4 bytes */
     if (e->out && r.lo >= e->lo && r.hi <= e->hi) {
-        UCHAR *raw = e->raw + (size_t)(r.lo - e->lo) * stride;
-        if (!conv_unchanged(e, raw, from, len, stride, 4)) {
-            /* Rewritten (a dynamic buffer): convert the range again. */
-            e->checked = d3d.frame;
-            memcpy(raw, from, len);
-            conv(from, stride, r.hi - r.lo, e->out + (size_t)(r.lo - e->lo) * size);
+        ULONG lo = r.lo, hi = r.hi;
+        if (conv_full_due(e)) {
+            lo = e->lo, hi = e->hi;
+        } else {
+            size_t len = (size_t)(hi - lo - 1) * stride + 4;   /* each vertex reads 4 bytes */
+            if (conv_sampled_same(e->raw + (size_t)(lo - e->lo) * stride, src + (size_t)lo * stride, len, stride, 4))
+                goto done;
         }
-        return e->out - (size_t)e->lo * size;
+        size_t len = (size_t)(hi - lo - 1) * stride + 4;
+        if (conv_refresh(e->raw + (size_t)(lo - e->lo) * stride, src + (size_t)lo * stride, len)) {
+            /* Rewritten (a dynamic buffer): convert the range again. */
+            UCHAR *out = e->out + (size_t)(lo - e->lo) * size;
+            conv(src + (size_t)lo * stride, stride, hi - lo, out);
+            if (e->buf) {
+                gc_bind_buffer(GL_ARRAY_BUFFER, e->buf);
+                p_glBufferSubData(GL_ARRAY_BUFFER, (size_t)lo * size, (size_t)(hi - lo) * size, out);
+            }
+        }
+        goto done;
     }
     /* Not covered yet: grow the entry to cover both ranges and convert it all. */
     if (e->out) {
         if (e->lo < r.lo) r.lo = e->lo;
         if (e->hi > r.hi) r.hi = e->hi;
-        from = src + (size_t)r.lo * stride;
-        len = (size_t)(r.hi - r.lo - 1) * stride + 4;
     }
+    const UCHAR *from = src + (size_t)r.lo * stride;
+    size_t len = (size_t)(r.hi - r.lo - 1) * stride + 4;
     free(e->raw);
     free(e->out);
     e->raw = malloc(len);
@@ -2564,6 +2617,16 @@ static const void *convert_cached(const UCHAR *src, ULONG stride, vrange r, ULON
     e->hi = r.hi;
     e->checked = d3d.frame;
     conv(from, stride, r.hi - r.lo, e->out);
+    if (e->buf || (buf && p_glGenBuffers)) {
+        /* Sized from vertex 0 so offsets match the indices; only lo..hi is filled. */
+        if (!e->buf) p_glGenBuffers(1, &e->buf);
+        gc_bind_buffer(GL_ARRAY_BUFFER, e->buf);
+        p_glBufferData(GL_ARRAY_BUFFER, (size_t)r.hi * size, NULL, GL_STATIC_DRAW);
+        p_glBufferSubData(GL_ARRAY_BUFFER, (size_t)r.lo * size, (size_t)(r.hi - r.lo) * size, e->out);
+    }
+done:
+    if (buf) *buf = e->buf;
+    else gc_bind_buffer(GL_ARRAY_BUFFER, 0);   /* the caller passes client pointers */
     return e->out - (size_t)e->lo * size;
 }
 
@@ -2581,9 +2644,9 @@ static void conv_normpacked3(const UCHAR *src, ULONG stride, ULONG n, UCHAR *out
     }
 }
 
-static const float *unpack_normpacked3(const UCHAR *src, ULONG stride, vrange r)
+static const float *unpack_normpacked3(const UCHAR *src, ULONG stride, vrange r, GLuint *buf)
 {
-    return convert_cached(src, stride, r, CONV_NORMPACKED3, 12, conv_normpacked3);
+    return convert_cached(src, stride, r, CONV_NORMPACKED3, 12, conv_normpacked3, buf);
 }
 
 /* D3DCOLOR vertex data (B, G, R, A bytes) copied out as R, G, B, A for GL
@@ -2599,9 +2662,9 @@ static void conv_rgba(const UCHAR *src, ULONG stride, ULONG n, UCHAR *o)
     }
 }
 
-static const void *rgba_colors(const UCHAR *src, ULONG stride, vrange r)
+static const void *rgba_colors(const UCHAR *src, ULONG stride, vrange r, GLuint *buf)
 {
-    return convert_cached(src, stride, r, CONV_RGBA, 4, conv_rgba);
+    return convert_cached(src, stride, r, CONV_RGBA, 4, conv_rgba, buf);
 }
 
 /* Bind the generic attribute arrays of a declared vertex layout.  `up` is
@@ -2634,16 +2697,18 @@ static void bind_attributes(const vshader *sh, const UCHAR *up, ULONG up_stride,
         }
         p_glEnableVertexAttribArray(r);
         if ((a->type & 0xF) == 6) {
-            gc_bind_buffer(GL_ARRAY_BUFFER, 0);
-            p_glVertexAttribPointer(r, 3, GL_FLOAT, GL_FALSE, 12,
-                                    unpack_normpacked3(base + a->offset + first_vertex * stride, stride, VERTS));
+            GLuint buf;
+            const void *p = unpack_normpacked3(base + a->offset + first_vertex * stride, stride, VERTS, &buf);
+            gc_bind_buffer(GL_ARRAY_BUFFER, buf);
+            p_glVertexAttribPointer(r, 3, GL_FLOAT, GL_FALSE, 12, buf ? NULL : p);
             continue;
         }
         /* D3DCOLOR is stored B, G, R, A and reaches the shader as (R, G, B, A). */
         if (a->type == 0x40 && rgba_vertex_colors) {
-            gc_bind_buffer(GL_ARRAY_BUFFER, 0);
-            p_glVertexAttribPointer(r, 4, GL_UNSIGNED_BYTE, GL_TRUE, 4,
-                                    rgba_colors(base + a->offset + first_vertex * stride, stride, VERTS));
+            GLuint buf;
+            const void *p = rgba_colors(base + a->offset + first_vertex * stride, stride, VERTS, &buf);
+            gc_bind_buffer(GL_ARRAY_BUFFER, buf);
+            p_glVertexAttribPointer(r, 4, GL_UNSIGNED_BYTE, GL_TRUE, 4, buf ? NULL : p);
             continue;
         }
         const UCHAR *ptr = base + a->offset + first_vertex * stride;
@@ -2678,16 +2743,16 @@ static void upload_constants(const vshader *sh, program_entry *e)
        most draws change a few matrices, and every uniform call costs (all
        192 is 3 KB, through box86 and Mesa on a Raspberry Pi). */
     if (e->loc_c >= 0) {
-        int lo = 0, hi = 191;
+        int n = e->c_size, lo = 0, hi = n - 1;
         if (!e->c_partial) {
-            p_glUniform4fv(e->loc_c, 192, &c[0][0]);
+            p_glUniform4fv(e->loc_c, n, &c[0][0]);
             goto uploaded;
         }
         if (e->last_c) {
             /* Word compares, not memcmp: a call per register crosses into
                native code under box86. */
-            while (lo < 192 && gc_same((const uint32_t *)c[lo], e->last_c[lo], 4)) lo++;
-            if (lo == 192) goto uploaded;
+            while (lo < n && gc_same((const uint32_t *)c[lo], e->last_c[lo], 4)) lo++;
+            if (lo == n) goto uploaded;
             while (gc_same((const uint32_t *)c[hi], e->last_c[hi], 4)) hi--;
         } else {
             e->last_c = malloc(sizeof(c));
@@ -2789,7 +2854,7 @@ static void draw_declared_(const vshader *sh, ULONG PrimitiveType, const UCHAR *
         glEnableClientState(GL_NORMAL_ARRAY);
         if ((sh->attr[2].type & 0xF) == 6)
             glNormalPointer(GL_FLOAT, 12, unpack_normpacked3(b + sh->attr[2].offset, s,
-                                                             vertex_range(first, count, indices)));
+                                                             vertex_range(first, count, indices), NULL));
         else
             glNormalPointer(sh->attr[2].gl_type, s, b + sh->attr[2].offset);
     } else {
@@ -2802,7 +2867,7 @@ static void draw_declared_(const vshader *sh, ULONG PrimitiveType, const UCHAR *
         glEnableClientState(GL_COLOR_ARRAY);
         if (sh->attr[3].type == 0x40 && rgba_vertex_colors)
             glColorPointer(4, GL_UNSIGNED_BYTE, 4,
-                           rgba_colors(b + sh->attr[3].offset, s, vertex_range(first, count, indices)));
+                           rgba_colors(b + sh->attr[3].offset, s, vertex_range(first, count, indices), NULL));
         else if (sh->attr[3].gl_type == GL_UNSIGNED_BYTE)
             glColorPointer(sh->attr[3].type == 0x40 ? GL_BGRA : 4, GL_UNSIGNED_BYTE, s, b + sh->attr[3].offset);
         else
@@ -2818,7 +2883,7 @@ static void draw_declared_(const vshader *sh, ULONG PrimitiveType, const UCHAR *
         STREAM(&sh->attr[4], b, s);
         const vattr *a = &sh->attr[4];
         if (a->type == 0x40 && rgba_vertex_colors)
-            secondary_color(lit, rgba_colors(b + a->offset, s, vertex_range(first, count, indices)), 3,
+            secondary_color(lit, rgba_colors(b + a->offset, s, vertex_range(first, count, indices), NULL), 3,
                             GL_UNSIGNED_BYTE, 4);
         else
             secondary_color(lit, b + a->offset, a->type == 0x40 ? GL_BGRA : 3, a->gl_type, s);
@@ -2887,7 +2952,7 @@ static void draw(ULONG PrimitiveType, const UCHAR *base, ULONG stride, ULONG fir
         glEnableClientState(GL_COLOR_ARRAY);
         if (rgba_vertex_colors)
             glColorPointer(4, GL_UNSIGNED_BYTE, 4,
-                           rgba_colors(base + l.diffuse_off, stride, vertex_range(first, count, indices)));
+                           rgba_colors(base + l.diffuse_off, stride, vertex_range(first, count, indices), NULL));
         else
             glColorPointer(GL_BGRA, GL_UNSIGNED_BYTE, stride, base + l.diffuse_off);
         if (lit) {
@@ -2900,7 +2965,7 @@ static void draw(ULONG PrimitiveType, const UCHAR *base, ULONG stride, ULONG fir
         glColor4f(1, 1, 1, 1);
     }
     if (rgba_vertex_colors && l.specular_off >= 0)
-        secondary_color(lit, rgba_colors(base + l.specular_off, stride, vertex_range(first, count, indices)), 3,
+        secondary_color(lit, rgba_colors(base + l.specular_off, stride, vertex_range(first, count, indices), NULL), 3,
                         GL_UNSIGNED_BYTE, 4);
     else
         secondary_color(lit, l.specular_off >= 0 ? base + l.specular_off : NULL, GL_BGRA, GL_UNSIGNED_BYTE, stride);
