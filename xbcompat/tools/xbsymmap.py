@@ -221,7 +221,8 @@ def main():
     ap.add_argument("-o", "--output")
     a = ap.parse_args()
 
-    out = subprocess.run([a.cli, a.xbe, "-e"], check=True, capture_output=True, text=True).stdout
+    out = subprocess.run([a.cli, a.xbe, "-e"], check=True, capture_output=True,
+                         text=True, timeout=120).stdout
     found = {}   # undecorated name -> (kind, conv, args, va)
     # With the library in a D3D section of its own, a D3D function the scanner
     # places elsewhere is title code that matched a signature (Phantom Dust's

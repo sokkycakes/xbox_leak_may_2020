@@ -1,25 +1,129 @@
 #!/bin/sh
-#
-# Game cards on the Sion: every other USB stick or SD card is mounted
-# read-only at /media/<device>, the way Kazeta finds carts, and unmounted
-# when it's pulled. xbcompat looks there for *.kzi/*.kzp (its CARD0: drive),
-# and the dashboard's Games list follows within a second or two.
-#
-# Read-only, so pulling a card never damages it; saves and installed games
-# go to /data. The boot stick and internal disks are left alone.
-#
-#   sion-cards           run in the foreground
-#   sion-cards --daemon  start in the background unless already running
-#
+# Read-only game cards for both Raspberry Pi and Sion. The Dashboard polls
+# CARD0: under /media; this service follows USB/SD media without a restart.
+# The path overrides and --once also allow isolated hotplug regression tests.
+MEDIA=${SION_CARDS_MEDIA:-/media}
+SYS=${SION_CARDS_SYS:-/sys/class/block}
+MOUNTS=${SION_CARDS_MOUNTS:-/proc/mounts}
+MOUNTINFO=${SION_CARDS_MOUNTINFO:-/proc/self/mountinfo}
+STATE=${SION_CARDS_STATE:-/var/run/sion-cards}
+PIDFILE=${SION_CARDS_PIDFILE:-/var/run/sion-cards.pid}
 
-. /usr/lib/sion/sion-lib.sh
+log() { logger -t sion-cards "$*"; }
+running() { [ -r "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; }
+volumes() {
+	parts=
+	for p in "$SYS/$1/$1"*; do
+		[ -e "$p/partition" ] && parts="$parts ${p##*/}"
+	done
+	echo "${parts:-$1}"
+}
 
-MEDIA=/media
-PIDFILE=/var/run/sion-cards.pid
-FAILED=$SION_RUN/cards-failed
+# Protect the entire disk if any partition is mounted outside /media, or
+# carries a system label. Mountinfo identifies /dev/root by major:minor too.
+system_disk() {
+	for v in $(volumes "$1"); do
+		num=$(cat "$SYS/$v/dev" 2>/dev/null)
+		if [ -n "$num" ] && awk -v dev="$num" -v media="$MEDIA/" '
+			$3 == dev && index($5, media) != 1 { found=1 }
+			END { exit !found }' "$MOUNTINFO"; then
+			return 0
+		fi
+		case $(blkid "/dev/$v" 2>/dev/null) in
+		*'LABEL="SIONBOOT"'*|*'LABEL="SIONDATA"'*|*'LABEL="XBOXBOOT"'*|*'LABEL="XBOXDATA"'*) return 0 ;;
+		esac
+	done
+	return 1
+}
 
-running() {
-	[ -r "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null
+removable() {
+	case $(readlink -f "$SYS/$1") in
+	*/usb[0-9]*|*/mmc[0-9]*) return 0 ;;
+	esac
+	return 1
+}
+
+# A reader can remain in sysfs with no card (size zero). diskseq also
+# distinguishes media replacement while the /dev name stays the same.
+identity() {
+	path=$(readlink -f "$SYS/$1") || return 1
+	[ -d "$path" ] || return 1
+	size=$(cat "$path/size" 2>/dev/null)
+	[ -n "$size" ] && [ "$size" != 0 ] || return 1
+	if [ -e "$path/partition" ]; then path=${path%/*}; fi
+	parent_size=$(cat "$path/size" 2>/dev/null)
+	[ -n "$parent_size" ] && [ "$parent_size" != 0 ] || return 1
+	seq=$(cat "$path/diskseq" 2>/dev/null)
+	num=$(cat "$SYS/$1/dev" 2>/dev/null)
+	printf '%s:%s:%s:%s\n' "$num" "${seq:-0}" "$size" "$parent_size"
+}
+
+mounted() { awk -v dev="/dev/$1" '$1 == dev { found=1 } END { exit !found }' "$MOUNTS"; }
+
+poll_cards() {
+	# A failed mount must not suppress a later card in the same reader.
+	for f in "$STATE"/*.failed; do
+		[ -f "$f" ] || continue
+		name=${f##*/}; name=${name%.failed}
+		new=$(identity "$name") || new=
+		[ -n "$new" ] && [ "$new" = "$(head -n 1 "$f")" ] || rm -f "$f"
+	done
+	removed=" "
+	while read -r dev mnt rest; do
+		name=${dev##*/}
+		[ "$dev" = "/dev/$name" ] && [ "$mnt" = "$MEDIA/$name" ] || continue
+		new=$(identity "$name") || new=
+		old=$(cat "$STATE/$name.mounted" 2>/dev/null)
+		if [ -n "$new" ] && { [ -z "$old" ] || [ "$new" = "$old" ]; }; then
+			printf '%s\n' "$new" > "$STATE/$name.mounted"
+			continue
+		fi
+		if umount -l "$mnt"; then
+			rmdir "$mnt" 2>/dev/null
+			rm -f "$STATE/$name.mounted" "$STATE/$name.failed"
+			log "card: $name removed or replaced"
+			# Leave a full poll interval empty so the Dashboard sees a swap,
+			# including two cards with identical cart filenames.
+			removed="$removed$name "
+		fi
+	done < "$MOUNTS"
+
+	for d in "$SYS"/*; do
+		disk=${d##*/}
+		[ -e "$d/partition" ] && continue
+		case $disk in sr*) continue ;; esac
+		removable "$disk" || continue
+		identity "$disk" > /dev/null || continue
+		system_disk "$disk" && continue
+		for v in $(volumes "$disk"); do
+			# A replacement may receive a different /dev name. Defer all
+			# new mounts for this pass after removing any old card.
+			[ "$removed" != " " ] && continue
+			mounted "$v" && continue
+			id=$(identity "$v") || continue
+			if [ "$(head -n 1 "$STATE/$v.failed" 2>/dev/null)" = "$id" ]; then
+				retry=$(sed -n '2p' "$STATE/$v.failed")
+				case $retry in ''|*[!0-9]*) retry=0 ;; esac
+				if [ "$retry" -gt 0 ]; then
+					printf '%s\n%s\n' "$id" "$((retry - 1))" > "$STATE/$v.failed"
+					continue
+				fi
+			fi
+			m=$MEDIA/$v
+			mkdir -p "$m"
+			# BusyBox blkid lacks -s/-o and may omit TYPE. Let mount probe
+			# installed filesystem drivers, always requesting read-only.
+			if mount -o ro,noatime "/dev/$v" "$m"; then
+				printf '%s\n' "$id" > "$STATE/$v.mounted"
+				rm -f "$STATE/$v.failed"
+				log "card: mounted /dev/$v on $m (read-only)"
+			else
+				rmdir "$m" 2>/dev/null
+				printf '%s\n4\n' "$id" > "$STATE/$v.failed"
+				log "card: /dev/$v could not be mounted; retrying after delay or media change"
+			fi
+		done
+	done
 }
 
 case $1 in
@@ -31,106 +135,15 @@ case $1 in
 		"$0" --run > /dev/null 2>&1 < /dev/null &
 	fi
 	echo $! > "$PIDFILE"
-	exit 0
-	;;
---run) ;;
+	exit 0 ;;
+--run|--once) ;;
 *)
 	running && { echo "sion-cards is already running"; exit 0; }
-	echo $$ > "$PIDFILE"
-	;;
+	echo $$ > "$PIDFILE" ;;
 esac
-
-esp=$(find_esp)
-boot=
-[ -n "$esp" ] && boot=$(part_disk "$esp")
-
-# The boot stick, found by its labels too, in case the EFI lookup failed:
-# its partitions are mounted read-write elsewhere.
-boot_disk() {
-	[ "/dev/$1" = "$boot" ] && return 0
-	for v in $(volumes "$1"); do
-		case $(fs_label "/dev/$v") in SIONBOOT|SIONDATA) return 0 ;; esac
-	done
-	return 1
-}
-
-mounted() {
-	grep -q "^/dev/$1 " /proc/mounts
-}
-
-# USB and SD devices only: an internal SATA or NVMe disk is never a card.
-removable() {
-	case $(readlink -f "/sys/class/block/$1") in
-	*/usb[0-9]*|*/mmc[0-9]*) return 0 ;;
-	esac
-	return 1
-}
-
-# The partitions of a card, or the whole device when it has none (sticks
-# formatted without a partition table).
-volumes() {
-	parts=
-	for p in "/sys/class/block/$1/$1"*; do
-		[ -e "$p/partition" ] && parts="$parts ${p##*/}"
-	done
-	echo "${parts:-$1}"
-}
-
-try_mount() {
-	dev=$1
-	grep -qx "$dev" "$FAILED" 2>/dev/null && return 1
-	type=$(blkid -s TYPE -o value "/dev/$dev" 2>/dev/null)
-	m=$MEDIA/$dev
-	mkdir -p "$m"
-	case $type in
-	vfat) mount -t vfat -o ro,noatime,utf8 "/dev/$dev" "$m" 2>/dev/null ||
-		mount -t vfat -o ro,noatime "/dev/$dev" "$m" 2>/dev/null ;;
-	ext2|ext3|ext4|iso9660|udf) mount -t "$type" -o ro,noatime "/dev/$dev" "$m" 2>/dev/null ;;
-	*) false ;;
-	esac
-	if [ $? -eq 0 ]; then
-		log "card: mounted /dev/$dev ($type) on $m"
-	else
-		rmdir "$m" 2>/dev/null
-		echo "$dev" >> "$FAILED"
-		case $type in
-		exfat) log "card: /dev/$dev is exFAT, which this system can't read yet; format it FAT32" ;;
-		*) log "card: /dev/$dev (${type:-no filesystem}) can't be mounted" ;;
-		esac
-	fi
-}
-
-mkdir -p "$MEDIA"
-: > "$FAILED"
-while true; do
-	# Pulled cards: drop their mounts (lazily, in case a game still has a
-	# file open) and forget earlier failures for them.
-	while read -r dev mnt _; do
-		case $mnt in "$MEDIA"/*) ;; *) continue ;; esac
-		[ -e "/sys/class/block/${dev##*/}" ] && continue
-		umount -l "$mnt" 2>/dev/null
-		rmdir "$mnt" 2>/dev/null
-		log "card: ${dev##*/} removed"
-	done < /proc/mounts
-	if [ -s "$FAILED" ]; then
-		while read -r dev; do
-			[ -e "/sys/class/block/$dev" ] && echo "$dev"
-		done < "$FAILED" > "$FAILED.new"
-		mv "$FAILED.new" "$FAILED"
-	fi
-
-	for d in /sys/class/block/*; do
-		disk=${d##*/}
-		[ -e "$d/partition" ] && continue
-		# An optical drive is the Xbox's DVD drive: xbcompat reads its discs.
-		case $disk in sr*) continue ;; esac
-		removable "$disk" || continue
-		boot_disk "$disk" && continue
-		# A card reader with no card in it reports size 0.
-		[ "$(cat "$d/size" 2>/dev/null)" != 0 ] || continue
-		for v in $(volumes "$disk"); do
-			mounted "$v" || try_mount "$v"
-		done
-	done
+mkdir -p "$MEDIA" "$STATE"
+while :; do
+	poll_cards
+	[ "$1" = --once ] && exit 0
 	sleep 2
 done

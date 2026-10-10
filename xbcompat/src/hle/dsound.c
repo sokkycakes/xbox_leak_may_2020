@@ -318,6 +318,7 @@ struct ds_object {
     uint8_t iface[8];                 /* p */
     DWORD speaker_config;
     uint8_t mixbin_headroom[DSMIXBIN_COUNT];
+    LONG dashboard_sound_boost; /* optional compensation, hundredths of dB */
     int headphones;
     struct ds_listener listener, listener_def;
     int ldef_dirty;
@@ -337,16 +338,17 @@ static struct {
     /* audio device */
     int audio_mode;                   /* 0 not started, 1 SDL device, 2 clock thread, 3 manual (tests) */
     SDL_AudioDeviceID dev;
+    unsigned callback_frames;        /* host period; internal mixer chunks stay 512 */
     uint64_t frames;                  /* 48 kHz frames rendered */
     uint64_t block_ns;                /* host time of the last block */
     volatile int stopping;
     /* ACCURATENOTIFY completions */
     int cthread_started;
-    pthread_cond_t ccond;
+    pthread_cond_t ccond XBC_COND_ALIGN;
     struct ds_done *acc; DWORD nacc, acc_cap;
     DWORD mem_allocated;
     /* statistics, logged at exit */
-    float peak; uint64_t audible_frames; unsigned plays, packets_done;
+    float peak; uint64_t audible_frames, clipped_samples; unsigned plays, packets_done;
 } g = { .lock = PTHREAD_MUTEX_INITIALIZER, .override_speaker = 0xFFFFFFFFu, .ccond = PTHREAD_COND_INITIALIZER };
 
 /* Tests can drive the mixer by hand: set this before any DirectSound call. */
@@ -754,11 +756,18 @@ static void voice_calc_gains(struct ds_voice *v)
     memset(v->gain, 0, sizeof(v->gain));
     memset(v->subgain, 0, sizeof(v->subgain));
     int sub_bin = v->output ? (int)v->output->input_mixbin : -1;
+    /* Optional Dashboard sound-level adjustment. Restore only headroom the
+       source actually reserves; zero-headroom music and submix stages get
+       no boost. Guest volume fades, bin volumes and 3D attenuation remain. */
+    /* v->volume already includes the negative source headroom. */
+    LONG boost = g.ds ? g.ds->dashboard_sound_boost : 0;
+    if ((DWORD)boost > v->headroom) boost = (LONG)v->headroom;
+    if (v->flags & DSBCAPS_SUBMIXMASK) boost = 0;
     for (DWORD k = 0; k < v->nbins; k++) {
         int c = voice_slot_channel(v, k);
         if (c >= 6) continue;
         int b = v->bins[k];
-        LONG att = -v->volume - v->binvol[b] - v->l3d_vol - v->pan[b];
+        LONG att = -v->volume - boost - v->binvol[b] - v->l3d_vol - v->pan[b];
         if (att < 0) att = 0;
         float gain = att >= 6400 ? 0.0f : powf(10.0f, -(float)att / 2000.0f);
         gain = ldexpf(gain, -(g.ds ? g.ds->mixbin_headroom[b] : (b == DSMIXBIN_SUBMIX ? 0 : 1)));
@@ -972,7 +981,8 @@ static uint64_t sample_time_locked(void)
     uint64_t t = g.frames;
     if (g.block_ns && g.audio_mode && g.audio_mode != 3) {
         uint64_t el = (mono_ns() - g.block_ns) * MIX_RATE / 1000000000ull;
-        if (el > MIX_FRAMES) el = MIX_FRAMES;
+        unsigned period = g.audio_mode == 1 && g.callback_frames ? g.callback_frames : MIX_FRAMES;
+        if (el > period) el = period;
         t += el;
     }
     return t;
@@ -1115,6 +1125,8 @@ static void flush_locked(struct ds_stream *s, DWORD status)
 
 static void *completion_thread(void *arg)
 {
+    pthread_setname_np(pthread_self(), "ds-notify");
+    prof_thread_start();
     (void)arg;
     thread_adopt_host("dsound");
     LOCK();
@@ -1306,8 +1318,8 @@ void ds_mix_block(float *out, int n)
     for (int i = 0; i < 2 * n; i++) {
         float a = fabsf(out[i]);
         if (a > peak) peak = a;
-        if (out[i] > 1.0f) out[i] = 1.0f;
-        else if (out[i] < -1.0f) out[i] = -1.0f;
+        if (out[i] > 1.0f) { out[i] = 1.0f; g.clipped_samples++; }
+        else if (out[i] < -1.0f) { out[i] = -1.0f; g.clipped_samples++; }
     }
     if (peak > g.peak) g.peak = peak;
     if (peak > 0) g.audible_frames += (uint64_t)n;
@@ -1323,6 +1335,8 @@ static void SDLCALL sdl_audio_cb(void *ud, Uint8 *stream, int len)
 
 static void *clock_thread(void *arg)
 {
+    pthread_setname_np(pthread_self(), "ds-clock");
+    prof_thread_start();
     (void)arg;
     static float scratch[MIX_FRAMES * 2];
     uint64_t next = mono_ns();
@@ -1342,8 +1356,8 @@ static void *clock_thread(void *arg)
 
 static void audio_stop(void)
 {
-    xlog("DSound: %llu frames mixed (%llu in audible blocks), peak %.3f, %u buffer plays, %u packets completed",
-         (unsigned long long)g.frames, (unsigned long long)g.audible_frames, g.peak, g.plays, g.packets_done);
+    xlog("DSound: %llu frames mixed (%llu in audible blocks), peak %.3f, %llu clipped samples, %u buffer plays, %u packets completed",
+         (unsigned long long)g.frames, (unsigned long long)g.audible_frames, g.peak, (unsigned long long)g.clipped_samples, g.plays, g.packets_done);
     g.stopping = 1;
     if (g.audio_mode == 1 && g.dev) { SDL_CloseAudioDevice(g.dev); g.dev = 0; }
     pthread_cond_broadcast(&g.ccond);
@@ -1356,6 +1370,14 @@ static void audio_start(void)
     SDL_AudioSpec want, have;
     memset(&want, 0, sizeof(want));
     want.freq = MIX_RATE; want.format = AUDIO_F32SYS; want.channels = 2; want.samples = MIX_FRAMES;
+    const char *frames = getenv("XBCOMPAT_AUDIO_FRAMES");
+    if (frames && *frames) {
+        char *end;
+        unsigned long n = strtoul(frames, &end, 10);
+        if (*end || n < MIX_FRAMES || n > 4096 || (n & (n - 1)))
+            xlog("DSound: ignoring invalid XBCOMPAT_AUDIO_FRAMES=%s (512/1024/2048/4096)", frames);
+        else want.samples = (Uint16)n;
+    }
     want.callback = sdl_audio_cb;
     for (int attempt = 0; attempt < 2 && !g.dev; attempt++) {
         if (attempt == 1) {
@@ -1373,6 +1395,7 @@ static void audio_start(void)
     }
     if (g.dev) {
         g.audio_mode = 1;
+        g.callback_frames = have.samples;
         xlog("DSound: audio on %s driver, %d Hz, %d channels, %d frames per block",
              SDL_GetCurrentAudioDriver(), have.freq, have.channels, have.samples);
         SDL_PauseAudioDevice(g.dev, 0);
@@ -1383,16 +1406,34 @@ static void audio_start(void)
         pthread_create(&t, NULL, clock_thread, NULL);
         pthread_detach(t);
     }
-    atexit(audio_stop);
+    xbc_at_exit(audio_stop);
 }
 
 /* ---- the DirectSound object -------------------------------------------------- */
+
+/* A listening-level preference, not a change to Xbox headroom semantics.
+   The title gate also protects games launched with inherited environment. */
+static LONG dashboard_sound_boost(ULONG title, const char *value)
+{
+    if (title != 0xFFFE0000u || !value || !*value) return 0;
+    char *end;
+    long db = strtol(value, &end, 10);
+    if (end == value || *end || db < 0 || db > 12) {
+        xlog("DSound: ignoring invalid XBCOMPAT_DASH_SOUND_BOOST_DB=%s (integer 0..12)", value);
+        return 0;
+    }
+    return (LONG)db * 100;
+}
 
 static struct ds_object *ds_create_locked(void)
 {
     if (g.ds) { g.ds->hdr.refs++; return g.ds; }
     struct ds_object *d = pool_alloc(sizeof(*d));
     if (!d) return NULL;
+    d->dashboard_sound_boost = dashboard_sound_boost(xbe_title_id(), getenv("XBCOMPAT_DASH_SOUND_BOOST_DB"));
+    if (d->dashboard_sound_boost)
+        xlog("DSound: Dashboard sound boost %ld dB (limited to source headroom)",
+             (long)d->dashboard_sound_boost / 100);
     d->valid_vptr = 0; d->valid_sig = 0x444E5344; /* 'DSND' */
     guest_vtbls();
     d->hdr.vtbl = refhdr_vtbl; d->hdr.refs = 1;
@@ -2378,13 +2419,14 @@ static HRESULT NTAPI DS_EnableHeadphones(void *self, ULONG on)
     return d ? DS_OK : DSERR_INVALIDPARAM;
 }
 
-static HRESULT NTAPI DS_SetMixBinHeadroom(void *self, DWORD bin, DWORD headroom)
+static HRESULT set_mixbin_headroom(void *self, DWORD mask, DWORD headroom)
 {
-    if (bin >= DSMIXBIN_COUNT || headroom > 7) return DSERR_INVALIDPARAM;
+    if (headroom > 7) return DSERR_INVALIDPARAM;
     LOCK();
     struct ds_object *d = find_ds(self);
     if (d) {
-        d->mixbin_headroom[bin] = (uint8_t)headroom;
+        for (unsigned bin = 0; bin < DSMIXBIN_COUNT; bin++)
+            if (mask & (1u << bin)) d->mixbin_headroom[bin] = (uint8_t)headroom;
         for (unsigned i = 0; i < g.nobjs; i++) {
             if (g.objs[i].kind == DS_BUFFER) ((struct ds_buffer *)g.objs[i].obj)->v.dirty = 1;
             else if (g.objs[i].kind == DS_STREAM) ((struct ds_stream *)g.objs[i].obj)->v.dirty = 1;
@@ -2392,6 +2434,21 @@ static HRESULT NTAPI DS_SetMixBinHeadroom(void *self, DWORD bin, DWORD headroom)
     }
     UNLOCK();
     return d ? DS_OK : DSERR_INVALIDPARAM;
+}
+
+static HRESULT NTAPI DS_SetMixBinHeadroom(void *self, DWORD bin, DWORD headroom)
+{
+    /* Early dashboards call the unversioned entry with DSMIXBIN_VALID, the
+       old all-bin mask. This value cannot be a modern bin index. Keep small
+       values as indices; explicit _v1 entries handle arbitrary old masks. */
+    if (bin == 0x7FFFFFFFu) return set_mixbin_headroom(self, bin, headroom);
+    if (bin >= DSMIXBIN_COUNT) return DSERR_INVALIDPARAM;
+    return set_mixbin_headroom(self, 1u << bin, headroom);
+}
+
+static HRESULT NTAPI DS_SetMixBinHeadroom_v1(void *self, DWORD mask, DWORD headroom)
+{
+    return set_mixbin_headroom(self, mask, headroom);
 }
 
 /* Listener 3D settings: immediate values go to both copies, deferred ones to the shadow. */
@@ -3343,6 +3400,8 @@ const struct hle_func dsound_funcs[] = {
     F("_IDirectSound_EnableHeadphones@8", DS_EnableHeadphones),
     F("?EnableHeadphones@CDirectSound@DirectSound@@QAGJH@Z", DS_EnableHeadphones),
     F("_IDirectSound_SetMixBinHeadroom@12", DS_SetMixBinHeadroom),
+    F("_IDirectSound_SetMixBinHeadroom_v1@12", DS_SetMixBinHeadroom_v1),
+    F("?SetMixBinHeadroom_v1@CDirectSound@DirectSound@@QAGJKK@Z", DS_SetMixBinHeadroom_v1),
     F("?SetMixBinHeadroom@CDirectSound@DirectSound@@QAGJKK@Z", DS_SetMixBinHeadroom),
     F("_IDirectSound_SetAllParameters@12", DS_SetAllParameters),
     F("?SetAllParameters@CDirectSound@DirectSound@@QAGJPBU_DS3DLISTENER@@K@Z", DS_SetAllParameters),

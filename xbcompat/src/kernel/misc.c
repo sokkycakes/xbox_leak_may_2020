@@ -213,14 +213,14 @@ void NTAPI HalReturnToFirmware(ULONG Routine)
             xlog("dashboard launch data saved to %s", page);
         }
     }
-    exit(0);
+    xbc_exit(0);
 }
 
 void NTAPI HalInitiateShutdown(void)
 {
     xlog("HalInitiateShutdown");
     av_hand_over();
-    exit(0);
+    xbc_exit(0);
 }
 
 BOOLEAN NTAPI HalIsResetOrShutdownPending(void) { return 0; }

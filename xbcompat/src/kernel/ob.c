@@ -11,6 +11,7 @@
 #include <string.h>
 #include <strings.h>
 
+#include "../cpu.h"
 #include "../xbcompat.h"
 
 #define MAX_HANDLES 4096
@@ -406,6 +407,7 @@ NTSTATUS NTAPI NtYieldExecution(void)
 {
     xthread *xt = thread_current();
     if (xt) __atomic_store_n(&xt->in_wait, 1, __ATOMIC_SEQ_CST);
+    cpu_block();
     sched_yield();
     thread_wait_end(xt);
     return STATUS_SUCCESS;

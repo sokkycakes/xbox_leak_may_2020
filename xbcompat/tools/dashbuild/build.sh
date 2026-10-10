@@ -5,11 +5,14 @@
 #
 #   tools/dashbuild/build.sh [WORK]     (default WORK=/tmp/xbdash)
 #   NEWGAMES=DIR tools/dashbuild/build.sh [WORK]
+#   NEWGAMES_XIPS=DIR tools/dashbuild/build.sh [WORK]
 #
 # NEWGAMES is the March 2001 dashboard's Games scene (TDATA\fffe0000\NewGames
 # on that recovery disc), with its Games_Title scene beside it.  With it the
 # Games screen is those scenes, packed into NewGames.xip and Games_Title.xip;
-# without it the Games screen is built on Settings home.
+# NEWGAMES_XIPS can instead supply already-built NewGames.xip and
+# Games_Title.xip (for updating an existing installation without its source
+# assets). Without either option the Games screen is built on Settings home.
 #   tools/dashbuild/run.sh   [WORK] [xbrun options...]
 #
 # Needs wine + wine32 (apt: libgd3:i386 first, then wine wine32:i386).
@@ -20,6 +23,13 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 WORK=${1:-/tmp/xbdash}
 LEAK=$(cd "$HERE/../../.." && pwd)/"xbox_leak_may_2020/xbox trunk/xbox"
 mkdir -p "$WORK/obj" "$WORK/patch"
+# Incremental rebuilds keep the installed Games scene when its source assets
+# are no longer beside the build. The output is outside the recreated dash/.
+if [ -z "$NEWGAMES" ] && [ -z "$NEWGAMES_XIPS" ] && \
+   [ -s "$WORK/run/hdd/partition2/NewGames.xip" ] && \
+   [ -s "$WORK/run/hdd/partition2/Games_Title.xip" ]; then
+    NEWGAMES_XIPS="$WORK/run/hdd/partition2"
+fi
 ln -sfn "$LEAK" "$WORK/xb"
 export WINEDEBUG=-all WINEPREFIX=${WINEPREFIX:-$WORK/wineprefix}
 W=$(echo "Z:$WORK" | tr / '\\')          # WORK as a Wine path
@@ -107,6 +117,13 @@ if [ -n "$NEWGAMES" ]; then
         tga2xbx panel8.tga 512 512
         timeout 300 wine "$WORK/xb/private/ui/XIP/obj/i386/xip.exe" -q -m -i GameHilite_01.bmp ..\\Games_Title.xip default.xap | tr -d '\r'
     )
+    XIPS="$XIPS NewGames.xip Games_Title.xip"
+elif [ -n "$NEWGAMES_XIPS" ]; then
+    for archive in NewGames.xip Games_Title.xip; do
+        test -s "$NEWGAMES_XIPS/$archive" || { echo "Missing $NEWGAMES_XIPS/$archive" >&2; exit 1; }
+        cp "$NEWGAMES_XIPS/$archive" "$WORK/dash/$archive"
+    done
+    cp "$HERE/games/newgames.xap" "$WORK/dash/games.xap"
     XIPS="$XIPS NewGames.xip Games_Title.xip"
 fi
 (

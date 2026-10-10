@@ -3,6 +3,10 @@
 # runs in Unicorn instead (src/cpu.h); everything else stays the same.
 # TRANSLATED=1 on i386 runs the guest in Unicorn too (for testing the
 # translator, and timing it against native, on a PC).
+RENDERER ?= builtin
+ifeq ($(RENDERER),native)
+BUILD ?= build-native-client
+endif
 TARGET  ?= i386
 UNICORN ?= /opt/unicorn-$(TARGET)
 ifeq ($(TARGET),armhf)
@@ -48,8 +52,31 @@ LEAK    ?= ../xbox_leak_may_2020/xbox trunk/xbox
 KERNSRC  = src/kernel/ke.c src/kernel/ob.c src/kernel/io.c src/kernel/rtl.c src/kernel/misc.c src/kernel/dvd.c \
            src/kernel/kernel.c src/kernel/av.c src/kernel/reset.c src/kernel/exports.gen.c
 HLESRC   = src/hle/hle.c src/hle/d3d8.c src/hle/vsh.c src/hle/vsh_interp.c src/hle/psh.c src/hle/xinput.c src/hle/dsound.c
-SRC      = src/main.c src/log.c src/loader.c src/memory.c src/thread.c $(KERNSRC) $(HLESRC)
+ifeq ($(RENDERER),native)
+ifneq ($(TARGET),i386)
+$(error RENDERER=native is the i386/Box86 client; build its ARM library with tools/native-renderer.mk)
+endif
+ifeq ($(TRANSLATED),1)
+$(error RENDERER=native cannot be combined with Unicorn TRANSLATED=1)
+endif
+HLESRC := $(filter-out src/hle/d3d8.c src/hle/vsh.c src/hle/vsh_interp.c src/hle/psh.c,$(HLESRC)) src/renderer/client.c
+override CFLAGS += -Isrc
+LDLIBS += -ldl
+endif
+SRC      = src/main.c src/log.c src/prof.c src/loader.c src/memory.c src/thread.c $(KERNSRC) $(HLESRC)
 OBJ      = $(SRC:%.c=$(BUILD)/%.o)
+ifeq ($(RENDERER),native)
+OBJ += $(BUILD)/renderer_stubs.o $(BUILD)/renderer_entry.o
+$(BUILD)/src/renderer/client.o: src/renderer/bridge.h src/cpu.h
+$(BUILD)/renderer_stubs.c: src/hle/d3d8.c tools/gen_renderer_stubs.py
+	@mkdir -p $(BUILD)
+	python3 tools/gen_renderer_stubs.py $< > $@
+$(BUILD)/renderer_stubs.o: $(BUILD)/renderer_stubs.c src/renderer/bridge.h
+	$(CC) $(CFLAGS) -c $< -o $@
+$(BUILD)/renderer_entry.o: src/renderer/entry.S
+	@mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+endif
 ifeq ($(TRANSLATED),1)
 # Each source file is compiled together with its generated guest-call
 # adapters (tools/gen_adapters.py), from a wrapper that includes both.

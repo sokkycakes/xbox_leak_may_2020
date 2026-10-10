@@ -26,6 +26,7 @@ static uint8_t ldt_used[8192];
 static LONG next_thread_id = 1;
 
 #ifdef XBC_NATIVE
+#define BOX86_LDT_ENTRY 0x1fff
 static int ldt_alloc(void *base, uint32_t limit)
 {
     pthread_mutex_lock(&ldt_lock);
@@ -46,13 +47,25 @@ static int ldt_alloc(void *base, uint32_t limit)
         .seg_not_present = 0,
         .useable = 1,
     };
-    if (syscall(SYS_modify_ldt, 1, &d, sizeof(d)) != 0)
-        fatal("modify_ldt: %s", strerror(errno));
+    if (syscall(SYS_modify_ldt, 1, &d, sizeof(d)) != 0) {
+        if (errno != ENOSYS) fatal("modify_ldt: %s", strerror(errno));
+        /* box86 (x86 on 32-bit ARM, e.g. a Raspberry Pi) has only Wine's
+           modify_ldt (0x11), and keeps a base per thread for each entry:
+           every thread uses the one entry with its own PCR. */
+        pthread_mutex_lock(&ldt_lock);
+        ldt_used[idx] = 0;
+        pthread_mutex_unlock(&ldt_lock);
+        d.entry_number = BOX86_LDT_ENTRY;
+        if (syscall(SYS_modify_ldt, 0x11, &d, sizeof(d)) != 0)
+            fatal("modify_ldt: %s", strerror(errno));
+        return BOX86_LDT_ENTRY;
+    }
     return idx;
 }
 
 static void ldt_free(int idx)
 {
+    if (idx == BOX86_LDT_ENTRY) return;
     pthread_mutex_lock(&ldt_lock);
     ldt_used[idx] = 0;
     pthread_mutex_unlock(&ldt_lock);
@@ -163,11 +176,16 @@ typedef ULONG (NTAPI *start_fn)(PVOID);
 typedef void (NTAPI *system_fn)(PVOID, PVOID);
 
 static pthread_mutex_t start_lock = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t start_cond = PTHREAD_COND_INITIALIZER;
+static pthread_cond_t start_cond XBC_COND_ALIGN = PTHREAD_COND_INITIALIZER;
 
 static void *thread_main(void *arg)
 {
     xthread *t = arg;
+    /* Named by start address, to find a busy thread in top -H or /proc. */
+    char name[16];
+    snprintf(name, sizeof name, "x%08x", (unsigned)(uintptr_t)t->start_routine);
+    pthread_setname_np(pthread_self(), name);
+    prof_thread_start();
     attach(t);
 
     pthread_mutex_lock(&start_lock);
@@ -198,7 +216,7 @@ static void *thread_main(void *arg)
     pthread_mutex_lock(&g_disp_lock);
     t->ethread.Tcb.HasTerminated = 1;
     t->ethread.Tcb.Header.SignalState = 1;
-    disp_signal_all();
+    disp_signal(&t->ethread.Tcb.Header);
     pthread_mutex_unlock(&g_disp_lock);
     ldt_free(t->ldt_index);
 #ifdef XBC_TRANSLATED

@@ -628,6 +628,8 @@ static void poll_drive(void)
 
 static void *poll_thread(void *arg)
 {
+    pthread_setname_np(pthread_self(), "dvd-poll");
+    prof_thread_start();
     (void)arg;
     for (;;) {
         struct timespec ts = { 0, 500 * 1000 * 1000 };
@@ -899,4 +901,3 @@ NTSTATUS dvd_scsi_pass_through(void *in, ULONG inlen)
     }
     return STATUS_SUCCESS;
 }
-

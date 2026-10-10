@@ -114,7 +114,20 @@ static void crash_handler(int sig, siginfo_t *si, void *uc_)
          (unsigned long)uc->uc_mcontext.arm_lr, (unsigned long)uc->uc_mcontext.arm_sp);
     Dl_info info;
     if (dladdr((void *)uc->uc_mcontext.arm_pc, &info) && info.dli_fname)
-        xlog("  pc is in %s %s", info.dli_fname, info.dli_sname ? info.dli_sname : "");
+        xlog("  pc is in %s %s +%#lx", info.dli_fname, info.dli_sname ? info.dli_sname : "",
+             (unsigned long)((uintptr_t)uc->uc_mcontext.arm_pc - (uintptr_t)info.dli_fbase));
+    /* Libraries like Mesa have no unwind tables: list the return addresses
+       left on the stack instead, as library offsets to look up later. */
+    const uintptr_t *sp = (const uintptr_t *)uc->uc_mcontext.arm_sp;
+    for (int i = 0, n = 0; i < 512 && n < 24; i++) {
+        if (!(sp[i] & 1) && (sp[i] & 3)) continue;   /* code addresses: ARM (4-aligned) or Thumb (odd) */
+        if (dladdr((void *)sp[i], &info) && info.dli_fname && info.dli_fbase) {
+            const char *f = strrchr(info.dli_fname, '/');
+            xlog("  stack[%d] %s+%#lx %s", i, f ? f + 1 : info.dli_fname,
+                 (unsigned long)(sp[i] - (uintptr_t)info.dli_fbase), info.dli_sname ? info.dli_sname : "");
+            n++;
+        }
+    }
 #else
     (void)uc;
 #endif
@@ -230,6 +243,7 @@ int main(int argc, char **argv)
     }
 
     install_fault_handlers();
+    prof_init();
 
     mem_init();
 #ifdef XBC_TRANSLATED
