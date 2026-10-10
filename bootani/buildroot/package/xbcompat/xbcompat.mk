@@ -70,6 +70,7 @@ define XBCOMPAT_INSTALL_TARGET_CMDS
 	rm -rf $(TARGET_DIR)/opt/xbcompat
 	mkdir -p $(TARGET_DIR)/opt/xbcompat
 	tar -C $(TARGET_DIR)/opt/xbcompat -xzf $(XBCOMPAT_TITLES)
+	XDG_CACHE_HOME=$(TARGET_DIR)/opt/xbcompat/cache python3 $(XBCOMPAT_SITE)/tools/pi/signatures.py
 	for tool in xbrun.py xbedump.py findsigs.py mksigs.py xbsymmap.py pe2xbe.py; do \
 		$(INSTALL) -D -m 0644 $(@D)/tools/$$tool $(TARGET_DIR)/opt/xbcompat/tools/$$tool; \
 	done
