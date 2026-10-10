@@ -971,6 +971,179 @@ int main(int argc, char **argv)
             puts("renderer skinning: six modes, FVF/declarations, inverse normals and normalization passed");
         }
 
+
+        /* Literal format fixtures test channel order and opaque-X semantics.
+         * Linear rows have sentinel padding; the sampled row is not row zero. */
+        {
+            static const struct {
+                unsigned swizzled, linear, bytes;
+                uint32_t texel;
+                unsigned char rgba[4];
+            } formats[] = {
+                {0x00,0x13,1,0x55,{85,85,85,255}},
+                {0x01,0x1b,1,0x55,{85,85,85,85}},
+                {0x19,0x1f,1,0x55,{255,255,255,85}},
+                {0x1a,0x20,2,0xaa55,{85,85,85,170}},
+                {0x32,0x35,2,0x5555,{85,85,85,255}},
+                {0x06,0x12,4,0xdd115599,{17,85,153,221}},
+                {0x07,0x1e,4,0x00115599,{17,85,153,255}},
+                {0x3a,0x3f,4,0xdd995511,{17,85,153,221}},
+                {0x3b,0x40,4,0x995511dd,{17,85,153,221}},
+                {0x3c,0x41,4,0x115599dd,{17,85,153,221}},
+                {0x05,0x11,2,0xaaa6,{173,85,49,255}},
+                {0x02,0x10,2,0xd543,{173,82,25,255}},
+                {0x03,0x1c,2,0x5543,{173,82,25,255}},
+                {0x04,0x1d,2,0xd159,{17,85,153,221}},
+                {0x38,0x3d,2,0xaa87,{173,82,25,255}},
+                {0x39,0x3e,2,0x159d,{17,85,153,221}}
+            };
+            uint32_t saved_rs[256],saved_tss[128];
+            memcpy(saved_rs,render_states,sizeof saved_rs);
+            memcpy(saved_tss,texture_states,sizeof saved_tss);
+            set_ps(control_ps); set_vs(0x144);
+            render_states[59] = render_states[60] = render_states[82] = 0;
+            render_states[92] = render_states[124] = 0;
+            texture_states[3] = texture_states[4] = 1;
+            texture_states[5] = texture_states[9] = texture_states[11] = texture_states[21] = 0;
+            for (unsigned f = 0; f < sizeof formats/sizeof formats[0]; f++)
+                for (unsigned linear = 0; linear < 2; linear++) {
+                    unsigned fmt = linear ? formats[f].linear : formats[f].swizzled;
+                    void *sample = create_tex(4,2,1,1,0,fmt,3);
+                    ULONG locked[2];
+                    lock_tex(sample,0,locked,NULL,0);
+                    unsigned char *data = (void *)locked[1];
+                    if (linear) {
+                        memset(data,0xee,locked[0]*2);
+                        memset(data,0,4*formats[f].bytes);
+                        for (int x = 0; x < 4; x++)
+                            memcpy(data+locked[0]+x*formats[f].bytes,&formats[f].texel,formats[f].bytes);
+                    } else {
+                        for (int x = 0; x < 8; x++)
+                            memcpy(data+x*formats[f].bytes,&formats[f].texel,formats[f].bytes);
+                    }
+                    set_tex(0,sample);
+                    for (int i = 0; i < 3; i++) {
+                        textured[i].u = linear ? 2.5f : .625f;
+                        textured[i].v = linear ? 1.5f : .75f;
+                    }
+                    clear(0,NULL,0xf0,0xff000000,1,0);
+                    draw(5,3,textured,sizeof textured[0]);
+                    glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                    for (int k = 0; k < 4; k++) {
+                        if (abs((int)pixel[k]-formats[f].rgba[k]) > 2)
+                            fprintf(stderr,"texture format %x channel %d: %u expected %u\n",fmt,k,pixel[k],formats[f].rgba[k]);
+                        assert(abs((int)pixel[k]-formats[f].rgba[k]) <= 2);
+                    }
+                }
+            /* Two luma samples share neutral chroma: byte-order errors
+             * cannot turn both endpoints into black and white correctly. */
+            static const unsigned char video[2][4] = {{16,128,235,128},{128,16,128,235}};
+            for (unsigned fmt = 0; fmt < 2; fmt++) {
+                void *sample = create_tex(2,2,1,1,0,0x24+fmt,3);
+                ULONG locked[2]; lock_tex(sample,0,locked,NULL,0);
+                memcpy((void *)locked[1],video[fmt],4);
+                memcpy((void *)(locked[1]+locked[0]),video[fmt],4);
+                set_tex(0,sample);
+                for (unsigned x = 0; x < 2; x++) {
+                    for (int i = 0; i < 3; i++) { textured[i].u = x+.5f; textured[i].v = 1.5f; }
+                    clear(0,NULL,0xf0,0xff000000,1,0);
+                    draw(5,3,textured,sizeof textured[0]);
+                    glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                    for (int k = 0; k < 3; k++) assert(abs((int)pixel[k]-(x ? 255 : 0)) <= 2);
+                    assert(pixel[3] > 240);
+                }
+            }
+            set_ps(0); set_tex(0,tex);
+            memcpy(render_states,saved_rs,sizeof saved_rs);
+            memcpy(texture_states,saved_tss,sizeof saved_tss);
+            puts("renderer texture formats: 32 color layouts, padded rows and both YUV byte orders passed");
+        }
+
+        /* Independently tabulated Morton addresses, with each storage word
+         * encoding its own address. Dimensions deliberately exhaust axes at
+         * different times. No runtime swizzler generates expected values. */
+        {
+            static const struct {
+                unsigned w,h,d,x,y,z,address;
+            } cases[] = {
+                {8,2,1,7,0,0,13},{8,2,1,3,1,0,7},
+                {2,8,1,0,7,0,14},{2,8,1,1,3,0,7},
+                {8,4,2,5,2,1,53},{8,4,2,2,1,0,10},
+                {2,4,8,1,2,5,45},{2,4,8,0,3,2,26}
+            };
+            void (NTAPI *lock_volume)(void *,ULONG,ULONG *,const LONG *,ULONG) =
+                find("_D3DVolumeTexture_LockBox@20");
+            ULONG def[60] = {0}, volume_ps = 0;
+            def[8] = 8; def[9] = 0x18u<<8; def[54] = 2;
+            create_ps(def,&volume_ps);
+            struct {float x,y,z,w; uint32_t color; float u,v,r;} vertices[] = {
+                {4,4,.5f,1,0xffffffff,0,0,0},{60,4,.5f,1,0xffffffff,0,0,0},{32,60,.5f,1,0xffffffff,0,0,0}
+            };
+            set_vs(0x10144);
+            texture_states[3] = texture_states[4] = 1;
+            texture_states[5] = texture_states[9] = texture_states[11] = texture_states[21] = 0;
+            for (unsigned c = 0; c < sizeof cases/sizeof cases[0]; c++) {
+                void *sample = create_tex(cases[c].w,cases[c].h,cases[c].d,1,0,6,cases[c].d>1 ? 4 : 3);
+                ULONG locked[3];
+                uint32_t *data;
+                if (cases[c].d>1) {
+                    lock_volume(sample,0,locked,NULL,0); data = (void *)locked[2];
+                } else {
+                    lock_tex(sample,0,locked,NULL,0); data = (void *)locked[1];
+                }
+                for (unsigned i = 0; i < cases[c].w*cases[c].h*cases[c].d; i++)
+                    data[i] = 0xff000000u | ((3*i)<<16) | (i<<8) | (255-i);
+                set_tex(0,sample);
+                set_ps(cases[c].d>1 ? volume_ps : control_ps);
+                for (int i = 0; i < 3; i++) {
+                    vertices[i].u = (cases[c].x+.5f)/cases[c].w;
+                    vertices[i].v = (cases[c].y+.5f)/cases[c].h;
+                    vertices[i].r = (cases[c].z+.5f)/cases[c].d;
+                }
+                clear(0,NULL,0xf0,0xff000000,1,0);
+                draw(5,3,vertices,sizeof vertices[0]);
+                glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                assert(abs((int)pixel[0]-3*(int)cases[c].address) <= 1);
+                assert(abs((int)pixel[1]-(int)cases[c].address) <= 1);
+                assert(abs((int)pixel[2]-(255-(int)cases[c].address)) <= 1);
+            }
+            set_ps(0); set_tex(0,tex); set_vs(0x144);
+            puts("renderer swizzles: 8x2, 2x8, 8x4x2 and 2x4x8 literal address fixtures passed");
+        }
+
+
+        /* Every supported palette length, highest valid index, and palette
+         * edits without touching indexed texture memory or shader state. */
+        {
+            LONG (NTAPI *create_palette)(ULONG,void **) = find("_D3DDevice_CreatePalette@8");
+            void (NTAPI *lock_palette)(void *,void **,ULONG) = find("_D3DPalette_Lock@12");
+            void (NTAPI *set_palette)(ULONG,void *) = find("_D3DDevice_SetPalette@8");
+            set_ps(control_ps); set_vs(0x144);
+            texture_states[3] = texture_states[4] = 1;
+            texture_states[5] = texture_states[9] = texture_states[11] = texture_states[21] = 0;
+            for (unsigned size = 0; size < 4; size++) {
+                unsigned count = 256u>>size;
+                void *palette = NULL;
+                assert(create_palette(size,&palette) == 0);
+                uint32_t *colors = NULL; lock_palette(palette,(void **)&colors,0);
+                memset(colors,0,count*4);
+                void *indexed = create_tex(2,2,1,1,0,0x0b,3);
+                ULONG locked[2]; lock_tex(indexed,0,locked,NULL,0);
+                memset((void *)locked[1],count-1,4);
+                set_palette(0,palette); set_tex(0,indexed);
+                for (int i = 0; i < 3; i++) textured[i].u = textured[i].v = .5f;
+                for (unsigned edit = 0; edit < 2; edit++) {
+                    colors[count-1] = edit ? 0xff00ff00 : 0xffff0000;
+                    clear(0,NULL,0xf0,0xff000000,1,0);
+                    draw(5,3,textured,sizeof textured[0]);
+                    glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                    assert(pixel[edit ? 1 : 0] > 240 && pixel[edit ? 0 : 1] < 8 && pixel[2] < 8);
+                }
+            }
+            set_palette(0,NULL); set_ps(0); set_tex(0,tex);
+            puts("renderer palettes: 32/64/128/256 entries and palette-only cache refresh passed");
+        }
+
         /* Compressed volume uploads decode the packed slab order before GL.
          * The selected blocks distinguish XY tiles, slices within a slab,
          * and the second slab. Minification then selects an authored mip. */
