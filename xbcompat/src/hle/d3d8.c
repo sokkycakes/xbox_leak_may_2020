@@ -2163,6 +2163,9 @@ typedef struct {
     vattr attr[16];
     uint32_t *code;          /* NV2A microcode, NULL for a fixed-function declaration */
     unsigned ninstr;
+    ULONG header;            /* the function blob's first dword, for GetVertexShaderFunction */
+    ULONG *decl;             /* a copy of the declaration, for GetVertexShaderDeclaration */
+    ULONG decl_dwords;
     float (*consts)[4];      /* D3DVSD_CONST data: slot, then values */
     int *const_slots;
     unsigned nconsts;
@@ -2242,6 +2245,13 @@ static vshader *parse_declaration(const ULONG *decl)
 static LONG NTAPI D3DDevice_CreateVertexShader(const ULONG *decl, const ULONG *func, ULONG *handle, ULONG usage)
 {
     vshader *sh = parse_declaration(decl);
+    if (decl) {
+        ULONG n = 0;
+        while (decl[n] != 0xFFFFFFFF) n++;
+        sh->decl_dwords = n + 1;
+        sh->decl = malloc(sh->decl_dwords * 4);
+        memcpy(sh->decl, decl, sh->decl_dwords * 4);
+    }
     if (func) {
         /* The blob starts with one header dword whose high word counts instructions. */
         unsigned n = func[0] >> 16;
@@ -2251,6 +2261,7 @@ static LONG NTAPI D3DDevice_CreateVertexShader(const ULONG *decl, const ULONG *f
             n = 136;
         }
         sh->ninstr = n;
+        sh->header = (func[0] & 0xFFFF) | n << 16;
         sh->code = malloc(n * 16);
         memcpy(sh->code, func + 1, n * 16);
     }
@@ -2290,6 +2301,7 @@ static void NTAPI D3DDevice_DeleteVertexShader(ULONG handle)
         p_glDeleteShader(sh->vs);
     }
     free(sh->code);
+    free(sh->decl);
     free(sh->consts);
     free(sh->const_slots);
     free(sh);
@@ -2307,8 +2319,33 @@ static LONG NTAPI D3DDevice_GetVertexShaderType(ULONG handle, ULONG *type)
     return D3D_OK;
 }
 
-static LONG NTAPI D3DDevice_GetVertexShaderDeclaration(ULONG h, void *data, ULONG *size) { return D3DERR_INVALIDCALL; }
-static LONG NTAPI D3DDevice_GetVertexShaderFunction(ULONG h, void *data, ULONG *size) { return D3DERR_INVALIDCALL; }
+/* Both copy into `data` when it is big enough and report the size in bytes;
+   a NULL `data` only asks for the size.  Half-Life 2 reads its shaders back
+   this way and creates new ones from the copies. */
+static LONG copy_out(void *data, ULONG *size, const void *a, ULONG a_bytes, const void *b, ULONG b_bytes)
+{
+    ULONG need = a_bytes + b_bytes;
+    if (!data) { *size = need; return D3D_OK; }
+    if (*size < need) { *size = need; return 0x887600A3; /* D3DERR_MOREDATA */ }
+    memcpy(data, a, a_bytes);
+    if (b_bytes) memcpy((char *)data + a_bytes, b, b_bytes);
+    *size = need;
+    return D3D_OK;
+}
+
+static LONG NTAPI D3DDevice_GetVertexShaderDeclaration(ULONG h, void *data, ULONG *size)
+{
+    if (!(h & 1) || !((vshader *)(h & ~1u))->decl) return D3DERR_INVALIDCALL;
+    vshader *sh = (vshader *)(h & ~1u);
+    return copy_out(data, size, sh->decl, sh->decl_dwords * 4, NULL, 0);
+}
+
+static LONG NTAPI D3DDevice_GetVertexShaderFunction(ULONG h, void *data, ULONG *size)
+{
+    if (!(h & 1) || !((vshader *)(h & ~1u))->code) return D3DERR_INVALIDCALL;
+    vshader *sh = (vshader *)(h & ~1u);
+    return copy_out(data, size, &sh->header, 4, sh->code, sh->ninstr * 16);
+}
 
 /* Vertex program memory (136 instruction slots), used for state shaders and
    for SelectVertexShader(NULL, address); ordinary programs are compiled from
