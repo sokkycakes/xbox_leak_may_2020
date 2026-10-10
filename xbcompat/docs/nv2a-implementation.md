@@ -60,6 +60,7 @@ This change is not a complete replacement of NV2A rendering. The audits preserve
 - Exceptional LOG/LIT/reciprocal and constant-address behavior, point-output enable selection, fog interpolation/source details, flat/two-sided edge cases, and zero-width fog intervals need stronger oracles.
 - The fixed-function migration covers the stated lighting subset. Skinning, spot cones/falloff, supplied secondary-color material sources, two-sided lighting, texgen, fog and point attenuation remain on the legacy path.
 - GPU CopyRects readback/update is exact for BGRA8 format views (06/07/12/1E). Packed/depth/compressed copies, format conversion and rendering into nonzero mip attachments remain incomplete. Source/destination allocation failures are checked.
+- Compressed-volume uploads use complete mip storage. Arbitrary nonzero compressed-volume LockBox sub-box offsets remain unverified and are not fixed by this change.
 - Exhaustive color/palette/YUV/depth-format and physical texture-border tests are still outstanding. Authored mipmap support was already supplied by the consolidated branch and is covered by its renderer regression.
 - FocusBlur's black box and actual Splinter Cell night/thermal vision remain unverified without their assets.
 

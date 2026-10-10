@@ -11,3 +11,7 @@ Endpoint expansion and interpolation produce eight-bit channels. Exact low-bit a
 `tests/dxt_test.c` checks explicit color and alpha palettes, transparent DXT1, both DXT5 alpha cases, multi-tile/slab addressing, cropped edges with buffer guards, undersized inputs and overflow rejection. Its non-power-of-two volume fixture exercises the generic decoder API, not an assertion that Xbox texture creation accepts those dimensions.
 
 The renderer integration fixture samples distinct slices/XY blocks of a power-of-two compressed volume and a smaller mip through the HLE path. Execution results are recorded separately.
+
+## LockBox boundary
+
+The upload and regression fixtures use whole mip locks with a null box. Existing nonzero sub-box pointer arithmetic does not implement the compressed volume slab layout; arbitrary compressed-volume sub-box locks remain unverified and are not claimed fixed by this change.
