@@ -662,6 +662,70 @@ static void test_original_mapping_precedence(void)
     SDL_free(selected);
 }
 
+/* Use the installed SDL database/backend mappings for DualSense, rather
+   than supplying a hand-written mapping that would mask a database issue.
+   Feed raw Circle and Create/Back separately into a virtual joystick with
+   that mapping. Linux's old/new evdev layouts and HIDAPI use different raw
+   indices. USB and Bluetooth identities must both keep B separate from Back.
+   These fixtures do not emulate USB/Bluetooth reports or Box86. */
+static void test_dualsense_mappings(void)
+{
+    static const struct { const char *guid; int circle, back; } layouts[] = {
+        { "030000004c050000e60c000011010000", 2, 8 }, /* older evdev USB */
+        { "050000004c050000e60c000000010000", 2, 8 }, /* older evdev BT */
+        { "030000004c050000e60c000011810000", 1, 8 }, /* hid-playstation USB */
+        { "050000004c050000e60c000000810000", 1, 8 }, /* hid-playstation BT */
+        { "030000004c050000e60c000000006800", 1, 4 }, /* SDL HIDAPI USB */
+        { "050000004c050000e60c000000006800", 1, 4 }, /* SDL HIDAPI BT */
+    };
+    for (unsigned l = 0; l < sizeof(layouts) / sizeof(layouts[0]); l++) {
+        reset_hle();
+        XInitDevices(0, NULL);
+        char *mapping = SDL_GameControllerMappingForGUID(SDL_JoystickGetGUIDFromString(layouts[l].guid));
+        CHECK(mapping != NULL);
+        if (!mapping) continue;
+        SDL_VirtualJoystickDesc desc;
+        SDL_zero(desc);
+        desc.version = SDL_VIRTUAL_JOYSTICK_DESC_VERSION;
+        desc.type = SDL_JOYSTICK_TYPE_UNKNOWN;
+        desc.naxes = 6;
+        desc.nbuttons = 21;
+        desc.nhats = 1;
+        desc.name = "xbcompat DualSense mapping fixture";
+        int index = SDL_JoystickAttachVirtualEx(&desc);
+        CHECK(index >= 0);
+        if (index < 0) { SDL_free(mapping); continue; }
+        char guid[33];
+        SDL_JoystickGetGUIDString(SDL_JoystickGetDeviceGUID(index), guid, sizeof(guid));
+        /* Retain the database mapping body; only bind it to the fixture. */
+        memcpy(mapping, guid, 32);
+        CHECK(SDL_GameControllerAddMapping(mapping) >= 0);
+        SDL_free(mapping);
+        force_sync();
+        HANDLE h = XInputOpen(&fake_gamepad, 0, XDEVICE_NO_SLOT, NULL);
+        SDL_Joystick *js = SDL_JoystickFromInstanceID(xi.port[0].instance);
+        CHECK(h != NULL && js != NULL);
+        if (h && js) {
+            for (int button = 0; button < 2; button++) {
+                for (int pressed = 1; pressed >= 0; pressed--) {
+                    CHECK(SDL_JoystickSetVirtualButton(js, button ? layouts[l].back : layouts[l].circle, pressed) == 0);
+                    settle(js, h);
+                    XINPUT_STATE state;
+                    CHECK(XInputGetState(h, &state) == ERROR_SUCCESS);
+                    const unsigned char *wire = (const unsigned char *)&state;
+                    CHECK(wire[7] == (!button && pressed ? 255 : 0)); /* B pressure */
+                    CHECK(wire[4] == (button && pressed ? 0x20 : 0) && wire[5] == 0); /* Back */
+                    for (int b = 0; b < 6; b++)
+                        if (b != 1) CHECK(wire[6 + b] == 0); /* no other face buttons */
+                }
+            }
+        }
+        if (h) XInputClose(h);
+        SDL_JoystickDetachVirtual(index);
+        force_sync();
+    }
+}
+
 /* A pad plugged in at boot is enumerated after XInitDevices: the title's
    first XGetDevices sees nothing, then the pad arrives as an insertion. */
 static void test_boot_enumeration(void)
@@ -703,6 +767,7 @@ int main(void)
     test_virtual_spec();
     test_original_pad();
     test_original_mapping_precedence();
+    test_dualsense_mappings();
     test_boot_enumeration();
 
     printf("xinput_test: %d checks, %d failures\n", checks, failures);

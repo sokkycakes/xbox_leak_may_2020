@@ -197,6 +197,8 @@ typedef struct xi_handle {                     /* pool_alloc'ed: the HANDLE the 
     ULONG packet;                               /* dwPacketNumber */
     uint64_t sampled_us;                        /* when `last` was taken */
     XINPUT_GAMEPAD last;                        /* latest report; kept after removal */
+    uint64_t logged_raw_buttons;                /* diagnostics: SDL joystick before mapping */
+    bool logged_raw_valid;
 } xi_handle;
 
 typedef struct {
@@ -349,7 +351,7 @@ static void insert_port(unsigned i, SDL_GameController *gc, SDL_JoystickID insta
         char guid[33];
         SDL_JoystickGetGUIDString(SDL_JoystickGetGUID(js), guid, sizeof(guid));
         char *mapping = SDL_GameControllerMapping(gc);
-        xlog("XInput: port %u: GUID %s, USB %04x:%04x, %d buttons, %d axes, %d hats",
+        xlog("XInput: port %u: GUID %s, VID/PID %04x:%04x, %d buttons, %d axes, %d hats",
              i, guid, SDL_JoystickGetVendor(js), SDL_JoystickGetProduct(js),
              SDL_JoystickNumButtons(js), SDL_JoystickNumAxes(js), SDL_JoystickNumHats(js));
         xlog("XInput: port %u: SDL mapping: %s", i, mapping ? mapping : "(none)");
@@ -850,6 +852,19 @@ static void sample(xi_handle *h, const xi_port *p, bool force)
     uint64_t interval = (h->pp.bInputInterval ? h->pp.bInputInterval : 1) * 1000ull;
     uint64_t elapsed = t - h->sampled_us;
     if (!force && elapsed < interval) return;
+    if (xi.log_input && p->gc) {
+        SDL_Joystick *js = SDL_GameControllerGetJoystick(p->gc);
+        int count = SDL_JoystickNumButtons(js);
+        uint64_t raw = 0;
+        for (int b = 0; b < count && b < 64; b++)
+            if (SDL_JoystickGetButton(js, b)) raw |= UINT64_C(1) << b;
+        if (!h->logged_raw_valid || raw != h->logged_raw_buttons) {
+            xlog("XInput: port %u: raw joystick buttons %#018llx (bit 0 = b0, first %d buttons)",
+                 h->port, (unsigned long long)raw, count < 64 ? count : 64);
+            h->logged_raw_valid = true;
+            h->logged_raw_buttons = raw;
+        }
+    }
     XINPUT_GAMEPAD before = h->last;
     read_port(p, &h->last);
     if (xi.log_input && memcmp(&before, &h->last, sizeof(before)))
