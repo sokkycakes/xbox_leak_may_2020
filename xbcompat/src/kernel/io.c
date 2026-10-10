@@ -610,6 +610,7 @@ NTSTATUS NTAPI NtWriteFile(HANDLE FileHandle, HANDLE Event, PVOID ApcRoutine, PV
     if (!f || f->fd < 0) return STATUS_INVALID_HANDLE;
     LONGLONG off = ByteOffset && ByteOffset->QuadPart >= 0 ? ByteOffset->QuadPart : f->pos;
     ssize_t n = pwrite(f->fd, Buffer, Length, off);
+    TRACE("NtWriteFile(%s, %#x at %#llx) = %#x", f->xbox, (unsigned)Length, (long long)off, (unsigned)n);
     if (n < 0) return complete(Event, ApcRoutine, ApcContext, iosb, errno_status(errno), 0);
     f->pos = off + n;
     complete(Event, ApcRoutine, ApcContext, iosb, STATUS_SUCCESS, (ULONG)n);
@@ -739,6 +740,8 @@ NTSTATUS NTAPI NtSetInformationFile(HANDLE FileHandle, IO_STATUS_BLOCK *iosb, PV
     xfile *f = file_of(FileHandle);
     if (!f) return STATUS_INVALID_HANDLE;
     NTSTATUS st = STATUS_SUCCESS;
+    TRACE("NtSetInformationFile(%s, class %u, %#llx)", f->xbox, (unsigned)Class,
+          Class >= 14 ? (long long)((LARGE_INTEGER *)Info)->QuadPart : (long long)*(BOOLEAN *)Info);
     switch (Class) {
     case 4: break;   /* FileBasicInformation: timestamps/attributes, ignored */
     case 10: {       /* FileRenameInformation */
