@@ -43,8 +43,9 @@
  *   gl_BackColor  / gl_BackSecondaryColor       oB0 / oB1 (oD0 / oD1 when
  *                                               the program never writes them)
  *   gl_TexCoord[0..3]             oT0 .. oT3
- *   gl_FogFragCoord               oFog.x (the fog *distance*; the fragment
- *                                 shader applies the fog mode to it)
+ *   uniform float fog_vertex_mode 0: legacy distance; 1/2/3: EXP/EXP2/LINEAR
+ *   gl_FogFragCoord               oFog.x in legacy mode; otherwise vertex
+ *                                 fog factor, unclamped until fragment use
  *   gl_PointSize                  oPts.x
  */
 char *vsh_translate(const uint32_t *code, unsigned count);
@@ -86,7 +87,9 @@ extern char vsh_error[96];   /* why vsh_translate last returned NULL */
  *   uniform vec4 key_color[4]            D3DTSS_COLORKEYCOLOR as RGBA
  *   gl_Color / gl_SecondaryColor         v0 / v1 (diffuse / specular)
  *   gl_TexCoord[0..3]                    stage 0..3 texture coordinates
- *   gl_FogFragCoord                      fog distance; with D3DRS_FOGENABLE
+ *   uniform float fog_vertex_mode       shared with vertex shader; nonzero
+ *                                        means interpolate factor then clamp
+ *   gl_FogFragCoord                      otherwise fog distance; with D3DRS_FOGENABLE
  *                                        the fog register is
  *                                        vec4(gl_Fog.color.rgb, f) where f
  *                                        comes from gl_Fog.start / end /

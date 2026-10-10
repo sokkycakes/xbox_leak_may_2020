@@ -2902,10 +2902,9 @@ static void program_off(void)
 }
 
 
-/* First owned FF vertex path: ordinary lit, unskinned geometry. Keep
-   unverified modes on the existing path until their own render fixtures
-   establish the NV2A behavior. In particular, legacy secondary color has
-   no alpha, so it cannot yet represent all COLOR2 material sources. */
+/* Owned FF vertex subset: lighting, weighted transforms, full COLOR2,
+   and normal/eye/object texgen. Keep unresolved modes on the existing
+   path; see docs/nv2a-ff-lighting-change.md for the tested boundary. */
 static bool fixed_lighting_supported(void)
 {
     ULONG blend = RS(118 /* VERTEXBLEND */);

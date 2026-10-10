@@ -497,6 +497,44 @@ int main(int argc, char **argv)
             glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
             assert(pixel[0] > 240 && pixel[1] < 8 && pixel[2] < 8);
 
+            /* COLOR2 alpha must survive both native attribute layouts.
+             * Toggle COLORVERTEX without changing the cached program. */
+            {
+                LONG (NTAPI *create_color_vs)(const ULONG *,const ULONG *,ULONG *,ULONG) =
+                    find("_D3DDevice_CreateVertexShader@16");
+                void (NTAPI *delete_color_vs)(ULONG) = find("_D3DDevice_DeleteVertexShader@4");
+                const ULONG color_decl[] = {
+                    0x20000000,0x40320000,0x40320002,0x40400003,0x40400004,0xffffffff
+                };
+                ULONG color_vs = 0;
+                assert(create_color_vs(color_decl,NULL,&color_vs,0) == 0 && color_vs);
+                struct { float p[3],n[3]; uint32_t primary,secondary; } colors[3] = {
+                    {{-.75f,-.75f,2},{0,0,1},0xff0000ff,0x4000ff00},
+                    {{ .75f,-.75f,2},{0,0,1},0xff0000ff,0x4000ff00},
+                    {{0,.75f,2},{0,0,1},0xff0000ff,0x4000ff00}
+                };
+                render_states[67] = 0xffffffffu;
+                render_states[101] = 2;
+                for (unsigned layout = 0; layout < 2; layout++) {
+                    set_vs(layout ? color_vs : 0xd2); /* XYZ/NORMAL/DIFFUSE/SPECULAR */
+                    for (unsigned pass = 0; pass < 3; pass++) {
+                        render_states[95] = pass != 1;
+                        clear(0,NULL,0xf3,0xff000000,1,0);
+                        draw(5,3,colors,sizeof colors[0]);
+                        glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                        if (pass == 1)
+                            assert(pixel[0] > 240 && pixel[1] < 8 && pixel[3] > 240);
+                        else
+                            assert(pixel[0] < 8 && pixel[1] > 240 && abs((int)pixel[3]-64) <= 2);
+                        assert(pixel[2] < 8);
+                    }
+                }
+                set_vs(0x12);
+                delete_color_vs(color_vs);
+                render_states[101] = 1;
+                puts("renderer COLOR2: FVF/declaration RGBA and material-source toggles passed");
+            }
+
             /* Ambient point contribution isolates range from varying
              * vertex-to-light angles across the triangle. */
             memset(material,0,sizeof material);
