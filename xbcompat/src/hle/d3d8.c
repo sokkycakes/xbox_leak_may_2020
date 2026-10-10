@@ -4731,6 +4731,19 @@ static bool surface_color_transfer(ULONG fmt, GLenum *format, GLenum *type, unsi
     }
 }
 
+/* Fixed integer depth has an exact GL transfer representation too. Floating
+   encodings remain excluded until their numeric conversion is specified. */
+static bool surface_transfer(ULONG fmt, GLenum *format, GLenum *type, unsigned *bytes)
+{
+    if (fmt == 0x2A || fmt == 0x2E) {
+        *format = GL_DEPTH_STENCIL; *type = GL_UNSIGNED_INT_24_8; *bytes = 4; return true;
+    }
+    if (fmt == 0x2C || fmt == 0x30) {
+        *format = GL_DEPTH_COMPONENT; *type = GL_UNSIGNED_SHORT; *bytes = 2; return true;
+    }
+    return surface_color_transfer(fmt, format, type, bytes);
+}
+
 /* The GL texture behind a standalone render target surface, kept in the
    texture cache under the surface's own memory so destroy_resource frees it. */
 static GLuint surface_rt_texture(D3DSurface *s, ULONG w, ULONG h)
@@ -4793,7 +4806,7 @@ static bool readback_rt_surface(D3DSurface *s)
     ULONG fmt = (s->Format >> 8) & 0xFF, level;
     GLenum transfer_format, transfer_type;
     unsigned bytes;
-    if (!surface_color_transfer(fmt, &transfer_format, &transfer_type, &bytes)) return false;
+    if (!surface_transfer(fmt, &transfer_format, &transfer_type, &bytes)) return false;
     GLenum face;
     tex_entry *e = surface_image(s, &face, &level);
     if (!e) return false;
@@ -4965,6 +4978,62 @@ static LONG NTAPI D3DDevice_CreateDepthStencilSurface(UINT_ w, UINT_ h, ULONG fm
     return D3DDevice_CreateImageSurface(w, h, fmt, pp);
 }
 
+
+/* Compressed 2D/cube copies preserve encoded blocks. They do not render or
+   convert formats. Small mip edges may end inside the final complete block. */
+static void copy_compressed_surface(D3DSurface *src, const LONG *rects, UINT_ n,
+                                    D3DSurface *dst, const LONG *points)
+{
+    ULONG fmt = (src->Format >> 8) & 0xFF;
+    if (fmt != ((dst->Format >> 8) & 0xFF) || (fmt != 0x0C && fmt != 0x0E && fmt != 0x0F)) {
+        xlog("D3D: compressed CopyRects requires identical DXT formats");
+        return;
+    }
+    ULONG sw,sh,sp,dw,dh,dp;
+    container_size((D3DPixelContainer *)src,&sw,&sh,&sp);
+    container_size((D3DPixelContainer *)dst,&dw,&dh,&dp);
+    unsigned block = fmt == 0x0C ? 8 : 16;
+    size_t source_pitch = ((size_t)sw+3)/4*block, dest_pitch = ((size_t)dw+3)/4*block;
+    size_t source_size = source_pitch*((sh+3)/4), dest_size = dest_pitch*((dh+3)/4);
+    /* Resource dimensions have already been limited by their encoded fields. */
+    if (!source_size || !dest_size) return;
+    for (UINT_ i = 0; i < (n ? n : 1); i++) {
+        LONG x0=n?rects[4*i]:0, y0=n?rects[4*i+1]:0;
+        LONG x1=n?rects[4*i+2]:(LONG)sw, y1=n?rects[4*i+3]:(LONG)sh;
+        LONG dx=n&&points?points[2*i]:0, dy=n&&points?points[2*i+1]:0;
+        if (x0<0 || y0<0 || dx<0 || dy<0 || x1<=x0 || y1<=y0
+            || x1>(LONG)sw || y1>(LONG)sh || dx>(LONG)dw-(x1-x0) || dy>(LONG)dh-(y1-y0)
+            || ((x0|y0|dx|dy)&3)
+            || ((x1&3) && x1!=(LONG)sw) || ((y1&3) && y1!=(LONG)sh)
+            || (((dx+x1-x0)&3) && dx+x1-x0!=(LONG)dw)
+            || (((dy+y1-y0)&3) && dy+y1-y0!=(LONG)dh)) {
+            xlog("D3D: compressed CopyRects needs in-bounds block-aligned rectangles");
+            return;
+        }
+    }
+    uint8_t *source = malloc(source_size);
+    if (!source) return;
+    memcpy(source,(const void *)(src->Data|CONTIG_BASE),source_size);
+    uint8_t *dest = (void *)(dst->Data|CONTIG_BASE);
+    for (UINT_ i = 0; i < (n ? n : 1); i++) {
+        LONG x0=n?rects[4*i]:0, y0=n?rects[4*i+1]:0;
+        LONG x1=n?rects[4*i+2]:(LONG)sw, y1=n?rects[4*i+3]:(LONG)sh;
+        LONG dx=n&&points?points[2*i]:0, dy=n&&points?points[2*i+1]:0;
+        size_t rows=((size_t)(y1-y0)+3)/4, bytes=((size_t)(x1-x0)+3)/4*block;
+        for (size_t row=0; row<rows; row++)
+            memcpy(dest+(dy/4+row)*dest_pitch+(dx/4)*block,
+                   source+(y0/4+row)*source_pitch+(x0/4)*block,bytes);
+    }
+    free(source);
+    GLenum face; ULONG level;
+    tex_entry *e = surface_image(dst,&face,&level);
+    if (e) {
+        GLenum internal = fmt == 0x0C ? 0x83F1 : fmt == 0x0E ? 0x83F2 : 0x83F3;
+        glBindTexture(e->target,e->id);
+        glCompressedTexSubImage2D(face,level,0,0,dw,dh,internal,dest_size,dest);
+    }
+}
+
 static void NTAPI D3DDevice_CopyRects(D3DSurface *src, const LONG *rects, UINT_ n, D3DSurface *dst,
                                       const LONG *points)
 {
@@ -4976,7 +5045,7 @@ static void NTAPI D3DDevice_CopyRects(D3DSurface *src, const LONG *rects, UINT_ 
     ULONG src_fmt = (src->Format >> 8) & 0xFF, dst_fmt = (dst->Format >> 8) & 0xFF;
     if (src_fmt == 0x0C || src_fmt == 0x0E || src_fmt == 0x0F ||
         dst_fmt == 0x0C || dst_fmt == 0x0E || dst_fmt == 0x0F) {
-        xlog("D3D: CopyRects of compressed surfaces is not supported");
+        copy_compressed_surface(src, rects, n, dst, points);
         return;
     }
     int bytes = format_bits(src_fmt, &lin) / 8;
@@ -5055,7 +5124,7 @@ static void NTAPI D3DDevice_CopyRects(D3DSurface *src, const LONG *rects, UINT_ 
     tex_entry *e = dst == d3d.backbuffer ? NULL : surface_image(dst, &face, &level);
     GLenum transfer_format, transfer_type;
     unsigned transfer_bytes;
-    if (e && surface_color_transfer(dst_fmt, &transfer_format, &transfer_type, &transfer_bytes)) {
+    if (e && surface_transfer(dst_fmt, &transfer_format, &transfer_type, &transfer_bytes)) {
         glBindTexture(e->target, e->id);
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
         glTexSubImage2D(face, level, 0, 0, dw, dh, transfer_format, transfer_type, dest_rows);

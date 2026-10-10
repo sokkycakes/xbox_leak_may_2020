@@ -1248,6 +1248,94 @@ int main(int argc, char **argv)
             puts("renderer texgen: normal/eye/object generation, matrix order and unlit normalization passed");
         }
 
+
+        /* Integer depth/stencil texture views retain independent mip contents,
+         * and CopyRects preserves the untouched destination depth and stencil. */
+        {
+            void *color = create_tex(8,8,1,2,0,6,3), *depth = create_tex(8,8,1,2,0,0x2a,3);
+            void *color0=NULL,*color1=NULL,*depth0=NULL,*depth1=NULL;
+            assert(surface(color,0,&color0)==0 && surface(color,1,&color1)==0);
+            assert(surface(depth,0,&depth0)==0 && surface(depth,1,&depth1)==0);
+            set_tex(0,NULL);
+            set_rt(color0,depth0); clear(0,NULL,0xf3,0xff000000,.25f,0x12);
+            set_rt(color1,depth1); clear(0,NULL,0xf3,0xff000000,.75f,0x34);
+            set_rt(color0,depth0);
+            float z=0; unsigned char stencil=0;
+            glReadPixels(2,2,1,1,GL_DEPTH_COMPONENT,GL_FLOAT,&z);
+            glReadPixels(2,2,1,1,GL_STENCIL_INDEX,GL_UNSIGNED_BYTE,&stencil);
+            assert(z>.249f && z<.251f && stencil==0x12);
+            LONG rect[4]={0,0,2,2},point[2]={0,0};
+            copy_rects(depth0,rect,1,depth1,point);
+            set_rt(color1,depth1);
+            glReadPixels(0,0,1,1,GL_DEPTH_COMPONENT,GL_FLOAT,&z);
+            glReadPixels(0,0,1,1,GL_STENCIL_INDEX,GL_UNSIGNED_BYTE,&stencil);
+            assert(z>.249f && z<.251f && stencil==0x12);
+            glReadPixels(3,3,1,1,GL_DEPTH_COMPONENT,GL_FLOAT,&z);
+            glReadPixels(3,3,1,1,GL_STENCIL_INDEX,GL_UNSIGNED_BYTE,&stencil);
+            assert(z>.749f && z<.751f && stencil==0x34);
+            set_rt(back,NULL); set_tex(0,tex);
+            puts("renderer depth views: D24S8 mip attachment and partial depth/stencil copy passed");
+        }
+
+        /* Same-format DXT copies preserve whole encoded blocks and support
+         * cached destinations, overlap and the final sub-4x4 mip footprint. */
+        {
+            static const unsigned formats[3]={0x0c,0x0e,0x0f};
+            set_vs(0x144); set_ps(control_ps);
+            texture_states[3]=texture_states[4]=1;
+            texture_states[5]=texture_states[9]=texture_states[11]=texture_states[21]=0;
+            for (int format=0; format<3; format++) {
+                unsigned bytes=format?16:8, color_offset=format?8:0;
+                void *src_tex=create_tex(8,4,1,1,0,formats[format],3), *src_view=NULL;
+                void *dst_tex=create_tex(8,4,1,1,0,formats[format],3), *dst_view=NULL;
+                assert(surface(src_tex,0,&src_view)==0 && surface(dst_tex,0,&dst_view)==0);
+                for (int target=0; target<2; target++) {
+                    ULONG locked[2]; lock_tex(target?dst_tex:src_tex,0,locked,NULL,0);
+                    unsigned char *data=(void *)locked[1];
+                    memset(data,0,2*bytes);
+                    for (int block=0; block<2; block++) {
+                        unsigned char *b=data+block*bytes;
+                        if (format==1) memset(b,255,8);
+                        if (format==2) b[0]=b[1]=255;
+                        unsigned endpoint=target?0x001f:(block?0x07e0:0xf800);
+                        b[color_offset]=endpoint&255; b[color_offset+1]=endpoint>>8;
+                    }
+                }
+                /* Populate the destination's GL cache before mutating it. */
+                set_tex(0,dst_tex);
+                for (int i=0;i<3;i++) textured[i].u=textured[i].v=.5f;
+                draw(5,3,textured,sizeof textured[0]);
+                LONG rect[4]={4,0,8,4},point[2]={0,0};
+                copy_rects(src_view,rect,1,dst_view,point);
+                for (unsigned side=0;side<2;side++) {
+                    for (int i=0;i<3;i++) textured[i].u=side?.75f:.25f;
+                    clear(0,NULL,0xf0,0xff000000,1,0);
+                    draw(5,3,textured,sizeof textured[0]);
+                    glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                    assert(pixel[side?2:1]>240 && pixel[side?1:2]<8 && pixel[0]<8);
+                }
+                rect[0]=0;rect[2]=4;point[0]=4;
+                copy_rects(dst_view,rect,1,dst_view,point);
+                clear(0,NULL,0xf0,0xff000000,1,0);
+                draw(5,3,textured,sizeof textured[0]);
+                glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                assert(pixel[1]>240 && pixel[0]<8 && pixel[2]<8);
+                void *small_a=create_tex(2,2,1,1,0,formats[format],3),*small_b=create_tex(2,2,1,1,0,formats[format],3);
+                void *small_src=NULL,*small_dst=NULL;
+                ULONG locked_a[2],locked_b[2];
+                lock_tex(small_a,0,locked_a,NULL,0);lock_tex(small_b,0,locked_b,NULL,0);
+                unsigned char *block=(void *)locked_a[1];
+                memset(block,0,bytes); if(format==1)memset(block,255,8); if(format==2)block[0]=block[1]=255;
+                block[color_offset]=0;block[color_offset+1]=0xf8;
+                memset((void *)locked_b[1],0,bytes);
+                assert(surface(small_a,0,&small_src)==0 && surface(small_b,0,&small_dst)==0);
+                copy_rects(small_src,NULL,0,small_dst,NULL);
+                assert(!memcmp((void *)locked_a[1],(void *)locked_b[1],bytes));
+            }
+            set_ps(0);set_tex(0,tex);
+            puts("renderer DXT copies: DXT1/3/5 cached blocks, overlap and small footprints passed");
+        }
+
         /* Compressed volume uploads decode the packed slab order before GL.
          * The selected blocks distinguish XY tiles, slices within a slab,
          * and the second slab. Minification then selects an authored mip. */
