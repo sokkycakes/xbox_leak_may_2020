@@ -25,6 +25,7 @@ static void (APIENTRY *p_glVertexAttrib4fv)(GLuint, const GLfloat *);
 static void (APIENTRY *p_glMultiTexCoord4fv)(GLenum, const GLfloat *);
 static void (APIENTRY *p_glPointParameterfv)(GLenum, const GLfloat *);
 static void (APIENTRY *p_glPointParameterf)(GLenum, GLfloat);
+static void (APIENTRY *p_glBindBuffer)(GLenum, GLuint);
 
 #define GC_UNITS 4
 #define GC_UNKNOWN 0xFFFFFFFFu
@@ -55,6 +56,7 @@ typedef struct { uint32_t v[TP_N]; } gc_texparams;
 static struct {
     uint8_t cap[CAP_GLOBAL], ucap[GC_UNITS][UCAP_N], client[CA_GLOBAL], client_tc[GC_UNITS];
     uint32_t active, client_active, program;
+    uint32_t array_buffer, element_buffer;
     uint32_t bound[GC_UNITS][3];                  /* 2D, cube, 3D */
     uint32_t texenv[GC_UNITS][TE_N];
     uint32_t texgen[GC_UNITS][4];
@@ -381,6 +383,20 @@ static void gc_multitexcoord4fv(GLenum unit, const GLfloat *v)
     p_glMultiTexCoord4fv(unit, v);
 }
 
+/* GL_ARRAY_BUFFER or GL_ELEMENT_ARRAY_BUFFER; pointers given while one is
+   bound are offsets into it, so client-memory draws bind 0 first. */
+static void gc_bind_buffer(GLenum target, GLuint id)
+{
+    uint32_t *s = target == GL_ARRAY_BUFFER ? &gc.array_buffer : &gc.element_buffer;
+    if (gc_set1(s, id)) p_glBindBuffer(target, id);
+}
+
+static void gc_forget_buffer(GLuint id)
+{
+    if (gc.array_buffer == id) gc.array_buffer = GC_UNKNOWN;
+    if (gc.element_buffer == id) gc.element_buffer = GC_UNKNOWN;
+}
+
 static void gc_use_program(GLuint p)
 {
     if (gc_set1(&gc.program, p)) p_glUseProgram(p);
@@ -414,6 +430,8 @@ static void gc_vertex_attrib4fv(GLuint r, const GLfloat *v)
 /* Turn every generic array off (fixed-function draws read the conventional ones). */
 static void gc_disable_attrib_arrays(void)
 {
+    gc_bind_buffer(GL_ARRAY_BUFFER, 0);
+    gc_bind_buffer(GL_ELEMENT_ARRAY_BUFFER, 0);
     for (int r = 0; r < 16; r++) gc_attrib_array(r, false);
 }
 

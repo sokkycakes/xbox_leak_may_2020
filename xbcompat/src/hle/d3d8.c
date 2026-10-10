@@ -964,6 +964,10 @@ static void (APIENTRY *p_glEndQuery)(GLenum);
 static void (APIENTRY *p_glGetQueryObjectuiv)(GLuint, GLenum, GLuint *);
 static void (APIENTRY *p_glPointParameterf)(GLenum, GLfloat);
 static void (APIENTRY *p_glUniform2fv)(GLint, GLsizei, const GLfloat *);
+static void (APIENTRY *p_glGenBuffers)(GLsizei, GLuint *);
+static void (APIENTRY *p_glDeleteBuffers)(GLsizei, const GLuint *);
+static void (APIENTRY *p_glBufferData)(GLenum, GLsizeiptr, const void *, GLenum);
+static void (APIENTRY *p_glBufferSubData)(GLenum, GLintptr, GLsizeiptr, const void *);
 
 static void container_size(const D3DPixelContainer *t, ULONG *w, ULONG *h, ULONG *pitch);
 static ULONG level_offset(const D3DPixelContainer *t, ULONG level);
@@ -1885,6 +1889,7 @@ static void load_shader_functions(void)
     LOAD(glVertexAttribPointer); LOAD(glVertexAttrib4fv); LOAD(glActiveTexture); LOAD(glClientActiveTexture);
     LOAD(glMultiTexCoord4fv); LOAD(glUniform2fv); LOAD(glPointParameterfv); LOAD(glPointParameterf);
     LOAD(glSecondaryColorPointer);
+    LOAD(glGenBuffers); LOAD(glDeleteBuffers); LOAD(glBindBuffer); LOAD(glBufferData); LOAD(glBufferSubData);
     LOAD(glGenQueries); LOAD(glBeginQuery); LOAD(glEndQuery); LOAD(glGetQueryObjectuiv);
 #undef LOAD
 }
@@ -2395,7 +2400,7 @@ typedef struct { ULONG lo, hi; } vrange;
    a rewritten buffer is caught at once, a small edit to one within that
    many frames. */
 #define CONV_FULL_EVERY 16
-enum { CONV_RANGE, CONV_NORMPACKED3, CONV_RGBA };
+enum { CONV_RANGE, CONV_NORMPACKED3, CONV_RGBA, CONV_VBO };
 typedef struct {
     const UCHAR *src;
     ULONG stride, kind, count;   /* count: CONV_RANGE's index count */
@@ -2405,6 +2410,8 @@ typedef struct {
     UCHAR *out;                  /* converted vertex lo */
     unsigned used;               /* draw serial of the last use */
     ULONG checked;               /* frame of the last full compare */
+    GLuint buf;                  /* CONV_RANGE: the indices; CONV_VBO: the vertices */
+    size_t span;                 /* CONV_VBO: bytes from vertex 0 in buf and raw */
 } conv_entry;
 
 #define CONV_SLOTS 1024
@@ -2424,7 +2431,8 @@ static conv_entry *conv_find(const UCHAR *src, ULONG stride, ULONG kind, ULONG c
     if (!victim) victim = &conv_cache[h];   /* all eight in this draw: share the first */
     free(victim->raw);
     free(victim->out);
-    *victim = (conv_entry){ src, stride, kind, count, 0, 0, NULL, 0, NULL, 0, d3d.frame };
+    if (victim->buf) { p_glDeleteBuffers(1, &victim->buf); gc_forget_buffer(victim->buf); }
+    *victim = (conv_entry){ src, stride, kind, count, 0, 0, NULL, 0, NULL, 0, d3d.frame, 0, 0 };
     return victim;
 }
 
@@ -2447,15 +2455,20 @@ static bool conv_unchanged(conv_entry *e, const UCHAR *copy, const UCHAR *cur, s
     return true;
 }
 
-static vrange vertex_range(ULONG first, ULONG count, const USHORT *indices)
+/* The cache entry of an index list: its vertex range, and with `upload` a
+   GL element buffer holding it. */
+static conv_entry *index_entry(const USHORT *ix, ULONG count, bool upload)
 {
-    if (!indices) return (vrange){ first, first + count };
-    if (!count) return (vrange){ 0, 0 };
-    const USHORT *ix = indices + first;
     conv_entry *e = conv_find((const UCHAR *)ix, 2, CONV_RANGE, count);
     e->used = conv_serial;
-    if (e->raw && conv_unchanged(e, e->raw, (const UCHAR *)ix, count * 2, 2, 2)) return (vrange){ e->lo, e->hi };
-    e->checked = d3d.frame;
+    bool same = e->raw && conv_unchanged(e, e->raw, (const UCHAR *)ix, count * 2, 2, 2);
+    if (!same) e->checked = d3d.frame;
+    if (upload && (!same || !e->buf)) {
+        if (!e->buf) p_glGenBuffers(1, &e->buf);
+        gc_bind_buffer(GL_ELEMENT_ARRAY_BUFFER, e->buf);
+        p_glBufferData(GL_ELEMENT_ARRAY_BUFFER, count * 2, ix, GL_STATIC_DRAW);
+    }
+    if (same) return e;
     ULONG lo = 0xFFFF, hi = 0;
     for (ULONG i = 0; i < count; i++) {
         ULONG v = ix[i];
@@ -2466,7 +2479,49 @@ static vrange vertex_range(ULONG first, ULONG count, const USHORT *indices)
     if (e->raw) memcpy(e->raw, ix, count * 2);
     e->lo = lo;
     e->hi = hi;
-    return (vrange){ lo, hi };
+    return e;
+}
+
+static vrange vertex_range(ULONG first, ULONG count, const USHORT *indices)
+{
+    if (!indices) return (vrange){ first, first + count };
+    if (!count) return (vrange){ 0, 0 };
+    conv_entry *e = index_entry(indices + first, count, false);
+    return (vrange){ e->lo, e->hi };
+}
+
+/* A GL buffer holding a vertex stream from vertex 0 through the last byte
+   `need` a draw reads, current for vertices r.lo up (see CONV_FULL_EVERY).
+   Mesa would otherwise copy client-memory arrays into a new buffer on
+   every draw. Returns 0 to draw from client memory instead. */
+static GLuint stream_buffer(const UCHAR *base, ULONG stride, vrange r, size_t need)
+{
+    if (!p_glGenBuffers || r.hi <= r.lo || !stride) return 0;
+    conv_entry *e = conv_find(base, stride, CONV_VBO, 0);
+    e->used = conv_serial;
+    size_t from = (size_t)r.lo * stride;
+    if (e->buf && need <= e->span) {
+        if (!conv_unchanged(e, e->raw + from, base + from, need - from, stride, 4)) {
+            e->checked = d3d.frame;
+            if (memcmp(e->raw + from, base + from, need - from)) {
+                memcpy(e->raw + from, base + from, need - from);
+                gc_bind_buffer(GL_ARRAY_BUFFER, e->buf);
+                p_glBufferSubData(GL_ARRAY_BUFFER, from, need - from, base + from);
+            }
+        }
+        return e->buf;
+    }
+    if (need < e->span) need = e->span;
+    UCHAR *raw = realloc(e->raw, need);
+    if (!raw) return 0;
+    e->raw = raw;
+    memcpy(e->raw, base, need);
+    e->span = need;
+    e->checked = d3d.frame;
+    if (!e->buf) p_glGenBuffers(1, &e->buf);
+    gc_bind_buffer(GL_ARRAY_BUFFER, e->buf);
+    p_glBufferData(GL_ARRAY_BUFFER, need, base, GL_STATIC_DRAW);
+    return e->buf;
 }
 
 /* Convert vertices r.lo to r.hi - 1 of `src` (vertex 0's attribute, `stride`
@@ -2579,18 +2634,27 @@ static void bind_attributes(const vshader *sh, const UCHAR *up, ULONG up_stride,
         }
         p_glEnableVertexAttribArray(r);
         if ((a->type & 0xF) == 6) {
+            gc_bind_buffer(GL_ARRAY_BUFFER, 0);
             p_glVertexAttribPointer(r, 3, GL_FLOAT, GL_FALSE, 12,
                                     unpack_normpacked3(base + a->offset + first_vertex * stride, stride, VERTS));
             continue;
         }
         /* D3DCOLOR is stored B, G, R, A and reaches the shader as (R, G, B, A). */
         if (a->type == 0x40 && rgba_vertex_colors) {
+            gc_bind_buffer(GL_ARRAY_BUFFER, 0);
             p_glVertexAttribPointer(r, 4, GL_UNSIGNED_BYTE, GL_TRUE, 4,
                                     rgba_colors(base + a->offset + first_vertex * stride, stride, VERTS));
             continue;
         }
-        p_glVertexAttribPointer(r, a->type == 0x40 ? GL_BGRA : a->components, a->gl_type, a->normalized, stride,
-                                base + a->offset + first_vertex * stride);
+        const UCHAR *ptr = base + a->offset + first_vertex * stride;
+        GLuint buf = 0;
+        if (base != up && !first_vertex) {
+            vrange v = VERTS;
+            if (v.hi > v.lo) buf = stream_buffer(base, stride, v, (size_t)(v.hi - 1) * stride + a->offset + a->bytes);
+        }
+        gc_bind_buffer(GL_ARRAY_BUFFER, buf);
+        if (buf) ptr = (const UCHAR *)(uintptr_t)a->offset;
+        p_glVertexAttribPointer(r, a->type == 0x40 ? GL_BGRA : a->components, a->gl_type, a->normalized, stride, ptr);
     }
 }
 
@@ -2662,8 +2726,12 @@ static void draw_programmable_(vshader *sh, ULONG PrimitiveType, const UCHAR *up
           RS(D3DRS_STENCILENABLE), d3d.viewport.X, d3d.viewport.Y, d3d.viewport.Width, d3d.viewport.Height,
           d3d.viewport.MinZ, d3d.viewport.MaxZ);
     upload_constants(sh, e);
+    /* Indices from a GL buffer too (kept like the vertices, see stream_buffer). */
+    conv_entry *ix = indices && count && p_glGenBuffers ? index_entry(indices + first, count, true) : NULL;
     bind_attributes(sh, up, up_stride, 0, first, count, indices);
-    TIMED(t_gl, if (indices) glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, indices + first);
+    gc_bind_buffer(GL_ELEMENT_ARRAY_BUFFER, ix ? ix->buf : 0);
+    TIMED(t_gl, if (ix) glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, NULL);
+                else if (indices) glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, indices + first);
                 else glDrawArrays(gl_primitive(PrimitiveType), first, count));
     /* The generic arrays stay bound for the next programmable draw; the
        fixed-function paths turn them off (gc_disable_attrib_arrays). */
