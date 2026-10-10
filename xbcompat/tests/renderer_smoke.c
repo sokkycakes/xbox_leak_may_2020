@@ -294,6 +294,125 @@ int main(int argc, char **argv)
         texture_states[9] = texture_states[11] = 0;
         texture_states[5] = 2;
         puts("renderer shader controls: cached kill/key toggles and key uniform updates passed");
+        /* Raw NV097 eye methods must survive capture/apply and recorded
+         * push replay. Deliberately leave device-pusher writes pending at
+         * capture, so stale CPU snapshots cannot accidentally pass. */
+        {
+            LONG (NTAPI *create_state)(ULONG,ULONG *)=find("_D3DDevice_CreateStateBlock@8");
+            LONG (NTAPI *capture_state)(ULONG)=find("_D3DDevice_CaptureStateBlock@4");
+            LONG (NTAPI *apply_state)(ULONG)=find("_D3DDevice_ApplyStateBlock@4");
+            LONG (NTAPI *delete_state)(ULONG)=find("_D3DDevice_DeleteStateBlock@4");
+            void (NTAPI *begin_push)(ULONG,ULONG **)=find("_D3DDevice_BeginPush@8");
+            void (NTAPI *end_push)(ULONG *)=find("_D3DDevice_EndPush@4");
+            LONG (NTAPI *create_push)(ULONG,BOOLEAN,void **)=find("_D3DDevice_CreatePushBuffer@12");
+            void (NTAPI *begin_record)(void *)=find("_D3DDevice_BeginPushBuffer@4");
+            LONG (NTAPI *end_record)(void)=find("_D3DDevice_EndPushBuffer@0");
+            void (NTAPI *run_push)(void *,void *)=find("_D3DDevice_RunPushBuffer@8");
+            LONG (NTAPI *cube_face)(void *,ULONG,ULONG,void **)=find("_D3DCubeTexture_GetCubeMapSurface@16");
+            void (NTAPI *lock_surface)(void *,ULONG *,const LONG *,ULONG)=find("_D3DSurface_LockRect@16");
+            ULONG original=0,eye_state=0;
+            assert(create_state(1,&original)==0);
+            void *cube=create_tex(4,4,1,1,0,6,5);
+            const uint32_t faces[6]={0xffff0000,0xff00ffff,0xff00ff00,0xffff00ff,0xff0000ff,0xffffff00};
+            for(unsigned face=0;face<6;face++){
+                void *view=NULL;ULONG locked[2];
+                assert(cube_face(cube,face,0,&view)==0);
+                lock_surface(view,locked,NULL,0);
+                for(int i=0;i<16;i++)((uint32_t *)locked[1])[i]=faces[face];
+            }
+            ULONG def[60]={0},reflection_ps=0;
+            def[8]=11;def[9]=0x1bu<<8;def[54]=4|(17<<5)|(17<<10)|(18<<15);
+            create_ps(def,&reflection_ps);assert(reflection_ps);
+            set_ps(reflection_ps);set_vs(0x22220444); /* four 4D coordinates */
+            for(int unit=0;unit<4;unit++){
+                set_tex(unit,unit==3?cube:NULL);
+                texture_states[unit*32+3]=texture_states[unit*32+4]=1;
+                texture_states[unit*32+5]=texture_states[unit*32+6]=texture_states[unit*32+7]=0;
+                texture_states[unit*32+9]=texture_states[unit*32+11]=texture_states[unit*32+21]=0;
+                texture_states[unit*32+28]=unit;
+            }
+            render_states[59]=render_states[60]=render_states[82]=render_states[92]=render_states[124]=0;
+            render_states[67]=0xffffffffu;
+            struct {float p[4];uint32_t color;float t[4][4];} vertices[3]={
+                {{4,4,.5f,1},0xffffffff,{{1,0,0,1},{2,0,0,7},{0,0,0,9},{0,0,0,11}}},
+                {{60,4,.5f,1},0xffffffff,{{1,0,0,1},{2,0,0,7},{0,0,0,9},{0,0,0,11}}},
+                {{32,60,.5f,1},0xffffffff,{{1,0,0,1},{2,0,0,7},{0,0,0,9},{0,0,0,11}}}
+            };
+            const ULONG eye_a[4]={(3u<<18)|0x181c,0x3e4ccccd,0x3f800000,0};
+            const ULONG eye_b[4]={(3u<<18)|0x181c,0xbf800000,0,0};
+            ULONG *pending=(ULONG *)((ULONG *)device)[0];
+            memcpy(pending,eye_a,sizeof eye_a);((ULONG *)device)[0]=(ULONG)(pending+4);
+            assert(create_state(1,&eye_state)==0);
+            void *recorded=NULL;assert(create_push(128,0,&recorded)==0 && recorded);
+            for(int pass=0;pass<7;pass++){
+                ULONG *raw;
+                if(pass==1){begin_push(4,&raw);memcpy(raw,eye_b,sizeof eye_b);end_push(raw+4);}
+                if(pass==2)assert(apply_state(eye_state)==0);
+                if(pass==3){
+                    pending=(ULONG *)((ULONG *)device)[0];
+                    memcpy(pending,eye_b,sizeof eye_b);((ULONG *)device)[0]=(ULONG)(pending+4);
+                    assert(capture_state(eye_state)==0);
+                    begin_push(4,&raw);memcpy(raw,eye_a,sizeof eye_a);end_push(raw+4);
+                    assert(apply_state(eye_state)==0);
+                }
+                if(pass==4){
+                    begin_record(recorded);begin_push(4,&raw);
+                    memcpy(raw,eye_a,sizeof eye_a);end_push(raw+4);assert(end_record()==0);
+                }
+                if(pass==5)run_push(recorded,NULL);
+                if(pass==6)assert(apply_state(eye_state)==0);
+                clear(0,NULL,0xf3,0xff000000,1,0);draw(5,3,vertices,sizeof vertices[0]);
+                glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                bool magenta=pass==0||pass==2||pass==5;
+                assert(pixel[magenta?0:1]>240 && pixel[magenta?1:0]<8 && pixel[2]>240);
+            }
+            assert(apply_state(original)==0);
+            delete_state(eye_state);delete_state(original);
+            puts("renderer reflection eye: pending raw methods, state capture/apply and push recording/replay passed");
+        }
+
+        /* LOD controls must affect both fragment paths and reset on cached
+         * images. A 16x16 chain uses red/green/blue authored levels. */
+        {
+            uint32_t saved_tss[128]; memcpy(saved_tss,texture_states,sizeof saved_tss);
+            void *lod_tex=create_tex(16,16,1,3,0,6,3);
+            const uint32_t colors[3]={0xffff0000,0xff00ff00,0xff0000ff};
+            for(unsigned level=0;level<3;level++){
+                ULONG locked[2];lock_tex(lod_tex,level,locked,NULL,0);
+                for(unsigned i=0;i<(16u>>level)*(16u>>level);i++)((uint32_t *)locked[1])[i]=colors[level];
+            }
+            set_tex(0,lod_tex);set_vs(0x144);
+            texture_states[3]=texture_states[4]=texture_states[5]=1;
+            texture_states[9]=texture_states[11]=0;
+            for(unsigned fragment=0;fragment<2;fragment++){
+                set_ps(fragment?control_ps:0);
+                /* rho=4 gives LOD 2; biases -2/-1/0 select levels 0/1/2. */
+                for(unsigned level=0;level<3;level++){
+                    float bias=(float)level-2;
+                    memcpy(&texture_states[6],&bias,4);texture_states[7]=0;
+                    textured[0].u=0;textured[0].v=0;
+                    textured[1].u=14;textured[1].v=0;
+                    textured[2].u=7;textured[2].v=14;
+                    clear(0,NULL,0xf3,0xff000000,1,0);
+                    draw(5,3,textured,sizeof textured[0]);
+                    glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                    assert(pixel[level]>240 && pixel[(level+1)%3]<8 && pixel[(level+2)%3]<8);
+                }
+                texture_states[6]=0;
+                for(unsigned pass=0;pass<4;pass++){
+                    unsigned level=pass==3?0:pass;
+                    texture_states[7]=level;
+                    for(int v=0;v<3;v++)textured[v].u=textured[v].v=.5f;
+                    clear(0,NULL,0xf3,0xff000000,1,0);draw(5,3,textured,sizeof textured[0]);
+                    glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                    assert(pixel[level]>240 && pixel[(level+1)%3]<8 && pixel[(level+2)%3]<8);
+                }
+            }
+            set_ps(0);set_tex(0,tex);
+            memcpy(texture_states,saved_tss,sizeof saved_tss);
+            puts("renderer LOD: signed bias, minimum sampled mip and cached reset on both fragment paths passed");
+        }
+
         /* A partial CopyRects into the backbuffer must preserve untouched GPU
          * pixels before the full CPU image is flushed back to the renderer. */
         {

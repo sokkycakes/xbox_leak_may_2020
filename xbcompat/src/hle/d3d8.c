@@ -1663,6 +1663,14 @@ static void apply_sampler(GLenum target, int s)
     color4(border, TSS(s, D3DTSS_BORDERCOLOR));
     glTexParameterfv(target, GL_TEXTURE_BORDER_COLOR, border);
     D3DPixelContainer *t = (D3DPixelContainer *)d3d.textures[s];
+    /* API LOD controls do not change the authored image chain. Linear
+       resources have a single level regardless of the requested filter. */
+    ULONG last = t ? level_count(t) - 1 : 0;
+    ULONG first = TSS(s, 7 /* MAXMIPLEVEL */);
+    if (first > last) first = last;
+    glTexParameterf(target, GL_TEXTURE_MIN_LOD, (GLfloat)first);
+    glTexEnvf(GL_TEXTURE_FILTER_CONTROL, GL_TEXTURE_LOD_BIAS,
+              t && !t->Size ? tss_float(s, 6 /* MIPMAPLODBIAS */) : 0.0f);
     if (target == GL_TEXTURE_2D && t && is_depth_format((t->Format >> 8) & 0xFF)) {
         /* The NV2A compares the stage's r/q with the stored depth as
            "stored SHADOWFUNC r"; GL compares "r FUNC stored", so mirror it.
