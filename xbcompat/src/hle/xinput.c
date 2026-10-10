@@ -344,6 +344,17 @@ static void insert_port(unsigned i, SDL_GameController *gc, SDL_JoystickID insta
     /* Only the Gamepad sample looks at the subtype (to pick the mesh). */
     p->subtype = (name && strstr(name, "Duke")) ? XINPUT_DEVSUBTYPE_GC_GAMEPAD : XINPUT_DEVSUBTYPE_GC_GAMEPAD_ALT;
     xlog("XInput: port %u: %s inserted", i, name ? name : "controller");
+    if (gc && xi.log_input) {
+        SDL_Joystick *js = SDL_GameControllerGetJoystick(gc);
+        char guid[33];
+        SDL_JoystickGetGUIDString(SDL_JoystickGetGUID(js), guid, sizeof(guid));
+        char *mapping = SDL_GameControllerMapping(gc);
+        xlog("XInput: port %u: GUID %s, USB %04x:%04x, %d buttons, %d axes, %d hats",
+             i, guid, SDL_JoystickGetVendor(js), SDL_JoystickGetProduct(js),
+             SDL_JoystickNumButtons(js), SDL_JoystickNumAxes(js), SDL_JoystickNumHats(js));
+        xlog("XInput: port %u: SDL mapping: %s", i, mapping ? mapping : "(none)");
+        SDL_free(mapping);
+    }
     report_insertion_removal(i, true);
 }
 
@@ -835,10 +846,13 @@ static void sample(xi_handle *h, const xi_port *p, bool force)
     XINPUT_GAMEPAD before = h->last;
     read_port(p, &h->last);
     if (xi.log_input && memcmp(&before, &h->last, sizeof(before)))
-        xlog("XInput: port %u: buttons %#06x, A %u B %u X %u Y %u, left stick %d,%d",
+        xlog("XInput: port %u: buttons %#06x, A %u B %u X %u Y %u Black %u White %u LT %u RT %u, sticks %d,%d / %d,%d",
              h->port, h->last.wButtons, h->last.bAnalogButtons[XINPUT_GAMEPAD_A],
              h->last.bAnalogButtons[XINPUT_GAMEPAD_B], h->last.bAnalogButtons[XINPUT_GAMEPAD_X],
-             h->last.bAnalogButtons[XINPUT_GAMEPAD_Y], h->last.sThumbLX, h->last.sThumbLY);
+             h->last.bAnalogButtons[XINPUT_GAMEPAD_Y],
+             h->last.bAnalogButtons[XINPUT_GAMEPAD_BLACK], h->last.bAnalogButtons[XINPUT_GAMEPAD_WHITE],
+             h->last.bAnalogButtons[XINPUT_GAMEPAD_LEFT_TRIGGER], h->last.bAnalogButtons[XINPUT_GAMEPAD_RIGHT_TRIGGER],
+             h->last.sThumbLX, h->last.sThumbLY, h->last.sThumbRX, h->last.sThumbRY);
     if (force) {
         h->sampled_us = t;
         h->packet++;

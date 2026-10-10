@@ -25,6 +25,12 @@ jobs:
           sparse-checkout: |
             /xbcompat/
             /xbox_leak_may_2020/xbox trunk/xbox/private/ntos/init/ntoskrnl.src
+      - name: Controller reports and button edges
+        working-directory: xbcompat
+        run: |
+          mkdir -p build-input
+          i686-linux-gnu-gcc -no-pie -fno-pie -std=gnu11 -Wall -Isrc $(env PKG_CONFIG_LIBDIR=/usr/lib/i386-linux-gnu/pkgconfig pkg-config --cflags sdl2) -o build-input/xinput-test tests/xinput_test.c $(env PKG_CONFIG_LIBDIR=/usr/lib/i386-linux-gnu/pkgconfig pkg-config --libs sdl2) -lpthread
+          SDL_VIDEODRIVER=dummy build-input/xinput-test
       - name: Shader and texture tests
         working-directory: xbcompat
         run: make -f tools/nv2a-check.mk -j4 CC=i686-linux-gnu-gcc PKGCFG='env PKG_CONFIG_LIBDIR=/usr/lib/i386-linux-gnu/pkgconfig pkg-config' check
@@ -43,10 +49,16 @@ jobs:
         run: |
           dpkg --add-architecture armhf
           apt-get update
-          apt-get install -y git ca-certificates make python3 gcc-arm-linux-gnueabihf libc6-dev-armhf-cross pkg-config libsdl2-dev:armhf libgl-dev:armhf
+          apt-get install -y git ca-certificates make python3 gcc-arm-linux-gnueabihf libc6-dev-armhf-cross pkg-config libsdl2-dev:armhf libgl-dev:armhf qemu-user
       - uses: actions/checkout@v4
         with:
           sparse-checkout: xbcompat
       - name: Build ARM renderer and generated ABI adapters
         working-directory: xbcompat
         run: make -f tools/native-renderer.mk TARGET=armhf BUILD=build-renderer-armhf -j4
+      - name: ARM controller reports and button edges
+        working-directory: xbcompat
+        run: |
+          mkdir -p build-input-armhf
+          arm-linux-gnueabihf-gcc -no-pie -fno-pie -fsigned-char -std=gnu11 -Wall -Isrc $(env PKG_CONFIG_LIBDIR=/usr/lib/arm-linux-gnueabihf/pkgconfig pkg-config --cflags sdl2) -o build-input-armhf/xinput-test tests/xinput_test.c $(env PKG_CONFIG_LIBDIR=/usr/lib/arm-linux-gnueabihf/pkgconfig pkg-config --libs sdl2) -lpthread
+          SDL_VIDEODRIVER=dummy qemu-arm -L /usr/arm-linux-gnueabihf build-input-armhf/xinput-test

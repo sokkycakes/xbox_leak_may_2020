@@ -64,7 +64,18 @@ static ULONG fake_xid_table[5];        /* Begin, 3 entries, End */
 static ULONG fake_init_flag;
 static ULONG last_error;
 
-static void __attribute__((stdcall)) fake_set_last_error(ULONG code) { last_error = code; }
+static void NTAPI fake_set_last_error(ULONG code) { last_error = code; }
+
+/* Only SetLastError crosses into the fake guest in this HLE test. */
+#ifdef XBC_TRANSLATED
+uint64_t cpu_call(uint32_t fn, int conv, int n, const uint32_t *args)
+{
+    if (fn != (uint32_t)(uintptr_t)fake_set_last_error || conv != CONV_STD || n != 1)
+        fatal("unexpected guest callback in XInput test");
+    fake_set_last_error(args[0]);
+    return 0;
+}
+#endif
 
 ULONG hle_lookup(const char *name)
 {
@@ -176,6 +187,40 @@ static void settle(SDL_Joystick *js, xi_handle *h)
     if (h) h->sampled_us = now_us() - 8000;
 }
 
+/* Exercise individual press/release edges through SDL and the public HLE
+   report. Literal byte offsets are the guest wire layout, independent of the
+   implementation's button constants: packet[4], digital[2], A B X Y Black White.
+   Run with both automatic and explicit polling, as titles use both modes. */
+static void check_face_buttons(SDL_Joystick *js, xi_handle *h, const int raw[6])
+{
+    XINPUT_POLLING_PARAMETERS saved = h->pp;
+    for (int manual = 0; manual < 2; manual++) {
+        h->pp.flags = manual ? 0 : XINPUT_POLL_AUTO;
+        for (int button = 0; button < 6; button++) {
+            for (int pressed = 1; pressed >= 0; pressed--) {
+                CHECK(SDL_JoystickSetVirtualButton(js, raw[button], pressed) == 0);
+                settle(js, h);
+                if (manual) CHECK(XInputPoll(h) == ERROR_SUCCESS);
+                struct { unsigned char before[4]; XINPUT_STATE state; unsigned char after[4]; } out;
+                memset(&out, 0xA5, sizeof(out));
+                CHECK(XInputGetState(h, &out.state) == ERROR_SUCCESS);
+                const unsigned char *wire = (const unsigned char *)&out.state;
+                for (int i = 0; i < 6; i++)
+                    CHECK(wire[6 + i] == (pressed && i == button ? 255 : 0));
+                CHECK(wire[4] == 0 && wire[5] == 0);
+                for (int i = 0; i < 4; i++)
+                    CHECK(out.before[i] == 0xA5 && out.after[i] == 0xA5);
+                if (manual) {
+                    ULONG packet = out.state.dwPacketNumber;
+                    CHECK(XInputGetState(h, &out.state) == ERROR_SUCCESS);
+                    CHECK(out.state.dwPacketNumber == packet);
+                }
+            }
+        }
+    }
+    h->pp = saved;
+}
+
 /* ---- the tests ---------------------------------------------------------- */
 
 static void test_layouts(void)
@@ -270,6 +315,17 @@ static void test_controller(void)
     CHECK(caps.SubType == XINPUT_DEVSUBTYPE_GC_GAMEPAD_ALT && caps.Reserved == 0);
     CHECK(caps.In.wButtons == 0xFFFF && caps.In.bAnalogButtons[7] == 0xFF && caps.In.sThumbRY == -1);
     CHECK(caps.Out.wLeftMotorSpeed == 0xFFFF && caps.Out.wRightMotorSpeed == 0xFFFF);
+
+    static const int face_buttons[6] = {
+        SDL_CONTROLLER_BUTTON_A, SDL_CONTROLLER_BUTTON_B,
+        SDL_CONTROLLER_BUTTON_X, SDL_CONTROLLER_BUTTON_Y,
+        SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, SDL_CONTROLLER_BUTTON_LEFTSHOULDER
+    };
+    check_face_buttons(js, h, face_buttons);
+    /* Start the following interval tests from a fresh open report. */
+    XInputClose(h);
+    h = XInputOpen(&fake_gamepad, 0, XDEVICE_NO_SLOT, NULL);
+    CHECK(h != NULL);
 
     /* The report. */
     XINPUT_STATE st;
@@ -529,6 +585,9 @@ static void test_original_pad(void)
         SDL_Joystick *js = SDL_JoystickFromInstanceID(xi.port[0].instance);
         CHECK(js != NULL);
         if (!js) continue;
+
+        static const int raw_face_buttons[6] = { 0, 1, 3, 4, 2, 5 };
+        check_face_buttons(js, h, raw_face_buttons);
 
         bool dpad_buttons = layouts[l].flags & OG_DPAD_BUTTONS;
         bool trig_buttons = layouts[l].flags & OG_TRIGGER_BUTTONS;
