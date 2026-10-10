@@ -161,6 +161,14 @@ profile the corrected scene again; do not reuse the old 26 ms main-scene cost
 as the new baseline. The nine-sample output filter and generic attribute
 mapping remain concrete areas to examine.
 
+## Subsequent audio validation
+
+The earlier runs requested ALSA but actually fell back to SDL dummy audio:
+the headphone driver was disabled and HDMI playback failed. With real 48 kHz
+stereo headphone playback enabled and a 1024-frame host period, the same
+4x-MSAA menu measures about 30.4–31.0 FPS. See [the audio investigation](pi3-audio.md)
+for the output-routing, underrun and Dashboard-volume corrections.
+
 ## Final state and validation
 
 The running candidate includes the corrected buffer hash and authored mipmap

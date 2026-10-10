@@ -24,6 +24,7 @@
  *       $(PKG_CONFIG_PATH=/usr/lib/i386-linux-gnu/pkgconfig pkg-config --libs sdl2) -lpthread -lm
  * Run:  SDL_AUDIODRIVER=dummy ./dsound_test [xbox-adpcm.wav]
  */
+#define _GNU_SOURCE
 #include <stdarg.h>
 #include <stddef.h>
 #include <unistd.h>
@@ -59,6 +60,16 @@ void fatal(const char *fmt, ...)
 
 void *pool_alloc(size_t size) { return calloc(1, size); }
 void pool_free(void *p) { free(p); }
+void prof_thread_start(void) {}
+void install_fault_handlers(void) {}
+void xbc_at_exit(void (*fn)(void)) { atexit(fn); }
+NTSTATUS handle_close(HANDLE h) { (void)h; return 0xC0000008; }
+NTSTATUS NTAPI NtOpenFile(HANDLE *h, ACCESS_MASK access, OBJECT_ATTRIBUTES *oa,
+                          IO_STATUS_BLOCK *io, ULONG share, ULONG options)
+{
+    (void)h; (void)access; (void)oa; (void)io; (void)share; (void)options;
+    return 0xC0000008; /* Tests use host files, not DVD handles. */
+}
 PVOID NTAPI MmAllocateContiguousMemoryEx(SIZE_T n, ULONG_PTR lo, ULONG_PTR hi, ULONG_PTR align, ULONG prot)
 {
     (void)lo; (void)hi; (void)align; (void)prot;
@@ -385,6 +396,37 @@ static void test_playback(void)
     DS_SetMixBinHeadroom((void *)ds, 1, 1);
     Obj_Release((void *)ds);
     free(pcm); free(pcm2);
+}
+
+static void test_legacy_mixbin_headroom(void)
+{
+    uint32_t ds = 0;
+    DirectSoundCreate(NULL, &ds, NULL);
+    WAVEFORMATEX w = pcm_format(1, 48000, 16);
+    short pcm[64];
+    for (unsigned i = 0; i < 64; i++) pcm[i] = 16384;
+    uint32_t b = make_buffer(&w, 0);
+    Voice_SetHeadroom((void *)b, 1200); /* Dashboard keeps 12 dB voice headroom. */
+    Buf_SetBufferData((void *)b, pcm, sizeof(pcm));
+    Buf_Play((void *)b, 0, 0, DSBPLAY_LOOPING);
+    float full = 0.5f * powf(10.0f, -0.6f);
+    mix(16);
+    CHECK(near(out[0], full * 0.5f, 1e-5f), "default mix-bin headroom");
+    CHECK(DS_SetMixBinHeadroom((void *)ds, 0x7FFFFFFF, 0) == DS_OK, "Dashboard all-bin mask");
+    mix(16);
+    CHECK(near(out[0], full, 1e-5f) && near(out[1], full, 1e-5f),
+          "all-bin headroom removes only the extra 6 dB: %f %f", out[0], out[1]);
+    CHECK(DS_SetMixBinHeadroom((void *)ds, 1, 1) == DS_OK, "modern bin 1 is right");
+    mix(16);
+    CHECK(near(out[0], full, 1e-5f) && near(out[1], full * 0.5f, 1e-5f), "index semantics preserved");
+    CHECK(DS_SetMixBinHeadroom_v1((void *)ds, 1, 1) == DS_OK, "legacy mask 1 is left");
+    mix(16);
+    CHECK(near(out[0], full * 0.5f, 1e-5f) && near(out[1], full * 0.5f, 1e-5f), "v1 mask semantics");
+    CHECK(DS_SetMixBinHeadroom((void *)ds, 32, 0) == DSERR_INVALIDPARAM, "invalid modern bin");
+    CHECK(DS_SetMixBinHeadroom((void *)ds, 0x7FFFFFFF, 8) == DSERR_INVALIDPARAM, "invalid mask headroom");
+    DS_SetMixBinHeadroom((void *)ds, 0x7FFFFFFF, 1);
+    Obj_Release((void *)b);
+    Obj_Release((void *)ds);
 }
 
 static void test_looping_and_regions(void)
@@ -1113,6 +1155,7 @@ int main(int argc, char **argv)
     test_formats();
     test_object_aliases();
     test_playback();
+    test_legacy_mixbin_headroom();
     test_looping_and_regions();
     test_pitch();
     test_adpcm(argc > 1 ? argv[1] : NULL);

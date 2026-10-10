@@ -45,6 +45,10 @@ export HOME=/root
 # can't be detected (the connector says "unknown"), and SDL only uses
 # connected outputs, so composite is switched on by hand when HDMI is empty.
 if grep -q 'Raspberry Pi' /proc/device-tree/model 2>/dev/null; then
+	# A 21 ms host period avoids ALSA underruns under Box86 on the Pi 3.
+	# The mixer still processes 512-frame chunks; other hosts keep 512.
+	: "${XBCOMPAT_AUDIO_FRAMES:=1024}"
+	export XBCOMPAT_AUDIO_FRAMES
 	pi_hdmi=
 	grep -qx connected /sys/class/drm/card*-HDMI-A-1/status 2>/dev/null && pi_hdmi=1
 	if [ -z "$pi_hdmi" ]; then
