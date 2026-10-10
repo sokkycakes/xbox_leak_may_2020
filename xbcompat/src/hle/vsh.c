@@ -164,7 +164,14 @@ typedef struct {
     strbuf b;
     bool cshadow;        /* the program writes constants: use a local copy */
     bool bad;            /* something the translator cannot express */
+    unsigned cur;        /* the instruction being emitted, for vsh_error */
 } emitter;
+
+/* Why the last vsh_translate returned NULL. */
+char vsh_error[96];
+
+#define BAD(e, ...) do { if (!(e)->bad) { int n_ = snprintf(vsh_error, sizeof vsh_error, "instruction %u: ", (e)->cur); \
+                          snprintf(vsh_error + n_, sizeof vsh_error - n_, __VA_ARGS__); } (e)->bad = true; } while (0)
 
 static const char *temp_name(unsigned r, char *buf)
 {
@@ -181,7 +188,7 @@ static void emit_operand(emitter *e, const vinstr *in, const operand *o, int sca
     if (o->neg) sb_put(&e->b, "-");
     switch (o->kind) {
     case SRC_R:
-        if (o->reg > 12) { e->bad = true; return; }
+        if (o->reg > 12) { BAD(e, "reads R%u", o->reg); return; }
         name = temp_name(o->reg, rbuf);
         break;
     case SRC_V:
@@ -192,13 +199,13 @@ static void emit_operand(emitter *e, const vinstr *in, const operand *o, int sca
         if (in->a0x) {
             sprintf(cbuf, "%s[ridx(A0 + %u)]", e->cshadow ? "cc" : "c", in->cidx);
         } else {
-            if (in->cidx > 191) { e->bad = true; return; }
+            if (in->cidx > 191) { BAD(e, "reads c%u", in->cidx); return; }
             sprintf(cbuf, "%s[%u]", e->cshadow ? "cc" : "c", in->cidx);
         }
         name = cbuf;
         break;
     default:
-        e->bad = true;
+        BAD(e, "operand kind %u", o->kind);
         return;
     }
     sb_put(&e->b, "%s", name);
@@ -231,7 +238,7 @@ static void emit_mac_expr(emitter *e, const vinstr *in)
     case MAC_MAX: sb_put(b, "max("); A(); sb_put(b, ", "); B(); sb_put(b, ")"); break;
     case MAC_SLT: sb_put(b, "vec4(lessThan("); A(); sb_put(b, ", "); B(); sb_put(b, "))"); break;
     case MAC_SGE: sb_put(b, "vec4(greaterThanEqual("); A(); sb_put(b, ", "); B(); sb_put(b, "))"); break;
-    default: e->bad = true; break;
+    default: BAD(e, "MAC opcode %u", in->mac); break;
     }
 #undef A
 #undef B
@@ -249,7 +256,7 @@ static void emit_ilu_expr(emitter *e, const vinstr *in)
     case ILU_EXP: sb_put(b, "_exp("); emit_operand(e, in, &in->c, 1); sb_put(b, ")"); break;
     case ILU_LOG: sb_put(b, "_log("); emit_operand(e, in, &in->c, 1); sb_put(b, ")"); break;
     case ILU_LIT: sb_put(b, "_lit("); emit_operand(e, in, &in->c, 0); sb_put(b, ")"); break;
-    default: e->bad = true; break;
+    default: BAD(e, "ILU opcode %u", in->ilu); break;
     }
 }
 
@@ -269,7 +276,7 @@ static void emit_output(emitter *e, const vinstr *in, const char *src)
     if (in->o_is_out) {
         unsigned idx = in->o_addr & 15;
         const char *name = out_name[idx];
-        if (!name) { e->bad = true; return; }
+        if (!name) { BAD(e, "writes output %u", idx); return; }
         if (idx == OUT_FOG || idx == OUT_PTS) {
             /* Scalar outputs take the most significant masked component. */
             static const char comp[4] = { 'x', 'y', 'z', 'w' };
@@ -282,7 +289,7 @@ static void emit_output(emitter *e, const vinstr *in, const char *src)
     } else {
         /* A constant destination is always absolute; A0 only applies to
            reads. */
-        if (in->o_addr > 191) { e->bad = true; return; }
+        if (in->o_addr > 191) { BAD(e, "writes c%u", in->o_addr); return; }
         sprintf(dest, "cc[%u]", in->o_addr);
         emit_masked(e, dest, in->o_mask, src);
     }
@@ -383,6 +390,7 @@ static const char *const helpers =
 
 char *vsh_translate(const uint32_t *code, unsigned count)
 {
+    vsh_error[0] = 0;
     if (!code || !count) return NULL;
 
     /* First pass: decode, find the end, and see what the program touches. */
@@ -442,6 +450,7 @@ char *vsh_translate(const uint32_t *code, unsigned count)
         const vinstr *in = &ins[i];
         const uint32_t *w = code + i * 4;
         if (in->mac == MAC_NOP && in->ilu == ILU_NOP) continue;
+        e.cur = i;
         sb_put(&e.b, "  /* %u: %08x %08x %08x %08x  ", i, w[0], w[1], w[2], w[3]);
         emit_disasm(&e, in);
         sb_put(&e.b, " */\n");
@@ -466,12 +475,12 @@ char *vsh_translate(const uint32_t *code, unsigned count)
         }
         char rbuf[8];
         if (have_t && mac_writes_temp(in)) {
-            if (in->out_r > 12) { e.bad = true; break; }
+            if (in->out_r > 12) { BAD(&e, "MAC writes R%u", in->out_r); break; }
             emit_masked(&e, temp_name(in->out_r, rbuf), in->mac_mask, "t");
         }
         if (have_u && in->ilu_mask) {
             unsigned r = ilu_temp_reg(in);
-            if (r > 12) { e.bad = true; break; }
+            if (r > 12) { BAD(&e, "ILU writes R%u", r); break; }
             emit_masked(&e, temp_name(r, rbuf), in->ilu_mask, "u");
         }
         if (in->o_mask) {
@@ -509,6 +518,7 @@ char *vsh_translate(const uint32_t *code, unsigned count)
            "  gl_PointSize = oPts.x;\n"
            "}\n");
 
+    if (e.b.oom) snprintf(vsh_error, sizeof vsh_error, "out of memory");
     if (e.bad || e.b.oom) {
         free(e.b.s);
         return NULL;

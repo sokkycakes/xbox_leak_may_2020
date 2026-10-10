@@ -46,6 +46,7 @@
  *   gl_PointSize                  oPts.x
  */
 char *vsh_translate(const uint32_t *code, unsigned count);
+extern char vsh_error[96];   /* why vsh_translate last returned NULL */
 
 /*
  * Pixel shaders (register combiners).

@@ -2245,7 +2245,11 @@ static LONG NTAPI D3DDevice_CreateVertexShader(const ULONG *decl, const ULONG *f
     if (func) {
         /* The blob starts with one header dword whose high word counts instructions. */
         unsigned n = func[0] >> 16;
-        if (!n || n > 136) n = 136;
+        if (!n || n > 136) {
+            static int warned;
+            if (warned++ < 4) xlog("D3D: vertex program header %#x has no usable length", func[0]);
+            n = 136;
+        }
         sh->ninstr = n;
         sh->code = malloc(n * 16);
         memcpy(sh->code, func + 1, n * 16);
@@ -2358,7 +2362,13 @@ static GLuint vertex_shader_object(vshader *sh)
     if (sh->vs || sh->failed) return sh->vs;
     char *src = vsh_translate(sh->code, sh->ninstr);
     if (!src) {
-        xlog("D3D: vertex program (%u instructions) could not be translated", sh->ninstr);
+        xlog("D3D: vertex program (%u instructions) could not be translated: %s", sh->ninstr, vsh_error);
+        /* Log the first few programs' microcode so they can be fixed offline. */
+        static int dumped;
+        if (dumped++ < 4)
+            for (unsigned i = 0; i < sh->ninstr; i++)
+                xlog("D3D:   vsh %3u: %08x %08x %08x %08x", i, sh->code[i * 4], sh->code[i * 4 + 1],
+                     sh->code[i * 4 + 2], sh->code[i * 4 + 3]);
         sh->failed = true;
         return 0;
     }
