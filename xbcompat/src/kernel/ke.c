@@ -389,6 +389,14 @@ NTSTATUS wait_objects(ULONG count, PVOID objects[], int wait_any, KPROCESSOR_MOD
     me.count = count;
     me.objects = objects;
     bool listed = false;
+    /* A loop that waits on a manual-reset event nobody resets never blocks.
+       The dashboard's audio stream thread does that while its stream is
+       stopped: on the Xbox it is a low-priority thread that only gets idle
+       time, here it took a whole core (and the dispatcher lock) from the
+       render thread, ~250000 waits a second. Past 64 such waits in a row,
+       each one first gives up the CPU for a while. */
+    static __thread unsigned spins;
+    bool spin_hit = false;
 
     pthread_mutex_lock(&g_disp_lock);
     for (;;) {
@@ -397,6 +405,7 @@ NTSTATUS wait_objects(ULONG count, PVOID objects[], int wait_any, KPROCESSOR_MOD
             for (ULONG i = 0; i < count; i++) {
                 DISPATCHER_HEADER *h = objects[i];
                 if (object_signaled(h, self)) {
+                    if (h->Type == EventNotificationObject) spin_hit = true;
                     st = consume(h, self);
                     st = st == STATUS_ABANDONED ? (NTSTATUS)(STATUS_ABANDONED + i) : (NTSTATUS)i;
                     goto done;
@@ -445,6 +454,13 @@ done:
                 break;
             }
     pthread_mutex_unlock(&g_disp_lock);
+    if (listed) spins = 0;
+    else if (spin_hit && !poll && ++spins > 64) {
+        /* The dashboard runs dozens of these threads, one per sound
+           stream: after a while, back off to 10 ms. */
+        cpu_block();
+        usleep(spins > 256 ? 10000 : 1000);
+    }
     return st;
 }
 
@@ -754,6 +770,8 @@ void (*g_vblank_hook)(void);
 /* The DPC thread: fires timers, runs DPCs and keeps KeTickCount moving. */
 static void *dpc_thread(void *arg)
 {
+    pthread_setname_np(pthread_self(), "dpc");
+    prof_thread_start();
     (void)arg;
     thread_adopt_host("dpc");
     set_irql(2);
