@@ -1653,33 +1653,69 @@ static GLenum gl_min_filter(ULONG min, ULONG mip)
 }
 
 /* Wrap and filter modes of stage `s`, applied to the texture bound to `target`. */
+/* Sampler state belongs to a stage, not to the shared texture image.
+   Use independent sampler objects where the host exposes them. */
+static void (APIENTRY *p_glGenSamplers)(GLsizei, GLuint *);
+static void (APIENTRY *p_glBindSampler)(GLuint, GLuint);
+static void (APIENTRY *p_glSamplerParameteri)(GLuint, GLenum, GLint);
+static void (APIENTRY *p_glSamplerParameterf)(GLuint, GLenum, GLfloat);
+static void (APIENTRY *p_glSamplerParameterfv)(GLuint, GLenum, const GLfloat *);
+static bool separate_samplers;
+static GLuint stage_sampler[4], bound_sampler[4];
+
+static void bind_stage_sampler(unsigned stage, GLuint sampler)
+{
+    if (bound_sampler[stage] == sampler) return;
+    p_glBindSampler(stage, sampler);
+    bound_sampler[stage] = sampler;
+}
+
+static void sampler_i(GLenum target, int s, GLenum name, GLint value)
+{
+    if (separate_samplers) p_glSamplerParameteri(stage_sampler[s], name, value);
+    else glTexParameteri(target, name, value);
+}
+
+static void sampler_f(GLenum target, int s, GLenum name, GLfloat value)
+{
+    if (separate_samplers) p_glSamplerParameterf(stage_sampler[s], name, value);
+    else glTexParameterf(target, name, value);
+}
+
 static void apply_sampler(GLenum target, int s)
 {
-    glTexParameteri(target, GL_TEXTURE_WRAP_S, gl_wrap(TSS(s, D3DTSS_ADDRESSU)));
-    glTexParameteri(target, GL_TEXTURE_WRAP_T, gl_wrap(TSS(s, D3DTSS_ADDRESSV)));
-    if (target != GL_TEXTURE_2D) glTexParameteri(target, GL_TEXTURE_WRAP_R, gl_wrap(TSS(s, D3DTSS_ADDRESSW)));
-    glTexParameteri(target, GL_TEXTURE_MAG_FILTER, gl_filter(TSS(s, D3DTSS_MAGFILTER)));
-    glTexParameteri(target, GL_TEXTURE_MIN_FILTER, gl_min_filter(TSS(s, D3DTSS_MINFILTER), TSS(s, D3DTSS_MIPFILTER)));
+    if (separate_samplers) {
+        if (!stage_sampler[0]) p_glGenSamplers(4, stage_sampler);
+        bind_stage_sampler(s, stage_sampler[s]);
+    }
+    sampler_i(target, s, GL_TEXTURE_WRAP_S, gl_wrap(TSS(s, D3DTSS_ADDRESSU)));
+    sampler_i(target, s, GL_TEXTURE_WRAP_T, gl_wrap(TSS(s, D3DTSS_ADDRESSV)));
+    if (target != GL_TEXTURE_2D) sampler_i(target, s, GL_TEXTURE_WRAP_R, gl_wrap(TSS(s, D3DTSS_ADDRESSW)));
+    sampler_i(target, s, GL_TEXTURE_MAG_FILTER, gl_filter(TSS(s, D3DTSS_MAGFILTER)));
+    sampler_i(target, s, GL_TEXTURE_MIN_FILTER, gl_min_filter(TSS(s, D3DTSS_MINFILTER), TSS(s, D3DTSS_MIPFILTER)));
     float border[4];
     color4(border, TSS(s, D3DTSS_BORDERCOLOR));
-    glTexParameterfv(target, GL_TEXTURE_BORDER_COLOR, border);
+    if (separate_samplers) p_glSamplerParameterfv(stage_sampler[s], GL_TEXTURE_BORDER_COLOR, border);
+    else glTexParameterfv(target, GL_TEXTURE_BORDER_COLOR, border);
     D3DPixelContainer *t = (D3DPixelContainer *)d3d.textures[s];
     /* API LOD controls do not change the authored image chain. Linear
        resources have a single level regardless of the requested filter. */
     ULONG last = t ? level_count(t) - 1 : 0;
     ULONG first = TSS(s, 7 /* MAXMIPLEVEL */);
     if (first > last) first = last;
-    glTexParameterf(target, GL_TEXTURE_MIN_LOD, (GLfloat)first);
-    glTexEnvf(GL_TEXTURE_FILTER_CONTROL, GL_TEXTURE_LOD_BIAS,
-              t && !t->Size ? tss_float(s, 6 /* MIPMAPLODBIAS */) : 0.0f);
+    sampler_f(target, s, GL_TEXTURE_MIN_LOD, (GLfloat)first);
+    float bias = t && !t->Size ? tss_float(s, 6 /* MIPMAPLODBIAS */) : 0.0f;
+    glTexEnvf(GL_TEXTURE_FILTER_CONTROL, GL_TEXTURE_LOD_BIAS, separate_samplers ? 0.0f : bias);
+    if (separate_samplers) sampler_f(target, s, GL_TEXTURE_LOD_BIAS, bias);
+    sampler_i(target, s, GL_TEXTURE_COMPARE_MODE, GL_NONE);
     if (target == GL_TEXTURE_2D && t && is_depth_format((t->Format >> 8) & 0xFF)) {
         /* The NV2A compares the stage's r/q with the stored depth as
            "stored SHADOWFUNC r"; GL compares "r FUNC stored", so mirror it.
            The D3DCMP values are the GL enums. */
         static const GLenum mirror[8] = { GL_NEVER, GL_GREATER, GL_EQUAL, GL_GEQUAL,
                                           GL_LESS, GL_NOTEQUAL, GL_LEQUAL, GL_ALWAYS };
-        glTexParameteri(target, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE);
-        glTexParameteri(target, GL_TEXTURE_COMPARE_FUNC, mirror[RS(D3DRS_SHADOWFUNC) & 7]);
+        sampler_i(target, s, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE);
+        sampler_i(target, s, GL_TEXTURE_COMPARE_FUNC, mirror[RS(D3DRS_SHADOWFUNC) & 7]);
     }
 }
 
@@ -1728,6 +1764,7 @@ static unsigned apply_textures(void)
         } else {
             /* A stage with no texture still combines DIFFUSE, CURRENT and
                TFACTOR on the Xbox; run it with a white texture. */
+            if (separate_samplers) bind_stage_sampler(s, 0);
             glBindTexture(GL_TEXTURE_2D, white_texture());
         }
         glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_COMBINE);
@@ -2312,6 +2349,11 @@ static void load_shader_functions(void)
     LOAD(glSecondaryColorPointer); LOAD(glBlendEquation); LOAD(glBlendColor);
     LOAD(glGetActiveUniform); LOAD(glGenBuffers); LOAD(glDeleteBuffers); LOAD(glBindBuffer); LOAD(glBufferData); LOAD(glBufferSubData);
     LOAD(glGenQueries); LOAD(glBeginQuery); LOAD(glEndQuery); LOAD(glGetQueryObjectuiv);
+    LOAD(glGenSamplers); LOAD(glBindSampler); LOAD(glSamplerParameteri);
+    LOAD(glSamplerParameterf); LOAD(glSamplerParameterfv);
+    separate_samplers = SDL_GL_ExtensionSupported("GL_ARB_sampler_objects")
+        && p_glGenSamplers && p_glBindSampler && p_glSamplerParameteri
+        && p_glSamplerParameterf && p_glSamplerParameterfv;
 #undef LOAD
 }
 
@@ -4508,6 +4550,8 @@ static void present_window_framebuffer(void)
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     p_glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, window_fb.tex);
+    GLuint saved_sampler[2] = { bound_sampler[0], bound_sampler[1] };
+    if (separate_samplers) { bind_stage_sampler(0, 0); bind_stage_sampler(1, 0); }
     p_glUseProgram(window_fb.prog);
     p_glUniform1i(window_fb.u_tex, 0);
     float step[2] = { 1.0f / d3d.width, 1.0f / d3d.height }, weight[2] = { wx, wy };
@@ -4543,6 +4587,9 @@ static void present_window_framebuffer(void)
     glBegin(GL_TRIANGLE_STRIP);
     glVertex2f(-1, -1); glVertex2f(1, -1); glVertex2f(-1, 1); glVertex2f(1, 1);
     glEnd();
+    if (separate_samplers) {
+        bind_stage_sampler(0, saved_sampler[0]); bind_stage_sampler(1, saved_sampler[1]);
+    }
     p_glUseProgram(prev_prog);
     glPopAttrib();
     if (filter_start) t_filter += now_ns() - filter_start;
