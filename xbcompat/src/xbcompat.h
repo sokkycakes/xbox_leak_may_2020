@@ -18,6 +18,9 @@ extern volatile ULONG *g_apu_sample_counter;   /* the APU's 48 kHz counter, or N
 void xlog(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void fatal(const char *fmt, ...) __attribute__((format(printf, 1, 2), noreturn));
 #define TRACE(...) do { if (g_trace) xlog(__VA_ARGS__); } while (0)
+/* Per-frame noise (drawing, pads, memory): left out when g_trace is 2
+   (XBCOMPAT_TRACE=files), which keeps file and thread calls only. */
+#define TRACE_ALL(...) do { if (g_trace == 1) xlog(__VA_ARGS__); } while (0)
 
 /* ---- memory ----------------------------------------------------------- */
 

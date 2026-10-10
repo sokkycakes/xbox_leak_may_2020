@@ -848,7 +848,7 @@ BOOLEAN NTAPI KeSynchronizeExecution(PVOID Interrupt, BOOLEAN (NTAPI *Routine)(P
 LONG NTAPI KeSetBasePriorityThread(KTHREAD *Thread, LONG Increment)
 {
     LONG old = Thread->BasePriority;
-    TRACE("KeSetBasePriorityThread(%p, %d)", (void *)Thread, (int)Increment);
+    TRACE_ALL("KeSetBasePriorityThread(%p, %d)", (void *)Thread, (int)Increment);
     Thread->BasePriority = (SCHAR)(8 + Increment);
     /* The thread runs at its new base priority (no boosts here). Increments
        of +-16 saturate (THREAD_PRIORITY_TIME_CRITICAL, _IDLE). */

@@ -233,7 +233,7 @@ static ULONG direct3d_object[4];
 
 static PVOID NTAPI Direct3DCreate8(UINT_ SDKVersion)
 {
-    TRACE("Direct3DCreate8(%#x)", SDKVersion);
+    TRACE_ALL("Direct3DCreate8(%#x)", SDKVersion);
     return direct3d_object;
 }
 
@@ -792,7 +792,7 @@ static void NTAPI D3DDevice_Clear(ULONG Count, const D3DRECT *pRects, ULONG Flag
         pb_record2(OP_CLEAR, h, sizeof(h), pRects, Count && pRects ? Count * sizeof(D3DRECT) : 0);
         return;
     }
-    TRACE("D3D: Clear(%u rects, flags %#x, color %#x, z %g)", Count, Flags, Color, Z);
+    TRACE_ALL("D3D: Clear(%u rects, flags %#x, color %#x, z %g)", Count, Flags, Color, Z);
     flush_cpu_backbuffer();   /* earlier CPU writes go under the clear, not over it at Present */
     GLbitfield mask = 0;
     if (Flags & 0xF0) {
@@ -839,7 +839,7 @@ static LONG NTAPI D3DDevice_CreateVertexBuffer(UINT_ Length, ULONG Usage, ULONG 
     vb->Data = (ULONG)mem & 0x7FFFFFFF;
     vb->Lock = 0;
     *ppVB = vb;
-    TRACE("CreateVertexBuffer(%u) = %p", Length, (void *)vb);
+    TRACE_ALL("CreateVertexBuffer(%u) = %p", Length, (void *)vb);
     return D3D_OK;
 }
 
@@ -928,7 +928,7 @@ static void internal_release_surface(D3DSurface *s)
 
 static ULONG NTAPI D3DResource_Release(D3DResource *r)
 {
-    TRACE("D3D: Release(%p) type %#x refs %u from %p", (void *)r, r->Common & D3DCOMMON_TYPE_MASK,
+    TRACE_ALL("D3D: Release(%p) type %#x refs %u from %p", (void *)r, r->Common & D3DCOMMON_TYPE_MASK,
           (r->Common & D3DCOMMON_REFCOUNT_MASK) - 1, __builtin_return_address(0));
     if ((r->Common & D3DCOMMON_REFCOUNT_MASK) == 1) {
         /* The last outside reference on a surface drops its parent's. */
@@ -1140,7 +1140,8 @@ static void upload_image3(GLenum target, ULONG fmt, ULONG w, ULONG h, ULONG d, U
     /* conv: 1 = V8U8 (bump), 2 = L6V5U5 (bump), both expanded to RGBA8 with
        du/dv as the signed bytes' bit patterns in r/g and luminance in b;
        3 = YUY2 and 4 = UYVY (video frames), converted to RGB with BT.601;
-       5 = A8, which the NV2A samples as white with that alpha. */
+       5 = A8, which the NV2A samples as white with that alpha;
+       6 = AL8, one byte that is both luminance and alpha. */
     struct { ULONG fmt; int bpp; bool swizzled; GLenum gl_fmt, gl_type; bool force_alpha; int conv; } table[] = {
         { 0x3A, 4, true,  GL_RGBA, GL_UNSIGNED_BYTE, false, 0 },               /* A8B8G8R8 / Q8W8V8U8 */
         { 0x3F, 4, false, GL_RGBA, GL_UNSIGNED_BYTE, false, 0 },               /* LIN_A8B8G8R8 */
@@ -1167,12 +1168,15 @@ static void upload_image3(GLenum target, ULONG fmt, ULONG w, ULONG h, ULONG d, U
         { 0x02, 2, true,  GL_BGRA, GL_UNSIGNED_SHORT_1_5_5_5_REV, false, 0 }, /* A1R5G5B5 */
         { 0x03, 2, true,  GL_BGRA, GL_UNSIGNED_SHORT_1_5_5_5_REV, true, 0 },  /* X1R5G5B5 */
         { 0x10, 2, false, GL_BGRA, GL_UNSIGNED_SHORT_1_5_5_5_REV, false, 0 }, /* LIN_A1R5G5B5 */
+        { 0x1C, 2, false, GL_BGRA, GL_UNSIGNED_SHORT_1_5_5_5_REV, true, 0 },  /* LIN_X1R5G5B5 */
         { 0x04, 2, true,  GL_BGRA, GL_UNSIGNED_SHORT_4_4_4_4_REV, false, 0 }, /* A4R4G4B4 */
         { 0x1D, 2, false, GL_BGRA, GL_UNSIGNED_SHORT_4_4_4_4_REV, false, 0 }, /* LIN_A4R4G4B4 */
         { 0x00, 1, true,  GL_LUMINANCE, GL_UNSIGNED_BYTE, false, 0 },         /* L8 */
         { 0x13, 1, false, GL_LUMINANCE, GL_UNSIGNED_BYTE, false, 0 },         /* LIN_L8 */
         { 0x19, 1, true,  GL_RGBA, GL_UNSIGNED_BYTE, false, 5 },              /* A8 */
         { 0x1F, 1, false, GL_RGBA, GL_UNSIGNED_BYTE, false, 5 },              /* LIN_A8 */
+        { 0x01, 1, true,  GL_RGBA, GL_UNSIGNED_BYTE, false, 6 },              /* AL8 */
+        { 0x1B, 1, false, GL_RGBA, GL_UNSIGNED_BYTE, false, 6 },              /* LIN_AL8 */
         { 0x1A, 2, true,  GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE, false, 0 },   /* A8L8 */
         { 0x20, 2, false, GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE, false, 0 },   /* LIN_A8L8 */
         { 0x24, 2, false, GL_RGBA, GL_UNSIGNED_BYTE, false, 3 },            /* YUY2 */
@@ -1210,10 +1214,10 @@ static void upload_image3(GLenum target, ULONG fmt, ULONG w, ULONG h, ULONG d, U
     }
     if (table[i].force_alpha && bpp == 4)
         for (ULONG k = 0; k < w * h * d; k++) px[k * 4 + 3] = 0xFF;
-    if (table[i].conv == 5) {
+    if (table[i].conv >= 5) {
         uint8_t *rgba = malloc(w * h * d * 4);
         for (ULONG k = 0; k < w * h * d; k++) {
-            rgba[k * 4] = rgba[k * 4 + 1] = rgba[k * 4 + 2] = 0xFF;
+            rgba[k * 4] = rgba[k * 4 + 1] = rgba[k * 4 + 2] = table[i].conv == 6 ? px[k] : 0xFF;
             rgba[k * 4 + 3] = px[k];
         }
         free(px);
@@ -1349,7 +1353,7 @@ static GLuint texture_for(D3DPixelContainer *t)
         upload_image(GL_TEXTURE_2D, fmt, w, h, pitch, src);
     }
     stats.uploads++;
-    TRACE("D3D: uploaded %ux%u texture format %#x%s", w, h, fmt, target == GL_TEXTURE_CUBE_MAP ? " (cube)" : "");
+    TRACE_ALL("D3D: uploaded %ux%u texture format %#x%s", w, h, fmt, target == GL_TEXTURE_CUBE_MAP ? " (cube)" : "");
     debug_dump_texture(target, t->res.Data, fmt, w, h);
 
     tex_entry *e = malloc(sizeof(*e));
@@ -1554,7 +1558,7 @@ static unsigned apply_textures(void)
         D3DPixelContainer *t = (D3DPixelContainer *)d3d.textures[s];
         bool sprite = s == 3 && RS(D3DRS_POINTSPRITEENABLE);   /* point sprites always use stage 3 */
         glTexEnvi(GL_POINT_SPRITE, GL_COORD_REPLACE, sprite);
-        TRACE("D3D: stage %d texture %p colorop %u(%u,%u) alphaop %u(%u,%u) tfactor %#x", s, (void *)t,
+        TRACE_ALL("D3D: stage %d texture %p colorop %u(%u,%u) alphaop %u(%u,%u) tfactor %#x", s, (void *)t,
               TSS(s, D3DTSS_COLOROP), TSS(s, D3DTSS_COLORARG1), TSS(s, D3DTSS_COLORARG2), TSS(s, D3DTSS_ALPHAOP),
               TSS(s, D3DTSS_ALPHAARG1), TSS(s, D3DTSS_ALPHAARG2), RS(D3DRS_TEXTUREFACTOR));
         if (TSS(s, D3DTSS_COLOROP) == 1 || (ended && !sprite)) { ended = true; continue; }
@@ -1915,7 +1919,7 @@ static void apply_render_states(bool pretransformed, bool has_normal)
     p_glPointParameterf(GL_POINT_SIZE_MAX, pmax);
     if (RS(D3DRS_POINTSPRITEENABLE)) glEnable(GL_POINT_SPRITE);
     else glDisable(GL_POINT_SPRITE);
-    TRACE("D3D: points size %g scale %u sprite %u min %g max %g", psize, RS(D3DRS_POINTSCALEENABLE),
+    TRACE_ALL("D3D: points size %g scale %u sprite %u min %g max %g", psize, RS(D3DRS_POINTSCALEENABLE),
           RS(D3DRS_POINTSPRITEENABLE), pmin, pmax);
 
     /* D3DCULL_CCW culls triangles that appear counter-clockwise on screen,
@@ -2070,7 +2074,7 @@ static void load_shader_functions(void)
 static GLuint compile_shader(GLenum kind, const char *src)
 {
     GLuint sh = p_glCreateShader(kind);
-    TRACE("D3D: compiling %s shader %u", kind == GL_VERTEX_SHADER ? "vertex" : "fragment", sh);
+    TRACE_ALL("D3D: compiling %s shader %u", kind == GL_VERTEX_SHADER ? "vertex" : "fragment", sh);
     p_glShaderSource(sh, 1, &src, NULL);
     p_glCompileShader(sh);
     stats.shaders++;
@@ -2091,7 +2095,7 @@ static GLuint compile_shader(GLenum kind, const char *src)
 static GLuint link_program(GLuint vs, GLuint fs)
 {
     GLuint prog = p_glCreateProgram();
-    TRACE("D3D: linking program %u (vs %u, fs %u)", prog, vs, fs);
+    TRACE_ALL("D3D: linking program %u (vs %u, fs %u)", prog, vs, fs);
     if (vs) p_glAttachShader(prog, vs);
     if (fs) p_glAttachShader(prog, fs);
     for (int i = 0; i < 16; i++) {
@@ -2215,7 +2219,7 @@ static LONG NTAPI D3DDevice_CreateVertexShader(const ULONG *decl, const ULONG *f
         memcpy(sh->code, func + 1, n * 16);
     }
     *handle = (ULONG)sh | 1;
-    TRACE("CreateVertexShader: %u instructions, usage %#x = %#x", sh->ninstr, usage, *handle);
+    TRACE_ALL("CreateVertexShader: %u instructions, usage %#x = %#x", sh->ninstr, usage, *handle);
     return D3D_OK;
 }
 
@@ -2683,17 +2687,17 @@ static void draw_programmable_(vshader *sh, ULONG PrimitiveType, const UCHAR *up
     if (!d3d.pixel_shader) apply_textures();
     program_entry *e;
     if (!use_program(vs, &e)) return;
-    TRACE("D3D: draw(program) prim %u count %u indices %p vs %u ps %#x z %u/%u/%u blend %u %u/%u atest %u cw %#x stencil %u vp %u,%u %ux%u %g-%g",
+    TRACE_ALL("D3D: draw(program) prim %u count %u indices %p vs %u ps %#x z %u/%u/%u blend %u %u/%u atest %u cw %#x stencil %u vp %u,%u %ux%u %g-%g",
           PrimitiveType, count, indices ? indices + first : NULL, vs, d3d.pixel_shader,
           RS(D3DRS_ZENABLE), RS(D3DRS_ZFUNC), RS(D3DRS_ZWRITEENABLE), RS(D3DRS_ALPHABLENDENABLE),
           RS(D3DRS_SRCBLEND), RS(D3DRS_DESTBLEND), RS(D3DRS_ALPHATESTENABLE), RS(D3DRS_COLORWRITEENABLE),
           RS(D3DRS_STENCILENABLE), d3d.viewport.X, d3d.viewport.Y, d3d.viewport.Width, d3d.viewport.Height,
           d3d.viewport.MinZ, d3d.viewport.MaxZ);
-    if (g_trace && d3d.pixel_shader)
+    if (g_trace == 1 && d3d.pixel_shader)
         xlog("D3D:   ps constants c0 %08x %08x c1 %08x %08x, mapping %08x %08x", RS(D3DRS_PSCONSTANT0_0),
              RS(D3DRS_PSCONSTANT0_0 + 1), RS(D3DRS_PSCONSTANT1_0), RS(D3DRS_PSCONSTANT1_0 + 1),
              ((const ULONG *)d3d.pixel_shader)[57], ((const ULONG *)d3d.pixel_shader)[58]);
-    if (g_trace)
+    if (g_trace == 1)
         for (int st = 0; st < 4; st++) {
             const D3DPixelContainer *t = (const D3DPixelContainer *)d3d.textures[st];
             if (t) xlog("D3D:   stage %d texture %p data %#x format %#x size %#x", st, (void *)t, t->res.Data,
@@ -2809,7 +2813,7 @@ static void draw_declared_(const vshader *sh, ULONG PrimitiveType, const UCHAR *
 #undef STREAM
     program_entry *e;
     if (!use_program(0, &e)) return;
-    TRACE("D3D: draw(declared) prim %u count %u stride %u indices %p shader %#x", PrimitiveType, count, stride,
+    TRACE_ALL("D3D: draw(declared) prim %u count %u stride %u indices %p shader %#x", PrimitiveType, count, stride,
           indices ? indices + first : NULL, d3d.vertex_shader);
     if (indices)
         glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, indices + first);
@@ -2892,7 +2896,7 @@ static void draw(ULONG PrimitiveType, const UCHAR *base, ULONG stride, ULONG fir
 
     program_entry *e;
     if (!use_program(0, &e)) return;
-    TRACE("D3D: draw prim %u count %u base %p stride %u indices %p fvf %#x", PrimitiveType, count, base, stride,
+    TRACE_ALL("D3D: draw prim %u count %u base %p stride %u indices %p fvf %#x", PrimitiveType, count, base, stride,
           indices ? indices + first : NULL, d3d.vertex_shader);
     if (indices)
         glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, indices + first);
@@ -3889,7 +3893,7 @@ static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
     d3d.target = target;
     d3d.target_depth = z;
     sync_device_surfaces();
-    TRACE("D3D: render target %p (parent %p) depth %p", (void *)target, (void *)target->Parent, (void *)z);
+    TRACE_ALL("D3D: render target %p (parent %p) depth %p", (void *)target, (void *)target->Parent, (void *)z);
     if (target == d3d.backbuffer || (!target->Parent && !p_glGenFramebuffers)) {
         if (target != d3d.backbuffer)
             xlog("D3D: no framebuffer objects, rendering a standalone surface into the back buffer");
@@ -4087,7 +4091,7 @@ static D3DPixelContainer *alloc_texture(ULONG w, ULONG h, ULONG depth, ULONG lev
     if (!mem) { pool_free(t); return NULL; }
     memset(mem, 0, bytes);
     t->res.Data = (ULONG)mem & 0x7FFFFFFF;
-    TRACE("D3D: texture %ux%ux%u fmt %#x levels %u%s = %p (%u bytes)", w, h, depth, fmt, levels,
+    TRACE_ALL("D3D: texture %ux%ux%u fmt %#x levels %u%s = %p (%u bytes)", w, h, depth, fmt, levels,
           cube ? " cube" : "", (void *)t, bytes);
     return t;
 }
@@ -4426,7 +4430,7 @@ static int constant_slot(LONG reg)
 static void NTAPI D3DDevice_SetVertexShaderConstant(LONG Register, const float *data, ULONG count)
 {
     if (d3d.recording) { ULONG h[2] = { (ULONG)Register, count }; pb_record2(OP_VS_CONST, h, 8, data, count * 16); }
-    TRACE("D3D: vs constant %d x%u = %g %g %g %g", Register, count, data[0], data[1], data[2], data[3]);
+    TRACE_ALL("D3D: vs constant %d x%u = %g %g %g %g", Register, count, data[0], data[1], data[2], data[3]);
     for (ULONG i = 0; i < count; i++) {
         int slot = constant_slot(Register + i);
         memcpy(d3d.vs_const[slot], data + i * 4, 16);
@@ -4706,7 +4710,7 @@ static void NTAPI D3DDevice_CreatePixelShader(const ULONG *def, ULONG *handle)
    dialog boxes and button glyphs got no color constant and drew nothing. */
 static void set_pixel_shader_def(const ULONG *def, ULONG *obj)
 {
-    TRACE("D3D: pixel shader %p", (void *)def);
+    TRACE_ALL("D3D: pixel shader %p", (void *)def);
     if (d3d.recording) { ULONG h = (ULONG)def; pb_record(OP_PIXEL_SHADER, &h, 4); }
     d3d.pixel_shader = (ULONG)def;
     if (device_layout_5849 && d3d.device) {
@@ -4774,7 +4778,7 @@ static void NTAPI D3DDevice_SetPixelShaderConstant(ULONG Register, const float *
 {
     if (d3d.recording) { ULONG h[2] = { Register, count }; pb_record2(OP_PS_CONST, h, 8, data, count * 16); }
     const ULONG *def = (const ULONG *)d3d.pixel_shader;
-    TRACE("D3D: SetPixelShaderConstant(%u, %g %g %g %g, %u) with shader %p", Register, data[0], data[1], data[2],
+    TRACE_ALL("D3D: SetPixelShaderConstant(%u, %g %g %g %g, %u) with shader %p", Register, data[0], data[1], data[2],
           data[3], count, (void *)def);
     for (ULONG i = 0; i < count && Register < 16; i++, Register++, data += 4) {
         memcpy(d3d.ps_const[Register], data, 16);
@@ -5106,7 +5110,7 @@ static LONG NTAPI D3DDevice_EndPushBuffer(void)
     memcpy(d3d.palettes, pb_saved.palettes, sizeof(pb_saved.palettes));
     if (d3d.target != pb_saved.target || d3d.target_depth != pb_saved.target_depth)
         D3DDevice_SetRenderTarget(pb_saved.target, pb_saved.target_depth);
-    TRACE("D3D: recorded push buffer %p: %u dwords", (void *)pb, pb_stream_of(pb, true)->n);
+    TRACE_ALL("D3D: recorded push buffer %p: %u dwords", (void *)pb, pb_stream_of(pb, true)->n);
     return D3D_OK;
 }
 
@@ -5788,7 +5792,7 @@ static D3DPixelContainer *NTAPI D3DDevice_CreateTexture2(UINT_ w, UINT_ h, UINT_
                                                          ULONG fmt, ULONG type)
 {
     D3DPixelContainer *t = NULL;
-    TRACE("D3D: CreateTexture2(%u, %u, %u, levels %u, usage %#x, fmt %#x, type %u)", w, h, depth, levels, usage, fmt,
+    TRACE_ALL("D3D: CreateTexture2(%u, %u, %u, levels %u, usage %#x, fmt %#x, type %u)", w, h, depth, levels, usage, fmt,
           type);
     switch (type) {
     case 4: D3DDevice_CreateVolumeTexture(w, h, depth, levels, usage, fmt, 0, &t); break;   /* D3DRTYPE_VOLUMETEXTURE */

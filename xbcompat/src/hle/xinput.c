@@ -973,7 +973,7 @@ static ULONG NTAPI XGetDevices(XPP_DEVICE_TYPE *DeviceType)
         ret = t->Current;
         t->Change = 0;
         t->Previous = t->Current;
-        TRACE("XInput: XGetDevices(%s) = %#x", table_name(t), ret);
+        TRACE_ALL("XInput: XGetDevices(%s) = %#x", table_name(t), ret);
     }
     pthread_mutex_unlock(&xi.lock);
     return ret;
@@ -1094,7 +1094,7 @@ static void NTAPI XInputClose(HANDLE hDevice)
             if (p->gc) SDL_GameControllerRumble(p->gc, 0, 0, 0);
         }
         xi.remaining++;
-        TRACE("XInput: XInputClose %p (port %u)", hDevice, d->port);
+        TRACE_ALL("XInput: XInputClose %p (port %u)", hDevice, d->port);
         d->magic = 0;
         pool_free(d);
     }
@@ -1173,7 +1173,7 @@ static ULONG NTAPI XInputSetState(HANDLE hDevice, XINPUT_FEEDBACK *pFeedback)
         xi_port *p = &xi.port[d->port];
         USHORT l = pFeedback->Rumble.wLeftMotorSpeed, r = pFeedback->Rumble.wRightMotorSpeed;
         if (p->gc) SDL_GameControllerRumble(p->gc, l, r, (l || r) ? XI_RUMBLE_MS : 0);
-        TRACE("XInput: XInputSetState port %u: rumble %u/%u", d->port, l, r);
+        TRACE_ALL("XInput: XInputSetState port %u: rumble %u/%u", d->port, l, r);
 
         /* The driver references the completion event when the report is
            submitted and drops a handle that is not an event (xid.cpp
@@ -1234,7 +1234,7 @@ static ULONG NTAPI XMountMUA(ULONG dwPort, ULONG dwSlot, CHAR *pchDrive)
     check_inited("XMountMU");
     if (pchDrive) *pchDrive = 0;
     mu_args_ok("XMountMU", dwPort, dwSlot);
-    TRACE("XInput: XMountMU(%u, %u): no memory unit", dwPort, dwSlot);
+    TRACE_ALL("XInput: XMountMU(%u, %u): no memory unit", dwPort, dwSlot);
     return ERROR_DEVICE_NOT_CONNECTED;
 }
 
@@ -1242,14 +1242,14 @@ static ULONG NTAPI XMountMURootA(ULONG dwPort, ULONG dwSlot, CHAR *pchDrive)
 {
     if (pchDrive) *pchDrive = 0;
     mu_args_ok("XMountMURoot", dwPort, dwSlot);
-    TRACE("XInput: XMountMURoot(%u, %u): no memory unit", dwPort, dwSlot);
+    TRACE_ALL("XInput: XMountMURoot(%u, %u): no memory unit", dwPort, dwSlot);
     return ERROR_DEVICE_NOT_CONNECTED;
 }
 
 static ULONG NTAPI XUnmountMU(ULONG dwPort, ULONG dwSlot)
 {
     mu_args_ok("XUnmountMU", dwPort, dwSlot);
-    TRACE("XInput: XUnmountMU(%u, %u): not mounted", dwPort, dwSlot);
+    TRACE_ALL("XInput: XUnmountMU(%u, %u): not mounted", dwPort, dwSlot);
     return ERROR_INVALID_DRIVE;
 }
 
@@ -1270,7 +1270,7 @@ static ULONG NTAPI XMUSlotFromDriveLetterA(ULONG chDrive)
 static ULONG NTAPI XMUNameFromDriveLetter(ULONG chDrive, WCHAR *lpName, ULONG cchName)
 {
     (void)lpName; (void)cchName;
-    TRACE("XInput: XMUNameFromDriveLetter(%c): not mounted", (CHAR)chDrive);
+    TRACE_ALL("XInput: XMUNameFromDriveLetter(%c): not mounted", (CHAR)chDrive);
     return ERROR_INVALID_DRIVE;
 }
 
