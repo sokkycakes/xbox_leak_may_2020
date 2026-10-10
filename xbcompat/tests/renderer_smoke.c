@@ -877,6 +877,100 @@ int main(int argc, char **argv)
             puts("renderer packed copies: nine 16/32-bit layouts and partial cached destinations passed");
         }
 
+
+        /* All six XDK blend modes, through both FVF and declarations. */
+        {
+            void (NTAPI *set_transform)(ULONG,const void *) = find("_D3DDevice_SetTransform@8");
+            void (NTAPI *get_transform)(ULONG,void *) = find("_D3DDevice_GetTransform@8");
+            void (NTAPI *set_material)(const float *) = find("_D3DDevice_SetMaterial@4");
+            LONG (NTAPI *set_light)(ULONG,const void *) = find("_D3DDevice_SetLight@8");
+            LONG (NTAPI *light_enable)(ULONG,BOOLEAN) = find("_D3DDevice_LightEnable@8");
+            LONG (NTAPI *create_vshader)(const ULONG *,const ULONG *,ULONG *,ULONG) =
+                find("_D3DDevice_CreateVertexShader@16");
+            void (NTAPI *delete_vshader)(ULONG) = find("_D3DDevice_DeleteVertexShader@4");
+            uint32_t saved_rs[256], saved_tss[128];
+            float saved_transforms[10][16];
+            memcpy(saved_rs,render_states,sizeof saved_rs);
+            memcpy(saved_tss,texture_states,sizeof saved_tss);
+            for (unsigned i = 0; i < 10; i++) get_transform(i,saved_transforms[i]);
+            float identity[16] = {1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
+            set_transform(0,identity); set_transform(1,identity);
+            static const float offsets[4] = {-.75f,.75f,.25f,-.25f};
+            for (int i = 0; i < 4; i++) {
+                identity[12] = offsets[i];
+                set_transform(6+i,identity);
+            }
+            identity[12] = 0;
+            struct {
+                ULONG type;
+                float diffuse[4],specular[4],ambient[4],position[3],direction[3];
+                float range,falloff,a0,a1,a2,theta,phi;
+            } light = {0};
+            light.type = 3; light.direction[2] = -1;
+            light.diffuse[0] = light.diffuse[1] = light.diffuse[2] = 1;
+            for (int i = 0; i < 8; i++) light_enable(i,0);
+            set_light(0,&light); light_enable(0,1);
+            float material[17] = {1,1,1,1};
+            set_material(material);
+            render_states[59] = render_states[60] = render_states[82] = 0;
+            render_states[93] = render_states[95] = render_states[105] = 0;
+            render_states[108] = render_states[109] = render_states[122] = 0;
+            render_states[123] = render_states[124] = render_states[125] = 0;
+            render_states[92] = 1;
+            render_states[67] = 0xffffffffu;
+            render_states[106] = 0x40800000u;
+            render_states[100] = render_states[101] = render_states[102] = render_states[103] = 0;
+            for (int i = 0; i < 4; i++) {
+                set_tex(i,NULL);
+                texture_states[i*32+12] = 1;
+                texture_states[i*32+21] = 0;
+                texture_states[i*32+28] = i;
+            }
+            static const ULONG decl[] = {
+                0x20000000,0x40320000,0x40420001,0x40320002,0x40400003,0xffffffff
+            };
+            ULONG declared = 0;
+            assert(create_vshader(decl,NULL,&declared,0) == 0 && declared);
+            struct { float position[3],weights[4],normal[3]; uint32_t color; } vertex =
+                {{0,0,.125f},{.25f,.25f,.25f,.25f},{0,0,1},0xffffffffu};
+            static const int xs[6] = {44,32,36,34,32,32};
+            static const int colors[6] = {255,128,255,191,255,255};
+            set_ps(0);
+            for (int layout = 0; layout < 2; layout++) {
+                set_vs(layout ? declared : 0x5c); /* XYZB4, normal, diffuse */
+                for (int mode = 1; mode <= 6; mode++) {
+                    render_states[118] = mode;
+                    clear(0,NULL,0xf0,0xff000000,1,0);
+                    draw(1,1,&vertex,sizeof vertex);
+                    glReadPixels(xs[mode-1],32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                    if (abs((int)pixel[0]-colors[mode-1]) > 3)
+                        fprintf(stderr,"skin mode %d layout %d: got %u wanted %d\n",mode,layout,pixel[0],colors[mode-1]);
+                    assert(abs((int)pixel[0]-colors[mode-1]) <= 3);
+                }
+                render_states[118] = 1;
+                identity[12] = .75f; identity[10] = 4;
+                set_transform(7,identity);
+                clear(0,NULL,0xf0,0xff000000,1,0);
+                draw(1,1,&vertex,sizeof vertex);
+                glReadPixels(44,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                assert(abs((int)pixel[0]-112) <= 3);
+                render_states[123] = 1;
+                clear(0,NULL,0xf0,0xff000000,1,0);
+                draw(1,1,&vertex,sizeof vertex);
+                glReadPixels(44,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                assert(pixel[0] > 240);
+                render_states[123] = 0;
+                identity[10] = 1; set_transform(7,identity);
+            }
+            light_enable(0,0);
+            set_vs(0x144); delete_vshader(declared);
+            for (unsigned i = 0; i < 10; i++) set_transform(i,saved_transforms[i]);
+            memcpy(render_states,saved_rs,sizeof saved_rs);
+            memcpy(texture_states,saved_tss,sizeof saved_tss);
+            set_tex(0,tex);
+            puts("renderer skinning: six modes, FVF/declarations, inverse normals and normalization passed");
+        }
+
         /* Compressed volume uploads decode the packed slab order before GL.
          * The selected blocks distinguish XY tiles, slices within a slab,
          * and the second slab. Minification then selects an authored mip. */

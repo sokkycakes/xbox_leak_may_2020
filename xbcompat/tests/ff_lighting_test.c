@@ -93,7 +93,9 @@ int main(void)
     GLuint fs = compile(GL_FRAGMENT_SHADER,
         "#version 120\nvoid main(){gl_FragColor=vec4(gl_Color.rgb+gl_SecondaryColor.rgb,gl_Color.a);}\n");
     GLuint program = glCreateProgram();
-    glAttachShader(program, vs); glAttachShader(program, fs); glLinkProgram(program);
+    glAttachShader(program, vs); glAttachShader(program, fs);
+    glBindAttribLocation(program, 1, "v1");
+    glLinkProgram(program);
     GLint ok;
     glGetProgramiv(program, GL_LINK_STATUS, &ok);
     if (!ok) {
@@ -160,6 +162,39 @@ int main(void)
     state[0][2] = 1;
     check("local viewer", 1, 2, -1, .6480125f, .6480125f, .6480125f, 1);
     check("back-facing light suppresses specular", 1, 2, 1, 0, 0, 0, 1);
+
+
+    /* Behavior-spec skinning fixtures: inverse-normal matrices supplied as
+       uniforms; normalize once after blending, never normalize weights. */
+    {
+        float transforms[28][4] = {{0}};
+        for (int matrix = 0; matrix < 4; matrix++) {
+            int b = matrix*7;
+            for (int k = 0; k < 4; k++) transforms[b+k][k] = 1;
+            for (int k = 0; k < 3; k++) transforms[b+4+k][k] = 1;
+        }
+        glUniform4fv(glGetUniformLocation(program,"ff_transform"),28,&transforms[0][0]);
+        reset();
+        rgb(3,1,1,1);
+        state[9][2] = 1; state[9][3] = 3;
+        rgb(11,1,1,1);
+        state[7][0] = 2; state[7][1] = 0;
+        glVertexAttrib4f(1,.25f,.25f,0,0);
+        check("explicit skin weights are not normalized",0,2,1,.5f,.5f,.5f,1);
+        state[0][1] = 1;
+        check("normal normalization follows blending",0,2,1,1,1,1,1);
+        state[0][1] = 0; state[7][1] = 1;
+        transforms[13][2] = .25f; /* matrix one's inverse normal Z scale */
+        glUniform4fv(glGetUniformLocation(program,"ff_transform"),28,&transforms[0][0]);
+        glVertexAttrib4f(1,1.5f,99,99,99);
+        check("negative generated final weight",0,2,.4f,.55f,.55f,.55f,1);
+        state[7][0] = 3;
+        glVertexAttrib4f(1,.25f,.5f,99,99);
+        check("three-matrix generated weight",0,2,1,.625f,.625f,.625f,1);
+        state[7][0] = 4; state[7][1] = 0;
+        glVertexAttrib4f(1,.1f,.4f,.2f,.3f);
+        check("four explicit matrix weights",0,2,1,.7f,.7f,.7f,1);
+    }
 
     printf("%d/%d FF lighting checks passed\n", checks - failures, checks);
     glDeleteProgram(program); glDeleteShader(vs); glDeleteShader(fs);

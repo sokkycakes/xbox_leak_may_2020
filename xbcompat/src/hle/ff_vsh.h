@@ -5,7 +5,8 @@
  *  1: diffuse/ambient/specular/emissive source (0 material, 1 primary, 2 secondary)
  *  2: scene ambient
  *  3..6: diffuse, ambient, specular, emissive material
- *  7..8: reserved
+ *  7: skin matrix count (0 disables), generated final weight, unlit flag
+ *  8: reserved
  *  9 + 5*i: light position (point) or direction toward light (directional);
  *           W selects disabled=0, point=1, directional=3
  *      +1: ambient, +2: diffuse, +3: specular, +4: a0/a1/a2/range
@@ -21,6 +22,8 @@
 static const char ff_lighting_source[] =
 "#version 120\n"
 "uniform vec4 ff_lighting[49];\n"
+"uniform vec4 ff_transform[28];\n"
+"attribute vec4 v1; /* blend weights */\n"
 "\n"
 "vec3 ff_unit(vec3 v)\n"
 "{\n"
@@ -38,8 +41,22 @@ static const char ff_lighting_source[] =
 "void main()\n"
 "{\n"
 "    vec4 eye = gl_ModelViewMatrix * gl_Vertex;\n"
-"    vec3 position = eye.xyz / eye.w;\n"
 "    vec3 normal = gl_NormalMatrix * gl_Normal;\n"
+"    if (ff_lighting[7].x != 0.0) {\n"
+"        eye = vec4(0.0); normal = vec3(0.0);\n"
+"        float sum = 0.0;\n"
+"        for (int i = 0; i < 4; i++) {\n"
+"            if (float(i) < ff_lighting[7].x) {\n"
+"                float weight = v1[i];\n"
+"                if (ff_lighting[7].y != 0.0 && float(i+1) == ff_lighting[7].x) weight = 1.0-sum;\n"
+"                sum += weight;\n"
+"                int b = 7*i;\n"
+"                eye += weight * (mat4(ff_transform[b],ff_transform[b+1],ff_transform[b+2],ff_transform[b+3]) * gl_Vertex);\n"
+"                normal += weight * (mat3(ff_transform[b+4].xyz,ff_transform[b+5].xyz,ff_transform[b+6].xyz) * gl_Normal);\n"
+"            }\n"
+"        }\n"
+"    }\n"
+"    vec3 position = eye.xyz / eye.w;\n"
 "    if (ff_lighting[0].y != 0.0) normal = ff_unit(normal);\n"
 "    vec3 viewer = ff_lighting[0].z != 0.0 ? ff_unit(-position) : vec3(0.0, 0.0, 1.0);\n"
 "    vec4 sources = ff_lighting[1];\n"
@@ -72,11 +89,15 @@ static const char ff_lighting_source[] =
 "            }\n"
 "        }\n"
 "    }\n"
+"    if (ff_lighting[7].z != 0.0) {\n"
+"        primary = gl_Color.rgb; diffuse.a = gl_Color.a;\n"
+"        secondary = ff_lighting[0].x != 0.0 ? gl_SecondaryColor.rgb : vec3(0.0);\n"
+"    }\n"
 "    gl_FrontColor = clamp(vec4(primary, diffuse.a), 0.0, 1.0);\n"
 "    gl_FrontSecondaryColor = clamp(vec4(secondary, 0.0), 0.0, 1.0);\n"
 "    gl_BackColor = gl_FrontColor;\n"
 "    gl_BackSecondaryColor = gl_FrontSecondaryColor;\n"
-"    gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex;\n"
+"    gl_Position = gl_ProjectionMatrix * eye;\n"
 "    gl_FogFragCoord = abs(position.z);\n"
 "    gl_PointSize = gl_Point.size;\n"
 "    gl_TexCoord[0] = gl_TextureMatrix[0] * gl_MultiTexCoord0;\n"

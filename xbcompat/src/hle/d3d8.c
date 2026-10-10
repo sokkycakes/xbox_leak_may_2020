@@ -235,6 +235,7 @@ static void backbuffer_read_begin(GLbitfield mask);
 static void backbuffer_read_end(void);
 static GLuint cur_program;   /* the GL program bound for draws (see use_program) */
 static bool ff_lighting_candidate, ff_primary_present, ff_secondary_present;
+static unsigned ff_weight_components;
 static void program_off(void);
 static GLuint backbuffer_copy_texture(ULONG data, ULONG w, ULONG h);
 static void run_callbacks(void);
@@ -1796,8 +1797,9 @@ static void apply_texture_transforms(unsigned units, const int tsize[4])
             }
         }
         D3DPixelContainer *t = (D3DPixelContainer *)d3d.textures[u];
-        if (on && t && t->Size) {
-            /* Linear textures are addressed in texels; GL wants [0,1]. */
+        if (on && t && t->Size && !d3d.pixel_shader) {
+            /* Only legacy fragment sampling needs vertex-side normalization.
+               Pixel shaders normalize at the texture instruction instead. */
             ULONG w, h, pitch;
             container_size(t, &w, &h, &pitch);
             for (int i = 0; i < 4; i++) { m[i][0] /= w; m[i][1] /= h; }
@@ -2054,7 +2056,8 @@ static GLenum stencil_op(ULONG op)
 
 static void apply_render_states(bool pretransformed, bool has_normal)
 {
-    ff_lighting_candidate = !pretransformed && has_normal && RS(D3DRS_LIGHTING);
+    ff_lighting_candidate = !pretransformed && ((has_normal && RS(D3DRS_LIGHTING)) || RS(118));
+    ff_weight_components = 0;
     ff_primary_present = ff_secondary_present = false;
     flush_cpu_backbuffer();
     apply_viewport();
@@ -2466,7 +2469,7 @@ static LONG NTAPI D3DDevice_CreateVertexShader(const ULONG *decl, const ULONG *f
    (0 = fixed function for that stage) with its uniform locations. */
 typedef struct program_entry {
     GLuint vs, fs, prog;
-    GLint loc_ff_lighting, loc_fog_vertex_mode;
+    GLint loc_ff_lighting, loc_fog_vertex_mode, loc_ff_transform;
     GLint loc_c, loc_flip_y, loc_vp_scale, loc_vp_offset, loc_wdepth;
     GLint loc_tex[4], loc_cube[4], loc_vol[4], loc_tex_scale, loc_c0, loc_c1, loc_fc0, loc_fc1,
           loc_bump_env, loc_bump_lum, loc_eye_vector, loc_key_color;
@@ -2668,6 +2671,7 @@ static program_entry *program_for(GLuint vs, GLuint fs)
         e->loc_bump_env = U("bump_env");
         e->loc_bump_lum = U("bump_lum");
         e->loc_ff_lighting = U("ff_lighting");
+        e->loc_ff_transform = U("ff_transform");
         e->loc_fog_vertex_mode = U("fog_vertex_mode");
         e->loc_eye_vector = U("eye_vector");
         e->loc_key_color = U("key_color");
@@ -2897,7 +2901,9 @@ static void program_off(void)
    no alpha, so it cannot yet represent all COLOR2 material sources. */
 static bool fixed_lighting_supported(void)
 {
-    if (!ff_lighting_candidate || RS(118 /* VERTEXBLEND */) || RS(122 /* TWOSIDEDLIGHTING */)
+    ULONG blend = RS(118 /* VERTEXBLEND */);
+    if (blend > 6 || (blend && ff_weight_components < blend / 2 + 1)) return false;
+    if (!ff_lighting_candidate || RS(122 /* TWOSIDEDLIGHTING */)
         || RS(D3DRS_FOGENABLE) || RS(D3DRS_POINTSCALEENABLE) || RS(D3DRS_POINTSPRITEENABLE)
         || RS(D3DRS_ZENABLE) == 2)
         return false;
@@ -2931,6 +2937,32 @@ static void upload_fixed_lighting(const program_entry *e)
 {
     if (e->loc_ff_lighting < 0) return;
     float state[FF_LIGHTING_VECTORS][4] = { { 0 } };
+    ULONG blend = RS(118 /* VERTEXBLEND */);
+    state[7][0] = blend ? (blend + 3) / 2 : 0;
+    state[7][1] = blend & 1; /* odd modes generate the final weight */
+    state[7][2] = !RS(D3DRS_LIGHTING);
+    if (blend && e->loc_ff_transform >= 0) {
+        float transform[28][4] = {{0}};
+        for (unsigned i = 0; i < 4; i++) {
+            D3DMATRIX mv;
+            mat_mul(&mv, &d3d.transforms[6+i], &d3d.transforms[0]);
+            memcpy(transform + 7*i, &mv, sizeof mv);
+            /* Cofactor(M)/det(M) is the inverse transpose for row-vector
+               normal transforms. Translation never participates. */
+            float cofactor[3][3];
+            for (int row = 0; row < 3; row++)
+                for (int col = 0; col < 3; col++) {
+                    int r1=(row+1)%3, r2=(row+2)%3, c1=(col+1)%3, c2=(col+2)%3;
+                    cofactor[row][col] = mv.m[r1][c1]*mv.m[r2][c2] - mv.m[r1][c2]*mv.m[r2][c1];
+                }
+            float det = mv.m[0][0]*cofactor[0][0] + mv.m[0][1]*cofactor[0][1] + mv.m[0][2]*cofactor[0][2];
+            if (det != 0)
+                for (int row = 0; row < 3; row++)
+                    for (int col = 0; col < 3; col++)
+                        transform[7*i+4+row][col] = cofactor[row][col]/det;
+        }
+        p_glUniform4fv(e->loc_ff_transform, 28, &transform[0][0]);
+    }
     state[0][0] = RS(D3DRS_SPECULARENABLE) != 0;
     state[0][1] = RS(D3DRS_NORMALIZENORMALS) != 0;
     state[0][2] = RS(94 /* LOCALVIEWER */) != 0;
@@ -3510,6 +3542,15 @@ static void draw_declared_(const vshader *sh, ULONG PrimitiveType, const UCHAR *
     apply_render_states(pretransformed, sh->attr[2].stream >= 0);
     ff_primary_present = sh->attr[3].stream >= 0;
     ff_secondary_present = sh->attr[4].stream >= 0;
+    ff_weight_components = sh->attr[1].stream >= 0 ? sh->attr[1].components : 0;
+    if (RS(118) && ff_weight_components) {
+        const UCHAR *weights; ULONG weight_stride;
+        STREAM(&sh->attr[1], weights, weight_stride);
+        gc_bind_buffer(GL_ARRAY_BUFFER, 0);
+        p_glEnableVertexAttribArray(1);
+        p_glVertexAttribPointer(1, sh->attr[1].components, sh->attr[1].gl_type,
+                               sh->attr[1].normalized, weight_stride, weights + sh->attr[1].offset);
+    }
     glEnableClientState(GL_VERTEX_ARRAY);
     glVertexPointer(pretransformed ? 3 : pos->components, pos->gl_type, stride, base + pos->offset);
     if (sh->attr[2].stream >= 0) {
@@ -3608,6 +3649,13 @@ static void draw(ULONG PrimitiveType, const UCHAR *base, ULONG stride, ULONG fir
     apply_render_states(l.pretransformed, l.normal_off >= 0);
     ff_primary_present = l.diffuse_off >= 0;
     ff_secondary_present = l.specular_off >= 0;
+    ULONG position_kind = d3d.vertex_shader & D3DFVF_POSITION_MASK;
+    ff_weight_components = position_kind >= D3DFVF_XYZB1 ? (position_kind-D3DFVF_XYZB1)/2+1 : 0;
+    if (RS(118) && ff_weight_components && ff_weight_components <= 4) {
+        gc_bind_buffer(GL_ARRAY_BUFFER, 0);
+        p_glEnableVertexAttribArray(1);
+        p_glVertexAttribPointer(1, ff_weight_components, GL_FLOAT, GL_FALSE, stride, base+12);
+    }
 
     glEnableClientState(GL_VERTEX_ARRAY);
     glVertexPointer(l.pos_size, GL_FLOAT, stride, base);
