@@ -33,6 +33,7 @@ define XBCOMPAT_BUILD_CMDS
 		CROSS=$(TARGET_CROSS) CFLAGS="$(TARGET_CFLAGS) -O2 -g" GL=opengl \
 		PKGCFG="$(PKG_CONFIG_HOST_BINARY)" UNICORN=$(STAGING_DIR)/usr \
 		LEAK="$(XBCOMPAT_LEAK)" BUILD=build-buildroot build-buildroot/xbcompat
+	$(TARGET_CC) $(TARGET_CFLAGS) -O2 -Wall -o $(@D)/build-buildroot/xbox-console-key $(@D)/tools/pi/console-key.c
 endef
 
 ifeq ($(BR2_PACKAGE_BOX86),y)
@@ -65,6 +66,9 @@ define XBCOMPAT_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/xbox-env $(TARGET_DIR)/usr/lib/xbox/xbox-env
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/dashboard $(TARGET_DIR)/usr/libexec/dashboard
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/xbox-sample $(TARGET_DIR)/usr/bin/xbox-sample
+	$(INSTALL) -D -m 0755 $(@D)/build-buildroot/xbox-console-key $(TARGET_DIR)/usr/libexec/xbox-console-key
+	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/xbox-console $(TARGET_DIR)/usr/libexec/xbox-console
+	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/xbox-dash $(TARGET_DIR)/usr/bin/xbox-dash
 	mkdir -p $(TARGET_DIR)/etc/default
 	echo 'DASHBOARD="xbox"' > $(TARGET_DIR)/etc/default/dashboard
 endef

@@ -11,12 +11,19 @@
 BOOTANI_PIDFILE=/var/run/bootani.pid
 LOG=/var/log/xbox.log
 FAILED=/var/run/xbox/dash-failed
+CONSOLE=/var/run/xbox/console
 
 . /usr/lib/xbox/xbox-env
 # XBOX_ARGS: more xbcompat options for the dashboard (e.g. --trace).
 # XBOX_DVD_DRIVE: the optical drive that is the Xbox's DVD drive (/dev/sr0).
 # shellcheck source=/dev/null
 [ -r /etc/default/xbox ] && . /etc/default/xbox
+
+# Ctrl + Alt + F1 on a keyboard leaves for the console (see xbox-console).
+rm -f "$CONSOLE"
+if [ -x /usr/libexec/xbox-console-key ] && ! pidof xbox-console-key > /dev/null; then
+	setsid /usr/libexec/xbox-console-key < /dev/null > /dev/null 2>&1 &
+fi
 
 # Hold the display between titles from here on (see xbox-env). Started
 # before bootani is done, so its exit doesn't hand the screen to the console.
@@ -69,8 +76,22 @@ for _ in $(seq 1 50); do
 done
 killall -q -9 theseus
 
+# Ctrl + Alt + F1 stopped xbcompat (see xbox-console): the login prompt on
+# the screen (the getty on tty1) until xbox-dash.
+console_wait() {
+	echo "$(date '+%F %T') at the console until xbox-dash"
+	killall -q xbox-av
+	chvt 1
+	printf '\n\nConsole: log in as root (password xbox); xbox-dash goes back to the dashboard.\n\n' > /dev/tty1
+	while [ -e "$CONSOLE" ]; do sleep 1; done
+	xbox_av_start
+	quick_fails=0
+}
+
 quick_fails=0
 while true; do
+	# Pressed during the boot animation.
+	[ -e "$CONSOLE" ] && console_wait
 	# Launch data a game left for the dashboard (XLaunchNewImage(NULL, data)).
 	launch=
 	if [ -s "$HDD/.dashlaunch" ]; then
@@ -88,6 +109,10 @@ while true; do
 	rc=$?
 	ran=$(( $(cut -d. -f1 /proc/uptime) - start ))
 	echo "$(date '+%F %T') exited with $rc after ${ran}s"
+	if [ -e "$CONSOLE" ]; then
+		console_wait
+		continue
+	fi
 	if grep -q 'XLaunchNewImage:' "$LOG"; then
 		quick_fails=0          # a game ran and quit
 	elif [ "$ran" -lt 20 ]; then
