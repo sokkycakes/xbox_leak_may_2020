@@ -1,0 +1,21 @@
+#!/bin/sh
+#
+# Prints the dashboard this boot runs: "xbox" (xboxdash.xbe under xbcompat)
+# or "theseus". DASHBOARD= comes from /etc/default/dashboard, and the boot
+# stick's sion/sion.conf overrides it. Theseus also takes over when the
+# Xbox dashboard has failed to start (xbox-session leaves a mark).
+#
+
+DASHBOARD=xbox
+# shellcheck source=/dev/null
+[ -r /etc/default/dashboard ] && . /etc/default/dashboard
+if [ -r /var/run/sion/sion.conf ]; then
+	d=$(sed -n 's/^DASHBOARD="\{0,1\}\([a-z]*\)"\{0,1\}$/\1/p' /var/run/sion/sion.conf | tail -n1)
+	[ -n "$d" ] && DASHBOARD=$d
+fi
+if [ "$DASHBOARD" = xbox ]; then
+	if [ ! -x /opt/xbcompat/bin/xbcompat ] || [ -e /var/run/xbox/dash-failed ]; then
+		DASHBOARD=theseus
+	fi
+fi
+echo "$DASHBOARD"

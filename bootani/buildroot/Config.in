@@ -1,0 +1,7 @@
+source "$BR2_EXTERNAL_BOOTANI_PATH/package/bootani/Config.in"
+source "$BR2_EXTERNAL_BOOTANI_PATH/package/theseus/Config.in"
+source "$BR2_EXTERNAL_BOOTANI_PATH/package/sion-tools/Config.in"
+source "$BR2_EXTERNAL_BOOTANI_PATH/package/xbcompat/Config.in"
+source "$BR2_EXTERNAL_BOOTANI_PATH/package/unicorn/Config.in"
+source "$BR2_EXTERNAL_BOOTANI_PATH/package/box86/Config.in"
+source "$BR2_EXTERNAL_BOOTANI_PATH/package/xbsymboldatabase/Config.in"

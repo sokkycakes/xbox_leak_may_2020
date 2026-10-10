@@ -1,0 +1,40 @@
+config BR2_PACKAGE_SION_TOOLS
+	bool "sion-tools"
+	depends on BR2_USE_MMU # openssh, avahi
+	depends on BR2_TOOLCHAIN_HAS_THREADS # avahi, efivar
+	depends on !BR2_STATIC_LIBS # avahi, efivar
+	depends on BR2_PACKAGE_EFIVAR_ARCH_SUPPORTS
+	select BR2_PACKAGE_OPENSSH
+	select BR2_PACKAGE_OPENSSH_SERVER
+	select BR2_PACKAGE_OPENSSH_KEY_UTILS
+	select BR2_PACKAGE_AVAHI
+	select BR2_PACKAGE_AVAHI_DAEMON
+	select BR2_PACKAGE_WPA_SUPPLICANT
+	select BR2_PACKAGE_WPA_SUPPLICANT_NL80211
+	select BR2_PACKAGE_WPA_SUPPLICANT_WPA3
+	select BR2_PACKAGE_WPA_SUPPLICANT_CLI
+	select BR2_PACKAGE_IW
+	select BR2_PACKAGE_WIRELESS_REGDB
+	select BR2_PACKAGE_EFIBOOTMGR
+	select BR2_PACKAGE_E2FSPROGS
+	select BR2_PACKAGE_E2FSPROGS_RESIZE2FS
+	select BR2_PACKAGE_UTIL_LINUX
+	select BR2_PACKAGE_UTIL_LINUX_BINARIES # sfdisk, blkid
+	select BR2_PACKAGE_UTIL_LINUX_PARTX
+	help
+	  Remote access and updates for a Sion machine:
+	  - SSH (with SFTP) as root, over wired, USB or Wi-Fi Ethernet,
+	    found on the network as <hostname>.local
+	  - a persistent ext4 partition (SIONDATA) mounted on /data, with
+	    an overlay copied over the root filesystem at boot
+	  - "sion update": A/B updates of the boot image that boot the new
+	    image once and keep it only if it comes up, otherwise the
+	    machine falls back to the previous one
+
+	  Settings come from sion/sion.conf on the boot disk's EFI
+	  partition.
+
+comment "sion-tools needs a toolchain w/ threads, dynamic library"
+	depends on BR2_USE_MMU
+	depends on BR2_PACKAGE_EFIVAR_ARCH_SUPPORTS
+	depends on !BR2_TOOLCHAIN_HAS_THREADS || BR2_STATIC_LIBS

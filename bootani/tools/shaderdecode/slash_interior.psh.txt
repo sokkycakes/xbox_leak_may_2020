@@ -1,0 +1,18 @@
+; g_slash_interior_xpu  (D3DPIXELSHADERDEF_FILE)
+; PSCombinerCount = 0x00011101 : 1 stage(s), mux on r0.a MSB, unique C0, unique C1
+; PSTextureModes = 0x00000000 : t0=NONE, t1=NONE, t2=NONE, t3=NONE
+; PSDotMapping = 0x00000000  PSInputTexture = 0x00000000  PSCompareMode = 0x00000000
+; PSC0Mapping = 0xffffffff  PSC1Mapping = 0xffffffff  PSFinalCombinerConstants = 0x000001ff
+xps.1.1
+; ---- stage 0  rgb in c4200000 out 000000c0 | alpha in d4301010 out 000000c0
+mov r0, v0
+; no final combiner in def (ABCD=EFG=0): D3D keeps the fixed-function final combiner,
+;   i.e. with fog and specular disabled: out.rgb = sat(r0.rgb), out.a = sat(r0.a)
+
+;------------------------------------------------------------------------------
+; Summary: a single combiner stage, r0 = v0 (rgb: v0.rgb*1, alpha: v0.a*1, signed
+; identity mapping, identity output), no textures (all PSTextureModes NONE), no
+; constants used (all mappings 0xF, all embedded constants 0), no final-combiner
+; words -> D3D's fixed-function final combiner outputs r0.
+; Result: fragColor = saturate(diffuse colour interpolated from oD0).
+;------------------------------------------------------------------------------

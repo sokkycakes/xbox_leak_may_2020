@@ -1,0 +1,63 @@
+config BR2_PACKAGE_XBCOMPAT
+	bool "xbcompat (Xbox boot animation and dashboard)"
+	# x86_64: runs the 32-bit x86 code natively (IA32 emulation).
+	# arm: 32-bit ARM (Raspberry Pi), Box86/native renderer or Unicorn.
+	depends on BR2_x86_64 || BR2_arm
+	depends on !BR2_arm || (BR2_USE_MMU && BR2_USE_WCHAR && BR2_TOOLCHAIN_HAS_THREADS && !BR2_STATIC_LIBS)
+	select BR2_PACKAGE_UNICORN if BR2_arm
+	select BR2_PACKAGE_SDL2 if BR2_arm
+	select BR2_PACKAGE_SDL2_KMSDRM if BR2_arm
+	select BR2_PACKAGE_SDL2_OPENGLES if BR2_arm
+	select BR2_PACKAGE_LIBGLVND if BR2_arm
+	select BR2_PACKAGE_HOST_PYTHON3 if BR2_arm
+	select BR2_PACKAGE_PYTHON3 if BR2_arm
+	select BR2_PACKAGE_XBSYMBOLDATABASE if BR2_arm
+	help
+	  The original Xbox boot animation (the leak's ani2) and
+	  dashboard (xboxdash.xbe), run by xbcompat, the compatibility
+	  layer in xbcompat/ of this repository, straight on KMSDRM.
+
+	  The boot animation replaces bootani at boot (bootani is
+	  still there, and runs if xbcompat can't start). The
+	  dashboard runs instead of Theseus when DASHBOARD=xbox (the
+	  default, in /etc/default/dashboard or sion/sion.conf);
+	  Theseus takes over if the Xbox dashboard keeps failing to
+	  start.
+
+	  xbcompat and the two titles are 32-bit programs with their
+	  own userspace (glibc, SDL2, Mesa), built outside Buildroot
+	  by xbcompat/tools/sion/bundle.sh into a tarball, which this
+	  package unpacks into /opt/xbcompat.
+
+	  On 32-bit ARM, xbcompat is built here from xbcompat/ in
+	  this repository, and the titles come from a tarball made
+	  by xbcompat/tools/pi/titles.sh. With Box86 enabled, the image
+	  also builds an i386 client and native ARM renderer, selected
+	  by default. XBOX_RENDERER=builtin selects the x86 renderer;
+	  XBOX_CPU=unicorn selects the ARM Unicorn fallback.
+
+if BR2_PACKAGE_XBCOMPAT
+
+config BR2_PACKAGE_XBCOMPAT_BUNDLE
+	string "bundle"
+	depends on BR2_x86_64
+	help
+	  Path to xbcompat-sion.tar.gz from xbcompat/tools/sion/bundle.sh.
+
+config BR2_PACKAGE_XBCOMPAT_TITLES
+	string "titles"
+	depends on BR2_arm
+	help
+	  Path to xbcompat-titles.tar.gz from xbcompat/tools/pi/titles.sh:
+	  the boot animation, the dashboard's partition and their
+	  library maps, unpacked into /opt/xbcompat.
+
+config BR2_PACKAGE_XBCOMPAT_DASHBOARD
+	string "dashboard at boot"
+	default "xbox"
+	help
+	  "xbox" for the Xbox dashboard under xbcompat, "theseus"
+	  for Theseus. Written to /etc/default/dashboard; DASHBOARD=
+	  in the boot stick's sion/sion.conf overrides it.
+
+endif

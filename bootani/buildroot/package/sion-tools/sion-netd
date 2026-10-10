@@ -1,0 +1,137 @@
+#!/bin/sh
+#
+# Brings up every network interface as it appears: wired and USB Ethernet
+# take an address over DHCP, Wi-Fi joins the network in sion/sion.conf (or
+# sion/wpa_supplicant.conf) first. Adapters plugged in later are picked up
+# within a few seconds. Addresses are logged to sion/logs/network.txt on the
+# boot stick, so a PC can read them.
+#
+
+. /usr/lib/sion/sion-lib.sh
+load_conf
+
+WPA_CONF=$SION_RUN/wpa_supplicant.conf
+LAST=$SION_RUN/addresses
+
+hexstr() {
+	printf '%s' "$1" | od -An -tx1 | tr -d ' \n'
+}
+
+make_wpa_conf() {
+	[ -r "$SION_RUN/wpa_supplicant.conf" ] && return 0
+	[ -n "$WIFI_SSID" ] || return 1
+	{
+		echo "ctrl_interface=/var/run/wpa_supplicant"
+		[ -n "$WIFI_COUNTRY" ] && echo "country=$WIFI_COUNTRY"
+		echo "network={"
+		echo "	ssid=$(hexstr "$WIFI_SSID")"
+		echo "	scan_ssid=1"
+		if [ -n "$WIFI_PASSWORD" ]; then
+			# WPA2 or WPA3, whichever the access point offers.
+			echo "	key_mgmt=WPA-PSK WPA-PSK-SHA256 SAE"
+			echo "	ieee80211w=1"
+			echo "	psk=\"$WIFI_PASSWORD\""
+		else
+			echo "	key_mgmt=NONE"
+		fi
+		echo "}"
+	} > "$WPA_CONF"
+	chmod 600 "$WPA_CONF"
+}
+
+alive() {
+	[ -r "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null
+}
+
+# A fixed Wi-Fi address (WIFI_ADDRESS in sion.conf), like a static lease,
+# so the machine is always at the same place on the network.
+static_ip() {
+	ifc=$1
+	# Only while the Wi-Fi is connected: an address (and its routes) on a
+	# disconnected interface would swallow replies meant for Ethernet.
+	if [ "$(cat "/sys/class/net/$ifc/operstate")" != up ]; then
+		if ip -4 addr show dev "$ifc" | grep -q inet; then
+			ip addr flush dev "$ifc"
+			log "$ifc disconnected; removed its address"
+		fi
+		return 0
+	fi
+	case "$WIFI_ADDRESS" in */*) addr=$WIFI_ADDRESS ;; *) addr=$WIFI_ADDRESS/24 ;; esac
+	gw=${WIFI_GATEWAY:-${WIFI_ADDRESS%.*}.1}
+	ip -4 addr show dev "$ifc" | grep -q " ${addr%/*}/" || ip addr add "$addr" dev "$ifc"
+	ip route show default | grep -q "via $gw dev $ifc" || ip route replace default via "$gw" dev "$ifc"
+	dns=${WIFI_DNS:-$gw}
+	want=$(for d in $dns; do echo "nameserver $d"; done)
+	[ "$(cat /etc/resolv.conf 2>/dev/null)" = "$want" ] || echo "$want" > /etc/resolv.conf
+}
+
+bring_up() {
+	ifc=$1
+	wireless=
+	if [ -d "/sys/class/net/$ifc/wireless" ] || [ -e "/sys/class/net/$ifc/phy80211" ]; then
+		wireless=yes
+		[ -r "$WPA_CONF" ] || return 0
+		if ! alive "$SION_RUN/wpa.$ifc.pid"; then
+			ip link set "$ifc" up
+			# Power saving adds 200 ms to every reply over SSH.
+			iw dev "$ifc" set power_save off 2>/dev/null
+			log "starting wpa_supplicant on $ifc"
+			wpa_supplicant -B -i "$ifc" -c "$WPA_CONF" -P "$SION_RUN/wpa.$ifc.pid" \
+				-f "/var/log/wpa_supplicant.$ifc.log" >> "$SION_LOG" 2>&1
+		fi
+		# Log each change of the connection state (SCANNING, COMPLETED, ...).
+		st=$(wpa_cli -i "$ifc" status 2>/dev/null | sed -n 's/^wpa_state=//p')
+		if [ "$st" != "$(cat "$SION_RUN/wpa.$ifc.state" 2>/dev/null)" ]; then
+			echo "$st" > "$SION_RUN/wpa.$ifc.state"
+			log "$ifc: $st"
+		fi
+	fi
+	if [ -n "$wireless" ] && [ -n "$WIFI_ADDRESS" ]; then
+		static_ip "$ifc"
+		return 0
+	fi
+	if ! alive "$SION_RUN/udhcpc.$ifc.pid"; then
+		ip link set "$ifc" up
+		udhcpc -b -S -R -t 5 -T 3 -A 10 -i "$ifc" -x "hostname:$HOSTNAME" \
+			-p "$SION_RUN/udhcpc.$ifc.pid" > /dev/null 2>&1
+	fi
+}
+
+# Writes the machine's addresses to the stick whenever they change.
+report() {
+	now=$(ip -4 -o addr show scope global | awk '{ print $2, $4 }')
+	[ "$now" = "$(cat "$LAST" 2>/dev/null)" ] && return 0
+	echo "$now" > "$LAST"
+	log "addresses: $(echo "$now" | tr '\n' ' ')"
+	m=$(esp_mount) || return 0
+	mkdir -p "$m/sion/logs"
+	{
+		echo "$(date '+%F %T') $HOSTNAME"
+		echo "$now"
+		echo
+		echo "ssh root@$HOSTNAME.local   (or ssh root@<address above>)"
+	} | sed 's/$/\r/' > "$m/sion/logs/network.txt"
+	esp_umount "$m"
+}
+
+# Ignore routes through interfaces with no link, and answer ARP only on the
+# interface that has the address, so a dead Wi-Fi or an unplugged cable
+# never takes the replies meant for the interface that works.
+for c in /proc/sys/net/ipv4/conf/*; do
+	echo 1 > "$c/ignore_routes_with_linkdown"
+	echo 1 > "$c/arp_ignore"
+	echo 2 > "$c/arp_announce"
+done
+
+make_wpa_conf
+while true; do
+	for p in /sys/class/net/*; do
+		ifc=${p##*/}
+		[ "$ifc" = lo ] && continue
+		# Skip virtual interfaces (bridges, tunnels); real ones have a device.
+		[ -e "$p/device" ] || continue
+		bring_up "$ifc"
+	done
+	report
+	sleep 3
+done

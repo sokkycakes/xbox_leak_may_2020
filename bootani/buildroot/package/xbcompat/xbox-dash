@@ -1,0 +1,8 @@
+#!/bin/sh
+# Back to the dashboard from the console (see xbox-console).
+if [ -e /var/run/xbox/console ]; then
+	rm -f /var/run/xbox/console
+	echo "Starting the dashboard."
+else
+	echo "The dashboard isn't waiting on the console (/etc/init.d/S98xbox restart starts it again)."
+fi

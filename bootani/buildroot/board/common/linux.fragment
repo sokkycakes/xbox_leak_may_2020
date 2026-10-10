@@ -1,0 +1,67 @@
+# Boot straight from UEFI: the kernel is its own EFI loader and carries the
+# root filesystem as an initramfs, so nothing waits on a disk.
+CONFIG_EFI=y
+CONFIG_EFI_STUB=y
+CONFIG_BLK_DEV_INITRD=y
+CONFIG_DEVTMPFS=y
+CONFIG_DEVTMPFS_MOUNT=y
+CONFIG_FW_LOADER=y
+
+# Display: DRM/KMS built in so the GPU is up before init runs. The fbdev
+# console is what bootani hands the screen back to.
+CONFIG_DRM=y
+CONFIG_DRM_FBDEV_EMULATION=y
+CONFIG_FRAMEBUFFER_CONSOLE=y
+
+# Sound: HD Audio built in; HDMI audio through the GPU's codec.
+CONFIG_SOUND=y
+CONFIG_SND=y
+CONFIG_SND_PCM=y
+CONFIG_SND_HDA_INTEL=y
+CONFIG_SND_HDA_CODEC_HDMI=y
+CONFIG_SND_HDA_CODEC_HDMI_INTEL=y
+CONFIG_SND_HDA_GENERIC=y
+CONFIG_SND_HDA_CODEC_GENERIC=y
+CONFIG_SND_HDA_PREALLOC_SIZE=2048
+
+# Game controllers for the dashboard: Xbox (xpad), and generic HID pads
+# (PlayStation, Switch, ...) through evdev.
+CONFIG_INPUT_EVDEV=y
+CONFIG_INPUT_JOYSTICK=y
+CONFIG_JOYSTICK_XPAD=y
+CONFIG_JOYSTICK_XPAD_FF=y
+CONFIG_HID_GENERIC=y
+CONFIG_HID_MICROSOFT=y
+CONFIG_HID_SONY=y
+CONFIG_HID_PLAYSTATION=y
+CONFIG_USB_HID=y
+
+# Remote access and image updates (package/sion-tools): Wi-Fi (Intel cards),
+# wired and USB Ethernet adapters, the ext4 data partition, UEFI variables
+# for one-shot trial boots, and the chipset watchdog that resets a trial
+# image that hangs. A panic reboots after 10 s, so a trial image that
+# panics falls back to the previous one on its own.
+CONFIG_WLAN=y
+CONFIG_CFG80211=y
+CONFIG_MAC80211=y
+CONFIG_RFKILL=y
+CONFIG_WLAN_VENDOR_INTEL=y
+CONFIG_IWLWIFI=y
+CONFIG_IWLDVM=y
+CONFIG_IWLMVM=y
+CONFIG_ETHERNET=y
+CONFIG_NET_VENDOR_REALTEK=y
+CONFIG_R8169=y
+CONFIG_USB_NET_DRIVERS=y
+CONFIG_USB_USBNET=y
+CONFIG_USB_NET_AX8817X=y
+CONFIG_USB_NET_AX88179_178A=y
+CONFIG_USB_NET_CDCETHER=y
+CONFIG_USB_NET_CDC_NCM=y
+CONFIG_USB_NET_RNDIS_HOST=y
+CONFIG_USB_RTL8152=y
+CONFIG_EXT4_FS=y
+CONFIG_EFIVAR_FS=y
+CONFIG_WATCHDOG=y
+CONFIG_ITCO_WDT=y
+CONFIG_PANIC_TIMEOUT=10

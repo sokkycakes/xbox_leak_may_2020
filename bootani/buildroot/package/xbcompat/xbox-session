@@ -1,0 +1,137 @@
+#!/bin/sh
+#
+# Runs the Xbox dashboard (xboxdash.xbe under xbcompat) once the boot
+# animation is done, and again whenever it exits. A game the dashboard
+# starts replaces it in the same process (XLaunchNewImage), so quitting the
+# game lands back here and the dashboard comes back, as the Xbox rebooted
+# into it. If the dashboard itself keeps failing to start, Theseus takes
+# over for the rest of this boot.
+#
+
+BOOTANI_PIDFILE=/var/run/bootani.pid
+LOG=/var/log/xbox.log
+FAILED=/var/run/xbox/dash-failed
+CONSOLE=/var/run/xbox/console
+
+. /usr/lib/xbox/xbox-env
+# XBOX_ARGS: more xbcompat options for the dashboard (e.g. --trace).
+# XBOX_DVD_DRIVE: the optical drive that is the Xbox's DVD drive (/dev/sr0).
+# shellcheck source=/dev/null
+[ -r /etc/default/xbox ] && . /etc/default/xbox
+
+# Ctrl + Alt + F1 on a keyboard leaves for the console (see xbox-console).
+rm -f "$CONSOLE"
+if [ -x /usr/libexec/xbox-console-key ] && ! pidof xbox-console-key > /dev/null; then
+	setsid /usr/libexec/xbox-console-key < /dev/null > /dev/null 2>&1 &
+fi
+
+# Hold the display between titles from here on (see xbox-env). Started
+# before bootani is done, so its exit doesn't hand the screen to the console.
+xbox_av_start
+
+# The boot animation owns the display until its last frame; KMS allows one
+# master.
+if [ -r "$BOOTANI_PIDFILE" ]; then
+	pid=$(cat "$BOOTANI_PIDFILE")
+	while [ -n "$pid" ] && [ -d "/proc/$pid" ]; do
+		sleep 0.1
+	done
+fi
+
+# The Xbox's hard disk, kept on /data when there is one:
+#   partition1  E: saves (UDATA, TDATA) and installed games (E:\Games)
+#   partition2  C: the dashboard: a link to the image's copy, so an image
+#               update brings its dashboard along (one link for the whole
+#               partition; with a link per file the dashboard crashes)
+#   partition3-5  X: Y: Z: title caches
+# The DVD drive (D: for the dashboard) is a USB DVD drive while one is
+# plugged in ($XBOX_DVD_DRIVE): discs go in and come out while the dashboard
+# or a game runs. Without a drive it is $XB/disc: put an extracted game disc
+# there; empty is an empty tray.
+if mountpoint -q /data; then
+	XB=/data/xbox
+else
+	XB=/var/run/xbox/data
+	echo "no /data: the Xbox hard disk is in RAM and lasts until reboot"
+fi
+HDD=$XB/hdd
+for p in 1 3 4 5; do mkdir -p "$HDD/partition$p"; done
+mkdir -p "$HDD/partition1/Games" "$XB/disc" "$XB/cache/xbcompat" /var/run/xbox
+if [ -d "$HDD/partition2" ] && [ ! -L "$HDD/partition2" ]; then
+	mv "$HDD/partition2" "$HDD/partition2.old.$$"
+fi
+ln -sfn "$X/dash" "$HDD/partition2"
+# Signatures for XDK 4400 titles, made at bundle time from the leak's
+# libraries; the maps xbrun.py makes for other titles land beside them.
+for f in "$X"/cache/xbcompat/*.json; do
+	[ -f "$f" ] || continue
+	[ -e "$XB/cache/xbcompat/${f##*/}" ] || cp "$f" "$XB/cache/xbcompat/"
+done
+mkdir -p "$XB/cache/xbcompat/maps"
+for f in "$X"/cache/xbcompat/maps/*.map; do
+	[ -f "$f" ] || continue
+	[ -e "$XB/cache/xbcompat/maps/${f##*/}" ] || cp "$f" "$XB/cache/xbcompat/maps/"
+done
+export XDG_CACHE_HOME=$XB/cache
+
+# KMS allows one master: wait for anything else on the display (Theseus,
+# when "sion restart xbox" takes over from it) to be gone.
+for _ in $(seq 1 50); do
+	pidof theseus > /dev/null || break
+	sleep 0.2
+done
+killall -q -9 theseus
+
+# Ctrl + Alt + F1 stopped xbcompat (see xbox-console): the login prompt on
+# the screen (the getty on tty1) until xbox-dash.
+console_wait() {
+	echo "$(date '+%F %T') at the console until xbox-dash"
+	killall -q xbox-av
+	chvt 1
+	printf '\n\nConsole: log in as root (password xbox); xbox-dash goes back to the dashboard.\n\n' > /dev/tty1
+	while [ -e "$CONSOLE" ]; do sleep 1; done
+	xbox_av_start
+	quick_fails=0
+}
+
+quick_fails=0
+while true; do
+	# Pressed during the boot animation.
+	[ -e "$CONSOLE" ] && console_wait
+	# Launch data a game left for the dashboard (XLaunchNewImage(NULL, data)).
+	launch=
+	if [ -s "$HDD/.dashlaunch" ]; then
+		mv "$HDD/.dashlaunch" /var/run/xbox/dashlaunch
+		launch="--launch-data /var/run/xbox/dashlaunch"
+	fi
+	[ -e "$LOG" ] && mv "$LOG" "$LOG.1"
+	start=$(cut -d. -f1 /proc/uptime)
+	echo "$(date '+%F %T') starting the dashboard${launch:+ with launch data}"
+	# shellcheck disable=SC2086
+	"$XBCOMPAT_BIN" --hle "$X/dash/xboxdash.map" --hdd "$HDD" --dvd "$XB/disc" \
+		--dvd-drive "${XBOX_DVD_DRIVE:-/dev/sr0}" \
+		--d-path '\Device\CdRom0' --xbe-path xboxdash.xbe $launch $XBOX_SHOT_ARGS $XBOX_ARGS \
+		"$HDD/partition2/xboxdash.xbe" > "$LOG" 2>&1
+	rc=$?
+	ran=$(( $(cut -d. -f1 /proc/uptime) - start ))
+	echo "$(date '+%F %T') exited with $rc after ${ran}s"
+	if [ -e "$CONSOLE" ]; then
+		console_wait
+		continue
+	fi
+	if grep -q 'XLaunchNewImage:' "$LOG"; then
+		quick_fails=0          # a game ran and quit
+	elif [ "$ran" -lt 20 ]; then
+		quick_fails=$((quick_fails + 1))
+		if [ "$quick_fails" -ge 3 ]; then
+			echo "the dashboard failed to start 3 times; starting Theseus (log: $LOG)"
+			touch "$FAILED"
+			killall -q xbox-av
+			[ -x /etc/init.d/S99theseus ] && /etc/init.d/S99theseus start
+			exit 1
+		fi
+	else
+		quick_fails=0
+	fi
+	sleep 2
+done

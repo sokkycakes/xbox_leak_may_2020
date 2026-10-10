@@ -1,0 +1,57 @@
+From: bootani <bootani@localhost>
+Subject: [PATCH] kmsdrm: start in bootani's mode, not the CRTC's
+
+SDL takes the mode already on the CRTC as the desktop mode. On the
+Chromebox with i915.fastboot=1 that is the firmware's boot mode, which can
+be 4:3 on a 16:9 display, so the picture comes out pillarboxed. Pick the
+mode the way bootani does instead: KMS_MODE=WxH when the display offers
+it, else the connector's preferred mode, and only then the CRTC's.
+
+Upstream-Status: Inappropriate [bootani-specific]
+---
+--- a/src/video/kmsdrm/SDL_kmsdrmvideo.c	2026-10-08 02:13:41.473947153 +0000
++++ b/src/video/kmsdrm/SDL_kmsdrmvideo.c	2026-10-08 02:19:00.803440378 +0000
+@@ -813,7 +813,42 @@
+     /* Find the index of the mode attached to this CRTC */
+     mode_index = -1;
+ 
+-    for (i = 0; i < connector->count_modes; i++) {
++    /* Start in the same mode bootani uses: KMS_MODE=WxH (e.g. 720x480 for
++       NTSC) if the display offers it, progressive before interlaced, else
++       the display's preferred mode. The mode left on the CRTC is only the
++       last resort: with i915.fastboot it is the firmware's boot mode,
++       which can be 4:3 on a widescreen display. */
++    {
++        const char *want = SDL_getenv("KMS_MODE");
++        int want_w = 0, want_h = 0;
++
++        if (want && SDL_sscanf(want, "%dx%d", &want_w, &want_h) == 2) {
++            for (i = 0; i < connector->count_modes; i++) {
++                drmModeModeInfo *mode = &connector->modes[i];
++
++                if (mode->hdisplay != want_w || mode->vdisplay != want_h) {
++                    continue;
++                }
++                if (mode_index == -1 ||
++                    ((connector->modes[mode_index].flags & DRM_MODE_FLAG_INTERLACE) &&
++                     !(mode->flags & DRM_MODE_FLAG_INTERLACE))) {
++                    mode_index = i;
++                }
++            }
++        }
++    }
++
++    for (i = 0; mode_index == -1 && i < connector->count_modes; i++) {
++        if (connector->modes[i].type & DRM_MODE_TYPE_PREFERRED) {
++            mode_index = i;
++        }
++    }
++
++    if (mode_index != -1) {
++        crtc->mode = connector->modes[mode_index];
++    }
++
++    for (i = 0; mode_index == -1 && i < connector->count_modes; i++) {
+         drmModeModeInfo *mode = &connector->modes[i];
+ 
+         if (!SDL_memcmp(mode, &crtc->mode, sizeof(crtc->mode))) {

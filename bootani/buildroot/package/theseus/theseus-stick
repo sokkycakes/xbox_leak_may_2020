@@ -1,0 +1,99 @@
+#!/bin/sh
+#
+# Test loop through the boot USB stick, for a machine with no network.
+#
+# If the stick's EFI partition has a theseus/ folder:
+#   theseus/opt/         copied over /opt/theseus before the dashboard starts
+#                        (a new build, changed configs or data)
+#   theseus/theseus.env  sourced by theseus-session (e.g. THESEUS_ARGS=...,
+#                        KMS_MODE=1280x720)
+#   theseus/logs/        written here: system info at boot, then the
+#                        dashboard's log every few seconds
+#
+# Usage: theseus-stick mount|overlay|logs
+
+STICK=/stick
+DIR=$STICK/theseus
+DEVFILE=/var/run/theseus-stick.dev
+
+# The stick stays mounted only while it is being read or written, so pulling
+# it (or the power) leaves a clean FAT behind.
+mount_stick() {
+	mountpoint -q "$STICK" && return 0
+	mkdir -p "$STICK"
+	if [ -r "$DEVFILE" ]; then
+		mount -t vfat -o rw,noatime "$(cat "$DEVFILE")" "$STICK" 2>/dev/null
+		return
+	fi
+	# sion-tools has already found the partition the machine booted from.
+	if [ -r /var/run/sion/esp-dev ]; then
+		dev=$(cat /var/run/sion/esp-dev)
+		mount -t vfat -o rw,noatime "$dev" "$STICK" 2>/dev/null || return 1
+		[ -d "$DIR" ] && echo "$dev" > "$DEVFILE" && return 0
+		umount "$STICK"
+		return 1
+	fi
+	# The kernel enumerates the USB stick a moment after init starts.
+	for _ in $(seq 1 50); do
+		for dev in /dev/sd?1 /dev/mmcblk?p1 /dev/nvme?n?p1; do
+			[ -b "$dev" ] || continue
+			mount -t vfat -o rw,noatime "$dev" "$STICK" 2>/dev/null || continue
+			[ -d "$DIR" ] && echo "$dev" > "$DEVFILE" && return 0
+			umount "$STICK"
+		done
+		sleep 0.2
+	done
+	return 1
+}
+
+case "$1" in
+mount)
+	mount_stick
+	;;
+overlay)
+	mount_stick || exit 0
+	if [ -d "$DIR/opt" ]; then
+		cp -r "$DIR/opt/." /opt/theseus/
+		chmod 755 /opt/theseus/theseus
+	fi
+	# theseus-session sources this after the stick is unmounted again.
+	cp "$DIR/theseus.env" /var/run/theseus.env 2>/dev/null
+	umount "$STICK"
+	;;
+logs)
+	mount_stick || exit 0
+	L=$DIR/logs
+	mkdir -p "$L"
+	rm -f "$L/theseus.log" "$L/dmesg.txt"
+	{
+		echo "== uname"; uname -a
+		echo "== cmdline"; cat /proc/cmdline
+		for c in /sys/class/drm/card*-*; do
+			[ -e "$c/status" ] || continue
+			echo "== $(basename "$c"): $(cat "$c/status") enabled=$(cat "$c/enabled" 2>/dev/null)"
+			cat "$c/modes" 2>/dev/null
+		done
+		echo "== fb"; cat /sys/class/graphics/fb0/virtual_size 2>/dev/null
+		echo "== input"; cat /proc/bus/input/devices
+		echo "== usb"
+		for u in /sys/bus/usb/devices/*; do
+			[ -r "$u/idVendor" ] || continue
+			echo "$(cat "$u/idVendor"):$(cat "$u/idProduct") $(cat "$u/manufacturer" 2>/dev/null) $(cat "$u/product" 2>/dev/null)"
+		done
+		echo "== /dev/input"; ls -l /dev/input
+		echo "== sound"; cat /proc/asound/pcm
+	} > "$L/system.txt" 2>&1
+	umount "$STICK"
+	while sleep 5; do
+		mount_stick || continue
+		cp /var/log/theseus.log "$L/theseus.log" 2>/dev/null
+		[ -r /var/log/sion.log ] && cp /var/log/sion.log "$L/sion.log"
+		[ -r /var/log/messages ] && cp /var/log/messages "$L/messages.txt"
+		for w in /var/log/wpa_supplicant.*.log; do
+			[ -r "$w" ] && cp "$w" "$L/${w##*/}"
+		done
+		dmesg > "$L/dmesg.txt"
+		umount "$STICK"
+	done
+	;;
+esac

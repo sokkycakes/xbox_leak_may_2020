@@ -1,0 +1,535 @@
+From: Claude <noreply@anthropic.com>
+Subject: [PATCH] desktop: render on KMSDRM with no window system
+
+On Linux, bgfx is only handed an X11 or Wayland window. Under SDL's KMSDRM
+driver there is no such window, so SDL creates the GL context itself (EGL
+on a GBM surface) and bgfx renders into it with its OpenGL backend,
+single threaded. Presenting becomes bgfx::frame() followed by
+SDL_GL_SwapWindow(), which also does the KMS page flip.
+
+Also adds --no-boot-anim, for when something else already played the
+boot animation, and two build knobs: NO_MILKDROP=1 (no projectM, no
+libGL) and NO_VULKAN=1 (bgfx built for OpenGL only, no Vulkan or X11).
+Without desktop GL headers, d3d8_sdl.h takes its GL typedefs from GLES2.
+
+On KMSDRM the log is the only view into the machine, so stdout is
+line-buffered and key presses are logged with where focus is.
+
+THESEUS_SCENE=WxH (KMSDRM only) renders the whole frame at a fixed size
+and stretches it over the display mode, the way the Xbox drew the
+dashboard at 640x480 and its video encoder stretched that across a
+720x480 NTSC signal.
+
+Upstream: not sent
+Signed-off-by: Claude <noreply@anthropic.com>
+---
+diff --git a/build/Makefile b/build/Makefile
+index 49656f2..584278b 100644
+--- a/build/Makefile
++++ b/build/Makefile
+@@ -459,7 +459,11 @@ else ifeq ($(UNAME_S),Linux)
+   SDL2_CFLAGS  := $(shell sdl2-config --cflags)
+   SDL2_LDFLAGS := $(shell sdl2-config --libs)
+   # OpenGL is for projectM, not a dashboard render backend.
+-  DESKTOP_PLATFORM_LDFLAGS = -lGL -lSDL2_mixer
++  ifdef NO_MILKDROP
++    DESKTOP_PLATFORM_LDFLAGS = -lSDL2_mixer
++  else
++    DESKTOP_PLATFORM_LDFLAGS = -lGL -lSDL2_mixer
++  endif
+ else
+   # Windows (MSYS2/MinGW). Native Windows desktop builds are unsupported;
+   # use the desktop-win64 cross target for Windows.
+@@ -518,6 +522,9 @@ MSYS2 `pacman -S mingw-w64-x86_64-curl`)
+   # the .cpp compile rule fires. (A previous version gated on a
+   # parse-time wildcard, which caused first-time `make desktop` runs on
+   # a clean checkout to silently ship a no-milkdrop binary.)
++  # NO_MILKDROP=1 leaves the visualizer out (and the GL / projectM build
++  # with it), for targets without libGL such as a KMSDRM-only Mesa.
++  ifndef NO_MILKDROP
+   PROJECTM_PREFIX := $(THESEUS_SRC)/third-party/projectm/install
+   PROJECTM_CFLAGS  := -I$(PROJECTM_PREFIX)/include -DTHESEUS_HAS_MILKDROP=1
+   ifeq ($(UNAME_S),Darwin)
+@@ -527,6 +534,7 @@ MSYS2 `pacman -S mingw-w64-x86_64-curl`)
+   endif
+   PROJECTM_LDFLAGS := -L$(PROJECTM_PREFIX)/lib -lprojectM-4 -lprojectM-4-playlist \
+                       $(PROJECTM_RPATH)
++  endif
+ endif
+ CDAUDIO_CFLAGS  := $(MPV_CFLAGS)
+ CDAUDIO_LDFLAGS :=
+@@ -644,12 +652,16 @@ else ifeq ($(UNAME_S),Linux)
+   #   make -C theseus/third-party/bgfx linux-gcc-release64
+   # bgfx on Linux uses Vulkan by default. Runtime needs vulkan-loader
+   # + X11 system libs; -ldl/-lpthread are for bgfx's RTLD use.
+-  BGFX_BUILD_DIR  := $(BGFX_ROOT)/.build/linux64_gcc/bin
++  BGFX_BUILD_DIR  ?= $(BGFX_ROOT)/.build/linux64_gcc/bin
+   DESKTOP_CFLAGS  += -I$(BX_ROOT)/include/compat/linux
+   DESKTOP_LDFLAGS += $(BGFX_BUILD_DIR)/libbgfxRelease.a \
+                      $(BGFX_BUILD_DIR)/libbxRelease.a \
+                      $(BGFX_BUILD_DIR)/libbimgRelease.a \
+-                     -lvulkan -lX11 -ldl -lpthread
++                     -ldl -lpthread
++  # NO_VULKAN=1: bgfx built for OpenGL only (KMSDRM), so no Vulkan or X11.
++  ifndef NO_VULKAN
++    DESKTOP_LDFLAGS += -lvulkan -lX11
++  endif
+ endif
+ 
+ # Desktop sources: ALL from theseus/desktop/ (UIX Desktop tree imported in full).
+@@ -925,7 +937,11 @@ PROJECTM_SRC    := $(abspath $(THESEUS_SRC)/third-party/projectm)
+ PROJECTM_MARKER := $(PROJECTM_SRC)/install/include/projectM-4/projectM.h
+ 
+ .PHONY: projectm-deps projectm-clean
++ifdef NO_MILKDROP
++projectm-deps:
++else
+ projectm-deps: $(PROJECTM_MARKER)
++endif
+ 
+ $(PROJECTM_MARKER):
+ 	@if [ ! -f $(PROJECTM_SRC)/CMakeLists.txt ]; then \
+diff --git a/theseus/desktop/boot_anim.cpp b/theseus/desktop/boot_anim.cpp
+index bf0d3f5..cdf86bc 100644
+--- a/theseus/desktop/boot_anim.cpp
++++ b/theseus/desktop/boot_anim.cpp
+@@ -162,7 +162,7 @@ bool BootAnim_PlayAndWait(SDL_Window* win, const char* path)
+ 
+ 		Bgfx_BlitTexturedQuad(tex, 1.f, 1.f, 0);
+ 
+-		bgfx::frame();
++		Plat_Present();
+ 	}
+ 
+ 	bgfx::destroy(tex);
+diff --git a/theseus/desktop/d3d8_sdl.h b/theseus/desktop/d3d8_sdl.h
+index 452dae9..e05ec61 100644
+--- a/theseus/desktop/d3d8_sdl.h
++++ b/theseus/desktop/d3d8_sdl.h
+@@ -19,10 +19,14 @@ extern "C" void stbi_image_free(void*);
+ #elif defined(_WIN32)
+         #include <windows.h>
+         #include <GL/gl.h>
+-#else
++#elif __has_include(<GL/gl.h>)
+     #define GL_GLEXT_PROTOTYPES
+     #include <GL/gl.h>
+     #include <GL/glext.h>
++#else
++    // EGL-only Mesa (KMSDRM): no desktop GL headers, and GLES2's carry the
++    // same base typedefs and the few enums used here.
++    #include <GLES2/gl2.h>
+ #endif
+ 
+ // Ensure D3D vertex constructors are available (vertex8.h, hud.cpp)
+@@ -986,6 +990,10 @@ inline void CRT_ResizeFBO_Bgfx(int width, int height) {
+ // recent setViewFrameBuffer call to *all* submits on that view in the
+ // frame (so resetting after submits would draw the scene to the
+ // backbuffer instead of into the FBO).
++// The fixed-size scene target on KMSDRM (THESEUS_SCENE), or invalid when
++// the scene draws straight to the backbuffer. See sdl_main.cpp.
++extern bgfx::FrameBufferHandle g_sceneFB;
++
+ inline void CRT_BeginCapture_Bgfx() {
+     bgfx::setViewFrameBuffer(0, g_crt.fb);
+ }
+@@ -994,14 +1002,14 @@ inline void CRT_BeginCapture_Bgfx() {
+ // backbuffer once CRT goes off again (the previous frame may have left
+ // it pointing at the offscreen FB).
+ inline void CRT_PointViewToBackbuffer_Bgfx() {
+-    bgfx::setViewFrameBuffer(0, BGFX_INVALID_HANDLE);
++    bgfx::setViewFrameBuffer(0, g_sceneFB);
+ }
+ 
+ // Submit the fullscreen blit into view 1 (which targets the backbuffer)
+ // with the CRT shader sampling view 0's color attachment.
+ inline void CRT_EndAndBlit_Bgfx(float time, int width, int height) {
+     // View 1 = post-process pass to backbuffer.
+-    bgfx::setViewFrameBuffer(1, BGFX_INVALID_HANDLE);
++    bgfx::setViewFrameBuffer(1, g_sceneFB);
+     bgfx::setViewRect(1, 0, 0, (uint16_t)width, (uint16_t)height);
+     bgfx::setViewClear(1, 0); // backbuffer is fully overwritten by the quad
+ 
+diff --git a/theseus/desktop/display.h b/theseus/desktop/display.h
+index a4748e4..aecb213 100644
+--- a/theseus/desktop/display.h
++++ b/theseus/desktop/display.h
+@@ -12,3 +12,7 @@ void Plat_GetWindowSize(int* w, int* h);
+ 
+ // pixels / points. 2.0 on Retina.
+ float Plat_GetDisplayScale(void);
++
++// bgfx::frame(), plus the buffer swap and page flip when SDL owns the GL
++// context (KMSDRM).
++void Plat_Present(void);
+diff --git a/theseus/desktop/preloader.cpp b/theseus/desktop/preloader.cpp
+index 1da1a90..b72d5b1 100644
+--- a/theseus/desktop/preloader.cpp
++++ b/theseus/desktop/preloader.cpp
+@@ -588,7 +588,7 @@ bool RunPreloader(SDL_Window* window) {
+         bgfx::touch(0);
+         extern void ImGui_ImplBgfx_RenderDrawData(ImDrawData*);
+         ImGui_ImplBgfx_RenderDrawData(ImGui::GetDrawData());
+-        bgfx::frame();
++        Plat_Present();
+     }
+ 
+     return extractedMode;
+diff --git a/theseus/desktop/sdl_main.cpp b/theseus/desktop/sdl_main.cpp
+index 7ca83f7..3b5a527 100644
+--- a/theseus/desktop/sdl_main.cpp
++++ b/theseus/desktop/sdl_main.cpp
+@@ -201,6 +201,12 @@ VirtualGameDB g_vgames = {};
+ 
+ // Global SDL/GL state; used by D3D8 stubs to render
+ SDL_Window*   g_pSDLWindow = NULL;
++
++// KMSDRM (no X11 or Wayland): SDL owns the display and a GL context on a GBM
++// surface, and bgfx renders into that context with its OpenGL backend.
++// Presenting is then SDL_GL_SwapWindow, which also does the KMS page flip.
++bool          g_kmsdrm = false;
++static SDL_GLContext s_kmsGLContext = NULL;
+ SDL_GLContext  g_pGLContext = NULL;
+ GLState        g_gl = {};
+ 
+@@ -728,7 +734,19 @@ unsigned long long GuiTextureImId(const GuiTexture* tex) {
+ 
+ // Forward declarations for PreSwapOverlays
+ bool g_debugMode = false;
+-void Plat_GetDrawableSize(int* w, int* h)
++// Fixed scene size (KMSDRM only, THESEUS_SCENE=WxH, e.g. 640x480). The
++// Xbox dashboard drew into a 640x480 back buffer whatever the TV, and the
++// video encoder stretched that across the 720x480 NTSC signal. Here the
++// whole frame (scene, CRT pass, ImGui) goes into an offscreen target of
++// that size, and Plat_Present stretches it over the display mode. Every
++// size query below Plat_GetDrawableSize sees the scene size.
++static int s_sceneW = 0, s_sceneH = 0;
++bgfx::FrameBufferHandle g_sceneFB = BGFX_INVALID_HANDLE;
++static bgfx::TextureHandle s_sceneTex = BGFX_INVALID_HANDLE;
++static const bgfx::ViewId kSceneBlitView = 250;
++
++// The real size of the output, whatever the scene size.
++void Plat_GetOutputSize(int* w, int* h)
+ {
+     if (w) *w = 0;
+     if (h) *h = 0;
+@@ -736,11 +754,108 @@ void Plat_GetDrawableSize(int* w, int* h)
+     SDL_GetWindowSizeInPixels(g_pSDLWindow, w, h);
+ }
+ 
++void Plat_GetDrawableSize(int* w, int* h)
++{
++    if (s_sceneW > 0) {
++        if (w) *w = s_sceneW;
++        if (h) *h = s_sceneH;
++        return;
++    }
++    Plat_GetOutputSize(w, h);
++}
++
++// (Re)creates the scene target and points the scene and ImGui views at it.
++// rtFlags is BGFX_TEXTURE_RT or one of the BGFX_TEXTURE_RT_MSAA_X* modes.
++static void Scene_ApplyTarget(uint64_t rtFlags)
++{
++    uint64_t msaaFlags = rtFlags;
++    if (s_sceneW <= 0) return;
++    static uint64_t s_flags = ~0ull;
++    if (!bgfx::isValid(g_sceneFB) || s_flags != msaaFlags) {
++        if (bgfx::isValid(g_sceneFB)) bgfx::destroy(g_sceneFB);
++        bgfx::TextureHandle att[2];
++        att[0] = bgfx::createTexture2D((uint16_t)s_sceneW, (uint16_t)s_sceneH, false, 1,
++                                       bgfx::TextureFormat::BGRA8,
++                                       msaaFlags |
++                                       BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP);
++        att[1] = bgfx::createTexture2D((uint16_t)s_sceneW, (uint16_t)s_sceneH, false, 1,
++                                       bgfx::TextureFormat::D24S8,
++                                       BGFX_TEXTURE_RT_WRITE_ONLY | msaaFlags);
++        g_sceneFB = bgfx::createFrameBuffer(2, att, true);
++        s_sceneTex = att[0];
++        s_flags = msaaFlags;
++    }
++    bgfx::setViewFrameBuffer(0, g_sceneFB);
++    bgfx::setViewFrameBuffer(2, g_sceneFB);
++}
++
++// Stretches the scene target over the whole output (bilinear, like the
++// Xbox's encoder scaling 640 pixels across the 720-wide signal).
++static void Scene_BlitToOutput()
++{
++    extern bgfx::ProgramHandle g_bgfxProgBlit;
++    extern bgfx::UniformHandle g_bgfxSamplerBlit;
++    if (!bgfx::isValid(g_sceneFB) || !bgfx::isValid(g_bgfxProgBlit)) return;
++    int ow = 0, oh = 0;
++    Plat_GetOutputSize(&ow, &oh);
++    bgfx::setViewFrameBuffer(kSceneBlitView, BGFX_INVALID_HANDLE);
++    bgfx::setViewRect(kSceneBlitView, 0, 0, (uint16_t)ow, (uint16_t)oh);
++    bgfx::setViewClear(kSceneBlitView, 0);
++
++    // Same layout as the CRT pass (vs_blit's inputs). The target was drawn
++    // by GL with its origin at the bottom, so the bottom of the quad samples
++    // V=0.
++    bgfx::VertexLayout layout;
++    layout.begin()
++        .add(bgfx::Attrib::Position,  3, bgfx::AttribType::Float)
++        .add(bgfx::Attrib::Normal,    3, bgfx::AttribType::Float)
++        .add(bgfx::Attrib::Color0,    4, bgfx::AttribType::Uint8, true)
++        .add(bgfx::Attrib::Color1,    4, bgfx::AttribType::Uint8, true)
++        .add(bgfx::Attrib::TexCoord0, 2, bgfx::AttribType::Float)
++        .end();
++    struct V { float px, py, pz, nx, ny, nz; uint32_t c0, c1; float u, v; };
++    const uint32_t white = 0xffffffff;
++    V verts[4] = {
++        { -1.f, -1.f, 0.f, 0,0,0, white,white, 0.f, 0.f },
++        {  1.f, -1.f, 0.f, 0,0,0, white,white, 1.f, 0.f },
++        {  1.f,  1.f, 0.f, 0,0,0, white,white, 1.f, 1.f },
++        { -1.f,  1.f, 0.f, 0,0,0, white,white, 0.f, 1.f },
++    };
++    const uint16_t idx[6] = { 0, 1, 2, 0, 2, 3 };
++    bgfx::TransientVertexBuffer tvb;
++    bgfx::TransientIndexBuffer  tib;
++    if (bgfx::getAvailTransientVertexBuffer(4, layout) < 4) return;
++    if (bgfx::getAvailTransientIndexBuffer(6) < 6)            return;
++    bgfx::allocTransientVertexBuffer(&tvb, 4, layout);
++    memcpy(tvb.data, verts, sizeof(verts));
++    bgfx::allocTransientIndexBuffer(&tib, 6);
++    memcpy(tib.data, idx, sizeof(idx));
++    bgfx::setTexture(0, g_bgfxSamplerBlit, s_sceneTex);
++    bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A);
++    bgfx::setVertexBuffer(0, &tvb, 0, 4);
++    bgfx::setIndexBuffer(&tib, 0, 6);
++    bgfx::submit(kSceneBlitView, g_bgfxProgBlit);
++}
++
++void Plat_Present(void)
++{
++    Scene_BlitToOutput();
++    bgfx::frame();
++    if (g_kmsdrm && g_pSDLWindow)
++        SDL_GL_SwapWindow(g_pSDLWindow);
++}
++
+ void Plat_GetWindowSize(int* w, int* h)
+ {
+     if (w) *w = 0;
+     if (h) *h = 0;
+     if (!g_pSDLWindow) return;
++    if (s_sceneW > 0) {
++        // The scene is the screen, at a display scale of 1.
++        if (w) *w = s_sceneW;
++        if (h) *h = s_sceneH;
++        return;
++    }
+     SDL_GetWindowSize(g_pSDLWindow, w, h);
+ }
+ 
+@@ -832,6 +947,19 @@ static void PreSwapOverlays() {
+     Gfx_ReconcileDrawable();
+ 
+     ImGui_ImplSDL2_NewFrame();
++    if (s_sceneW > 0) {
++        // ImGui draws into the scene target too, so lay it out at the scene
++        // size and map the pointer into it.
++        ImGuiIO& sio = ImGui::GetIO();
++        int ww = 0, wh = 0;
++        SDL_GetWindowSize(g_pSDLWindow, &ww, &wh);
++        if (ww > 0 && wh > 0 && sio.MousePos.x != -FLT_MAX) {
++            sio.MousePos.x *= (float)s_sceneW / ww;
++            sio.MousePos.y *= (float)s_sceneH / wh;
++        }
++        sio.DisplaySize = ImVec2((float)s_sceneW, (float)s_sceneH);
++        sio.DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
++    }
+     ImGui::NewFrame();
+ 
+     // Pointer gets out of the way: always in pad mode, otherwise after a few
+@@ -1082,10 +1210,19 @@ static uint32_t BgfxResetFlags() {
+ // fullscreen hiccup.
+ static void BgfxApplyReset() {
+     if (!g_pSDLWindow) return;
+-    int w = 0, h = 0;
++    int w = 0, h = 0, ow = 0, oh = 0;
+     Plat_GetDrawableSize(&w, &h);
+-    if (w <= 0 || h <= 0) return;
+-    bgfx::reset((uint32_t)w, (uint32_t)h, BgfxResetFlags());
++    Plat_GetOutputSize(&ow, &oh);
++    if (w <= 0 || h <= 0 || ow <= 0 || oh <= 0) return;
++    if (s_sceneW > 0) {
++        // MSAA belongs on the scene target; the output only gets the blit.
++        bgfx::reset((uint32_t)ow, (uint32_t)oh, BgfxResetFlags() & ~BGFX_RESET_MSAA_MASK);
++        // RESET_MSAA_X2..X16 are 1..4; TEXTURE_RT..RT_MSAA_X16 are 1..5.
++        uint64_t msaa = (BgfxResetFlags() & BGFX_RESET_MSAA_MASK) >> BGFX_RESET_MSAA_SHIFT;
++        Scene_ApplyTarget((msaa + 1) << BGFX_TEXTURE_RT_SHIFT);
++    } else {
++        bgfx::reset((uint32_t)ow, (uint32_t)oh, BgfxResetFlags());
++    }
+     bgfx::setViewRect(0, 0, 0, (uint16_t)w, (uint16_t)h);
+     // ImGui lives on view 2 (sharp on top of any CRT pass on view 1).
+     // bgfx skips views with no rect set, so size it to the backbuffer.
+@@ -1102,6 +1239,13 @@ static void BgfxApplyReset() {
+ void ApplyDisplayMode() {
+     if (!g_pSDLWindow) return;
+ 
++    // On KMSDRM the window is the screen at its current mode; there is
++    // nothing to resize or toggle.
++    if (g_kmsdrm) {
++        BgfxApplyReset();
++        return;
++    }
++
+     SDL_SetWindowFullscreen(g_pSDLWindow, 0);
+ 
+     if (g_windowResolution > 0) {
+@@ -1342,6 +1486,10 @@ int main(int argc, char* argv[]) {
+     g_argv = argv;
+     s_execPath = argv[0];
+ 
++    // Line-buffer the log when it goes to a file (the KMSDRM session's
++    // /var/log/theseus.log), so it is current when copied off the machine.
++    setvbuf(stdout, NULL, _IOLBF, 0);
++
+ #ifdef _WIN32
+     // /SUBSYSTEM:WINDOWS so explorer launches don't pop a console, but
+     // attach to a parent shell when one exists so stdout/stderr show up.
+@@ -1479,6 +1627,42 @@ int main(int argc, char* argv[]) {
+     // macOS, Vulkan/D3D11 elsewhere), so no GL drawable flag.
+     Uint32 windowFlags = SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
+ 
++    // KMSDRM has no native window for bgfx to attach to, so SDL creates the
++    // GL context (EGL on GBM) and bgfx borrows it. The vs/fs .bin shaders
++    // for bgfx's GL backend are GLSL 150, so ask for 3.3 core.
++    {
++        const char* vd = SDL_GetCurrentVideoDriver();
++        if (vd && SDL_strcasecmp(vd, "KMSDRM") == 0) {
++            g_kmsdrm = true;
++            const char* scene = SDL_getenv("THESEUS_SCENE");
++            if (scene && SDL_sscanf(scene, "%dx%d", &s_sceneW, &s_sceneH) != 2)
++                s_sceneW = s_sceneH = 0;
++            if (s_sceneW <= 0 || s_sceneH <= 0) s_sceneW = s_sceneH = 0;
++            if (s_sceneW > 0)
++                fprintf(stdout, "KMSDRM: scene %dx%d, stretched over the display mode\n",
++                        s_sceneW, s_sceneH);
++            // SDL insists on dlopen'ing a GL library before it uses EGL. A
++            // Mesa built without GLX has no libGL.so.1; every GL entry point
++            // still comes from eglGetProcAddress, so libEGL itself will do.
++            if (!SDL_getenv("SDL_VIDEO_GL_DRIVER"))
++                SDL_setenv("SDL_VIDEO_GL_DRIVER", "libEGL.so.1", 0);
++            SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
++            SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
++            SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
++            SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
++            SDL_GL_SetAttribute(SDL_GL_RED_SIZE, 8);
++            SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE, 8);
++            SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE, 8);
++            SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
++            SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
++            // FULLSCREEN_DESKTOP keeps the mode the display is already in
++            // (the panel's or TV's preferred one) instead of picking the
++            // mode closest to the 1280x720 asked for below.
++            windowFlags = SDL_WINDOW_SHOWN | SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN_DESKTOP;
++            fprintf(stdout, "KMSDRM: rendering through bgfx OpenGL on SDL's EGL context\n");
++        }
++    }
++
+     g_pSDLWindow = SDL_CreateWindow(
+         "UIX Desktop - Preview",
+         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+@@ -1492,6 +1676,19 @@ int main(int argc, char* argv[]) {
+         return 1;
+     }
+ 
++    if (g_kmsdrm) {
++        s_kmsGLContext = SDL_GL_CreateContext(g_pSDLWindow);
++        if (!s_kmsGLContext) {
++            fprintf(stderr, "SDL_GL_CreateContext failed: %s\n", SDL_GetError());
++            SDL_Quit();
++            return 1;
++        }
++        SDL_GL_MakeCurrent(g_pSDLWindow, s_kmsGLContext);
++        SDL_GL_SetSwapInterval(1);
++        // The pad and keyboard drive the dashboard; no pointer on a TV.
++        SDL_ShowCursor(SDL_DISABLE);
++    }
++
+     // Window icon (TeamUIX logo, embedded).
+     {
+         int iw, ih, ich;
+@@ -1516,6 +1713,14 @@ int main(int argc, char* argv[]) {
+         } else {
+             bgfx::PlatformData pd;
+             std::memset(&pd, 0, sizeof(pd));
++            if (g_kmsdrm) {
++                // bgfx draws into SDL's current GL context and leaves the
++                // swap to us (Plat_Present). Calling renderFrame before init
++                // keeps bgfx single threaded, so the context stays current
++                // on this thread.
++                pd.context = s_kmsGLContext;
++                bgfx::renderFrame();
++            } else {
+ #  if defined(__APPLE__)
+             pd.nwh = wmi.info.cocoa.window;
+ #  elif defined(_WIN32)
+@@ -1524,16 +1729,23 @@ int main(int argc, char* argv[]) {
+             // Branch on SDL's actual subsystem. Feeding x11 lanes to
+             // bgfx on a Wayland session hands RADV a NULL Display and
+             // it crashes in vkGetPhysicalDeviceSurfaceSupportKHR.
++            // An SDL built for KMSDRM only has neither union member.
++#    if defined(SDL_VIDEO_DRIVER_WAYLAND)
+             if (wmi.subsystem == SDL_SYSWM_WAYLAND) {
+                 pd.ndt  = wmi.info.wl.display;
+                 pd.nwh  = wmi.info.wl.surface;
+                 pd.type = bgfx::NativeWindowHandleType::Wayland;
+-            } else {
++            } else
++#    endif
++            {
++#    if defined(SDL_VIDEO_DRIVER_X11)
+                 pd.ndt  = wmi.info.x11.display;
+                 pd.nwh  = (void*)(uintptr_t)wmi.info.x11.window;
+                 pd.type = bgfx::NativeWindowHandleType::Default; // X11
++#    endif
+             }
+ #  endif
++            }
+             bgfx::Init bgfxInit;
+             bgfxInit.platformData       = pd;
+             // Pixels, not points. On a HiDPI display the drawable is larger
+@@ -1559,6 +1771,7 @@ int main(int argc, char* argv[]) {
+                 case 5: bgfxInit.type = bgfx::RendererType::OpenGLES;   break;
+                 default: bgfxInit.type = bgfx::RendererType::Count;     break;
+             }
++            if (g_kmsdrm) bgfxInit.type = bgfx::RendererType::OpenGL;
+             if (!bgfx::init(bgfxInit)) {
+                 fprintf(stderr, "bgfx::init failed\n");
+             } else {
+@@ -1780,6 +1993,7 @@ int main(int argc, char* argv[]) {
+         else if (strcmp(argv[i], "--graphics-debug") == 0) g_graphicsDebug = true;
+         else if (strcmp(argv[i], "--fullscreen") == 0) cliFullscreen = true;
+         else if (strcmp(argv[i], "--no-toolbar") == 0) g_showMenuBar = false;
++        else if (strcmp(argv[i], "--no-boot-anim") == 0) g_bShowBootAnimation = false;
+         else if (strcmp(argv[i], "--scale") == 0 && i + 1 < argc) {
+             cliUiScale = (float)atof(argv[++i]);
+         }
+@@ -1973,6 +2187,12 @@ int main(int argc, char* argv[]) {
+                         Keyboard_InsertText(g_pActiveKeyboard, event.text.text);
+                     break;
+                 case SDL_KEYDOWN:
++                    // On KMSDRM the log is the only window into input.
++                    if (g_kmsdrm && !event.key.repeat)
++                        printf("[Input] key %s (focus=%s imgui=%d)\n",
++                               SDL_GetScancodeName(event.key.keysym.scancode),
++                               SDL_GetKeyboardFocus() == g_pSDLWindow ? "main" : "none",
++                               (int)ImGui_WantsKeyboard());
+                     // Esc / Q / Backspace quits the xCloud stream and drops
+                     // back to the dashboard.
+                     if (g_xcloudFullscreen) {
+@@ -2297,8 +2517,8 @@ int main(int argc, char* argv[]) {
+         // Swap
+         Uint64 tSwap0 = SDL_GetPerformanceCounter();
+         // bgfx owns presentation; its backend layer is the visible surface.
+-        // No GL drawable, so no SDL_GL_SwapWindow.
+-        bgfx::frame();
++        // No GL drawable, so no SDL_GL_SwapWindow (except on KMSDRM).
++        Plat_Present();
+         Uint64 tSwap1 = SDL_GetPerformanceCounter();
+ 
+         if (g_graphicsDebug) {

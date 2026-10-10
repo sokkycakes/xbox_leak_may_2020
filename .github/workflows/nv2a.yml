@@ -1,0 +1,36 @@
+name: NV2A regression
+on:
+  push:
+    branches: [claude/project-thread-zvdmzt]
+    paths: ['xbcompat/**', '.github/workflows/nv2a.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  nv2a:
+    runs-on: ubuntu-24.04
+    container: debian:bookworm
+    timeout-minutes: 25
+    env:
+      LIBGL_ALWAYS_SOFTWARE: '1'
+    steps:
+      - name: Install i386 build and rendering dependencies
+        run: |
+          dpkg --add-architecture i386
+          apt-get update
+          apt-get install -y git ca-certificates make python3 gcc-i686-linux-gnu libc6-dev-i386-cross pkg-config libsdl2-dev:i386 libgl-dev:i386 xvfb xauth
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /xbcompat/
+            /xbox_leak_may_2020/xbox trunk/xbox/private/ntos/init/ntoskrnl.src
+      - name: Shader and texture tests
+        working-directory: xbcompat
+        run: make -f tools/nv2a-check.mk -j4 CC=i686-linux-gnu-gcc PKGCFG='env PKG_CONFIG_LIBDIR=/usr/lib/i386-linux-gnu/pkgconfig pkg-config' check
+      - name: Native renderer ABI and rendering tests
+        working-directory: xbcompat
+        run: make -f tools/native-renderer.mk TARGET=i386 BUILD=build-nv2a -j4 check check-render
+      - name: Full native executable build
+        working-directory: xbcompat
+        run: make -j4 TARGET=i386 CC=i686-linux-gnu-gcc BUILD=build-native-nv2a PKGCFG='env PKG_CONFIG_LIBDIR=/usr/lib/i386-linux-gnu/pkgconfig pkg-config'
