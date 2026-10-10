@@ -525,23 +525,44 @@ static void wait_vblank(void)
     sleep_until(base + ((now - base) / period + 1) * period);
 }
 
-/* XBCOMPAT_LOG_FPS: log the frame rate every 5 seconds. */
+/* XBCOMPAT_LOG_FPS: log the frame rate every 5 seconds, with where the
+   frame time went: draws (xbcompat's state/constant/vertex setup, then the
+   GL draw calls themselves), presenting (the filter pass and the buffer
+   swap, which waits for the display), and the rest (the title's own code). */
+static int fps_on = -1;
+static uint64_t t_draw, t_gl, t_present, t_pace;
+static unsigned n_draws;
+
+static uint64_t now_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000u + ts.tv_nsec;
+}
+
 static void log_fps(void)
 {
-    static int on = -1;
-    static Uint64 since;
+    static uint64_t since;
     static unsigned frames;
-    if (on < 0) { const char *e = getenv("XBCOMPAT_LOG_FPS"); on = e && *e && *e != '0'; }
-    if (!on) return;
-    Uint64 now = SDL_GetTicks64();
+    if (fps_on < 0) { const char *e = getenv("XBCOMPAT_LOG_FPS"); fps_on = e && *e && *e != '0'; }
+    if (!fps_on) return;
+    uint64_t now = now_ns();
     if (!since) since = now;
     frames++;
-    if (now - since >= 5000) {
-        xlog("D3D: %.1f fps", frames * 1000.0 / (double)(now - since));
+    if (now - since >= 5000000000u) {
+        double f = frames, ms = (now - since) / 1e6 / f;
+        xlog("D3D: %.1f fps: %.1f ms a frame, %u draws %.1f ms (GL calls %.1f), present+swap %.1f ms, "
+             "pacing %.1f ms, other %.1f ms", 1000.0 / ms, ms, (unsigned)(n_draws / f), t_draw / 1e6 / f,
+             t_gl / 1e6 / f, t_present / 1e6 / f, t_pace / 1e6 / f,
+             ms - (t_draw + t_present + t_pace) / 1e6 / f);
         since = now;
         frames = 0;
+        t_draw = t_gl = t_present = t_pace = 0;
+        n_draws = 0;
     }
 }
+#define TIMED(acc, ...) do { if (fps_on > 0) { uint64_t t0_ = now_ns(); __VA_ARGS__; acc += now_ns() - t0_; } \
+                             else { __VA_ARGS__; } } while (0)
 
 static void pace_present(void)
 {
@@ -550,7 +571,7 @@ static void pace_present(void)
     if (unpaced()) return;
     Uint64 now = SDL_GetPerformanceCounter(), period = SDL_GetPerformanceFrequency() / 60;
     if (!next || now > next + period) next = now;   /* first frame, or fell behind: resync */
-    sleep_until(next);
+    TIMED(t_pace, sleep_until(next));
     next += period;
 }
 
@@ -572,10 +593,8 @@ static ULONG NTAPI D3DDevice_Swap(ULONG Flags)
     } else if (g_screenshot_path && (int)d3d.frame == g_screenshot_frame) {
         save_screenshot(g_screenshot_path);
     }
-    present_window_framebuffer();
-    cpu_block();
-    SDL_GL_SwapWindow(d3d.window);
-    restore_window_framebuffer();
+    TIMED(t_present, present_window_framebuffer(); cpu_block(); SDL_GL_SwapWindow(d3d.window);
+          restore_window_framebuffer());
     restore_overlay();
     pace_present();
     if (d3d.vblank_callback) {
@@ -2012,6 +2031,8 @@ typedef struct program_entry {
     GLint loc_c, loc_flip_y;
     GLint loc_tex[4], loc_cube[4], loc_vol[4], loc_tex_scale, loc_c0, loc_c1, loc_fc0, loc_fc1,
           loc_bump_env, loc_bump_lum;
+    float (*last_c)[4];   /* the constants last uploaded to the program */
+    bool c_partial;
     struct program_entry *next;
 } program_entry;
 
@@ -2126,6 +2147,9 @@ static program_entry *program_for(GLuint vs, GLuint fs)
     if (e->prog) {
 #define U(name) p_glGetUniformLocation(e->prog, name)
         e->loc_c = U("c");
+        /* Element i of c at loc_c + i, as Mesa lays arrays out: only then
+           can part of it be uploaded on its own. */
+        e->c_partial = e->loc_c >= 0 && U("c[191]") == e->loc_c + 191;
         e->loc_flip_y = U("flip_y");
         static const char *tex[] = { "tex0", "tex1", "tex2", "tex3" }, *cube[] = { "cube0", "cube1", "cube2", "cube3" },
                           *vol[] = { "vol0", "vol1", "vol2", "vol3" };
@@ -2453,7 +2477,7 @@ static void unbind_attributes(void)
     for (int r = 0; r < 16; r++) p_glDisableVertexAttribArray(r);
 }
 
-static void upload_constants(const vshader *sh, const program_entry *e)
+static void upload_constants(const vshader *sh, program_entry *e)
 {
     float c[192][4];
     memcpy(c, d3d.vs_const, sizeof(c));
@@ -2467,13 +2491,41 @@ static void upload_constants(const vshader *sh, const program_entry *e)
     c[59][0] = v->X + sx + d3d.screen_offset[0];
     c[59][1] = v->Y - sy + d3d.screen_offset[1];
     c[59][2] = d3d.zscale * v->MinZ; c[59][3] = 0;
-    if (e->loc_c >= 0) p_glUniform4fv(e->loc_c, 192, &c[0][0]);
+    /* Upload only the registers that changed since this program last drew:
+       most draws change a few matrices, and every uniform call costs (all
+       192 is 3 KB, through box86 and Mesa on a Raspberry Pi). */
+    if (e->loc_c >= 0) {
+        int lo = 0, hi = 191;
+        if (!e->c_partial) {
+            p_glUniform4fv(e->loc_c, 192, &c[0][0]);
+            goto uploaded;
+        }
+        if (e->last_c) {
+            while (lo < 192 && !memcmp(c[lo], e->last_c[lo], 16)) lo++;
+            if (lo == 192) goto uploaded;
+            while (!memcmp(c[hi], e->last_c[hi], 16)) hi--;
+        } else {
+            e->last_c = malloc(sizeof(c));
+        }
+        memcpy(e->last_c[lo], c[lo], (hi - lo + 1) * 16);
+        p_glUniform4fv(e->loc_c + lo, hi - lo + 1, &c[lo][0]);
+    }
+uploaded:
     if (e->loc_flip_y >= 0) p_glUniform1f(e->loc_flip_y, d3d.rt_texture ? -1.0f : 1.0f);
 }
 
 /* Draw with a programmable vertex shader: generic attributes + GLSL. */
+static void draw_programmable_(vshader *sh, ULONG PrimitiveType, const UCHAR *up, ULONG up_stride, ULONG first,
+                               ULONG count, const USHORT *indices);
 static void draw_programmable(vshader *sh, ULONG PrimitiveType, const UCHAR *up, ULONG up_stride, ULONG first,
                               ULONG count, const USHORT *indices)
+{
+    n_draws++;
+    TIMED(t_draw, draw_programmable_(sh, PrimitiveType, up, up_stride, first, count, indices));
+}
+
+static void draw_programmable_(vshader *sh, ULONG PrimitiveType, const UCHAR *up, ULONG up_stride, ULONG first,
+                               ULONG count, const USHORT *indices)
 {
     GLuint vs = vertex_shader_object(sh);
     if (!vs) return;
@@ -2489,10 +2541,8 @@ static void draw_programmable(vshader *sh, ULONG PrimitiveType, const UCHAR *up,
           d3d.viewport.MinZ, d3d.viewport.MaxZ);
     upload_constants(sh, e);
     bind_attributes(sh, up, up_stride, 0, vertex_range(first, count, indices));
-    if (indices)
-        glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, indices + first);
-    else
-        glDrawArrays(gl_primitive(PrimitiveType), first, count);
+    TIMED(t_gl, if (indices) glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, indices + first);
+                else glDrawArrays(gl_primitive(PrimitiveType), first, count));
     unbind_attributes();
     end_program(e);
     debug_dump_draw();
@@ -2515,8 +2565,17 @@ static void secondary_color(bool lit, const void *ptr, GLint size, GLenum type, 
 }
 
 /* A declaration without a program: fixed function with a custom layout. */
+static void draw_declared_(const vshader *sh, ULONG PrimitiveType, const UCHAR *up, ULONG up_stride, ULONG first,
+                           ULONG count, const USHORT *indices);
 static void draw_declared(const vshader *sh, ULONG PrimitiveType, const UCHAR *up, ULONG up_stride, ULONG first,
                           ULONG count, const USHORT *indices)
+{
+    n_draws++;
+    TIMED(t_draw, draw_declared_(sh, PrimitiveType, up, up_stride, first, count, indices));
+}
+
+static void draw_declared_(const vshader *sh, ULONG PrimitiveType, const UCHAR *up, ULONG up_stride, ULONG first,
+                           ULONG count, const USHORT *indices)
 {
     const vattr *pos = &sh->attr[0];
     if (pos->stream < 0) return;
@@ -2603,10 +2662,8 @@ static void draw_declared(const vshader *sh, ULONG PrimitiveType, const UCHAR *u
     if (!use_program(0, &e)) return;
     TRACE("D3D: draw(declared) prim %u count %u stride %u indices %p shader %#x", PrimitiveType, count, stride,
           indices ? indices + first : NULL, d3d.vertex_shader);
-    if (indices)
-        glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, indices + first);
-    else
-        glDrawArrays(gl_primitive(PrimitiveType), first, count);
+    TIMED(t_gl, if (indices) glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, indices + first);
+                else glDrawArrays(gl_primitive(PrimitiveType), first, count));
     end_program(e);
 }
 
