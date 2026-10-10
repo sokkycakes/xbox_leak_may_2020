@@ -864,6 +864,9 @@ int main(int argc, char **argv)
                     clear(0,NULL,0xf0,0xff000000,1,0);
                     draw(5,3,textured,sizeof textured[0]);
                     glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                    if (pixel[side ? 2 : 0] <= 240)
+                        fprintf(stderr,"packed copy format %x side %u: %u %u %u %u\n",
+                                formats[f][0],side,pixel[0],pixel[1],pixel[2],pixel[3]);
                     assert(pixel[side ? 2 : 0] > 240);
                     assert(pixel[side ? 0 : 2] < 8 && pixel[1] < 8 && pixel[3] > 240);
                 }
