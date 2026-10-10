@@ -779,6 +779,56 @@ int main(int argc, char **argv)
             puts("renderer programmable fog: exponential interpolation, unclamped factors, masks and disable passed");
         }
 
+
+        /* Rendering to a nonzero mip must preserve level zero and use the
+         * view's dimensions for the framebuffer/viewport. Repeat for a cube. */
+        {
+            LONG (NTAPI *cube_surface)(void *,ULONG,ULONG,void **) =
+                find("_D3DCubeTexture_GetCubeMapSurface@16");
+            for (unsigned cube = 0; cube < 2; cube++) {
+                void *mipped = create_tex(16,16,1,2,0,6,cube ? 5 : 3);
+                void *level0 = NULL, *level1 = NULL;
+                assert(mipped);
+                if (cube) {
+                    assert(cube_surface(mipped,2,0,&level0) == 0);
+                    assert(cube_surface(mipped,2,1,&level1) == 0);
+                } else {
+                    assert(surface(mipped,0,&level0) == 0);
+                    assert(surface(mipped,1,&level1) == 0);
+                }
+                set_tex(0,NULL);
+                set_rt(level0,NULL);
+                clear(0,NULL,0xf0,0xffff0000,1.0f,0);
+                set_rt(level1,NULL);
+                /* Viewport is applied on draw, so inspect the XDK state. */
+                void (NTAPI *get_viewport)(ULONG *) = find("_D3DDevice_GetViewport@4");
+                ULONG vp[6];
+                get_viewport(vp);
+                assert(vp[2] == 8 && vp[3] == 8);
+                clear(0,NULL,0xf0,0xff00ff00,1.0f,0);
+                set_rt(back,NULL);
+                for (unsigned level = 0; level < 2; level++) {
+                    unsigned extent = level ? 8 : 16;
+                    void *out_tex = create_tex(extent,extent,1,1,0,0x12,3), *out_surface = NULL;
+                    assert(surface(out_tex,0,&out_surface) == 0);
+                    copy_rects(level ? level1 : level0,NULL,0,out_surface,NULL);
+                    set_tex(0,out_tex);
+                    set_ps(0); set_vs(0x144);
+                    texture_states[3] = texture_states[4] = 1;
+                    texture_states[5] = 0;
+                    texture_states[12] = texture_states[16] = 2;
+                    texture_states[14] = texture_states[18] = 2;
+                    for (int i = 0; i < 3; i++) textured[i].u = textured[i].v = extent/2;
+                    clear(0,NULL,0xf0,0xff000000,1.0f,0);
+                    draw(5,3,textured,sizeof textured[0]);
+                    glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                    assert(pixel[level ? 1 : 0] > 240 && pixel[level ? 0 : 1] < 8);
+                }
+            }
+            set_tex(0,tex);
+            puts("renderer mip targets: 2D/cube level-one attachment, viewport and sibling preservation passed");
+        }
+
         /* Compressed volume uploads decode the packed slab order before GL.
          * The selected blocks distinguish XY tiles, slices within a slab,
          * and the second slab. Minification then selects an authored mip. */

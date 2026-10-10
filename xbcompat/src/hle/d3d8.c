@@ -4741,27 +4741,35 @@ static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
         return;
     }
     ULONG w, h, pitch;
-    container_size(target->Parent ? target->Parent : (D3DPixelContainer *)target, &w, &h, &pitch);
+    container_size((D3DPixelContainer *)target, &w, &h, &pitch);
     if (!d3d.fbo) p_glGenFramebuffers(1, (GLuint *)&d3d.fbo);
     p_glBindFramebuffer(GL_FRAMEBUFFER, d3d.fbo);
     /* A standalone surface (CreateRenderTarget) renders into a GL texture of
        its own; CopyRects reads it back. */
     GLuint tex = target->Parent ? texture_for(target->Parent) : surface_rt_texture(target, w, h);
     GLenum face_target = GL_TEXTURE_2D;
-    if (target->Parent && tex_target(target->Parent) == GL_TEXTURE_CUBE_MAP) {
-        /* A cube face surface sits face * cube_face_bytes past the cube's data. */
-        ULONG face = (target->Data - target->Parent->res.Data) / cube_face_bytes(target->Parent);
-        face_target = GL_TEXTURE_CUBE_MAP_POSITIVE_X + (face < 6 ? face : 0);
+    ULONG target_level = 0;
+    /* Surface dimensions and offsets identify the actual mip, including a
+       mip within a cube face. The parent's level zero is not this view. */
+    if (target->Parent && !surface_image(target, &face_target, &target_level)) {
+        xlog("D3D: cannot resolve render target subresource");
+        return;
     }
-    p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, face_target, tex, 0);
+    p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, face_target, tex, target_level);
     d3d.target_zmax = z ? depth_format_max((z->Format >> 8) & 0xFF) : d3d.zscale;
     if (z && z->Parent && tex_target(z->Parent) == GL_TEXTURE_2D) {
         /* Depth into a texture (a shadow buffer). */
         GLuint dt = texture_for(z->Parent);
+        GLenum depth_face;
+        ULONG depth_level;
+        if (!surface_image(z, &depth_face, &depth_level)) {
+            xlog("D3D: cannot resolve depth target subresource");
+            return;
+        }
         bool d24 = depth_format_max((z->Format >> 8) & 0xFF) > 65535.0f;
         p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, 0);
         p_glFramebufferTexture2D(GL_FRAMEBUFFER, d24 ? GL_DEPTH_STENCIL_ATTACHMENT : GL_DEPTH_ATTACHMENT,
-                                 GL_TEXTURE_2D, dt, 0);
+                                 depth_face, dt, depth_level);
         GLenum st = p_glCheckFramebufferStatus(GL_FRAMEBUFFER);
         if (st != GL_FRAMEBUFFER_COMPLETE) xlog("D3D: depth texture framebuffer incomplete (%#x)", st);
         d3d.rt_width = w;
