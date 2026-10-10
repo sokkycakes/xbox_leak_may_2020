@@ -94,6 +94,7 @@ Environment variables:
 
 | Variable | Meaning |
 | --- | --- |
+| `XBCOMPAT_DASH_SOUND_BOOST_DB=12` | Optional Dashboard-only sound boost (integer 0..12 dB, default 0), limited to reserved voice headroom; zero-headroom music and other titles are unchanged. See [Pi audio notes](docs/pi3-audio.md). |
 | `XBCOMPAT_NO_KBD_PAD=1` | Do not offer the keyboard pad. |
 | `XBCOMPAT_VIRTUAL_PAD=1` | Attach an SDL virtual controller (for testing). |
 | `XBCOMPAT_DUMP_TEXTURES=DIR` | Write every texture upload to DIR; `tools/texdump.py` turns one into a PNG. |

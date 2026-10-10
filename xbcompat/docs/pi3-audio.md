@@ -80,5 +80,49 @@ image configuration carries the same settings.
 No reboot was performed, so persistence of the effective driver parameter still
 needs verification after a future boot. The fixed runtime binary remains an
 isolated temporary test; the installed runtime is unchanged. The volume fix
-applies to x86 builds too once rebuilt from this branch. The user has not yet
-confirmed the corrected perceived loudness relative to games.
+applies to x86 builds too once rebuilt from this branch. The user reported that the 6 dB correction was still far too quiet. See the
+additional opt-in adjustment below.
+
+## Additional Dashboard sound adjustment
+
+The user reported the Dashboard remained far too quiet after the API correction.
+The decoder is not losing amplitude: all 77,254 blocks of the engine-room
+ambient ADPCM file match the independent reference decoder exactly. Its decoded
+peak/RMS are 0.579132/0.108276, compared with 0.579010/0.108274 in the original
+PCM asset. The scroll beep's 21 ADPCM blocks also match the reference.
+
+The Dashboard explicitly reserves 12 dB of headroom in XAppCreateSoundBuffer.
+Its WMA music path subsequently calls SetHeadroom(0). No evidence was found
+that this 12 dB reservation is itself an emulation bug or that a hidden output
+gain should cancel it universally.
+
+XBCOMPAT_DASH_SOUND_BOOST_DB now provides an optional integer 0..12 dB sound
+level adjustment. The default is zero. For this listening test, the Pi launcher
+sets it to 12. To use the same adjustment on x86, set the variable to 12 before
+launching a rebuilt xbcompat. A value of zero or an unset variable restores
+unadjusted behavior. Invalid values are ignored with a log message.
+
+The setting applies only to XBE title FFFE0000 (verified for this Dashboard).
+It compensates at most the source voice's existing headroom, excludes submix
+stages, and preserves guest fades, mute and routing attenuation. A 12 dB
+reservation therefore becomes approximately 3.981 times the signal amplitude,
+while sources already using zero headroom, including the WMA music path,
+receive no boost. Games receive no boost even when inheriting the environment.
+This is a listening preference, not another Xbox API correctness fix.
+
+The mixer counts samples exceeding full scale before its existing final clamp.
+Overlapping sounds can still clip; the adjustment does not add compression.
+The live Pi snapshot after 3,145,216 mixed frames (about 65 seconds) showed
+a pre-clamp peak of 0.420893 and zero clipped samples. ALSA reported no underruns;
+the menu remained around 30 FPS with 4x MSAA. This does not establish levels for
+every Dashboard sound or prove the user's desired loudness has been reached.
+
+258 audio checks pass at both 512 and 1024 host frames when supplied a real
+ADPCM asset. Tests cover title transitions with inherited settings, invalid
+values, compensation limits, fades, mute, zero-headroom music, and clipping.
+Both the native-renderer client and built-in x86 renderer build successfully.
+
+The current temporary Pi runtime is xbcompat-audio-boost, launched by
+/tmp/xbcompat-native-test.if8zCJ/launch-audio-boost.sh; its log is audio-boost.log
+in that directory. Installed runtime binaries and startup gain settings remain
+unchanged. Rebooting does not retain this temporary louder test build.

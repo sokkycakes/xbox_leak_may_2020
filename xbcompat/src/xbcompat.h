@@ -181,6 +181,7 @@ typedef struct {
 } xbe_image;
 
 void xbe_load(const char *path, xbe_image *img);
+ULONG xbe_title_id(void);
 void xbe_reload_section(ULONG va, ULONG raw_offset, ULONG raw_size, ULONG virtual_size);
 void kernel_resolve_imports(xbe_image *img);
 void kernel_init(void);
