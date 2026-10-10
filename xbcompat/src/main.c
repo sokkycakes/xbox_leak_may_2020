@@ -242,6 +242,7 @@ int main(int argc, char **argv)
     }
 
     install_fault_handlers();
+    prof_init();
 
     mem_init();
 #ifdef XBC_TRANSLATED

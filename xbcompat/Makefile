@@ -48,7 +48,7 @@ LEAK    ?= ../xbox_leak_may_2020/xbox trunk/xbox
 KERNSRC  = src/kernel/ke.c src/kernel/ob.c src/kernel/io.c src/kernel/rtl.c src/kernel/misc.c src/kernel/dvd.c \
            src/kernel/kernel.c src/kernel/av.c src/kernel/exports.gen.c
 HLESRC   = src/hle/hle.c src/hle/d3d8.c src/hle/vsh.c src/hle/vsh_interp.c src/hle/psh.c src/hle/xinput.c src/hle/dsound.c
-SRC      = src/main.c src/log.c src/loader.c src/memory.c src/thread.c $(KERNSRC) $(HLESRC)
+SRC      = src/main.c src/log.c src/prof.c src/loader.c src/memory.c src/thread.c $(KERNSRC) $(HLESRC)
 OBJ      = $(SRC:%.c=$(BUILD)/%.o)
 ifeq ($(TRANSLATED),1)
 # Each source file is compiled together with its generated guest-call

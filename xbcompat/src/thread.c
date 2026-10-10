@@ -181,6 +181,7 @@ static void *thread_main(void *arg)
     char name[16];
     snprintf(name, sizeof name, "x%08x", (unsigned)(uintptr_t)t->start_routine);
     pthread_setname_np(pthread_self(), name);
+    prof_thread_start();
     attach(t);
 
     pthread_mutex_lock(&start_lock);

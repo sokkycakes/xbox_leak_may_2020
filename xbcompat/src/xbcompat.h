@@ -137,6 +137,8 @@ NTSTATUS fs_host_path(const char *xpath, char *host, size_t hostlen);
 const char *fs_hdd_root(void);
 void fs_set_card(const char *dir);
 void install_fault_handlers(void);
+void prof_init(void);   /* XBCOMPAT_PROFILE=FILE, see prof.c */
+void prof_thread_start(void);
 
 /* ---- the DVD drive and its tray (kernel/dvd.c) ------------------------ */
 
