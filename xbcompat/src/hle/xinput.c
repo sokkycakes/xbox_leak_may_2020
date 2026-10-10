@@ -64,7 +64,10 @@
  * the button ("2000:p2start") presses it on a second scripted pad, which is
  * plugged into port 1 when the script names one (split-screen menus).
  * "lsup", "lsdown", "lsleft", "lsright" and the same with "rs" push a stick
- * all the way while they are held.
+ * all the way while they are held.  A "t" in front of the time
+ * ("t90:a/10") counts seconds since the first poll instead of frames, for
+ * screens that wait on a button without presenting; a "w" ("w8:a/10")
+ * presses it whenever no frame has been presented for that many seconds.
  */
 #define _GNU_SOURCE
 #include <SDL.h>
@@ -736,13 +739,44 @@ static void read_script(XINPUT_GAMEPAD *g, unsigned port)
     ULONG now = d3d_frame_count();
     char buf[1024];
     snprintf(buf, sizeof buf, "%s", script);
-    for (char *save, *tok = strtok_r(buf, " ,", &save); tok; tok = strtok_r(NULL, " ,", &save)) {
+    /* A press also ends once its hold has passed in wall time (60 frames a
+       second): titles that stop presenting while they load would otherwise
+       see the button held forever. */
+    static uint64_t pressed_at[128];
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    uint64_t ms = (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    unsigned n = 0;
+    for (char *save, *tok = strtok_r(buf, " ,", &save); tok; tok = strtok_r(NULL, " ,", &save), n++) {
         char buf2[16] = "", *name = buf2;
         unsigned frame = 0, hold = 6;
-        if (sscanf(tok, "%u:%15[a-z0-9]/%u", &frame, buf2, &hold) < 2) continue;
+        bool timed = *tok == 't', stalled = *tok == 'w';
+        if (sscanf(tok + (timed || stalled), "%u:%15[a-z0-9]/%u", &frame, buf2, &hold) < 2) continue;
         unsigned to = 0;
         if (!strncmp(name, "p2", 2)) { to = 1; name += 2; }
-        if (to != port || now < frame || now >= frame + hold) continue;
+        if (timed) {
+            /* "tSECONDS:BUTTON": seconds since the first poll, for screens
+               that wait on a button without presenting frames. */
+            static uint64_t start_ms;
+            if (!start_ms) start_ms = ms;
+            if (to != port || ms - start_ms < frame * 1000ull || ms - start_ms >= frame * 1000ull + hold * 1000ull / 60)
+                continue;
+        } else if (stalled) {
+            /* "wSECONDS:BUTTON": pressed whenever no frame has been
+               presented for that long (a "press A" screen after loading). */
+            static ULONG last_frame;
+            static uint64_t last_change_ms, press_until;
+            if (now != last_frame || !last_change_ms) { last_frame = now; last_change_ms = ms; }
+            if (ms >= press_until && ms - last_change_ms >= frame * 1000ull) {
+                press_until = ms + hold * 1000ull / 60;
+                last_change_ms = press_until;      /* the next press waits another stall */
+            }
+            if (to != port || ms >= press_until) continue;
+        } else if (to != port || now < frame || now >= frame + hold) continue;
+        if (!timed && !stalled && n < 128) {
+            if (!pressed_at[n]) pressed_at[n] = ms;
+            else if (ms - pressed_at[n] > hold * 1000ull / 60 + 50) continue;
+        }
         static const char *analog[] = { "a", "b", "x", "y", "black", "white", "lt", "rt" };
         static const int analog_idx[] = { XINPUT_GAMEPAD_A, XINPUT_GAMEPAD_B, XINPUT_GAMEPAD_X, XINPUT_GAMEPAD_Y,
                                           XINPUT_GAMEPAD_BLACK, XINPUT_GAMEPAD_WHITE,

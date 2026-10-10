@@ -1707,6 +1707,10 @@ static void NTAPI D3DDevice_SetTransform(ULONG State, const D3DMATRIX *m)
 {
     if (d3d.recording) pb_record2(OP_TRANSFORM, &State, 4, m, sizeof(*m));
     if (State < 10) d3d.transforms[State] = *m;
+    if (State == 1)
+        TRACE_ALL("D3D: projection %g %g %g %g / %g %g %g %g / %g %g %g %g / %g %g %g %g",
+                  m->m[0][0], m->m[0][1], m->m[0][2], m->m[0][3], m->m[1][0], m->m[1][1], m->m[1][2], m->m[1][3],
+                  m->m[2][0], m->m[2][1], m->m[2][2], m->m[2][3], m->m[3][0], m->m[3][1], m->m[3][2], m->m[3][3]);
 }
 
 /* The viewport scale and offset the library writes to
@@ -2296,7 +2300,7 @@ static LONG NTAPI D3DDevice_CreateVertexShader(const ULONG *decl, const ULONG *f
    (0 = fixed function for that stage) with its uniform locations. */
 typedef struct program_entry {
     GLuint vs, fs, prog;
-    GLint loc_c, loc_flip_y, loc_vp_scale, loc_vp_offset;
+    GLint loc_c, loc_flip_y, loc_vp_scale, loc_vp_offset, loc_wdepth;
     GLint loc_tex[4], loc_cube[4], loc_vol[4], loc_tex_scale, loc_c0, loc_c1, loc_fc0, loc_fc1,
           loc_bump_env, loc_bump_lum;
     float (*last_c)[4];   /* the constants last uploaded to this program */
@@ -2460,6 +2464,7 @@ static program_entry *program_for(GLuint vs, GLuint fs)
         e->loc_flip_y = U("flip_y");
         e->loc_vp_scale = U("vp_scale");
         e->loc_vp_offset = U("vp_offset");
+        e->loc_wdepth = U("wdepth");
         static const char *tex[] = { "tex0", "tex1", "tex2", "tex3" }, *cube[] = { "cube0", "cube1", "cube2", "cube3" },
                           *vol[] = { "vol0", "vol1", "vol2", "vol3" };
         for (int i = 0; i < 4; i++) {
@@ -2787,6 +2792,21 @@ static void upload_constants(const vshader *sh, program_entry *e)
     if (e->loc_flip_y >= 0) p_glUniform1f(e->loc_flip_y, d3d.rt_texture ? -1.0f : 1.0f);
     if (e->loc_vp_scale >= 0) p_glUniform4fv(e->loc_vp_scale, 1, vp[0]);
     if (e->loc_vp_offset >= 0) p_glUniform4fv(e->loc_vp_offset, 1, vp[1]);
+    if (e->loc_wdepth >= 0) {
+        /* D3DZB_USEW: the NV2A depth-tests w and ignores oPos.z, which
+           W-buffered titles leave unscaled (Splinter Cell's z/w is 0..1, not
+           0..2^24-1, so it all landed on the near plane).  Rebuild the z the
+           fixed-function draws get from the projection transform, which the
+           library needs set for its W range anyway: z/w = m22/m23 + m32/w. */
+        float wd[4] = { 0, 0, 0, 0 };
+        const D3DMATRIX *p = &d3d.transforms[1];
+        if (RS(D3DRS_ZENABLE) == 2 && p->m[2][3] != 0 && p->m[3][3] == 0) {
+            wd[0] = 1;
+            wd[1] = p->m[2][2] / p->m[2][3];
+            wd[2] = p->m[3][2];
+        }
+        p_glUniform4fv(e->loc_wdepth, 1, wd);
+    }
 }
 
 /* Draw with a programmable vertex shader: generic attributes + GLSL. */
@@ -4543,6 +4563,8 @@ static void NTAPI D3DDevice_SetVertexShaderConstant(LONG Register, const float *
 {
     if (d3d.recording) { ULONG h[2] = { (ULONG)Register, count }; pb_record2(OP_VS_CONST, h, 8, data, count * 16); }
     TRACE_ALL("D3D: vs constant %d x%u = %g %g %g %g", Register, count, data[0], data[1], data[2], data[3]);
+    for (unsigned r = 1; r < count && r < 8; r++)
+        TRACE_ALL("D3D:   +%u = %g %g %g %g", r, data[r * 4], data[r * 4 + 1], data[r * 4 + 2], data[r * 4 + 3]);
     for (ULONG i = 0; i < count; i++) {
         int slot = constant_slot(Register + i);
         memcpy(d3d.vs_const[slot], data + i * 4, 16);
@@ -4816,6 +4838,12 @@ static void NTAPI D3DDevice_CreatePixelShader(const ULONG *def, ULONG *handle)
     ULONG *copy = pool_alloc(PSDEF_DWORDS * 4);
     memcpy(copy, def, PSDEF_DWORDS * 4);
     *handle = (ULONG)copy;
+    if (getenv("XBCOMPAT_PSH_CATALOG")) {
+        /* Debug aid: log every definition a title creates (tests/psh_catalog.py). */
+        char line[PSDEF_DWORDS * 9 + 1], *o = line;
+        for (int i = 0; i < PSDEF_DWORDS; i++) o += sprintf(o, "%08lx ", (unsigned long)def[i]);
+        xlog("D3D: psdef %#lx %s", (unsigned long)*handle, line);
+    }
 }
 
 /* Load a D3DPIXELSHADERDEF into the render states.  `obj` is the title's
@@ -4839,6 +4867,17 @@ static void set_pixel_shader_def(const ULONG *def, ULONG *obj)
         d3d.device[0x784 / 4] = def ? (ULONG)obj : 0;
     }
     if (!def) return;
+    if (getenv("XBCOMPAT_PSH_CATALOG")) {
+        static ULONG seen[512]; static int nseen;
+        int k = 0;
+        while (k < nseen && seen[k] != (ULONG)def) k++;
+        if (k == nseen && nseen < 512) {
+            seen[nseen++] = (ULONG)def;
+            char line[PSDEF_DWORDS * 9 + 1], *o = line;
+            for (int i = 0; i < PSDEF_DWORDS; i++) o += sprintf(o, "%08lx ", (unsigned long)def[i]);
+            xlog("D3D: psdef-used %#lx %s", (unsigned long)def, line);
+        }
+    }
     memcpy(d3d.render_state, def, D3DRS_PS_MAX * 4);
     RS(D3DRS_PSTEXTUREMODES) = def[54];
 }

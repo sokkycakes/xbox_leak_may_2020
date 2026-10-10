@@ -343,7 +343,7 @@ static const char *const prologue =
     "/* NV2A vertex program, translated by xbcompat */\n"
     "uniform vec4 c[192];\n"
     "uniform float flip_y;\n"
-    "uniform vec4 vp_scale, vp_offset;\n";
+    "uniform vec4 vp_scale, vp_offset, wdepth;\n";
 
 static const char *const helpers =
     "\n"
@@ -505,6 +505,7 @@ char *vsh_translate(const uint32_t *code, unsigned count)
            "  vs_n.z = (vp_scale.z != 0.0) ? vs_n.z / vp_scale.z : 0.0;\n"
            "  float vs_w = (oPos.w >= 0.0) ? clamp(oPos.w, 5.42101086e-20, 1.84467441e19)\n"
            "                               : clamp(oPos.w, -1.84467441e19, -5.42101086e-20);\n"
+           "  if (wdepth.x != 0.0) vs_n.z = wdepth.y + wdepth.z / vs_w;\n"
            "  gl_Position = vec4(vs_n.x, vs_n.y * flip_y, 2.0 * vs_n.z - 1.0, 1.0) * vs_w;\n"
            "  gl_FrontColor = clamp(oD0, 0.0, 1.0);\n"
            "  gl_FrontSecondaryColor = clamp(oD1, 0.0, 1.0);\n");
