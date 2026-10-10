@@ -66,10 +66,12 @@ define XBCOMPAT_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/dashboard $(TARGET_DIR)/usr/libexec/dashboard
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/xbox-sample $(TARGET_DIR)/usr/bin/xbox-sample
 	mkdir -p $(TARGET_DIR)/etc/default
+	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/../../../../xbcompat/tools/sion/cards/sion-cards $(TARGET_DIR)/usr/sbin/sion-cards
 	echo 'DASHBOARD="xbox"' > $(TARGET_DIR)/etc/default/dashboard
 endef
 
 define XBCOMPAT_INSTALL_INIT_SYSV
+	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/../../../../xbcompat/tools/sion/cards/S35cards $(TARGET_DIR)/etc/init.d/S35cards
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/S11xbox-boot $(TARGET_DIR)/etc/init.d/S11xbox-boot
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/S98xbox $(TARGET_DIR)/etc/init.d/S98xbox
 endef
