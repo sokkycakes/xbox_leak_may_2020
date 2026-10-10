@@ -4766,7 +4766,7 @@ static GLuint surface_rt_texture(D3DSurface *s, ULONG w, ULONG h)
     ULONG fmt = (s->Format >> 8) & 0xFF;
     GLenum transfer_format, transfer_type;
     unsigned bytes;
-    if (surface_color_transfer(fmt, &transfer_format, &transfer_type, &bytes)) {
+    if (surface_transfer(fmt, &transfer_format, &transfer_type, &bytes)) {
         ULONG sw, sh, pitch;
         container_size((D3DPixelContainer *)s, &sw, &sh, &pitch);
         upload_image3(GL_TEXTURE_2D, 0, fmt, w, h, 1, pitch,
@@ -4882,9 +4882,15 @@ static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
     }
     p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, face_target, tex, target_level);
     d3d.target_zmax = z ? depth_format_max((z->Format >> 8) & 0xFF) : d3d.zscale;
-    if (z && z->Parent && tex_target(z->Parent) == GL_TEXTURE_2D) {
-        /* Depth into a texture (a shadow buffer). */
-        GLuint dt = texture_for(z->Parent);
+    if (z && ((z->Parent && tex_target(z->Parent) == GL_TEXTURE_2D)
+              || (!z->Parent && (((z->Format >> 8) & 0xFF) == 0x2E
+                               || ((z->Format >> 8) & 0xFF) == 0x30)))) {
+        /* Give standalone integer depth surfaces their own persistent image,
+           just like texture views. A shared scratch renderbuffer loses data
+           when targets alternate and cannot be copied or locked back. */
+        ULONG zw, zh, zp;
+        container_size((D3DPixelContainer *)z, &zw, &zh, &zp);
+        GLuint dt = z->Parent ? texture_for(z->Parent) : surface_rt_texture(z, zw, zh);
         GLenum depth_face;
         ULONG depth_level;
         if (!surface_image(z, &depth_face, &depth_level)) {
@@ -4954,7 +4960,8 @@ static void NTAPI D3DSurface_LockRect(D3DSurface *s, ULONG *locked, const LONG *
         for (ULONG y = 0; y < h; y++) memcpy(px + y * pitch, tmp + (h - 1 - y) * w * 4, w * 4);
         free(tmp);
     }
-    if (s == d3d.backbuffer && !(flags & 0x10 /* D3DLOCK_READONLY */)) d3d.bb_cpu_dirty = true;
+    if (s != d3d.backbuffer) readback_rt_surface(s);
+    if (s == d3d.backbuffer && !(flags & 0x80 /* D3DLOCK_READONLY */)) d3d.bb_cpu_dirty = true;
     if (s->Parent && !(flags & 0x80)) tex_invalidate(s->Parent->res.Data);
     ULONG fmt = (s->Format >> 8) & 0xFF, offset = rect ? rect[1] * pitch + rect[0] * (pitch / w) : 0;
     if (fmt == 0x0C || fmt == 0x0E || fmt == 0x0F) {   /* rows of 4x4 blocks, as in lock_level */

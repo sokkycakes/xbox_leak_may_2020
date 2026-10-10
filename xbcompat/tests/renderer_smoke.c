@@ -1602,6 +1602,39 @@ int main(int argc, char **argv)
             printf("renderer depth views: format %02x mip attachment and partial copy passed\n",depth_format);
         }
 
+        /* Distinct standalone depth surfaces must not share a scratch image.
+         * Copy into an already attached destination, then lock it read-only. */
+        for(unsigned format=0x2a;format<=0x2c;format+=2){
+            LONG (NTAPI *create_depth)(ULONG,ULONG,ULONG,ULONG,void **)=find("_D3DDevice_CreateDepthStencilSurface@20");
+            void (NTAPI *lock_surface)(void *,ULONG *,const LONG *,ULONG)=find("_D3DSurface_LockRect@16");
+            void *color=create_tex(8,8,1,1,0,6,3),*color_view=NULL,*depth_a=NULL,*depth_b=NULL;
+            assert(surface(color,0,&color_view)==0);
+            assert(create_depth(8,8,format,0,&depth_a)==0 && create_depth(8,8,format,0,&depth_b)==0);
+            set_tex(0,NULL);
+            set_rt(color_view,depth_a);clear(0,NULL,0xf3,0xff000000,.25f,0x12);
+            set_rt(color_view,depth_b);clear(0,NULL,0xf3,0xff000000,.75f,0x34);
+            set_rt(color_view,depth_a);
+            float z=0;glReadPixels(1,1,1,1,GL_DEPTH_COMPONENT,GL_FLOAT,&z);
+            assert(z>.249f && z<.251f);
+            set_rt(color_view,depth_b);
+            LONG rect[4]={0,0,2,2},point[2]={0,0};copy_rects(depth_a,rect,1,depth_b,point);
+            glReadPixels(0,0,1,1,GL_DEPTH_COMPONENT,GL_FLOAT,&z);assert(z>.249f && z<.251f);
+            glReadPixels(6,6,1,1,GL_DEPTH_COMPONENT,GL_FLOAT,&z);assert(z>.749f && z<.751f);
+            ULONG locked[2];lock_surface(depth_b,locked,NULL,0x80);
+            unsigned char *data=(void *)locked[1];
+            if(format==0x2a){
+                uint32_t copied=*(uint32_t *)data,untouched=*(uint32_t *)(data+6*locked[0]+6*4);
+                assert((copied&255)==0x12 && (untouched&255)==0x34);
+                assert((copied>>8)>4190000 && (copied>>8)<4200000);
+                assert((untouched>>8)>12580000 && (untouched>>8)<12590000);
+            }else{
+                uint16_t copied=*(uint16_t *)data,untouched=*(uint16_t *)(data+6*locked[0]+6*2);
+                assert(copied>16370 && copied<16400 && untouched>49140 && untouched<49170);
+            }
+            set_rt(back,NULL);set_tex(0,tex);
+        }
+        puts("renderer standalone depth: independent images, active partial copies and read-only locks passed");
+
         /* Same-format DXT copies preserve whole encoded blocks and support
          * cached destinations, overlap and the final sub-4x4 mip footprint. */
         {
