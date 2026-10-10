@@ -10,6 +10,13 @@ if [ "${XBOX_CPU:-box86}" = box86 ] && [ -x /usr/bin/box86 ] && [ -x "$D/xbcompa
 	# glvnd's libOpenGL (no GLX).
 	export BOX86_LOWEST=50000000 BOX86_TSC_HZ=733333333 BOX86_LIBGL=libOpenGL.so.0
 	export BOX86_NOBANNER=1 BOX86_LOG=${BOX86_LOG:-0}
+	# Faster recompiled code: bigger blocks, direct call/ret, no flags kept
+	# across calls. The dashboard draws the same frames with them (checked
+	# against the defaults); /etc/default/xbox can set any of them back.
+	export BOX86_DYNAREC_BIGBLOCK=${BOX86_DYNAREC_BIGBLOCK:-2}
+	export BOX86_DYNAREC_CALLRET=${BOX86_DYNAREC_CALLRET:-1}
+	export BOX86_DYNAREC_SAFEFLAGS=${BOX86_DYNAREC_SAFEFLAGS:-0}
+	export BOX86_DYNAREC_FORWARD=${BOX86_DYNAREC_FORWARD:-1024}
 	exec /usr/bin/box86 "$D/xbcompat.x86" "$@"
 fi
 exec "$D/xbcompat.arm" "$@"

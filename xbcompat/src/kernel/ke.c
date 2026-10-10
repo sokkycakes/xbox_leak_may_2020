@@ -657,6 +657,7 @@ typedef void (NTAPI *dpc_fn)(KDPC *, PVOID, PVOID, PVOID);
 /* The DPC thread: fires timers, runs DPCs and keeps KeTickCount moving. */
 static void *dpc_thread(void *arg)
 {
+    pthread_setname_np(pthread_self(), "dpc");
     (void)arg;
     thread_adopt_host("dpc");
     set_irql(2);

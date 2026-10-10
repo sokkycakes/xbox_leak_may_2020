@@ -1115,6 +1115,7 @@ static void flush_locked(struct ds_stream *s, DWORD status)
 
 static void *completion_thread(void *arg)
 {
+    pthread_setname_np(pthread_self(), "ds-notify");
     (void)arg;
     thread_adopt_host("dsound");
     LOCK();
@@ -1323,6 +1324,7 @@ static void SDLCALL sdl_audio_cb(void *ud, Uint8 *stream, int len)
 
 static void *clock_thread(void *arg)
 {
+    pthread_setname_np(pthread_self(), "ds-clock");
     (void)arg;
     static float scratch[MIX_FRAMES * 2];
     uint64_t next = mono_ns();

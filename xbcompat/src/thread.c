@@ -177,6 +177,10 @@ static pthread_cond_t start_cond XBC_COND_ALIGN = PTHREAD_COND_INITIALIZER;
 static void *thread_main(void *arg)
 {
     xthread *t = arg;
+    /* Named by start address, to find a busy thread in top -H or /proc. */
+    char name[16];
+    snprintf(name, sizeof name, "x%08x", (unsigned)(uintptr_t)t->start_routine);
+    pthread_setname_np(pthread_self(), name);
     attach(t);
 
     pthread_mutex_lock(&start_lock);
