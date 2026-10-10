@@ -34,3 +34,19 @@ jobs:
       - name: Full native executable build
         working-directory: xbcompat
         run: make -j4 TARGET=i386 CC=i686-linux-gnu-gcc BUILD=build-native-nv2a PKGCFG='env PKG_CONFIG_LIBDIR=/usr/lib/i386-linux-gnu/pkgconfig pkg-config'
+  armhf-build:
+    runs-on: ubuntu-24.04
+    container: debian:bookworm
+    timeout-minutes: 25
+    steps:
+      - name: Install ARM renderer build dependencies
+        run: |
+          dpkg --add-architecture armhf
+          apt-get update
+          apt-get install -y git ca-certificates make python3 gcc-arm-linux-gnueabihf libc6-dev-armhf-cross pkg-config libsdl2-dev:armhf libgl-dev:armhf
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: xbcompat
+      - name: Build ARM renderer and generated ABI adapters
+        working-directory: xbcompat
+        run: make -f tools/native-renderer.mk TARGET=armhf BUILD=build-renderer-armhf -j4
