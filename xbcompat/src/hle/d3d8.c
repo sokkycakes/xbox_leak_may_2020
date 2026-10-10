@@ -981,12 +981,31 @@ static void NTAPI D3DResource_Register(D3DResource *r, PVOID base)
 
 typedef struct tex_entry {
     ULONG data, format, size;
+    ULONG pal;           /* P8 textures: a hash of the palette they were expanded with */
     GLuint id;
     GLenum target;
     struct tex_entry *next;
 } tex_entry;
 
 static tex_entry *tex_cache;
+
+/* The palette of the stage whose texture is being bound (P8 textures). */
+static const uint32_t *tex_palette;
+static ULONG tex_palette_count;
+
+static void tex_use_palette(int stage)
+{
+    D3DPalette *p = stage < 4 ? d3d.palettes[stage] : NULL;
+    tex_palette = p ? (const uint32_t *)(p->Data | CONTIG_BASE) : NULL;
+    tex_palette_count = p ? 256u >> (p->Common >> 30) : 0;
+}
+
+static ULONG palette_hash(void)
+{
+    ULONG h = 2166136261u;
+    for (ULONG i = 0; tex_palette && i < tex_palette_count; i++) h = (h ^ tex_palette[i]) * 16777619u;
+    return h | 1;
+}
 
 /* Forget the GL copy of a texture the title is about to modify. */
 static void tex_invalidate(ULONG data)
@@ -1141,7 +1160,8 @@ static void upload_image3(GLenum target, ULONG fmt, ULONG w, ULONG h, ULONG d, U
        du/dv as the signed bytes' bit patterns in r/g and luminance in b;
        3 = YUY2 and 4 = UYVY (video frames), converted to RGB with BT.601;
        5 = A8, which the NV2A samples as white with that alpha;
-       6 = AL8, one byte that is both luminance and alpha. */
+       6 = AL8, one byte that is both luminance and alpha;
+       7 = P8, an index into the stage's palette of A8R8G8B8 colors. */
     struct { ULONG fmt; int bpp; bool swizzled; GLenum gl_fmt, gl_type; bool force_alpha; int conv; } table[] = {
         { 0x3A, 4, true,  GL_RGBA, GL_UNSIGNED_BYTE, false, 0 },               /* A8B8G8R8 / Q8W8V8U8 */
         { 0x3F, 4, false, GL_RGBA, GL_UNSIGNED_BYTE, false, 0 },               /* LIN_A8B8G8R8 */
@@ -1176,6 +1196,7 @@ static void upload_image3(GLenum target, ULONG fmt, ULONG w, ULONG h, ULONG d, U
         { 0x19, 1, true,  GL_RGBA, GL_UNSIGNED_BYTE, false, 5 },              /* A8 */
         { 0x1F, 1, false, GL_RGBA, GL_UNSIGNED_BYTE, false, 5 },              /* LIN_A8 */
         { 0x01, 1, true,  GL_RGBA, GL_UNSIGNED_BYTE, false, 6 },              /* AL8 */
+        { 0x0B, 1, true,  GL_BGRA, GL_UNSIGNED_BYTE, false, 7 },              /* P8 */
         { 0x1B, 1, false, GL_RGBA, GL_UNSIGNED_BYTE, false, 6 },              /* LIN_AL8 */
         { 0x1A, 2, true,  GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE, false, 0 },   /* A8L8 */
         { 0x20, 2, false, GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE, false, 0 },   /* LIN_A8L8 */
@@ -1214,7 +1235,16 @@ static void upload_image3(GLenum target, ULONG fmt, ULONG w, ULONG h, ULONG d, U
     }
     if (table[i].force_alpha && bpp == 4)
         for (ULONG k = 0; k < w * h * d; k++) px[k * 4 + 3] = 0xFF;
-    if (table[i].conv >= 5) {
+    if (table[i].conv == 7) {
+        uint8_t *bgra = malloc(w * h * d * 4);
+        for (ULONG k = 0; k < w * h * d; k++) {
+            uint32_t c = tex_palette && px[k] < tex_palette_count ? tex_palette[px[k]] : 0xFFFF00FF;
+            memcpy(bgra + k * 4, &c, 4);
+        }
+        free(px);
+        px = bgra;
+        bpp = 4;
+    } else if (table[i].conv >= 5) {
         uint8_t *rgba = malloc(w * h * d * 4);
         for (ULONG k = 0; k < w * h * d; k++) {
             rgba[k * 4] = rgba[k * 4 + 1] = rgba[k * 4 + 2] = table[i].conv == 6 ? px[k] : 0xFF;
@@ -1328,10 +1358,11 @@ static GLuint texture_for(D3DPixelContainer *t)
     static int nocache = -1;
     if (nocache < 0) nocache = getenv("XBCOMPAT_NO_TEXCACHE") != NULL;
     if (nocache) tex_invalidate(t->res.Data);
-    for (tex_entry *e = tex_cache; e; e = e->next)
-        if (e->data == t->res.Data && e->format == t->Format && e->size == t->Size) return e->id;
-
     ULONG fmt = (t->Format >> 8) & 0xFF, w, h, pitch;
+    ULONG pal = fmt == 0x0B ? palette_hash() : 0;
+    for (tex_entry *e = tex_cache; e; e = e->next)
+        if (e->data == t->res.Data && e->format == t->Format && e->size == t->Size && e->pal == pal) return e->id;
+
     container_size(t, &w, &h, &pitch);
     if (!t->Size) pitch = 0;
     const uint8_t *src = (const uint8_t *)(t->res.Data | CONTIG_BASE);
@@ -1357,7 +1388,7 @@ static GLuint texture_for(D3DPixelContainer *t)
     debug_dump_texture(target, t->res.Data, fmt, w, h);
 
     tex_entry *e = malloc(sizeof(*e));
-    *e = (tex_entry){ t->res.Data, t->Format, t->Size, id, target, tex_cache };
+    *e = (tex_entry){ t->res.Data, t->Format, t->Size, pal, id, target, tex_cache };
     tex_cache = e;
     return id;
 }
@@ -1565,6 +1596,7 @@ static unsigned apply_textures(void)
         GLenum target = t ? tex_target(t) : GL_TEXTURE_2D;
         glEnable(target);
         if (t) {
+            tex_use_palette(s);
             glBindTexture(target, texture_for(t));
             apply_sampler(target, s);
         } else {
@@ -2473,6 +2505,7 @@ static void apply_shader_textures(const program_entry *e)
             continue;
         }
         GLenum target = tex_target(t);
+        tex_use_palette(s);
         glBindTexture(target, texture_for(t));
         apply_sampler(target, s);
         if (t->Size) {   /* linear textures are addressed in texels */
@@ -3852,7 +3885,7 @@ static GLuint surface_rt_texture(D3DSurface *s, ULONG w, ULONG h)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_BGRA, GL_UNSIGNED_BYTE, NULL);
     tex_entry *e = malloc(sizeof(*e));
-    *e = (tex_entry){ s->Data, s->Format, s->Size, id, GL_TEXTURE_2D, tex_cache };
+    *e = (tex_entry){ s->Data, s->Format, s->Size, 0, id, GL_TEXTURE_2D, tex_cache };
     tex_cache = e;
     return id;
 }
