@@ -1362,8 +1362,8 @@ int main(int argc, char **argv)
 
         /* Integer depth/stencil texture views retain independent mip contents,
          * and CopyRects preserves the untouched destination depth and stencil. */
-        {
-            void *color = create_tex(8,8,1,2,0,6,3), *depth = create_tex(8,8,1,2,0,0x2a,3);
+        for (unsigned depth_format=0x2a; depth_format<=0x2c; depth_format+=2) {
+            void *color = create_tex(8,8,1,2,0,6,3), *depth = create_tex(8,8,1,2,0,depth_format,3);
             void *color0=NULL,*color1=NULL,*depth0=NULL,*depth1=NULL;
             assert(surface(color,0,&color0)==0 && surface(color,1,&color1)==0);
             assert(surface(depth,0,&depth0)==0 && surface(depth,1,&depth1)==0);
@@ -1373,19 +1373,19 @@ int main(int argc, char **argv)
             set_rt(color0,depth0);
             float z=0; unsigned char stencil=0;
             glReadPixels(2,2,1,1,GL_DEPTH_COMPONENT,GL_FLOAT,&z);
-            glReadPixels(2,2,1,1,GL_STENCIL_INDEX,GL_UNSIGNED_BYTE,&stencil);
-            assert(z>.249f && z<.251f && stencil==0x12);
+            if (depth_format==0x2a) glReadPixels(2,2,1,1,GL_STENCIL_INDEX,GL_UNSIGNED_BYTE,&stencil);
+            assert(z>.249f && z<.251f && (depth_format!=0x2a || stencil==0x12));
             LONG rect[4]={0,0,2,2},point[2]={0,0};
             copy_rects(depth0,rect,1,depth1,point);
             set_rt(color1,depth1);
             glReadPixels(0,0,1,1,GL_DEPTH_COMPONENT,GL_FLOAT,&z);
-            glReadPixels(0,0,1,1,GL_STENCIL_INDEX,GL_UNSIGNED_BYTE,&stencil);
-            assert(z>.249f && z<.251f && stencil==0x12);
+            if (depth_format==0x2a) glReadPixels(0,0,1,1,GL_STENCIL_INDEX,GL_UNSIGNED_BYTE,&stencil);
+            assert(z>.249f && z<.251f && (depth_format!=0x2a || stencil==0x12));
             glReadPixels(3,3,1,1,GL_DEPTH_COMPONENT,GL_FLOAT,&z);
-            glReadPixels(3,3,1,1,GL_STENCIL_INDEX,GL_UNSIGNED_BYTE,&stencil);
-            assert(z>.749f && z<.751f && stencil==0x34);
+            if (depth_format==0x2a) glReadPixels(3,3,1,1,GL_STENCIL_INDEX,GL_UNSIGNED_BYTE,&stencil);
+            assert(z>.749f && z<.751f && (depth_format!=0x2a || stencil==0x34));
             set_rt(back,NULL); set_tex(0,tex);
-            puts("renderer depth views: D24S8 mip attachment and partial depth/stencil copy passed");
+            printf("renderer depth views: format %02x mip attachment and partial copy passed\n",depth_format);
         }
 
         /* Same-format DXT copies preserve whole encoded blocks and support

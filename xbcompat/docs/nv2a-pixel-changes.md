@@ -24,3 +24,9 @@ The existing signed dot-map formulas were retained: the unusual D3D endpoint at 
 These isolated tests do not establish that Splinter Cell night or thermal vision is fixed. Game captures and the ATG suite remain necessary integration regressions. Execution results belong in the task's validation record.
 
 The HLE integration test in `renderer_smoke --render` additionally reuses one shader and texture while toggling alpha kill and color-key operations off/on/off, then changes only the key-color uniform. This covers shader-cache identity and per-draw state uploads beyond the isolated translator tests.
+
+## Continuation from 16927d2
+
+Paired programmable vertex/pixel stages now evaluate ordinary finite EXP, EXP2 and LINEAR fog at vertices. A shared per-draw uniform distinguishes interpolated factors from legacy fog distances; the fragment shader clamps the interpolated factor. The renderer regression distinguishes nonlinear vertex-factor interpolation from fragment evaluation and checks masked scalar writes, unclamped linear factors and fog disable. Equal endpoints, exceptional values, ABS modes and mixed/FF stages are not newly specified.
+
+Fixed-function texture transforms no longer normalize linear texture coordinates when a programmable pixel stage already applies tex_scale. Literal packed-color copy tests exposed and now guard the duplicate normalization. This does not change the unresolved rule for dependent reads into linear destinations.
