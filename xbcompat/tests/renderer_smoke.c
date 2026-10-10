@@ -199,6 +199,519 @@ int main(int argc, char **argv)
             assert(pixel[mip ? 1 : 0] > 240 && pixel[mip ? 0 : 1] < 8 && pixel[2] < 8);
         }
         puts("renderer mipmaps: authored partial chain and none/point/linear selection passed");
+        /* Post-processing copies must read the GPU image, not the stale
+         * CPU allocation behind a render-to-texture surface. Repeat with
+         * new colors and exercise both linear and swizzled destinations. */
+        LONG (NTAPI *surface)(void *,ULONG,void **) = find("_D3DTexture_GetSurfaceLevel@12");
+        void (NTAPI *get_rt)(void **) = find("_D3DDevice_GetRenderTarget@4");
+        void (NTAPI *set_rt)(void *,void *) = find("_D3DDevice_SetRenderTarget@8");
+        void (NTAPI *copy_rects)(void *,const LONG *,ULONG,void *,const LONG *) =
+            find("_D3DDevice_CopyRects@20");
+        void *back = NULL, *source_surface = NULL;
+        void *source_tex = create_tex(16,16,1,1,0,6,3);
+        get_rt(&back);
+        assert(surface(source_tex,0,&source_surface) == 0);
+        texture_states[5] = 0;
+        for (unsigned layout = 0; layout < 2; layout++) {
+            void *dest_tex = create_tex(16,16,1,1,0,layout ? 6 : 0x12,3);
+            void *dest_surface = NULL;
+            assert(surface(dest_tex,0,&dest_surface) == 0);
+            for (unsigned frame = 0; frame < 2; frame++) {
+                set_tex(0,NULL);
+                set_rt(source_surface,NULL);
+                clear(0,NULL,0xf0,frame ? 0xff0000ff : 0xff00ff00,1.0f,0);
+                set_rt(back,NULL);
+                copy_rects(source_surface,NULL,0,dest_surface,NULL);
+                set_tex(0,dest_tex);
+                for (unsigned v = 0; v < 3; v++) {
+                    textured[v].u = textured[v].v = layout ? 0.5f : 8.0f;
+                }
+                clear(0,NULL,0xf0,0xff000000,1.0f,0);
+                draw(5,3,textured,sizeof(textured[0]));
+                glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                assert(pixel[frame ? 2 : 1] > 240 && pixel[frame ? 1 : 2] < 8 && pixel[0] < 8);
+            }
+        }
+        puts("renderer copies: fresh GPU render targets to linear/swizzled textures passed");
+        /* Texture controls participate in the fragment-program cache, while
+         * key colors are per-draw uniforms. Reuse the same shader/texture to
+         * catch stale variants and stale uniforms through the HLE backend. */
+        void (NTAPI *create_ps)(const ULONG *, ULONG *) =
+            find("_D3DDevice_CreatePixelShader@8");
+        void (NTAPI *set_ps)(ULONG) = find("_D3DDevice_SetPixelShader@4");
+        void (NTAPI *set_key_color)(ULONG, ULONG) =
+            find("_D3DDevice_SetTextureState_ColorKeyColor@8");
+        ULONG control_def[60] = {0}, control_ps = 0;
+        control_def[8] = 8;            /* explicit final RGB = T0 */
+        control_def[9] = 0x18u << 8;   /* final alpha = T0.a */
+        control_def[54] = 1;           /* PROJECT2D, then disabled stages */
+        create_ps(control_def, &control_ps);
+        assert(control_ps);
+        void *control_tex = create_tex(4,4,1,1,0,6,3);
+        assert(control_tex);
+        ULONG control_lock[2];
+        lock_tex(control_tex,0,control_lock,NULL,0);
+        for (unsigned i = 0; i < 16; i++)
+            ((uint32_t *)control_lock[1])[i] = 0x00ff0000; /* red, zero alpha */
+        set_tex(0,control_tex);
+        set_ps(control_ps);
+        set_vs(0x144);
+        texture_states[5] = 0;  /* no mip filtering */
+        texture_states[9] = 0;  /* color key disabled */
+        texture_states[11] = 0; /* alpha kill disabled */
+        render_states[59] = render_states[60] = 0;
+        render_states[92] = render_states[124] = 0;
+        for (unsigned pass = 0; pass < 3; pass++) {
+            /* D3DTEXTUREALPHAKILL_ENABLE is the hardware bit value 4. */
+            texture_states[11] = pass == 1 ? 4 : 0;
+            clear(0,NULL,0xf3,0xff000000,1.0f,0);
+            draw(5,3,textured,sizeof(textured[0]));
+            glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+            assert(pass == 1 ? pixel[0] < 8 : pixel[0] > 240);
+            assert(pixel[1] < 8 && pixel[2] < 8);
+        }
+        set_key_color(0,0x00ff0000);
+        for (unsigned pass = 0; pass < 3; pass++) {
+            texture_states[9] = pass == 1 ? 3 : 0; /* kill matching texels */
+            clear(0,NULL,0xf3,0xff000000,1.0f,0);
+            draw(5,3,textured,sizeof(textured[0]));
+            glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+            assert(pass == 1 ? pixel[0] < 8 : pixel[0] > 240);
+            assert(pixel[1] < 8 && pixel[2] < 8);
+        }
+        texture_states[9] = 3;
+        for (unsigned pass = 0; pass < 3; pass++) {
+            /* Identical shader variant: only the key-color uniform changes. */
+            set_key_color(0,pass == 1 ? 0x000000ff : 0x00ff0000);
+            clear(0,NULL,0xf3,0xff000000,1.0f,0);
+            draw(5,3,textured,sizeof(textured[0]));
+            glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+            assert(pass == 1 ? pixel[0] > 240 : pixel[0] < 8);
+            assert(pixel[1] < 8 && pixel[2] < 8);
+        }
+        set_ps(0);
+        set_tex(0,tex);
+        texture_states[9] = texture_states[11] = 0;
+        texture_states[5] = 2;
+        puts("renderer shader controls: cached kill/key toggles and key uniform updates passed");
+        /* A partial CopyRects into the backbuffer must preserve untouched GPU
+         * pixels before the full CPU image is flushed back to the renderer. */
+        {
+            void (NTAPI *get_bb)(LONG,ULONG,void **) = find("_D3DDevice_GetBackBuffer@12");
+            LONG (NTAPI *get_depth)(void **) = find("_D3DDevice_GetDepthStencilSurface@4");
+            void (NTAPI *set_target)(void *,void *) = find("_D3DDevice_SetRenderTarget@8");
+            LONG (NTAPI *create_image)(ULONG,ULONG,ULONG,void **) =
+                find("_D3DDevice_CreateImageSurface@16");
+            void (NTAPI *lock_surface)(void *,ULONG *,const LONG *,ULONG) =
+                find("_D3DSurface_LockRect@16");
+            void (NTAPI *copy_rects)(void *,const LONG *,ULONG,void *,const LONG *) =
+                find("_D3DDevice_CopyRects@20");
+            void *bb = NULL, *depth = NULL, *source = NULL;
+            get_bb(0,0,&bb);
+            assert(get_depth(&depth) == 0);
+            assert(create_image(1,1,6,&source) == 0);
+            ULONG locked[2];
+            lock_surface(source,locked,NULL,0);
+            *(uint32_t *)locked[1] = 0xffff0000;
+            set_target(bb,depth);
+            clear(0,NULL,0xf3,0xff0000ff,1.0f,0);
+            LONG rect[4] = {0,0,1,1}, point[2] = {8,8};
+            copy_rects(source,rect,1,bb,point);
+            /* A zero-mask clear flushes CPU writes without overwriting pixels. */
+            clear(0,NULL,0,0,1.0f,0);
+            unsigned char copied[4] = {0}, untouched[4] = {0};
+            glReadPixels(8,55,1,1,GL_RGBA,GL_UNSIGNED_BYTE,copied);
+            glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,untouched);
+            assert(copied[0] > 240 && copied[1] < 8 && copied[2] < 8);
+            assert(untouched[0] < 8 && untouched[1] < 8 && untouched[2] > 240);
+            puts("renderer CopyRects: partial backbuffer copy preserves untouched pixels");
+        }
+
+        /* Updating a standalone render target must keep its current attachment
+         * valid and preserve the copied pixels when the target is rebound. */
+        {
+            void (NTAPI *get_bb)(LONG,ULONG,void **) = find("_D3DDevice_GetBackBuffer@12");
+            LONG (NTAPI *get_depth)(void **) = find("_D3DDevice_GetDepthStencilSurface@4");
+            void (NTAPI *set_target)(void *,void *) = find("_D3DDevice_SetRenderTarget@8");
+            LONG (NTAPI *create_image)(ULONG,ULONG,ULONG,void **) =
+                find("_D3DDevice_CreateImageSurface@16");
+            LONG (NTAPI *create_target)(ULONG,ULONG,ULONG,ULONG,BOOLEAN,void **) =
+                find("_D3DDevice_CreateRenderTarget@24");
+            void (NTAPI *lock_surface)(void *,ULONG *,const LONG *,ULONG) =
+                find("_D3DSurface_LockRect@16");
+            void (NTAPI *copy_rects)(void *,const LONG *,ULONG,void *,const LONG *) =
+                find("_D3DDevice_CopyRects@20");
+            void *bb = NULL, *depth = NULL, *source = NULL, *target = NULL, *uncached = NULL;
+            get_bb(0,0,&bb);
+            assert(get_depth(&depth) == 0);
+            assert(create_image(1,1,6,&source) == 0);
+            assert(create_target(8,8,6,0,1,&target) == 0);
+            assert(create_target(8,8,6,0,1,&uncached) == 0);
+            ULONG locked[2];
+            lock_surface(source,locked,NULL,0);
+            *(uint32_t *)locked[1] = 0xffff0000;
+            LONG rect[4] = {0,0,1,1}, point[2] = {2,2};
+            set_target(target,NULL);
+            clear(0,NULL,0xf3,0xff0000ff,1.0f,0);
+            copy_rects(source,rect,1,target,point);
+            unsigned char copied[4] = {0}, untouched[4] = {0};
+            glReadPixels(2,2,1,1,GL_RGBA,GL_UNSIGNED_BYTE,copied);
+            glReadPixels(7,7,1,1,GL_RGBA,GL_UNSIGNED_BYTE,untouched);
+            assert(copied[0] > 240 && copied[1] < 8 && copied[2] < 8);
+            assert(untouched[0] < 8 && untouched[1] < 8 && untouched[2] > 240);
+            set_target(bb,depth);
+            set_target(target,NULL);
+            memset(copied,0,sizeof copied);
+            glReadPixels(2,2,1,1,GL_RGBA,GL_UNSIGNED_BYTE,copied);
+            assert(copied[0] > 240 && copied[1] < 8 && copied[2] < 8);
+            /* Copying before the first binding must initialize the later GL
+             * image from surface memory, rather than allocating empty pixels. */
+            set_target(bb,depth);
+            copy_rects(source,rect,1,uncached,point);
+            set_target(uncached,NULL);
+            memset(copied,0,sizeof copied);
+            glReadPixels(2,2,1,1,GL_RGBA,GL_UNSIGNED_BYTE,copied);
+            assert(copied[0] > 240 && copied[1] < 8 && copied[2] < 8);
+            set_target(bb,depth);
+            puts("renderer CopyRects: standalone attachment, rebind and first-bind pixels persist");
+        }
+
+        /* Updating one cube face must not discard GPU-only pixels rendered
+         * into its siblings when the shared parent texture is cached. */
+        {
+            void (NTAPI *get_bb)(LONG,ULONG,void **) = find("_D3DDevice_GetBackBuffer@12");
+            LONG (NTAPI *get_depth)(void **) = find("_D3DDevice_GetDepthStencilSurface@4");
+            void (NTAPI *set_target)(void *,void *) = find("_D3DDevice_SetRenderTarget@8");
+            LONG (NTAPI *create_image)(ULONG,ULONG,ULONG,void **) =
+                find("_D3DDevice_CreateImageSurface@16");
+            LONG (NTAPI *create_cube)(ULONG,ULONG,ULONG,ULONG,ULONG,void **) =
+                find("_D3DDevice_CreateCubeTexture@24");
+            LONG (NTAPI *get_face)(void *,ULONG,ULONG,void **) =
+                find("_D3DCubeTexture_GetCubeMapSurface@16");
+            void (NTAPI *lock_surface)(void *,ULONG *,const LONG *,ULONG) =
+                find("_D3DSurface_LockRect@16");
+            void (NTAPI *copy_rects)(void *,const LONG *,ULONG,void *,const LONG *) =
+                find("_D3DDevice_CopyRects@20");
+            void *bb = NULL, *depth = NULL, *source = NULL, *cube = NULL;
+            void *face0 = NULL, *face1 = NULL;
+            get_bb(0,0,&bb);
+            assert(get_depth(&depth) == 0);
+            assert(create_image(1,1,6,&source) == 0);
+            assert(create_cube(8,1,0,6,0,&cube) == 0);
+            assert(get_face(cube,0,0,&face0) == 0);
+            assert(get_face(cube,1,0,&face1) == 0);
+            ULONG locked[2];
+            lock_surface(source,locked,NULL,0);
+            *(uint32_t *)locked[1] = 0xffff0000;
+            set_target(face0,NULL);
+            clear(0,NULL,0xf3,0xff00ff00,1.0f,0);
+            set_target(face1,NULL);
+            clear(0,NULL,0xf3,0xff0000ff,1.0f,0);
+            LONG rect[4] = {0,0,1,1}, point[2] = {2,2};
+            copy_rects(source,rect,1,face1,point);
+            set_target(face0,NULL);
+            unsigned char sibling[4] = {0}, copied[4] = {0}, untouched[4] = {0};
+            glReadPixels(4,4,1,1,GL_RGBA,GL_UNSIGNED_BYTE,sibling);
+            assert(sibling[0] < 8 && sibling[1] > 240 && sibling[2] < 8);
+            set_target(face1,NULL);
+            glReadPixels(2,2,1,1,GL_RGBA,GL_UNSIGNED_BYTE,copied);
+            glReadPixels(7,7,1,1,GL_RGBA,GL_UNSIGNED_BYTE,untouched);
+            assert(copied[0] > 240 && copied[1] < 8 && copied[2] < 8);
+            assert(untouched[0] < 8 && untouched[1] < 8 && untouched[2] > 240);
+            set_target(bb,depth);
+            puts("renderer CopyRects: cached cube siblings and destination pixels persist");
+        }
+
+        /* Owned FF lighting through the real HLE state/matrix/uniform path.
+         * No pixel shader: this also verifies the compatibility fragment
+         * stage receives our separate primary and specular outputs. */
+        {
+            void (NTAPI *ff_set_transform)(ULONG,const void *) = find("_D3DDevice_SetTransform@8");
+            void (NTAPI *ff_set_material)(const float *) = find("_D3DDevice_SetMaterial@4");
+            LONG (NTAPI *ff_set_light)(ULONG,const void *) = find("_D3DDevice_SetLight@8");
+            LONG (NTAPI *ff_light_enable)(ULONG,BOOLEAN) = find("_D3DDevice_LightEnable@8");
+            void (NTAPI *ff_set_ps)(ULONG) = find("_D3DDevice_SetPixelShader@4");
+            struct ff_light {
+                ULONG type;
+                float diffuse[4], specular[4], ambient[4], position[3], direction[3];
+                float range, falloff, a0, a1, a2, theta, phi;
+            } light = { 0 };
+            struct ff_vertex { float x,y,z,nx,ny,nz; uint32_t color; };
+            struct ff_vertex vertices[] = {
+                {-.75f,-.75f,2,0,0,1,0xff00ff00},
+                { .75f,-.75f,2,0,0,1,0xff00ff00},
+                {0,.75f,2,0,0,1,0xff00ff00}
+            };
+            struct ff_plain_vertex { float x,y,z,nx,ny,nz; };
+            struct ff_plain_vertex plain[] = {
+                {-.75f,-.75f,2,0,0,1}, {.75f,-.75f,2,0,0,1}, {0,.75f,2,0,0,1}
+            };
+            float identity[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+            float projection[16] = {1,0,0,0, 0,1,0,0, 0,0,.1f,0, 0,0,0,1};
+            float material[17] = {1,0,0,1}; /* red diffuse */
+            ff_set_ps(0);
+            for (unsigned unit = 0; unit < 4; unit++) {
+                set_tex(unit,NULL);
+                texture_states[unit * 32 + 12] = 1; /* disable texture stage */
+                texture_states[unit * 32 + 21] = 0;
+                texture_states[unit * 32 + 28] = unit;
+            }
+            render_states[59] = render_states[60] = render_states[82] = 0;
+            render_states[108] = render_states[109] = render_states[118] = render_states[122] = 0;
+            render_states[123] = render_states[124] = render_states[125] = render_states[128] = 0;
+            render_states[67] = 0x01010101;
+            render_states[92] = render_states[95] = 1;
+            render_states[93] = render_states[94] = 0;
+            render_states[100] = render_states[101] = render_states[102] = render_states[103] = 0;
+            render_states[105] = 0;
+            render_states[120] = GL_FILL;
+            ff_set_transform(0,identity);
+            ff_set_transform(1,projection);
+            ff_set_transform(6,identity);
+            for (unsigned i = 0; i < 8; i++) ff_light_enable(i,0);
+            light.type = 3; /* directional: range must be ignored */
+            light.direction[2] = -1;
+            light.diffuse[0] = light.diffuse[1] = light.diffuse[2] = 1;
+            ff_set_light(0,&light);
+            ff_light_enable(0,1);
+            ff_set_material(material);
+            set_vs(0x52); /* XYZ, NORMAL, DIFFUSE */
+            clear(0,NULL,0xf3,0xff000000,1,0);
+            draw(5,3,vertices,sizeof vertices[0]);
+            glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+            assert(pixel[0] > 240 && pixel[1] < 8 && pixel[2] < 8);
+            render_states[101] = 1; /* primary vertex color as diffuse */
+            clear(0,NULL,0xf3,0xff000000,1,0);
+            draw(5,3,vertices,sizeof vertices[0]);
+            glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+            assert(pixel[1] > 240 && pixel[0] < 8 && pixel[2] < 8);
+            render_states[101] = 2; /* absent secondary must use red material, not green primary */
+            clear(0,NULL,0xf3,0xff000000,1,0);
+            draw(5,3,vertices,sizeof vertices[0]);
+            glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+            assert(pixel[0] > 240 && pixel[1] < 8 && pixel[2] < 8);
+            render_states[101] = 1;
+            set_vs(0x12); /* same material source, but primary is absent */
+            clear(0,NULL,0xf3,0xff000000,1,0);
+            draw(5,3,plain,sizeof plain[0]);
+            glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+            assert(pixel[0] > 240 && pixel[1] < 8 && pixel[2] < 8);
+
+            /* Ambient point contribution isolates range from varying
+             * vertex-to-light angles across the triangle. */
+            memset(material,0,sizeof material);
+            material[3] = material[4] = 1; /* opaque, red ambient */
+            ff_set_material(material);
+            memset(&light,0,sizeof light);
+            light.type = 1; light.a0 = 1;
+            light.ambient[0] = light.ambient[1] = light.ambient[2] = 1;
+            for (unsigned pass = 0; pass < 3; pass++) {
+                light.range = pass ? 4 : 1;
+                light.a0 = pass == 2 ? 2 : 1;
+                ff_set_light(0,&light);
+                clear(0,NULL,0xf3,0xff000000,1,0);
+                draw(5,3,plain,sizeof plain[0]);
+                glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                if (!pass) assert(pixel[0] < 8);
+                else if (pass == 1) assert(pixel[0] > 240);
+                else assert(pixel[0] > 120 && pixel[0] < 135);
+                assert(pixel[1] < 8 && pixel[2] < 8);
+            }
+
+            /* Move the sample away from the camera axis; LOCALVIEWER
+             * changes the halfway vector but not its screen position. */
+            struct ff_plain_vertex eye_test[] = {
+                {.8f,-.2f,2,0,0,-1}, {1.2f,-.2f,2,0,0,-1}, {1,.2f,2,0,0,-1}
+            };
+            projection[0] = projection[5] = 4;
+            projection[12] = -4;
+            ff_set_transform(1,projection);
+            memset(material,0,sizeof material);
+            material[3] = 1;
+            material[8] = material[9] = material[10] = 1;
+            material[16] = 16;
+            ff_set_material(material);
+            memset(&light,0,sizeof light);
+            light.type = 3; light.direction[2] = 1;
+            light.specular[0] = light.specular[1] = light.specular[2] = 1;
+            ff_set_light(0,&light);
+            render_states[93] = 1;
+            render_states[101] = 0;
+            for (unsigned local = 0; local < 2; local++) {
+                render_states[94] = local;
+                clear(0,NULL,0xf3,0xff000000,1,0);
+                draw(5,3,eye_test,sizeof eye_test[0]);
+                glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                if (!local) assert(pixel[0] < 8 && pixel[1] < 8 && pixel[2] < 8);
+                else for (int channel = 0; channel < 3; channel++)
+                    assert(pixel[channel] > 130 && pixel[channel] < 190);
+            }
+            ff_light_enable(0,0);
+            render_states[92] = render_states[93] = 0;
+            puts("renderer FF lighting: material sources, absent color, point range/attenuation and local viewer passed");
+        }
+        /* The pixel-shader draw path must set stage-3 point-sprite coordinate
+         * replacement itself, including clearing it when sprites are disabled. */
+        {
+            void (NTAPI *create_sprite_ps)(const ULONG *,ULONG *) =
+                find("_D3DDevice_CreatePixelShader@8");
+            void (NTAPI *set_sprite_ps)(ULONG) = find("_D3DDevice_SetPixelShader@4");
+            uint32_t saved_rs[256], saved_tss[128];
+            memcpy(saved_rs,render_states,sizeof saved_rs);
+            memcpy(saved_tss,texture_states,sizeof saved_tss);
+            render_states[59] = render_states[60] = 0;
+            render_states[67] = 0xffffffffu; /* all color channels */
+            render_states[82] = render_states[92] = render_states[93] = 0;
+            render_states[124] = render_states[125] = 0;
+            render_states[106] = 0x41800000u; /* POINTSIZE = 16.0f */
+            render_states[107] = 0x3f800000u; /* POINTSIZE_MIN = 1.0f */
+            render_states[113] = 0x42800000u; /* POINTSIZE_MAX = 64.0f */
+            render_states[108] = render_states[109] = 0;
+            for (unsigned s = 0; s < 4; s++) {
+                set_tex(s,NULL);
+                texture_states[s*32+12] = 1; /* fixed-function chain disabled */
+                texture_states[s*32+9] = texture_states[s*32+11] = 0;
+                texture_states[s*32+21] = 0; /* no texture transform */
+                texture_states[s*32+28] = s;
+            }
+            struct sprite_vertex {
+                float x,y,z,w;
+                uint32_t color;
+                float uv[4][2];
+            } point = {32,32,0.5f,1,0xffffffffu,
+                       {{0.25f,0.25f},{0.25f,0.25f},{0.25f,0.25f},{0.25f,0.25f}}};
+            set_vs(0x444); /* XYZRHW, diffuse, four pairs of texture coordinates */
+            set_sprite_ps(0);
+            /* Seed all coordinate-replacement flags to false using the
+             * existing fixed-function setup. The following enable occurs
+             * exclusively through the pixel-shader draw path. */
+            draw(1,1,&point,sizeof point);
+            void *sprite_tex = create_tex(2,2,1,1,0,6,3);
+            assert(sprite_tex);
+            ULONG locked[2];
+            lock_tex(sprite_tex,0,locked,NULL,0);
+            /* A 2x2 Morton image has the same order as these two linear rows.
+             * Left texels have green=0; right texels have green=255. */
+            uint32_t sprite_pixels[4] = {
+                0xffff0000u, 0xff00ff00u, 0xff0000ffu, 0xffffffffu
+            };
+            memcpy((void *)locked[1],sprite_pixels,sizeof sprite_pixels);
+            set_tex(3,sprite_tex);
+            texture_states[3*32+0] = texture_states[3*32+1] = 3; /* clamp */
+            texture_states[3*32+3] = texture_states[3*32+4] = 1; /* point */
+            texture_states[3*32+5] = 0; /* no mips */
+            ULONG sprite_def[60] = {0}, sprite_ps = 0;
+            sprite_def[8] = 11;          /* explicit final RGB = T3 */
+            sprite_def[9] = 0x1bu << 8;   /* final alpha = T3.a */
+            sprite_def[54] = 1u << 15;    /* stage 3 PROJECT2D */
+            create_sprite_ps(sprite_def,&sprite_ps);
+            assert(sprite_ps);
+            set_sprite_ps(sprite_ps);
+            for (unsigned pass = 0; pass < 2; pass++) {
+                render_states[108] = pass == 0; /* enable, then disable */
+                clear(0,NULL,0xf3,0xff000000,1.0f,0);
+                draw(1,1,&point,sizeof point);
+                unsigned char left[4] = {0}, right[4] = {0};
+                glReadPixels(27,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,left);
+                glReadPixels(36,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,right);
+                assert(left[3] > 240 && right[3] > 240);
+                assert(left[1] < 8);
+                if (pass == 0) {
+                    /* V orientation is immaterial: both right-hand texels
+                     * have green=255, unlike either left-hand texel. */
+                    assert(right[1] > 240);
+                } else {
+                    /* Restored vertex UV(.25,.25) samples red everywhere. */
+                    assert(left[0] > 240 && right[0] > 240);
+                    assert(right[1] < 8 && left[2] < 8 && right[2] < 8);
+                }
+            }
+            set_sprite_ps(0);
+            set_tex(3,NULL);
+            set_tex(0,tex);
+            set_vs(0x144);
+            memcpy(render_states,saved_rs,sizeof saved_rs);
+            memcpy(texture_states,saved_tss,sizeof saved_tss);
+            puts("renderer point sprites: pixel-shader stage-3 coordinates enable and disable passed");
+        }
+
+        /* Compressed volume uploads decode the packed slab order before GL.
+         * The selected blocks distinguish XY tiles, slices within a slab,
+         * and the second slab. Minification then selects an authored mip. */
+        {
+            void (NTAPI *lock_volume)(void *,ULONG,ULONG *,const LONG *,ULONG) =
+                find("_D3DVolumeTexture_LockBox@20");
+            ULONG volume_def[60] = {0}, volume_ps = 0;
+            volume_def[8] = 8;
+            volume_def[9] = 0x18u << 8;
+            volume_def[54] = 2; /* PROJECT3D */
+            create_ps(volume_def,&volume_ps);
+            assert(volume_ps);
+            set_ps(volume_ps);
+            set_vs(0x10144); /* XYZRHW + diffuse + TEX1 with 3 coordinates */
+            render_states[59] = render_states[60] = 0;
+            render_states[92] = render_states[124] = 0;
+            texture_states[9] = texture_states[11] = 0;
+            texture_states[3] = texture_states[4] = 1;
+            struct volume_vertex { float x,y,z,w; uint32_t color; float u,v,r; };
+            struct volume_vertex volume_triangle[] = {
+                {4,4,0.5f,1,0xffffffff,0,0,0},
+                {60,4,0.5f,1,0xffffffff,0,0,0},
+                {32,60,0.5f,1,0xffffffff,0,0,0}
+            };
+            static const unsigned formats[3] = {0x0c,0x0e,0x0f};
+            static const unsigned positions[4][3] = {{1,1,1},{5,1,1},{1,5,5},{5,5,7}};
+            static const unsigned expected_red[4] = {16,49,214,8};
+            for (unsigned format_index = 0; format_index < 3; format_index++) {
+                unsigned format = formats[format_index];
+                unsigned block_bytes = format == 0x0c ? 8 : 16;
+                unsigned color_offset = format == 0x0c ? 0 : 8;
+                void *volume_tex = create_tex(8,8,8,2,0,format,4);
+                assert(volume_tex);
+                for (unsigned level = 0; level < 2; level++) {
+                    ULONG locked[3];
+                    lock_volume(volume_tex,level,locked,NULL,0);
+                    unsigned blocks = level ? 4 : 32;
+                    unsigned char *packed = (void *)locked[2];
+                    memset(packed,0,blocks*block_bytes);
+                    for (unsigned block = 0; block < blocks; block++) {
+                        unsigned char *entry = packed + block*block_bytes;
+                        if (format == 0x0e) memset(entry,255,8);
+                        if (format == 0x0f) entry[0] = entry[1] = 255;
+                        unsigned endpoint = level ? 0x07e0 : ((block % 31) + 1) << 11;
+                        entry[color_offset] = endpoint & 255;
+                        entry[color_offset+1] = endpoint >> 8;
+                    }
+                }
+                set_tex(0,volume_tex);
+                texture_states[5] = 0;
+                for (unsigned sample = 0; sample < 4; sample++) {
+                    for (int vertex = 0; vertex < 3; vertex++) {
+                        volume_triangle[vertex].u = (positions[sample][0]+0.5f)/8;
+                        volume_triangle[vertex].v = (positions[sample][1]+0.5f)/8;
+                        volume_triangle[vertex].r = (positions[sample][2]+0.5f)/8;
+                    }
+                    clear(0,NULL,0xf3,0xff000000,1.0f,0);
+                    draw(5,3,volume_triangle,sizeof(volume_triangle[0]));
+                    glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                    assert(abs((int)pixel[0] - (int)expected_red[sample]) <= 2);
+                    assert(pixel[1] < 3 && pixel[2] < 3);
+                }
+                texture_states[5] = 1; /* nearest authored mip */
+                volume_triangle[0].u = 0; volume_triangle[0].v = 0;
+                volume_triangle[1].u = 16; volume_triangle[1].v = 0;
+                volume_triangle[2].u = 8; volume_triangle[2].v = 16;
+                clear(0,NULL,0xf3,0xff000000,1.0f,0);
+                draw(5,3,volume_triangle,sizeof(volume_triangle[0]));
+                glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                assert(pixel[0] < 8 && pixel[1] > 240 && pixel[2] < 8);
+            }
+            set_ps(0);
+            set_tex(0,tex);
+            set_vs(0x144);
+            texture_states[5] = 2;
+            puts("renderer compressed volumes: DXT1/3/5 slab slices and authored mip passed");
+        }
         /* The outstanding 65th callback executes inside Swap; device creation
          * resets scale, so restore the values its reentrant check expects. */
         set_scale(1.25f,0.75f);

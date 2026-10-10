@@ -20,8 +20,7 @@
  * touch the hardware's final combiner, which then still holds the
  * fixed-function setup from LazySetSpecFogCombiner: R0 out, blended with the
  * fog colour by the fog factor when D3DRS_FOGENABLE is set.  (The
- * fixed-function path also adds specular when D3DRS_SPECULARENABLE is set;
- * that render state is not part of our input, so it is not applied.)
+ * fixed-function path also adds specular when D3DRS_SPECULARENABLE is set.)
  */
 #include <stdarg.h>
 #include <stdio.h>
@@ -44,6 +43,7 @@
 #define RS_PSINPUTTEXTURE       56
 #define RS_FOGENABLE            82
 #define RS_FOGTABLEMODE         83
+#define RS_SPECULARENABLE       93
 #define RS_PSTEXTUREMODES      117
 
 /* ---- PS_* encodings (d3d8types.h) -------------------------------------- */
@@ -138,6 +138,7 @@ typedef struct {
 
 typedef struct {
     const uint32_t *rs;
+    psh_options options;
     int nstages, flags;
     int texmode[4], inputtex[4], dotmap[4], compare[4];
 
@@ -148,6 +149,7 @@ typedef struct {
     int use_snorm8[3];       /* snorm8_d3d, snorm8_gl, snorm8 */
     int use_hilo16, use_snorm16[3], use_hemi;
     int use_dotmap[8];
+    int use_eye_vector, use_key_color;
     int dot_defined[4];
 
     sbuf tex;                /* texture shader stage code */
@@ -315,6 +317,25 @@ static void emit_dot(psh_ctx *c, int i)
     c->dot_defined[i] = 1;
 }
 
+/* Texture controls act on a completed fetch before later stages consume it.
+   Key matching follows the reference's quantized sampled-color behavior. */
+static void emit_texture_controls(psh_ctx *c, int i)
+{
+    sbuf *o = &c->tex;
+    if (!c->sampler[i]) return;
+    if (c->options.alpha_kill & (1u << i))
+        sb_fmt(o, "    if (t%d.a == 0.0) discard;\n", i);
+    unsigned operation = c->options.color_key[i] & 3u;
+    if (operation) {
+        const char *components = (c->options.color_key_ignore_alpha & (1u << i)) ? "rgb" : "rgba";
+        c->use_key_color = 1;
+        sb_fmt(o, "    if (all(equal(floor(clamp(t%d.%s, 0.0, 1.0) * 255.0 + 0.5), floor(clamp(key_color[%d].%s, 0.0, 1.0) * 255.0 + 0.5)))) ", i, components, i, components);
+        if (operation == 1) sb_fmt(o, "t%d.a = 0.0;\n", i);
+        else if (operation == 2) sb_fmt(o, "t%d = vec4(0.0);\n", i);
+        else sb_cat(o, "discard;\n");
+    }
+}
+
 /* Returns 0 when the mode cannot be expressed. */
 static int emit_texture_stage(psh_ctx *c, int i)
 {
@@ -346,9 +367,9 @@ static int emit_texture_stage(psh_ctx *c, int i)
     case TM_PROJECT2D:
         c->use_texscale = 1;
         if (psh_shadow_stages & (1u << i)) {
-            /* A depth texture: the NV2A compares r/q with the stored depth. */
+            /* PROJECT2D uses a zero reference; PROJECT3D supplies r/q. */
             c->sampler[i] = 4;
-            sb_fmt(o, "    vec4 t%d = shadow2DProj(tex%d, gl_TexCoord[%d] * vec4(tex_scale[%d].xyz, 1.0));\n", i, i, i, i);
+            sb_fmt(o, "    vec4 t%d = shadow2DProj(tex%d, vec4(gl_TexCoord[%d].xy * tex_scale[%d].xy, 0.0, gl_TexCoord[%d].w));\n", i, i, i, i, i);
             break;
         }
         c->sampler[i] = 2;
@@ -356,6 +377,14 @@ static int emit_texture_stage(psh_ctx *c, int i)
                i, i, i, i, i);
         break;
     case TM_PROJECT3D:
+        if (psh_shadow_stages & (1u << i)) {
+            c->sampler[i] = 4;
+            c->use_texscale = 1;
+            sb_fmt(o, "    vec3 shadow_coord%d = gl_TexCoord[%d].xyz * tex_scale[%d].xyz / gl_TexCoord[%d].w;\n", i, i, i, i);
+            sb_fmt(o, "    shadow_coord%d.z = clamp(shadow_coord%d.z, 0.0, 1.0);\n", i, i);
+            sb_fmt(o, "    vec4 t%d = shadow2D(tex%d, shadow_coord%d);\n", i, i, i);
+            break;
+        }
         c->sampler[i] = 3;
         c->use_texscale = 1;
         sb_fmt(o, "    vec4 t%d = texture3DProj(vol%d, vec4(gl_TexCoord[%d].xyz * tex_scale[%d].xyz, gl_TexCoord[%d].w));\n",
@@ -380,7 +409,8 @@ static int emit_texture_stage(psh_ctx *c, int i)
            convention); du/dv are the signed bytes in the input's r/g. */
         c->sampler[i] = 2;
         c->use_texscale = c->use_bumpenv = c->use_snorm8[2] = 1;
-        sb_fmt(o, "    vec2 dsdt%d = vec2(snorm8(t%d.r), snorm8(t%d.g));\n", i, in, in);
+        sb_fmt(o, "    vec2 dsdt%d = vec2(snorm8(t%d.%c), snorm8(t%d.g));\n",
+               i, in, (c->options.bump_bgra & (1u << in)) ? 'b' : 'r', in);
         sb_fmt(o, "    vec4 t%d = texture2D(tex%d, (gl_TexCoord[%d].xy + vec2(dot(bump_env[%d].xz, dsdt%d), dot(bump_env[%d].yw, dsdt%d))) * tex_scale[%d].xy);\n",
                i, i, i, i, i, i, i, i);
         if (mode == TM_BUMPENVMAP_LUM) {
@@ -390,8 +420,8 @@ static int emit_texture_stage(psh_ctx *c, int i)
                "1x" and L = 0.5 is "2x"), but a texture register only holds
                0..1, so the product saturates. */
             c->use_bumplum = 1;
-            sb_fmt(o, "    t%d = clamp(t%d * (bump_lum[%d].x * t%d.b + bump_lum[%d].y), 0.0, 1.0);\n",
-                   i, i, i, in, i);
+            sb_fmt(o, "    t%d = clamp(t%d * (bump_lum[%d].x * t%d.%c + bump_lum[%d].y), 0.0, 1.0);\n",
+                   i, i, i, in, (c->options.bump_bgra & (1u << in)) ? 'r' : 'b', i);
         }
         break;
     case TM_BRDF:
@@ -430,12 +460,18 @@ static int emit_texture_stage(psh_ctx *c, int i)
                i, i, dot_ref(c, d1, sizeof d1, i - 1), i, i);
         break;
     case TM_DOT_RFLCT_SPEC:
+    case TM_DOT_RFLCT_SPEC_CONST:
         c->sampler[i] = 6;
         emit_dot(c, i);
         sb_fmt(o, "    vec3 n%d = vec3(%s, %s, dot%d);\n", i,
                dot_ref(c, d1, sizeof d1, i - 2), dot_ref(c, d2, sizeof d2, i - 1), i);
-        sb_fmt(o, "    vec3 e%d = vec3(gl_TexCoord[%d].w, gl_TexCoord[%d].w, gl_TexCoord[%d].w);\n",
-               i, i - 2, i - 1, i);
+        if (mode == TM_DOT_RFLCT_SPEC_CONST) {
+            c->use_eye_vector = 1;
+            sb_fmt(o, "    vec3 e%d = eye_vector.xyz;\n", i);
+        } else {
+            sb_fmt(o, "    vec3 e%d = vec3(gl_TexCoord[%d].w, gl_TexCoord[%d].w, gl_TexCoord[%d].w);\n",
+                   i, i - 2, i - 1, i);
+        }
         sb_fmt(o, "    vec3 rv%d = 2.0 * n%d * dot(n%d, e%d) / dot(n%d, n%d) - e%d;\n",
                i, i, i, i, i, i, i);
         sb_fmt(o, "    vec4 t%d = textureCube(cube%d, rv%d);\n", i, i, i);
@@ -467,15 +503,10 @@ static int emit_texture_stage(psh_ctx *c, int i)
         emit_dot(c, i);
         sb_fmt(o, "    vec4 t%d = vec4(0.0);\n", i);
         break;
-    case TM_DOT_RFLCT_SPEC_CONST:
-        /* The eye vector is the float value of D3D pixel shader constant
-           0 (SetPixelShaderConstant pushes it to NV097_SET_EYE_VECTOR);
-           nothing in the render state array or the uniform set carries
-           it. */
-        return 0;
     default:
         return 0;
     }
+    emit_texture_controls(c, i);
     return 1;
 }
 
@@ -598,7 +629,7 @@ static void emit_final(psh_ctx *c, uint32_t abcd, uint32_t efg)
 
 uint32_t psh_shadow_stages;
 
-char *psh_translate(const uint32_t *rs)
+char *psh_translate_ex(const uint32_t *rs, const psh_options *options)
 {
     psh_ctx cx, *c = &cx;
     sbuf out;
@@ -608,6 +639,7 @@ char *psh_translate(const uint32_t *rs)
 
     memset(c, 0, sizeof *c);
     c->rs = rs;
+    if (options) c->options = *options;
     c->nstages = rs[RS_PSCOMBINERCOUNT] & 0xf;
     if (c->nstages > 8) c->nstages = 8;
     c->flags = rs[RS_PSCOMBINERCOUNT] >> 8;
@@ -637,12 +669,13 @@ char *psh_translate(const uint32_t *rs)
     for (int i = 0; i < c->nstages; i++) emit_stage(c, i);
 
     if (abcd == 0 && efg == 0) {
-        /* No xfc: the fixed-function final combiner the library leaves in
-           place (LazySetSpecFogCombiner), minus specular. */
+        /* LazySetSpecFogCombiner: saturate diffuse plus optional specular
+           before fog, while preserving the general combiner's alpha. */
+        int color = rs[RS_SPECULARENABLE] ? REG_V1R0_SUM : REG_R0;
         if (fog_enable) {
-            abcd = ((REG_FOG | CHAN_ALPHA) << 24) | (REG_R0 << 16) | (REG_FOG << 8) | REG_ZERO;
+            abcd = ((REG_FOG | CHAN_ALPHA) << 24) | (color << 16) | (REG_FOG << 8) | REG_ZERO;
         } else {
-            abcd = REG_R0;
+            abcd = color;
         }
         efg = ((REG_ZERO) << 24) | (REG_ZERO << 16) | ((REG_R0 | CHAN_ALPHA) << 8) | FCS_CLAMP_SUM;
     }
@@ -664,6 +697,8 @@ char *psh_translate(const uint32_t *rs)
     if (c->use_fc1) sb_cat(&out, "uniform vec4 fc1;\n");
     if (c->use_bumpenv) sb_cat(&out, "uniform vec4 bump_env[4];\n");
     if (c->use_bumplum) sb_cat(&out, "uniform vec2 bump_lum[4];\n");
+    if (c->use_eye_vector) sb_cat(&out, "uniform vec4 eye_vector;\n");
+    if (c->use_key_color) sb_cat(&out, "uniform vec4 key_color[4];\n");
 
     /* helpers: signed interpretations of unsigned-normalised texels */
     if (c->use_snorm8[0])
@@ -718,4 +753,9 @@ char *psh_translate(const uint32_t *rs)
     sb_free(&c->tex);
     sb_free(&c->comb);
     return out.s;
+}
+
+char *psh_translate(const uint32_t *rs)
+{
+    return psh_translate_ex(rs, NULL);
 }

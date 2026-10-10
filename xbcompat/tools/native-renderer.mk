@@ -26,7 +26,7 @@ HEADERS = src/xbcompat.h src/xbox.h src/cpu.h src/hle/hle.h src/hle/glcache.h \
           src/hle/nv2a_shaders.h src/renderer/bridge.h
 .DEFAULT_GOAL := all
 all: $(BUILD)/libxbcompat_renderer.so.1
-$(BUILD)/d3d8.o: src/hle/d3d8.c tools/gen_adapters.py $(HEADERS)
+$(BUILD)/d3d8.o: src/hle/d3d8.c src/hle/ff_vsh.h src/hle/dxt_decode.h tools/gen_adapters.py $(HEADERS)
 	@mkdir -p $(BUILD)
 	$(CC) $(CFLAGS) -DXBC_GEN -E $< -o $(BUILD)/d3d8.i
 	python3 tools/gen_adapters.py $(BUILD)/d3d8.i $< > $(BUILD)/d3d8.xa.inc

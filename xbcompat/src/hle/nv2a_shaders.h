@@ -67,6 +67,7 @@ extern char vsh_error[96];   /* why vsh_translate last returned NULL */
  *   rs[117]       D3DRS_PSTEXTUREMODES (5 bits per stage: PS_TEXTUREMODES_*)
  *   rs[82]        D3DRS_FOGENABLE
  *   rs[83]        D3DRS_FOGTABLEMODE (D3DFOG_NONE 0, EXP 1, EXP2 2, LINEAR 3)
+ *   rs[93]        D3DRS_SPECULARENABLE (synthesized final combiner only)
  * Everything else that varies per draw comes in through uniforms.
  *
  * Conventions of the generated GLSL (declare only what the program uses):
@@ -81,6 +82,8 @@ extern char vsh_error[96];   /* why vsh_translate last returned NULL */
  *   uniform vec4 fc0, fc1                final combiner constants
  *   uniform vec4 bump_env[4]             D3DTSS_BUMPENVMAT00, 01, 10, 11
  *   uniform vec2 bump_lum[4]             D3DTSS_BUMPENVLSCALE, BUMPENVLOFFSET
+ *   uniform vec4 eye_vector              NV097_SET_EYE_VECTOR (unquantized)
+ *   uniform vec4 key_color[4]            D3DTSS_COLORKEYCOLOR as RGBA
  *   gl_Color / gl_SecondaryColor         v0 / v1 (diffuse / specular)
  *   gl_TexCoord[0..3]                    stage 0..3 texture coordinates
  *   gl_FogFragCoord                      fog distance; with D3DRS_FOGENABLE
@@ -92,6 +95,15 @@ extern char vsh_error[96];   /* why vsh_translate last returned NULL */
  *   gl_FragColor                         the final combiner output
  * Alpha test is done by the host (fixed-function GL alpha test).
  */
+/* Texture-stage controls that do not live in D3D__RenderState. Bitmasks
+   use bit i for stage i; color_key contains D3DTCOLORKEYOP values 0..3. */
+typedef struct {
+    uint32_t alpha_kill;
+    uint32_t color_key[4];
+    uint32_t color_key_ignore_alpha;
+    uint32_t bump_bgra;
+} psh_options;
+char *psh_translate_ex(const uint32_t *rs, const psh_options *options);
 char *psh_translate(const uint32_t *rs);
 /* Stages psh_translate samples as shadow buffers (depth textures), one bit each. */
 extern uint32_t psh_shadow_stages;

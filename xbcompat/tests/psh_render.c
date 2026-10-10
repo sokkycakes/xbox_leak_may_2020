@@ -51,6 +51,9 @@ static void (APIENTRY *p_glUniform4fv)(GLint, GLsizei, const GLfloat *);
 static void (APIENTRY *p_glActiveTexture)(GLenum);
 static void (APIENTRY *p_glMultiTexCoord2f)(GLenum, GLfloat, GLfloat);
 static void (APIENTRY *p_glFogCoordf)(GLfloat);
+static void (APIENTRY *p_glUniform2fv)(GLint, GLsizei, const GLfloat *);
+static void (APIENTRY *p_glMultiTexCoord4fv)(GLenum, const GLfloat *);
+static void (APIENTRY *p_glSecondaryColor3fv)(const GLfloat *);
 #define GL_FOG_COORD_SRC_ 0x8450
 #define GL_FOG_COORD_ 0x8451
 
@@ -158,6 +161,305 @@ static void save_ppm(const char *path)
     fclose(f);
 }
 
+
+/* Regressions for NV2A state that supplements the shader definition.
+   Constant coordinates keep sample choice independent of raster position. */
+static float nv2a_coords[4][4];
+static unsigned char nv2a_texel[4];
+
+static void nv2a_fill(int x, int y, unsigned char *p)
+{
+    (void)x; (void)y;
+    memcpy(p, nv2a_texel, 4);
+}
+
+static void nv2a_solid(int unit, int r, int g, int b, int a)
+{
+    nv2a_texel[0] = r; nv2a_texel[1] = g;
+    nv2a_texel[2] = b; nv2a_texel[3] = a;
+    texture(unit, nv2a_fill);
+}
+
+static void nv2a_rs(uint32_t *rs, unsigned reg, uint32_t modes)
+{
+    memset(rs, 0, 128 * sizeof *rs);
+    rs[117] = modes;
+    rs[D_FCABCD] = reg;
+    rs[D_FCEFG] = (reg | ALPHA) << 8;
+}
+
+static GLuint nv2a_program(const uint32_t *rs, const psh_options *options)
+{
+    char *source = psh_translate_ex(rs, options);
+    GLuint program = source ? make_program(source) : 0;
+    free(source);
+    if (!program) { printf("FAIL NV2A regression shader\n"); failures++; return 0; }
+    p_glUseProgram(program);
+    static const float scale[16] = { 1,1,1,1, 1,1,1,1, 1,1,1,1, 1,1,1,1 };
+    p_glUniform4fv(p_glGetUniformLocation(program, "tex_scale"), 4, scale);
+    for (int i = 0; i < 4; i++) {
+        char name[16];
+        snprintf(name, sizeof name, "tex%d", i);
+        p_glUniform1i(p_glGetUniformLocation(program, name), i);
+        snprintf(name, sizeof name, "cube%d", i);
+        p_glUniform1i(p_glGetUniformLocation(program, name), i);
+    }
+    return program;
+}
+
+static void nv2a_draw(GLuint program, const float *secondary)
+{
+    static const float black[3] = {0,0,0};
+    glViewport(0, 0, W, H);
+    glClearColor(0, 1, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    p_glUseProgram(program);
+    glColor4f(1,1,1,1);
+    p_glSecondaryColor3fv(secondary ? secondary : black);
+    glBegin(GL_QUADS);
+    for (int corner = 0; corner < 4; corner++) {
+        for (int unit = 0; unit < 4; unit++)
+            p_glMultiTexCoord4fv(GL_TEXTURE0 + unit, nv2a_coords[unit]);
+        glVertex2f(corner == 1 || corner == 2 ? 1 : -1, corner >= 2 ? 1 : -1);
+    }
+    glEnd();
+    p_glUseProgram(0);
+    glFinish();
+    glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+}
+
+static void nv2a_cube(int unit)
+{
+    static const unsigned char faces[6][4] = {
+        {255,0,0,255}, {0,255,255,255}, {0,255,0,255},
+        {255,0,255,255}, {0,0,255,255}, {255,255,0,255}
+    };
+    GLuint texture_id;
+    glGenTextures(1, &texture_id);
+    p_glActiveTexture(GL_TEXTURE0 + unit);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, texture_id);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+    for (int i = 0; i < 6; i++)
+        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, 0, GL_RGBA8,
+                     1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, faces[i]);
+}
+
+static void nv2a_depth(int bits)
+{
+    GLuint texture_id;
+    const float depth = 0.5f;
+    glGenTextures(1, &texture_id);
+    p_glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, texture_id);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_R_TO_TEXTURE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL);
+    glTexImage2D(GL_TEXTURE_2D, 0, bits == 16 ? GL_DEPTH_COMPONENT16 : GL_DEPTH_COMPONENT24,
+                 1, 1, 0, GL_DEPTH_COMPONENT, GL_FLOAT, &depth);
+}
+
+static void nv2a_halves(int x, int y, unsigned char *p)
+{
+    (void)y;
+    p[0] = x < 4 ? 255 : 0; p[1] = 0;
+    p[2] = x < 4 ? 0 : 255; p[3] = 255;
+}
+
+static void test_nv2a_state(void)
+{
+    uint32_t rs[128];
+    psh_options options = {0};
+    GLuint program;
+    const float secondary[3] = {0.75f, 0.25f, 0.5f};
+    for (int i = 0; i < 4; i++) {
+        nv2a_coords[i][0] = nv2a_coords[i][1] = nv2a_coords[i][2] = 0.5f;
+        nv2a_coords[i][3] = 1;
+    }
+    glEnable(GL_COLOR_SUM);
+
+    /* Implicit specular sum saturates before fog; alpha comes from R0. */
+    nv2a_solid(0, 255,0,0,128);
+    memset(rs, 0, sizeof rs);
+    rs[117] = PS_TEXTUREMODES(1,0,0,0);
+    rs[D_COUNT] = 1;
+    rs[D_RGBIN] = PS_COMBINERINPUTS(T0, ONE, ZERO, ZERO);
+    rs[D_ALPHAIN] = PS_COMBINERINPUTS(T0 | ALPHA, ONE, ZERO, ZERO);
+    rs[D_RGBOUT] = rs[D_ALPHAOUT] = PS_COMBINEROUTPUTS(R0, DISCARD, DISCARD, 0);
+    program = nv2a_program(rs, &options);
+    if (!program) return;
+    nv2a_draw(program, secondary);
+    expect_pixel("implicit specular off", 20,20, 255,0,0,128);
+    rs[93] = 1;
+    program = nv2a_program(rs, &options);
+    if (!program) return;
+    nv2a_draw(program, secondary);
+    expect_pixel("implicit specular on", 20,20, 255,64,128,128);
+    rs[82] = 1;
+    const float fog_color[4] = {0,1,1,1};
+    glFogfv(GL_FOG_COLOR, fog_color);
+    glFogi(GL_FOG_COORD_SRC_, GL_FOG_COORD_);
+    p_glFogCoordf(0.25f);
+    program = nv2a_program(rs, &options);
+    if (!program) return;
+    nv2a_draw(program, secondary);
+    expect_pixel("specular saturates before fog", 20,20, 64,207,223,128);
+    rs[D_FCABCD] = T0;
+    rs[D_FCEFG] = (T0 | ALPHA) << 8;
+    program = nv2a_program(rs, &options);
+    if (!program) return;
+    nv2a_draw(program, secondary);
+    expect_pixel("explicit final ignores implicit specular and fog", 20,20, 255,0,0,128);
+
+    /* Alpha kill is equality with zero, and occurs before key substitution. */
+    nv2a_rs(rs, T0, PS_TEXTUREMODES(1,0,0,0));
+    options.alpha_kill = 1;
+    nv2a_solid(0, 64,128,192,0);
+    program = nv2a_program(rs, &options);
+    if (!program) return;
+    nv2a_draw(program, NULL);
+    expect_pixel("alpha kill zero", 20,20, 0,255,0,255);
+    nv2a_solid(0, 64,128,192,1);
+    nv2a_draw(program, NULL);
+    expect_pixel("alpha kill smallest nonzero byte survives", 20,20, 64,128,192,1);
+
+    float keys[16] = {64/255.0f,128/255.0f,192/255.0f,1/255.0f};
+    for (int operation = 1; operation <= 3; operation++) {
+        options.color_key[0] = operation;
+        program = nv2a_program(rs, &options);
+        if (!program) return;
+        p_glUniform4fv(p_glGetUniformLocation(program, "key_color"), 4, keys);
+        nv2a_draw(program, NULL);
+        if (operation == 1)
+            expect_pixel("key alpha zero after alpha kill", 20,20, 64,128,192,0);
+        else if (operation == 2)
+            expect_pixel("key RGBA zero", 20,20, 0,0,0,0);
+        else
+            expect_pixel("key discard", 20,20, 0,255,0,255);
+    }
+    keys[3] = 1;
+    program = nv2a_program(rs, &options);
+    if (!program) return;
+    p_glUniform4fv(p_glGetUniformLocation(program, "key_color"), 4, keys);
+    nv2a_draw(program, NULL);
+    expect_pixel("ARGB key compares alpha", 20,20, 64,128,192,1);
+    options.color_key_ignore_alpha = 1;
+    program = nv2a_program(rs, &options);
+    if (!program) return;
+    p_glUniform4fv(p_glGetUniformLocation(program, "key_color"), 4, keys);
+    nv2a_draw(program, NULL);
+    expect_pixel("XRGB key ignores alpha", 20,20, 0,255,0,255);
+
+    /* Neither source texel matches the key; their filtered result does. */
+    static const unsigned char filtered[2][4] = {{0,0,0,255},{128,0,0,255}};
+    p_glActiveTexture(GL_TEXTURE0);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 2,1,0,GL_RGBA,GL_UNSIGNED_BYTE,filtered);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
+    keys[0] = 64/255.0f; keys[1] = keys[2] = 0; keys[3] = 1;
+    p_glUseProgram(program);
+    p_glUniform4fv(p_glGetUniformLocation(program, "key_color"), 4, keys);
+    nv2a_draw(program, NULL);
+    expect_pixel("color key compares filtered texel", 20,20, 0,255,0,255);
+
+    /* Non-sampling PASSTHRU must not run texture kill or key operations. */
+    nv2a_rs(rs, T0, PS_TEXTUREMODES(4,0,0,0));
+    nv2a_coords[0][0] = 0.25f; nv2a_coords[0][1] = 0.5f;
+    nv2a_coords[0][2] = 0.75f; nv2a_coords[0][3] = 0;
+    program = nv2a_program(rs, &options);
+    if (!program) return;
+    nv2a_draw(program, NULL);
+    expect_pixel("passthru skips sampled texture controls",20,20,64,128,191,0);
+
+    /* Constant eye reflection: non-unit normal rejects an unnormalized
+       reflection formula. Changing eye state must change the cube face. */
+    memset(&options, 0, sizeof options);
+    nv2a_rs(rs, T3, PS_TEXTUREMODES(4,17,17,18));
+    memset(nv2a_coords, 0, sizeof nv2a_coords);
+    nv2a_coords[0][0] = 1; nv2a_coords[0][3] = 1;
+    nv2a_coords[1][0] = 2; nv2a_coords[1][3] = 7;
+    nv2a_coords[2][3] = 9; nv2a_coords[3][3] = 11;
+    nv2a_cube(3);
+    program = nv2a_program(rs, &options);
+    if (!program) return;
+    float eye[4] = {0.2f,1,0,0};
+    p_glUniform4fv(p_glGetUniformLocation(program, "eye_vector"),1,eye);
+    nv2a_draw(program,NULL);
+    expect_pixel("constant eye with non-unit normal selects -Y",20,20,255,0,255,255);
+    eye[0] = -1; eye[1] = 0;
+    p_glUseProgram(program);
+    p_glUniform4fv(p_glGetUniformLocation(program, "eye_vector"),1,eye);
+    nv2a_draw(program,NULL);
+    expect_pixel("constant eye update selects -X",20,20,0,255,255,255);
+
+    /* X8L8V8U8 shares an upload encoding with X8R8G8B8; interpreted as
+       a bump source, uploaded (L,V,U) supplies U,V displacements and L. */
+    nv2a_rs(rs,T1,PS_TEXTUREMODES(1,7,0,0));
+    options.bump_bgra = 1;
+    nv2a_solid(0,64,0,127,255);
+    texture(1,nv2a_halves);
+    nv2a_coords[0][0] = nv2a_coords[0][1] = 0.5f;
+    nv2a_coords[0][2] = 0; nv2a_coords[0][3] = 1;
+    nv2a_coords[1][0] = 0.1f; nv2a_coords[1][1] = 0.5f;
+    nv2a_coords[1][2] = 0; nv2a_coords[1][3] = 1;
+    program = nv2a_program(rs,&options);
+    if (!program) return;
+    float bump[16] = {0};
+    float luminance[8] = {0};
+    bump[4] = 0.5f; luminance[2] = 1;
+    p_glUniform4fv(p_glGetUniformLocation(program,"bump_env"),4,bump);
+    p_glUniform2fv(p_glGetUniformLocation(program,"bump_lum"),4,luminance);
+    nv2a_draw(program,NULL);
+    expect_pixel("X8L8V8U8 uses U displacement and L luminance",20,20,0,0,64,64);
+
+    /* Alpha kill follows luminance modulation, not the unmodified fetch. */
+    options.alpha_kill = 2;
+    program = nv2a_program(rs,&options);
+    if (!program) return;
+    luminance[2] = 0;
+    p_glUniform4fv(p_glGetUniformLocation(program,"bump_env"),4,bump);
+    p_glUniform2fv(p_glGetUniformLocation(program,"bump_lum"),4,luminance);
+    nv2a_draw(program,NULL);
+    expect_pixel("alpha kill observes zero luminance",20,20,0,255,0,255);
+
+    /* Native D16/D24 references use z/q. PROJECT2D compares zero even
+       when incoming z is nonzero; PROJECT3D enables the depth reference. */
+    memset(&options,0,sizeof options);
+    for (int bits = 16; bits <= 24; bits += 8) {
+        nv2a_depth(bits);
+        float maximum = bits == 16 ? 65535.0f : 16777215.0f;
+        for (int mode = 1; mode <= 2; mode++) {
+            nv2a_rs(rs,T0,PS_TEXTUREMODES(mode,0,0,0));
+            psh_shadow_stages = 1;
+            program = nv2a_program(rs,&options);
+            psh_shadow_stages = 0;
+            if (!program) return;
+            float scale[16] = {1,1,1,1, 1,1,1,1, 1,1,1,1, 1,1,1,1};
+            scale[2] = 1.0f / maximum;
+            p_glUniform4fv(p_glGetUniformLocation(program,"tex_scale"),4,scale);
+            nv2a_coords[0][0] = nv2a_coords[0][1] = 1;
+            nv2a_coords[0][2] = maximum * 1.5f;
+            nv2a_coords[0][3] = 2;
+            nv2a_draw(program,NULL);
+            char label[80];
+            snprintf(label,sizeof label,"D%d PROJECT%d high projected reference",bits,mode+1);
+            int value = mode == 1 ? 255 : 0;
+            expect_pixel(label,20,20,value,value,value,255);
+            nv2a_coords[0][2] = maximum * 0.5f;
+            nv2a_draw(program,NULL);
+            snprintf(label,sizeof label,"D%d PROJECT%d low projected reference",bits,mode+1);
+            expect_pixel(label,20,20,255,255,255,255);
+        }
+    }
+    glDisable(GL_COLOR_SUM);
+}
+
 int main(int argc, char **argv)
 {
     if (SDL_Init(SDL_INIT_VIDEO) != 0) { fprintf(stderr, "SDL_Init: %s\n", SDL_GetError()); return 2; }
@@ -171,6 +473,7 @@ int main(int argc, char **argv)
     LOAD(glGetShaderInfoLog); LOAD(glCreateProgram); LOAD(glAttachShader); LOAD(glLinkProgram);
     LOAD(glGetProgramiv); LOAD(glUseProgram); LOAD(glGetUniformLocation); LOAD(glUniform1i);
     LOAD(glUniform4fv); LOAD(glActiveTexture); LOAD(glMultiTexCoord2f); LOAD(glFogCoordf);
+    LOAD(glUniform2fv); LOAD(glMultiTexCoord4fv); LOAD(glSecondaryColor3fv);
 
     texture(0, red);
     texture(1, blue);
@@ -265,6 +568,8 @@ int main(int argc, char **argv)
     render(prog, white);
     /* 0.25*red + 0.75*cyan = (0.25, 0.75, 0.75), alpha t0.a */
     expect_pixel("fog register blend", 20, 20, 64, 191, 191, 128);
+
+    test_nv2a_state();
 
     printf("%s: %d failures\n", failures ? "FAILED" : "all ok", failures);
     return failures != 0;

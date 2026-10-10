@@ -25,6 +25,8 @@
 #include "hle.h"
 #include "../cpu.h"
 #include "nv2a_shaders.h"
+#include "dxt_decode.h"
+#include "ff_vsh.h"
 
 /* Set at device creation: see rgba_colors. */
 static bool rgba_vertex_colors;
@@ -164,6 +166,7 @@ static struct {
     ULONG constant_mode;
     float vs_const[192][4];      /* vertex shader constants, hardware numbering */
     float ps_const[16][4];
+    float eye_vector[4];
     ULONG pixel_shader;
     float zscale;                /* depth range of the target: 2^24-1 or 2^16-1 */
     PVOID vblank_callback, swap_callback;
@@ -211,6 +214,7 @@ static float tss_float(int s, ULONG i) { float f; memcpy(&f, &d3d.texture_state[
 
 enum {
     D3DTSS_ADDRESSU = 0, D3DTSS_ADDRESSV = 1, D3DTSS_ADDRESSW = 2, D3DTSS_MAGFILTER = 3, D3DTSS_MINFILTER = 4,
+    D3DTSS_COLORKEYOP = 9, D3DTSS_ALPHAKILL = 11,
     D3DTSS_MIPFILTER = 5, D3DTSS_BUMPENVMAT00 = 22, D3DTSS_BUMPENVMAT01 = 23, D3DTSS_BUMPENVMAT11 = 24,
     D3DTSS_BUMPENVMAT10 = 25, D3DTSS_BUMPENVLSCALE = 26, D3DTSS_BUMPENVLOFFSET = 27,
     D3DTSS_COLOROP = 12, D3DTSS_COLORARG0 = 13, D3DTSS_COLORARG1 = 14, D3DTSS_COLORARG2 = 15,
@@ -230,6 +234,7 @@ static void restore_window_framebuffer(void);
 static void backbuffer_read_begin(GLbitfield mask);
 static void backbuffer_read_end(void);
 static GLuint cur_program;   /* the GL program bound for draws (see use_program) */
+static bool ff_lighting_candidate, ff_primary_present, ff_secondary_present;
 static void program_off(void);
 static GLuint backbuffer_copy_texture(ULONG data, ULONG w, ULONG h);
 static void run_callbacks(void);
@@ -1276,7 +1281,27 @@ static void upload_image3(GLenum target, GLint level, ULONG fmt, ULONG w, ULONG 
         { 0x25, 2, false, GL_RGBA, GL_UNSIGNED_BYTE, false, 4 },            /* UYVY */
     };
 
-    if ((fmt == 0x0C || fmt == 0x0E || fmt == 0x0F) && target != GL_TEXTURE_3D) {
+    if (fmt == 0x0C || fmt == 0x0E || fmt == 0x0F) {
+        if (target == GL_TEXTURE_3D) {
+            /* S3TC is not a legal compressed GL_TEXTURE_3D format.
+               Decode the NV2A slab order before uploading a normal volume. */
+            size_t packed_bytes, rgba_bytes;
+            if (!dxt_volume_sizes(fmt, w, h, d, &packed_bytes, &rgba_bytes)) {
+                xlog("D3D: invalid DXT volume dimensions %ux%ux%u", w, h, d);
+                return;
+            }
+            uint8_t *rgba = malloc(rgba_bytes);
+            if (!rgba) {
+                xlog("D3D: cannot allocate %zu bytes for DXT volume", rgba_bytes);
+                return;
+            }
+            if (dxt_decode_volume(fmt, w, h, d, src, packed_bytes, rgba, rgba_bytes)) {
+                glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+                glTexImage3D(target, level, GL_RGBA, w, h, d, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+            }
+            free(rgba);
+            return;
+        }
         /* DXT1/3/5 are stored linearly in 4x4 blocks, like on the PC. */
         static const GLenum dxt[] = { 0x83F1, 0x83F2, 0x83F3 };  /* GL_COMPRESSED_RGBA_S3TC_DXT{1,3,5}_EXT */
         GLenum internal = dxt[fmt == 0x0C ? 0 : fmt == 0x0E ? 1 : 2];
@@ -2029,6 +2054,8 @@ static GLenum stencil_op(ULONG op)
 
 static void apply_render_states(bool pretransformed, bool has_normal)
 {
+    ff_lighting_candidate = !pretransformed && has_normal && RS(D3DRS_LIGHTING);
+    ff_primary_present = ff_secondary_present = false;
     flush_cpu_backbuffer();
     apply_viewport();
 
@@ -2439,9 +2466,10 @@ static LONG NTAPI D3DDevice_CreateVertexShader(const ULONG *decl, const ULONG *f
    (0 = fixed function for that stage) with its uniform locations. */
 typedef struct program_entry {
     GLuint vs, fs, prog;
+    GLint loc_ff_lighting;
     GLint loc_c, loc_flip_y, loc_vp_scale, loc_vp_offset, loc_wdepth;
     GLint loc_tex[4], loc_cube[4], loc_vol[4], loc_tex_scale, loc_c0, loc_c1, loc_fc0, loc_fc1,
-          loc_bump_env, loc_bump_lum;
+          loc_bump_env, loc_bump_lum, loc_eye_vector, loc_key_color;
     float (*last_c)[4];   /* the constants last uploaded to the program */
     bool c_partial;
     int c_size;           /* active elements of c (the compiler drops unused trailing ones) */
@@ -2639,6 +2667,9 @@ static program_entry *program_for(GLuint vs, GLuint fs)
         e->loc_fc1 = U("fc1");
         e->loc_bump_env = U("bump_env");
         e->loc_bump_lum = U("bump_lum");
+        e->loc_ff_lighting = U("ff_lighting");
+        e->loc_eye_vector = U("eye_vector");
+        e->loc_key_color = U("key_color");
 #undef U
     }
     e->next = programs;
@@ -2674,8 +2705,11 @@ static ULONG adjusted_texture_modes(void)
         GLenum target = t ? tex_target(t) : 0;
         if (!t && m != 0x04 && m != 0x05 && m != 0x0A && m != 0x11)
             m = 0;
-        else if (t && m >= 0x01 && m <= 0x03)
-            m = target == GL_TEXTURE_CUBE_MAP ? 0x03 : target == GL_TEXTURE_3D ? 0x02 : 0x01;
+        else if (t && m >= 0x01 && m <= 0x03) {
+            /* A 2D depth image still needs PROJECT3D to supply reference r/q. */
+            if (!(m == 0x02 && target == GL_TEXTURE_2D && is_depth_format((t->Format >> 8) & 0xFF)))
+                m = target == GL_TEXTURE_CUBE_MAP ? 0x03 : target == GL_TEXTURE_3D ? 0x02 : 0x01;
+        }
         else if (t && (m == 0x0D || m == 0x0E))
             m = target == GL_TEXTURE_CUBE_MAP ? 0x0E : 0x0D;
         out = (out << 5) | m;
@@ -2694,7 +2728,25 @@ static ULONG shadow_stages(void)
     return mask;
 }
 
-static void fshader_key(uint32_t *key)
+static psh_options fragment_shader_options(void)
+{
+    psh_options o = {0};
+    for (int i = 0; i < 4; i++) {
+        if (TSS(i, D3DTSS_ALPHAKILL) & 4) o.alpha_kill |= 1u << i;
+        o.color_key[i] = TSS(i, D3DTSS_COLORKEYOP) & 3;
+        const D3DPixelContainer *t = (const D3DPixelContainer *)d3d.textures[i];
+        if (!t) continue;
+        ULONG fmt = (t->Format >> 8) & 0xFF;
+        if (fmt == 0x03 || fmt == 0x1C || fmt == 0x07 || fmt == 0x1E)
+            o.color_key_ignore_alpha |= 1u << i;
+        /* X8L8V8U8 aliases X8R8G8B8: preserve ordinary RGB sampling, but
+           tell bump stages where U, V and luminance landed in that upload. */
+        if (fmt == 0x07 || fmt == 0x1E) o.bump_bgra |= 1u << i;
+    }
+    return o;
+}
+
+static void fshader_key(uint32_t *key, const psh_options *o)
 {
     memset(key, 0, 64 * 4);
     memcpy(key, d3d.render_state, D3DRS_PS_MAX * 4);
@@ -2704,12 +2756,17 @@ static void fshader_key(uint32_t *key)
     key[58] = RS(D3DRS_FOGENABLE);
     key[59] = RS(D3DRS_FOGTABLEMODE);
     key[60] = shadow_stages();
+    key[61] = RS(D3DRS_SPECULARENABLE) != 0;
+    key[62] = o->alpha_kill;
+    key[63] = (o->color_key_ignore_alpha << 8) | (o->bump_bgra << 12);
+    for (int i = 0; i < 4; i++) key[63] |= o->color_key[i] << (i * 2);
 }
 
 static GLuint fragment_shader_object(void)
 {
     uint32_t key[64];
-    fshader_key(key);
+    psh_options options = fragment_shader_options();
+    fshader_key(key, &options);
     static fshader_entry *last;
     if (last && gc_same(last->key, key, 64)) return last->fs;
     for (fshader_entry *e = fshaders; e; e = e->next)
@@ -2721,7 +2778,7 @@ static GLuint fragment_shader_object(void)
     ULONG rs[D3DRS_MAX];   /* psh.c reads 4400 numbering */
     for (int i = 0; i < D3DRS_MAX; i++) rs[i] = RS(i);
     psh_shadow_stages = key[60];
-    char *src = psh_translate(rs);
+    char *src = psh_translate_ex(rs, &options);
     RS(D3DRS_PSTEXTUREMODES) = modes;
     if (!src) {
         xlog("D3D: pixel shader %#x could not be translated", d3d.pixel_shader);
@@ -2743,6 +2800,10 @@ static void apply_shader_textures(const program_entry *e)
     float scale[4][4];
     for (int s = 0; s < 4; s++) {
         p_glActiveTexture(GL_TEXTURE0 + s);
+        /* With GLSL 1.20 the point sprite replacement feeds gl_TexCoord.
+           Set every unit here too: a pixel shader draw may not have passed
+           through fixed-function texture setup, or may follow a sprite. */
+        glTexEnvi(GL_POINT_SPRITE, GL_COORD_REPLACE, s == 3 && RS(D3DRS_POINTSPRITEENABLE));
         scale[s][0] = scale[s][1] = scale[s][2] = scale[s][3] = 1;
         D3DPixelContainer *t = (D3DPixelContainer *)d3d.textures[s];
         if (!t) {
@@ -2778,6 +2839,11 @@ static void apply_shader_textures(const program_entry *e)
 static void upload_ps_uniforms(const program_entry *e)
 {
     float c[8][4];
+    if (e->loc_eye_vector >= 0) p_glUniform4fv(e->loc_eye_vector, 1, d3d.eye_vector);
+    if (e->loc_key_color >= 0) {
+        for (int i = 0; i < 4; i++) color4(c[i], TSS(i, D3DTSS_COLORKEYCOLOR));
+        p_glUniform4fv(e->loc_key_color, 4, &c[0][0]);
+    }
     if (e->loc_c0 >= 0) {
         for (int i = 0; i < 8; i++) color4(c[i], RS(D3DRS_PSCONSTANT0_0 + i));
         p_glUniform4fv(e->loc_c0, 8, &c[0][0]);
@@ -2822,6 +2888,85 @@ static void program_off(void)
     cur_program = 0;
 }
 
+
+/* First owned FF vertex path: ordinary lit, unskinned geometry. Keep
+   unverified modes on the existing path until their own render fixtures
+   establish the NV2A behavior. In particular, legacy secondary color has
+   no alpha, so it cannot yet represent all COLOR2 material sources. */
+static bool fixed_lighting_supported(void)
+{
+    if (!ff_lighting_candidate || RS(118 /* VERTEXBLEND */) || RS(122 /* TWOSIDEDLIGHTING */)
+        || RS(D3DRS_FOGENABLE) || RS(D3DRS_POINTSCALEENABLE) || RS(D3DRS_POINTSPRITEENABLE)
+        || RS(D3DRS_ZENABLE) == 2)
+        return false;
+    static const int sources[4] = { 101, 102, 100, 103 }; /* diffuse, ambient, specular, emissive */
+    for (int k = 0; k < 4; k++) {
+        ULONG source = RS(sources[k]);
+        bool active = k != 2 || RS(D3DRS_SPECULARENABLE);
+        if (active && RS(D3DRS_COLORVERTEX) && (source > 2 || (source == 2 && ff_secondary_present)))
+            return false;
+        if (TSS(k, D3DTSS_TEXCOORDINDEX) >> 16) return false;
+    }
+    for (int i = 0; i < 8; i++)
+        if (d3d.lights[i].enabled && d3d.lights[i].type != 1 && d3d.lights[i].type != 3)
+            return false;
+    return isfinite(d3d.material_power) && d3d.material_power >= 0;
+}
+
+static GLuint fixed_lighting_shader(void)
+{
+    static GLuint object;
+    static bool attempted;
+    if (!fixed_lighting_supported()) return 0;
+    if (!attempted) {
+        attempted = true;
+        object = compile_shader(GL_VERTEX_SHADER, ff_lighting_source);
+    }
+    return object;
+}
+
+static void upload_fixed_lighting(const program_entry *e)
+{
+    if (e->loc_ff_lighting < 0) return;
+    float state[FF_LIGHTING_VECTORS][4] = { { 0 } };
+    state[0][0] = RS(D3DRS_SPECULARENABLE) != 0;
+    state[0][1] = RS(D3DRS_NORMALIZENORMALS) != 0;
+    state[0][2] = RS(94 /* LOCALVIEWER */) != 0;
+    state[0][3] = d3d.material_power;
+    static const int sources[4] = { 101, 102, 100, 103 };
+    for (int k = 0; k < 4; k++) {
+        ULONG source = RS(D3DRS_COLORVERTEX) ? RS(sources[k]) : 0;
+        if ((source == 1 && !ff_primary_present) || (source == 2 && !ff_secondary_present)) source = 0;
+        state[1][k] = source;
+    }
+    color4(state[2], RS(D3DRS_AMBIENT));
+    memcpy(state[3], d3d.material, sizeof d3d.material);
+    for (int i = 0; i < 8; i++) {
+        typeof(d3d.lights[0]) *light = &d3d.lights[i];
+        if (!light->enabled) continue;
+        int base = 9 + 5 * i;
+        float world[4], eye[4] = { 0 };
+        if (light->type == 3) {
+            for (int j = 0; j < 3; j++) world[j] = -light->direction[j];
+            world[3] = 0;
+        } else {
+            memcpy(world, light->position, sizeof world);
+        }
+        for (int j = 0; j < 4; j++)
+            for (int k = 0; k < 4; k++)
+                eye[j] += world[k] * d3d.transforms[0].m[k][j];
+        for (int j = 0; j < 3; j++)
+            state[base][j] = light->type == 3 ? eye[j] : eye[j] / eye[3];
+        state[base][3] = light->type;
+        memcpy(state[base + 1], light->ambient, 16);
+        memcpy(state[base + 2], light->diffuse, 16);
+        memcpy(state[base + 3], light->specular, 16);
+        memcpy(state[base + 4], light->attenuation, 12);
+        state[base + 4][3] = light->range;
+    }
+    p_glUniform4fv(e->loc_ff_lighting, FF_LIGHTING_VECTORS, &state[0][0]);
+}
+
 /* Select the program for a draw: `vs` is the vertex shader object (0 for
    fixed function); the fragment side follows the title's pixel shader.
    Returns false when the draw must be skipped (a shader failed), else sets
@@ -2834,6 +2979,7 @@ static bool use_program(GLuint vs, program_entry **out)
         fs = fragment_shader_object();
         if (!fs) return false;
     }
+    if (!vs) vs = fixed_lighting_shader();
     if (!vs && !fs) { program_off(); return true; }
     program_entry *e = program_for(vs, fs);
     if (!e->prog) return false;
@@ -2842,6 +2988,7 @@ static bool use_program(GLuint vs, program_entry **out)
     if (cur_program != e->prog) p_glUseProgram(e->prog);
     cur_program = e->prog;
     if (fs) upload_ps_uniforms(e);
+    upload_fixed_lighting(e);
     *out = e;
     return true;
 }
@@ -3343,6 +3490,8 @@ static void draw_declared_(const vshader *sh, ULONG PrimitiveType, const UCHAR *
     bool pretransformed = pos->components == 4 && pos->gl_type == GL_FLOAT;
     gc_disable_attrib_arrays();
     apply_render_states(pretransformed, sh->attr[2].stream >= 0);
+    ff_primary_present = sh->attr[3].stream >= 0;
+    ff_secondary_present = sh->attr[4].stream >= 0;
     glEnableClientState(GL_VERTEX_ARRAY);
     glVertexPointer(pretransformed ? 3 : pos->components, pos->gl_type, stride, base + pos->offset);
     if (sh->attr[2].stream >= 0) {
@@ -3439,6 +3588,8 @@ static void draw(ULONG PrimitiveType, const UCHAR *base, ULONG stride, ULONG fir
     conv_serial++;
     gc_disable_attrib_arrays();
     apply_render_states(l.pretransformed, l.normal_off >= 0);
+    ff_primary_present = l.diffuse_off >= 0;
+    ff_secondary_present = l.specular_off >= 0;
 
     glEnableClientState(GL_VERTEX_ARRAY);
     glVertexPointer(l.pos_size, GL_FLOAT, stride, base);
@@ -4460,33 +4611,86 @@ static GLuint surface_rt_texture(D3DSurface *s, ULONG w, ULONG h)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_BGRA, GL_UNSIGNED_BYTE, NULL);
+    ULONG fmt = (s->Format >> 8) & 0xFF;
+    const uint8_t *pixels = NULL;
+    uint8_t *rows = NULL;
+    if ((fmt == 0x06 || fmt == 0x07 || fmt == 0x12 || fmt == 0x1E) &&
+        w && h && w <= SIZE_MAX / h / 4) {
+        ULONG sw, sh, pitch;
+        container_size((D3DPixelContainer *)s, &sw, &sh, &pitch);
+        rows = malloc((size_t)w * h * 4);
+        if (rows) {
+            pixels = (const uint8_t *)(s->Data | CONTIG_BASE);
+            if (s->Size) {
+                for (ULONG y = 0; y < h; y++) memcpy(rows + y * w * 4, pixels + y * pitch, w * 4);
+            } else {
+                unswizzle(pixels, rows, w, h, 4);
+            }
+            pixels = rows;
+        }
+    }
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_BGRA, GL_UNSIGNED_BYTE, pixels);
+    free(rows);
     tex_entry *e = malloc(sizeof(*e));
     *e = (tex_entry){ s->Data, s->Format, s->Size, 0, id, GL_TEXTURE_2D, tex_cache };
     tex_cache = e;
     return id;
 }
 
-/* Copy a standalone render target's GL pixels into its memory.  Render
-   targets are drawn flipped, so GL row 0 is the top row. */
+/* Resolve a surface view without replacing its parent texture. */
+static tex_entry *surface_image(D3DSurface *s, GLenum *face, ULONG *level)
+{
+    D3DPixelContainer *t = s->Parent ? s->Parent : (D3DPixelContainer *)s;
+    for (tex_entry *e = tex_cache; e; e = e->next) {
+        if (e->data != t->res.Data || e->format != t->Format || e->size != t->Size) continue;
+        if (e->target != GL_TEXTURE_2D && e->target != GL_TEXTURE_CUBE_MAP) return NULL;
+        ULONG offset = s->Data - t->res.Data;
+        *face = e->target;
+        *level = 0;
+        if (e->target == GL_TEXTURE_CUBE_MAP) {
+            ULONG stride = cube_face_bytes(t), f = offset / stride;
+            if (f >= 6) return NULL;
+            *face = GL_TEXTURE_CUBE_MAP_POSITIVE_X + f;
+            offset %= stride;
+        }
+        if (s->Parent) {
+            while (*level < level_count(t) && level_offset(t, *level) != offset) (*level)++;
+            if (*level == level_count(t)) return NULL;
+        }
+        return e;
+    }
+    return NULL;
+}
+
+/* Texture-backed surfaces retain GPU writes until explicitly read back.
+   GL row zero is the Xbox top row for these render targets. */
 static bool readback_rt_surface(D3DSurface *s)
 {
-    if (s->Parent || s == d3d.backbuffer) return false;
-    stats.readbacks++;
-    for (tex_entry *e = tex_cache; e; e = e->next) {
-        if (e->data != s->Data || e->format != s->Format || e->size != s->Size) continue;
-        ULONG w, h, pitch;
-        container_size((D3DPixelContainer *)s, &w, &h, &pitch);
-        uint8_t *tmp = malloc(w * h * 4), *px = (uint8_t *)(s->Data | CONTIG_BASE);
-        glBindTexture(GL_TEXTURE_2D, e->id);
-        glPixelStorei(GL_PACK_ALIGNMENT, 1);
-        glGetTexImage(GL_TEXTURE_2D, 0, GL_BGRA, GL_UNSIGNED_BYTE, tmp);
-        ULONG row = pitch < w * 4 ? pitch : w * 4;
-        for (ULONG y = 0; y < h; y++) memcpy(px + y * pitch, tmp + y * w * 4, row);
-        free(tmp);
-        return true;
+    if (s == d3d.backbuffer) return false;
+    ULONG fmt = (s->Format >> 8) & 0xFF, level;
+    /* Other formats need their own packed readback. */
+    if (fmt != 0x06 && fmt != 0x07 && fmt != 0x12 && fmt != 0x1E) return false;
+    GLenum face;
+    tex_entry *e = surface_image(s, &face, &level);
+    if (!e) return false;
+    ULONG w, h, pitch;
+    container_size((D3DPixelContainer *)s, &w, &h, &pitch);
+    if (!w || !h || w > SIZE_MAX / h / 4) return false;
+    uint8_t *tmp = malloc((size_t)w * h * 4);
+    if (!tmp) return false;
+    uint8_t *px = (uint8_t *)(s->Data | CONTIG_BASE);
+    glBindTexture(e->target, e->id);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glGetTexImage(face, level, GL_BGRA, GL_UNSIGNED_BYTE, tmp);
+    if (s->Size) {
+        for (ULONG y = 0; y < h; y++) memcpy(px + y * pitch, tmp + y * w * 4, w * 4);
+    } else {
+        swizzle(tmp, w * 4, px, w, h, 4);
     }
-    return false;
+    free(tmp);
+    stats.readbacks++;
+    return true;
 }
 
 static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
@@ -4638,32 +4842,97 @@ static void NTAPI D3DDevice_CopyRects(D3DSurface *src, const LONG *rects, UINT_ 
     container_size((D3DPixelContainer *)src, &sw, &sh, &sp);
     container_size((D3DPixelContainer *)dst, &dw, &dh, &dp);
     bool lin;
-    int bytes = format_bits((src->Format >> 8) & 0xFF, &lin) / 8;
+    ULONG src_fmt = (src->Format >> 8) & 0xFF, dst_fmt = (dst->Format >> 8) & 0xFF;
+    if (src_fmt == 0x0C || src_fmt == 0x0E || src_fmt == 0x0F ||
+        dst_fmt == 0x0C || dst_fmt == 0x0E || dst_fmt == 0x0F) {
+        xlog("D3D: CopyRects of compressed surfaces is not supported");
+        return;
+    }
+    int bytes = format_bits(src_fmt, &lin) / 8;
     if (src == d3d.backbuffer) {
         ULONG locked[2];
         D3DSurface_LockRect(src, locked, NULL, 0x80);   /* refresh its pixels */
     } else {
         readback_rt_surface(src);
     }
-    const uint8_t *s = (const uint8_t *)(src->Data | CONTIG_BASE);
-    uint8_t *d = (uint8_t *)(dst->Data | CONTIG_BASE);
     bool dst_lin;
     int dst_bytes = format_bits((dst->Format >> 8) & 0xFF, &dst_lin) / 8;
-    if (!n && !dst_lin && dst_bytes == bytes && sw == dw && sh == dh) {
-        /* Into a swizzled texture level: the copy swizzles. */
-        swizzle(s, sp, d, dw, dh, bytes);
-    } else if (!n) {
-        ULONG w = sw < dw ? sw : dw, h = sh < dh ? sh : dh;
-        for (ULONG y = 0; y < h; y++) memcpy(d + y * dp, s + y * sp, w * bytes);
-    } else {
-        for (UINT_ i = 0; i < n; i++) {
-            LONG x0 = rects[i * 4], y0 = rects[i * 4 + 1], x1 = rects[i * 4 + 2], y1 = rects[i * 4 + 3];
-            LONG dx = points ? points[i * 2] : 0, dy = points ? points[i * 2 + 1] : 0;
-            for (LONG y = y0; y < y1; y++)
-                memcpy(d + (dy + y - y0) * dp + dx * bytes, s + y * sp + x0 * bytes, (x1 - x0) * bytes);
+    if (bytes <= 0 || dst_bytes != bytes) {
+        xlog("D3D: CopyRects needs matching uncompressed pixel sizes");
+        return;
+    }
+    /* Work in linear rows even when either surface is swizzled. Separate
+       buffers also make overlapping self-copies independent of write order. */
+    if (dst != src) {
+        if (dst == d3d.backbuffer && !d3d.bb_cpu_dirty) {
+            ULONG locked[2];
+            D3DSurface_LockRect(dst, locked, NULL, 0x80);
+        } else {
+            readback_rt_surface(dst);
         }
     }
-    if (dst->Parent) tex_invalidate(dst->Parent->res.Data);
+    if (!sw || !sh || !dw || !dh || sw > SIZE_MAX / sh / bytes || dw > SIZE_MAX / dh / bytes) {
+        xlog("D3D: CopyRects surface is too large");
+        return;
+    }
+    const uint8_t *source = (const uint8_t *)(src->Data | CONTIG_BASE);
+    uint8_t *dest = (uint8_t *)(dst->Data | CONTIG_BASE);
+    uint8_t *source_rows = malloc(sw * sh * bytes);
+    uint8_t *dest_rows = malloc(dw * dh * bytes);
+    if (!source_rows || !dest_rows) {
+        free(source_rows);
+        free(dest_rows);
+        xlog("D3D: CopyRects could not allocate row buffers");
+        return;
+    }
+    if (lin) {
+        for (ULONG y = 0; y < sh; y++) memcpy(source_rows + y * sw * bytes, source + y * sp, sw * bytes);
+    } else {
+        unswizzle(source, source_rows, sw, sh, bytes);
+    }
+    if (dst_lin) {
+        for (ULONG y = 0; y < dh; y++) memcpy(dest_rows + y * dw * bytes, dest + y * dp, dw * bytes);
+    } else {
+        unswizzle(dest, dest_rows, dw, dh, bytes);
+    }
+    for (UINT_ i = 0; i < (n ? n : 1); i++) {
+        LONG x0 = n ? rects[i * 4] : 0, y0 = n ? rects[i * 4 + 1] : 0;
+        LONG x1 = n ? rects[i * 4 + 2] : (LONG)sw, y1 = n ? rects[i * 4 + 3] : (LONG)sh;
+        LONG dx = n && points ? points[i * 2] : 0, dy = n && points ? points[i * 2 + 1] : 0;
+        if (x0 < 0) { dx -= x0; x0 = 0; }
+        if (y0 < 0) { dy -= y0; y0 = 0; }
+        if (dx < 0) { x0 -= dx; dx = 0; }
+        if (dy < 0) { y0 -= dy; dy = 0; }
+        if (x1 > (LONG)sw) x1 = sw;
+        if (y1 > (LONG)sh) y1 = sh;
+        if (x1 - x0 > (LONG)dw - dx) x1 = x0 + (LONG)dw - dx;
+        if (y1 - y0 > (LONG)dh - dy) y1 = y0 + (LONG)dh - dy;
+        if (x1 <= x0 || y1 <= y0) continue;
+        for (LONG y = y0; y < y1; y++)
+            memcpy(dest_rows + ((dy + y - y0) * dw + dx) * bytes,
+                   source_rows + (y * sw + x0) * bytes, (x1 - x0) * bytes);
+    }
+    if (dst_lin) {
+        for (ULONG y = 0; y < dh; y++) memcpy(dest + y * dp, dest_rows + y * dw * bytes, dw * bytes);
+    } else {
+        swizzle(dest_rows, dw * bytes, dest, dw, dh, bytes);
+    }
+    /* Updating the existing image preserves sibling mip/face GPU contents
+       and any live framebuffer attachment to this texture. */
+    GLenum face;
+    ULONG level;
+    tex_entry *e = dst == d3d.backbuffer ? NULL : surface_image(dst, &face, &level);
+    bool bgra = dst_fmt == 0x06 || dst_fmt == 0x07 || dst_fmt == 0x12 || dst_fmt == 0x1E;
+    if (e && bgra) {
+        glBindTexture(e->target, e->id);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexSubImage2D(face, level, 0, 0, dw, dh, GL_BGRA, GL_UNSIGNED_BYTE, dest_rows);
+    } else if (dst->Parent) {
+        tex_invalidate(dst->Parent->res.Data);
+    }
+    free(source_rows);
+    free(dest_rows);
+    if (dst == d3d.backbuffer) d3d.bb_cpu_dirty = true;
 }
 
 /* ---- texture objects --------------------------------------------------- */
@@ -5517,6 +5786,8 @@ static void imm_flush(ULONG prim)
                              : (d3d.vertex_shader & D3DFVF_POSITION_MASK) == D3DFVF_XYZRHW;
     gc_disable_attrib_arrays();
     apply_render_states(pretransformed, imm.used[2]);
+    ff_primary_present = imm.used[3];
+    ff_secondary_present = imm.used[4];
     bool lit = glIsEnabled(GL_LIGHTING);
     if (lit && imm.used[3] && RS(D3DRS_COLORVERTEX)) {
         glEnable(GL_COLOR_MATERIAL);
@@ -5615,7 +5886,7 @@ static struct {
     D3DVIEWPORT8 viewport;
     typeof(d3d.lights) lights;
     float material[4][4], material_power;
-    float vs_const[192][4], ps_const[16][4];
+    float vs_const[192][4], ps_const[16][4], eye_vector[4];
     D3DPalette *palettes[4];
     D3DSurface *target, *target_depth;
 } pb_saved;
@@ -5714,6 +5985,7 @@ static void NTAPI D3DDevice_BeginPushBuffer(D3DPushBuffer *pb)
     pb_saved.material_power = d3d.material_power;
     memcpy(pb_saved.vs_const, d3d.vs_const, sizeof(pb_saved.vs_const));
     memcpy(pb_saved.ps_const, d3d.ps_const, sizeof(pb_saved.ps_const));
+    memcpy(pb_saved.eye_vector, d3d.eye_vector, sizeof(pb_saved.eye_vector));
     memcpy(pb_saved.palettes, d3d.palettes, sizeof(pb_saved.palettes));
     pb_saved.target = d3d.target;
     pb_saved.target_depth = d3d.target_depth;
@@ -5741,6 +6013,7 @@ static LONG NTAPI D3DDevice_EndPushBuffer(void)
     d3d.material_power = pb_saved.material_power;
     memcpy(d3d.vs_const, pb_saved.vs_const, sizeof(pb_saved.vs_const));
     memcpy(d3d.ps_const, pb_saved.ps_const, sizeof(pb_saved.ps_const));
+    memcpy(d3d.eye_vector, pb_saved.eye_vector, sizeof(pb_saved.eye_vector));
     memcpy(d3d.palettes, pb_saved.palettes, sizeof(pb_saved.palettes));
     if (d3d.target != pb_saved.target || d3d.target_depth != pb_saved.target_depth)
         D3DDevice_SetRenderTarget(pb_saved.target, pb_saved.target_depth);
@@ -6084,6 +6357,8 @@ static void pb_interpret(const ULONG *p, unsigned n)
                 } else {
                     elems[elems_n++] = d;
                 }
+            } else if (m >= 0x181C && m <= 0x1824) {   /* NV097_SET_EYE_VECTOR */
+                d3d.eye_vector[(m - 0x181C) / 4] = f;
             } else if (m == 0x1EA4) {   /* NV097_SET_TRANSFORM_CONSTANT_LOAD */
                 const_load = d;
             } else if (m >= 0xB80 && m < 0xC00) {   /* NV097_SET_TRANSFORM_CONSTANT */
@@ -6332,10 +6607,12 @@ typedef struct state_block {
     float material[4][4], material_power, back_material[4][4], back_material_power;
     float vs_const[192][4];
     float ps_const[16][4];
+    float eye_vector[4];
 } state_block;
 
 static void state_capture(state_block *b)
 {
+    pusher_drain();
     for (int i = 0; i < D3DRS_MAX; i++) b->rs[i] = RS(i);
     memcpy(b->tss, d3d.texture_state, sizeof(b->tss));
     memcpy(b->transforms, d3d.transforms, sizeof(b->transforms));
@@ -6353,6 +6630,7 @@ static void state_capture(state_block *b)
     b->back_material_power = d3d.back_material_power;
     memcpy(b->vs_const, d3d.vs_const, sizeof(b->vs_const));
     memcpy(b->ps_const, d3d.ps_const, sizeof(b->ps_const));
+    memcpy(b->eye_vector, d3d.eye_vector, sizeof(b->eye_vector));
 }
 
 static void state_apply(const state_block *b)
@@ -6373,6 +6651,7 @@ static void state_apply(const state_block *b)
     d3d.back_material_power = b->back_material_power;
     memcpy(d3d.vs_const, b->vs_const, sizeof(b->vs_const));
     memcpy(d3d.ps_const, b->ps_const, sizeof(b->ps_const));
+    memcpy(d3d.eye_vector, b->eye_vector, sizeof(b->eye_vector));
 }
 
 static LONG NTAPI D3DDevice_CreateStateBlock(ULONG Type, ULONG *pToken)
