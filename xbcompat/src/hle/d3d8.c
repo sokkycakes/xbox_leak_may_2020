@@ -4656,6 +4656,21 @@ static void linear_words(ULONG fmt, ULONG w, ULONG h, ULONG *format, ULONG *size
 static ULONG linear_variant(ULONG fmt)
 {
     switch (fmt) {
+    case 0x00: return 0x13;  /* L8 */
+    case 0x01: return 0x1B;  /* AL8 */
+    case 0x04: return 0x1D;  /* A4R4G4B4 */
+    case 0x19: return 0x1F;  /* A8 */
+    case 0x1A: return 0x20;  /* A8L8 */
+    case 0x27: return 0x37;  /* R6G5B5 / L6V5U5 */
+    case 0x28: return 0x17;  /* G8B8 / V8U8 */
+    case 0x29: return 0x16;  /* R8B8 */
+    case 0x32: return 0x35;  /* L16 */
+    case 0x33: return 0x36;  /* V16U16 */
+    case 0x38: return 0x3D;  /* R5G5B5A1 */
+    case 0x39: return 0x3E;  /* R4G4B4A4 */
+    case 0x3A: return 0x3F;  /* A8B8G8R8 */
+    case 0x3B: return 0x40;  /* B8G8R8A8 */
+    case 0x3C: return 0x41;  /* R8G8B8A8 */
     case 0x06: return 0x12;  /* A8R8G8B8 */
     case 0x07: return 0x1E;  /* X8R8G8B8 */
     case 0x05: return 0x11;  /* R5G6B5 */
@@ -5073,6 +5088,12 @@ static void NTAPI D3DDevice_CopyRects(D3DSurface *src, const LONG *rects, UINT_ 
     if (src_fmt == 0x0C || src_fmt == 0x0E || src_fmt == 0x0F ||
         dst_fmt == 0x0C || dst_fmt == 0x0E || dst_fmt == 0x0F) {
         copy_compressed_surface(src, rects, n, dst, points);
+        return;
+    }
+    /* CopyRects copies equal format layouts; it is not a conversion API.
+       A linear/swizzled pair of the same format differs only in addressing. */
+    if (linear_variant(src_fmt) != linear_variant(dst_fmt)) {
+        xlog("D3D: CopyRects requires matching source and destination formats");
         return;
     }
     int bytes = format_bits(src_fmt, &lin) / 8;

@@ -1352,6 +1352,36 @@ int main(int argc, char **argv)
             render_states[92] = render_states[124] = 0;
             texture_states[3] = texture_states[4] = 1;
             texture_states[5] = texture_states[9] = texture_states[11] = texture_states[21] = 0;
+            LONG (NTAPI *create_image)(ULONG,ULONG,ULONG,void **)=find("_D3DDevice_CreateImageSurface@16");
+            void (NTAPI *lock_image)(void *,ULONG *,const LONG *,ULONG)=find("_D3DSurface_LockRect@16");
+            void (NTAPI *describe_image)(void *,ULONG *)=find("_D3DSurface_GetDesc@8");
+            for(unsigned f=0;f<sizeof formats/sizeof formats[0];f++){
+                void *image=NULL,*destination=create_tex(4,2,1,1,0,formats[f].swizzled,3),*view=NULL;
+                assert(create_image(4,2,formats[f].swizzled,&image)==0);
+                ULONG desc[7],locked[2];describe_image(image,desc);
+                assert(desc[0]==formats[f].linear && desc[5]==4 && desc[6]==2);
+                lock_image(image,locked,NULL,0);
+                unsigned char *data=(void *)locked[1];
+                memset(data,0xee,locked[0]*2);
+                for(int y=0;y<2;y++)for(int x=0;x<4;x++)
+                    memcpy(data+y*locked[0]+x*formats[f].bytes,&formats[f].texel,formats[f].bytes);
+                assert(surface(destination,0,&view)==0);copy_rects(image,NULL,0,view,NULL);
+                set_tex(0,destination);
+                for(int v=0;v<3;v++)textured[v].u=textured[v].v=.75f;
+                clear(0,NULL,0xf3,0xff000000,1,0);draw(5,3,textured,sizeof textured[0]);
+                glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                for(int channel=0;channel<4;channel++)
+                    assert(abs((int)pixel[channel]-formats[f].rgba[channel])<=3);
+            }
+            /* Equal byte size does not make L8 and AL8 interchangeable. */
+            {
+                void *a=NULL,*b=NULL;ULONG al[2],bl[2];
+                assert(create_image(4,2,0,&a)==0 && create_image(4,2,1,&b)==0);
+                lock_image(a,al,NULL,0);lock_image(b,bl,NULL,0);
+                memset((void *)al[1],0x11,al[0]*2);memset((void *)bl[1],0x77,bl[0]*2);
+                copy_rects(a,NULL,0,b,NULL);
+                for(unsigned i=0;i<bl[0]*2;i++)assert(((unsigned char *)bl[1])[i]==0x77);
+            }
             for (unsigned f = 0; f < sizeof formats/sizeof formats[0]; f++)
                 for (unsigned linear = 0; linear < 2; linear++) {
                     unsigned fmt = linear ? formats[f].linear : formats[f].swizzled;
