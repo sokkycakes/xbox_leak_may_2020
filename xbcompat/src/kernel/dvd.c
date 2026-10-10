@@ -138,7 +138,10 @@ static bool disc_read_raw(disc *d, void *buf, size_t len, uint64_t off)
         uint32_t lba = off / SECTOR, skip = off % SECTOR;
         uint32_t count = (skip + len + SECTOR - 1) / SECTOR;
         if (count > 32) count = 32;
-        if (!sg_read(d->fd, bounce, lba, count)) return false;
+        if (!sg_read(d->fd, bounce, lba, count)) {
+            xlog("DVD: the drive failed to read %u sectors at LBA %u", count, lba);
+            return false;
+        }
         size_t n = count * SECTOR - skip;
         if (n > len) n = len;
         memcpy(buf, bounce + skip, n);
@@ -864,8 +867,9 @@ void dvd_title_started(const char *xbe_host_path)
    only run from an Xbox game disc asks the drive (MODE SENSE, page 0x3E)
    whether it has authenticated the disc; a title that hears no goes back to
    the dashboard.  A PC drive can't do the Xbox drive's challenge and
-   response, so any disc in the tray is reported as authenticated.  Other
-   commands get no data, as before. */
+   response, so the disc is always reported as authenticated, also with the
+   tray empty: titles installed on the hard disk run without their disc.
+   Other commands get no data, as before. */
 NTSTATUS dvd_scsi_pass_through(void *in, ULONG inlen)
 {
     struct {
@@ -877,7 +881,6 @@ NTSTATUS dvd_scsi_pass_through(void *in, ULONG inlen)
         UCHAR Cdb[16];
     } *pt = in;
     if (!pt || inlen < sizeof(*pt)) return STATUS_INVALID_PARAMETER;
-    if (dvd_tray_empty()) return STATUS_NO_MEDIA_IN_DEVICE;
     uint8_t *buf = pt->DataBuffer;
     ULONG len = pt->DataTransferLength;
     if (buf && len) memset(buf, 0, len);

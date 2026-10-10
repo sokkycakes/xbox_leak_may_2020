@@ -128,7 +128,7 @@ static const testcase cases[] = {
           { .ilu = ILU_MOV, .vidx = 2, .c = V(XYZW), .o_mask = M_Y, .o_is_out = 1, .o_addr = O_PTS, .o_from_ilu = 1 },
           { .mac = MAC_MOV, .a = V(XYZW), .o_mask = M_XYZW, .o_is_out = 1, .o_addr = O_POS, .final = 1 } },
         3,
-        { "oFog.x = t.z;", "oPts.x = u.y;", "gl_FogFragCoord = oFog.x;", "gl_PointSize = oPts.x;" },
+        { "oFog.x = t.z;", "oPts.x = u.y;", "float fog_factor = oFog.x;", "gl_PointSize = oPts.x;" },
         { "oFog.zw =", "oPts.y =" }
     },
     {

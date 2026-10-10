@@ -164,7 +164,14 @@ typedef struct {
     strbuf b;
     bool cshadow;        /* the program writes constants: use a local copy */
     bool bad;            /* something the translator cannot express */
+    unsigned cur;        /* the instruction being emitted, for vsh_error */
 } emitter;
+
+/* Why the last vsh_translate returned NULL. */
+char vsh_error[96];
+
+#define BAD(e, ...) do { if (!(e)->bad) { int n_ = snprintf(vsh_error, sizeof vsh_error, "instruction %u: ", (e)->cur); \
+                          snprintf(vsh_error + n_, sizeof vsh_error - n_, __VA_ARGS__); } (e)->bad = true; } while (0)
 
 static const char *temp_name(unsigned r, char *buf)
 {
@@ -181,7 +188,7 @@ static void emit_operand(emitter *e, const vinstr *in, const operand *o, int sca
     if (o->neg) sb_put(&e->b, "-");
     switch (o->kind) {
     case SRC_R:
-        if (o->reg > 12) { e->bad = true; return; }
+        if (o->reg > 12) { BAD(e, "reads R%u", o->reg); return; }
         name = temp_name(o->reg, rbuf);
         break;
     case SRC_V:
@@ -192,13 +199,13 @@ static void emit_operand(emitter *e, const vinstr *in, const operand *o, int sca
         if (in->a0x) {
             sprintf(cbuf, "%s[ridx(A0 + %u)]", e->cshadow ? "cc" : "c", in->cidx);
         } else {
-            if (in->cidx > 191) { e->bad = true; return; }
+            if (in->cidx > 191) { BAD(e, "reads c%u", in->cidx); return; }
             sprintf(cbuf, "%s[%u]", e->cshadow ? "cc" : "c", in->cidx);
         }
         name = cbuf;
         break;
     default:
-        e->bad = true;
+        BAD(e, "operand kind %u", o->kind);
         return;
     }
     sb_put(&e->b, "%s", name);
@@ -231,7 +238,7 @@ static void emit_mac_expr(emitter *e, const vinstr *in)
     case MAC_MAX: sb_put(b, "max("); A(); sb_put(b, ", "); B(); sb_put(b, ")"); break;
     case MAC_SLT: sb_put(b, "vec4(lessThan("); A(); sb_put(b, ", "); B(); sb_put(b, "))"); break;
     case MAC_SGE: sb_put(b, "vec4(greaterThanEqual("); A(); sb_put(b, ", "); B(); sb_put(b, "))"); break;
-    default: e->bad = true; break;
+    default: BAD(e, "MAC opcode %u", in->mac); break;
     }
 #undef A
 #undef B
@@ -249,7 +256,7 @@ static void emit_ilu_expr(emitter *e, const vinstr *in)
     case ILU_EXP: sb_put(b, "_exp("); emit_operand(e, in, &in->c, 1); sb_put(b, ")"); break;
     case ILU_LOG: sb_put(b, "_log("); emit_operand(e, in, &in->c, 1); sb_put(b, ")"); break;
     case ILU_LIT: sb_put(b, "_lit("); emit_operand(e, in, &in->c, 0); sb_put(b, ")"); break;
-    default: e->bad = true; break;
+    default: BAD(e, "ILU opcode %u", in->ilu); break;
     }
 }
 
@@ -269,7 +276,7 @@ static void emit_output(emitter *e, const vinstr *in, const char *src)
     if (in->o_is_out) {
         unsigned idx = in->o_addr & 15;
         const char *name = out_name[idx];
-        if (!name) { e->bad = true; return; }
+        if (!name) { BAD(e, "writes output %u", idx); return; }
         if (idx == OUT_FOG || idx == OUT_PTS) {
             /* Scalar outputs take the most significant masked component. */
             static const char comp[4] = { 'x', 'y', 'z', 'w' };
@@ -282,7 +289,7 @@ static void emit_output(emitter *e, const vinstr *in, const char *src)
     } else {
         /* A constant destination is always absolute; A0 only applies to
            reads. */
-        if (in->o_addr > 191) { e->bad = true; return; }
+        if (in->o_addr > 191) { BAD(e, "writes c%u", in->o_addr); return; }
         sprintf(dest, "cc[%u]", in->o_addr);
         emit_masked(e, dest, in->o_mask, src);
     }
@@ -335,7 +342,9 @@ static const char *const prologue =
     "#version 120\n"
     "/* NV2A vertex program, translated by xbcompat */\n"
     "uniform vec4 c[192];\n"
-    "uniform float flip_y;\n";
+    "uniform float flip_y;\n"
+    "uniform float fog_vertex_mode;\n"
+    "uniform vec4 vp_scale, vp_offset, wdepth;\n";
 
 static const char *const helpers =
     "\n"
@@ -383,6 +392,7 @@ static const char *const helpers =
 
 char *vsh_translate(const uint32_t *code, unsigned count)
 {
+    vsh_error[0] = 0;
     if (!code || !count) return NULL;
 
     /* First pass: decode, find the end, and see what the program touches. */
@@ -442,17 +452,14 @@ char *vsh_translate(const uint32_t *code, unsigned count)
         const vinstr *in = &ins[i];
         const uint32_t *w = code + i * 4;
         if (in->mac == MAC_NOP && in->ilu == ILU_NOP) continue;
+        e.cur = i;
         sb_put(&e.b, "  /* %u: %08x %08x %08x %08x  ", i, w[0], w[1], w[2], w[3]);
         emit_disasm(&e, in);
         sb_put(&e.b, " */\n");
 
         /* Both units read their inputs before either writes. */
         bool have_t = false, have_u = false;
-        if (in->mac == MAC_ARL) {
-            sb_put(&e.b, "  A0 = int(floor(");
-            emit_operand(&e, in, &in->a, 1);
-            sb_put(&e.b, " + 0.001));\n");
-        } else if (in->mac != MAC_NOP) {
+        if (in->mac != MAC_NOP && in->mac != MAC_ARL) {
             sb_put(&e.b, "  t = ");
             emit_mac_expr(&e, in);
             sb_put(&e.b, ";\n");
@@ -464,14 +471,20 @@ char *vsh_translate(const uint32_t *code, unsigned count)
             sb_put(&e.b, ";\n");
             have_u = true;
         }
+        /* ARL is a write too: its paired ILU must read the previous A0. */
+        if (in->mac == MAC_ARL) {
+            sb_put(&e.b, "  A0 = int(floor(");
+            emit_operand(&e, in, &in->a, 1);
+            sb_put(&e.b, " + 0.001));\n");
+        }
         char rbuf[8];
         if (have_t && mac_writes_temp(in)) {
-            if (in->out_r > 12) { e.bad = true; break; }
+            if (in->out_r > 12) { BAD(&e, "MAC writes R%u", in->out_r); break; }
             emit_masked(&e, temp_name(in->out_r, rbuf), in->mac_mask, "t");
         }
         if (have_u && in->ilu_mask) {
             unsigned r = ilu_temp_reg(in);
-            if (r > 12) { e.bad = true; break; }
+            if (r > 12) { BAD(&e, "ILU writes R%u", r); break; }
             emit_masked(&e, temp_name(r, rbuf), in->ilu_mask, "u");
         }
         if (in->o_mask) {
@@ -489,12 +502,13 @@ char *vsh_translate(const uint32_t *code, unsigned count)
        into (0, 0, 0, 0). */
     sb_put(&e.b,
            "\n"
-           "  vec3 vs_n = oPos.xyz - c[59].xyz;\n"
-           "  vs_n.x = (c[58].x != 0.0) ? vs_n.x / c[58].x : 0.0;\n"
-           "  vs_n.y = (c[58].y != 0.0) ? vs_n.y / c[58].y : 0.0;\n"
-           "  vs_n.z = (c[58].z != 0.0) ? vs_n.z / c[58].z : 0.0;\n"
+           "  vec3 vs_n = oPos.xyz - vp_offset.xyz;\n"
+           "  vs_n.x = (vp_scale.x != 0.0) ? vs_n.x / vp_scale.x : 0.0;\n"
+           "  vs_n.y = (vp_scale.y != 0.0) ? vs_n.y / vp_scale.y : 0.0;\n"
+           "  vs_n.z = (vp_scale.z != 0.0) ? vs_n.z / vp_scale.z : 0.0;\n"
            "  float vs_w = (oPos.w >= 0.0) ? clamp(oPos.w, 5.42101086e-20, 1.84467441e19)\n"
            "                               : clamp(oPos.w, -1.84467441e19, -5.42101086e-20);\n"
+           "  if (wdepth.x != 0.0) vs_n.z = wdepth.y + wdepth.z / vs_w;\n"
            "  gl_Position = vec4(vs_n.x, vs_n.y * flip_y, 2.0 * vs_n.z - 1.0, 1.0) * vs_w;\n"
            "  gl_FrontColor = clamp(oD0, 0.0, 1.0);\n"
            "  gl_FrontSecondaryColor = clamp(oD1, 0.0, 1.0);\n");
@@ -505,10 +519,19 @@ char *vsh_translate(const uint32_t *code, unsigned count)
            "  gl_TexCoord[1] = oT1;\n"
            "  gl_TexCoord[2] = oT2;\n"
            "  gl_TexCoord[3] = oT3;\n"
-           "  gl_FogFragCoord = oFog.x;\n"
+           /* Preserve finite factors outside [0,1] until fragment use. */
+           "  float fog_factor = oFog.x;\n"
+           "  if (fog_vertex_mode == 1.0) fog_factor = exp(-gl_Fog.density * oFog.x);\n"
+           "  else if (fog_vertex_mode == 2.0) {\n"
+           "    float fd = gl_Fog.density * oFog.x;\n"
+           "    fog_factor = exp(-fd * fd);\n"
+           "  } else if (fog_vertex_mode == 3.0)\n"
+           "    fog_factor = (gl_Fog.end - oFog.x) * gl_Fog.scale;\n"
+           "  gl_FogFragCoord = fog_factor;\n"
            "  gl_PointSize = oPts.x;\n"
            "}\n");
 
+    if (e.b.oom) snprintf(vsh_error, sizeof vsh_error, "out of memory");
     if (e.bad || e.b.oom) {
         free(e.b.s);
         return NULL;

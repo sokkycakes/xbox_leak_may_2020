@@ -102,6 +102,8 @@ $(BUILD)/%.o: %.c src/xbcompat.h src/xbox.h src/hle/hle.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+$(BUILD)/src/hle/d3d8.o: src/hle/ff_vsh.h src/hle/dxt_decode.h src/hle/nv2a_shaders.h
+
 $(BUILD)/glslcheck: tools/glslcheck.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $< $(LDLIBS)

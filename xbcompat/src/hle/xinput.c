@@ -63,6 +63,11 @@
  * down a menu at frame 1500 and presses A at frame 1530.  A "p2" in front of
  * the button ("2000:p2start") presses it on a second scripted pad, which is
  * plugged into port 1 when the script names one (split-screen menus).
+ * "lsup", "lsdown", "lsleft", "lsright" and the same with "rs" push a stick
+ * all the way while they are held.  A "t" in front of the time
+ * ("t90:a/10") counts seconds since the first poll instead of frames, for
+ * screens that wait on a button without presenting; a "w" ("w8:a/10")
+ * presses it whenever no frame has been presented for that many seconds.
  */
 #define _GNU_SOURCE
 #include <SDL.h>
@@ -734,13 +739,44 @@ static void read_script(XINPUT_GAMEPAD *g, unsigned port)
     ULONG now = d3d_frame_count();
     char buf[1024];
     snprintf(buf, sizeof buf, "%s", script);
-    for (char *save, *tok = strtok_r(buf, " ,", &save); tok; tok = strtok_r(NULL, " ,", &save)) {
+    /* A press also ends once its hold has passed in wall time (60 frames a
+       second): titles that stop presenting while they load would otherwise
+       see the button held forever. */
+    static uint64_t pressed_at[128];
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    uint64_t ms = (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    unsigned n = 0;
+    for (char *save, *tok = strtok_r(buf, " ,", &save); tok; tok = strtok_r(NULL, " ,", &save), n++) {
         char buf2[16] = "", *name = buf2;
         unsigned frame = 0, hold = 6;
-        if (sscanf(tok, "%u:%15[a-z0-9]/%u", &frame, buf2, &hold) < 2) continue;
+        bool timed = *tok == 't', stalled = *tok == 'w';
+        if (sscanf(tok + (timed || stalled), "%u:%15[a-z0-9]/%u", &frame, buf2, &hold) < 2) continue;
         unsigned to = 0;
         if (!strncmp(name, "p2", 2)) { to = 1; name += 2; }
-        if (to != port || now < frame || now >= frame + hold) continue;
+        if (timed) {
+            /* "tSECONDS:BUTTON": seconds since the first poll, for screens
+               that wait on a button without presenting frames. */
+            static uint64_t start_ms;
+            if (!start_ms) start_ms = ms;
+            if (to != port || ms - start_ms < frame * 1000ull || ms - start_ms >= frame * 1000ull + hold * 1000ull / 60)
+                continue;
+        } else if (stalled) {
+            /* "wSECONDS:BUTTON": pressed whenever no frame has been
+               presented for that long (a "press A" screen after loading). */
+            static ULONG last_frame;
+            static uint64_t last_change_ms, press_until;
+            if (now != last_frame || !last_change_ms) { last_frame = now; last_change_ms = ms; }
+            if (ms >= press_until && ms - last_change_ms >= frame * 1000ull) {
+                press_until = ms + hold * 1000ull / 60;
+                last_change_ms = press_until;      /* the next press waits another stall */
+            }
+            if (to != port || ms >= press_until) continue;
+        } else if (to != port || now < frame || now >= frame + hold) continue;
+        if (!timed && !stalled && n < 128) {
+            if (!pressed_at[n]) pressed_at[n] = ms;
+            else if (ms - pressed_at[n] > hold * 1000ull / 60 + 50) continue;
+        }
         static const char *analog[] = { "a", "b", "x", "y", "black", "white", "lt", "rt" };
         static const int analog_idx[] = { XINPUT_GAMEPAD_A, XINPUT_GAMEPAD_B, XINPUT_GAMEPAD_X, XINPUT_GAMEPAD_Y,
                                           XINPUT_GAMEPAD_BLACK, XINPUT_GAMEPAD_WHITE,
@@ -753,6 +789,17 @@ static void read_script(XINPUT_GAMEPAD *g, unsigned port)
         for (int i = 0; i < 8; i++) {
             if (!strcmp(name, analog[i])) g->bAnalogButtons[analog_idx[i]] = 255;
             if (!strcmp(name, digital[i])) g->wButtons |= digital_bit[i];
+        }
+        /* Sticks pushed all the way: lsup lsdown lsleft lsright, rs... likewise. */
+        if (name[1] == 's' && (name[0] == 'l' || name[0] == 'r')) {
+            bool right = name[0] == 'r';
+            const char *dir = name + 2;
+            SHORT v = !strcmp(dir, "up") || !strcmp(dir, "right") ? 32767 : -32768;
+            if (!strcmp(dir, "up") || !strcmp(dir, "down")) {
+                if (right) g->sThumbRY = v; else g->sThumbLY = v;
+            } else if (!strcmp(dir, "left") || !strcmp(dir, "right")) {
+                if (right) g->sThumbRX = v; else g->sThumbLX = v;
+            }
         }
     }
 }
@@ -973,7 +1020,7 @@ static ULONG NTAPI XGetDevices(XPP_DEVICE_TYPE *DeviceType)
         ret = t->Current;
         t->Change = 0;
         t->Previous = t->Current;
-        TRACE("XInput: XGetDevices(%s) = %#x", table_name(t), ret);
+        TRACE_ALL("XInput: XGetDevices(%s) = %#x", table_name(t), ret);
     }
     pthread_mutex_unlock(&xi.lock);
     return ret;
@@ -1094,7 +1141,7 @@ static void NTAPI XInputClose(HANDLE hDevice)
             if (p->gc) SDL_GameControllerRumble(p->gc, 0, 0, 0);
         }
         xi.remaining++;
-        TRACE("XInput: XInputClose %p (port %u)", hDevice, d->port);
+        TRACE_ALL("XInput: XInputClose %p (port %u)", hDevice, d->port);
         d->magic = 0;
         pool_free(d);
     }
@@ -1173,7 +1220,7 @@ static ULONG NTAPI XInputSetState(HANDLE hDevice, XINPUT_FEEDBACK *pFeedback)
         xi_port *p = &xi.port[d->port];
         USHORT l = pFeedback->Rumble.wLeftMotorSpeed, r = pFeedback->Rumble.wRightMotorSpeed;
         if (p->gc) SDL_GameControllerRumble(p->gc, l, r, (l || r) ? XI_RUMBLE_MS : 0);
-        TRACE("XInput: XInputSetState port %u: rumble %u/%u", d->port, l, r);
+        TRACE_ALL("XInput: XInputSetState port %u: rumble %u/%u", d->port, l, r);
 
         /* The driver references the completion event when the report is
            submitted and drops a handle that is not an event (xid.cpp
@@ -1234,7 +1281,7 @@ static ULONG NTAPI XMountMUA(ULONG dwPort, ULONG dwSlot, CHAR *pchDrive)
     check_inited("XMountMU");
     if (pchDrive) *pchDrive = 0;
     mu_args_ok("XMountMU", dwPort, dwSlot);
-    TRACE("XInput: XMountMU(%u, %u): no memory unit", dwPort, dwSlot);
+    TRACE_ALL("XInput: XMountMU(%u, %u): no memory unit", dwPort, dwSlot);
     return ERROR_DEVICE_NOT_CONNECTED;
 }
 
@@ -1242,14 +1289,14 @@ static ULONG NTAPI XMountMURootA(ULONG dwPort, ULONG dwSlot, CHAR *pchDrive)
 {
     if (pchDrive) *pchDrive = 0;
     mu_args_ok("XMountMURoot", dwPort, dwSlot);
-    TRACE("XInput: XMountMURoot(%u, %u): no memory unit", dwPort, dwSlot);
+    TRACE_ALL("XInput: XMountMURoot(%u, %u): no memory unit", dwPort, dwSlot);
     return ERROR_DEVICE_NOT_CONNECTED;
 }
 
 static ULONG NTAPI XUnmountMU(ULONG dwPort, ULONG dwSlot)
 {
     mu_args_ok("XUnmountMU", dwPort, dwSlot);
-    TRACE("XInput: XUnmountMU(%u, %u): not mounted", dwPort, dwSlot);
+    TRACE_ALL("XInput: XUnmountMU(%u, %u): not mounted", dwPort, dwSlot);
     return ERROR_INVALID_DRIVE;
 }
 
@@ -1270,7 +1317,7 @@ static ULONG NTAPI XMUSlotFromDriveLetterA(ULONG chDrive)
 static ULONG NTAPI XMUNameFromDriveLetter(ULONG chDrive, WCHAR *lpName, ULONG cchName)
 {
     (void)lpName; (void)cchName;
-    TRACE("XInput: XMUNameFromDriveLetter(%c): not mounted", (CHAR)chDrive);
+    TRACE_ALL("XInput: XMUNameFromDriveLetter(%c): not mounted", (CHAR)chDrive);
     return ERROR_INVALID_DRIVE;
 }
 

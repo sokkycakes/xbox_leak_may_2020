@@ -26,15 +26,17 @@
  * Conventions of the generated GLSL:
  *   attribute vec4 v0 .. v15      vertex registers, bound to locations 0..15
  *   uniform vec4 c[192]           constant registers in hardware numbering
- *                                 (title register r lives in c[r + 96];
- *                                 c[58] / c[59] are the viewport scale and
- *                                 offset the real library keeps there:
+ *                                 (title register r lives in c[r + 96])
+ *   uniform vec4 vp_scale, vp_offset  the viewport scale and offset the
+ *                                 library writes to NV097_SET_VIEWPORT_*:
  *                                 scale = (W/2, -H/2, zscale*(maxZ-minZ), 0),
- *                                 offset = (X + W/2, Y + H/2, zscale*minZ, 0))
+ *                                 offset = (X + W/2, Y + H/2, zscale*minZ, 0)
+ *                                 (the library also keeps them in c[58] /
+ *                                 c[59], which 192 constant titles may reuse)
  *   uniform float flip_y          1.0, or -1.0 when rendering into a texture
  *   gl_Position                   oPos converted back to OpenGL clip space:
- *                                   vec3 n = (oPos.xyz - c[59].xyz) / c[58].xyz;
- *                                   (guard c[58].z == 0: n.z = 0)
+ *                                   vec3 n = (oPos.xyz - vp_offset.xyz) / vp_scale.xyz;
+ *                                   (guard vp_scale.z == 0: n.z = 0)
  *                                   gl_Position = vec4(n.x, n.y * flip_y,
  *                                                      2.0 * n.z - 1.0, 1.0) * oPos.w;
  *   gl_FrontColor / gl_FrontSecondaryColor      oD0 / oD1 (clamped to 0..1)
@@ -46,6 +48,7 @@
  *   gl_PointSize                  oPts.x
  */
 char *vsh_translate(const uint32_t *code, unsigned count);
+extern char vsh_error[96];   /* why vsh_translate last returned NULL */
 
 /*
  * Pixel shaders (register combiners).
@@ -64,6 +67,7 @@ char *vsh_translate(const uint32_t *code, unsigned count);
  *   rs[117]       D3DRS_PSTEXTUREMODES (5 bits per stage: PS_TEXTUREMODES_*)
  *   rs[82]        D3DRS_FOGENABLE
  *   rs[83]        D3DRS_FOGTABLEMODE (D3DFOG_NONE 0, EXP 1, EXP2 2, LINEAR 3)
+ *   rs[93]        D3DRS_SPECULARENABLE (synthesized final combiner only)
  * Everything else that varies per draw comes in through uniforms.
  *
  * Conventions of the generated GLSL (declare only what the program uses):
@@ -78,6 +82,8 @@ char *vsh_translate(const uint32_t *code, unsigned count);
  *   uniform vec4 fc0, fc1                final combiner constants
  *   uniform vec4 bump_env[4]             D3DTSS_BUMPENVMAT00, 01, 10, 11
  *   uniform vec2 bump_lum[4]             D3DTSS_BUMPENVLSCALE, BUMPENVLOFFSET
+ *   uniform vec4 eye_vector              NV097_SET_EYE_VECTOR (unquantized)
+ *   uniform vec4 key_color[4]            D3DTSS_COLORKEYCOLOR as RGBA
  *   gl_Color / gl_SecondaryColor         v0 / v1 (diffuse / specular)
  *   gl_TexCoord[0..3]                    stage 0..3 texture coordinates
  *   gl_FogFragCoord                      fog distance; with D3DRS_FOGENABLE
@@ -89,6 +95,15 @@ char *vsh_translate(const uint32_t *code, unsigned count);
  *   gl_FragColor                         the final combiner output
  * Alpha test is done by the host (fixed-function GL alpha test).
  */
+/* Texture-stage controls that do not live in D3D__RenderState. Bitmasks
+   use bit i for stage i; color_key contains D3DTCOLORKEYOP values 0..3. */
+typedef struct {
+    uint32_t alpha_kill;
+    uint32_t color_key[4];
+    uint32_t color_key_ignore_alpha;
+    uint32_t bump_bgra;
+} psh_options;
+char *psh_translate_ex(const uint32_t *rs, const psh_options *options);
 char *psh_translate(const uint32_t *rs);
 /* Stages psh_translate samples as shadow buffers (depth textures), one bit each. */
 extern uint32_t psh_shadow_stages;

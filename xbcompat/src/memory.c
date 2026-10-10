@@ -107,7 +107,7 @@ NTSTATUS NTAPI NtAllocateVirtualMemory(PVOID *BaseAddress, ULONG_PTR ZeroBits,
     (void)ZeroBits;
     uint32_t base = (uint32_t)*BaseAddress, size = *RegionSize;
     NTSTATUS st = STATUS_SUCCESS;
-    TRACE("NtAllocateVirtualMemory(%#x, %#x, type %#x, prot %#x)", base, size, AllocationType, Protect);
+    TRACE_ALL("NtAllocateVirtualMemory(%#x, %#x, type %#x, prot %#x)", base, size, AllocationType, Protect);
     if (size == 0)
         return STATUS_INVALID_PARAMETER;
 
@@ -152,7 +152,7 @@ out:
 NTSTATUS NTAPI NtFreeVirtualMemory(PVOID *BaseAddress, SIZE_T *RegionSize, ULONG FreeType)
 {
     uint32_t base = (uint32_t)*BaseAddress & ~(PAGE_SIZE - 1), size = *RegionSize;
-    TRACE("NtFreeVirtualMemory(%#x, %#x, %#x)", base, size, FreeType);
+    TRACE_ALL("NtFreeVirtualMemory(%#x, %#x, %#x)", base, size, FreeType);
     if (!in_arena(base))
         return STATUS_INVALID_PARAMETER;
     pthread_mutex_lock(&mem_lock);
@@ -505,7 +505,7 @@ void NTAPI MmLockUnlockPhysicalPage(ULONG_PTR PhysicalAddress, BOOLEAN Unlock)
    the change without making it. */
 NTSTATUS NTAPI NtProtectVirtualMemory(PVOID *BaseAddress, SIZE_T *RegionSize, ULONG NewProtect, ULONG *OldProtect)
 {
-    TRACE("NtProtectVirtualMemory(%p, %#lx, %#x)", *BaseAddress, (unsigned long)*RegionSize, NewProtect);
+    TRACE_ALL("NtProtectVirtualMemory(%p, %#lx, %#x)", *BaseAddress, (unsigned long)*RegionSize, NewProtect);
     if (OldProtect) *OldProtect = 0x04;   /* PAGE_READWRITE */
     return STATUS_SUCCESS;
 }

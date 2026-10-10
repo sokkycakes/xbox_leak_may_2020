@@ -380,6 +380,7 @@ NTSTATUS wait_objects(ULONG count, PVOID objects[], int wait_any, KPROCESSOR_MOD
     bool poll = timeout && timeout->QuadPart == 0;
     NTSTATUS st;
 
+    if (xt) __atomic_store_n(&xt->in_wait, 1, __ATOMIC_SEQ_CST);
     static __thread struct disp_waiter me;
     static __thread bool me_init;
     if (!me_init) {
@@ -461,6 +462,7 @@ done:
         cpu_block();
         usleep(spins > 256 ? 10000 : 1000);
     }
+    thread_wait_end(xt);
     return st;
 }
 
@@ -493,10 +495,14 @@ NTSTATUS NTAPI KeDelayExecutionThread(KPROCESSOR_MODE WaitMode, BOOLEAN Alertabl
     ULONGLONG rel = t < 0 ? (ULONGLONG)-t : (t > (LONGLONG)system_time_now() ? t - system_time_now() : 0);
     cpu_block();
     if (rel == 0) {
+        if (xt) __atomic_store_n(&xt->in_wait, 1, __ATOMIC_SEQ_CST);
         sched_yield();
+        thread_wait_end(xt);
     } else {
         struct timespec ts = { rel / 10000000ULL, (rel % 10000000ULL) * 100 };
+        if (xt) __atomic_store_n(&xt->in_wait, 1, __ATOMIC_SEQ_CST);
         while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {}
+        thread_wait_end(xt);
     }
     return STATUS_SUCCESS;
 }
@@ -915,7 +921,7 @@ BOOLEAN NTAPI KeSynchronizeExecution(PVOID Interrupt, BOOLEAN (NTAPI *Routine)(P
 LONG NTAPI KeSetBasePriorityThread(KTHREAD *Thread, LONG Increment)
 {
     LONG old = Thread->BasePriority;
-    TRACE("KeSetBasePriorityThread(%p, %d)", (void *)Thread, (int)Increment);
+    TRACE_ALL("KeSetBasePriorityThread(%p, %d)", (void *)Thread, (int)Increment);
     Thread->BasePriority = (SCHAR)(8 + Increment);
     /* The thread runs at its new base priority (no boosts here). Increments
        of +-16 saturate (THREAD_PRIORITY_TIME_CRITICAL, _IDLE). */

@@ -281,15 +281,163 @@ static unsigned char *slurp(const char *path, size_t *size)
     return buf;
 }
 
+/* Literal instruction-entry A0 fixtures; the CPU interpreter is not the oracle. */
+static int pairing_selftest(GLuint abo)
+{
+    static const struct {
+        const char *name;
+        unsigned count;
+        uint32_t code[4][4];
+    } cases[] = {
+        { "paired-arl-temporary", 4, {
+            { 0, 0x01a000aa, 0x08000000, 0 }, /* A0 = v0.z = 2 */
+            { 0, 0x03ac0000, 0x0800006c, 0x307f0002 }, /* ARL v0.x + MOV R1,c[A0+96] */
+            { 0, 0x0020001b, 0x14000000, 0x0000f848 }, /* oT0 = R1 */
+            { 0, 0x002c001b, 0x0c000000, 0x0000f853 }  /* oT1 = c[A0+96] */
+        } },
+        { "paired-arl-output-only", 3, {
+            { 0, 0x01a000aa, 0x08000000, 0 },
+            { 0, 0x03ac0000, 0x0800006c, 0x3070f84e }, /* ARL v0.x + MOV oT0,c[A0+96] */
+            { 0, 0x002c001b, 0x0c000000, 0x0000f853 }
+        } },
+        { "paired-arl-relative-source", 3, {
+            { 0, 0x01a000aa, 0x08000000, 0 },
+            { 0, 0x03ac0000, 0x0c00006c, 0x3070f84e }, /* Both operands read c98; then A0 = 5 */
+            { 0, 0x002c001b, 0x0c000000, 0x0000f853 }
+        } }
+    };
+    static const float expected[8] = { 5, .3f, .4f, .5f, .7f, .8f, .9f, 1 };
+    float attrs[16][4] = { { 5, 0, 2, 1 } }, constants[192][4] = {{0}};
+    const float scale[4] = {1,1,1,0}, offset[4] = {0,0,0,0};
+    memcpy(constants[98], expected, 4 * sizeof(float));
+    memcpy(constants[101], expected + 4, 4 * sizeof(float));
+    p_glBindBuffer(GLE_ARRAY_BUFFER, abo);
+    p_glBufferData(GLE_ARRAY_BUFFER, sizeof(attrs), attrs, GLE_STATIC_DRAW);
+    for (int i = 0; i < 16; i++) {
+        p_glEnableVertexAttribArray(i);
+        p_glVertexAttribPointer(i, 4, GL_FLOAT, GL_FALSE, sizeof(attrs), (const void *)(uintptr_t)(i * 16));
+    }
+    int failed = 0;
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        char *glsl = vsh_translate(&cases[i].code[0][0], cases[i].count);
+        char log[4096] = "";
+        GLuint prog = glsl ? build(glsl, log, sizeof log) : 0;
+        free(glsl);
+        if (!prog) { printf("%s: build failed: %s %s\n", cases[i].name, vsh_error, log); failed++; continue; }
+        p_glUseProgram(prog);
+        GLint loc = p_glGetUniformLocation(prog, "c");
+        if (loc >= 0) p_glUniform4fv(loc, 192, &constants[0][0]);
+        loc = p_glGetUniformLocation(prog, "flip_y");
+        if (loc >= 0) p_glUniform1f(loc, 1);
+        loc = p_glGetUniformLocation(prog, "vp_scale");
+        if (loc >= 0) p_glUniform4fv(loc, 1, scale);
+        loc = p_glGetUniformLocation(prog, "vp_offset");
+        if (loc >= 0) p_glUniform4fv(loc, 1, offset);
+        p_glBeginTransformFeedback(GL_POINTS);
+        glDrawArrays(GL_POINTS, 0, 1);
+        p_glEndTransformFeedback();
+        glFinish();
+        float result[STRIDE];
+        p_glGetBufferSubData(GLE_TRANSFORM_FEEDBACK_BUFFER, 0, sizeof result, result);
+        int bad = 0;
+        for (int k = 0; k < 8; k++) {
+            float got = result[20 + k];
+            if (!isfinite(got) || fabsf(got - expected[k]) > 1e-5f) {
+                printf("%s: oT%d.%c expected %g, got %g\n", cases[i].name, k / 4, "xyzw"[k % 4], expected[k], got);
+                bad = 1;
+            }
+        }
+        if (bad) failed++;
+        else printf("%s: instruction-entry A0 matches\n", cases[i].name);
+        p_glDeleteProgram(prog);
+    }
+    return failed;
+}
+
+/* Regression for the accepted 11ceddce projection-based W-depth workaround.
+   Literal clip-space values test that workaround, not complete NV2A depth. */
+static int wdepth_selftest(GLuint abo)
+{
+    /* MOV oPos, v0. */
+    static const uint32_t code[4] = {
+        0x00000000u, 0x0020001bu, 0x08000000u, 0x0000f801u
+    };
+    static const struct {
+        const char *name;
+        float w;
+        float depth[4];
+        float expect[4];
+    } cases[] = {
+        { "wdepth-enabled-w2", 2, {1, 0.8f, -0.2f, 0}, {0.5f, 1.5f, 0.8f, 2} },
+        { "wdepth-disabled-w2", 2, {0, 0.8f, -0.2f, 0}, {0.5f, 1.5f, -1, 2} },
+        { "wdepth-enabled-w4", 4, {1, 0.8f, -0.2f, 0}, {1, 3, 2, 4} },
+        { "wdepth-disabled-w4", 4, {0, 0.8f, -0.2f, 0}, {1, 3, -2, 4} }
+    };
+    char *glsl = vsh_translate(code, 1);
+    char log[4096] = "";
+    GLuint prog = glsl ? build(glsl, log, sizeof log) : 0;
+    free(glsl);
+    if (!prog) {
+        printf("wdepth regression: build failed: %s %s\n", vsh_error, log);
+        return 4;
+    }
+    p_glUseProgram(prog);
+    const float scale[4] = {1, 1, 1, 0}, offset[4] = {0, 0, 0, 0};
+    GLint loc = p_glGetUniformLocation(prog, "vp_scale");
+    if (loc >= 0) p_glUniform4fv(loc, 1, scale);
+    loc = p_glGetUniformLocation(prog, "vp_offset");
+    if (loc >= 0) p_glUniform4fv(loc, 1, offset);
+    loc = p_glGetUniformLocation(prog, "flip_y");
+    if (loc >= 0) p_glUniform1f(loc, 1);
+    GLint depth_loc = p_glGetUniformLocation(prog, "wdepth");
+    if (depth_loc < 0) {
+        puts("wdepth regression: missing projection-depth uniform");
+        p_glDeleteProgram(prog);
+        return 4;
+    }
+    float attrs[16][4] = {{0.25f, 0.75f, 0.25f, 2}};
+    p_glBindBuffer(GLE_ARRAY_BUFFER, abo);
+    for (int i = 0; i < 16; i++) {
+        p_glEnableVertexAttribArray(i);
+        p_glVertexAttribPointer(i, 4, GL_FLOAT, GL_FALSE, sizeof(attrs),
+                               (const void *)(uintptr_t)(i * 16));
+    }
+    int failed = 0;
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        attrs[0][3] = cases[i].w;
+        p_glBufferData(GLE_ARRAY_BUFFER, sizeof(attrs), attrs, GLE_STATIC_DRAW);
+        p_glUniform4fv(depth_loc, 1, cases[i].depth);
+        p_glBeginTransformFeedback(GL_POINTS);
+        glDrawArrays(GL_POINTS, 0, 1);
+        p_glEndTransformFeedback();
+        glFinish();
+        float result[STRIDE];
+        p_glGetBufferSubData(GLE_TRANSFORM_FEEDBACK_BUFFER, 0, sizeof result, result);
+        int bad = 0;
+        for (int k = 0; k < 4; k++) {
+            if (!isfinite(result[k]) || fabsf(result[k] - cases[i].expect[k]) > 1e-5f) {
+                printf("%s: clip.%c expected %g, got %g\n", cases[i].name,
+                       "xyzw"[k], cases[i].expect[k], result[k]);
+                bad = 1;
+            }
+        }
+        if (bad) failed++;
+        else printf("%s: projection-depth regression matches\n", cases[i].name);
+    }
+    p_glDeleteProgram(prog);
+    return failed;
+}
+
 int main(int argc, char **argv)
 {
-    int nverts = 24, verbose = 0, argi = 1;
+    int nverts = 24, verbose = 0, selftest = 0, argi = 1;
     while (argi < argc && argv[argi][0] == '-') {
         if (!strcmp(argv[argi], "-n") && argi + 1 < argc) nverts = atoi(argv[argi + 1]), argi += 2;
         else if (!strcmp(argv[argi], "-v")) verbose = 1, argi++;
-        else { fprintf(stderr, "usage: vsh_exec [-n vertices] [-v] file.xvu...\n"); return 2; }
+        else if (!strcmp(argv[argi], "--selftest")) selftest = 1, argi++;
+        else { fprintf(stderr, "usage: vsh_exec [--selftest] [-n vertices] [-v] [file.xvu...]\n"); return 2; }
     }
-    if (argi >= argc || nverts < 1 || nverts > 4096) { fprintf(stderr, "usage: vsh_exec [-n vertices] [-v] file.xvu...\n"); return 2; }
+    if ((!selftest && argi >= argc) || nverts < 1 || nverts > 4096) { fprintf(stderr, "usage: vsh_exec [--selftest] [-n vertices] [-v] [file.xvu...]\n"); return 2; }
 
     if (SDL_Init(SDL_INIT_VIDEO) != 0) { fprintf(stderr, "SDL_Init: %s\n", SDL_GetError()); return 2; }
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
@@ -316,7 +464,7 @@ int main(int argc, char **argv)
     p_glBindBufferBase(GLE_TRANSFORM_FEEDBACK_BUFFER, 0, tbo);
     glEnable(GLE_RASTERIZER_DISCARD);
 
-    int failed = 0, total = 0;
+    int failed = selftest ? pairing_selftest(abo) + wdepth_selftest(abo) : 0, total = selftest ? 7 : 0;
     for (; argi < argc; argi++) {
         const char *path = argv[argi];
         total++;
@@ -349,6 +497,10 @@ int main(int argc, char **argv)
         if (loc >= 0) p_glUniform4fv(loc, 192, &m.c[0][0]);
         loc = p_glGetUniformLocation(prog, "flip_y");
         if (loc >= 0) p_glUniform1f(loc, flip);
+        loc = p_glGetUniformLocation(prog, "vp_scale");
+        if (loc >= 0) p_glUniform4fv(loc, 1, m.c[58]);
+        loc = p_glGetUniformLocation(prog, "vp_offset");
+        if (loc >= 0) p_glUniform4fv(loc, 1, m.c[59]);
         p_glBindBuffer(GLE_ARRAY_BUFFER, abo);
         p_glBufferData(GLE_ARRAY_BUFFER, nverts * sizeof(*attrs), attrs, GLE_STATIC_DRAW);
         for (int i = 0; i < 16; i++) {
@@ -409,6 +561,6 @@ int main(int argc, char **argv)
         p_glDeleteProgram(prog);
         free(code);
     }
-    printf("%d of %d shaders match the interpreter\n", total - failed, total);
+    printf("%d of %d shaders passed execution checks\n", total - failed, total);
     return failed ? 1 : 0;
 }

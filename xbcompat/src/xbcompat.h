@@ -23,6 +23,9 @@ void fatal(const char *fmt, ...) __attribute__((format(printf, 1, 2), noreturn))
 void xbc_at_exit(void (*fn)(void));
 void xbc_exit(int code) __attribute__((noreturn));
 #define TRACE(...) do { if (g_trace) xlog(__VA_ARGS__); } while (0)
+/* Per-frame noise (drawing, pads, memory): left out when g_trace is 2
+   (XBCOMPAT_TRACE=files), which keeps file and thread calls only. */
+#define TRACE_ALL(...) do { if (g_trace == 1) xlog(__VA_ARGS__); } while (0)
 
 /* ---- memory ----------------------------------------------------------- */
 
@@ -75,6 +78,11 @@ typedef struct xthread {
     PVOID system_routine, start_routine, start_context;
     jmp_buf exit_jmp;
     struct xapc *apc_head, *apc_tail;   /* queued APCs, under g_disp_lock */
+    bool started;               /* past its creation suspend, under start_lock */
+    int parked;                 /* stopped in thread_suspend's signal handler */
+    int in_wait;                /* blocked in a kernel wait (thread_wait_end clears) */
+    ULONG suspend_ip;           /* host code the last suspend signal found it in */
+    int resume_gen;             /* counts resumes that brought SuspendCount to 0 */
 } xthread;
 
 void thread_init_main(void);
@@ -83,6 +91,8 @@ xthread *thread_create(SIZE_T stack_size, SIZE_T tls_size, PVOID system_routine,
                        PVOID start_routine, PVOID start_context, bool suspended);
 /* Attach a host thread (e.g. the DPC thread) to a guest KPCR so guest code can run on it. */
 xthread *thread_adopt_host(const char *name);
+ULONG thread_suspend(xthread *t);
+void thread_wait_end(xthread *t);
 void thread_exit(NTSTATUS status) __attribute__((noreturn));
 
 /* ---- dispatcher objects ---------------------------------------------- */

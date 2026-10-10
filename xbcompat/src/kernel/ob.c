@@ -405,8 +405,11 @@ NTSTATUS NTAPI NtDuplicateObject(HANDLE Source, HANDLE *Target, ULONG Options)
 
 NTSTATUS NTAPI NtYieldExecution(void)
 {
+    xthread *xt = thread_current();
+    if (xt) __atomic_store_n(&xt->in_wait, 1, __ATOMIC_SEQ_CST);
     cpu_block();
     sched_yield();
+    thread_wait_end(xt);
     return STATUS_SUCCESS;
 }
 
@@ -470,8 +473,10 @@ NTSTATUS NTAPI NtSuspendThread(HANDLE h, ULONG *Prev)
 {
     xobject *o = handle_lookup(h);
     if (!o || o->kind != OBJ_THREAD) return STATUS_INVALID_HANDLE;
-    if (Prev) *Prev = o->thread->ethread.Tcb.SuspendCount;
-    xlog("NtSuspendThread: suspending a running thread is not supported");
+    ULONG prev = thread_suspend(o->thread);
+    TRACE("NtSuspendThread(thread %u) = previous count %u",
+          (unsigned)(ULONG_PTR)o->thread->ethread.UniqueThread, prev);
+    if (Prev) *Prev = prev;
     return STATUS_SUCCESS;
 }
 

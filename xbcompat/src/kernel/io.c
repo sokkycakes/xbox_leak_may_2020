@@ -401,7 +401,10 @@ NTSTATUS NTAPI NtCreateFile(HANDLE *FileHandle, ACCESS_MASK DesiredAccess, OBJEC
         }
         if (st == STATUS_OBJECT_NAME_NOT_FOUND && CreateDisposition != FILE_OPEN && CreateDisposition != FILE_OVERWRITE)
             st = STATUS_MEDIA_WRITE_PROTECTED;
-        if (!NT_SUCCESS(st)) goto out;
+        if (!NT_SUCCESS(st)) {
+            xlog("DVD: can't open %s (%#x)", xpath, (unsigned)st);
+            goto out;
+        }
         f->is_dir = dvd_node_is_dir(f->dvd);
         if (f->is_dir && (CreateOptions & FILE_NON_DIRECTORY_FILE)) { st = STATUS_FILE_IS_A_DIRECTORY; goto out; }
         if (!f->is_dir && (CreateOptions & FILE_DIRECTORY_FILE)) { st = STATUS_NOT_A_DIRECTORY; goto out; }
@@ -569,9 +572,16 @@ NTSTATUS NTAPI NtReadFile(HANDLE FileHandle, HANDLE Event, PVOID ApcRoutine, PVO
         ssize_t n = f->is_device ? dvd_read_volume(Buffer, Length, off)
                   : f->dvd && !f->is_dir ? dvd_read(f->dvd, Buffer, Length, off) : -2;
         if (n == -2) return complete(Event, ApcRoutine, ApcContext, iosb, STATUS_INVALID_DEVICE_REQUEST, 0);
-        if (n < 0) return complete(Event, ApcRoutine, ApcContext, iosb, STATUS_NO_MEDIA_IN_DEVICE, 0);
+        if (n < 0) {
+            xlog("DVD: read of %s failed (%u bytes at %lld)", f->xbox, (unsigned)Length, (long long)off);
+            return complete(Event, ApcRoutine, ApcContext, iosb, STATUS_NO_MEDIA_IN_DEVICE, 0);
+        }
         f->pos = off + n;
-        if (n == 0 && Length > 0) return complete(Event, ApcRoutine, ApcContext, iosb, STATUS_END_OF_FILE, 0);
+        TRACE("NtReadFile(%s, %#x at %#llx) = %#x", f->xbox, (unsigned)Length, (long long)off, (unsigned)n);
+        if (n == 0 && Length > 0) {
+            xlog("DVD: read of %s at %lld is past its end", f->xbox, (long long)off);
+            return complete(Event, ApcRoutine, ApcContext, iosb, STATUS_END_OF_FILE, 0);
+        }
         complete(Event, ApcRoutine, ApcContext, iosb, STATUS_SUCCESS, (ULONG)n);
         return f->async ? STATUS_PENDING : STATUS_SUCCESS;
     }
@@ -579,6 +589,7 @@ NTSTATUS NTAPI NtReadFile(HANDLE FileHandle, HANDLE Event, PVOID ApcRoutine, PVO
     if (!f || f->fd < 0) return STATUS_INVALID_HANDLE;
     LONGLONG off = ByteOffset ? ByteOffset->QuadPart : f->pos;
     ssize_t n = pread(f->fd, Buffer, Length, off);
+    TRACE("NtReadFile(%s, %#x at %#llx) = %#x", f->xbox, (unsigned)Length, (long long)off, (unsigned)n);
     if (n < 0) return complete(Event, ApcRoutine, ApcContext, iosb, errno_status(errno), 0);
     f->pos = off + n;
     if (n == 0 && Length > 0) return complete(Event, ApcRoutine, ApcContext, iosb, STATUS_END_OF_FILE, 0);
@@ -599,6 +610,7 @@ NTSTATUS NTAPI NtWriteFile(HANDLE FileHandle, HANDLE Event, PVOID ApcRoutine, PV
     if (!f || f->fd < 0) return STATUS_INVALID_HANDLE;
     LONGLONG off = ByteOffset && ByteOffset->QuadPart >= 0 ? ByteOffset->QuadPart : f->pos;
     ssize_t n = pwrite(f->fd, Buffer, Length, off);
+    TRACE("NtWriteFile(%s, %#x at %#llx) = %#x", f->xbox, (unsigned)Length, (long long)off, (unsigned)n);
     if (n < 0) return complete(Event, ApcRoutine, ApcContext, iosb, errno_status(errno), 0);
     f->pos = off + n;
     complete(Event, ApcRoutine, ApcContext, iosb, STATUS_SUCCESS, (ULONG)n);
@@ -728,6 +740,8 @@ NTSTATUS NTAPI NtSetInformationFile(HANDLE FileHandle, IO_STATUS_BLOCK *iosb, PV
     xfile *f = file_of(FileHandle);
     if (!f) return STATUS_INVALID_HANDLE;
     NTSTATUS st = STATUS_SUCCESS;
+    TRACE("NtSetInformationFile(%s, class %u, %#llx)", f->xbox, (unsigned)Class,
+          Class >= 14 ? (long long)((LARGE_INTEGER *)Info)->QuadPart : (long long)*(BOOLEAN *)Info);
     switch (Class) {
     case 4: break;   /* FileBasicInformation: timestamps/attributes, ignored */
     case 10: {       /* FileRenameInformation */

@@ -93,6 +93,12 @@ void xbe_load(const char *path, xbe_image *img)
     title[40] = 0;
     xlog("loaded \"%s\" (title %08X, %s key), entry %#x", title, cert->TitleID, kind,
          h->AddressOfEntryPoint);
+    /* XBCOMPAT_TRACE=1 traces every title; =game every title but the
+       dashboard (for a console whose dashboard starts the game); =files is
+       =game without the per-frame drawing, pad and memory calls. */
+    const char *tr = getenv("XBCOMPAT_TRACE");
+    bool files = tr && !strcmp(tr, "files");
+    if (tr && ((strcmp(tr, "game") && !files) || cert->TitleID != 0xFFFE0000)) g_trace = files ? 2 : 1;
 
     img->header = h;
     img->entry = h->AddressOfEntryPoint;

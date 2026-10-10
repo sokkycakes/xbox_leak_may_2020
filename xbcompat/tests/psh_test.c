@@ -83,10 +83,10 @@ static int run_glslcheck(const char *what, const char *a, const char *b, const c
 }
 
 /* Translate, write, compile.  expect_null: the translator must refuse. */
-static char *check(const char *name, const uint32_t *rs, int expect_null)
+static char *check_ex(const char *name, const uint32_t *rs, const psh_options *options, int expect_null)
 {
     char path[512], log[512];
-    char *src = psh_translate(rs);
+    char *src = psh_translate_ex(rs, options);
 
     if (expect_null) {
         if (src) {
@@ -118,6 +118,11 @@ static char *check(const char *name, const uint32_t *rs, int expect_null)
         failures++;
     }
     return src;
+}
+
+static char *check(const char *name, const uint32_t *rs, int expect_null)
+{
+    return check_ex(name, rs, NULL, expect_null);
 }
 
 static int has(const char *src, const char *needle)
@@ -318,11 +323,14 @@ static void test_texture_modes(void)
         free(src);
     }
 
-    /* constant-eye reflection cannot be expressed */
+    /* Constant-eye reflection uses the eye uniform. */
     simple_def(def, T3, PS_TEXTUREMODES(TM_PROJECT2D, TM_DOTPRODUCT, TM_DOTPRODUCT, TM_DOT_RFLCT_SPEC_CONST),
                0, 0);
     rs_from_def(rs, def, 0, 0);
-    check("tm_spec_const", rs, 1);
+    src = check("tm_spec_const", rs, 0);
+    expect("tm_spec_const", src, "uniform vec4 eye_vector;", 1);
+    expect("tm_spec_const", src, "vec3 e3 = eye_vector.xyz;", 1);
+    free(src);
 
     /* a mode in a stage it is not valid for just disables the stage */
     simple_def(def, T0, PS_TEXTUREMODES(TM_BUMPENVMAP, TM_NONE, TM_NONE, TM_NONE), 0, 0);
@@ -330,6 +338,42 @@ static void test_texture_modes(void)
     src = check("tm_invalid_stage", rs, 0);
     expect("tm_invalid_stage", src, "vec4 t0 = vec4(0.0, 0.0, 0.0, 1.0);", 1);
     free(src);
+}
+
+/* Compile the extra texture-control variants as well as rendering them
+   in psh_render. One shader exercises all color-key operations. */
+static void test_texture_controls(void)
+{
+    uint32_t def[60], rs[128];
+    psh_options options = {0};
+    simple_def(def, T3, PS_TEXTUREMODES(TM_PROJECT2D, TM_PROJECT2D,
+                                      TM_PROJECT2D, TM_PROJECT2D), 0, 0);
+    rs_from_def(rs, def, 0, 0);
+    options.alpha_kill = 15;
+    options.color_key[1] = 1;
+    options.color_key[2] = 2;
+    options.color_key[3] = 3;
+    options.color_key_ignore_alpha = 8;
+    char *src = check_ex("tm_kill_key_controls", rs, &options, 0);
+    free(src);
+
+    simple_def(def, T1, PS_TEXTUREMODES(TM_PROJECT2D, TM_BUMPENVMAP_LUM,
+                                      TM_NONE, TM_NONE), 0, 0);
+    rs_from_def(rs, def, 0, 0);
+    options.bump_bgra = 1;
+    src = check_ex("tm_x8l8v8u8_controls", rs, &options, 0);
+    free(src);
+
+    for (int mode = TM_PROJECT2D; mode <= TM_PROJECT3D; mode++) {
+        char name[40];
+        snprintf(name, sizeof name, "tm_shadow_project%d", mode + 1);
+        simple_def(def, T0, PS_TEXTUREMODES(mode, TM_NONE, TM_NONE, TM_NONE), 0, 0);
+        rs_from_def(rs, def, 0, 0);
+        psh_shadow_stages = 1;
+        src = check(name, rs, 0);
+        psh_shadow_stages = 0;
+        free(src);
+    }
 }
 
 static void test_combiners(void)
@@ -620,15 +664,17 @@ static void test_link(void)
 int main(int argc, char **argv)
 {
     if (argc < 3) {
-        fprintf(stderr, "usage: psh_test <samples dir> <glslcheck> [outdir]\n");
+        fprintf(stderr, "usage: psh_test <samples dir|--synthetic> <glslcheck> [outdir]\n");
         return 2;
     }
     glslcheck = argv[2];
     if (argc > 3) outdir = argv[3];
     mkdir(outdir, 0777);
 
-    test_xpus(argv[1]);
+    if (strcmp(argv[1], "--synthetic")) test_xpus(argv[1]);
+    else puts("Synthetic-only run: sample XPU files were not tested");
     test_texture_modes();
+    test_texture_controls();
     test_combiners();
     test_final_combiner();
     test_modify_pixel_shader();
