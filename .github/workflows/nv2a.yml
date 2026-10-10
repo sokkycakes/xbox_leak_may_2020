@@ -31,6 +31,18 @@ jobs:
           mkdir -p build-input
           i686-linux-gnu-gcc -no-pie -fno-pie -std=gnu11 -Wall -Isrc $(env PKG_CONFIG_LIBDIR=/usr/lib/i386-linux-gnu/pkgconfig pkg-config --cflags sdl2) -o build-input/xinput-test tests/xinput_test.c $(env PKG_CONFIG_LIBDIR=/usr/lib/i386-linux-gnu/pkgconfig pkg-config --libs sdl2) -lpthread
           SDL_VIDEODRIVER=dummy build-input/xinput-test
+      - name: Controller tests with the Sion SDL version
+        working-directory: xbcompat
+        run: |
+          git clone --depth 1 --branch release-2.32.10 https://github.com/libsdl-org/SDL.git build-input/SDL
+          mkdir -p build-input/SDL/build
+          cd build-input/SDL/build
+          CC=i686-linux-gnu-gcc PKG_CONFIG_LIBDIR=/usr/lib/i386-linux-gnu/pkgconfig ../configure --host=i686-linux-gnu --prefix="$PWD/install" --disable-shared --enable-static --disable-video --disable-audio --disable-render --disable-haptic
+          make -j4
+          make install
+          cd ../../..
+          i686-linux-gnu-gcc -no-pie -fno-pie -std=gnu11 -Wall -Isrc $(build-input/SDL/build/install/bin/sdl2-config --cflags) -o build-input/xinput-sion-test tests/xinput_test.c $(build-input/SDL/build/install/bin/sdl2-config --static-libs) -lpthread
+          SDL_VIDEODRIVER=dummy build-input/xinput-sion-test
       - name: Shader and texture tests
         working-directory: xbcompat
         run: make -f tools/nv2a-check.mk -j4 CC=i686-linux-gnu-gcc PKGCFG='env PKG_CONFIG_LIBDIR=/usr/lib/i386-linux-gnu/pkgconfig pkg-config' check
