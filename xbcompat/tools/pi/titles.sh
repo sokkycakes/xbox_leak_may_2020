@@ -47,5 +47,12 @@ for exe in "$@"; do
 	echo "sample $name"
 done
 
+mkdir -p "$stage/cache/xbcompat/maps"
+for sample in "$stage"/samples/*; do
+	[ -f "$sample/default.xbe" ] && [ -s "$sample/xbcompat.map" ] || continue
+	python3 "$here/cache-map.py" "$sample/default.xbe" --map "$sample/xbcompat.map" \
+		--cache "$stage/cache/xbcompat/maps"
+done
+
 tar -C "$stage" -czf "$out" .
 echo "wrote $out"

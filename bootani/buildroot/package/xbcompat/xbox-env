@@ -9,13 +9,15 @@ if [ -d $X/lib ]; then
 	export LIBGL_DRIVERS_PATH=$X/lib/dri GBM_DRIVERS_PATH=$X/lib/dri
 	export __EGL_VENDOR_LIBRARY_FILENAMES=$X/share/glvnd/egl_vendor.d/50_mesa.json
 fi
-export XBCOMPAT_BIN=$X/bin/xbcompat
+export XBCOMPAT_BIN=${XBCOMPAT_BIN:-$X/bin/xbcompat}
 if [ -x $X/bin/python3 ]; then
 	# Titles the dashboard launches come back through xbrun.py, which builds
 	# their library map first.
 	export PYTHONHOME=$X PYTHONDONTWRITEBYTECODE=1
 	export XBSYMDB_CLI=$X/tools/XbSymbolDatabaseCLI
-	export XBCOMPAT_LAUNCHER="$X/bin/python3 $X/tools/xbrun.py"
+	export XBCOMPAT_LAUNCHER="${XBCOMPAT_LAUNCHER:-$X/bin/python3 $X/tools/xbrun.py}"
+elif [ -x /usr/libexec/xbox-title ]; then
+	export XBCOMPAT_LAUNCHER=${XBCOMPAT_LAUNCHER:-/usr/libexec/xbox-title}
 fi
 
 # The display mode bootani uses (KMS_MODE=WxH), straight through KMSDRM.

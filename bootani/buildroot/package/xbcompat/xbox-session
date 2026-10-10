@@ -57,7 +57,13 @@ ln -sfn "$X/dash" "$HDD/partition2"
 # Signatures for XDK 4400 titles, made at bundle time from the leak's
 # libraries; the maps xbrun.py makes for other titles land beside them.
 for f in "$X"/cache/xbcompat/*.json; do
+	[ -f "$f" ] || continue
 	[ -e "$XB/cache/xbcompat/${f##*/}" ] || cp "$f" "$XB/cache/xbcompat/"
+done
+mkdir -p "$XB/cache/xbcompat/maps"
+for f in "$X"/cache/xbcompat/maps/*.map; do
+	[ -f "$f" ] || continue
+	[ -e "$XB/cache/xbcompat/maps/${f##*/}" ] || cp "$f" "$XB/cache/xbcompat/maps/"
 done
 export XDG_CACHE_HOME=$XB/cache
 
@@ -81,7 +87,7 @@ while true; do
 	start=$(cut -d. -f1 /proc/uptime)
 	echo "$(date '+%F %T') starting the dashboard${launch:+ with launch data}"
 	# shellcheck disable=SC2086
-	"$X/bin/xbcompat" --hle "$X/dash/xboxdash.map" --hdd "$HDD" --dvd "$XB/disc" \
+	"$XBCOMPAT_BIN" --hle "$X/dash/xboxdash.map" --hdd "$HDD" --dvd "$XB/disc" \
 		--dvd-drive "${XBOX_DVD_DRIVE:-/dev/sr0}" \
 		--d-path '\Device\CdRom0' --xbe-path xboxdash.xbe $launch $XBOX_SHOT_ARGS $XBOX_ARGS \
 		"$HDD/partition2/xboxdash.xbe" > "$LOG" 2>&1

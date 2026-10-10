@@ -62,6 +62,7 @@ define XBCOMPAT_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(@D)/build-buildroot/xbcompat $(TARGET_DIR)/opt/xbcompat/bin/xbcompat
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/xbox-boot $(TARGET_DIR)/usr/libexec/xbox-boot
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/xbox-session $(TARGET_DIR)/usr/libexec/xbox-session
+	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/xbox-title $(TARGET_DIR)/usr/libexec/xbox-title
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/xbox-env $(TARGET_DIR)/usr/lib/xbox/xbox-env
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/dashboard $(TARGET_DIR)/usr/libexec/dashboard
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/xbox-sample $(TARGET_DIR)/usr/bin/xbox-sample
@@ -85,6 +86,7 @@ define XBCOMPAT_INSTALL_TARGET_CMDS
 	tar -C $(TARGET_DIR)/opt -xzf $(XBCOMPAT_BUNDLE)
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/xbox-boot $(TARGET_DIR)/usr/libexec/xbox-boot
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/xbox-session $(TARGET_DIR)/usr/libexec/xbox-session
+	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/xbox-title $(TARGET_DIR)/usr/libexec/xbox-title
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/xbox-env $(TARGET_DIR)/usr/lib/xbox/xbox-env
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/dashboard $(TARGET_DIR)/usr/libexec/dashboard
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/../../../../xbcompat/tools/sion/cards/sion-cards $(TARGET_DIR)/usr/sbin/sion-cards

@@ -1,0 +1,28 @@
+#!/bin/sh
+# XLaunchNewImage entry point on images without Python/signature scanning.
+# Each executable needs its own precomputed map; never inherit a title's map.
+[ $# -gt 0 ] || { echo "xbox-title: missing XBE path" >&2; exit 64; }
+image=$1
+shift
+case $image in /*) ;; *) image=$PWD/$image ;; esac
+[ -r "$image" ] || { echo "xbox-title: cannot read $image" >&2; exit 66; }
+
+digest=$(sha1sum "$image") || exit 74
+digest=${digest%% *}
+cache=${XBCOMPAT_MAP_DIR:-${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/xbcompat/maps}
+map=
+for candidate in "$cache/$digest.map" "$image.map"; do
+	if [ -s "$candidate" ]; then map=$candidate; break; fi
+done
+# The bundled samples have one default.xbe and an xbcompat.map beside it.
+if [ -z "$map" ] && [ "${image##*/}" = default.xbe ] && [ -s "${image%/*}/xbcompat.map" ]; then
+	map=${image%/*}/xbcompat.map
+fi
+if [ -z "$map" ]; then
+	echo "xbox-title: no HLE map for $image (SHA-1 $digest)." >&2
+	echo "Prepare its map with tools/pi/cache-map.py; refusing to run unpatched Xbox hardware code." >&2
+	exit 78
+fi
+echo "xbox-title: $image uses $map" >&2
+export XBCOMPAT_LAUNCHER=${XBCOMPAT_LAUNCHER:-$0}
+exec "${XBCOMPAT_BIN:-/opt/xbcompat/bin/xbcompat}" --hle "$map" "$@" "$image"
