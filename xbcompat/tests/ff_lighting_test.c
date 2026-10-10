@@ -95,6 +95,7 @@ int main(void)
     GLuint program = glCreateProgram();
     glAttachShader(program, vs); glAttachShader(program, fs);
     glBindAttribLocation(program, 1, "v1");
+    glBindAttribLocation(program, 6, "ff_color2");
     glLinkProgram(program);
     GLint ok;
     glGetProgramiv(program, GL_LINK_STATUS, &ok);
@@ -196,6 +197,15 @@ int main(void)
         check("four explicit matrix weights",0,2,1,.7f,.7f,.7f,1);
     }
 
+
+    reset();
+    glVertexAttrib4f(6,.2f,.4f,.8f,.3f);
+    rgb(3,1,1,1);
+    state[9][2] = 1; state[9][3] = 3; rgb(11,1,1,1);
+    state[1][0] = 2;
+    check("secondary diffuse source retains alpha",0,2,1,.2f,.4f,.8f,.3f);
+    reset(); state[1][3] = 2;
+    check("secondary emissive source",0,2,1,.2f,.4f,.8f,1);
     printf("%d/%d FF lighting checks passed\n", checks - failures, checks);
     glDeleteProgram(program); glDeleteShader(vs); glDeleteShader(fs);
     SDL_GL_DeleteContext(context); SDL_DestroyWindow(window); SDL_Quit();

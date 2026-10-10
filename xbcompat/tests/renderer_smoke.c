@@ -1144,6 +1144,110 @@ int main(int argc, char **argv)
             puts("renderer palettes: 32/64/128/256 entries and palette-only cache refresh passed");
         }
 
+
+        /* Programmable front/back colors use the two-sided raster selector;
+         * disabling it must take effect without rebuilding the program. */
+        {
+            uint32_t saved_rs[256]; memcpy(saved_rs,render_states,sizeof saved_rs);
+            LONG (NTAPI *create_vshader)(const ULONG *,const ULONG *,ULONG *,ULONG) =
+                find("_D3DDevice_CreateVertexShader@16");
+            void (NTAPI *delete_vshader)(ULONG) = find("_D3DDevice_DeleteVertexShader@4");
+            static const ULONG decl[] = {0x20000000,0x40420000,0x40420001,0x40420002,0xffffffff};
+            static const ULONG function[] = {
+                0x00032078,
+                0,0x0020001b,0x08000000,0x0000f800,
+                0,0x0020021b,0x08000000,0x0000f818,
+                0,0x0020041b,0x08000000,0x0000f839
+            };
+            ULONG colors_vs = 0, colors_ps = 0, def[60] = {0};
+            assert(create_vshader(decl,function,&colors_vs,0) == 0 && colors_vs);
+            def[8] = 4; def[9] = 0x14u<<8; create_ps(def,&colors_ps);
+            struct color_vertex {float position[4],front[4],back[4];} triangle[] = {
+                {{4,4,.5f,1},{1,0,0,1},{0,1,0,1}},
+                {{60,4,.5f,1},{1,0,0,1},{0,1,0,1}},
+                {{32,60,.5f,1},{1,0,0,1},{0,1,0,1}}
+            };
+            set_vs(colors_vs); set_ps(colors_ps);
+            render_states[59] = render_states[60] = render_states[82] = 0;
+            render_states[92] = render_states[124] = render_states[128] = 0;
+            render_states[67] = 0xffffffffu;
+            render_states[66] = GL_SMOOTH;
+            for (int enabled = 1; enabled >= 0; enabled--) {
+                render_states[122] = enabled;
+                unsigned red_faces = 0, green_faces = 0;
+                for (int winding = 0; winding < 2; winding++) {
+                    struct color_vertex tmp = triangle[0]; triangle[0] = triangle[1]; triangle[1] = tmp;
+                    clear(0,NULL,0xf0,0xff000000,1,0);
+                    draw(5,3,triangle,sizeof triangle[0]);
+                    glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                    red_faces += pixel[0]>240 && pixel[1]<8;
+                    green_faces += pixel[1]>240 && pixel[0]<8;
+                }
+                assert(red_faces == (enabled ? 1u : 2u) && green_faces == (enabled ? 1u : 0u));
+            }
+            /* Ordinary color flat shading must not blend the triangle's
+             * red/green/blue vertex colors. This checks current GL last-vertex
+             * behavior; broader Xbox strip/fan provoking rules remain open. */
+            triangle[1].front[0] = 0; triangle[1].front[1] = 1;
+            triangle[2].front[0] = 0; triangle[2].front[2] = 1;
+            render_states[66] = GL_FLAT;
+            clear(0,NULL,0xf0,0xff000000,1,0);
+            draw(5,3,triangle,sizeof triangle[0]);
+            glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+            assert(pixel[0]<8 && pixel[1]<8 && pixel[2]>240);
+            set_ps(0); set_vs(0x144); delete_vshader(colors_vs);
+            memcpy(render_states,saved_rs,sizeof saved_rs);
+            puts("renderer vertex colors: front/back selection, disable and flat triangle passed");
+        }
+
+        /* Owned texgen emits object/eye/normal coordinates before the texture
+         * matrix. Normalize normals even when lighting itself is disabled. */
+        {
+            uint32_t saved_rs[256],saved_tss[128]; float saved[10][16];
+            void (NTAPI *set_transform)(ULONG,const void *) = find("_D3DDevice_SetTransform@8");
+            void (NTAPI *get_transform)(ULONG,void *) = find("_D3DDevice_GetTransform@8");
+            memcpy(saved_rs,render_states,sizeof saved_rs); memcpy(saved_tss,texture_states,sizeof saved_tss);
+            for (int i = 0; i < 10; i++) get_transform(i,saved[i]);
+            float matrix[16] = {1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
+            set_transform(0,matrix); set_transform(1,matrix);
+            matrix[12] = .25f; matrix[13] = .5f; set_transform(6,matrix);
+            matrix[12] = .125f; matrix[13] = 0; set_transform(2,matrix);
+            ULONG def[60] = {0}, generated_ps = 0;
+            def[8] = 8; def[9] = 0x18u<<8; def[54] = 4; /* PASSTHRU */
+            create_ps(def,&generated_ps); set_ps(generated_ps);
+            for (int i = 0; i < 4; i++) {
+                set_tex(i,NULL); texture_states[i*32+28] = i;
+                texture_states[i*32+21] = 0;
+            }
+            texture_states[21] = 3;
+            render_states[59] = render_states[60] = render_states[82] = 0;
+            render_states[92] = render_states[93] = render_states[109] = 0;
+            render_states[118] = render_states[122] = render_states[124] = 0;
+            render_states[67] = 0xffffffffu;
+            render_states[106] = 0x40800000u;
+            struct {float position[3],normal[3]; uint32_t color; float uv[2];} point =
+                {{0,0,.25f},{0,0,.5f},0xffffffffu,{.9f,.9f}};
+            set_vs(0x152);
+            static const unsigned modes[] = {1,2,4,1};
+            static const unsigned char expected[][3] = {{32,0,128},{96,128,64},{32,0,64},{32,0,255}};
+            for (unsigned i = 0; i < 4; i++) {
+                texture_states[28] = modes[i]<<16;
+                render_states[123] = i == 3;
+                clear(0,NULL,0xf0,0xff000000,1,0);
+                draw(1,1,&point,sizeof point);
+                glReadPixels(40,48,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                for (int k = 0; k < 3; k++) {
+                    if (abs((int)pixel[k]-expected[i][k]) > 3)
+                        fprintf(stderr,"texgen %u channel %d: %u expected %u\n",i,k,pixel[k],expected[i][k]);
+                    assert(abs((int)pixel[k]-expected[i][k]) <= 3);
+                }
+            }
+            set_ps(0); set_vs(0x144); set_tex(0,tex);
+            for (int i = 0; i < 10; i++) set_transform(i,saved[i]);
+            memcpy(render_states,saved_rs,sizeof saved_rs); memcpy(texture_states,saved_tss,sizeof saved_tss);
+            puts("renderer texgen: normal/eye/object generation, matrix order and unlit normalization passed");
+        }
+
         /* Compressed volume uploads decode the packed slab order before GL.
          * The selected blocks distinguish XY tiles, slices within a slab,
          * and the second slab. Minification then selects an authored mip. */

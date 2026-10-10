@@ -2058,6 +2058,11 @@ static void apply_render_states(bool pretransformed, bool has_normal)
 {
     ff_lighting_candidate = !pretransformed && ((has_normal && RS(D3DRS_LIGHTING)) || RS(118));
     ff_weight_components = 0;
+    if (!pretransformed)
+        for (int i = 0; i < 4; i++) {
+            ULONG gen = TSS(i, D3DTSS_TEXCOORDINDEX) >> 16;
+            if (gen == 1 || gen == 2 || gen == 4) ff_lighting_candidate = true;
+        }
     ff_primary_present = ff_secondary_present = false;
     flush_cpu_backbuffer();
     apply_viewport();
@@ -2330,6 +2335,7 @@ static GLuint link_program(GLuint vs, GLuint fs)
         snprintf(name, sizeof(name), "v%d", i);
         p_glBindAttribLocation(prog, i, name);
     }
+    p_glBindAttribLocation(prog, 6, "ff_color2");
     p_glLinkProgram(prog);
     GLint ok = 0;
     p_glGetProgramiv(prog, GL_LINK_STATUS, &ok);
@@ -2892,6 +2898,7 @@ static void program_off(void)
     if (cur_program) p_glUseProgram(0);
     cur_program = 0;
     glDisable(GL_VERTEX_PROGRAM_POINT_SIZE);
+    glDisable(GL_VERTEX_PROGRAM_TWO_SIDE);
 }
 
 
@@ -2911,9 +2918,10 @@ static bool fixed_lighting_supported(void)
     for (int k = 0; k < 4; k++) {
         ULONG source = RS(sources[k]);
         bool active = k != 2 || RS(D3DRS_SPECULARENABLE);
-        if (active && RS(D3DRS_COLORVERTEX) && (source > 2 || (source == 2 && ff_secondary_present)))
+        if (active && RS(D3DRS_COLORVERTEX) && source > 2)
             return false;
-        if (TSS(k, D3DTSS_TEXCOORDINDEX) >> 16) return false;
+        ULONG gen = TSS(k, D3DTSS_TEXCOORDINDEX) >> 16;
+        if (gen && gen != 1 && gen != 2 && gen != 4) return false;
     }
     for (int i = 0; i < 8; i++)
         if (d3d.lights[i].enabled && d3d.lights[i].type != 1 && d3d.lights[i].type != 3)
@@ -2941,6 +2949,7 @@ static void upload_fixed_lighting(const program_entry *e)
     state[7][0] = blend ? (blend + 3) / 2 : 0;
     state[7][1] = blend & 1; /* odd modes generate the final weight */
     state[7][2] = !RS(D3DRS_LIGHTING);
+    for (int i = 0; i < 4; i++) state[8][i] = TSS(i, D3DTSS_TEXCOORDINDEX) >> 16;
     if (blend && e->loc_ff_transform >= 0) {
         float transform[28][4] = {{0}};
         for (unsigned i = 0; i < 4; i++) {
@@ -3016,6 +3025,8 @@ static bool use_program(GLuint vs, program_entry **out)
     /* NV2A programmable oPts is selected only with point parameters enabled.
        Fixed-function attenuation remains owned by the fixed-function path.
        Synchronize on every draw, including cached program reuse and VS -> FF. */
+    if (vs && RS(122 /* TWOSIDEDLIGHTING */)) glEnable(GL_VERTEX_PROGRAM_TWO_SIDE);
+    else glDisable(GL_VERTEX_PROGRAM_TWO_SIDE);
     if (vs && RS(D3DRS_POINTSCALEENABLE)) glEnable(GL_VERTEX_PROGRAM_POINT_SIZE);
     else glDisable(GL_VERTEX_PROGRAM_POINT_SIZE);
     bool programmable_vertex = vs != 0;
@@ -3542,6 +3553,19 @@ static void draw_declared_(const vshader *sh, ULONG PrimitiveType, const UCHAR *
     apply_render_states(pretransformed, sh->attr[2].stream >= 0);
     ff_primary_present = sh->attr[3].stream >= 0;
     ff_secondary_present = sh->attr[4].stream >= 0;
+    if (ff_secondary_present) {
+        const UCHAR *colors; ULONG color_stride;
+        const vattr *a = &sh->attr[4];
+        STREAM(a, colors, color_stride);
+        gc_bind_buffer(GL_ARRAY_BUFFER, 0);
+        p_glEnableVertexAttribArray(6);
+        if (a->type == 0x40 && rgba_vertex_colors)
+            p_glVertexAttribPointer(6, 4, GL_UNSIGNED_BYTE, GL_TRUE, 4,
+                rgba_colors(colors+a->offset, color_stride, vertex_range(first,count,indices), NULL));
+        else
+            p_glVertexAttribPointer(6, a->type == 0x40 ? GL_BGRA : a->components,
+                                   a->gl_type, a->normalized, color_stride, colors+a->offset);
+    }
     ff_weight_components = sh->attr[1].stream >= 0 ? sh->attr[1].components : 0;
     if (RS(118) && ff_weight_components) {
         const UCHAR *weights; ULONG weight_stride;
@@ -3649,6 +3673,15 @@ static void draw(ULONG PrimitiveType, const UCHAR *base, ULONG stride, ULONG fir
     apply_render_states(l.pretransformed, l.normal_off >= 0);
     ff_primary_present = l.diffuse_off >= 0;
     ff_secondary_present = l.specular_off >= 0;
+    if (ff_secondary_present) {
+        gc_bind_buffer(GL_ARRAY_BUFFER, 0);
+        p_glEnableVertexAttribArray(6);
+        if (rgba_vertex_colors)
+            p_glVertexAttribPointer(6, 4, GL_UNSIGNED_BYTE, GL_TRUE, 4,
+                rgba_colors(base+l.specular_off, stride, vertex_range(first,count,indices), NULL));
+        else
+            p_glVertexAttribPointer(6, GL_BGRA, GL_UNSIGNED_BYTE, GL_TRUE, stride, base+l.specular_off);
+    }
     ULONG position_kind = d3d.vertex_shader & D3DFVF_POSITION_MASK;
     ff_weight_components = position_kind >= D3DFVF_XYZB1 ? (position_kind-D3DFVF_XYZB1)/2+1 : 0;
     if (RS(118) && ff_weight_components && ff_weight_components <= 4) {

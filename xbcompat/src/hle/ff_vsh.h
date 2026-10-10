@@ -6,7 +6,7 @@
  *  2: scene ambient
  *  3..6: diffuse, ambient, specular, emissive material
  *  7: skin matrix count (0 disables), generated final weight, unlit flag
- *  8: reserved
+ *  8: texture-generation modes for stages 0..3 (0 input, 1 normal, 2 eye, 4 object)
  *  9 + 5*i: light position (point) or direction toward light (directional);
  *           W selects disabled=0, point=1, directional=3
  *      +1: ambient, +2: diffuse, +3: specular, +4: a0/a1/a2/range
@@ -24,6 +24,7 @@ static const char ff_lighting_source[] =
 "uniform vec4 ff_lighting[49];\n"
 "uniform vec4 ff_transform[28];\n"
 "attribute vec4 v1; /* blend weights */\n"
+"attribute vec4 ff_color2; /* complete secondary color, including alpha */\n"
 "\n"
 "vec3 ff_unit(vec3 v)\n"
 "{\n"
@@ -34,8 +35,16 @@ static const char ff_lighting_source[] =
 "vec4 ff_material(float source, vec4 material)\n"
 "{\n"
 "    if (source == 1.0) return gl_Color;\n"
-"    if (source == 2.0) return gl_SecondaryColor;\n"
+"    if (source == 2.0) return ff_color2;\n"
 "    return material;\n"
+"}\n"
+"\n"
+"vec4 ff_texcoord(vec4 input_coord, float mode, vec4 eye, vec3 normal)\n"
+"{\n"
+"    if (mode == 1.0) return vec4(normal, input_coord.w);\n"
+"    if (mode == 2.0) return vec4(eye.xyz, input_coord.w);\n"
+"    if (mode == 4.0) return vec4(gl_Vertex.xyz, input_coord.w);\n"
+"    return input_coord;\n"
 "}\n"
 "\n"
 "void main()\n"
@@ -100,9 +109,9 @@ static const char ff_lighting_source[] =
 "    gl_Position = gl_ProjectionMatrix * eye;\n"
 "    gl_FogFragCoord = abs(position.z);\n"
 "    gl_PointSize = gl_Point.size;\n"
-"    gl_TexCoord[0] = gl_TextureMatrix[0] * gl_MultiTexCoord0;\n"
-"    gl_TexCoord[1] = gl_TextureMatrix[1] * gl_MultiTexCoord1;\n"
-"    gl_TexCoord[2] = gl_TextureMatrix[2] * gl_MultiTexCoord2;\n"
-"    gl_TexCoord[3] = gl_TextureMatrix[3] * gl_MultiTexCoord3;\n"
+"    gl_TexCoord[0] = gl_TextureMatrix[0] * ff_texcoord(gl_MultiTexCoord0, ff_lighting[8][0], eye, normal);\n"
+"    gl_TexCoord[1] = gl_TextureMatrix[1] * ff_texcoord(gl_MultiTexCoord1, ff_lighting[8][1], eye, normal);\n"
+"    gl_TexCoord[2] = gl_TextureMatrix[2] * ff_texcoord(gl_MultiTexCoord2, ff_lighting[8][2], eye, normal);\n"
+"    gl_TexCoord[3] = gl_TextureMatrix[3] * ff_texcoord(gl_MultiTexCoord3, ff_lighting[8][3], eye, normal);\n"
 "}\n";
 #endif
