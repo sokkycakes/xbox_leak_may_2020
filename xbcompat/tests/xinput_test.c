@@ -570,11 +570,13 @@ static void test_original_pad(void)
         int index = SDL_JoystickAttachVirtualEx(&desc);
         CHECK(index >= 0);
         SDL_JoystickGUID guid = SDL_JoystickGetDeviceGUID(index);
-        guid.data[2] = guid.data[3] = 0;
         char g[33], m[512];
         SDL_JoystickGetGUIDString(guid, g, sizeof(g));
-        original_pad_mapping(g, layouts[l].flags, m, sizeof(m));
+        /* A name-specific mapping which lacks Black/White must be replaced,
+           not left in preference to xbcompat's corrected mapping. */
+        snprintf(m, sizeof(m), "%s,Incomplete original pad,a:b0,b:b1,x:b3,y:b4,", g);
         CHECK(SDL_GameControllerAddMapping(m) >= 0);
+        CHECK(install_original_pad_mapping(guid, layouts[l].flags) >= 0);
         CHECK(SDL_IsGameController(index));
         char *used = SDL_GameControllerMappingForDeviceIndex(index);
         CHECK(used && strstr(used, "Xbox Controller (original)"));
@@ -622,6 +624,44 @@ static void test_original_pad(void)
     }
 }
 
+/* Reproduce SDL's CRC-specific mapping precedence with a Mad Catz USB
+   identity and two different name checksums. The old generic registration
+   leaves the incomplete exact mapping selected; keeping the CRC replaces it.
+   This tests mapping selection as well as the virtual-pad report tests above. */
+static void test_original_mapping_precedence(void)
+{
+    SDL_JoystickGUID device = SDL_JoystickGetGUIDFromString("0300abcd380700002045000000010000");
+    SDL_JoystickGUID other = device;
+    other.data[2] = 0x12;
+    other.data[3] = 0x34;
+    char guid[33], mapping[512];
+    SDL_JoystickGetGUIDString(device, guid, sizeof(guid));
+    snprintf(mapping, sizeof(mapping), "%s,Incomplete Mad Catz,a:b0,b:b1,x:b3,y:b4,", guid);
+    CHECK(SDL_GameControllerAddMapping(mapping) >= 0);
+    SDL_JoystickGetGUIDString(other, guid, sizeof(guid));
+    snprintf(mapping, sizeof(mapping), "%s,Other device,a:b1,b:b0,", guid);
+    CHECK(SDL_GameControllerAddMapping(mapping) >= 0);
+
+    /* The previous registration dropped bytes 2/3. Demonstrate its failure. */
+    SDL_JoystickGUID generic = device;
+    generic.data[2] = generic.data[3] = 0;
+    SDL_JoystickGetGUIDString(generic, guid, sizeof(guid));
+    original_pad_mapping(guid, 0, mapping, sizeof(mapping));
+    CHECK(SDL_GameControllerAddMapping(mapping) >= 0);
+    char *selected = SDL_GameControllerMappingForGUID(device);
+    CHECK(selected && strstr(selected, "Incomplete Mad Catz") && !strstr(selected, "rightshoulder:"));
+    SDL_free(selected);
+
+    CHECK(install_original_pad_mapping(device, 0) >= 0);
+    selected = SDL_GameControllerMappingForGUID(device);
+    CHECK(selected && strstr(selected, "Xbox Controller (original)") &&
+          strstr(selected, "rightshoulder:b2") && strstr(selected, "leftshoulder:b5"));
+    SDL_free(selected);
+    selected = SDL_GameControllerMappingForGUID(other);
+    CHECK(selected && strstr(selected, "Other device") && strstr(selected, "a:b1"));
+    SDL_free(selected);
+}
+
 /* A pad plugged in at boot is enumerated after XInitDevices: the title's
    first XGetDevices sees nothing, then the pad arrives as an insertion. */
 static void test_boot_enumeration(void)
@@ -662,6 +702,7 @@ int main(void)
     test_prealloc();
     test_virtual_spec();
     test_original_pad();
+    test_original_mapping_precedence();
     test_boot_enumeration();
 
     printf("xinput_test: %d checks, %d failures\n", checks, failures);

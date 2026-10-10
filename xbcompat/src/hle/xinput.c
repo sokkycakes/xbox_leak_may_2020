@@ -441,6 +441,17 @@ static void original_pad_mapping(const char *guid, int flags, char *m, size_t si
     if (!(flags & OG_TRIGGER_BUTTONS)) snprintf(m + n, size - n, "righttrigger:a%d,", a++);
 }
 
+/* Keep the device name CRC in the GUID passed to SDL. SDL stores it in the
+   mapping's crc field; discarding it installs only a generic fallback, which
+   loses to an existing name-specific mapping for the same USB identity. */
+static int install_original_pad_mapping(SDL_JoystickGUID guid, int flags)
+{
+    char g[33], mapping[512];
+    SDL_JoystickGetGUIDString(guid, g, sizeof(g));
+    original_pad_mapping(g, flags, mapping, sizeof(mapping));
+    return SDL_GameControllerAddMapping(mapping);
+}
+
 #ifdef __linux__
 
 static const struct { Uint16 vendor, product; Uint8 flags; } og_pads[] = {
@@ -466,7 +477,6 @@ static void map_original_pad(int j)
     static SDL_JoystickGUID done[16];
     static unsigned ndone;
     SDL_JoystickGUID guid = SDL_JoystickGetDeviceGUID(j);
-    guid.data[2] = guid.data[3] = 0;            /* mappings never carry the name CRC */
     for (unsigned i = 0; i < ndone; i++)
         if (!memcmp(&done[i], &guid, sizeof(guid))) return;
     if (guid.data[0] != 0x03 || guid.data[1] != 0) return;      /* USB only */
@@ -490,10 +500,7 @@ static void map_original_pad(int j)
         flags = 0;
     }
 
-    char g[33], m[512];
-    SDL_JoystickGetGUIDString(guid, g, sizeof(g));
-    original_pad_mapping(g, flags, m, sizeof(m));
-    if (SDL_GameControllerAddMapping(m) < 0)
+    if (install_original_pad_mapping(guid, flags) < 0)
         xlog("XInput: original Xbox pad %04x:%04x: SDL_GameControllerAddMapping: %s",
              vendor, product, SDL_GetError());
     else
