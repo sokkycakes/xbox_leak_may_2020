@@ -93,7 +93,9 @@ enum {
     D3DRS_PSFINALCOMBINERCONSTANT0 = 43, D3DRS_PSFINALCOMBINERCONSTANT1 = 44, D3DRS_PS_MAX = 57,
     D3DRS_ZFUNC = 57, D3DRS_ALPHAFUNC = 58, D3DRS_ALPHABLENDENABLE = 59, D3DRS_ALPHATESTENABLE = 60,
     D3DRS_ALPHAREF = 61, D3DRS_SRCBLEND = 62, D3DRS_DESTBLEND = 63, D3DRS_ZWRITEENABLE = 64,
-    D3DRS_SHADEMODE = 66, D3DRS_COLORWRITEENABLE = 67, D3DRS_BLENDOP = 74,
+    D3DRS_SHADEMODE = 66, D3DRS_COLORWRITEENABLE = 67, D3DRS_STENCILZFAIL = 68, D3DRS_STENCILPASS = 69,
+    D3DRS_STENCILFUNC = 70, D3DRS_STENCILREF = 71, D3DRS_STENCILMASK = 72, D3DRS_STENCILWRITEMASK = 73,
+    D3DRS_BLENDOP = 74, D3DRS_BLENDCOLOR = 75, D3DRS_STENCILFAIL = 126,
     D3DRS_POLYGONOFFSETZSLOPESCALE = 77, D3DRS_POLYGONOFFSETZOFFSET = 78, D3DRS_SOLIDOFFSETENABLE = 81,
     D3DRS_FOGENABLE = 82, D3DRS_FOGTABLEMODE = 83, D3DRS_FOGSTART = 84, D3DRS_FOGEND = 85,
     D3DRS_FOGDENSITY = 86, D3DRS_LIGHTING = 92, D3DRS_SPECULARENABLE = 93, D3DRS_COLORVERTEX = 95,
@@ -257,6 +259,9 @@ static void default_render_states(void)
     RS(D3DRS_SHADEMODE) = GL_SMOOTH;
     RS(D3DRS_COLORWRITEENABLE) = 0x01010101;
     RS(D3DRS_BLENDOP) = GL_FUNC_ADD;
+    RS(D3DRS_STENCILFUNC) = GL_ALWAYS;
+    RS(D3DRS_STENCILMASK) = RS(D3DRS_STENCILWRITEMASK) = 0xFF;
+    RS(D3DRS_STENCILFAIL) = RS(D3DRS_STENCILZFAIL) = RS(D3DRS_STENCILPASS) = GL_KEEP;
     RS(D3DRS_LIGHTING) = 1;
     RS(D3DRS_COLORVERTEX) = 1;
     RS(D3DRS_DIFFUSEMATERIALSOURCE) = 1;   /* D3DMCS_COLOR1 */
@@ -1087,6 +1092,8 @@ static void (APIENTRY *p_glMultiTexCoord4fv)(GLenum, const GLfloat *);
 static void (APIENTRY *p_glPointParameterfv)(GLenum, const GLfloat *);
 static void (APIENTRY *p_glGenQueries)(GLsizei, GLuint *);
 static void (APIENTRY *p_glSecondaryColorPointer)(GLint, GLenum, GLsizei, const void *);
+static void (APIENTRY *p_glBlendEquation)(GLenum);
+static void (APIENTRY *p_glBlendColor)(GLfloat, GLfloat, GLfloat, GLfloat);
 static void (APIENTRY *p_glBeginQuery)(GLenum, GLuint);
 static void (APIENTRY *p_glEndQuery)(GLenum);
 static void (APIENTRY *p_glGetQueryObjectuiv)(GLuint, GLenum, GLuint *);
@@ -1722,6 +1729,7 @@ static bool pb_render_state(ULONG m, ULONG d)
         return true;
     }
     if (m == 0x32C) { RS(D3DRS_STENCILENABLE) = d; return true; }   /* NV097_SET_STENCIL_TEST_ENABLE */
+    if (m == 0x370) { RS(D3DRS_STENCILFAIL) = d; return true; }     /* NV097_SET_STENCIL_OP_FAIL */
     return false;
 }
 
@@ -1846,6 +1854,17 @@ static void color4(float *out, ULONG c)
     out[3] = (c >> 24) / 255.0f;
 }
 
+static GLenum stencil_op(ULONG op)
+{
+    switch (op) {
+    case GL_ZERO: case GL_KEEP: case GL_REPLACE: case GL_INCR: case GL_DECR: case GL_INVERT:
+    case GL_INCR_WRAP: case GL_DECR_WRAP:
+        return op;
+    default:
+        return GL_KEEP;
+    }
+}
+
 static void apply_render_states(bool pretransformed, bool has_normal)
 {
     flush_cpu_backbuffer();
@@ -1876,8 +1895,31 @@ static void apply_render_states(bool pretransformed, bool has_normal)
     if (RS(D3DRS_ALPHABLENDENABLE)) {
         glEnable(GL_BLEND);
         glBlendFunc(RS(D3DRS_SRCBLEND), RS(D3DRS_DESTBLEND));
+        /* D3DBLENDOP_* are the GL equations; the Xbox's signed ones
+           (0xF005 REVSUBTRACTSIGNED, 0xF006 ADDSIGNED) have no GL
+           counterpart and fall back to their unsigned forms. */
+        ULONG op = RS(D3DRS_BLENDOP);
+        if (op == 0xF005) op = GL_FUNC_REVERSE_SUBTRACT;
+        else if (op != GL_FUNC_ADD && op != GL_FUNC_SUBTRACT && op != GL_FUNC_REVERSE_SUBTRACT
+                 && op != GL_MIN && op != GL_MAX) op = GL_FUNC_ADD;
+        if (p_glBlendEquation) p_glBlendEquation(op);
+        if (p_glBlendColor) {
+            float bc[4];
+            color4(bc, RS(D3DRS_BLENDCOLOR));
+            p_glBlendColor(bc[0], bc[1], bc[2], bc[3]);
+        }
     } else {
         glDisable(GL_BLEND);
+    }
+    /* Stencil: the D3DCMP_* and D3DSTENCILOP_* values are GL's. */
+    if (RS(D3DRS_STENCILENABLE)) {
+        glEnable(GL_STENCIL_TEST);
+        glStencilFunc(RS(D3DRS_STENCILFUNC), RS(D3DRS_STENCILREF) & 0xFF, RS(D3DRS_STENCILMASK) & 0xFF);
+        glStencilOp(stencil_op(RS(D3DRS_STENCILFAIL)), stencil_op(RS(D3DRS_STENCILZFAIL)),
+                    stencil_op(RS(D3DRS_STENCILPASS)));
+        glStencilMask(RS(D3DRS_STENCILWRITEMASK) & 0xFF);
+    } else {
+        glDisable(GL_STENCIL_TEST);
     }
     if (RS(D3DRS_ALPHATESTENABLE)) {
         glEnable(GL_ALPHA_TEST);
@@ -2053,7 +2095,7 @@ static void load_shader_functions(void)
     LOAD(glUniform1f); LOAD(glUniform1i); LOAD(glEnableVertexAttribArray); LOAD(glDisableVertexAttribArray);
     LOAD(glVertexAttribPointer); LOAD(glVertexAttrib4fv); LOAD(glActiveTexture); LOAD(glClientActiveTexture);
     LOAD(glMultiTexCoord4fv); LOAD(glUniform2fv); LOAD(glPointParameterfv); LOAD(glPointParameterf);
-    LOAD(glSecondaryColorPointer);
+    LOAD(glSecondaryColorPointer); LOAD(glBlendEquation); LOAD(glBlendColor);
     LOAD(glGenQueries); LOAD(glBeginQuery); LOAD(glEndQuery); LOAD(glGetQueryObjectuiv);
 #undef LOAD
 }
