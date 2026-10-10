@@ -170,3 +170,22 @@ The Pi was left running the isolated native test at the original 4x setting.
 Installed binaries and boot configuration were not replaced. A reboot returns
 to the installed runtime. The temporary test directory and logs are
 /tmp/xbcompat-native-test.if8zCJ; they are not persistent across reboot.
+
+## Detailed renderer profiling
+
+XBCOMPAT_PROFILE_RENDERER=1 enables FPS logging plus per-frame CPU wall-clock
+timing for resolve/filter/swap and programmable draw preparation, and counts
+conversion-cache hits, evictions and uploads. It adds timing overhead and is
+off by default. These are CPU-side call durations, not GPU query results.
+
+Two diagnostic controls retain the original behavior unless explicitly set:
+
+- XBCOMPAT_PRESENT_FILTER=0 bypasses the fullscreen soft/flicker filter while
+  retaining MSAA and the final output blit. This changes the image.
+- XBCOMPAT_SWAP_INTERVAL=0 requests unsynchronized swaps (possible tearing).
+  The default remains 1; the requested interval and SDL result are logged.
+
+The follow-up investigation fixed conversion-cache address hashing and raised
+the Pi's 4x main-menu result from about 24.5 to 25.6 FPS. See
+[the detailed MSAA profile](../../docs/pi3-native-msaa-profile.md) for GPU
+execution measurements, controlled comparisons and the remaining bottleneck.

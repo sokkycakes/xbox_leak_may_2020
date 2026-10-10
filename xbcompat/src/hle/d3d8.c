@@ -353,7 +353,10 @@ static LONG NTAPI Direct3D_CreateDevice(UINT_ Adapter, ULONG DeviceType, PVOID p
     d3d.gl = SDL_GL_CreateContext(d3d.window);
     if (!d3d.gl) fatal("SDL_GL_CreateContext: %s", SDL_GetError());
     gc_reset();
-    SDL_GL_SetSwapInterval(1);
+    const char *swap_env = getenv("XBCOMPAT_SWAP_INTERVAL");
+    int swap_interval = swap_env && !strcmp(swap_env, "0") ? 0 : 1;
+    int swap_result = SDL_GL_SetSwapInterval(swap_interval);
+    xlog("D3D: swap interval %d (%s)", swap_interval, swap_result ? SDL_GetError() : "accepted");
     xlog("D3D: OpenGL %s on %s", glGetString(GL_VERSION), glGetString(GL_RENDERER));
     /* The Raspberry Pi's VC4 can't fetch B,G,R,A vertex colors; Mesa then
        converts them on every draw, and that path crashes in vc4 (indexed
@@ -533,9 +536,13 @@ static void wait_vblank(void)
    frame time went: draws (xbcompat's state/constant/vertex setup, then the
    GL draw calls themselves), presenting (the filter pass and the buffer
    swap, which waits for the display), and the rest (the title's own code). */
-static int fps_on = -1;
+static int fps_on = -1, detail_on;
 static uint64_t t_draw, t_gl, t_present, t_pace;
+static uint64_t t_resolve, t_filter, t_swap, t_restore;
+static uint64_t t_state, t_program, t_constants, t_attributes, t_indices;
 static unsigned n_draws;
+static unsigned cache_hits, cache_misses, cache_evicts, cache_uploads;
+static uint64_t cache_upload_bytes;
 
 static uint64_t now_ns(void)
 {
@@ -548,7 +555,11 @@ static void log_fps(void)
 {
     static uint64_t since;
     static unsigned frames;
-    if (fps_on < 0) { const char *e = getenv("XBCOMPAT_LOG_FPS"); fps_on = e && *e && *e != '0'; }
+    if (fps_on < 0) {
+        const char *e = getenv("XBCOMPAT_LOG_FPS"), *p = getenv("XBCOMPAT_PROFILE_RENDERER");
+        detail_on = p && *p && *p != '0';
+        fps_on = detail_on || (e && *e && *e != '0');
+    }
     if (!fps_on) return;
     uint64_t now = now_ns();
     if (!since) since = now;
@@ -559,6 +570,16 @@ static void log_fps(void)
              "pacing %.1f ms, other %.1f ms; GL state calls %u, %u skipped", 1000.0 / ms, ms, (unsigned)(n_draws / f),
              t_draw / 1e6 / f, t_gl / 1e6 / f, t_present / 1e6 / f, t_pace / 1e6 / f,
              ms - (t_draw + t_present + t_pace) / 1e6 / f, (unsigned)(gc_calls / f), (unsigned)(gc_skipped / f));
+        if (detail_on) {
+            xlog("D3D detail: resolve %.2f filter %.2f swap %.2f restore %.2f; state %.2f program %.2f constants %.2f attributes %.2f indices %.2f ms/frame",
+                 t_resolve / 1e6 / f, t_filter / 1e6 / f, t_swap / 1e6 / f, t_restore / 1e6 / f,
+                 t_state / 1e6 / f, t_program / 1e6 / f, t_constants / 1e6 / f, t_attributes / 1e6 / f, t_indices / 1e6 / f);
+            xlog("D3D cache: hits %.1f misses %.1f evictions %.1f uploads %.1f bytes %.0f per frame",
+                 cache_hits / f, cache_misses / f, cache_evicts / f, cache_uploads / f, cache_upload_bytes / f);
+            cache_hits = cache_misses = cache_evicts = cache_uploads = 0; cache_upload_bytes = 0;
+            t_resolve = t_filter = t_swap = t_restore = 0;
+            t_state = t_program = t_constants = t_attributes = t_indices = 0;
+        }
         gc_calls = gc_skipped = 0;
         since = now;
         frames = 0;
@@ -566,6 +587,8 @@ static void log_fps(void)
         n_draws = 0;
     }
 }
+#define DETAIL_TIMED(acc, ...) do { if (detail_on) { uint64_t td_ = now_ns(); __VA_ARGS__; acc += now_ns() - td_; } \
+                                    else { __VA_ARGS__; } } while (0)
 #define TIMED(acc, ...) do { if (fps_on > 0) { uint64_t t0_ = now_ns(); __VA_ARGS__; acc += now_ns() - t0_; } \
                              else { __VA_ARGS__; } } while (0)
 
@@ -598,8 +621,8 @@ static ULONG NTAPI D3DDevice_Swap(ULONG Flags)
     } else if (g_screenshot_path && (int)d3d.frame == g_screenshot_frame) {
         save_screenshot(g_screenshot_path);
     }
-    TIMED(t_present, present_window_framebuffer(); cpu_block(); SDL_GL_SwapWindow(d3d.window);
-          restore_window_framebuffer());
+    TIMED(t_present, present_window_framebuffer(); cpu_block(); DETAIL_TIMED(t_swap, SDL_GL_SwapWindow(d3d.window));
+          DETAIL_TIMED(t_restore, restore_window_framebuffer()));
     restore_overlay();
     pace_present();
     if (d3d.vblank_callback) {
@@ -2445,15 +2468,26 @@ static unsigned conv_serial;   /* bumped per draw: entries in use by this draw a
 
 static conv_entry *conv_find(const UCHAR *src, ULONG stride, ULONG kind, ULONG count)
 {
-    unsigned h = ((uintptr_t)src * 2654435761u ^ stride * 40503u ^ kind ^ count * 97u) & (CONV_SLOTS - 1);
+    unsigned h = (uintptr_t)src * 2654435761u ^ stride * 40503u ^ kind ^ count * 97u;
+    /* Mix high address bits before selecting the bucket: aligned buffers at
+       different addresses otherwise collide in the same eight-slot probe
+       window and evict one another on every frame. */
+    h ^= h >> 16; h *= 0x7feb352du;
+    h ^= h >> 15; h *= 0x846ca68bu;
+    h ^= h >> 16;
+    h &= CONV_SLOTS - 1;
     conv_entry *victim = NULL;
     for (int i = 0; i < 8; i++) {
         conv_entry *e = &conv_cache[(h + i) & (CONV_SLOTS - 1)];
-        if (e->src == src && e->stride == stride && e->kind == kind && e->count == count) return e;
+        if (e->src == src && e->stride == stride && e->kind == kind && e->count == count) {
+            if (detail_on) cache_hits++;
+            return e;
+        }
         if (!e->src) { if (!victim || victim->src) victim = e; continue; }
         if (e->used != conv_serial && (!victim || (victim->src && e->used < victim->used))) victim = e;
     }
     if (!victim) victim = &conv_cache[h];   /* all eight in this draw: share the first */
+    if (detail_on) { cache_misses++; if (victim->src) cache_evicts++; }
     free(victim->raw);
     free(victim->out);
     if (victim->buf) { p_glDeleteBuffers(1, &victim->buf); gc_forget_buffer(victim->buf); }
@@ -2510,6 +2544,7 @@ static conv_entry *index_entry(const USHORT *ix, ULONG count, bool upload)
     if (upload && (!same || !e->buf)) {
         if (!e->buf) p_glGenBuffers(1, &e->buf);
         gc_bind_buffer(GL_ELEMENT_ARRAY_BUFFER, e->buf);
+        if (detail_on) { cache_uploads++; cache_upload_bytes += count * 2; }
         p_glBufferData(GL_ELEMENT_ARRAY_BUFFER, count * 2, ix, GL_STATIC_DRAW);
     }
     if (same) return e;
@@ -2558,6 +2593,7 @@ static GLuint stream_buffer(const UCHAR *base, ULONG stride, vrange r, size_t ne
         else if (conv_sampled_same(e->raw + from, base + from, to - from, stride, 4)) return e->buf;
         if (conv_refresh(e->raw + from, base + from, to - from)) {
             gc_bind_buffer(GL_ARRAY_BUFFER, e->buf);
+            if (detail_on) { cache_uploads++; cache_upload_bytes += to - from; }
             p_glBufferSubData(GL_ARRAY_BUFFER, from, to - from, base + from);
         }
         return e->buf;
@@ -2571,6 +2607,7 @@ static GLuint stream_buffer(const UCHAR *base, ULONG stride, vrange r, size_t ne
     e->checked = d3d.frame;
     if (!e->buf) p_glGenBuffers(1, &e->buf);
     gc_bind_buffer(GL_ARRAY_BUFFER, e->buf);
+    if (detail_on) { cache_uploads++; cache_upload_bytes += need; }
     p_glBufferData(GL_ARRAY_BUFFER, need, base, GL_STATIC_DRAW);
     return e->buf;
 }
@@ -2603,6 +2640,7 @@ static const void *convert_cached(const UCHAR *src, ULONG stride, vrange r, ULON
             conv(src + (size_t)lo * stride, stride, hi - lo, out);
             if (e->buf) {
                 gc_bind_buffer(GL_ARRAY_BUFFER, e->buf);
+                if (detail_on) { cache_uploads++; cache_upload_bytes += (size_t)(hi - lo) * size; }
                 p_glBufferSubData(GL_ARRAY_BUFFER, (size_t)lo * size, (size_t)(hi - lo) * size, out);
             }
         }
@@ -2631,6 +2669,7 @@ static const void *convert_cached(const UCHAR *src, ULONG stride, vrange r, ULON
         if (!e->buf) p_glGenBuffers(1, &e->buf);
         gc_bind_buffer(GL_ARRAY_BUFFER, e->buf);
         p_glBufferData(GL_ARRAY_BUFFER, (size_t)r.hi * size, NULL, GL_STATIC_DRAW);
+        if (detail_on) { cache_uploads++; cache_upload_bytes += (size_t)(r.hi - r.lo) * size; }
         p_glBufferSubData(GL_ARRAY_BUFFER, (size_t)r.lo * size, (size_t)(r.hi - r.lo) * size, e->out);
     }
 done:
@@ -2792,20 +2831,23 @@ static void draw_programmable_(vshader *sh, ULONG PrimitiveType, const UCHAR *up
 {
     GLuint vs = vertex_shader_object(sh);
     if (!vs) return;
-    apply_render_states(false, false);
-    if (!d3d.pixel_shader) apply_textures();
+    DETAIL_TIMED(t_state, apply_render_states(false, false);
+          if (!d3d.pixel_shader) apply_textures());
     program_entry *e;
-    if (!use_program(vs, &e)) return;
+    bool ready;
+    DETAIL_TIMED(t_program, ready = use_program(vs, &e));
+    if (!ready) return;
     TRACE("D3D: draw(program) prim %u count %u indices %p vs %u ps %#x z %u/%u/%u blend %u %u/%u atest %u cw %#x stencil %u vp %u,%u %ux%u %g-%g",
           PrimitiveType, count, indices ? indices + first : NULL, vs, d3d.pixel_shader,
           RS(D3DRS_ZENABLE), RS(D3DRS_ZFUNC), RS(D3DRS_ZWRITEENABLE), RS(D3DRS_ALPHABLENDENABLE),
           RS(D3DRS_SRCBLEND), RS(D3DRS_DESTBLEND), RS(D3DRS_ALPHATESTENABLE), RS(D3DRS_COLORWRITEENABLE),
           RS(D3DRS_STENCILENABLE), d3d.viewport.X, d3d.viewport.Y, d3d.viewport.Width, d3d.viewport.Height,
           d3d.viewport.MinZ, d3d.viewport.MaxZ);
-    upload_constants(sh, e);
+    DETAIL_TIMED(t_constants, upload_constants(sh, e));
     /* Indices from a GL buffer too (kept like the vertices, see stream_buffer). */
-    conv_entry *ix = indices && count && p_glGenBuffers ? index_entry(indices + first, count, true) : NULL;
-    bind_attributes(sh, up, up_stride, 0, first, count, indices);
+    conv_entry *ix;
+    DETAIL_TIMED(t_indices, ix = indices && count && p_glGenBuffers ? index_entry(indices + first, count, true) : NULL);
+    DETAIL_TIMED(t_attributes, bind_attributes(sh, up, up_stride, 0, first, count, indices));
     gc_bind_buffer(GL_ELEMENT_ARRAY_BUFFER, ix ? ix->buf : 0);
     TIMED(t_gl, if (ix) glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, NULL);
                 else if (indices) glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, indices + first);
@@ -3667,7 +3709,8 @@ static bool present_program(void)
 static void present_window_framebuffer(void)
 {
     if (!window_fb.fbo) return;
-    resolve_window_framebuffer(GL_COLOR_BUFFER_BIT);
+    DETAIL_TIMED(t_resolve, resolve_window_framebuffer(GL_COLOR_BUFFER_BIT));
+    uint64_t filter_start = detail_on ? now_ns() : 0;
     static int flicker_override = -2;
     if (flicker_override == -2) flicker_override = env_int("XBCOMPAT_FLICKER", -1);
     int flicker = flicker_override >= 0 ? flicker_override : (int)d3d.flicker_filter;
@@ -3678,13 +3721,16 @@ static void present_window_framebuffer(void)
     float wy = window_fb.soft + flicker * 0.05f;
     if (wy > 0.3f) wy = 0.3f;
 
-    if ((wx <= 0 && wy <= 0) || !present_program()) {
+    static int filter_enabled = -1;
+    if (filter_enabled < 0) filter_enabled = env_int("XBCOMPAT_PRESENT_FILTER", 1);
+    if (!filter_enabled || (wx <= 0 && wy <= 0) || !present_program()) {
         GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
         glDisable(GL_SCISSOR_TEST);
         window_fb.bind(GL_READ_FRAMEBUFFER, window_fb.resolve ? window_fb.resolve : window_fb.fbo);
         window_fb.bind(GL_DRAW_FRAMEBUFFER, 0);
         window_fb.blit(0, 0, d3d.width, d3d.height, 0, 0, window_fb.w, window_fb.h, GL_COLOR_BUFFER_BIT, GL_LINEAR);
         if (scissor) glEnable(GL_SCISSOR_TEST);
+        if (filter_start) t_filter += now_ns() - filter_start;
         return;
     }
 
@@ -3710,6 +3756,7 @@ static void present_window_framebuffer(void)
     glEnd();
     p_glUseProgram(prev_prog);
     glPopAttrib();
+    if (filter_start) t_filter += now_ns() - filter_start;
 }
 
 static void restore_window_framebuffer(void)
