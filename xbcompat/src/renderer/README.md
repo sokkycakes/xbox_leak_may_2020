@@ -185,7 +185,11 @@ Two diagnostic controls retain the original behavior unless explicitly set:
 - XBCOMPAT_SWAP_INTERVAL=0 requests unsynchronized swaps (possible tearing).
   The default remains 1; the requested interval and SDL result are logged.
 
-The follow-up investigation fixed conversion-cache address hashing and raised
-the Pi's 4x main-menu result from about 24.5 to 25.6 FPS. See
-[the detailed MSAA profile](../../docs/pi3-native-msaa-profile.md) for GPU
-execution measurements, controlled comparisons and the remaining bottleneck.
+Follow-up work first fixed conversion-cache address hashing (24.5 to 25.6 FPS),
+then found and implemented missing authored mipmaps and mip-filter selection.
+The Pi's 4x main-menu result is now about 32.8 FPS with normal filtering, the
+fullscreen output filter, swap interval 1 and ondemand retained. The mipmap
+change also has a rendered-pixel regression test for partial chains and
+none/point/linear mip selection. See
+[the detailed MSAA profile](../../docs/pi3-native-msaa-profile.md) for the
+texture-stall evidence, measurements and validation limits.

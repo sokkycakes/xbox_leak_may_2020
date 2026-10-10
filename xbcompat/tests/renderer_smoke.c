@@ -129,6 +129,41 @@ int main(int argc, char **argv)
         unsigned char pixel[4] = {0};
         glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
         assert(pixel[0] > 240 && pixel[1] < 8 && pixel[2] < 8);
+        /* Authored mip levels must be uploaded and selected by MIPFILTER.
+         * A two-level 64x64 chain deliberately stops before 1x1: without
+         * MAX_LEVEL it is incomplete, and without mip uploads it stays red. */
+        void *(NTAPI *create_tex)(ULONG,ULONG,ULONG,ULONG,ULONG,ULONG,ULONG) =
+            find("_D3DDevice_CreateTexture2@28");
+        void (NTAPI *lock_tex)(void *,ULONG,ULONG *,const LONG *,ULONG) =
+            find("_D3DTexture_LockRect@20");
+        void (NTAPI *set_tex)(ULONG,void *) = find("_D3DDevice_SetTexture@8");
+        void *tex = create_tex(64,64,1,2,0,6,3);
+        assert(tex);
+        for (unsigned level = 0; level < 2; level++) {
+            ULONG locked[2];
+            lock_tex(tex,level,locked,NULL,0);
+            uint32_t *pixels = (void *)locked[1];
+            for (unsigned i = 0; i < (64u >> level) * (64u >> level); i++)
+                pixels[i] = level ? 0xff00ff00 : 0xffff0000;
+        }
+        set_tex(0,tex);
+        texture_states[3] = texture_states[4] = 1; /* point mag/min */
+        texture_states[12] = texture_states[16] = 2; /* select arg1 */
+        texture_states[14] = texture_states[18] = 2; /* texture */
+        set_vs(0x144); /* XYZRHW + diffuse + TEX1 */
+        struct tex_vertex { float x,y,z,w; uint32_t color; float u,v; };
+        struct tex_vertex textured[] = {
+            {4,4,0.5f,1,0xffffffff,0,0}, {60,4,0.5f,1,0xffffffff,8,0},
+            {32,60,0.5f,1,0xffffffff,4,8}
+        };
+        for (unsigned mip = 0; mip < 3; mip++) {
+            texture_states[5] = mip; /* none, point, linear */
+            clear(0,NULL,0xf3,0xff000000,1.0f,0);
+            draw(5,3,textured,sizeof(textured[0]));
+            glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+            assert(pixel[mip ? 1 : 0] > 240 && pixel[mip ? 0 : 1] < 8 && pixel[2] < 8);
+        }
+        puts("renderer mipmaps: authored partial chain and none/point/linear selection passed");
         /* The outstanding 65th callback executes inside Swap; device creation
          * resets scale, so restore the values its reentrant check expects. */
         set_scale(1.25f,0.75f);

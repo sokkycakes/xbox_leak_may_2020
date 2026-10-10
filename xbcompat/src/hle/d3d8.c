@@ -1012,7 +1012,7 @@ static GLenum tex_target(const D3DPixelContainer *t)
 static bool is_depth_format(ULONG fmt) { return fmt >= 0x2A && fmt <= 0x31; }
 static float depth_format_max(ULONG fmt) { return (fmt & ~4u) == 0x2A || (fmt & ~4u) == 0x2B ? 16777215.0f : 65535.0f; }
 
-static void upload_image3(GLenum target, ULONG fmt, ULONG w, ULONG h, ULONG d, ULONG pitch, const uint8_t *src)
+static void upload_image3(GLenum target, GLint level, ULONG fmt, ULONG w, ULONG h, ULONG d, ULONG pitch, const uint8_t *src)
 {
     if (is_depth_format(fmt) && target == GL_TEXTURE_2D) {
         /* A depth texture (a shadow buffer): sampled with a depth compare.
@@ -1023,9 +1023,9 @@ static void upload_image3(GLenum target, ULONG fmt, ULONG w, ULONG h, ULONG d, U
         if (swz) unswizzle(src, px, w, h, bpp);
         else for (ULONG y = 0; y < h; y++) memcpy(px + y * w * bpp, src + y * (pitch ? pitch : w * bpp), w * bpp);
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-        if (d24) glTexImage2D(target, 0, 0x88F0 /* GL_DEPTH24_STENCIL8 */, w, h, 0, 0x84F9 /* GL_DEPTH_STENCIL */,
+        if (d24) glTexImage2D(target, level, 0x88F0 /* GL_DEPTH24_STENCIL8 */, w, h, 0, 0x84F9 /* GL_DEPTH_STENCIL */,
                               0x84FA /* GL_UNSIGNED_INT_24_8 */, px);
-        else glTexImage2D(target, 0, GL_DEPTH_COMPONENT24, w, h, 0, GL_DEPTH_COMPONENT, GL_UNSIGNED_SHORT, px);
+        else glTexImage2D(target, level, GL_DEPTH_COMPONENT24, w, h, 0, GL_DEPTH_COMPONENT, GL_UNSIGNED_SHORT, px);
         free(px);
         return;
     }
@@ -1077,7 +1077,7 @@ static void upload_image3(GLenum target, ULONG fmt, ULONG w, ULONG h, ULONG d, U
         GLenum internal = dxt[fmt == 0x0C ? 0 : fmt == 0x0E ? 1 : 2];
         ULONG block = fmt == 0x0C ? 8 : 16;
         ULONG bytes = ((w + 3) / 4) * ((h + 3) / 4) * block;
-        glCompressedTexImage2D(target, 0, internal, w, h, 0, bytes, src);
+        glCompressedTexImage2D(target, level, internal, w, h, 0, bytes, src);
         return;
     }
     unsigned i = 0;
@@ -1085,8 +1085,8 @@ static void upload_image3(GLenum target, ULONG fmt, ULONG w, ULONG h, ULONG d, U
     if (i == sizeof(table) / sizeof(table[0])) {
         xlog("D3D: texture format %#x is not supported yet%s", fmt, target == GL_TEXTURE_3D ? " for volumes" : "");
         uint32_t magenta = 0xFFFF00FF;
-        if (target == GL_TEXTURE_3D) glTexImage3D(target, 0, GL_RGBA, 1, 1, 1, 0, GL_BGRA, GL_UNSIGNED_BYTE, &magenta);
-        else glTexImage2D(target, 0, GL_RGBA, 1, 1, 0, GL_BGRA, GL_UNSIGNED_BYTE, &magenta);
+        if (target == GL_TEXTURE_3D) glTexImage3D(target, level, GL_RGBA, 1, 1, 1, 0, GL_BGRA, GL_UNSIGNED_BYTE, &magenta);
+        else glTexImage2D(target, level, GL_RGBA, 1, 1, 0, GL_BGRA, GL_UNSIGNED_BYTE, &magenta);
         return;
     }
     int bpp = table[i].bpp;
@@ -1156,16 +1156,12 @@ static void upload_image3(GLenum target, ULONG fmt, ULONG w, ULONG h, ULONG d, U
     }
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     if (target == GL_TEXTURE_3D)
-        glTexImage3D(target, 0, table[i].force_alpha ? GL_RGB : GL_RGBA, w, h, d, 0, table[i].gl_fmt, table[i].gl_type, px);
+        glTexImage3D(target, level, table[i].force_alpha ? GL_RGB : GL_RGBA, w, h, d, 0, table[i].gl_fmt, table[i].gl_type, px);
     else
-        glTexImage2D(target, 0, table[i].force_alpha ? GL_RGB : GL_RGBA, w, h, 0, table[i].gl_fmt, table[i].gl_type, px);
+        glTexImage2D(target, level, table[i].force_alpha ? GL_RGB : GL_RGBA, w, h, 0, table[i].gl_fmt, table[i].gl_type, px);
     free(px);
 }
 
-static void upload_image(GLenum target, ULONG fmt, ULONG w, ULONG h, ULONG pitch, const uint8_t *src)
-{
-    upload_image3(target, fmt, w, h, 1, pitch, src);
-}
 
 #ifndef GL_READ_FRAMEBUFFER
 #define GL_READ_FRAMEBUFFER 0x8CA8
@@ -1221,15 +1217,24 @@ static GLuint texture_for(D3DPixelContainer *t)
     glBindTexture(target, id);
     glTexParameteri(target, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(target, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    if (target == GL_TEXTURE_CUBE_MAP) {
-        /* Six faces, each a whole mip chain, 128-byte aligned. */
-        ULONG face = (level_offset(t, level_count(t)) + 127) & ~127u;
-        for (int f = 0; f < 6; f++)
-            upload_image(GL_TEXTURE_CUBE_MAP_POSITIVE_X + f, fmt, w, h, pitch, src + f * face);
-    } else if (target == GL_TEXTURE_3D) {
-        upload_image3(GL_TEXTURE_3D, fmt, w, h, 1u << ((t->Format >> 28) & 0xF), pitch, src);
-    } else {
-        upload_image(GL_TEXTURE_2D, fmt, w, h, pitch, src);
+    ULONG levels = level_count(t);
+    /* Titles may provide a partial chain. Bound GL's completeness check to
+       the supplied levels instead of requiring every level down to 1x1. */
+    glTexParameteri(target, GL_TEXTURE_MAX_LEVEL, levels - 1);
+    /* Cube faces each contain a whole mip chain, 128-byte aligned. */
+    ULONG face_bytes = target == GL_TEXTURE_CUBE_MAP ? (level_offset(t, levels) + 127) & ~127u : 0;
+    int faces = target == GL_TEXTURE_CUBE_MAP ? 6 : 1;
+    for (int f = 0; f < faces; f++) {
+        ULONG lw = w, lh = h;
+        ULONG ld = target == GL_TEXTURE_3D ? 1u << ((t->Format >> 28) & 0xF) : 1;
+        GLenum image_target = target == GL_TEXTURE_CUBE_MAP ? GL_TEXTURE_CUBE_MAP_POSITIVE_X + f : target;
+        for (ULONG level = 0; level < levels; level++) {
+            upload_image3(image_target, level, fmt, lw, lh, ld, pitch,
+                          src + f * face_bytes + level_offset(t, level));
+            if (lw > 1) lw >>= 1;
+            if (lh > 1) lh >>= 1;
+            if (ld > 1) ld >>= 1;
+        }
     }
     TRACE("D3D: uploaded %ux%u texture format %#x%s", w, h, fmt, target == GL_TEXTURE_CUBE_MAP ? " (cube)" : "");
     debug_dump_texture(target, t->res.Data, fmt, w, h);
@@ -1382,7 +1387,17 @@ static GLenum gl_wrap(ULONG mode)
 
 static GLenum gl_filter(ULONG f)
 {
-    return f == 1 ? GL_NEAREST : GL_LINEAR;   /* D3DTEXF_POINT; no mip levels are uploaded */
+    return f == 1 ? GL_NEAREST : GL_LINEAR;   /* D3DTEXF_POINT */
+}
+
+static GLenum gl_min_filter(ULONG min, ULONG mip)
+{
+    bool point = gl_filter(min) == GL_NEAREST;
+    switch (mip) {
+    case 1: return point ? GL_NEAREST_MIPMAP_NEAREST : GL_LINEAR_MIPMAP_NEAREST;
+    case 2: return point ? GL_NEAREST_MIPMAP_LINEAR : GL_LINEAR_MIPMAP_LINEAR;
+    default: return gl_filter(min);   /* D3DTEXF_NONE */
+    }
 }
 
 /* Wrap and filter modes of stage `s`, applied to the texture bound to `target`. */
@@ -1392,7 +1407,7 @@ static void apply_sampler(GLenum target, int s)
     glTexParameteri(target, GL_TEXTURE_WRAP_T, gl_wrap(TSS(s, D3DTSS_ADDRESSV)));
     if (target != GL_TEXTURE_2D) glTexParameteri(target, GL_TEXTURE_WRAP_R, gl_wrap(TSS(s, D3DTSS_ADDRESSW)));
     glTexParameteri(target, GL_TEXTURE_MAG_FILTER, gl_filter(TSS(s, D3DTSS_MAGFILTER)));
-    glTexParameteri(target, GL_TEXTURE_MIN_FILTER, gl_filter(TSS(s, D3DTSS_MINFILTER)));
+    glTexParameteri(target, GL_TEXTURE_MIN_FILTER, gl_min_filter(TSS(s, D3DTSS_MINFILTER), TSS(s, D3DTSS_MIPFILTER)));
     float border[4];
     color4(border, TSS(s, D3DTSS_BORDERCOLOR));
     glTexParameterfv(target, GL_TEXTURE_BORDER_COLOR, border);
@@ -3940,6 +3955,7 @@ static GLuint surface_rt_texture(D3DSurface *s, ULONG w, ULONG h)
     glBindTexture(GL_TEXTURE_2D, id);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_BGRA, GL_UNSIGNED_BYTE, NULL);
     tex_entry *e = malloc(sizeof(*e));
     *e = (tex_entry){ s->Data, s->Format, s->Size, id, GL_TEXTURE_2D, tex_cache };
