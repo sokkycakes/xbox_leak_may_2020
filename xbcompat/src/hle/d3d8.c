@@ -1670,15 +1670,33 @@ static void bind_stage_sampler(unsigned stage, GLuint sampler)
     bound_sampler[stage] = sampler;
 }
 
+static bool sampler_changed(int stage, GLenum name, const void *value, unsigned words)
+{
+    static struct { GLenum name; unsigned words; uint32_t value[4]; } cache[4][16];
+    for (unsigned i = 0; i < 16; i++) {
+        if (cache[stage][i].name && cache[stage][i].name != name) continue;
+        if (cache[stage][i].name == name && cache[stage][i].words == words
+            && !memcmp(cache[stage][i].value, value, words * 4)) return false;
+        cache[stage][i].name = name; cache[stage][i].words = words;
+        memcpy(cache[stage][i].value, value, words * 4);
+        return true;
+    }
+    return true;
+}
+
 static void sampler_i(GLenum target, int s, GLenum name, GLint value)
 {
-    if (separate_samplers) p_glSamplerParameteri(stage_sampler[s], name, value);
+    if (separate_samplers) {
+        if (sampler_changed(s, name, &value, 1)) p_glSamplerParameteri(stage_sampler[s], name, value);
+    }
     else glTexParameteri(target, name, value);
 }
 
 static void sampler_f(GLenum target, int s, GLenum name, GLfloat value)
 {
-    if (separate_samplers) p_glSamplerParameterf(stage_sampler[s], name, value);
+    if (separate_samplers) {
+        if (sampler_changed(s, name, &value, 1)) p_glSamplerParameterf(stage_sampler[s], name, value);
+    }
     else glTexParameterf(target, name, value);
 }
 
@@ -1695,7 +1713,10 @@ static void apply_sampler(GLenum target, int s)
     sampler_i(target, s, GL_TEXTURE_MIN_FILTER, gl_min_filter(TSS(s, D3DTSS_MINFILTER), TSS(s, D3DTSS_MIPFILTER)));
     float border[4];
     color4(border, TSS(s, D3DTSS_BORDERCOLOR));
-    if (separate_samplers) p_glSamplerParameterfv(stage_sampler[s], GL_TEXTURE_BORDER_COLOR, border);
+    if (separate_samplers) {
+        if (sampler_changed(s, GL_TEXTURE_BORDER_COLOR, border, 4))
+            p_glSamplerParameterfv(stage_sampler[s], GL_TEXTURE_BORDER_COLOR, border);
+    }
     else glTexParameterfv(target, GL_TEXTURE_BORDER_COLOR, border);
     D3DPixelContainer *t = (D3DPixelContainer *)d3d.textures[s];
     /* API LOD controls do not change the authored image chain. Linear
@@ -1707,14 +1728,14 @@ static void apply_sampler(GLenum target, int s)
     float bias = t && !t->Size ? tss_float(s, 6 /* MIPMAPLODBIAS */) : 0.0f;
     glTexEnvf(GL_TEXTURE_FILTER_CONTROL, GL_TEXTURE_LOD_BIAS, separate_samplers ? 0.0f : bias);
     if (separate_samplers) sampler_f(target, s, GL_TEXTURE_LOD_BIAS, bias);
-    sampler_i(target, s, GL_TEXTURE_COMPARE_MODE, GL_NONE);
-    if (target == GL_TEXTURE_2D && t && is_depth_format((t->Format >> 8) & 0xFF)) {
+    bool depth_compare = target == GL_TEXTURE_2D && t && is_depth_format((t->Format >> 8) & 0xFF);
+    sampler_i(target, s, GL_TEXTURE_COMPARE_MODE, depth_compare ? GL_COMPARE_REF_TO_TEXTURE : GL_NONE);
+    if (depth_compare) {
         /* The NV2A compares the stage's r/q with the stored depth as
            "stored SHADOWFUNC r"; GL compares "r FUNC stored", so mirror it.
            The D3DCMP values are the GL enums. */
         static const GLenum mirror[8] = { GL_NEVER, GL_GREATER, GL_EQUAL, GL_GEQUAL,
                                           GL_LESS, GL_NOTEQUAL, GL_LEQUAL, GL_ALWAYS };
-        sampler_i(target, s, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE);
         sampler_i(target, s, GL_TEXTURE_COMPARE_FUNC, mirror[RS(D3DRS_SHADOWFUNC) & 7]);
     }
 }

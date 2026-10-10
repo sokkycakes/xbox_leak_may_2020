@@ -512,12 +512,17 @@ int main(int argc, char **argv)
             ULONG multi_def[60]={0},multi_ps=0;
             multi_def[8]=(0x20u<<24)|(8u<<16)|9u; /* (1-zero)*T0 + T1 */
             multi_def[9]=0x18u<<8;multi_def[54]=1|(1<<5);
-            create_ps(multi_def,&multi_ps);set_ps(multi_ps);
-            for(unsigned pass=0;pass<2;pass++){
-                texture_states[7]=pass?2:0;texture_states[32+7]=pass?0:2;
-                clear(0,NULL,0xf3,0xff000000,1,0);draw(5,3,textured,sizeof textured[0]);
-                glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
-                assert(pixel[0]>240 && pixel[1]<8 && pixel[2]>240);
+            create_ps(multi_def,&multi_ps);
+            texture_states[32+12]=7;texture_states[32+14]=2;texture_states[32+15]=1; /* texture + current */
+            texture_states[32+16]=2;texture_states[32+18]=2;
+            for(unsigned fragment=0;fragment<2;fragment++){
+                set_ps(fragment?multi_ps:0);
+                for(unsigned pass=0;pass<2;pass++){
+                    texture_states[7]=pass?2:0;texture_states[32+7]=pass?0:2;
+                    clear(0,NULL,0xf3,0xff000000,1,0);draw(5,3,textured,sizeof textured[0]);
+                    glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                    assert(pixel[0]>240 && pixel[1]<8 && pixel[2]>240);
+                }
             }
             set_tex(1,NULL);
             set_ps(0);set_tex(0,tex);
