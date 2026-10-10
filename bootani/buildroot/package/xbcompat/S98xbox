@@ -33,13 +33,14 @@ stop() {
 	# SDL turns SIGTERM into a quit event that xbcompat sees at its next
 	# frame; one that isn't drawing frames gets SIGKILL. The display is free
 	# only once it's gone.
-	# Under box86 (Raspberry Pi) the process is named xbcompat.x86.
-	killall -q xbcompat xbcompat.x86
+	# Under box86 (Raspberry Pi) the process is named xbcompat.x86, or
+	# xbcompat-native.x86 with the native renderer.
+	killall -q xbcompat xbcompat.x86 xbcompat-native.x86
 	for _ in 1 2 3 4 5 6 7 8 9 10; do
-		pidof xbcompat xbcompat.x86 > /dev/null || break
+		pidof xbcompat xbcompat.x86 xbcompat-native.x86 > /dev/null || break
 		sleep 0.3
 	done
-	killall -q -9 xbcompat xbcompat.x86
+	killall -q -9 xbcompat xbcompat.x86 xbcompat-native.x86
 	# The display keeper last: with it gone the console gets the display.
 	killall -q xbox-av
 	rm -f "$PIDFILE"

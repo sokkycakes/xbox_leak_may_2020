@@ -16,7 +16,7 @@ xbc=$(dirname "$(dirname "$here")")
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-tar -C "$work" -xzf "$bundle" xbcompat/boot xbcompat/dash
+tar -C "$work" -xzf "$bundle" xbcompat/boot xbcompat/dash xbcompat/cache/xbcompat
 stage=$work/xbcompat
 while [ $# -gt 0 ] && [ "$1" != -- ]; do
 	for f in "$1"/*; do
@@ -45,6 +45,13 @@ for exe in "$@"; do
 	cp -r "$(dirname "$2")"/. "$stage/samples/$name/"
 	cp "$1" "$stage/samples/$name/xbcompat.map"
 	echo "sample $name"
+done
+
+mkdir -p "$stage/cache/xbcompat/maps"
+for sample in "$stage"/samples/*; do
+	[ -f "$sample/default.xbe" ] && [ -s "$sample/xbcompat.map" ] || continue
+	python3 "$here/cache-map.py" "$sample/default.xbe" --map "$sample/xbcompat.map" \
+		--cache "$stage/cache/xbcompat/maps"
 done
 
 tar -C "$stage" -czf "$out" .

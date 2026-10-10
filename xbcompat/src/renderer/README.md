@@ -3,7 +3,10 @@
 This optional build keeps the XBE and xbcompat runtime in the existing i386
 process, but runs the D3D implementation and shader preparation in a native
 32-bit ARM shared library. SDL and OpenGL calls made by the renderer stay
-native. The built-in renderer remains the default.
+native. The built-in renderer remains the default for standalone builds;
+the Pi image selects the native renderer when Box86 and its ARM library are
+installed. See [Pi synchronization](../../docs/pi3-source-sync.md) for the
+persistent deployment and fallback.
 
 ## Build
 
@@ -78,6 +81,11 @@ then report the precise callee stack cleanup. The entry assembly preserves
 callee-saved registers, realigns for host C, and supports edx:eax and x87
 return values. The wire structure uses only 32-bit words; doubles cross via
 memcpy, not assumptions about ARM double alignment.
+
+ABI 2 also bridges vblank callbacks, miniport event signaling and reset
+checks. The kernel keeps an x86 vblank thunk which invokes the native hook;
+no ARM function address is published to the x86 DPC thread. Hook publication
+is atomic, and callbacks remain reentrant.
 
 Initialization verifies the ABI version and every HLE export name/order
 before accepting calls. All 303 exports in the initial source revision are

@@ -12,9 +12,11 @@ import argparse
 import hashlib
 import json
 import os
+from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -84,39 +86,66 @@ def xdk_build(xbe):
     return LEAK_XDK_BUILD
 
 
+def publish_map(path, generate):
+    """Only a complete, nonempty map becomes visible to another launch."""
+    os.makedirs(CACHE, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=".map-", dir=CACHE)
+    os.close(fd)
+    try:
+        generate(temporary)
+        if not os.path.getsize(temporary):
+            raise RuntimeError("signature scanner produced an empty HLE map")
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+    return path
+
+
 def make_map(xbe):
+    digest = hashlib.sha1(Path(xbe).read_bytes()).hexdigest()
     if xdk_build(xbe) != LEAK_XDK_BUILD:
-        digest = hashlib.sha1(open(xbe, "rb").read()).hexdigest()[:16]
-        binary = os.environ.get("XBCOMPAT_BIN", os.path.join(ROOT, "build", "xbcompat"))
-        # The map depends on the binary's host tables and on xbsymmap itself.
-        bdigest = hashlib.sha1(open(binary, "rb").read() +
-                               open(os.path.join(HERE, "xbsymmap.py"), "rb").read()).hexdigest()[:8]
+        # A Pi runtime can be a shell script invoking Box86. Read the actual
+        # ELF's host tables, never the wrapper's text.
+        binary = os.environ.get("XBCOMPAT_HLE_BINARY") or os.environ.get(
+            "XBCOMPAT_BIN", os.path.join(ROOT, "build", "xbcompat"))
+        binary_data = Path(binary).read_bytes()
+        if binary_data[:4] != b"\x7fELF":
+            raise RuntimeError("XBCOMPAT_HLE_BINARY must name the runtime ELF, not its launcher")
+        cli = xbsymdb_cli()
+        # Updating the runtime, adapter logic, or scanner invalidates the map.
+        bdigest = hashlib.sha1(binary_data + Path(cli).read_bytes() +
+                               Path(HERE, "xbsymmap.py").read_bytes()).hexdigest()[:16]
         path = os.path.join(CACHE, f"{digest}-xbsym-{bdigest}.map")
-        if not os.path.exists(path):
-            os.makedirs(CACHE, exist_ok=True)
-            run(sys.executable, os.path.join(HERE, "xbsymmap.py"), xbsymdb_cli(), xbe, binary, "-o", path)
-        return path
+        if os.path.exists(path) and os.path.getsize(path):
+            return path
+        return publish_map(path, lambda output: run(
+            sys.executable, os.path.join(HERE, "xbsymmap.py"), cli, xbe, binary, "-o", output))
     libs = [REPLACED_LIBS[l] for l in library_versions(xbe) if l in REPLACED_LIBS]
     if not libs:
         return None
-    digest = hashlib.sha1(open(xbe, "rb").read()).hexdigest()[:16]
-    path = os.path.join(CACHE, digest + "-" + "+".join(sorted(libs)) + ".map")
-    if os.path.exists(path):
+    sigs = signatures(libs)
+    sdigest = hashlib.sha1(Path(sigs).read_bytes() +
+                           Path(HERE, "findsigs.py").read_bytes()).hexdigest()[:16]
+    path = os.path.join(CACHE, digest + "-" + "+".join(sorted(libs)) + "-" + sdigest + ".map")
+    if os.path.exists(path) and os.path.getsize(path):
         return path
-    res = subprocess.run([sys.executable, os.path.join(HERE, "findsigs.py"), signatures(libs), xbe, "--json"],
+    res = subprocess.run([sys.executable, os.path.join(HERE, "findsigs.py"), sigs, xbe, "--json"],
                          check=True, capture_output=True, text=True).stdout
     d = json.loads(res)
-    with open(path, "w") as f:
-        # "name va" for functions, "name va data" for variables (never patched).
-        for section in ("unique", "code_refs", "data_symbols"):
-            for name, v in d.get(section, {}).items():
-                va = v["va"] if isinstance(v, dict) else v
-                f.write(f"{name} {va}{' data' if section == 'data_symbols' else ''}\n")
-    return path
+    def generate(output):
+        with open(output, "w") as f:
+            # "name va" for functions, "name va data" for variables (never patched).
+            for section in ("unique", "code_refs", "data_symbols"):
+                for name, v in d.get(section, {}).items():
+                    va = v["va"] if isinstance(v, dict) else v
+                    f.write(f"{name} {va}{' data' if section == 'data_symbols' else ''}\n")
+    return publish_map(path, generate)
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--map-only", action="store_true", help="print the map path without running the title")
     ap.add_argument("image")
     ap.add_argument("args", nargs=argparse.REMAINDER, help="extra xbcompat options")
     a = ap.parse_args()
@@ -143,6 +172,12 @@ def main():
         run(sys.executable, os.path.join(HERE, "pe2xbe.py"), image, xbe)
     else:
         xbe = image
+
+    if a.map_only:
+        m = make_map(xbe)
+        if m:
+            print(m)
+        return
 
     # A title that calls XLaunchNewImage comes back through this script, so
     # the next image gets its own library map.

@@ -817,13 +817,14 @@ static void *dpc_thread(void *arg)
         }
 
         /* Vertical blanks, 60 a second. */
-        if (g_vblank_hook) {
+        void (*vblank_hook)(void) = __atomic_load_n(&g_vblank_hook, __ATOMIC_ACQUIRE);
+        if (vblank_hook) {
             if (!next_vblank) next_vblank = now;
             if (now >= next_vblank) {
                 next_vblank += 166667;
                 if (next_vblank + 100 * 10000ULL < now) next_vblank = now + 166667;
                 pthread_mutex_unlock(&dpc_lock);
-                g_vblank_hook();
+                vblank_hook();
                 pthread_mutex_lock(&dpc_lock);
             }
         }

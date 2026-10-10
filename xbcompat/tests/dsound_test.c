@@ -24,6 +24,7 @@
  *       $(PKG_CONFIG_PATH=/usr/lib/i386-linux-gnu/pkgconfig pkg-config --libs sdl2) -lpthread -lm
  * Run:  SDL_AUDIODRIVER=dummy ./dsound_test [xbox-adpcm.wav]
  */
+#define _GNU_SOURCE
 #include <stdarg.h>
 #include <stddef.h>
 #include <unistd.h>
@@ -33,6 +34,8 @@
 /* ---- stubs for the rest of xbcompat ------------------------------------ */
 
 int g_trace = 0;
+static ULONG test_title_id;
+ULONG xbe_title_id(void) { return test_title_id; }
 FILE *g_log;
 static int quiet;
 
@@ -59,6 +62,16 @@ void fatal(const char *fmt, ...)
 
 void *pool_alloc(size_t size) { return calloc(1, size); }
 void pool_free(void *p) { free(p); }
+void prof_thread_start(void) {}
+void install_fault_handlers(void) {}
+void xbc_at_exit(void (*fn)(void)) { atexit(fn); }
+NTSTATUS handle_close(HANDLE h) { (void)h; return 0xC0000008; }
+NTSTATUS NTAPI NtOpenFile(HANDLE *h, ACCESS_MASK access, OBJECT_ATTRIBUTES *oa,
+                          IO_STATUS_BLOCK *io, ULONG share, ULONG options)
+{
+    (void)h; (void)access; (void)oa; (void)io; (void)share; (void)options;
+    return 0xC0000008; /* Tests use host files, not DVD handles. */
+}
 PVOID NTAPI MmAllocateContiguousMemoryEx(SIZE_T n, ULONG_PTR lo, ULONG_PTR hi, ULONG_PTR align, ULONG prot)
 {
     (void)lo; (void)hi; (void)align; (void)prot;
@@ -387,6 +400,97 @@ static void test_playback(void)
     free(pcm); free(pcm2);
 }
 
+static void test_legacy_mixbin_headroom(void)
+{
+    uint32_t ds = 0;
+    DirectSoundCreate(NULL, &ds, NULL);
+    WAVEFORMATEX w = pcm_format(1, 48000, 16);
+    short pcm[64];
+    for (unsigned i = 0; i < 64; i++) pcm[i] = 16384;
+    uint32_t b = make_buffer(&w, 0);
+    Voice_SetHeadroom((void *)b, 1200); /* Dashboard keeps 12 dB voice headroom. */
+    Buf_SetBufferData((void *)b, pcm, sizeof(pcm));
+    Buf_Play((void *)b, 0, 0, DSBPLAY_LOOPING);
+    float full = 0.5f * powf(10.0f, -0.6f);
+    mix(16);
+    CHECK(near(out[0], full * 0.5f, 1e-5f), "default mix-bin headroom");
+    CHECK(DS_SetMixBinHeadroom((void *)ds, 0x7FFFFFFF, 0) == DS_OK, "Dashboard all-bin mask");
+    mix(16);
+    CHECK(near(out[0], full, 1e-5f) && near(out[1], full, 1e-5f),
+          "all-bin headroom removes only the extra 6 dB: %f %f", out[0], out[1]);
+    CHECK(DS_SetMixBinHeadroom((void *)ds, 1, 1) == DS_OK, "modern bin 1 is right");
+    mix(16);
+    CHECK(near(out[0], full, 1e-5f) && near(out[1], full * 0.5f, 1e-5f), "index semantics preserved");
+    CHECK(DS_SetMixBinHeadroom_v1((void *)ds, 1, 1) == DS_OK, "legacy mask 1 is left");
+    mix(16);
+    CHECK(near(out[0], full * 0.5f, 1e-5f) && near(out[1], full * 0.5f, 1e-5f), "v1 mask semantics");
+    CHECK(DS_SetMixBinHeadroom((void *)ds, 32, 0) == DSERR_INVALIDPARAM, "invalid modern bin");
+    CHECK(DS_SetMixBinHeadroom((void *)ds, 0x7FFFFFFF, 8) == DSERR_INVALIDPARAM, "invalid mask headroom");
+    DS_SetMixBinHeadroom((void *)ds, 0x7FFFFFFF, 1);
+    Obj_Release((void *)b);
+    Obj_Release((void *)ds);
+}
+
+static void test_dashboard_sound_boost(void)
+{
+    CHECK(dashboard_sound_boost(0xFFFE0000, NULL) == 0, "no boost by default");
+    CHECK(dashboard_sound_boost(0xFFFE0000, "0") == 0, "explicit zero boost");
+    CHECK(dashboard_sound_boost(0xFFFE0000, "6") == 600, "partial boost");
+    const char *bad[] = { "nan", "inf", "-1", "13", "12x", "1.5", "9999999999999999999999" };
+    for (unsigned i = 0; i < sizeof(bad) / sizeof(bad[0]); i++)
+        CHECK(dashboard_sound_boost(0xFFFE0000, bad[i]) == 0, "invalid boost %s", bad[i]);
+    setenv("XBCOMPAT_DASH_SOUND_BOOST_DB", "12", 1);
+    WAVEFORMATEX w = pcm_format(1, 48000, 16);
+    short pcm[64];
+    for (unsigned i = 0; i < 64; i++) pcm[i] = 16384;
+    /* Dashboard then game, keeping the same launch environment. */
+    for (int dashboard = 1; dashboard >= 0; dashboard--) {
+        test_title_id = dashboard ? 0xFFFE0000 : 0x4D530001;
+        uint32_t sound = 0;
+        DirectSoundCreate(NULL, &sound, NULL);
+        DS_SetMixBinHeadroom((void *)sound, 0x7FFFFFFF, 0);
+        uint32_t b = make_buffer(&w, 0);
+        Voice_SetHeadroom((void *)b, 1200);
+        Buf_SetBufferData((void *)b, pcm, sizeof(pcm));
+        Buf_Play((void *)b, 0, 0, DSBPLAY_LOOPING);
+        mix(16);
+        float expected = dashboard ? 0.5f : 0.5f * powf(10.0f, -0.6f);
+        CHECK(near(out[0], expected, 1e-5f), "title gate %d: %f", dashboard, out[0]);
+        CHECK(g.ds->dashboard_sound_boost == (dashboard ? 1200 : 0), "title scope refreshed");
+        if (dashboard) {
+            Voice_SetVolume((void *)b, -600);
+            mix(16);
+            CHECK(near(out[0], 0.5f * powf(10.0f, -0.3f), 1e-5f), "guest fade preserved");
+            Voice_SetVolume((void *)b, DSBVOLUME_MIN);
+            mix(16);
+            CHECK(out[0] == 0 && out[1] == 0, "guest mute preserved");
+            Voice_SetVolume((void *)b, 0);
+            Voice_SetHeadroom((void *)b, 600);
+            mix(16);
+            CHECK(near(out[0], 0.5f, 1e-5f), "boost capped by source headroom");
+            Voice_SetHeadroom((void *)b, 0);
+            mix(16);
+            CHECK(near(out[0], 0.5f, 1e-5f), "zero-headroom music unchanged");
+            Voice_SetHeadroom((void *)b, 1200);
+            uint32_t other = make_buffer(&w, 0);
+            Voice_SetHeadroom((void *)other, 1200);
+            short loud[64];
+            for (unsigned i = 0; i < 64; i++) loud[i] = 30000;
+            Buf_SetBufferData((void *)other, loud, sizeof(loud));
+            Buf_Play((void *)other, 0, 0, DSBPLAY_LOOPING);
+            uint64_t clipped = g.clipped_samples;
+            mix(16);
+            CHECK(out[0] == 1.0f && out[1] == 1.0f && g.clipped_samples == clipped + 32,
+                  "overlapping sounds clamp and count clipped samples");
+            Obj_Release((void *)other);
+        }
+        Obj_Release((void *)b);
+        Obj_Release((void *)sound);
+    }
+    unsetenv("XBCOMPAT_DASH_SOUND_BOOST_DB");
+    test_title_id = 0;
+}
+
 static void test_looping_and_regions(void)
 {
     WAVEFORMATEX w = pcm_format(1, 48000, 16);
@@ -558,15 +662,22 @@ static void test_adpcm(const char *wavpath)
             Wave_Process(xmo, NULL, &xp);
             CHECK(status == 0 && got == len / (36u * ch) * 36u * ch, "wave XMO read %u of %u", got, len);
             DWORD blocks = got / (36 * ch), mismatched = 0, bad = 0;
+            double squares = 0, peak = 0;
             for (DWORD i = 0; i < blocks; i++) {
                 short x[128], y[128];
                 int okx = ds_adpcm_decode_block(data + i * 36 * ch, ch, x);
                 int oky = ref_decode_block(data + i * 36 * ch, ch, y);
                 if (!oky) bad++;
                 else if (!okx || memcmp(x, y, 64 * ch * sizeof(short))) mismatched++;
+                for (int k = 0; k < 64 * ch; k++) {
+                    double sample = x[k] / 32768.0;
+                    squares += sample * sample;
+                    if (fabs(sample) > peak) peak = fabs(sample);
+                }
             }
             CHECK(!mismatched && !bad, "%u real blocks: %u mismatched, %u invalid", blocks, mismatched, bad);
-            printf("  decoded %u blocks of %s against the reference\n", blocks, wavpath);
+            printf("  decoded %u blocks of %s against the reference (peak %.6f, RMS %.6f)\n",
+                   blocks, wavpath, peak, blocks ? sqrt(squares / (blocks * 64.0 * ch)) : 0);
             free(data);
             Wave_Release(xmo);
         }
@@ -1113,6 +1224,8 @@ int main(int argc, char **argv)
     test_formats();
     test_object_aliases();
     test_playback();
+    test_legacy_mixbin_headroom();
+    test_dashboard_sound_boost();
     test_looping_and_regions();
     test_pitch();
     test_adpcm(argc > 1 ? argv[1] : NULL);

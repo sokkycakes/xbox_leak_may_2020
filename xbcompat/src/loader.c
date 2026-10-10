@@ -17,6 +17,9 @@ static const struct { const char *kind; ULONG ep, kt; } keys[] = {
 };
 
 static char *xbe_path;
+static ULONG title_id;
+
+ULONG xbe_title_id(void) { return title_id; }
 
 /* XeLoadSection on a section nobody holds: the console reads it from disk
    again, so whatever the title changed in place since (fixed-up resource
@@ -84,6 +87,7 @@ void xbe_load(const char *path, xbe_image *img)
     if (!kind) fatal("cannot decode the XBE entry point");
 
     XBE_CERTIFICATE *cert = (XBE_CERTIFICATE *)h->Certificate;
+    title_id = cert->TitleID;
     char title[41];
     for (int i = 0; i < 40; i++) title[i] = (char)cert->TitleName[i];
     title[40] = 0;

@@ -9,13 +9,15 @@ if [ -d $X/lib ]; then
 	export LIBGL_DRIVERS_PATH=$X/lib/dri GBM_DRIVERS_PATH=$X/lib/dri
 	export __EGL_VENDOR_LIBRARY_FILENAMES=$X/share/glvnd/egl_vendor.d/50_mesa.json
 fi
-export XBCOMPAT_BIN=$X/bin/xbcompat
+export XBCOMPAT_BIN=${XBCOMPAT_BIN:-$X/bin/xbcompat}
 if [ -x $X/bin/python3 ]; then
 	# Titles the dashboard launches come back through xbrun.py, which builds
 	# their library map first.
 	export PYTHONHOME=$X PYTHONDONTWRITEBYTECODE=1
 	export XBSYMDB_CLI=$X/tools/XbSymbolDatabaseCLI
-	export XBCOMPAT_LAUNCHER="$X/bin/python3 $X/tools/xbrun.py"
+	export XBCOMPAT_LAUNCHER="${XBCOMPAT_LAUNCHER:-$X/bin/python3 $X/tools/xbrun.py}"
+elif [ -x /usr/libexec/xbox-title ]; then
+	export XBCOMPAT_LAUNCHER=${XBCOMPAT_LAUNCHER:-/usr/libexec/xbox-title}
 fi
 
 # The display mode bootani uses (KMS_MODE=WxH), straight through KMSDRM.
@@ -45,6 +47,10 @@ export HOME=/root
 # can't be detected (the connector says "unknown"), and SDL only uses
 # connected outputs, so composite is switched on by hand when HDMI is empty.
 if grep -q 'Raspberry Pi' /proc/device-tree/model 2>/dev/null; then
+	# A 21 ms host period avoids ALSA underruns under Box86 on the Pi 3.
+	# The mixer still processes 512-frame chunks; other hosts keep 512.
+	: "${XBCOMPAT_AUDIO_FRAMES:=1024}"
+	export XBCOMPAT_AUDIO_FRAMES
 	pi_hdmi=
 	grep -qx connected /sys/class/drm/card*-HDMI-A-1/status 2>/dev/null && pi_hdmi=1
 	if [ -z "$pi_hdmi" ]; then

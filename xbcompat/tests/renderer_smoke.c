@@ -11,6 +11,19 @@
 #include <GL/gl.h>
 int g_trace, g_screenshot_frame, g_exit_after_frames;
 const char *g_screenshot_path;
+volatile unsigned g_guest_traps;
+void (*g_vblank_hook)(void);
+static unsigned reset_combos, reset_checks, vblanks, event_signals;
+static KEVENT *last_event;
+void xinput_check_reset_combo(void) { reset_combos++; }
+void reset_check(void) { reset_checks++; }
+LONG NTAPI KeSetEvent(KEVENT *event, LONG increment, BOOLEAN wait)
+{
+    assert(increment == 1 && wait == 0);
+    LONG old = event->Header.SignalState;
+    event->Header.SignalState = 1;
+    last_event = event; event_signals++; return old;
+}
 static uint32_t render_states[256], texture_states[128];
 static unsigned lookup_calls, alloc_calls, callbacks;
 static unsigned char *contig;
@@ -66,13 +79,25 @@ static void CDECLAPI callback(ULONG ctx)
     assert(x == 1.25f && y == 0.75f);
     callbacks++;
 }
+static void CDECLAPI vblank_callback(ULONG *data)
+{
+    assert(data[0] == ++vblanks);
+    assert(d3d_frame_count() == data[1]); /* Reenter renderer from DPC callback. */
+}
 int main(int argc, char **argv)
 {
+    /* Device setup reads the loaded XBE header to select its XDK layout. */
+    void *header = mmap((void *)0x10000, 4096, PROT_READ|PROT_WRITE,
+                        MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED_NOREPLACE, -1, 0);
+    assert(header == (void *)0x10000);
     contig = mmap((void *)0x81000000, 1024*1024, PROT_READ|PROT_WRITE,
                   MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED_NOREPLACE, -1, 0);
     assert(contig == (void *)0x81000000);
     d3d_bind_globals();
     assert(lookup_calls >= 5);
+    assert(g_vblank_hook);
+    g_vblank_hook(); /* Before CreateDevice: must safely do nothing. */
+    assert(!vblanks && !event_signals);
     void (NTAPI *set_scale)(float,float) = find("_D3DDevice_SetBackBufferScale@8");
     get_scale = find("_D3DDevice_GetBackBufferScale@8");
     set_scale(1.25f,0.75f);
@@ -102,11 +127,21 @@ int main(int argc, char **argv)
 
     if (argc > 1 && !strcmp(argv[1], "--render")) {
         /* Actual GL work through the split backend, with pixel verification. */
+        setenv("XBCOMPAT_MINIPORT_OFFSET", "0x1db4", 1);
         uint32_t pp[21] = {64,64,6,1,0,0,0,1,1,0x2a};
         void *device = NULL;
         LONG (NTAPI *create)(ULONG,ULONG,void *,ULONG,void *,void **) =
             find("_Direct3D_CreateDevice@24");
         assert(create(0,1,NULL,0,pp,&device) == 0 && device);
+        void (NTAPI *set_vblank)(void *) = find("_D3DDevice_SetVerticalBlankCallback@4");
+        set_vblank(vblank_callback);
+        g_vblank_hook();
+        assert(vblanks == 1 && event_signals == 1);
+        assert(last_event == (KEVENT *)((char *)device + 0x1dbc));
+        assert(last_event->Header.SignalState == 1);
+        last_event->Header.SignalState = 0;
+        g_vblank_hook();
+        assert(vblanks == 2 && event_signals == 2 && last_event->Header.SignalState == 1);
         void (NTAPI *clear)(ULONG,void *,ULONG,ULONG,float,ULONG) =
             find("_D3DDevice_Clear@24");
         void (NTAPI *set_vs)(ULONG) = find("_D3DDevice_SetVertexShader@4");
@@ -170,6 +205,8 @@ int main(int argc, char **argv)
         swap(0);
         assert(callbacks == 65);
         assert(d3d_frame_count() == 1);
+        assert(reset_combos == 1 && reset_checks == 1);
+        puts("renderer runtime: vblank, miniport event, reentrant callback and reset services passed");
         puts("renderer draw: native GL triangle pixel and presentation passed");
     }
     puts("renderer integration: shared state, fastcall, resources, callbacks and reentrancy passed");

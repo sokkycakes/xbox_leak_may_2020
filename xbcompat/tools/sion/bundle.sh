@@ -136,7 +136,9 @@ make -s -C "$XBC" -j"$J" BUILD="$WORK/xbcompat-build" GL=opengl \
 
 # ---- the titles ----------------------------------------------------------
 [ -f "$WORK/ani/Bootscreen.xbe" ] || "$XBC/tools/anibuild/build.sh" "$WORK/ani"
-[ -f "$WORK/dash/run/hdd/partition2/xboxdash.xbe" ] || "$XBC/tools/dashbuild/build.sh" "$WORK/dash"
+# Rebuild incrementally: an existing XBE does not mean its scripts/source
+# match the current checkout. dashbuild retains the existing Games assets.
+"$XBC/tools/dashbuild/build.sh" "$WORK/dash"
 
 # ---- assemble ----------------------------------------------------------
 echo "== assemble $OUT"

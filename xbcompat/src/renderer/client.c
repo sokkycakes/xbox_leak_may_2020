@@ -12,6 +12,7 @@
 extern int g_screenshot_frame, g_exit_after_frames;
 extern const char *g_screenshot_path;
 SIZE_T NTAPI MmQueryAllocationSize(PVOID p);
+LONG NTAPI KeSetEvent(KEVENT *event, LONG increment, BOOLEAN wait);
 static pthread_once_t once = PTHREAD_ONCE_INIT;
 static atomic_bool backend_ready;
 static int (*backend_init)(uint32_t, xbr_host_fn);
@@ -37,7 +38,10 @@ static void host_service(uint32_t op, uint32_t *a)
         a[0] = (uint32_t)MmAllocateContiguousMemoryEx(a[0], a[1], a[2], a[3], a[4]); break;
     case XBR_CONTIG_FREE: MmFreeContiguousMemory((void *)a[0]); break;
     case XBR_ALLOC_SIZE: a[0] = MmQueryAllocationSize((void *)a[0]); break;
-    case XBR_FRAME_PRESENTED: ke_frame_presented(); break;
+    case XBR_FRAME_PRESENTED: ke_frame_presented(); a[0] = g_guest_traps; break;
+    case XBR_SET_EVENT: a[0] = KeSetEvent((KEVENT *)a[0], (LONG)a[1], (BOOLEAN)a[2]); break;
+    case XBR_RESET_COMBO: xinput_check_reset_combo(); break;
+    case XBR_RESET_CHECK: reset_check(); break;
     case XBR_FAULT_HANDLERS: install_fault_handlers(); break;
     case XBR_AV_START: av_title_starting(); break;
     case XBR_AV_HANDOVER: av_hand_over(); break;
@@ -94,6 +98,12 @@ void xbr_do_call(uint32_t index, const uint32_t *stack, uint32_t ecx, uint32_t e
     backend_invoke(index, &call);
     *out = (struct xbr_result){call.lo, call.hi, call.fret_lo, call.fret_hi, call.fp, call.pop_bytes};
 }
+/* The kernel owns an x86 function pointer; never publish an ARM address.
+ * No bridge lock is held: vblank can call the guest and reenter D3D. */
+static void native_vblank(void)
+{
+    backend_control(XBR_VBLANK, NULL);
+}
 void d3d_bind_globals(void)
 {
     ensure_backend();
@@ -101,6 +111,7 @@ void d3d_bind_globals(void)
                                 (uint32_t)g_screenshot_path};
     backend_control(XBR_CONFIG, (uint32_t *)&config);
     backend_control(XBR_BIND_GLOBALS, NULL);
+    __atomic_store_n(&g_vblank_hook, native_vblank, __ATOMIC_RELEASE);
 }
 ULONG d3d_frame_count(void)
 {

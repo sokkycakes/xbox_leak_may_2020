@@ -898,4 +898,3 @@ NTSTATUS dvd_scsi_pass_through(void *in, ULONG inlen)
     }
     return STATUS_SUCCESS;
 }
-

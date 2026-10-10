@@ -507,7 +507,7 @@ static LONG NTAPI Direct3D_CreateDevice(UINT_ Adapter, ULONG DeviceType, PVOID p
     }
     bind_miniport(dev);
     pusher_init(dev);
-    g_vblank_hook = d3d_vblank;
+    __atomic_store_n(&g_vblank_hook, d3d_vblank, __ATOMIC_RELEASE);
     if (d3d.device_ptr) *d3d.device_ptr = (ULONG)dev;
     *ppDevice = dev;
     return D3D_OK;

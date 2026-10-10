@@ -16,7 +16,7 @@ ifeq ($(BR2_arm),y)
 # and unpack the titles beside it. Same /opt/xbcompat layout as the Sion's.
 XBCOMPAT_SITE = $(BR2_EXTERNAL_BOOTANI_PATH)/../../xbcompat
 XBCOMPAT_SITE_METHOD = local
-XBCOMPAT_DEPENDENCIES = unicorn sdl2 mesa3d libglvnd host-python3 host-pkgconf
+XBCOMPAT_DEPENDENCIES = unicorn sdl2 mesa3d libglvnd python3 xbsymboldatabase host-python3 host-pkgconf
 XBCOMPAT_TITLES = $(call qstrip,$(BR2_PACKAGE_XBCOMPAT_TITLES))
 XBCOMPAT_LEAK = $(BR2_EXTERNAL_BOOTANI_PATH)/../../xbox_leak_may_2020/xbox trunk/xbox
 
@@ -34,6 +34,8 @@ define XBCOMPAT_BUILD_CMDS
 		PKGCFG="$(PKG_CONFIG_HOST_BINARY)" UNICORN=$(STAGING_DIR)/usr \
 		LEAK="$(XBCOMPAT_LEAK)" BUILD=build-buildroot build-buildroot/xbcompat
 	$(TARGET_CC) $(TARGET_CFLAGS) -O2 -Wall -o $(@D)/build-buildroot/xbox-console-key $(@D)/tools/pi/console-key.c
+	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) -O2 -Wall \
+		-o $(@D)/build-buildroot/xbox-av $(@D)/tools/sion/av/xbox-av.c
 endef
 
 ifeq ($(BR2_PACKAGE_BOX86),y)
@@ -45,10 +47,18 @@ define XBCOMPAT_BUILD_X86
 	$(MAKE) -C $(@D) TARGET=i386 CC=/usr/bin/gcc CFLAGS="-O2 -g -fno-stack-protector" \
 		PKGCFG="PKG_CONFIG_PATH=/usr/lib/i386-linux-gnu/pkgconfig /usr/bin/pkg-config" \
 		LEAK="$(XBCOMPAT_LEAK)" BUILD=build-x86 build-x86/xbcompat
+	$(MAKE) -C $(@D) TARGET=i386 RENDERER=native CC=/usr/bin/gcc CFLAGS="-O2 -g -fno-stack-protector" \
+		PKGCFG="PKG_CONFIG_PATH=/usr/lib/i386-linux-gnu/pkgconfig /usr/bin/pkg-config" \
+		LEAK="$(XBCOMPAT_LEAK)" BUILD=build-native-x86 build-native-x86/xbcompat
+	$(TARGET_MAKE_ENV) PATH=$(HOST_DIR)/bin:$$PATH $(MAKE) -C $(@D) -f tools/native-renderer.mk \
+		TARGET=armhf CC=$(TARGET_CC) CFLAGS="$(TARGET_CFLAGS) -O2 -g" GL=opengl \
+		PKGCFG="$(PKG_CONFIG_HOST_BINARY)" BUILD=build-native-arm
 endef
 XBCOMPAT_POST_BUILD_HOOKS += XBCOMPAT_BUILD_X86
 define XBCOMPAT_INSTALL_X86
 	$(INSTALL) -D -m 0755 $(@D)/build-x86/xbcompat $(TARGET_DIR)/opt/xbcompat/bin/xbcompat.x86
+	$(INSTALL) -D -m 0755 $(@D)/build-native-x86/xbcompat $(TARGET_DIR)/opt/xbcompat/bin/xbcompat-native.x86
+	$(INSTALL) -D -m 0755 $(@D)/build-native-arm/libxbcompat_renderer.so.1 $(TARGET_DIR)/opt/xbcompat/native/lib/libxbcompat_renderer.so.1
 	mv $(TARGET_DIR)/opt/xbcompat/bin/xbcompat $(TARGET_DIR)/opt/xbcompat/bin/xbcompat.arm
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/xbcompat-launch $(TARGET_DIR)/opt/xbcompat/bin/xbcompat
 endef
@@ -60,9 +70,15 @@ define XBCOMPAT_INSTALL_TARGET_CMDS
 	rm -rf $(TARGET_DIR)/opt/xbcompat
 	mkdir -p $(TARGET_DIR)/opt/xbcompat
 	tar -C $(TARGET_DIR)/opt/xbcompat -xzf $(XBCOMPAT_TITLES)
+	for tool in xbrun.py xbedump.py findsigs.py mksigs.py xbsymmap.py pe2xbe.py; do \
+		$(INSTALL) -D -m 0644 $(@D)/tools/$$tool $(TARGET_DIR)/opt/xbcompat/tools/$$tool; \
+	done
+	ln -s /usr/bin/XbSymbolDatabaseCLI $(TARGET_DIR)/opt/xbcompat/tools/XbSymbolDatabaseCLI
 	$(INSTALL) -D -m 0755 $(@D)/build-buildroot/xbcompat $(TARGET_DIR)/opt/xbcompat/bin/xbcompat
+	$(INSTALL) -D -m 0755 $(@D)/build-buildroot/xbox-av $(TARGET_DIR)/opt/xbcompat/bin/xbox-av
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/xbox-boot $(TARGET_DIR)/usr/libexec/xbox-boot
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/xbox-session $(TARGET_DIR)/usr/libexec/xbox-session
+	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/xbox-title $(TARGET_DIR)/usr/libexec/xbox-title
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/xbox-env $(TARGET_DIR)/usr/lib/xbox/xbox-env
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/dashboard $(TARGET_DIR)/usr/libexec/dashboard
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/xbox-sample $(TARGET_DIR)/usr/bin/xbox-sample
@@ -70,10 +86,12 @@ define XBCOMPAT_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/xbox-console $(TARGET_DIR)/usr/libexec/xbox-console
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/xbox-dash $(TARGET_DIR)/usr/bin/xbox-dash
 	mkdir -p $(TARGET_DIR)/etc/default
+	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/../../../../xbcompat/tools/sion/cards/sion-cards $(TARGET_DIR)/usr/sbin/sion-cards
 	echo 'DASHBOARD="xbox"' > $(TARGET_DIR)/etc/default/dashboard
 endef
 
 define XBCOMPAT_INSTALL_INIT_SYSV
+	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/../../../../xbcompat/tools/sion/cards/S35cards $(TARGET_DIR)/etc/init.d/S35cards
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/S11xbox-boot $(TARGET_DIR)/etc/init.d/S11xbox-boot
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/S98xbox $(TARGET_DIR)/etc/init.d/S98xbox
 endef
@@ -87,6 +105,7 @@ define XBCOMPAT_INSTALL_TARGET_CMDS
 	tar -C $(TARGET_DIR)/opt -xzf $(XBCOMPAT_BUNDLE)
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/xbox-boot $(TARGET_DIR)/usr/libexec/xbox-boot
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/xbox-session $(TARGET_DIR)/usr/libexec/xbox-session
+	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/xbox-title $(TARGET_DIR)/usr/libexec/xbox-title
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/xbox-env $(TARGET_DIR)/usr/lib/xbox/xbox-env
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/dashboard $(TARGET_DIR)/usr/libexec/dashboard
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/../../../../xbcompat/tools/sion/cards/sion-cards $(TARGET_DIR)/usr/sbin/sion-cards
