@@ -18,6 +18,9 @@ echo '/dev/mmcblk0p3 /data ext4 defaults,noatime,nofail 0 2' >> "$TARGET_DIR"/et
 # ...grown to fill the card at first boot.
 install -m 755 "$(dirname "$0")"/S03growdata "$TARGET_DIR"/etc/init.d/S03growdata
 
+# The CPU at full speed, not ondemand's guess (see S02cpufreq).
+install -m 755 "$(dirname "$0")"/S02cpufreq "$TARGET_DIR"/etc/init.d/S02cpufreq
+
 # The display mode everything uses: NTSC 720x480, as on the Sion.
 mkdir -p "$TARGET_DIR"/etc/default
 echo 'KMS_MODE=720x480' > "$TARGET_DIR"/etc/default/kms
