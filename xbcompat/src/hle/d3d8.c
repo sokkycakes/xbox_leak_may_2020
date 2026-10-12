@@ -748,7 +748,18 @@ static void sleep_until(Uint64 t)
    blanks arriving (before the kernel's thread runs, or a stalled fixed-step
    clock), fall back to a free 60 Hz grid. */
 
+static uint64_t t_vbwait;   /* PROFILE_WORK: time in wait_vblank */
+static uint64_t now_ns(void);
+static void wait_vblank_(void);
+
 static void wait_vblank(void)
+{
+    uint64_t t0 = work_on ? now_ns() : 0;
+    wait_vblank_();
+    if (t0) t_vbwait += now_ns() - t0;
+}
+
+static void wait_vblank_(void)
 {
     static Uint64 base;
     if (unpaced()) return;
@@ -773,6 +784,9 @@ static void wait_vblank(void)
    GL draw calls themselves), presenting (the filter pass and the buffer
    swap, which waits for the display), and the rest (the title's own code). */
 static uint64_t t_draw, t_gl, t_present, t_pace;
+/* With PROFILE_WORK, the presenting thread's CPU time in draws and present:
+   wall time beyond it was spent blocked (a GPU sync in the driver, a lock). */
+static uint64_t c_draw, c_present;
 static uint64_t t_resolve, t_filter, t_swap, t_restore;
 static uint64_t t_state, t_program, t_constants, t_attributes, t_indices, t_buffer_upload;
 static unsigned n_draws;
@@ -786,14 +800,21 @@ static uint64_t now_ns(void)
     return (uint64_t)ts.tv_sec * 1000000000u + ts.tv_nsec;
 }
 
+static uint64_t thread_cpu_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000u + ts.tv_nsec;
+}
+
 static void log_fps(void)
 {
-    static uint64_t since;
+    static uint64_t since, cpu_since;
     static unsigned frames;
     profiling();
     if (!fps_on) return;
     uint64_t now = now_ns();
-    if (!since) since = now;
+    if (!since) { since = now; cpu_since = work_on ? thread_cpu_ns() : 0; }
     frames++;
     if (now - since >= 5000000000u) {
         double f = frames, ms = (now - since) / 1e6 / f;
@@ -808,6 +829,15 @@ static void log_fps(void)
              "pacing %.1f ms, other %.1f ms; GL state calls %u, %u skipped", 1000.0 / ms, ms, (unsigned)(n_draws / f),
              t_draw / 1e6 / f, t_gl / 1e6 / f, t_present / 1e6 / f, t_pace / 1e6 / f,
              ms - (t_draw + t_present + t_pace) / 1e6 / f, (unsigned)(gc_calls / f), (unsigned)(gc_skipped / f));
+        uint64_t cpu_now = thread_cpu_ns();
+        double cpu = (cpu_now - cpu_since) / 1e6 / f, other = ms - (t_draw + t_present + t_pace) / 1e6 / f;
+        xlog("D3D: presenting thread on the CPU %.0f%% of the frame: draws %.1f of %.1f ms, present %.1f of %.1f ms, "
+             "other %.1f of %.1f ms (the rest blocked; %.1f ms of it in BlockUntilVerticalBlank)", 100.0 * cpu / ms,
+             c_draw / 1e6 / f, t_draw / 1e6 / f, c_present / 1e6 / f, t_present / 1e6 / f,
+             cpu - (c_draw + c_present) / 1e6 / f, other, t_vbwait / 1e6 / f);
+        t_vbwait = 0;
+        cpu_since = cpu_now;
+        c_draw = c_present = 0;
         static unsigned traps;
         double tick = 1000.0 / (double)SDL_GetPerformanceFrequency() / f;
         xlog("D3D: per frame %u texture uploads, %u readbacks, %u shader compiles, %u guest traps; "
@@ -843,6 +873,11 @@ static void log_fps(void)
                                     else { __VA_ARGS__; } } while (0)
 #define TIMED(acc, ...) do { if (profiling()) { uint64_t t0_ = now_ns(); __VA_ARGS__; acc += now_ns() - t0_; } \
                              else { __VA_ARGS__; } } while (0)
+/* TIMED, and the thread's CPU time into cacc when PROFILE_WORK is on. */
+#define TIMED_CPU(acc, cacc, ...) do { if (profiling()) { uint64_t c0_ = work_on ? thread_cpu_ns() : 0; \
+                                           uint64_t t0_ = now_ns(); __VA_ARGS__; acc += now_ns() - t0_; \
+                                           if (work_on) cacc += thread_cpu_ns() - c0_; } \
+                                       else { __VA_ARGS__; } } while (0)
 
 static void pace_present(void)
 {
@@ -883,7 +918,7 @@ static ULONG NTAPI D3DDevice_Swap(ULONG Flags)
     } else if (g_screenshot_path && (int)d3d.frame == g_screenshot_frame) {
         save_screenshot(g_screenshot_path);
     }
-    TIMED(t_present, present_window_framebuffer(); cpu_block(); DETAIL_TIMED(t_swap, SDL_GL_SwapWindow(d3d.window));
+    TIMED_CPU(t_present, c_present, present_window_framebuffer(); cpu_block(); DETAIL_TIMED(t_swap, SDL_GL_SwapWindow(d3d.window));
           DETAIL_TIMED(t_restore, restore_window_framebuffer()));
     restore_overlay();
     pace_present();
@@ -3802,7 +3837,7 @@ static void draw_programmable(vshader *sh, ULONG PrimitiveType, const UCHAR *up,
 {
     n_draws++;
     conv_serial++;
-    TIMED(t_draw, draw_programmable_(sh, PrimitiveType, up, up_stride, first, count, indices); if (prof_sync) glFinish());
+    TIMED_CPU(t_draw, c_draw, draw_programmable_(sh, PrimitiveType, up, up_stride, first, count, indices); if (prof_sync) glFinish());
 }
 
 static void draw_programmable_(vshader *sh, ULONG PrimitiveType, const UCHAR *up, ULONG up_stride, ULONG first,
@@ -3873,7 +3908,7 @@ static void draw_declared(const vshader *sh, ULONG PrimitiveType, const UCHAR *u
 {
     n_draws++;
     conv_serial++;
-    TIMED(t_draw, draw_declared_(sh, PrimitiveType, up, up_stride, first, count, indices); if (prof_sync) glFinish());
+    TIMED_CPU(t_draw, c_draw, draw_declared_(sh, PrimitiveType, up, up_stride, first, count, indices); if (prof_sync) glFinish());
 }
 
 static void draw_declared_(const vshader *sh, ULONG PrimitiveType, const UCHAR *up, ULONG up_stride, ULONG first,
@@ -4065,7 +4100,7 @@ static void draw(ULONG PrimitiveType, const UCHAR *base, ULONG stride, ULONG fir
         return;
     }
     n_draws++;
-    TIMED(t_draw, draw_fvf(PrimitiveType, base, stride, first, count, indices); if (prof_sync) glFinish());
+    TIMED_CPU(t_draw, c_draw, draw_fvf(PrimitiveType, base, stride, first, count, indices); if (prof_sync) glFinish());
 }
 
 static void NTAPI D3DDevice_DrawVertices(ULONG, UINT_, UINT_), D3DDevice_DrawVerticesUP(ULONG, UINT_, const void *, UINT_),

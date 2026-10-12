@@ -11,6 +11,8 @@
  * .map, xbcompat's own against its binary (addr2line). An address that is
  * not x86 code (a call into a native library under box86) is counted under
  * the x86 return address on top of the stack, marked "native call from".
+ * XBCOMPAT_PROFILE_WORK=1 without XBCOMPAT_PROFILE samples to
+ * /tmp/xbcompat-profile.txt.
  */
 #define _GNU_SOURCE
 #include <dlfcn.h>
@@ -165,7 +167,12 @@ void prof_thread_start(void)
 void prof_init(void)
 {
     out_path = getenv("XBCOMPAT_PROFILE");
-    if (!out_path || !*out_path) { out_path = NULL; return; }
+    if (!out_path || !*out_path) {
+        /* XBCOMPAT_PROFILE_WORK samples too, to a fixed file. */
+        const char *w = getenv("XBCOMPAT_PROFILE_WORK");
+        out_path = w && *w && *w != '0' ? "/tmp/xbcompat-profile.txt" : NULL;
+    }
+    if (!out_path) return;
     /* From librt: box86 wraps the timer calls there, not in libc. */
     void *rt = dlopen("librt.so.1", RTLD_NOW);
     if (rt) {
@@ -191,3 +198,97 @@ void prof_init(void)
 void prof_init(void) {}
 void prof_thread_start(void) {}
 #endif
+
+/* ---- blocked time ------------------------------------------------------------ */
+
+#include <time.h>
+
+static int waits_on = -1;
+static pthread_mutex_t waits_lock = PTHREAD_MUTEX_INITIALIZER;
+#define WAIT_SLOTS 512
+static struct wait_slot { uint32_t site, tid; int kind; uint32_t n; uint64_t ns; } waits[WAIT_SLOTS];
+static uint64_t waits_since;
+static uint32_t waits_dropped;
+
+static uint64_t wait_now(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000u + ts.tv_nsec;
+}
+
+uint64_t prof_wait_begin(void)
+{
+    if (waits_on < 0) {
+        const char *w = getenv("XBCOMPAT_PROFILE_WORK");
+        waits_on = w && *w && *w != '0';
+    }
+    return waits_on ? wait_now() : 0;
+}
+
+static int by_ns(const void *a, const void *b)
+{
+    const struct wait_slot *x = a, *y = b;
+    return x->ns < y->ns ? 1 : x->ns > y->ns ? -1 : 0;
+}
+
+/* Called with waits_lock held: log the window's biggest waits and clear it. */
+static void waits_log(uint64_t now)
+{
+    static struct wait_slot copy[WAIT_SLOTS];
+    int used = 0;
+    for (int i = 0; i < WAIT_SLOTS; i++)
+        if (waits[i].n) copy[used++] = waits[i];
+    qsort(copy, used, sizeof(*copy), by_ns);
+    double secs = (now - waits_since) / 1e9;
+    for (int i = 0; i < used && i < 10; i++) {
+        char path[64], name[32] = "?";
+        snprintf(path, sizeof path, "/proc/self/task/%u/comm", copy[i].tid);
+        FILE *c = fopen(path, "r");
+        if (c) {
+            if (fgets(name, sizeof name, c)) name[strcspn(name, "\n")] = 0;
+            fclose(c);
+        }
+        xlog("Waits: %s (%u) blocked %.1f ms/s in %.0f %s/s from %08x", name, copy[i].tid,
+             copy[i].ns / 1e6 / secs, copy[i].n / secs,
+             copy[i].kind < 0 ? "delays" : copy[i].kind == 0 || copy[i].kind == 1 ? "event waits" :
+             copy[i].kind == 2 ? "mutant waits" : copy[i].kind == 5 ? "semaphore waits" :
+             copy[i].kind == 6 ? "thread waits" : copy[i].kind == 8 || copy[i].kind == 9 ? "timer waits" : "other waits",
+             copy[i].site);
+    }
+    if (waits_dropped) xlog("Waits: %u not counted (table full)", waits_dropped);
+    memset(waits, 0, sizeof waits);
+    waits_dropped = 0;
+    waits_since = now;
+}
+
+void prof_wait_end(uint64_t start, int kind)
+{
+    if (!start) return;
+    uint64_t now = wait_now();
+    /* The title code that made the call: follow xbcompat's frame pointers
+       out of its own code. */
+    uint32_t site = 0;
+    uintptr_t *fp = __builtin_frame_address(0);
+    for (int depth = 0; depth < 16 && fp; depth++) {
+        uintptr_t pc = fp[1];
+        if (pc >= 0x10000 && pc < IMAGE_REGION_END) { site = (uint32_t)pc; break; }
+        uintptr_t *next = (uintptr_t *)fp[0];
+        if (next <= fp || (uintptr_t)next - (uintptr_t)fp > (1u << 20)) break;
+        fp = next;
+    }
+    uint32_t tid = (uint32_t)syscall(SYS_gettid);
+    pthread_mutex_lock(&waits_lock);
+    if (!waits_since) waits_since = now;
+    unsigned h = ((site ^ tid * 31u ^ (uint32_t)kind * 7919u) * 2654435761u) % WAIT_SLOTS;
+    struct wait_slot *w = NULL;
+    for (unsigned i = 0; i < WAIT_SLOTS; i++, h = (h + 1) % WAIT_SLOTS) {
+        struct wait_slot *t = &waits[h];
+        if (!t->n) { t->site = site; t->tid = tid; t->kind = kind; w = t; break; }
+        if (t->site == site && t->tid == tid && t->kind == kind) { w = t; break; }
+    }
+    if (w) { w->n++; w->ns += now - start; }
+    else waits_dropped++;
+    if (now - waits_since >= 5000000000u) waits_log(now);
+    pthread_mutex_unlock(&waits_lock);
+}

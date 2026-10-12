@@ -382,6 +382,7 @@ NTSTATUS wait_objects(ULONG count, PVOID objects[], int wait_any, KPROCESSOR_MOD
     bool has_dl = deadline_from(timeout, &dl);
     bool poll = timeout && timeout->QuadPart == 0;
     NTSTATUS st;
+    uint64_t prof_start = prof_wait_begin();
 
     if (xt) __atomic_store_n(&xt->in_wait, 1, __ATOMIC_SEQ_CST);
     static __thread struct disp_waiter me;
@@ -466,6 +467,7 @@ done:
         usleep(spins > 256 ? 10000 : 1000);
     }
     thread_wait_end(xt);
+    prof_wait_end(prof_start, count ? ((DISPATCHER_HEADER *)objects[0])->Type : -1);
     return st;
 }
 
@@ -496,6 +498,7 @@ NTSTATUS NTAPI KeDelayExecutionThread(KPROCESSOR_MODE WaitMode, BOOLEAN Alertabl
     }
     LONGLONG t = Interval->QuadPart;
     ULONGLONG rel = t < 0 ? (ULONGLONG)-t : (t > (LONGLONG)system_time_now() ? t - system_time_now() : 0);
+    uint64_t prof_start = prof_wait_begin();
     cpu_block();
     if (rel == 0) {
         if (xt) __atomic_store_n(&xt->in_wait, 1, __ATOMIC_SEQ_CST);
@@ -507,6 +510,7 @@ NTSTATUS NTAPI KeDelayExecutionThread(KPROCESSOR_MODE WaitMode, BOOLEAN Alertabl
         while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {}
         thread_wait_end(xt);
     }
+    prof_wait_end(prof_start, -1);
     return STATUS_SUCCESS;
 }
 
