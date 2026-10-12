@@ -249,11 +249,27 @@ xthread *thread_create(SIZE_T stack_size, SIZE_T tls_size, PVOID system_routine,
     return t;
 }
 
+/* Add to a thread's SuspendCount, a byte in the KTHREAD. Box86 (Raspberry
+   Pi) has no locked byte arithmetic (lock sub/add byte [mem]: SIGILL), so
+   the byte changes through a compare-and-swap on its aligned 32-bit word. */
+static UCHAR suspend_count_add(xthread *t, int delta)
+{
+    UCHAR *b = (UCHAR *)&t->ethread.Tcb.SuspendCount;
+    uint32_t *w = (uint32_t *)((uintptr_t)b & ~(uintptr_t)3);
+    unsigned shift = ((uintptr_t)b & 3) * 8;
+    uint32_t old = __atomic_load_n(w, __ATOMIC_SEQ_CST), new;
+    do {
+        UCHAR v = (UCHAR)((old >> shift) + delta);
+        new = (old & ~(0xffu << shift)) | ((uint32_t)v << shift);
+    } while (!__atomic_compare_exchange_n(w, &old, new, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST));
+    return (UCHAR)(new >> shift);
+}
+
 void thread_resume(xthread *t)
 {
     pthread_mutex_lock(&start_lock);
     if (t->ethread.Tcb.SuspendCount > 0 &&
-        __atomic_sub_fetch(&t->ethread.Tcb.SuspendCount, 1, __ATOMIC_SEQ_CST) == 0)
+        suspend_count_add(t, -1) == 0)
         __atomic_add_fetch(&t->resume_gen, 1, __ATOMIC_SEQ_CST);
     pthread_cond_broadcast(&start_cond);
     pthread_mutex_unlock(&start_lock);
@@ -314,7 +330,7 @@ ULONG thread_suspend(xthread *t)
         pthread_mutex_unlock(&start_lock);
         return prev;
     }
-    __atomic_add_fetch(&t->ethread.Tcb.SuspendCount, 1, __ATOMIC_SEQ_CST);
+    suspend_count_add(t, 1);
     if (t == thread_current()) {
         /* Stopped: a suspend from elsewhere only counts.  Run again once a
            resume brings the count to 0, even if another suspend follows

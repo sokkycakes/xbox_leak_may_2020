@@ -796,6 +796,9 @@ struct drm_vblank_query {
 static int vbl_fd = -1;
 static uint32_t vbl_type;
 static ULONGLONG vbl_period = 166833;   /* 100 ns units; 59.94 Hz until measured */
+/* Display blanks per Xbox vblank. Interlaced modes (the Pi's 480i composite)
+   blank once per field, ~119.9 Hz; the Xbox's vblank came once per frame. */
+static unsigned vbl_step = 1;
 
 static bool vbl_query(uint32_t type, uint32_t *seq, ULONGLONG *when)
 {
@@ -853,8 +856,11 @@ static bool vbl_open(void)
             nanosleep(&ts, NULL);
             if (!vbl_query(type, &s1, &t1) || s1 == s0) continue;
             vbl_type = type;
-            vbl_period = (t1 - t0) / (s1 - s0);
-            xlog("vblank: following the display on %s (CRTC %u, %.2f Hz)", path, crtc, 1e7 / vbl_period);
+            ULONGLONG blank = (t1 - t0) / (s1 - s0);
+            while (blank * vbl_step < 111111) vbl_step++;   /* faster than 90 Hz: fields */
+            vbl_period = blank * vbl_step;
+            xlog("vblank: following the display on %s (CRTC %u, %.2f Hz blanks, every %u)", path, crtc,
+                 1e7 / blank, vbl_step);
             return true;
         }
         close(fd);
@@ -879,7 +885,9 @@ static ULONGLONG vbl_next(ULONGLONG now)
     if (vbl_fd < 0 || !vbl_query(vbl_type, &seq, &last)) return 0;
     /* Refine the period over a long run of blanks (a mode change resets it). */
     if (!first_time || seq < first_seq || seq - first_seq > 36000) first_seq = seq, first_time = last;
-    else if (seq - first_seq >= 60 && last > first_time) vbl_period = (last - first_time) / (seq - first_seq);
+    else if (seq - first_seq >= 60 && last > first_time) vbl_period = (last - first_time) * vbl_step / (seq - first_seq);
+    /* With fields, keep to the same one of each pair (the frame's first). */
+    last -= (ULONGLONG)((seq - first_seq) % vbl_step) * (vbl_period / vbl_step);
     ULONGLONG next = last + VBL_LAG;
     while (next <= now) next += vbl_period;
     return next;
