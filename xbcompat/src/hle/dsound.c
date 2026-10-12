@@ -256,10 +256,16 @@ struct ds_voice {
     float fc_cur, q_cur, svf_f, svf_q, low[6], band[6];
     uint32_t ctl;             /* frames since VoiceOn: control-rate phase */
     double step_cur;
-    /* decoded ADPCM block cache (mixer-owned) */
+    /* Decoded ADPCM blocks (mixer-owned): the last block decoded and the
+       one before it.  Interpolation reads frame 63 of one block and frame 0
+       of the next, and while resampling up it does so for several output
+       frames in a row; with one block cached each of those decoded both
+       blocks again.  Setting adpcm_block to -1 drops both. */
     int16_t adpcm_cache[2 * 64];
     int32_t adpcm_block;
     const uint8_t *adpcm_base;
+    int16_t adpcm_prev_cache[2 * 64];
+    int32_t adpcm_prev_block;
 };
 
 struct ds_notify { DWORD offset; HANDLE event; };
@@ -567,12 +573,25 @@ static inline void fetch_frame(const struct ds_src *s, DWORD idx, float *out)
     if (f->adpcm) {
         int32_t block = (int32_t)(idx / 64);
         struct ds_voice *v = s->v;
-        if (v->adpcm_block != block || v->adpcm_base != s->data) {
-            ds_adpcm_decode_block(s->data + (DWORD)block * f->unit_bytes, ch, v->adpcm_cache);
-            v->adpcm_block = block;
-            v->adpcm_base = s->data;
+        const int16_t *cache = v->adpcm_cache;
+        if (v->adpcm_block < 0 || v->adpcm_base != s->data) {
+            v->adpcm_prev_block = -1;
+            v->adpcm_block = -1;
         }
-        const int16_t *c = v->adpcm_cache + (idx % 64) * ch;
+        if (v->adpcm_block != block) {
+            if (v->adpcm_prev_block == block) {
+                cache = v->adpcm_prev_cache;
+            } else {
+                if (v->adpcm_block >= 0) {
+                    memcpy(v->adpcm_prev_cache, v->adpcm_cache, sizeof v->adpcm_cache);
+                    v->adpcm_prev_block = v->adpcm_block;
+                }
+                ds_adpcm_decode_block(s->data + (DWORD)block * f->unit_bytes, ch, v->adpcm_cache);
+                v->adpcm_block = block;
+                v->adpcm_base = s->data;
+            }
+        }
+        const int16_t *c = cache + (idx % 64) * ch;
         for (int i = 0; i < ch; i++) out[i] = c[i] * (1.0f / 32768.0f);
     } else if (f->bits == 16) {
         const uint8_t *p = s->data + idx * f->align;

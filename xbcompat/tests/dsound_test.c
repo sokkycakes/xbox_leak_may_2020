@@ -646,6 +646,31 @@ static void test_adpcm(const char *wavpath)
     CHECK(play == 1000 / 64 * 36 && write == play + 36, "ADPCM cursor in blocks: %u %u", play, write);
     Obj_Release((void *)b);
 
+    /* Resampled up (22.05 kHz into the 48 kHz mix), interpolation keeps
+       reading across block edges: the same output as the decoded samples
+       played as 16-bit PCM. */
+    short *dec = malloc(NB * 64 * sizeof(short));
+    for (int blk = 0; blk < NB; blk++) ref_decode_block(mono + blk * 36, 1, dec + blk * 64);
+    float *want = malloc(2000 * 2 * sizeof(float));
+    WAVEFORMATEX pf = { WAVE_FORMAT_PCM, 1, 22050, 44100, 2, 16, 0 };
+    b = make_buffer(&pf, 0);
+    unity(b);
+    Buf_SetBufferData((void *)b, dec, NB * 64 * sizeof(short));
+    Buf_Play((void *)b, 0, 0, 0);
+    mix(2000);
+    memcpy(want, out, 2000 * 2 * sizeof(float));
+    Obj_Release((void *)b);
+    XAudioCreateAdpcmFormat(1, 22050, &f);
+    b = make_buffer(&f.wfx, 0);
+    unity(b);
+    Buf_SetBufferData((void *)b, mono, NB * 36);
+    Buf_Play((void *)b, 0, 0, 0);
+    mix(2000);
+    CHECK(!memcmp(out, want, 2000 * 2 * sizeof(float)), "resampled ADPCM plays as its decoded PCM");
+    free(want);
+    free(dec);
+    Obj_Release((void *)b);
+
     /* A real Xbox ADPCM file (FileStream's becky_xbadpcm.wav), when given. */
     if (wavpath) {
         void *xmo = NULL;

@@ -43,11 +43,16 @@ ifeq ($(BR2_PACKAGE_BOX86),y)
 # gcc, SDL2 and GL (gcc-multilib, libsdl2-dev:i386, libgl-dev:i386): box86
 # hands its libc, SDL2 and GL calls to the Pi's native libraries.
 XBCOMPAT_DEPENDENCIES += box86
+# SSE2 scalar math for the box86 runtime: box86 turns it into VFP
+# instructions directly, where x87 code goes through its emulated
+# register stack (the sound mixer is mostly float math).  Guest entry
+# points already realign the stack (force_align_arg_pointer).
+XBCOMPAT_BOX86_CFLAGS = -O2 -g -fno-stack-protector -msse2 -mfpmath=sse
 define XBCOMPAT_BUILD_X86
 	$(MAKE) -C $(@D) TARGET=i386 CC=/usr/bin/gcc CFLAGS="-O2 -g -fno-stack-protector" \
 		PKGCFG="PKG_CONFIG_PATH=/usr/lib/i386-linux-gnu/pkgconfig /usr/bin/pkg-config" \
 		LEAK="$(XBCOMPAT_LEAK)" BUILD=build-x86 build-x86/xbcompat
-	$(MAKE) -C $(@D) TARGET=i386 RENDERER=native CC=/usr/bin/gcc CFLAGS="-O2 -g -fno-stack-protector" \
+	$(MAKE) -C $(@D) TARGET=i386 RENDERER=native CC=/usr/bin/gcc CFLAGS="$(XBCOMPAT_BOX86_CFLAGS)" \
 		PKGCFG="PKG_CONFIG_PATH=/usr/lib/i386-linux-gnu/pkgconfig /usr/bin/pkg-config" \
 		LEAK="$(XBCOMPAT_LEAK)" BUILD=build-native-x86 build-native-x86/xbcompat
 	$(TARGET_MAKE_ENV) PATH=$(HOST_DIR)/bin:$$PATH $(MAKE) -C $(@D) -f tools/native-renderer.mk \
