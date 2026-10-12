@@ -199,7 +199,14 @@ void prof_thread_start(void) {}
 static int waits_on = -1;
 static pthread_mutex_t waits_lock = PTHREAD_MUTEX_INITIALIZER;
 #define WAIT_SLOTS 512
-static struct wait_slot { uint32_t site, tid; int kind; uint32_t n; uint64_t ns; } waits[WAIT_SLOTS];
+#define SIG_SLOTS 512
+#define CHAIN 1
+/* site: the title code up the stack (nearest first); obj: the first object
+   waited on (0 for a delay). */
+static struct wait_slot { uint32_t site[CHAIN], obj, tid; int kind; uint32_t n; uint64_t ns; } waits[WAIT_SLOTS];
+/* Who signalled an object: site[0] is xbcompat's own caller when no title
+   code is on the stack (a DPC, a sound notification). */
+static struct sig_slot { uint32_t site[CHAIN], obj, tid, internal, n; } sigs[SIG_SLOTS];
 static uint64_t waits_since;
 static uint32_t waits_dropped;
 
@@ -210,13 +217,36 @@ static uint64_t wait_now(void)
     return (uint64_t)ts.tv_sec * 1000000000u + ts.tv_nsec;
 }
 
-uint64_t prof_wait_begin(void)
+static int waits_enabled(void)
 {
     if (waits_on < 0) {
         const char *w = getenv("XBCOMPAT_PROFILE_WORK");
         waits_on = w && *w && *w != '0';
     }
-    return waits_on ? wait_now() : 0;
+    return waits_on;
+}
+
+uint64_t prof_wait_begin(void)
+{
+    return waits_enabled() ? wait_now() : 0;
+}
+
+/* Follow xbcompat's frame pointers from fp out to the title code that made
+   the call: site[0] is that return address (0 if there is none, for a thread
+   of xbcompat's own), *own xbcompat's first caller above fp.  Title code may
+   not keep frame pointers, so the walk stops there; site[1..] stay 0. */
+static void title_chain(uintptr_t *fp, uint32_t site[CHAIN], uint32_t *own)
+{
+    *own = 0;
+    memset(site, 0, CHAIN * sizeof(uint32_t));
+    for (int depth = 0; depth < 16 && fp; depth++) {
+        uintptr_t pc = fp[1];
+        if (pc >= 0x10000 && pc < IMAGE_REGION_END) { site[0] = (uint32_t)pc; break; }
+        if (!*own && depth > 0) *own = (uint32_t)pc;
+        uintptr_t *next = (uintptr_t *)fp[0];
+        if (next <= fp || (uintptr_t)next - (uintptr_t)fp > (1u << 20)) break;
+        fp = next;
+    }
 }
 
 static int by_ns(const void *a, const void *b)
@@ -225,76 +255,132 @@ static int by_ns(const void *a, const void *b)
     return x->ns < y->ns ? 1 : x->ns > y->ns ? -1 : 0;
 }
 
-/* Log a window's biggest waits (a copy of the table, taken under waits_lock;
-   the logging itself runs unlocked so no other thread's wait queues behind
-   the file reads and the log write). */
-static void waits_log(struct wait_slot *copy, double secs, uint32_t dropped)
+static int by_n(const void *a, const void *b)
 {
-    int used = 0;
-    for (int i = 0; i < WAIT_SLOTS; i++)
-        if (copy[i].n) copy[used++] = copy[i];
-    qsort(copy, used, sizeof(*copy), by_ns);
-    for (int i = 0; i < used && i < 10; i++) {
-        char path[64], name[32] = "?";
-        snprintf(path, sizeof path, "/proc/self/task/%u/comm", copy[i].tid);
-        FILE *c = fopen(path, "r");
-        if (c) {
-            if (fgets(name, sizeof name, c)) name[strcspn(name, "\n")] = 0;
-            fclose(c);
-        }
-        xlog("Waits: %s (%u) blocked %.1f ms/s in %.0f %s/s from %08x", name, copy[i].tid,
-             copy[i].ns / 1e6 / secs, copy[i].n / secs,
-             copy[i].kind < 0 ? "delays" : copy[i].kind == 0 || copy[i].kind == 1 ? "event waits" :
-             copy[i].kind == 2 ? "mutant waits" : copy[i].kind == 5 ? "semaphore waits" :
-             copy[i].kind == 6 ? "thread waits" : copy[i].kind == 8 || copy[i].kind == 9 ? "timer waits" : "other waits",
-             copy[i].site);
-    }
-    if (dropped) xlog("Waits: %u not counted (table full)", dropped);
+    const struct sig_slot *x = a, *y = b;
+    return x->n < y->n ? 1 : x->n > y->n ? -1 : 0;
 }
 
-void prof_wait_end(uint64_t start, int kind)
+static void thread_name(uint32_t tid, char *name, size_t len)
+{
+    char path[64];
+    snprintf(path, sizeof path, "/proc/self/task/%u/comm", tid);
+    snprintf(name, len, "?");
+    FILE *c = fopen(path, "r");
+    if (c) {
+        if (fgets(name, (int)len, c)) name[strcspn(name, "\n")] = 0;
+        fclose(c);
+    }
+}
+
+/* Log a window's biggest waits and who signalled those objects (copies of
+   the tables, taken under waits_lock; the logging runs unlocked so no
+   other thread's wait queues behind the file reads and the log write). */
+static void waits_log(struct wait_slot *copy, struct sig_slot *scopy, double secs, uint32_t dropped)
+{
+    int used = 0, sused = 0;
+    for (int i = 0; i < WAIT_SLOTS; i++)
+        if (copy[i].n) copy[used++] = copy[i];
+    for (int i = 0; i < SIG_SLOTS; i++)
+        if (scopy[i].n) scopy[sused++] = scopy[i];
+    qsort(copy, used, sizeof(*copy), by_ns);
+    qsort(scopy, sused, sizeof(*scopy), by_n);
+    for (int i = 0; i < used && i < 10; i++) {
+        struct wait_slot *w = &copy[i];
+        char name[32];
+        thread_name(w->tid, name, sizeof name);
+        xlog("Waits: %s (%u) blocked %.1f ms/s in %.0f %s/s on %08x from %08x", name, w->tid,
+             w->ns / 1e6 / secs, w->n / secs,
+             w->kind < 0 ? "delays" : w->kind == 0 || w->kind == 1 ? "event waits" :
+             w->kind == 2 ? "mutant waits" : w->kind == 5 ? "semaphore waits" :
+             w->kind == 6 ? "thread waits" : w->kind == 8 || w->kind == 9 ? "timer waits" : "other waits",
+             w->obj, w->site[0]);
+        if (!w->obj || i >= 6) continue;
+        int shown = 0;
+        for (int k = 0; k < sused && shown < 3; k++) {
+            struct sig_slot *g = &scopy[k];
+            if (g->obj != w->obj) continue;
+            thread_name(g->tid, name, sizeof name);
+            xlog("Waits:   %08x signalled %.1f/s by %s (%u) from %s%08x", g->obj, g->n / secs, name,
+                 g->tid, g->internal ? "xbcompat " : "", g->site[0]);
+            shown++;
+        }
+    }
+    if (dropped) xlog("Waits: %u not counted (tables full)", dropped);
+}
+
+static struct wait_slot wcopy[WAIT_SLOTS];
+static struct sig_slot scopy_[SIG_SLOTS];
+static uint32_t logging;
+
+/* With waits_lock held: take the window if it is due.  Returns its length. */
+static double waits_take(uint64_t now, uint32_t *dropped)
+{
+    if (!waits_since) waits_since = now;
+    if (now - waits_since < 5000000000u || logging) return 0;
+    logging = 1;
+    memcpy(wcopy, waits, sizeof wcopy);
+    memcpy(scopy_, sigs, sizeof scopy_);
+    double secs = (now - waits_since) / 1e9;
+    *dropped = waits_dropped;
+    memset(waits, 0, sizeof waits);
+    memset(sigs, 0, sizeof sigs);
+    waits_dropped = 0;
+    waits_since = now;
+    return secs;
+}
+
+static void waits_finish(double secs, uint32_t dropped)
+{
+    if (secs <= 0) return;
+    waits_log(wcopy, scopy_, secs, dropped);
+    __atomic_store_n(&logging, 0, __ATOMIC_RELEASE);
+}
+
+void prof_wait_end(uint64_t start, int kind, const void *obj)
 {
     if (!start) return;
     uint64_t now = wait_now();
-    /* The title code that made the call: follow xbcompat's frame pointers
-       out of its own code. */
-    uint32_t site = 0;
-    uintptr_t *fp = __builtin_frame_address(0);
-    for (int depth = 0; depth < 16 && fp; depth++) {
-        uintptr_t pc = fp[1];
-        if (pc >= 0x10000 && pc < IMAGE_REGION_END) { site = (uint32_t)pc; break; }
-        uintptr_t *next = (uintptr_t *)fp[0];
-        if (next <= fp || (uintptr_t)next - (uintptr_t)fp > (1u << 20)) break;
-        fp = next;
-    }
-    uint32_t tid = (uint32_t)syscall(SYS_gettid);
+    uint32_t site[CHAIN], own;
+    title_chain(__builtin_frame_address(0), site, &own);
+    uint32_t tid = (uint32_t)syscall(SYS_gettid), o = (uint32_t)(uintptr_t)obj;
     pthread_mutex_lock(&waits_lock);
-    if (!waits_since) waits_since = now;
-    unsigned h = ((site ^ tid * 31u ^ (uint32_t)kind * 7919u) * 2654435761u) % WAIT_SLOTS;
+    unsigned h = ((site[0] ^ o * 13u ^ tid * 31u ^ (uint32_t)kind * 7919u) * 2654435761u) % WAIT_SLOTS;
     struct wait_slot *w = NULL;
     for (unsigned i = 0; i < WAIT_SLOTS; i++, h = (h + 1) % WAIT_SLOTS) {
         struct wait_slot *t = &waits[h];
-        if (!t->n) { t->site = site; t->tid = tid; t->kind = kind; w = t; break; }
-        if (t->site == site && t->tid == tid && t->kind == kind) { w = t; break; }
+        if (!t->n) { memcpy(t->site, site, sizeof site); t->obj = o; t->tid = tid; t->kind = kind; w = t; break; }
+        if (t->site[0] == site[0] && t->obj == o && t->tid == tid && t->kind == kind) { w = t; break; }
     }
     if (w) { w->n++; w->ns += now - start; }
     else waits_dropped++;
-    static struct wait_slot copy[WAIT_SLOTS];
-    static uint32_t logging;
-    double secs = 0;
     uint32_t dropped = 0;
-    if (now - waits_since >= 5000000000u && !logging) {
-        logging = 1;
-        memcpy(copy, waits, sizeof copy);
-        secs = (now - waits_since) / 1e9;
-        dropped = waits_dropped;
-        memset(waits, 0, sizeof waits);
-        waits_dropped = 0;
-        waits_since = now;
-    }
+    double secs = waits_take(now, &dropped);
     pthread_mutex_unlock(&waits_lock);
-    if (secs > 0) {
-        waits_log(copy, secs, dropped);
-        __atomic_store_n(&logging, 0, __ATOMIC_RELEASE);
+    waits_finish(secs, dropped);
+}
+
+void prof_signal(const void *obj)
+{
+    if (!waits_enabled()) return;
+    uint32_t site[CHAIN], own;
+    title_chain(__builtin_frame_address(0), site, &own);
+    uint32_t internal = !site[0];
+    if (internal) site[0] = own;
+    uint32_t tid = (uint32_t)syscall(SYS_gettid), o = (uint32_t)(uintptr_t)obj;
+    uint64_t now = wait_now();
+    pthread_mutex_lock(&waits_lock);
+    unsigned h = ((site[0] ^ o * 13u ^ tid * 31u) * 2654435761u) % SIG_SLOTS;
+    struct sig_slot *g = NULL;
+    for (unsigned i = 0; i < SIG_SLOTS; i++, h = (h + 1) % SIG_SLOTS) {
+        struct sig_slot *t = &sigs[h];
+        if (!t->n) { memcpy(t->site, site, sizeof site); t->obj = o; t->tid = tid; t->internal = internal; g = t; break; }
+        if (t->site[0] == site[0] && t->obj == o && t->tid == tid) { g = t; break; }
     }
+    if (g) g->n++;
+    else waits_dropped++;
+    uint32_t dropped = 0;
+    double secs = waits_take(now, &dropped);
+    pthread_mutex_unlock(&waits_lock);
+    waits_finish(secs, dropped);
 }

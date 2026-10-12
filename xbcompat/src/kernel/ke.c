@@ -467,7 +467,7 @@ done:
         usleep(spins > 256 ? 10000 : 1000);
     }
     thread_wait_end(xt);
-    prof_wait_end(prof_start, count ? ((DISPATCHER_HEADER *)objects[0])->Type : -1);
+    prof_wait_end(prof_start, count ? ((DISPATCHER_HEADER *)objects[0])->Type : -1, count ? objects[0] : NULL);
     return st;
 }
 
@@ -510,7 +510,7 @@ NTSTATUS NTAPI KeDelayExecutionThread(KPROCESSOR_MODE WaitMode, BOOLEAN Alertabl
         while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {}
         thread_wait_end(xt);
     }
-    prof_wait_end(prof_start, -1);
+    prof_wait_end(prof_start, -1, NULL);
     return STATUS_SUCCESS;
 }
 
@@ -533,6 +533,7 @@ void NTAPI KeInitializeEvent(KEVENT *Event, ULONG Type, BOOLEAN State)
 
 LONG NTAPI KeSetEvent(KEVENT *Event, LONG Increment, BOOLEAN Wait)
 {
+    prof_signal(Event);
     (void)Increment; (void)Wait;
     pthread_mutex_lock(&g_disp_lock);
     LONG old = Event->Header.SignalState;
@@ -553,6 +554,7 @@ LONG NTAPI KeResetEvent(KEVENT *Event)
 
 LONG NTAPI KePulseEvent(KEVENT *Event, LONG Increment, BOOLEAN Wait)
 {
+    prof_signal(Event);
     (void)Increment; (void)Wait;
     /* Waking only current waiters needs wait lists; approximate by signalling
        and letting the next waiter consume it. */
@@ -576,6 +578,7 @@ void NTAPI KeInitializeSemaphore(KSEMAPHORE *Semaphore, LONG Count, LONG Limit)
 
 LONG NTAPI KeReleaseSemaphore(KSEMAPHORE *Semaphore, LONG Increment, LONG Adjustment, BOOLEAN Wait)
 {
+    prof_signal(Semaphore);
     (void)Increment; (void)Wait;
     pthread_mutex_lock(&g_disp_lock);
     LONG old = Semaphore->Header.SignalState;

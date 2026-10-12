@@ -160,10 +160,12 @@ void prof_init(void);   /* XBCOMPAT_PROFILE=FILE, see prof.c */
 void prof_thread_start(void);
 /* XBCOMPAT_PROFILE_WORK: time a thread spent blocked in a kernel wait or
    delay that began at start (prof_wait_begin), charged to the title code that
-   made the call; logged every 5 seconds.  kind: the first object's
-   dispatcher type, or -1 for a delay. */
+   made the call; logged every 5 seconds with who signalled the objects
+   (prof_signal).  kind: the first object's dispatcher type, or -1 for a
+   delay; obj: the first object, or NULL. */
 uint64_t prof_wait_begin(void);
-void prof_wait_end(uint64_t start, int kind);
+void prof_wait_end(uint64_t start, int kind, const void *obj);
+void prof_signal(const void *obj);
 
 /* ---- the DVD drive and its tray (kernel/dvd.c) ------------------------ */
 
