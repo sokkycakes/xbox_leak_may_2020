@@ -2164,6 +2164,13 @@ static bool pb_render_state(ULONG m, ULONG d)
     }
     if (m == 0x32C) { RS(D3DRS_STENCILENABLE) = d; return true; }   /* NV097_SET_STENCIL_TEST_ENABLE */
     if (m == 0x370) { RS(D3DRS_STENCILFAIL) = d; return true; }     /* NV097_SET_STENCIL_OP_FAIL */
+    if (m >= 0x1B0C && m < 0x1B0C + 4 * 0x40 && (m - 0x1B0C) % 0x40 == 0) {   /* NV097_SET_TEXTURE_CONTROL0(i) */
+        /* Phantom Dust sets its cut-out textures' alpha kill this way. */
+        unsigned i = (m - 0x1B0C) / 0x40;
+        TSS(i, D3DTSS_ALPHAKILL) = d & 4 ? 4 /* D3DTALPHAKILL_ENABLE */ : 0;
+        TSS(i, D3DTSS_COLORKEYOP) = d & 3;
+        return true;
+    }
     return false;
 }
 
@@ -2908,6 +2915,31 @@ static void NTAPI D3DDevice_SetVertexShaderInput(ULONG handle, UINT_ count, cons
 }
 
 
+/* Vertex shader objects whose program writes back colors (oB0/oB1): only
+   those are drawn with two-sided color, as vsh.c leaves the back colors out
+   of the rest. */
+static unsigned char *two_side_shaders;
+static GLuint two_side_cap;
+
+static void note_two_side(GLuint vs, const char *src)
+{
+    if (!vs) return;
+    if (vs >= two_side_cap) {
+        GLuint cap = two_side_cap ? two_side_cap : 256;
+        while (cap <= vs) cap *= 2;
+        unsigned char *n = realloc(two_side_shaders, cap);
+        if (!n) return;
+        memset(n + two_side_cap, 0, cap - two_side_cap);
+        two_side_shaders = n; two_side_cap = cap;
+    }
+    two_side_shaders[vs] = strstr(src, "gl_BackColor") != NULL;
+}
+
+static bool shader_two_side(GLuint vs)
+{
+    return vs < two_side_cap && two_side_shaders[vs];
+}
+
 static GLuint vertex_shader_generic_object(vshader *sh)
 {
     if (sh->vs || sh->failed) return sh->vs;
@@ -2933,6 +2965,7 @@ static GLuint vertex_shader_generic_object(vshader *sh)
         xlog("D3D: vertex program %u instructions, inputs%s", sh->ninstr, line);
     }
     sh->vs = compile_shader(GL_VERTEX_SHADER, src);
+    note_two_side(sh->vs, src);
     free(src);
     if (!sh->vs) sh->failed = true;
     return sh->vs;
@@ -2953,6 +2986,7 @@ static GLuint vertex_shader_object(vshader *sh)
             char *src = vsh_translate_ex(sh->code, sh->ninstr, VSH_VARIANT_Z);
             if (src) {
                 sh->vs_z = compile_shader(GL_VERTEX_SHADER, src);
+                note_two_side(sh->vs_z, src);
                 free(src);
             }
         }
@@ -3387,7 +3421,7 @@ static bool use_program(GLuint vs, program_entry **out)
     /* NV2A programmable oPts is selected only with point parameters enabled.
        Fixed-function attenuation remains owned by the fixed-function path.
        Synchronize on every draw, including cached program reuse and VS -> FF. */
-    if (vs && RS(122 /* TWOSIDEDLIGHTING */)) glEnable(GL_VERTEX_PROGRAM_TWO_SIDE);
+    if (vs && RS(122 /* TWOSIDEDLIGHTING */) && shader_two_side(vs)) glEnable(GL_VERTEX_PROGRAM_TWO_SIDE);
     else glDisable(GL_VERTEX_PROGRAM_TWO_SIDE);
     if (vs && RS(D3DRS_POINTSCALEENABLE)) glEnable(GL_VERTEX_PROGRAM_POINT_SIZE);
     else glDisable(GL_VERTEX_PROGRAM_POINT_SIZE);

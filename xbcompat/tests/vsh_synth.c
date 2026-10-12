@@ -154,17 +154,18 @@ static const testcase cases[] = {
         11,
         { "dot((-v0.yzxw).xyz, (c[97]).xyz)", "u = _lit(v0.xyww);", "dot(vec4((R2.xxxx).xyz, 1.0), -c[98])",
           "u = _exp(R1.w);", "_dst(R2, c[99])", "u = _log(-v0.w);", "gl_BackColor = clamp(oB0, 0.0, 1.0);" },
-        { "/* 10:", "gl_BackColor = clamp(oD0" }
+        { "/* 10:", "gl_BackColor = clamp(oD0", "gl_BackSecondaryColor" }
     },
     {
         /* A program that stops at the final bit (instruction 11 above is
-           after it) and never writes oD0/oB0: the back colours fall back. */
+           after it) and never writes oB0/oB1: no back colours (they count
+           against the GPU's varying limit), every texture coordinate. */
         "defaults",
         { { .mac = MAC_MOV, .a = V(XYZW), .o_mask = M_XYZW, .o_is_out = 1, .o_addr = O_POS, .final = 1 },
           { .mac = MAC_MOV, .a = V(XYZW), .o_mask = M_XYZW, .o_is_out = 1, .o_addr = O_D0 } },
         2,
-        { "gl_BackColor = clamp(oD0, 0.0, 1.0);", "gl_BackSecondaryColor = clamp(oD1, 0.0, 1.0);" },
-        { "/* 1:" }
+        { "gl_FrontColor = clamp(oD0, 0.0, 1.0);", "gl_TexCoord[3] = oT3;" },
+        { "/* 1:", "gl_BackColor", "gl_BackSecondaryColor" }
     },
 };
 

@@ -116,8 +116,6 @@ static const char ff_lighting_source[] =
 "    }\n"
 "    gl_FrontColor = clamp(vec4(primary, diffuse.a), 0.0, 1.0);\n"
 "    gl_FrontSecondaryColor = clamp(vec4(secondary, 0.0), 0.0, 1.0);\n"
-"    gl_BackColor = gl_FrontColor;\n"
-"    gl_BackSecondaryColor = gl_FrontSecondaryColor;\n"
 "    gl_Position = gl_ProjectionMatrix * eye;\n"
 "    gl_FogFragCoord = abs(position.z);\n"
 "    gl_PointSize = gl_Point.size;\n"

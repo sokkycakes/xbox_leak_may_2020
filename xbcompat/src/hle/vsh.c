@@ -518,13 +518,27 @@ char *vsh_translate_ex(const uint32_t *code, unsigned count, unsigned flags)
            "  gl_Position = vec4(vs_n.x, vs_n.y * flip_y, 2.0 * vs_n.z - 1.0, 1.0) * vs_w;\n"
            "  gl_FrontColor = clamp(oD0, 0.0, 1.0);\n"
            "  gl_FrontSecondaryColor = clamp(oD1, 0.0, 1.0);\n");
-    sb_put(&e.b, "  gl_BackColor = clamp(%s, 0.0, 1.0);\n", outs & (1u << OUT_B0) ? "oB0" : "oD0");
-    sb_put(&e.b, "  gl_BackSecondaryColor = clamp(%s, 0.0, 1.0);\n", outs & (1u << OUT_B1) ? "oB1" : "oD1");
+    /* Back colors only for a program that writes oB0/oB1: without them the
+       back faces take the front colors anyway, and every varying counts
+       against the GPU's limit (VC4: 32 components, which two back colors on
+       top of four texture coordinates and fog exceed).  A program without
+       them is drawn with two-sided color off (d3d8.c). */
+    bool two_side = outs & (1u << OUT_B0 | 1u << OUT_B1);
+    unsigned ntex = 0;
+    for (int t = 0; t < 4; t++) ntex += !!(outs & (1u << (OUT_T0 + t)));
+    if (two_side) {
+        sb_put(&e.b, "  gl_BackColor = clamp(%s, 0.0, 1.0);\n", outs & (1u << OUT_B0) ? "oB0" : "oD0");
+        /* Four vec4 colors, four coordinates and fog would still be 36:
+           the back specular color goes first. */
+        if (ntex < 4)
+            sb_put(&e.b, "  gl_BackSecondaryColor = clamp(%s, 0.0, 1.0);\n", outs & (1u << OUT_B1) ? "oB1" : "oD1");
+    }
+    /* With back colors, leave out the texture coordinates the program never
+       writes, for the same limit. */
+    for (int t = 0; t < 4; t++)
+        if (!two_side || (outs & (1u << (OUT_T0 + t))))
+            sb_put(&e.b, "  gl_TexCoord[%d] = oT%d;\n", t, t);
     sb_put(&e.b,
-           "  gl_TexCoord[0] = oT0;\n"
-           "  gl_TexCoord[1] = oT1;\n"
-           "  gl_TexCoord[2] = oT2;\n"
-           "  gl_TexCoord[3] = oT3;\n"
            /* Preserve finite factors outside [0,1] until fragment use. */
            "  float fog_factor = oFog.x;\n"
            "  if (fog_vertex_mode == 1.0) fog_factor = exp(-gl_Fog.density * oFog.x);\n"

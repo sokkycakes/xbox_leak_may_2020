@@ -40,9 +40,11 @@
  *                                   gl_Position = vec4(n.x, n.y * flip_y,
  *                                                      2.0 * n.z - 1.0, 1.0) * oPos.w;
  *   gl_FrontColor / gl_FrontSecondaryColor      oD0 / oD1 (clamped to 0..1)
- *   gl_BackColor  / gl_BackSecondaryColor       oB0 / oB1 (oD0 / oD1 when
- *                                               the program never writes them)
- *   gl_TexCoord[0..3]             oT0 .. oT3
+ *   gl_BackColor  / gl_BackSecondaryColor       oB0 / oB1 (oD0 / oD1 for the
+ *                                               one it doesn't write); left out
+ *                                               when it writes neither
+ *   gl_TexCoord[0..3]             oT0 .. oT3 (with back colors, only the ones
+ *                                 the program writes)
  *   uniform float fog_vertex_mode 0: legacy distance; 1/2/3: EXP/EXP2/LINEAR
  *   gl_FogFragCoord               oFog.x in legacy mode; otherwise vertex
  *                                 fog factor, unclamped until fragment use

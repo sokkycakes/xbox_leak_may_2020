@@ -227,10 +227,37 @@ static const int varying_size[] = { 4, 4, 4, 4, 4, 4, 4, 4, 4, 1, 1 };
 #define NVARY 11
 #define STRIDE 38
 
-static GLuint build(const char *src, char *log, size_t loglen)
+/* The translator leaves out back colors (and, alongside them, unwritten
+   texture coordinates) to stay inside small varying limits; put the values
+   those outputs would carry back in, so every program feeds back the same
+   layout and the comparison below stays complete. */
+static char *complete(const char *src)
 {
+    static const char *const fill[][2] = {
+        { "gl_BackColor", "  gl_BackColor = gl_FrontColor;\n" },
+        { "gl_BackSecondaryColor", "  gl_BackSecondaryColor = gl_FrontSecondaryColor;\n" },
+        { "gl_TexCoord[0]", "  gl_TexCoord[0] = oT0;\n" }, { "gl_TexCoord[1]", "  gl_TexCoord[1] = oT1;\n" },
+        { "gl_TexCoord[2]", "  gl_TexCoord[2] = oT2;\n" }, { "gl_TexCoord[3]", "  gl_TexCoord[3] = oT3;\n" }
+    };
+    const char *end = strrchr(src, '}');
+    size_t head = end ? (size_t)(end - src) : strlen(src), len = strlen(src) + 1;
+    for (unsigned i = 0; i < 6; i++) len += strlen(fill[i][1]);
+    char *out = malloc(len);
+    memcpy(out, src, head);
+    out[head] = 0;
+    for (unsigned i = 0; i < 6; i++)
+        if (!strstr(src, fill[i][0])) strcat(out, fill[i][1]);
+    strcat(out, src + head);
+    return out;
+}
+
+static GLuint build(const char *glsl, char *log, size_t loglen)
+{
+    char *full = complete(glsl);
+    const char *src = full;
     GLuint sh = p_glCreateShader(GLE_VERTEX_SHADER);
     p_glShaderSource(sh, 1, &src, NULL);
+    free(full);
     p_glCompileShader(sh);
     GLint ok = 0;
     p_glGetShaderiv(sh, GLE_COMPILE_STATUS, &ok);
