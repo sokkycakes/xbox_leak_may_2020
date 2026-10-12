@@ -237,54 +237,79 @@ static void dsmix_frame_params(struct dsmix_state *v, int32_t pitch)
 
 /* ---- sample fetch ---------------------------------------------------------- */
 
+/* Sample formats, for the specialised voice loops below. */
+enum { DSMIX_PCM8, DSMIX_PCM16, DSMIX_ADPCM };
+
 struct dsmix_src {
     const uint8_t *data;
     const struct dsmix_voice *j;
     struct dsmix_state *st;
 };
 
-static inline void dsmix_fetch(const struct dsmix_src *s, uint32_t idx, float *out)
+/* Before fetching ADPCM frames from data: a cache filled from other data, or
+   dropped (adpcm_block -1), drops both blocks. */
+static inline void dsmix_adpcm_begin(struct dsmix_state *v, const uint8_t *data)
 {
-    const struct dsmix_voice *j = s->j;
-    int ch = (int)j->ch;
-    if (j->adpcm) {
-        int32_t block = (int32_t)(idx / 64);
-        struct dsmix_state *v = s->st;
-        const int16_t *cache = v->adpcm_cache;
-        if (v->adpcm_block < 0 || v->adpcm_base != s->data) {
-            v->adpcm_prev_block = -1;
-            v->adpcm_block = -1;
-        }
-        if (v->adpcm_block != block) {
-            if (v->adpcm_prev_block == block) {
-                cache = v->adpcm_prev_cache;
-            } else {
-                if (v->adpcm_block >= 0) {
-                    memcpy(v->adpcm_prev_cache, v->adpcm_cache, sizeof v->adpcm_cache);
-                    v->adpcm_prev_block = v->adpcm_block;
-                }
-                dsmix_adpcm_decode_block(s->data + (uint32_t)block * j->unit_bytes, ch, v->adpcm_cache);
-                v->adpcm_block = block;
-                v->adpcm_base = s->data;
+    if (v->adpcm_block < 0 || v->adpcm_base != data) {
+        v->adpcm_prev_block = -1;
+        v->adpcm_block = -1;
+    }
+}
+
+/* The decoded frame idx of an ADPCM source, after dsmix_adpcm_begin. */
+static inline __attribute__((always_inline)) const int16_t *
+dsmix_adpcm_frame(const struct dsmix_src *s, uint32_t idx, int ch)
+{
+    int32_t block = (int32_t)(idx / 64);
+    struct dsmix_state *v = s->st;
+    const int16_t *cache = v->adpcm_cache;
+    if (v->adpcm_block != block) {
+        if (v->adpcm_prev_block == block) {
+            cache = v->adpcm_prev_cache;
+        } else {
+            if (v->adpcm_block >= 0) {
+                memcpy(v->adpcm_prev_cache, v->adpcm_cache, sizeof v->adpcm_cache);
+                v->adpcm_prev_block = v->adpcm_block;
             }
+            dsmix_adpcm_decode_block(s->data + (uint32_t)block * s->j->unit_bytes, ch, v->adpcm_cache);
+            v->adpcm_block = block;
+            v->adpcm_base = s->data;
         }
-        const int16_t *c = cache + (idx % 64) * ch;
+    }
+    return cache + (idx % 64) * ch;
+}
+
+/* Frame idx as floats.  fmt and ch are constants in the specialised loops. */
+static inline __attribute__((always_inline)) void
+dsmix_fetch_t(const struct dsmix_src *s, uint32_t idx, float *out, int fmt, int ch)
+{
+    if (fmt == DSMIX_ADPCM) {
+        const int16_t *c = dsmix_adpcm_frame(s, idx, ch);
         for (int i = 0; i < ch; i++) out[i] = c[i] * (1.0f / 32768.0f);
-    } else if (j->bits == 16) {
-        const uint8_t *p = s->data + idx * j->align;
+    } else if (fmt == DSMIX_PCM16) {
+        const uint8_t *p = s->data + idx * s->j->align;
         for (int i = 0; i < ch; i++) {
             int16_t x; memcpy(&x, p + 2 * i, 2);
             out[i] = x * (1.0f / 32768.0f);
         }
     } else {
-        const uint8_t *p = s->data + idx * j->align;
+        const uint8_t *p = s->data + idx * s->j->align;
         for (int i = 0; i < ch; i++) out[i] = (p[i] - 128) * (1.0f / 128.0f);
     }
 }
 
+static inline int dsmix_format(const struct dsmix_voice *j)
+{
+    return j->adpcm ? DSMIX_ADPCM : j->bits == 16 ? DSMIX_PCM16 : DSMIX_PCM8;
+}
+
 /* ---- voices ---------------------------------------------------------------- */
 
-static void dsmix_buffer(struct dsmix_voice *j, float *out, int n)
+/* One buffer voice for n frames.  fmt, ch, vp and filt (the DLS2 low-pass on)
+   are constants in each specialisation, so the per-frame work has no format
+   branches and keeps the samples in registers. */
+static inline __attribute__((always_inline)) void
+dsmix_buffer_t(struct dsmix_voice *j, float *out, int n, int fmt, int ch, int vp, int filt)
 {
     struct dsmix_state *v = j->st;
     uint32_t total = j->total, ls = j->loop_start, ll = j->loop_len;
@@ -292,13 +317,13 @@ static void dsmix_buffer(struct dsmix_voice *j, float *out, int n)
     uint32_t le = ls + ll;
     int32_t pitch = j->pitch;
     double step = exp2((double)pitch / 4096.0);
-    int vp = (int)j->vp;
     struct dsmix_src src = { j->data, j, v };
-    int ch = (int)j->ch;
     float *sub = j->sub;
     double pos = j->pos;
     int playing = 1;
-    float a[6], c[6];
+    float a[6], c[6], gl[6], gr[6], gm[6];
+    for (int k = 0; k < ch; k++) { gl[k] = j->gain[k][0]; gr[k] = j->gain[k][1]; gm[k] = j->subgain[k]; }
+    if (fmt == DSMIX_ADPCM) dsmix_adpcm_begin(v, j->data);
     for (int i = 0; i < n; i++) {
         if (looping && pos >= le) pos = ls + fmod(pos - ls, (double)ll);
         if (pos >= total) { playing = 0; pos = 0; break; }
@@ -307,8 +332,8 @@ static void dsmix_buffer(struct dsmix_voice *j, float *out, int n)
         uint32_t nxt = idx + 1;
         if (looping && nxt >= le) nxt = ls;
         if (nxt >= total) nxt = idx;
-        dsmix_fetch(&src, idx, a);
-        dsmix_fetch(&src, nxt, c);
+        dsmix_fetch_t(&src, idx, a, fmt, ch);
+        dsmix_fetch_t(&src, nxt, c, fmt, ch);
         float l = 0, r = 0, m = 0, amp = 1.0f;
         if (vp) {
             if ((v->ctl++ & 31) == 0) dsmix_frame_params(v, pitch);
@@ -318,16 +343,16 @@ static void dsmix_buffer(struct dsmix_voice *j, float *out, int n)
         }
         for (int k = 0; k < ch; k++) {
             float s = a[k] + (c[k] - a[k]) * frac;
-            if (vp && v->fmode == 1) {   /* Chamberlin state-variable low-pass */
+            if (filt) {   /* Chamberlin state-variable low-pass */
                 v->low[k] += v->svf_f * v->band[k];
                 float high = s - v->low[k] - v->svf_q * v->band[k];
                 v->band[k] += v->svf_f * high;
                 s = v->low[k];
             }
             s *= amp;
-            l += s * j->gain[k][0];
-            r += s * j->gain[k][1];
-            m += s * j->subgain[k];
+            l += s * gl[k];
+            r += s * gr[k];
+            if (sub) m += s * gm[k];
         }
         out[2 * i] += l;
         out[2 * i + 1] += r;
@@ -347,11 +372,48 @@ static void dsmix_buffer(struct dsmix_voice *j, float *out, int n)
     j->playing = (uint32_t)playing;
 }
 
+#define DSMIX_BUFFER_FN(name, fmt, ch, vp, filt) \
+    static void name(struct dsmix_voice *j, float *out, int n) { dsmix_buffer_t(j, out, n, fmt, ch, vp, filt); }
+DSMIX_BUFFER_FN(dsmix_adpcm1, DSMIX_ADPCM, 1, 0, 0)
+DSMIX_BUFFER_FN(dsmix_adpcm1_vp, DSMIX_ADPCM, 1, 1, 0)
+DSMIX_BUFFER_FN(dsmix_adpcm1_vpf, DSMIX_ADPCM, 1, 1, 1)
+DSMIX_BUFFER_FN(dsmix_adpcm2, DSMIX_ADPCM, 2, 0, 0)
+DSMIX_BUFFER_FN(dsmix_adpcm2_vp, DSMIX_ADPCM, 2, 1, 0)
+DSMIX_BUFFER_FN(dsmix_adpcm2_vpf, DSMIX_ADPCM, 2, 1, 1)
+DSMIX_BUFFER_FN(dsmix_pcm16_1, DSMIX_PCM16, 1, 0, 0)
+DSMIX_BUFFER_FN(dsmix_pcm16_1_vp, DSMIX_PCM16, 1, 1, 0)
+DSMIX_BUFFER_FN(dsmix_pcm16_1_vpf, DSMIX_PCM16, 1, 1, 1)
+DSMIX_BUFFER_FN(dsmix_pcm16_2, DSMIX_PCM16, 2, 0, 0)
+DSMIX_BUFFER_FN(dsmix_pcm16_2_vp, DSMIX_PCM16, 2, 1, 0)
+DSMIX_BUFFER_FN(dsmix_pcm16_2_vpf, DSMIX_PCM16, 2, 1, 1)
+
+/* Any other layout (8-bit, or more than two channels). */
+static void dsmix_buffer_any(struct dsmix_voice *j, float *out, int n)
+{
+    int fmt = dsmix_format(j), ch = (int)j->ch, vp = (int)j->vp, filt = vp && j->st->fmode == 1;
+    if (fmt == DSMIX_ADPCM) dsmix_buffer_t(j, out, n, DSMIX_ADPCM, ch, vp, filt);
+    else if (fmt == DSMIX_PCM16) dsmix_buffer_t(j, out, n, DSMIX_PCM16, ch, vp, filt);
+    else dsmix_buffer_t(j, out, n, DSMIX_PCM8, ch, vp, filt);
+}
+
+static void dsmix_buffer(struct dsmix_voice *j, float *out, int n)
+{
+    typedef void (*fn)(struct dsmix_voice *, float *, int);
+    static const fn table[2][2][3] = {   /* [fmt adpcm/pcm16][ch-1][0, vp, vp+filter] */
+        { { dsmix_adpcm1, dsmix_adpcm1_vp, dsmix_adpcm1_vpf }, { dsmix_adpcm2, dsmix_adpcm2_vp, dsmix_adpcm2_vpf } },
+        { { dsmix_pcm16_1, dsmix_pcm16_1_vp, dsmix_pcm16_1_vpf }, { dsmix_pcm16_2, dsmix_pcm16_2_vp, dsmix_pcm16_2_vpf } },
+    };
+    int fmt = dsmix_format(j);
+    if (fmt == DSMIX_PCM8 || j->ch < 1 || j->ch > 2) { dsmix_buffer_any(j, out, n); return; }
+    int var = !j->vp ? 0 : j->st->fmode == 1 ? 2 : 1;
+    table[fmt == DSMIX_PCM16][j->ch - 1][var](j, out, n);
+}
+
 static void dsmix_stream(struct dsmix_voice *j, float *out, int n)
 {
     struct dsmix_state *v = j->st;
     double step = exp2((double)j->pitch / 4096.0);
-    int ch = (int)j->ch;
+    int ch = (int)j->ch, fmt = dsmix_format(j);
     float *sub = j->sub;
     double pos = j->pos;
     uint32_t head = 0;
@@ -372,8 +434,9 @@ static void dsmix_stream(struct dsmix_voice *j, float *out, int n)
         uint32_t idx = (uint32_t)pos;
         float frac = (float)(pos - idx);
         uint32_t nxt = idx + 1 < p->frames ? idx + 1 : idx;
-        dsmix_fetch(&src, idx, a);
-        dsmix_fetch(&src, nxt, c);
+        if (fmt == DSMIX_ADPCM) dsmix_adpcm_begin(v, p->data);
+        dsmix_fetch_t(&src, idx, a, fmt, ch);
+        dsmix_fetch_t(&src, nxt, c, fmt, ch);
         float l = 0, r = 0, m = 0;
         for (int k = 0; k < ch; k++) {
             float smp = a[k] + (c[k] - a[k]) * frac;
