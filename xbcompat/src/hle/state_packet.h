@@ -69,6 +69,7 @@ struct xbr_draw_front *d3d_state_front_create(void *impl)
     return f;
 }
 
+#ifdef XBC_TRANSLATED /* guest call frames exist only in the translated renderer */
 struct xbr_state_packet *d3d_state_packet_capture(struct xbr_draw_front *f, void *impl,
                                                   struct xa_frame *call)
 {
@@ -133,6 +134,7 @@ struct xbr_state_packet *d3d_state_packet_capture(struct xbr_draw_front *f, void
 
     return out;
 }
+#endif
 
 void d3d_state_packet_commit(struct xbr_draw_front *f, const struct xbr_state_packet *p)
 {

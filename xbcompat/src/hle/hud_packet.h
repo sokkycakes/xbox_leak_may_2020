@@ -83,6 +83,7 @@ void d3d_draw_front_free(struct xbr_draw_front *front)
     free(front);
 }
 
+#ifdef XBC_TRANSLATED /* guest call frames exist only in the translated renderer */
 struct xbr_draw_packet *d3d_draw_packet_capture(const struct xbr_draw_front *front, void *impl,
                                                 struct xa_frame *call)
 {
@@ -170,6 +171,7 @@ struct xbr_draw_packet *d3d_draw_packet_capture(const struct xbr_draw_front *fro
     memcpy(packet->vertices, vertices, bytes);
     return packet;
 }
+#endif
 
 size_t d3d_draw_packet_size(const struct xbr_draw_packet *packet) { return packet->size; }
 void d3d_draw_packet_free(struct xbr_draw_packet *packet) { free(packet); }
