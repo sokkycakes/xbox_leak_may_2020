@@ -197,6 +197,8 @@ typedef struct xi_handle {                     /* pool_alloc'ed: the HANDLE the 
     ULONG packet;                               /* dwPacketNumber */
     uint64_t sampled_us;                        /* when `last` was taken */
     XINPUT_GAMEPAD last;                        /* latest report; kept after removal */
+    uint64_t logged_raw_buttons;                /* diagnostics: SDL joystick before mapping */
+    bool logged_raw_valid;
 } xi_handle;
 
 typedef struct {
@@ -344,6 +346,17 @@ static void insert_port(unsigned i, SDL_GameController *gc, SDL_JoystickID insta
     /* Only the Gamepad sample looks at the subtype (to pick the mesh). */
     p->subtype = (name && strstr(name, "Duke")) ? XINPUT_DEVSUBTYPE_GC_GAMEPAD : XINPUT_DEVSUBTYPE_GC_GAMEPAD_ALT;
     xlog("XInput: port %u: %s inserted", i, name ? name : "controller");
+    if (gc && xi.log_input) {
+        SDL_Joystick *js = SDL_GameControllerGetJoystick(gc);
+        char guid[33];
+        SDL_JoystickGetGUIDString(SDL_JoystickGetGUID(js), guid, sizeof(guid));
+        char *mapping = SDL_GameControllerMapping(gc);
+        xlog("XInput: port %u: GUID %s, VID/PID %04x:%04x, %d buttons, %d axes, %d hats",
+             i, guid, SDL_JoystickGetVendor(js), SDL_JoystickGetProduct(js),
+             SDL_JoystickNumButtons(js), SDL_JoystickNumAxes(js), SDL_JoystickNumHats(js));
+        xlog("XInput: port %u: SDL mapping: %s", i, mapping ? mapping : "(none)");
+        SDL_free(mapping);
+    }
     report_insertion_removal(i, true);
 }
 
@@ -430,6 +443,17 @@ static void original_pad_mapping(const char *guid, int flags, char *m, size_t si
     if (!(flags & OG_TRIGGER_BUTTONS)) snprintf(m + n, size - n, "righttrigger:a%d,", a++);
 }
 
+/* Keep the device name CRC in the GUID passed to SDL. SDL stores it in the
+   mapping's crc field; discarding it installs only a generic fallback, which
+   loses to an existing name-specific mapping for the same USB identity. */
+static int install_original_pad_mapping(SDL_JoystickGUID guid, int flags)
+{
+    char g[33], mapping[512];
+    SDL_JoystickGetGUIDString(guid, g, sizeof(g));
+    original_pad_mapping(g, flags, mapping, sizeof(mapping));
+    return SDL_GameControllerAddMapping(mapping);
+}
+
 #ifdef __linux__
 
 static const struct { Uint16 vendor, product; Uint8 flags; } og_pads[] = {
@@ -455,7 +479,6 @@ static void map_original_pad(int j)
     static SDL_JoystickGUID done[16];
     static unsigned ndone;
     SDL_JoystickGUID guid = SDL_JoystickGetDeviceGUID(j);
-    guid.data[2] = guid.data[3] = 0;            /* mappings never carry the name CRC */
     for (unsigned i = 0; i < ndone; i++)
         if (!memcmp(&done[i], &guid, sizeof(guid))) return;
     if (guid.data[0] != 0x03 || guid.data[1] != 0) return;      /* USB only */
@@ -479,10 +502,7 @@ static void map_original_pad(int j)
         flags = 0;
     }
 
-    char g[33], m[512];
-    SDL_JoystickGetGUIDString(guid, g, sizeof(g));
-    original_pad_mapping(g, flags, m, sizeof(m));
-    if (SDL_GameControllerAddMapping(m) < 0)
+    if (install_original_pad_mapping(guid, flags) < 0)
         xlog("XInput: original Xbox pad %04x:%04x: SDL_GameControllerAddMapping: %s",
              vendor, product, SDL_GetError());
     else
@@ -832,13 +852,29 @@ static void sample(xi_handle *h, const xi_port *p, bool force)
     uint64_t interval = (h->pp.bInputInterval ? h->pp.bInputInterval : 1) * 1000ull;
     uint64_t elapsed = t - h->sampled_us;
     if (!force && elapsed < interval) return;
+    if (xi.log_input && p->gc) {
+        SDL_Joystick *js = SDL_GameControllerGetJoystick(p->gc);
+        int count = SDL_JoystickNumButtons(js);
+        uint64_t raw = 0;
+        for (int b = 0; b < count && b < 64; b++)
+            if (SDL_JoystickGetButton(js, b)) raw |= UINT64_C(1) << b;
+        if (!h->logged_raw_valid || raw != h->logged_raw_buttons) {
+            xlog("XInput: port %u: raw joystick buttons %#018llx (bit 0 = b0, first %d buttons)",
+                 h->port, (unsigned long long)raw, count < 64 ? count : 64);
+            h->logged_raw_valid = true;
+            h->logged_raw_buttons = raw;
+        }
+    }
     XINPUT_GAMEPAD before = h->last;
     read_port(p, &h->last);
     if (xi.log_input && memcmp(&before, &h->last, sizeof(before)))
-        xlog("XInput: port %u: buttons %#06x, A %u B %u X %u Y %u, left stick %d,%d",
+        xlog("XInput: port %u: buttons %#06x, A %u B %u X %u Y %u Black %u White %u LT %u RT %u, sticks %d,%d / %d,%d",
              h->port, h->last.wButtons, h->last.bAnalogButtons[XINPUT_GAMEPAD_A],
              h->last.bAnalogButtons[XINPUT_GAMEPAD_B], h->last.bAnalogButtons[XINPUT_GAMEPAD_X],
-             h->last.bAnalogButtons[XINPUT_GAMEPAD_Y], h->last.sThumbLX, h->last.sThumbLY);
+             h->last.bAnalogButtons[XINPUT_GAMEPAD_Y],
+             h->last.bAnalogButtons[XINPUT_GAMEPAD_BLACK], h->last.bAnalogButtons[XINPUT_GAMEPAD_WHITE],
+             h->last.bAnalogButtons[XINPUT_GAMEPAD_LEFT_TRIGGER], h->last.bAnalogButtons[XINPUT_GAMEPAD_RIGHT_TRIGGER],
+             h->last.sThumbLX, h->last.sThumbLY, h->last.sThumbRX, h->last.sThumbRY);
     if (force) {
         h->sampled_us = t;
         h->packet++;
