@@ -120,6 +120,8 @@ typedef int32_t HRESULT;
 #define DSMIXBIN_ASSIGNMENT_MAX 8
 #define DSMIXBIN_SUBMIX 31
 
+#include "dsmix.h"
+
 #define MIX_RATE   48000
 #define MIX_FRAMES 512     /* frames per mixer block */
 #define HW_FRAME   32      /* hardware frame, samples */
@@ -249,23 +251,11 @@ struct ds_voice {
     int dirty;                /* recompute 3D + gains before the next block */
     float gain[6][2];         /* per source channel: left, right */
     float subgain[6];         /* per source channel: into the output (submix) buffer */
-    /* voice processor: the two envelope generators and the filter */
-    struct ds_eg { DWORD d[10]; int seg; uint32_t count; float value, step, coef, target; } eg[2];
-    int noteoff;              /* StopEx(ENVELOPE): releasing, off when the amplitude EG ends */
-    DWORD fmode, fc0, fc1;    /* SetFilter: mode, DLS2 cutoff and resonance registers */
-    float fc_cur, q_cur, svf_f, svf_q, low[6], band[6];
-    uint32_t ctl;             /* frames since VoiceOn: control-rate phase */
-    double step_cur;
-    /* Decoded ADPCM blocks (mixer-owned): the last block decoded and the
-       one before it.  Interpolation reads frame 63 of one block and frame 0
-       of the next, and while resampling up it does so for several output
-       frames in a row; with one block cached each of those decoded both
-       blocks again.  Setting adpcm_block to -1 drops both. */
-    int16_t adpcm_cache[2 * 64];
-    int32_t adpcm_block;
-    const uint8_t *adpcm_base;
-    int16_t adpcm_prev_cache[2 * 64];
-    int32_t adpcm_prev_block;
+    /* The mixer's state (dsmix.h): envelopes, filter, decoded ADPCM. */
+    union {
+        struct { DSMIX_STATE_FIELDS };
+        struct dsmix_state ms;
+    };
 };
 
 struct ds_notify { DWORD offset; HANDLE event; };
@@ -498,112 +488,11 @@ static LONG calc_pitch(DWORD freq)
 
 /* ---- Xbox ADPCM ------------------------------------------------------------ */
 
-static const int16_t adpcm_step[89] = {
-    7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41, 45, 50, 55, 60, 66, 73, 80, 88,
-    97, 107, 118, 130, 143, 157, 173, 190, 209, 230, 253, 279, 307, 337, 371, 408, 449, 494, 544, 598, 658,
-    724, 796, 876, 963, 1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066, 2272, 2499, 2749, 3024, 3327, 3660,
-    4026, 4428, 4871, 5358, 5894, 6484, 7132, 7845, 8630, 9493, 10442, 11487, 12635, 13899, 15289, 16818,
-    18500, 20350, 22385, 24623, 27086, 29794, 32767
-};
-static const int8_t adpcm_index_adjust[16] = { -1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4, 6, 8 };
-
-static inline int adpcm_sample(int nibble, int *pred, int *idx)
-{
-    int step = adpcm_step[*idx];
-    int diff = step >> 3;
-    if (nibble & 4) diff += step;
-    if (nibble & 2) diff += step >> 1;
-    if (nibble & 1) diff += step >> 2;
-    if (nibble & 8) diff = -diff;
-    int s = *pred + diff;
-    if (s < -32768) s = -32768; else if (s > 32767) s = 32767;
-    *pred = s;
-    *idx += adpcm_index_adjust[nibble];
-    if (*idx < 0) *idx = 0; else if (*idx > 88) *idx = 88;
-    return s;
-}
-
 /* Decode one 64-frame block (36 bytes per channel) to interleaved 16-bit PCM.
    Returns 0 and silence for a corrupt step index, as the library does. */
 int ds_adpcm_decode_block(const uint8_t *src, int ch, int16_t *out)
 {
-    int pred[2], idx[2];
-    for (int c = 0; c < ch; c++) {
-        uint32_t h; memcpy(&h, src + 4 * c, 4);
-        pred[c] = (int16_t)(h & 0xFFFF);
-        idx[c] = (h >> 16) & 0xFF;
-        if (idx[c] > 88) { memset(out, 0, 64 * ch * sizeof(*out)); return 0; }
-        out[c] = (int16_t)pred[c];
-    }
-    const uint8_t *p = src + 4 * ch;
-    if (ch == 1) {
-        for (int k = 1; k < 64; k++) {
-            int b = p[(k - 1) >> 1];
-            int n = (k & 1) ? b & 0xF : b >> 4;
-            out[k] = (int16_t)adpcm_sample(n, &pred[0], &idx[0]);
-        }
-    } else {
-        int k = 1;
-        for (int grp = 0; grp < 8; grp++) {
-            uint32_t l, r;
-            memcpy(&l, p + grp * 8, 4);
-            memcpy(&r, p + grp * 8 + 4, 4);
-            for (int i = 0; i < 8 && k < 64; i++, k++) {
-                out[k * 2] = (int16_t)adpcm_sample(l & 0xF, &pred[0], &idx[0]);
-                out[k * 2 + 1] = (int16_t)adpcm_sample(r & 0xF, &pred[1], &idx[1]);
-                l >>= 4; r >>= 4;
-            }
-        }
-    }
-    return 1;
-}
-
-/* ---- sample fetch ---------------------------------------------------------- */
-
-struct ds_src {
-    const uint8_t *data;
-    DWORD nframes;
-    const struct ds_fmt *fmt;
-    struct ds_voice *v;
-};
-
-static inline void fetch_frame(const struct ds_src *s, DWORD idx, float *out)
-{
-    const struct ds_fmt *f = s->fmt;
-    int ch = f->ch;
-    if (f->adpcm) {
-        int32_t block = (int32_t)(idx / 64);
-        struct ds_voice *v = s->v;
-        const int16_t *cache = v->adpcm_cache;
-        if (v->adpcm_block < 0 || v->adpcm_base != s->data) {
-            v->adpcm_prev_block = -1;
-            v->adpcm_block = -1;
-        }
-        if (v->adpcm_block != block) {
-            if (v->adpcm_prev_block == block) {
-                cache = v->adpcm_prev_cache;
-            } else {
-                if (v->adpcm_block >= 0) {
-                    memcpy(v->adpcm_prev_cache, v->adpcm_cache, sizeof v->adpcm_cache);
-                    v->adpcm_prev_block = v->adpcm_block;
-                }
-                ds_adpcm_decode_block(s->data + (DWORD)block * f->unit_bytes, ch, v->adpcm_cache);
-                v->adpcm_block = block;
-                v->adpcm_base = s->data;
-            }
-        }
-        const int16_t *c = cache + (idx % 64) * ch;
-        for (int i = 0; i < ch; i++) out[i] = c[i] * (1.0f / 32768.0f);
-    } else if (f->bits == 16) {
-        const uint8_t *p = s->data + idx * f->align;
-        for (int i = 0; i < ch; i++) {
-            int16_t x; memcpy(&x, p + 2 * i, 2);
-            out[i] = x * (1.0f / 32768.0f);
-        }
-    } else {
-        const uint8_t *p = s->data + idx * f->align;
-        for (int i = 0; i < ch; i++) out[i] = (p[i] - 128) * (1.0f / 128.0f);
-    }
+    return dsmix_adpcm_decode_block(src, ch, out);
 }
 
 /* ---- volume, mixbins, 3D --------------------------------------------------- */
@@ -819,57 +708,9 @@ static LONG voice_effective_pitch(const struct ds_voice *v)
     return p;
 }
 
-/* ---- voice processor: envelopes and filter ----------------------------------- */
+/* ---- voice processor: envelopes and filter (the model is in dsmix.h) ---------- */
 
-/* The model is the one bootani's software mixer uses (dsound_soft.c):
-   envelope lengths count 512-sample units; attack is linear, decay and
-   release exponential, landing at the end of their programmed length.  The
-   multi-function EG moves pitch by lPitchScale (s.7 octaves at full scale)
-   and the filter cutoff by lFilterCutOff (s3.4 octaves).  DLS2 filter
-   coefficient 0 is log2 of a Chamberlin SVF frequency coefficient in s3.12,
-   coefficient 1 its damping in 1.15; the MCPX's own fixed-point filter is not
-   documented, so this is an approximation.  Parameters update every 32
-   frames, as the APU processes voices in 32-sample frames. */
-enum { DSEG_IDX_MULTI = 0, DSEG_IDX_AMP = 1 };
-enum { EGD_EG, EGD_MODE, EGD_DELAY, EGD_ATTACK, EGD_HOLD, EGD_DECAY, EGD_RELEASE, EGD_SUSTAIN, EGD_PITCH, EGD_FC };
-enum { EG_OFF, EG_DELAY, EG_ATTACK, EG_HOLD, EG_DECAY, EG_SUSTAIN, EG_RELEASE };
-#define EG_LEN(x) (((uint32_t)(x) & 0xFFFu) * 512u)
-
-static void eg_enter(struct ds_eg *e, int seg)
-{
-    for (;;) {
-        e->seg = seg;
-        switch (seg) {
-        case EG_DELAY:
-            e->value = 0.0f;
-            if ((e->count = EG_LEN(e->d[EGD_DELAY]))) return;
-            seg = EG_ATTACK; break;
-        case EG_ATTACK:
-            if ((e->count = EG_LEN(e->d[EGD_ATTACK]))) { e->step = (1.0f - e->value) / e->count; return; }
-            seg = EG_HOLD; break;
-        case EG_HOLD:
-            e->value = 1.0f;
-            if ((e->count = EG_LEN(e->d[EGD_HOLD]))) return;
-            seg = EG_DECAY; break;
-        case EG_DECAY:
-            e->target = (e->d[EGD_SUSTAIN] & 0xFF) / 256.0f;
-            if ((e->count = EG_LEN(e->d[EGD_DECAY]))) { e->coef = (float)exp(-5.0 / e->count); return; }
-            seg = EG_SUSTAIN; break;
-        case EG_SUSTAIN:
-            e->value = (e->d[EGD_SUSTAIN] & 0xFF) / 256.0f;
-            e->count = 0;
-            return;
-        case EG_RELEASE:
-            if ((e->count = EG_LEN(e->d[EGD_RELEASE]))) { e->coef = (float)exp(-5.0 / e->count); return; }
-            seg = EG_OFF; break;
-        default:
-            e->seg = EG_OFF; e->value = 0.0f; e->count = 0;
-            return;
-        }
-    }
-}
-
-static void eg_default(struct ds_eg *e, DWORD which)
+static void eg_default(struct dsmix_eg *e, DWORD which)
 {
     memset(e, 0, sizeof(*e));
     e->d[EGD_EG] = which;
@@ -878,34 +719,15 @@ static void eg_default(struct ds_eg *e, DWORD which)
     e->value = 1.0f;
 }
 
-static void eg_start(struct ds_eg *e)
+static void eg_start(struct dsmix_eg *e)
 {
     switch (e->d[EGD_MODE]) {
-    case 1: eg_enter(e, EG_DELAY); break;                        /* DSEG_MODE_DELAY */
-    case 2: e->value = 0.0f; eg_enter(e, EG_ATTACK); break;      /* DSEG_MODE_ATTACK */
-    case 3: eg_enter(e, EG_HOLD); break;                         /* DSEG_MODE_HOLD */
-    default: e->seg = EG_SUSTAIN; e->value = 1.0f; e->count = 0; /* disabled: full scale */
+    case 1: dsmix_eg_enter(e, EG_DELAY); break;                     /* DSEG_MODE_DELAY */
+    case 2: e->value = 0.0f; dsmix_eg_enter(e, EG_ATTACK); break;   /* DSEG_MODE_ATTACK */
+    case 3: dsmix_eg_enter(e, EG_HOLD); break;                      /* DSEG_MODE_HOLD */
+    default: e->seg = EG_SUSTAIN; e->value = 1.0f; e->count = 0;    /* disabled: full scale */
     }
 }
-
-static float eg_tick(struct ds_eg *e)
-{
-    float v = e->value;
-    switch (e->seg) {
-    case EG_DELAY: if (--e->count == 0) eg_enter(e, EG_ATTACK); break;
-    case EG_ATTACK: e->value += e->step; if (--e->count == 0) eg_enter(e, EG_HOLD); break;
-    case EG_HOLD: if (--e->count == 0) eg_enter(e, EG_DECAY); break;
-    case EG_DECAY:
-        e->value = e->target + (e->value - e->target) * e->coef;
-        if (--e->count == 0) eg_enter(e, EG_SUSTAIN);
-        break;
-    case EG_RELEASE: e->value *= e->coef; if (--e->count == 0) eg_enter(e, EG_OFF); break;
-    }
-    return v;
-}
-
-static float s16field(DWORD v) { return (float)(int16_t)(uint16_t)(v & 0xFFFF); }
-static float s8field(DWORD v) { return (float)(int8_t)(uint8_t)(v & 0xFF); }
 
 /* VoiceOn: restart both envelopes and the filter. */
 static void voice_on(struct ds_voice *v)
@@ -916,33 +738,13 @@ static void voice_on(struct ds_voice *v)
     eg_start(&v->eg[DSEG_IDX_MULTI]);
     memset(v->low, 0, sizeof(v->low));
     memset(v->band, 0, sizeof(v->band));
-    v->fc_cur = s16field(v->fc0);
+    v->fc_cur = dsmix_s16field(v->fc0);
     v->q_cur = (v->fc1 & 0xFFFF) / 32768.0f;
 }
 
 static bool voice_has_vp(const struct ds_voice *v)
 {
     return v->fmode == 1 || v->eg[DSEG_IDX_AMP].d[EGD_MODE] || v->eg[DSEG_IDX_MULTI].d[EGD_MODE];
-}
-
-/* Per 32-frame update: pitch and cutoff with the multi-function EG. */
-static void voice_frame_params(struct ds_voice *v, LONG pitch)
-{
-    const struct ds_eg *m = &v->eg[DSEG_IDX_MULTI];
-    float env = m->value;
-    float p = pitch + s8field(m->d[EGD_PITCH]) * 32.0f * env;
-    if (p < DSBPITCH_MIN) p = DSBPITCH_MIN;
-    if (p > DSBPITCH_MAX) p = DSBPITCH_MAX;
-    v->step_cur = exp2(p / 4096.0);
-    if (v->fmode == 1) {   /* DSFILTER_MODE_DLS2; other modes are passed through */
-        v->fc_cur += (s16field(v->fc0) - v->fc_cur) * 0.25f;
-        v->q_cur += ((v->fc1 & 0xFFFF) / 32768.0f - v->q_cur) * 0.25f;
-        float fc = v->fc_cur + s8field(m->d[EGD_FC]) * 256.0f * env;
-        if (fc > 0.0f) fc = 0.0f;
-        if (fc < -32768.0f) fc = -32768.0f;
-        v->svf_f = exp2f(fc / 4096.0f);
-        v->svf_q = v->q_cur < 0.02f ? 0.02f : v->q_cur > 2.0f ? 2.0f : v->q_cur;
-    }
 }
 
 static void voice_init(struct ds_voice *v, int kind, void *owner, DWORD flags, const struct ds_fmt *fmt,
@@ -1223,118 +1025,82 @@ static void *completion_thread(void *arg)
 
 /* ---- the mixer --------------------------------------------------------------- */
 
-/* Render one buffer voice into out (interleaved stereo, n frames). */
-static void render_buffer(struct ds_buffer *b, float *out, int n, struct ds_events *ev)
+/* The voice's format, gains and pitch for dsmix_run. */
+static void voice_job(struct dsmix_voice *j, struct ds_voice *v)
+{
+    const struct ds_fmt *f = &v->fmt;
+    voice_refresh(v);
+    memset(j, 0, sizeof(*j));
+    j->st = &v->ms;
+    j->sub = v->output ? v->output->sub : NULL;
+    j->ch = f->ch; j->bits = f->bits; j->align = f->align;
+    j->unit_bytes = f->unit_bytes; j->adpcm = (uint32_t)f->adpcm;
+    j->pitch = voice_effective_pitch(v);
+    memcpy(j->gain, v->gain, sizeof(j->gain));
+    memcpy(j->subgain, v->subgain, sizeof(j->subgain));
+}
+
+/* Describe a playing buffer for dsmix_run; false when there is nothing to mix. */
+static bool buffer_job(struct ds_buffer *b, struct dsmix_voice *j, struct ds_events *ev)
 {
     struct ds_voice *v = &b->v;
-    if (!b->playing || b->paused || !b->data || (v->flags & DSBCAPS_SUBMIXMASK)) return;
+    if (!b->playing || b->paused || !b->data || (v->flags & DSBCAPS_SUBMIXMASK)) return false;
     const struct ds_fmt *f = &v->fmt;
     DWORD total = bytes_to_frames(f, b->play_len);
-    if (!total) { b->playing = 0; b->cursor = 0; if (b->notify_active) buffer_position_delta(b, ev); return; }
-    DWORD ls = bytes_to_frames(f, b->loop_start), ll = bytes_to_frames(f, b->loop_len);
-    int looping = b->looping && ll > 0 && ls + ll <= total;
-    DWORD le = ls + ll;
-    voice_refresh(v);
-    LONG pitch = voice_effective_pitch(v);
-    double step = exp2((double)pitch / 4096.0);
-    bool vp = voice_has_vp(v);
-    struct ds_src src = { b->data + b->play_start, total, f, v };
-    int ch = f->ch;
-    float *sub = v->output ? v->output->sub : NULL;
-    double pos = b->pos;
-    float a[6], c[6];
-    for (int i = 0; i < n; i++) {
-        if (looping && pos >= le) pos = ls + fmod(pos - ls, (double)ll);
-        if (pos >= total) { b->playing = 0; pos = 0; break; }
-        DWORD idx = (DWORD)pos;
-        float frac = (float)(pos - idx);
-        DWORD nxt = idx + 1;
-        if (looping && nxt >= le) nxt = ls;
-        if (nxt >= total) nxt = idx;
-        fetch_frame(&src, idx, a);
-        fetch_frame(&src, nxt, c);
-        float l = 0, r = 0, m = 0, amp = 1.0f;
-        if (vp) {
-            if ((v->ctl++ & 31) == 0) voice_frame_params(v, pitch);
-            step = v->step_cur;
-            amp = eg_tick(&v->eg[DSEG_IDX_AMP]);
-            eg_tick(&v->eg[DSEG_IDX_MULTI]);
-        }
-        for (int k = 0; k < ch; k++) {
-            float s = a[k] + (c[k] - a[k]) * frac;
-            if (vp && v->fmode == 1) {   /* Chamberlin state-variable low-pass */
-                v->low[k] += v->svf_f * v->band[k];
-                float high = s - v->low[k] - v->svf_q * v->band[k];
-                v->band[k] += v->svf_f * high;
-                s = v->low[k];
-            }
-            s *= amp;
-            l += s * v->gain[k][0];
-            r += s * v->gain[k][1];
-            m += s * v->subgain[k];
-        }
-        out[2 * i] += l;
-        out[2 * i + 1] += r;
-        if (sub) sub[i] += m;
-        if (v->noteoff && v->eg[DSEG_IDX_AMP].seg == EG_OFF) {   /* end of release: voice off */
-            b->playing = 0;
-            break;
-        }
-        pos += step;
-    }
-    if (b->playing) {
-        if (looping && pos >= le) pos = ls + fmod(pos - ls, (double)ll);
-        b->pos = pos;
+    if (!total) { b->playing = 0; b->cursor = 0; if (b->notify_active) buffer_position_delta(b, ev); return false; }
+    voice_job(j, v);
+    j->kind = DSMIX_BUFFER;
+    j->data = b->data + b->play_start;
+    j->total = total;
+    j->loop_start = bytes_to_frames(f, b->loop_start);
+    j->loop_len = bytes_to_frames(f, b->loop_len);
+    j->looping = (uint32_t)b->looping;
+    j->vp = voice_has_vp(v);
+    j->pos = b->pos;
+    return true;
+}
+
+static void buffer_mixed(struct ds_buffer *b, const struct dsmix_voice *j, struct ds_events *ev)
+{
+    if (j->playing) {
+        b->pos = j->pos;
     } else {
-        /* Reached the end of a non-looping play region: the voice is off
-           and the cached cursor is the 0 that Play left there. */
-        b->pos = 0; b->cursor = 0;
+        /* Reached the end of a non-looping play region, or the end of an
+           envelope release: the voice is off and the cached cursor is the 0
+           that Play left there. */
+        b->playing = 0; b->pos = 0; b->cursor = 0;
     }
     if (b->notify_active) buffer_position_delta(b, ev);
 }
 
-static void render_stream(struct ds_stream *s, float *out, int n)
+/* Describe a running stream for dsmix_run, its queued packets in pk. */
+static bool stream_job(struct ds_stream *s, struct dsmix_voice *j, struct dsmix_packet *pk)
 {
-    struct ds_voice *v = &s->v;
-    if (!s->active || s->paused || s->starved || !s->count) return;
-    const struct ds_fmt *f = &v->fmt;
-    voice_refresh(v);
-    double step = exp2((double)voice_effective_pitch(v) / 4096.0);
-    int ch = f->ch;
-    float *sub = v->output ? v->output->sub : NULL;
-    float a[6], c[6];
-    for (int i = 0; i < n; i++) {
-        struct ds_packet *p = &s->pk[s->head];
-        while (s->pos >= p->frames) {
-            s->pos -= p->frames;
-            stream_complete(s, p, XMEDIAPACKET_STATUS_SUCCESS);
-            s->head = (s->head + 1) % s->max_packets;
-            s->count--;
-            v->adpcm_block = -1;
-            if (!s->count) {
-                if (s->discontinuity) { s->active = 0; s->discontinuity = 0; s->pos = 0; }
-                else s->starved = 1;
-                return;
-            }
-            p = &s->pk[s->head];
-        }
-        struct ds_src src = { p->xmp.pvBuffer, p->frames, f, v };
-        DWORD idx = (DWORD)s->pos;
-        float frac = (float)(s->pos - idx);
-        DWORD nxt = idx + 1 < p->frames ? idx + 1 : idx;
-        fetch_frame(&src, idx, a);
-        fetch_frame(&src, nxt, c);
-        float l = 0, r = 0, m = 0;
-        for (int k = 0; k < ch; k++) {
-            float smp = a[k] + (c[k] - a[k]) * frac;
-            l += smp * v->gain[k][0];
-            r += smp * v->gain[k][1];
-            m += smp * v->subgain[k];
-        }
-        out[2 * i] += l;
-        out[2 * i + 1] += r;
-        if (sub) sub[i] += m;
-        s->pos += step;
+    if (!s->active || s->paused || s->starved || !s->count) return false;
+    voice_job(j, &s->v);
+    j->kind = DSMIX_STREAM;
+    for (DWORD i = 0; i < s->count; i++) {
+        const struct ds_packet *p = &s->pk[(s->head + i) % s->max_packets];
+        pk[i].data = p->xmp.pvBuffer;
+        pk[i].frames = p->frames;
+    }
+    j->pk = pk;
+    j->npk = s->count;
+    j->pos = s->pos;
+    return true;
+}
+
+static void stream_mixed(struct ds_stream *s, const struct dsmix_voice *j)
+{
+    for (uint32_t i = 0; i < j->consumed; i++) {
+        stream_complete(s, &s->pk[s->head], XMEDIAPACKET_STATUS_SUCCESS);
+        s->head = (s->head + 1) % s->max_packets;
+        s->count--;
+    }
+    s->pos = j->pos;
+    if (j->ran_out) {
+        if (s->discontinuity) { s->active = 0; s->discontinuity = 0; s->pos = 0; }
+        else s->starved = 1;
     }
 }
 
@@ -1356,11 +1122,32 @@ static void buffer_stop_locked(struct ds_buffer *b, struct ds_events *ev);
 static void buffer_stopex_locked(struct ds_buffer *b, DWORD flags, struct ds_events *ev);
 static HRESULT buffer_play_locked(struct ds_buffer *b, DWORD flags);
 
+/* The native ARM mixer, when the x86 runtime runs under box86 beside the
+   native renderer (renderer/client.c); XBCOMPAT_NATIVE_MIXER=0 keeps the
+   mixing here. */
+void ds_native_mix(struct dsmix_job *job) __attribute__((weak));
+
+static void mix_voices(struct dsmix_job *job)
+{
+    static int native = -1;
+    if (native < 0) {
+        const char *e = getenv("XBCOMPAT_NATIVE_MIXER");
+        native = ds_native_mix && !(e && *e == '0');
+        if (ds_native_mix) xlog("DSound: mixing %s", native ? "natively" : "in x86 code (XBCOMPAT_NATIVE_MIXER=0)");
+    }
+    if (native) ds_native_mix(job);
+    else dsmix_run(job);
+}
+
 /* Mix one block of n frames into out (zeroed here).  Called from the audio
    thread, the clock thread, or a test. */
 void ds_mix_block(float *out, int n)
 {
     for (; n > MIX_FRAMES; n -= MIX_FRAMES, out += 2 * MIX_FRAMES) ds_mix_block(out, MIX_FRAMES);
+    static struct dsmix_voice *jobs;
+    static void **owners;
+    static struct dsmix_packet *packets;
+    static unsigned job_cap, packet_cap;
     struct ds_events ev = { .n = 0 };
     memset(out, 0, (size_t)n * 2 * sizeof(float));
     ds_in_mixer = 1;
@@ -1370,11 +1157,24 @@ void ds_mix_block(float *out, int n)
     g.frames += (uint64_t)n;
     g.block_ns = mono_ns();
     int64_t now = reference_time_locked();
+    unsigned npackets = 0;
     for (unsigned i = 0; i < g.nobjs; i++) {
         struct ds_entry *e = &g.objs[i];
         if (e->kind == DS_BUFFER && ((struct ds_buffer *)e->obj)->sub)
             memset(((struct ds_buffer *)e->obj)->sub, 0, (size_t)n * sizeof(float));
+        if (e->kind == DS_STREAM) npackets += ((struct ds_stream *)e->obj)->count;
     }
+    if (g.nobjs > job_cap) {
+        job_cap = g.nobjs * 2;
+        jobs = realloc(jobs, job_cap * sizeof(*jobs));
+        owners = realloc(owners, job_cap * sizeof(*owners));
+    }
+    if (npackets > packet_cap) {
+        packet_cap = npackets * 2;
+        packets = realloc(packets, packet_cap * sizeof(*packets));
+    }
+    unsigned nj = 0;
+    npackets = 0;
     for (unsigned i = 0; i < g.nobjs; i++) {
         struct ds_entry *e = &g.objs[i];
         if (e->kind == DS_BUFFER) {
@@ -1385,14 +1185,24 @@ void ds_mix_block(float *out, int n)
                 buffer_play_locked(b, b->start_flags);
             }
             if (b->stop_at && now >= b->stop_at) { b->stop_at = 0; buffer_stopex_locked(b, b->stop_flags, &ev); }
-            if (t0 && b->playing && !b->paused && b->data && !(b->v.flags & DSBCAPS_SUBMIXMASK))
-                voices[voice_has_vp(&b->v) ? 2 : b->v.fmt.adpcm ? 1 : 0]++;
-            render_buffer(b, out, n, &ev);
+            if (buffer_job(b, &jobs[nj], &ev)) {
+                if (t0) voices[jobs[nj].vp ? 2 : jobs[nj].adpcm ? 1 : 0]++;
+                owners[nj++] = b;
+            }
         } else if (e->kind == DS_STREAM) {
             struct ds_stream *st = e->obj;
-            if (t0 && st->active && !st->paused && !st->starved && st->count) voices[3]++;
-            render_stream(st, out, n);
+            if (stream_job(st, &jobs[nj], packets + npackets)) {
+                npackets += st->count;
+                if (t0) voices[3]++;
+                owners[nj++] = st;
+            }
         }
+    }
+    struct dsmix_job job = { jobs, nj, out, (uint32_t)n };
+    if (nj) mix_voices(&job);
+    for (unsigned i = 0; i < nj; i++) {
+        if (jobs[i].kind == DSMIX_STREAM) stream_mixed(owners[i], &jobs[i]);
+        else buffer_mixed(owners[i], &jobs[i], &ev);
     }
     for (unsigned i = 0; i < g.nobjs; i++) {
         struct ds_entry *e = &g.objs[i];
@@ -1577,8 +1387,8 @@ static void buffer_stopex_locked(struct ds_buffer *b, DWORD flags, struct ds_eve
         if (flags & DSBSTOPEX_RELEASEWAVEFORM) b->looping = 0;
         if (!v->noteoff) {
             v->noteoff = 1;
-            if (v->eg[DSEG_IDX_AMP].seg != EG_OFF) eg_enter(&v->eg[DSEG_IDX_AMP], EG_RELEASE);
-            if (v->eg[DSEG_IDX_MULTI].seg != EG_OFF) eg_enter(&v->eg[DSEG_IDX_MULTI], EG_RELEASE);
+            if (v->eg[DSEG_IDX_AMP].seg != EG_OFF) dsmix_eg_enter(&v->eg[DSEG_IDX_AMP], EG_RELEASE);
+            if (v->eg[DSEG_IDX_MULTI].seg != EG_OFF) dsmix_eg_enter(&v->eg[DSEG_IDX_MULTI], EG_RELEASE);
             if (v->eg[DSEG_IDX_AMP].seg == EG_OFF) buffer_stop_locked(b, ev);
         }
     } else if (b->playing && (flags & DSBSTOPEX_ENVELOPE) && (flags & DSBSTOPEX_RELEASEWAVEFORM)) {
@@ -2727,7 +2537,7 @@ static HRESULT NTAPI Voice_SetEG(void *self, const void *desc)
     const DWORD *d = desc;
     if (d[0] > 1) return DSERR_INVALIDPARAM;
     VOICE_ENTRY(v, self);
-    struct ds_eg *e = &v->eg[d[0] == 1 ? DSEG_IDX_AMP : DSEG_IDX_MULTI];
+    struct dsmix_eg *e = &v->eg[d[0] == 1 ? DSEG_IDX_AMP : DSEG_IDX_MULTI];
     memcpy(e->d, d, sizeof(e->d));
     VOICE_RETURN(DS_OK);
 }
@@ -2738,7 +2548,7 @@ static HRESULT NTAPI Voice_SetFilter(void *self, const void *desc)
     const DWORD *d = desc;   /* dwMode, dwQCoefficient, adwCoefficients[4] */
     VOICE_ENTRY(v, self);
     if (v->fmode != 1 && (d[0] & 3) == 1) {   /* switched on: track from the new values */
-        v->fc_cur = s16field(d[2]);
+        v->fc_cur = dsmix_s16field(d[2]);
         v->q_cur = (d[3] & 0xFFFF) / 32768.0f;
     }
     v->fmode = d[0] & 3;

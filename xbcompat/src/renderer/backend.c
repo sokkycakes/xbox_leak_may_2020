@@ -20,6 +20,8 @@ void (*g_vblank_hook)(void); /* Native hook, distinct from the x86 kernel thunk.
 
 static void invoke_now(uint32_t index, struct xbr_call *call);
 static void control_now(uint32_t op, uint32_t *a);
+struct dsmix_job;
+void renderer_ds_mix(struct dsmix_job *job);   /* dsmix.c */
 #include "worker.h"
 /* Runs one request where it was drained; nested runs restore renderer_current. */
 static void renderer_execute(struct xbr_request *r)
@@ -150,6 +152,10 @@ void xbr_control(uint32_t op, uint32_t *args)
     if (!host_call) abort();
     if (op == XBR_FRAME_COUNT) { /* A plain counter: no need to wait for the queue. */
         args[0] = d3d_frame_count();
+        return;
+    }
+    if (op == XBR_DS_MIX) {   /* The sound mixer: no GL, so not the render queue's business. */
+        renderer_ds_mix((struct dsmix_job *)args);
         return;
     }
     renderer_dispatch(XBR_REQUEST_CONTROL, op, NULL, args);

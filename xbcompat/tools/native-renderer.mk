@@ -21,7 +21,7 @@ override CFLAGS += $(ARCH_FLAGS) -std=gnu11 -Wall -Wextra -Wno-unused-parameter 
     -D_FILE_OFFSET_BITS=64 -DXBC_FORCE_TRANSLATED -Isrc \
     $(shell $(PKGCFG) --cflags sdl2 $(GL))
 LIBS = $(shell $(PKGCFG) --libs sdl2 $(GL)) -lpthread -lm
-OBJ = $(BUILD)/d3d8.o $(BUILD)/vsh.o $(BUILD)/vsh_interp.o $(BUILD)/psh.o $(BUILD)/backend.o
+OBJ = $(BUILD)/d3d8.o $(BUILD)/vsh.o $(BUILD)/vsh_interp.o $(BUILD)/psh.o $(BUILD)/backend.o $(BUILD)/dsmix.o
 HEADERS = src/xbcompat.h src/xbox.h src/cpu.h src/hle/hle.h src/hle/glcache.h \
           src/hle/nv2a_shaders.h src/renderer/bridge.h
 .DEFAULT_GOAL := all
@@ -38,6 +38,10 @@ $(BUILD)/%.o: src/hle/%.c $(HEADERS)
 $(BUILD)/backend.o: src/renderer/backend.c $(HEADERS)
 	@mkdir -p $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
+# No fused multiply-add, so the ARM mixer's output matches the x86 one bit for bit.
+$(BUILD)/dsmix.o: src/renderer/dsmix.c src/hle/dsmix.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) -ffp-contract=off -c $< -o $@
 $(BUILD)/libxbcompat_renderer.so.1: $(OBJ)
 	$(CC) $(ARCH_FLAGS) -shared -Wl,-z,defs,-Bsymbolic,-soname,libxbcompat_renderer.so.1 -o $@ $^ $(LIBS)
 .PHONY: all

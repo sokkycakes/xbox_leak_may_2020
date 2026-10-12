@@ -113,6 +113,14 @@ void d3d_bind_globals(void)
     backend_control(XBR_BIND_GLOBALS, NULL);
     __atomic_store_n(&g_vblank_hook, native_vblank, __ATOMIC_RELEASE);
 }
+/* dsound.c's mixer hands each block's voices to the native library. */
+struct dsmix_job;
+void ds_native_mix(struct dsmix_job *job);
+void ds_native_mix(struct dsmix_job *job)
+{
+    ensure_backend();
+    backend_control(XBR_DS_MIX, (uint32_t *)job);
+}
 ULONG d3d_frame_count(void)
 {
     ensure_backend();
