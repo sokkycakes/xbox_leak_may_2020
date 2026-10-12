@@ -225,15 +225,15 @@ static int by_ns(const void *a, const void *b)
     return x->ns < y->ns ? 1 : x->ns > y->ns ? -1 : 0;
 }
 
-/* Called with waits_lock held: log the window's biggest waits and clear it. */
-static void waits_log(uint64_t now)
+/* Log a window's biggest waits (a copy of the table, taken under waits_lock;
+   the logging itself runs unlocked so no other thread's wait queues behind
+   the file reads and the log write). */
+static void waits_log(struct wait_slot *copy, double secs, uint32_t dropped)
 {
-    static struct wait_slot copy[WAIT_SLOTS];
     int used = 0;
     for (int i = 0; i < WAIT_SLOTS; i++)
-        if (waits[i].n) copy[used++] = waits[i];
+        if (copy[i].n) copy[used++] = copy[i];
     qsort(copy, used, sizeof(*copy), by_ns);
-    double secs = (now - waits_since) / 1e9;
     for (int i = 0; i < used && i < 10; i++) {
         char path[64], name[32] = "?";
         snprintf(path, sizeof path, "/proc/self/task/%u/comm", copy[i].tid);
@@ -249,10 +249,7 @@ static void waits_log(uint64_t now)
              copy[i].kind == 6 ? "thread waits" : copy[i].kind == 8 || copy[i].kind == 9 ? "timer waits" : "other waits",
              copy[i].site);
     }
-    if (waits_dropped) xlog("Waits: %u not counted (table full)", waits_dropped);
-    memset(waits, 0, sizeof waits);
-    waits_dropped = 0;
-    waits_since = now;
+    if (dropped) xlog("Waits: %u not counted (table full)", dropped);
 }
 
 void prof_wait_end(uint64_t start, int kind)
@@ -282,6 +279,22 @@ void prof_wait_end(uint64_t start, int kind)
     }
     if (w) { w->n++; w->ns += now - start; }
     else waits_dropped++;
-    if (now - waits_since >= 5000000000u) waits_log(now);
+    static struct wait_slot copy[WAIT_SLOTS];
+    static uint32_t logging;
+    double secs = 0;
+    uint32_t dropped = 0;
+    if (now - waits_since >= 5000000000u && !logging) {
+        logging = 1;
+        memcpy(copy, waits, sizeof copy);
+        secs = (now - waits_since) / 1e9;
+        dropped = waits_dropped;
+        memset(waits, 0, sizeof waits);
+        waits_dropped = 0;
+        waits_since = now;
+    }
     pthread_mutex_unlock(&waits_lock);
+    if (secs > 0) {
+        waits_log(copy, secs, dropped);
+        __atomic_store_n(&logging, 0, __ATOMIC_RELEASE);
+    }
 }
