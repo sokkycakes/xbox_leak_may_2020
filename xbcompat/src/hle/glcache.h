@@ -45,7 +45,7 @@ enum { CA_VERTEX, CA_NORMAL, CA_COLOR, CA_SECONDARY, CA_GLOBAL };
 enum {
     TE_MODE, TE_COMBINE_RGB, TE_COMBINE_ALPHA, TE_SRC_RGB0, TE_SRC_ALPHA0 = TE_SRC_RGB0 + 3,
     TE_OP_RGB0 = TE_SRC_ALPHA0 + 3, TE_OP_ALPHA0 = TE_OP_RGB0 + 3, TE_RGB_SCALE = TE_OP_ALPHA0 + 3,
-    TE_ALPHA_SCALE, TE_COORD_REPLACE, TE_COLOR, TE_N = TE_COLOR + 4
+    TE_ALPHA_SCALE, TE_COORD_REPLACE, TE_COLOR, TE_LOD_BIAS = TE_COLOR + 4, TE_N
 };
 
 /* glTexParameter values, per texture object. */
@@ -77,10 +77,12 @@ static struct {
 
 static gc_texparams *gc_tex;    /* indexed by texture name */
 static uint32_t gc_ntex;
+static unsigned gc_epoch;      /* bumped whenever GL state may have changed */
 static unsigned gc_calls, gc_skipped;   /* this frame, for the fps log */
 
 static void gc_reset(void)
 {
+    gc_epoch++;
     memset(&gc, 0, sizeof gc);
     /* 0 means unknown for the capability bytes; everything else uses GC_UNKNOWN. */
     uint8_t *caps_end = (uint8_t *)&gc.active;
@@ -104,7 +106,7 @@ static inline bool gc_set(uint32_t *a, const void *b, int n)
 {
     if (gc_same(a, b, n)) { gc_skipped++; return false; }
     memcpy(a, b, n * 4);
-    gc_calls++;
+    gc_calls++; gc_epoch++;
     return true;
 }
 
@@ -163,7 +165,7 @@ static void gc_enable(GLenum cap, bool on)
     uint8_t *s = gc_cap_slot(cap);
     if (s && *s == (on ? 2 : 1)) { gc_skipped++; return; }
     if (s) *s = on ? 2 : 1;
-    gc_calls++;
+    gc_calls++; gc_epoch++;
     if (on) (glEnable)(cap); else (glDisable)(cap);
 }
 
@@ -201,7 +203,7 @@ static void gc_client(GLenum a, bool on)
     }
     if (s && *s == (on ? 2 : 1)) { gc_skipped++; return; }
     if (s) *s = on ? 2 : 1;
-    gc_calls++;
+    gc_calls++; gc_epoch++;
     if (on) (glEnableClientState)(a); else (glDisableClientState)(a);
 }
 
@@ -227,7 +229,7 @@ static void gc_bind_texture(GLenum target, GLuint id)
     if (u < GC_UNITS && t >= 0) {
         if (!gc_set1(&gc.bound[u][t], id)) return;
     } else {
-        gc_calls++;
+        gc_calls++; gc_epoch++;
     }
     (glBindTexture)(target, id);
 }
@@ -272,7 +274,7 @@ static void gc_tex_parameteri(GLenum target, GLenum pname, GLint v)
     if (p && i >= 0) {
         if (!gc_set1(&p->v[i], (uint32_t)v)) return;
     } else {
-        gc_calls++;
+        gc_calls++; gc_epoch++;
     }
     (glTexParameteri)(target, pname, v);
 }
@@ -283,7 +285,7 @@ static void gc_tex_parameterfv(GLenum target, GLenum pname, const GLfloat *v)
     if (p && pname == GL_TEXTURE_BORDER_COLOR) {
         if (!gc_set(&p->v[TP_BORDER], v, 4)) return;
     } else {
-        gc_calls++;
+        gc_calls++; gc_epoch++;
     }
     (glTexParameterfv)(target, pname, v);
 }
@@ -291,6 +293,7 @@ static void gc_tex_parameterfv(GLenum target, GLenum pname, const GLfloat *v)
 /* New or deleted names start with default parameters and are unbound. */
 static void gc_forget_textures(GLsizei n, const GLuint *ids)
 {
+    gc_epoch++;
     for (GLsizei i = 0; i < n; i++) {
         if (ids[i] < gc_ntex) memset(&gc_tex[ids[i]], 0xFF, sizeof *gc_tex);
         for (int u = 0; u < GC_UNITS; u++)
@@ -313,6 +316,7 @@ static void gc_delete_textures(GLsizei n, const GLuint *ids)
 
 static int gc_texenv_index(GLenum target, GLenum pname)
 {
+    if (target == 0x8500 /* GL_TEXTURE_FILTER_CONTROL */) return pname == 0x8501 /* GL_TEXTURE_LOD_BIAS */ ? TE_LOD_BIAS : -1;
     if (target == 0x8861 /* GL_POINT_SPRITE */) return pname == 0x8862 /* GL_COORD_REPLACE */ ? TE_COORD_REPLACE : -1;
     if (target != GL_TEXTURE_ENV) return -1;
     switch (pname) {
@@ -340,16 +344,23 @@ static uint32_t *gc_texenv_slot(GLenum target, GLenum pname)
 static void gc_texenvi(GLenum target, GLenum pname, GLint v)
 {
     uint32_t *s = gc_texenv_slot(target, pname);
-    if (s) { if (!gc_set1(s, (uint32_t)v & 0x7FFFFFFFu)) return; }
-    else gc_calls++;
+    if (s) {
+        uint32_t bits = (uint32_t)v;
+        if (!gc_set1(s, bits)) return;
+    }
+    else { gc_calls++; gc_epoch++; }
     (glTexEnvi)(target, pname, v);
 }
 
 static void gc_texenvf(GLenum target, GLenum pname, GLfloat v)
 {
     uint32_t *s = gc_texenv_slot(target, pname);
-    if (s) { if (!gc_set1(s, gc_fbits(v) | 0x80000000u)) return; }
-    else gc_calls++;
+    if (s) {
+        /* Float values carry a kind bit, except LOD bias (only ever a float). */
+        uint32_t bits = target == 0x8500 ? gc_fbits(v) : gc_fbits(v) | 0x80000000u;
+        if (!gc_set1(s, bits)) return;
+    }
+    else { gc_calls++; gc_epoch++; }
     (glTexEnvf)(target, pname, v);
 }
 
@@ -359,7 +370,7 @@ static void gc_texenvfv(GLenum target, GLenum pname, const GLfloat *v)
     if (target == GL_TEXTURE_ENV && pname == GL_TEXTURE_ENV_COLOR && u < GC_UNITS) {
         if (!gc_set(&gc.texenv[u][TE_COLOR], v, 4)) return;
     } else {
-        gc_calls++;
+        gc_calls++; gc_epoch++;
     }
     (glTexEnvfv)(target, pname, v);
 }
@@ -370,7 +381,7 @@ static void gc_texgeni(GLenum coord, GLenum pname, GLint v)
     if (u < GC_UNITS && c < 4 && pname == GL_TEXTURE_GEN_MODE) {
         if (!gc_set1(&gc.texgen[u][c], (uint32_t)v)) return;
     } else {
-        gc_calls++;
+        gc_calls++; gc_epoch++;
     }
     (glTexGeni)(coord, pname, v);
 }
@@ -379,7 +390,7 @@ static void gc_multitexcoord4fv(GLenum unit, const GLfloat *v)
 {
     unsigned u = unit - GL_TEXTURE0;
     if (u < GC_UNITS) { if (!gc_set(gc.texcoord[u], v, 4)) return; }
-    else gc_calls++;
+    else { gc_calls++; gc_epoch++; }
     p_glMultiTexCoord4fv(unit, v);
 }
 
@@ -393,6 +404,7 @@ static void gc_bind_buffer(GLenum target, GLuint id)
 
 static void gc_forget_buffer(GLuint id)
 {
+    gc_epoch++;
     if (gc.array_buffer == id) gc.array_buffer = GC_UNKNOWN;
     if (gc.element_buffer == id) gc.element_buffer = GC_UNKNOWN;
 }
@@ -406,7 +418,7 @@ static void gc_attrib_array(GLuint r, bool on)
 {
     uint32_t bit = 1u << r;
     if (r < 16 && ((on ? gc.attrib_on : gc.attrib_off) & bit)) { gc_skipped++; return; }
-    gc_calls++;
+    gc_calls++; gc_epoch++;
     if (r < 16) {
         if (on) { gc.attrib_on |= bit; gc.attrib_off &= ~bit; gc.attrib_val_known &= ~bit; }
         else { gc.attrib_off |= bit; gc.attrib_on &= ~bit; }
@@ -423,7 +435,7 @@ static void gc_vertex_attrib4fv(GLuint r, const GLfloat *v)
         /* Only an attribute with its array off keeps the value through a draw. */
         if (gc.attrib_off & bit) gc.attrib_val_known |= bit;
     }
-    gc_calls++;
+    gc_calls++; gc_epoch++;
     p_glVertexAttrib4fv(r, v);
 }
 
@@ -464,14 +476,14 @@ static void gc_polygon_mode(GLenum face, GLenum mode)
 {
     if (face == GL_FRONT_AND_BACK) { if (gc_set1(&gc.polygon_mode, mode)) (glPolygonMode)(face, mode); return; }
     gc.polygon_mode = GC_UNKNOWN;
-    gc_calls++;
+    gc_calls++; gc_epoch++;
     (glPolygonMode)(face, mode);
 }
 
 static void gc_point_parameterfv(GLenum p, const GLfloat *v)
 {
     if (p == 0x8129 /* GL_POINT_DISTANCE_ATTENUATION */) { if (gc_set(gc.point_att, v, 3)) p_glPointParameterfv(p, v); return; }
-    gc_calls++;
+    gc_calls++; gc_epoch++;
     p_glPointParameterfv(p, v);
 }
 
@@ -479,7 +491,7 @@ static void gc_point_parameterf(GLenum p, GLfloat v)
 {
     uint32_t *s = p == 0x8126 /* GL_POINT_SIZE_MIN */ ? &gc.point_min : p == 0x8127 /* MAX */ ? &gc.point_max : NULL;
     if (s) { if (gc_set1(s, gc_fbits(v))) p_glPointParameterf(p, v); return; }
-    gc_calls++;
+    gc_calls++; gc_epoch++;
     p_glPointParameterf(p, v);
 }
 
@@ -506,14 +518,14 @@ static void gc_depth_range(GLclampd n, GLclampd f)
     if (gc.depth_range[0] == n && gc.depth_range[1] == f) { gc_skipped++; return; }
     gc.depth_range[0] = n;
     gc.depth_range[1] = f;
-    gc_calls++;
+    gc_calls++; gc_epoch++;
     (glDepthRange)(n, f);
 }
 
 static void gc_fogfv(GLenum p, const GLfloat *v)
 {
     if (p == GL_FOG_COLOR) { if (gc_set(gc.fog, v, 4)) (glFogfv)(p, v); return; }
-    gc_calls++;
+    gc_calls++; gc_epoch++;
     (glFogfv)(p, v);
 }
 
@@ -521,7 +533,7 @@ static void gc_fogf(GLenum p, GLfloat v)
 {
     uint32_t *s = p == GL_FOG_START ? &gc.fog[4] : p == GL_FOG_END ? &gc.fog[5] : p == GL_FOG_DENSITY ? &gc.fog[6] : NULL;
     if (s) { if (gc_set1(s, gc_fbits(v))) (glFogf)(p, v); return; }
-    gc_calls++;
+    gc_calls++; gc_epoch++;
     (glFogf)(p, v);
 }
 
@@ -546,7 +558,7 @@ static void gc_load_matrixf(const GLfloat *m)
         memcpy(gc.matrix[s], m, 64);
         gc.matrix_known[s] = 1;
     }
-    gc_calls++;
+    gc_calls++; gc_epoch++;
     (glLoadMatrixf)(m);
 }
 
@@ -556,7 +568,7 @@ static void gc_matrix_changed(void)
     int s = gc_matrix_slot();
     if (s >= 0) gc.matrix_known[s] = 0;
     else memset(gc.matrix_known, 0, sizeof gc.matrix_known);
-    gc_calls++;
+    gc_calls++; gc_epoch++;
 }
 
 static void gc_pop_attrib(void)

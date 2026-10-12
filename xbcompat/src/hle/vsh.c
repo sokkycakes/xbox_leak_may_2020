@@ -390,9 +390,13 @@ static const char *const helpers =
     "  return vec4(1.0, x, z, 1.0);\n"
     "}\n";
 
-char *vsh_translate(const uint32_t *code, unsigned count)
+char *vsh_translate_ex(const uint32_t *code, unsigned count, unsigned flags)
 {
     vsh_error[0] = 0;
+    if (flags & ~VSH_VARIANT_Z) {
+        snprintf(vsh_error, sizeof vsh_error, "unsupported variant flags %#x", flags);
+        return NULL;
+    }
     if (!code || !count) return NULL;
 
     /* First pass: decode, find the end, and see what the program touches. */
@@ -507,8 +511,10 @@ char *vsh_translate(const uint32_t *code, unsigned count)
            "  vs_n.y = (vp_scale.y != 0.0) ? vs_n.y / vp_scale.y : 0.0;\n"
            "  vs_n.z = (vp_scale.z != 0.0) ? vs_n.z / vp_scale.z : 0.0;\n"
            "  float vs_w = (oPos.w >= 0.0) ? clamp(oPos.w, 5.42101086e-20, 1.84467441e19)\n"
-           "                               : clamp(oPos.w, -1.84467441e19, -5.42101086e-20);\n"
-           "  if (wdepth.x != 0.0) vs_n.z = wdepth.y + wdepth.z / vs_w;\n"
+           "                               : clamp(oPos.w, -1.84467441e19, -5.42101086e-20);\n");
+    if (!(flags & VSH_VARIANT_Z))
+        sb_put(&e.b, "  if (wdepth.x != 0.0) vs_n.z = wdepth.y + wdepth.z / vs_w;\n");
+    sb_put(&e.b,
            "  gl_Position = vec4(vs_n.x, vs_n.y * flip_y, 2.0 * vs_n.z - 1.0, 1.0) * vs_w;\n"
            "  gl_FrontColor = clamp(oD0, 0.0, 1.0);\n"
            "  gl_FrontSecondaryColor = clamp(oD1, 0.0, 1.0);\n");
@@ -558,4 +564,9 @@ char *vsh_translate(const uint32_t *code, unsigned count)
         serial++;
     }
     return e.b.s;
+}
+
+char *vsh_translate(const uint32_t *code, unsigned count)
+{
+    return vsh_translate_ex(code, count, 0);
 }

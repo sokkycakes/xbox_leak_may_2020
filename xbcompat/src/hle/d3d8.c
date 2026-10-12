@@ -27,17 +27,23 @@
 #include "nv2a_shaders.h"
 #include "dxt_decode.h"
 #include "ff_vsh.h"
+#include "shader_diagnostics.h"
+#include "cpu_compare_audit.h"
+static unsigned shader_diag_draw;   /* draws seen, for XBCOMPAT_SHADER_DIAGNOSTICS */
 
 /* Set at device creation: see rgba_colors. */
 static bool rgba_vertex_colors;
 static bool vc4;   /* the Raspberry Pi's GPU */
+static GLint host_vertex_attribs;   /* GL_MAX_VERTEX_ATTRIBS */
 
 #include "glcache.h"
 
 typedef ULONG UINT_;
 
 #define D3D_OK 0
+#define D3DERR_NOTAVAILABLE ((LONG)0x8876086A)
 #define D3DERR_INVALIDCALL ((LONG)0x8876086C)
+#define D3DERR_NOTFOUND ((LONG)0x88760866)
 
 /* ---- Xbox D3D types ---------------------------------------------------- */
 
@@ -54,6 +60,12 @@ typedef struct D3DPixelContainer {
 } D3DPixelContainer;
 
 static void tex_invalidate(ULONG data);
+
+/* A captured HUD packet is drawing (see hud_packet.h): its textures are bound already. */
+static bool hud_packet_active;
+static bool hud_raw_active;
+static ULONG hud_packet_texture_identity[4];
+static GLuint hud_packet_texture_id[4];
 
 typedef struct {
     ULONG BackBufferWidth;
@@ -102,7 +114,7 @@ enum {
     D3DRS_PSCONSTANT0_0 = 10, D3DRS_PSCONSTANT1_0 = 18, D3DRS_PSCONSTANT1_7 = 25,
     D3DRS_PSFINALCOMBINERCONSTANT0 = 43, D3DRS_PSFINALCOMBINERCONSTANT1 = 44, D3DRS_PS_MAX = 57,
     D3DRS_ZFUNC = 57, D3DRS_ALPHAFUNC = 58, D3DRS_ALPHABLENDENABLE = 59, D3DRS_ALPHATESTENABLE = 60,
-    D3DRS_ALPHAREF = 61, D3DRS_SRCBLEND = 62, D3DRS_DESTBLEND = 63, D3DRS_ZWRITEENABLE = 64,
+    D3DRS_ALPHAREF = 61, D3DRS_SRCBLEND = 62, D3DRS_DESTBLEND = 63, D3DRS_ZWRITEENABLE = 64, D3DRS_DITHERENABLE = 65,
     D3DRS_SHADEMODE = 66, D3DRS_COLORWRITEENABLE = 67, D3DRS_STENCILZFAIL = 68, D3DRS_STENCILPASS = 69,
     D3DRS_STENCILFUNC = 70, D3DRS_STENCILREF = 71, D3DRS_STENCILMASK = 72, D3DRS_STENCILWRITEMASK = 73,
     D3DRS_BLENDOP = 74, D3DRS_BLENDCOLOR = 75, D3DRS_STENCILFAIL = 126,
@@ -153,11 +165,13 @@ static struct {
     int rt_width, rt_height;     /* size of the current render target */
     bool rt_texture;             /* rendering into a texture (GL rows run bottom-up) */
     float target_zmax;           /* largest value of the current depth buffer's format */
+    float host_zmax;             /* the same for the GL depth buffer actually backing it */
     ULONG fbo;                   /* framebuffer object for texture targets */
     struct { ULONG count; ULONG exclusive; D3DRECT rects[8]; } scissors;
     float screen_offset[2];
     float backbuffer_scale[2];
     ULONG multisample_type;      /* D3DPRESENT_PARAMETERS.MultiSampleType */
+    ULONG color_format, depth_format;   /* the device's back buffer formats */
     ULONG flicker_filter;        /* SetFlickerFilter level, 0 (off) to 5 */
     bool soft_display;           /* SetSoftDisplayFilter (the encoder's luma filter) */
     unsigned char gamma[3][256]; /* SetGammaRamp: red, green, blue (D3DGAMMARAMP) */
@@ -227,15 +241,16 @@ enum {
 static void load_fbo_functions(void);
 static void load_shader_functions(void);
 static void create_device_surfaces(ULONG format, ULONG depth_format);
-static void create_window_framebuffer(void);
+static bool create_window_framebuffer(void);
 static void present_window_framebuffer(void);
 static void gamma_identity(void);
 static void restore_window_framebuffer(void);
 static void backbuffer_read_begin(GLbitfield mask);
 static void backbuffer_read_end(void);
+static void hud_batch_flush(void), hud_profile_log(double frames);   /* fvf_batch.h */
 static GLuint cur_program;   /* the GL program bound for draws (see use_program) */
 static bool ff_lighting_candidate, ff_primary_present, ff_secondary_present;
-static unsigned ff_weight_components;
+static unsigned ff_texture_units, ff_weight_components;
 static bool ff_pretransformed;
 static void program_off(void);
 static GLuint backbuffer_copy_texture(ULONG data, ULONG w, ULONG h);
@@ -332,8 +347,10 @@ static void bind_render_state_layout(void)
              d3d.rs_count);
 }
 
-/* Frames presented so far (XBCOMPAT_INPUT_SCRIPT counts in these). */
-ULONG d3d_frame_count(void) { return d3d.frame; }
+/* Frames presented so far (XBCOMPAT_INPUT_SCRIPT counts in these). The input
+   thread reads it while the render worker presents, so Swap publishes it. */
+static ULONG published_frame_count;
+ULONG d3d_frame_count(void) { return __atomic_load_n(&published_frame_count, __ATOMIC_ACQUIRE); }
 
 void d3d_bind_globals(void)
 {
@@ -454,6 +471,8 @@ static LONG NTAPI Direct3D_CreateDevice(UINT_ Adapter, ULONG DeviceType, PVOID p
     d3d.width = pp->BackBufferWidth ? pp->BackBufferWidth : 640;
     d3d.height = pp->BackBufferHeight ? pp->BackBufferHeight : 480;
     d3d.multisample_type = pp->MultiSampleType;
+    d3d.color_format = pp->BackBufferFormat;
+    d3d.depth_format = pp->EnableAutoDepthStencil ? pp->AutoDepthStencilFormat : 0;
     d3d.flicker_filter = 5;   /* what the Xbox's device init sets */
     d3d.soft_display = false;
     gamma_identity();
@@ -480,7 +499,10 @@ static LONG NTAPI Direct3D_CreateDevice(UINT_ Adapter, ULONG DeviceType, PVOID p
     if (!d3d.window) fatal("SDL_CreateWindow: %s", SDL_GetError());
     d3d.gl = SDL_GL_CreateContext(d3d.window);
     if (!d3d.gl) fatal("SDL_GL_CreateContext: %s", SDL_GetError());
+    shader_diagnostics_init();
     gc_reset();
+    glGetIntegerv(GL_MAX_VERTEX_ATTRIBS, &host_vertex_attribs);
+    if (host_vertex_attribs > 16) host_vertex_attribs = 16;
     const char *swap_env = getenv("XBCOMPAT_SWAP_INTERVAL");
     int swap_interval = swap_env && !strcmp(swap_env, "0") ? 0 : 1;
     int swap_result = SDL_GL_SetSwapInterval(swap_interval);
@@ -504,7 +526,12 @@ static LONG NTAPI Direct3D_CreateDevice(UINT_ Adapter, ULONG DeviceType, PVOID p
     d3d.device_refs = 1;
 
     load_fbo_functions();
-    create_window_framebuffer();
+    if (!create_window_framebuffer()) {
+        SDL_GL_DeleteContext(d3d.gl); d3d.gl = NULL;
+        SDL_DestroyWindow(d3d.window); d3d.window = NULL;
+        if (ppDevice) *ppDevice = NULL;
+        return D3DERR_NOTAVAILABLE;
+    }
     load_shader_functions();
     create_device_surfaces(pp->BackBufferFormat, pp->EnableAutoDepthStencil ? pp->AutoDepthStencilFormat : 0);
     d3d.backbuffer_scale[0] = d3d.backbuffer_scale[1] = 1;
@@ -547,6 +574,7 @@ static int write_bmp(const char *path, int w, int h, const uint8_t *px)
 
 static void save_screenshot(const char *path)
 {
+    hud_batch_flush();
     int w = d3d.width, h = d3d.height;
     uint8_t *px = malloc(w * h * 4);
     backbuffer_read_begin(GL_COLOR_BUFFER_BIT);
@@ -563,23 +591,29 @@ static void save_screenshot(const char *path)
 /* Debug aid: XBCOMPAT_DUMP_DRAWS=dir saves the current target after every
    draw of one frame (XBCOMPAT_DUMP_FRAME, default the first) as
    dir/drawNNN.bmp. */
-/* Work counted for XBCOMPAT_LOG_FPS: what a slow frame spends its time on. */
+/* Work counted for XBCOMPAT_LOG_FPS and PROFILE_WORK: what a slow frame spends its time on. */
 static struct { unsigned draws, uploads, readbacks, shaders; } stats;
 /* Push buffer replay time per frame (draws included), in performance-counter
    ticks; log_fps times the rest. XBCOMPAT_PROFILE_SYNC=1 makes each draw
    wait for the GPU, so its time lands on the draw. */
 static struct { Uint64 drain; } prof;
-static int prof_on = -1, prof_sync;
+static int fps_on = -1, detail_on, work_on, prof_sync;
+static unsigned fvf_plan_hits, fvf_plan_misses;
 
-/* XBCOMPAT_LOG_FPS is set: count and time the frame's work. */
+/* XBCOMPAT_LOG_FPS or XBCOMPAT_PROFILE_WORK is set: count and time the
+   frame's work (the log has only the rate without PROFILE_WORK).
+   XBCOMPAT_PROFILE_RENDERER adds the per-call timers (detail_on). */
 static bool profiling(void)
 {
-    if (prof_on < 0) {
-        const char *e = getenv("XBCOMPAT_LOG_FPS"), *s = getenv("XBCOMPAT_PROFILE_SYNC");
-        prof_on = e && *e && *e != '0';
+    if (fps_on < 0) {
+        const char *e = getenv("XBCOMPAT_LOG_FPS"), *w = getenv("XBCOMPAT_PROFILE_WORK");
+        const char *p = getenv("XBCOMPAT_PROFILE_RENDERER"), *s = getenv("XBCOMPAT_PROFILE_SYNC");
+        detail_on = p && *p && *p != '0';
+        work_on = w && *w && *w != '0';
+        fps_on = e && *e && *e != '0';
         prof_sync = s && *s && *s != '0';
     }
-    return prof_on;
+    return fps_on || work_on;
 }
 
 static Uint64 prof_draw_begin(void)
@@ -630,7 +664,8 @@ static void debug_dump_texture(GLenum target, ULONG data, ULONG fmt, ULONG w, UL
 static void (APIENTRY *p_glWindowPos2i)(GLint, GLint);
 static void (APIENTRY *p_glBindFramebuffer)(GLenum, GLuint);
 static void (APIENTRY *p_glActiveTexture)(GLenum);
-static void draw_window_pixels(const uint8_t *tmp);
+static void draw_window_pixels_format(const uint8_t *tmp, GLenum format, GLenum type);
+static bool surface_color_transfer(ULONG fmt, GLenum *format, GLenum *type, unsigned *bytes);
 static void present_overlay(void);
 static void restore_overlay(void);
 static LONG NTAPI D3DDevice_PersistDisplay(void);
@@ -640,17 +675,26 @@ static void flush_cpu_backbuffer(void)
     if (!d3d.bb_cpu_dirty || !d3d.backbuffer) return;
     d3d.bb_cpu_dirty = false;
     ULONG w = d3d.width, h = d3d.height;
-    ULONG pitch = d3d.backbuffer->Size ? ((d3d.backbuffer->Size >> 24) + 1) * 64 : w * 4;
+    GLenum format, type; unsigned bytes;
+    if (!surface_color_transfer((d3d.backbuffer->Format >> 8) & 0xFF, &format, &type, &bytes)) {
+        xlog("D3D: unsupported CPU back-buffer transfer format"); return;
+    }
+    ULONG pitch = d3d.backbuffer->Size ? ((d3d.backbuffer->Size >> 24) + 1) * 64 : w * bytes;
     const uint8_t *px = (const uint8_t *)(d3d.backbuffer->Data | CONTIG_BASE);
-    uint8_t *tmp = malloc(w * h * 4);
-    for (ULONG y = 0; y < h; y++) memcpy(tmp + (h - 1 - y) * w * 4, px + y * pitch, w * 4);
-    draw_window_pixels(tmp);
+    uint8_t *tmp = malloc(w * h * bytes);
+    if (!tmp) return;
+    for (ULONG y = 0; y < h; y++) memcpy(tmp + (h - 1 - y) * w * bytes, px + y * pitch, w * bytes);
+    draw_window_pixels_format(tmp, format, type);
     free(tmp);
 }
 
 /* Replace the window's color buffer with BGRA pixels, bottom row first. */
 static void draw_window_pixels(const uint8_t *tmp)
+{ draw_window_pixels_format(tmp, GL_BGRA, GL_UNSIGNED_BYTE); }
+
+static void draw_window_pixels_format(const uint8_t *tmp, GLenum format, GLenum type)
 {
+    shader_diagnostics_mark(d3d.frame, ++shader_diag_draw, 0, 0, 0, "cpu-pixels");
     if (!p_glWindowPos2i) p_glWindowPos2i = SDL_GL_GetProcAddress("glWindowPos2i");
     if (!p_glWindowPos2i) return;
     ULONG w = d3d.width, h = d3d.height;
@@ -662,11 +706,12 @@ static void draw_window_pixels(const uint8_t *tmp)
     }
     glDisable(GL_DEPTH_TEST); glDisable(GL_BLEND); glDisable(GL_ALPHA_TEST); glDisable(GL_FOG);
     glDisable(GL_STENCIL_TEST); glDisable(GL_SCISSOR_TEST); glDisable(GL_LIGHTING);
+    glDisable(GL_DITHER);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     if (p_glBindFramebuffer) p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
     p_glWindowPos2i(0, 0);
-    glDrawPixels(w, h, GL_BGRA, GL_UNSIGNED_BYTE, tmp);
+    glDrawPixels(w, h, format, type, tmp);
     if (p_glBindFramebuffer) p_glBindFramebuffer(GL_FRAMEBUFFER, d3d.rt_texture ? d3d.fbo : 0);
     glPopAttrib();
 }
@@ -727,10 +772,9 @@ static void wait_vblank(void)
    frame time went: draws (xbcompat's state/constant/vertex setup, then the
    GL draw calls themselves), presenting (the filter pass and the buffer
    swap, which waits for the display), and the rest (the title's own code). */
-static int fps_on = -1, detail_on;
 static uint64_t t_draw, t_gl, t_present, t_pace;
 static uint64_t t_resolve, t_filter, t_swap, t_restore;
-static uint64_t t_state, t_program, t_constants, t_attributes, t_indices;
+static uint64_t t_state, t_program, t_constants, t_attributes, t_indices, t_buffer_upload;
 static unsigned n_draws;
 static unsigned cache_hits, cache_misses, cache_evicts, cache_uploads;
 static uint64_t cache_upload_bytes;
@@ -746,17 +790,20 @@ static void log_fps(void)
 {
     static uint64_t since;
     static unsigned frames;
-    if (fps_on < 0) {
-        const char *e = getenv("XBCOMPAT_LOG_FPS"), *p = getenv("XBCOMPAT_PROFILE_RENDERER");
-        detail_on = p && *p && *p != '0';
-        fps_on = detail_on || (e && *e && *e != '0');
-    }
+    profiling();
     if (!fps_on) return;
     uint64_t now = now_ns();
     if (!since) since = now;
     frames++;
     if (now - since >= 5000000000u) {
         double f = frames, ms = (now - since) / 1e6 / f;
+        if (!work_on) {   /* the rate alone: counting the work costs frames */
+            xlog("D3D: %.1f fps: %.2f ms a frame, %u draws (rate only)", 1000.0 / ms, ms,
+                 (unsigned)(n_draws / f));
+            since = now;
+            n_draws = frames = 0;
+            return;
+        }
         xlog("D3D: %.1f fps: %.1f ms a frame, %u draws %.1f ms (GL calls %.1f), present+swap %.1f ms, "
              "pacing %.1f ms, other %.1f ms; GL state calls %u, %u skipped", 1000.0 / ms, ms, (unsigned)(n_draws / f),
              t_draw / 1e6 / f, t_gl / 1e6 / f, t_present / 1e6 / f, t_pace / 1e6 / f,
@@ -768,6 +815,7 @@ static void log_fps(void)
              (unsigned)(stats.shaders / f), (unsigned)((g_guest_traps - traps) / f), prof.drain * tick,
              prof_sync ? " [GPU synced per draw]" : "");
         traps = g_guest_traps;
+        hud_profile_log(f);
         memset(&prof, 0, sizeof(prof));
         memset(&stats, 0, sizeof(stats));
         if (detail_on) {
@@ -778,8 +826,12 @@ static void log_fps(void)
                  cache_hits / f, cache_misses / f, cache_evicts / f, cache_uploads / f, cache_upload_bytes / f);
             cache_hits = cache_misses = cache_evicts = cache_uploads = 0; cache_upload_bytes = 0;
             t_resolve = t_filter = t_swap = t_restore = 0;
+            xlog("D3D buffers: upload calls %.2f ms/frame", t_buffer_upload / 1e6 / f);
+            xlog("D3D prepared state: reused %.1f rebuilt %.1f per frame", fvf_plan_hits / f, fvf_plan_misses / f);
+            t_buffer_upload = 0;
             t_state = t_program = t_constants = t_attributes = t_indices = 0;
         }
+        fvf_plan_hits = fvf_plan_misses = 0;
         gc_calls = gc_skipped = 0;
         since = now;
         frames = 0;
@@ -789,7 +841,7 @@ static void log_fps(void)
 }
 #define DETAIL_TIMED(acc, ...) do { if (detail_on) { uint64_t td_ = now_ns(); __VA_ARGS__; acc += now_ns() - td_; } \
                                     else { __VA_ARGS__; } } while (0)
-#define TIMED(acc, ...) do { if (fps_on > 0) { uint64_t t0_ = now_ns(); __VA_ARGS__; acc += now_ns() - t0_; } \
+#define TIMED(acc, ...) do { if (profiling()) { uint64_t t0_ = now_ns(); __VA_ARGS__; acc += now_ns() - t0_; } \
                              else { __VA_ARGS__; } } while (0)
 
 static void pace_present(void)
@@ -806,9 +858,12 @@ static void pace_present(void)
 static ULONG NTAPI D3DDevice_Swap(ULONG Flags)
 {
     pusher_drain();
+    hud_batch_flush();
     (void)Flags;
     flush_cpu_backbuffer();
     d3d.frame++;
+    cpu_compare_audit_frame(d3d.frame);
+    __atomic_store_n(&published_frame_count, d3d.frame, __ATOMIC_RELEASE);
     {
         /* Debug aid: XBCOMPAT_TRACE_FRAME=n turns --trace on for frame n only. */
         static long trace_frame = -2;
@@ -869,6 +924,7 @@ static ULONG NTAPI D3DDevice_Swap(ULONG Flags)
 
 static void apply_viewport(void)
 {
+    hud_batch_flush();
     D3DVIEWPORT8 *v = &d3d.viewport;
     /* GL rows run bottom-up: flip the window viewport; a texture target is
        drawn upside down instead (see apply_render_states). */
@@ -889,6 +945,7 @@ static void NTAPI D3DDevice_Clear(ULONG Count, const D3DRECT *pRects, ULONG Flag
                                   ULONG Stencil)
 {
     pusher_drain();
+    hud_batch_flush();
     if (d3d.recording) {
         ULONG h[5] = { Count, Flags, Color, 0, Stencil };
         memcpy(&h[3], &Z, 4);
@@ -898,6 +955,7 @@ static void NTAPI D3DDevice_Clear(ULONG Count, const D3DRECT *pRects, ULONG Flag
     TRACE_ALL("D3D: Clear(%u rects, flags %#x, color %#x, z %g)", Count, Flags, Color, Z);
     if ((Flags & 3) && d3d.target_depth && d3d.target_depth == d3d.depth) depth_gpu_writes++;
     flush_cpu_backbuffer();   /* earlier CPU writes go under the clear, not over it at Present */
+    gc_enable(GL_DITHER, RS(D3DRS_DITHERENABLE) != 0);   /* the clear dithers as draws do */
     GLbitfield mask = 0;
     if (Flags & 0xF0) {
         glClearColor(((Color >> 16) & 255) / 255.0f, ((Color >> 8) & 255) / 255.0f, (Color & 255) / 255.0f,
@@ -976,6 +1034,7 @@ static void res_free_header(D3DResource *r)
    its parent has already been dropped by whoever released it. */
 static void destroy_resource(D3DResource *r)
 {
+    hud_batch_flush();   /* a queued HUD draw may still read it */
     if (!(r->Common & D3DCOMMON_D3DCREATED)) return;
     ULONG type = r->Common & D3DCOMMON_TYPE_MASK;
     if (type == D3DCOMMON_TYPE_VERTEXBUFFER || type == D3DCOMMON_TYPE_PALETTE) {
@@ -1092,6 +1151,7 @@ typedef struct tex_entry {
 } tex_entry;
 
 static tex_entry *tex_cache;
+static unsigned tex_cache_version;   /* bumped whenever a cached texture goes away */
 
 /* The palette of the stage whose texture is being bound (P8 textures). */
 static const uint32_t *tex_palette;
@@ -1099,6 +1159,7 @@ static ULONG tex_palette_count;
 
 static void tex_use_palette(int stage)
 {
+    if (hud_packet_active) return;   /* the packet carries its own textures */
     D3DPalette *p = stage < 4 ? d3d.palettes[stage] : NULL;
     tex_palette = p ? (const uint32_t *)(p->Data | CONTIG_BASE) : NULL;
     tex_palette_count = p ? 256u >> (p->Common >> 30) : 0;
@@ -1114,6 +1175,8 @@ static ULONG palette_hash(void)
 /* Forget the GL copy of a texture the title is about to modify. */
 static void tex_invalidate(ULONG data)
 {
+    tex_cache_version++;
+    hud_batch_flush();
     tex_entry **pp = &tex_cache;
     while (*pp) {
         tex_entry *e = *pp;
@@ -1199,6 +1262,7 @@ static void (APIENTRY *p_glGetShaderInfoLog)(GLuint, GLsizei, GLsizei *, char *)
 static GLuint (APIENTRY *p_glCreateProgram)(void);
 static void (APIENTRY *p_glAttachShader)(GLuint, GLuint);
 static void (APIENTRY *p_glBindAttribLocation)(GLuint, GLuint, const char *);
+static GLint (APIENTRY *p_glGetAttribLocation)(GLuint, const char *);
 static void (APIENTRY *p_glLinkProgram)(GLuint);
 static void (APIENTRY *p_glGetProgramiv)(GLuint, GLenum, GLint *);
 static void (APIENTRY *p_glGetProgramInfoLog)(GLuint, GLsizei, GLsizei *, char *);
@@ -1430,8 +1494,9 @@ static void upload_image3(GLenum target, GLint level, ULONG fmt, ULONG w, ULONG 
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     if (target == GL_TEXTURE_3D)
         glTexImage3D(target, level, table[i].force_alpha ? GL_RGB : GL_RGBA, w, h, d, 0, table[i].gl_fmt, table[i].gl_type, px);
-    else
-        glTexImage2D(target, level, table[i].force_alpha ? GL_RGB : GL_RGBA, w, h, 0, table[i].gl_fmt, table[i].gl_type, px);
+    else   /* 5:6:5 stays 16-bit on the GPU: half the texture memory and upload bandwidth */
+        glTexImage2D(target, level, fmt == 0x05 || fmt == 0x11 ? 0x8D62 /* GL_RGB565 */ : table[i].force_alpha ? GL_RGB : GL_RGBA,
+                     w, h, 0, table[i].gl_fmt, table[i].gl_type, px);
     free(px);
 }
 
@@ -1445,6 +1510,7 @@ static void (APIENTRY *p_glBindFramebuffer)(GLenum, GLuint);   /* loaded with th
    memory (top row first), the way the NV2A keeps them in RAM. */
 static void readback_surface(D3DSurface *s, bool depth)
 {
+    hud_batch_flush();
     stats.readbacks++;
     ULONG w, h, pitch;
     container_size((D3DPixelContainer *)s, &w, &h, &pitch);
@@ -1480,12 +1546,16 @@ static uint64_t depth_memory_hash(void)
 
 static GLuint texture_for(D3DPixelContainer *t)
 {
+    if (hud_packet_active)   /* a captured HUD packet bound its textures already */
+        for (int s = 0; s < 4; s++)
+            if (d3d.textures[s] == (D3DResource *)t) return hud_packet_texture_id[s];
     /* A texture header over the back buffer or the depth buffer (titles
        build these with XGSetTextureHeader to filter the frame): read the
        current pixels back and upload them fresh. */
     ULONG va = t->res.Data | CONTIG_BASE;
     bool on_color = d3d.backbuffer && va == (d3d.backbuffer->Data | CONTIG_BASE) && t != (D3DPixelContainer *)d3d.backbuffer;
     bool on_depth = d3d.depth && va == (d3d.depth->Data | CONTIG_BASE) && t != (D3DPixelContainer *)d3d.depth;
+    if (on_color || on_depth) hud_batch_flush();   /* queued draws land in the frame first */
     if (on_color) {
         /* A 32-bit view of the back buffer (Phantom Dust filters the frame
            through three every frame): copy it on the GPU, no readback. */
@@ -1526,6 +1596,7 @@ static GLuint texture_for(D3DPixelContainer *t)
     for (tex_entry *e = tex_cache; e; e = e->next)
         if (e->data == t->res.Data && e->format == t->Format && e->size == t->Size && e->pal == pal) return e->id;
 
+    hud_batch_flush();   /* uploading rebinds texture units a queued draw uses */
     container_size(t, &w, &h, &pitch);
     if (!t->Size) pitch = 0;
     const uint8_t *src = (const uint8_t *)(t->res.Data | CONTIG_BASE);
@@ -1562,6 +1633,7 @@ static GLuint texture_for(D3DPixelContainer *t)
     tex_entry *e = malloc(sizeof(*e));
     *e = (tex_entry){ t->res.Data, t->Format, t->Size, pal, id, target, tex_cache };
     tex_cache = e;
+    tex_cache_version++;
     return id;
 }
 
@@ -1603,6 +1675,7 @@ static GLenum combine_source(ULONG arg)
 
 /* GL_ATI_texture_env_combine3 adds MODULATE_ADD (s0 * s2 + s1), which the
    triadic and "add smooth" ops need. */
+static bool texture_combine_initialized;   /* the GL_COMBINE state below has been set once */
 static bool have_combine3(void)
 {
     static int have = -1;
@@ -1610,6 +1683,7 @@ static bool have_combine3(void)
         const char *ext = (const char *)glGetString(GL_EXTENSIONS);
         have = ext && (strstr(ext, "GL_ATI_texture_env_combine3") || strstr(ext, "GL_NV_texture_env_combine4"));
         if (!have) xlog("D3D: no GL_ATI_texture_env_combine3; triadic texture ops fall back to MODULATE");
+        texture_combine_initialized = true;
     }
     return have;
 }
@@ -1877,6 +1951,7 @@ static unsigned apply_textures(void)
    and always divides by q, so the matrix is rearranged to match. */
 static void apply_texture_transforms(unsigned units, const int tsize[4])
 {
+    ff_texture_units = units;
     static const float sx[4] = { 1, 0, 0, 0 }, sy[4] = { 0, 1, 0, 0 }, sz[4] = { 0, 0, 1, 0 };
     /* Eye-linear planes are given in eye space: set them under an identity
        modelview (only then, as the push and pop cost calls every draw). */
@@ -2204,6 +2279,8 @@ static void apply_render_states(bool pretransformed, bool has_normal)
     ff_primary_present = ff_secondary_present = false;
     flush_cpu_backbuffer();
     apply_viewport();
+    /* The Pi's 16-bit back buffer bands without dithering; follow the title. */
+    gc_enable(GL_DITHER, RS(D3DRS_DITHERENABLE) != 0);
 
     if (RS(D3DRS_ZENABLE)) {
         glEnable(GL_DEPTH_TEST);
@@ -2219,10 +2296,11 @@ static void apply_render_states(bool pretransformed, bool has_normal)
         glColorMask(!!(cw & 0xFF0000), !!(cw & 0xFF00), !!(cw & 0xFF), !!(cw & 0xFF000000));
     }
     if (RS(D3DRS_SOLIDOFFSETENABLE)) {
-        /* The offset counts steps of the Xbox depth format; GL's of a 24-bit buffer. */
+        /* The offset counts steps of the Xbox depth format; GL's of the
+           host depth buffer, which may be 16 or 24 bits. */
         glEnable(GL_POLYGON_OFFSET_FILL);
         glPolygonOffset(rs_float(D3DRS_POLYGONOFFSETZSLOPESCALE),
-                        rs_float(D3DRS_POLYGONOFFSETZOFFSET) * 16777215.0f / d3d.target_zmax);
+                        rs_float(D3DRS_POLYGONOFFSETZOFFSET) * d3d.host_zmax / d3d.target_zmax);
     } else {
         glDisable(GL_POLYGON_OFFSET_FILL);
     }
@@ -2429,7 +2507,7 @@ static void load_shader_functions(void)
 {
 #define LOAD(n) p_##n = SDL_GL_GetProcAddress(#n)
     LOAD(glCreateShader); LOAD(glShaderSource); LOAD(glCompileShader); LOAD(glGetShaderiv);
-    LOAD(glGetShaderInfoLog); LOAD(glCreateProgram); LOAD(glAttachShader); LOAD(glBindAttribLocation);
+    LOAD(glGetShaderInfoLog); LOAD(glCreateProgram); LOAD(glAttachShader); LOAD(glBindAttribLocation); LOAD(glGetAttribLocation);
     LOAD(glLinkProgram); LOAD(glGetProgramiv); LOAD(glGetProgramInfoLog); LOAD(glUseProgram);
     LOAD(glDeleteShader); LOAD(glDeleteProgram); LOAD(glGetUniformLocation); LOAD(glUniform4fv);
     LOAD(glUniform1f); LOAD(glUniform1i); LOAD(glEnableVertexAttribArray); LOAD(glDisableVertexAttribArray);
@@ -2449,6 +2527,7 @@ static void load_shader_functions(void)
 static GLuint compile_shader(GLenum kind, const char *src)
 {
     GLuint sh = p_glCreateShader(kind);
+    shader_diagnostics_source(kind, sh, src);
     TRACE_ALL("D3D: compiling %s shader %u", kind == GL_VERTEX_SHADER ? "vertex" : "fragment", sh);
     p_glShaderSource(sh, 1, &src, NULL);
     p_glCompileShader(sh);
@@ -2473,13 +2552,14 @@ static GLuint link_program(GLuint vs, GLuint fs)
     TRACE_ALL("D3D: linking program %u (vs %u, fs %u)", prog, vs, fs);
     if (vs) p_glAttachShader(prog, vs);
     if (fs) p_glAttachShader(prog, fs);
-    for (int i = 0; i < 16; i++) {
-        char name[4];
-        snprintf(name, sizeof(name), "v%d", i);
-        p_glBindAttribLocation(prog, i, name);
-    }
+    /* Only position, diffuse and the fixed-function secondary color need
+       fixed slots; the rest take what the linker gives them (looked up with
+       glGetAttribLocation), so programs fit VC4's 8 attributes. */
+    p_glBindAttribLocation(prog, 0, "v0");
+    p_glBindAttribLocation(prog, 1, "v1");
     p_glBindAttribLocation(prog, 6, "ff_color2");
     p_glLinkProgram(prog);
+    shader_diagnostics_link(prog, vs, fs);
     GLint ok = 0;
     p_glGetProgramiv(prog, GL_LINK_STATUS, &ok);
     if (!ok) {
@@ -2514,7 +2594,9 @@ typedef struct {
     int *const_slots;
     unsigned nconsts;
     GLuint vs;               /* compiled vertex shader, 0 until first use */
+    GLuint vs_z;             /* its XBCOMPAT_VSH_Z_VARIANT twin, 0 until first use */
     bool failed;
+    bool vs_z_attempted;     /* the variant was tried (it may not compile) */
     ULONG stream_mask;
     int tess_normal_in, tess_normal_out, tess_uv_out;   /* tessellator outputs, -1 if unused */
 } vshader;
@@ -2618,15 +2700,63 @@ static LONG NTAPI D3DDevice_CreateVertexShader(const ULONG *decl, const ULONG *f
    (0 = fixed function for that stage) with its uniform locations. */
 typedef struct program_entry {
     GLuint vs, fs, prog;
+    GLint attr[16];          /* the location of each v<n> input, -1 if unused */
+    unsigned attr_mask;      /* the locations in attr */
     GLint loc_ff_lighting, loc_fog_vertex_mode, loc_ff_transform, loc_ff_texcount;
     GLint loc_c, loc_flip_y, loc_vp_scale, loc_vp_offset, loc_wdepth;
     GLint loc_tex[4], loc_cube[4], loc_vol[4], loc_tex_scale, loc_c0, loc_c1, loc_fc0, loc_fc1,
           loc_bump_env, loc_bump_lum, loc_eye_vector, loc_key_color;
+    struct { GLint location; unsigned words; uint32_t *value; } uniforms[32];   /* last values set */
+    unsigned uniform_count;
     float (*last_c)[4];   /* the constants last uploaded to the program */
     bool c_partial;
     int c_size;           /* active elements of c (the compiler drops unused trailing ones) */
     struct program_entry *next;
 } program_entry;
+
+/* GL keeps uniform values per program, and setting one costs a call that
+   the VC4 driver makes expensive; remember what each program was last given
+   and skip uploads that change nothing. A uniform the table has no room for
+   is always uploaded. */
+static bool program_uniform_changed(program_entry *e, GLint location, unsigned words, const void *value)
+{
+    if (location < 0) return false;
+    unsigned i;
+    for (i = 0; i < e->uniform_count; i++)
+        if (e->uniforms[i].location == location) break;
+    if (i == e->uniform_count) {
+        if (i == 32) return true;
+        e->uniforms[i].location = location;
+        e->uniform_count++;
+    }
+    __typeof__(e->uniforms[0]) *u = &e->uniforms[i];
+    if (u->value && u->words == words
+        && gc_same(u->value, value, words)) return false;
+    uint32_t *p = realloc(u->value, words * 4);
+    if (!p) { free(u->value); u->value = NULL; u->words = 0; return true; }
+    u->value = p;
+    u->words = words;
+
+    memcpy(p, value, words * 4);
+    return true;
+}
+
+static void program_uniform4fv(program_entry *e, GLint location, GLsizei count, const GLfloat *value)
+{
+    if (program_uniform_changed(e, location, count * 4, value)) p_glUniform4fv(location, count, value);
+}
+static void program_uniform2fv(program_entry *e, GLint location, GLsizei count, const GLfloat *value)
+{
+    if (program_uniform_changed(e, location, count * 2, value)) p_glUniform2fv(location, count, value);
+}
+static void program_uniform1f(program_entry *e, GLint location, GLfloat value)
+{
+    if (program_uniform_changed(e, location, 1, &value)) p_glUniform1f(location, value);
+}
+static void program_uniform1i(program_entry *e, GLint location, GLint value)
+{
+    if (program_uniform_changed(e, location, 1, &value)) p_glUniform1i(location, value);
+}
 
 static program_entry *programs;
 
@@ -2634,18 +2764,20 @@ static void NTAPI D3DDevice_DeleteVertexShader(ULONG handle)
 {
     if (!(handle & 1)) return;
     vshader *sh = (vshader *)(handle & ~1u);
-    if (sh->vs) {
-        /* GL reuses the name, so programs linked with it must go too. */
+    if (sh->vs || sh->vs_z) {
+        /* GL reuses the names, so programs linked with them must go too. */
         for (program_entry **pp = &programs; *pp;) {
             program_entry *e = *pp;
-            if (e->vs != sh->vs) { pp = &e->next; continue; }
+            if (!e->vs || (e->vs != sh->vs && e->vs != sh->vs_z)) { pp = &e->next; continue; }
             if (e->prog && e->prog == cur_program) program_off();
             if (e->prog) p_glDeleteProgram(e->prog);
             *pp = e->next;
+            for (unsigned i = 0; i < e->uniform_count; i++) free(e->uniforms[i].value);
             free(e->last_c);
             free(e);
         }
-        p_glDeleteShader(sh->vs);
+        if (sh->vs) p_glDeleteShader(sh->vs);
+        if (sh->vs_z) p_glDeleteShader(sh->vs_z);
     }
     free(sh->code);
     free(sh->decl);
@@ -2741,7 +2873,7 @@ static void NTAPI D3DDevice_SetVertexShaderInput(ULONG handle, UINT_ count, cons
 }
 
 
-static GLuint vertex_shader_object(vshader *sh)
+static GLuint vertex_shader_generic_object(vshader *sh)
 {
     if (sh->vs || sh->failed) return sh->vs;
     char *src = vsh_translate(sh->code, sh->ninstr);
@@ -2771,6 +2903,29 @@ static GLuint vertex_shader_object(vshader *sh)
     return sh->vs;
 }
 
+static GLuint vertex_shader_object(vshader *sh)
+{
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char *e = getenv("XBCOMPAT_VSH_Z_VARIANT");
+        enabled = e && *e && *e != '0';
+    }
+    /* XBCOMPAT_VSH_Z_VARIANT: a variant without the w-buffer depth math,
+       for draws that don't use D3DZB_USEW; the generic program otherwise. */
+    if (enabled && RS(D3DRS_ZENABLE) != 2 /* D3DZB_USEW */) {
+        if (!sh->vs_z_attempted) {
+            sh->vs_z_attempted = true;
+            char *src = vsh_translate_ex(sh->code, sh->ninstr, VSH_VARIANT_Z);
+            if (src) {
+                sh->vs_z = compile_shader(GL_VERTEX_SHADER, src);
+                free(src);
+            }
+        }
+        if (sh->vs_z) return sh->vs_z;
+    }
+    return vertex_shader_generic_object(sh);
+}
+
 static program_entry *program_for(GLuint vs, GLuint fs)
 {
     for (program_entry *e = programs; e; e = e->next)
@@ -2780,6 +2935,12 @@ static program_entry *program_for(GLuint vs, GLuint fs)
     e->fs = fs;
     e->prog = link_program(vs, fs);
     if (e->prog) {
+        for (int r = 0; r < 16; r++) {
+            char name[4];
+            snprintf(name, sizeof name, "v%d", r);
+            e->attr[r] = p_glGetAttribLocation(e->prog, name);
+            if (e->attr[r] >= 0) e->attr_mask |= 1u << e->attr[r];
+        }
 #define U(name) p_glGetUniformLocation(e->prog, name)
         e->loc_c = U("c");
         /* Element i of c at loc_c + i, as Mesa lays arrays out: only then
@@ -2950,16 +3111,19 @@ static GLuint fragment_shader_object(void)
 
 /* Bind the textures of stages 0..3 to GL units 0..3 for a fragment program
    and point its samplers at them. */
-static void apply_shader_textures(const program_entry *e)
+static void apply_shader_textures(program_entry *e)
 {
     float scale[4][4];
     for (int s = 0; s < 4; s++) {
+        scale[s][0] = scale[s][1] = scale[s][2] = scale[s][3] = 1;
         p_glActiveTexture(GL_TEXTURE0 + s);
         /* With GLSL 1.20 the point sprite replacement feeds gl_TexCoord.
            Set every unit here too: a pixel shader draw may not have passed
            through fixed-function texture setup, or may follow a sprite. */
         glTexEnvi(GL_POINT_SPRITE, GL_COORD_REPLACE, s == 3 && RS(D3DRS_POINTSPRITEENABLE));
-        scale[s][0] = scale[s][1] = scale[s][2] = scale[s][3] = 1;
+        /* A stage the program never samples keeps whatever is bound: no
+           upload, no readback for a texture it would not read. */
+        if (e->loc_tex[s] < 0 && e->loc_cube[s] < 0 && e->loc_vol[s] < 0) continue;
         D3DPixelContainer *t = (D3DPixelContainer *)d3d.textures[s];
         if (!t) {
             glBindTexture(GL_TEXTURE_2D, 0);
@@ -2981,34 +3145,34 @@ static void apply_shader_textures(const program_entry *e)
             scale[s][2] = 1.0f / depth_format_max((t->Format >> 8) & 0xFF);
         /* The program declares at most one sampler per stage, of the type its
            texture mode wants; point it at unit s whatever is bound there. */
-        if (e->loc_tex[s] >= 0) p_glUniform1i(e->loc_tex[s], s);
-        if (e->loc_cube[s] >= 0) p_glUniform1i(e->loc_cube[s], s);
-        if (e->loc_vol[s] >= 0) p_glUniform1i(e->loc_vol[s], s);
+        if (e->loc_tex[s] >= 0) program_uniform1i(e, e->loc_tex[s], s);
+        if (e->loc_cube[s] >= 0) program_uniform1i(e, e->loc_cube[s], s);
+        if (e->loc_vol[s] >= 0) program_uniform1i(e, e->loc_vol[s], s);
     }
     p_glActiveTexture(GL_TEXTURE0);
-    if (e->loc_tex_scale >= 0) p_glUniform4fv(e->loc_tex_scale, 4, &scale[0][0]);
+    program_uniform4fv(e, e->loc_tex_scale, 4, &scale[0][0]);
 }
 
 
 /* The per-draw inputs of a fragment program. */
-static void upload_ps_uniforms(const program_entry *e)
+static void upload_ps_uniforms(program_entry *e)
 {
     float c[8][4];
-    if (e->loc_eye_vector >= 0) p_glUniform4fv(e->loc_eye_vector, 1, d3d.eye_vector);
+    if (e->loc_eye_vector >= 0) program_uniform4fv(e, e->loc_eye_vector, 1, d3d.eye_vector);
     if (e->loc_key_color >= 0) {
         for (int i = 0; i < 4; i++) color4(c[i], TSS(i, D3DTSS_COLORKEYCOLOR));
-        p_glUniform4fv(e->loc_key_color, 4, &c[0][0]);
+        program_uniform4fv(e, e->loc_key_color, 4, &c[0][0]);
     }
     if (e->loc_c0 >= 0) {
         for (int i = 0; i < 8; i++) color4(c[i], RS(D3DRS_PSCONSTANT0_0 + i));
-        p_glUniform4fv(e->loc_c0, 8, &c[0][0]);
+        program_uniform4fv(e, e->loc_c0, 8, &c[0][0]);
     }
     if (e->loc_c1 >= 0) {
         for (int i = 0; i < 8; i++) color4(c[i], RS(D3DRS_PSCONSTANT1_0 + i));
-        p_glUniform4fv(e->loc_c1, 8, &c[0][0]);
+        program_uniform4fv(e, e->loc_c1, 8, &c[0][0]);
     }
-    if (e->loc_fc0 >= 0) { color4(c[0], RS(D3DRS_PSFINALCOMBINERCONSTANT0)); p_glUniform4fv(e->loc_fc0, 1, c[0]); }
-    if (e->loc_fc1 >= 0) { color4(c[0], RS(D3DRS_PSFINALCOMBINERCONSTANT1)); p_glUniform4fv(e->loc_fc1, 1, c[0]); }
+    if (e->loc_fc0 >= 0) { color4(c[0], RS(D3DRS_PSFINALCOMBINERCONSTANT0)); program_uniform4fv(e, e->loc_fc0, 1, c[0]); }
+    if (e->loc_fc1 >= 0) { color4(c[0], RS(D3DRS_PSFINALCOMBINERCONSTANT1)); program_uniform4fv(e, e->loc_fc1, 1, c[0]); }
     if (e->loc_bump_env >= 0) {
         for (int s = 0; s < 4; s++) {
             c[s][0] = tss_float(s, D3DTSS_BUMPENVMAT00);
@@ -3016,7 +3180,7 @@ static void upload_ps_uniforms(const program_entry *e)
             c[s][2] = tss_float(s, D3DTSS_BUMPENVMAT10);
             c[s][3] = tss_float(s, D3DTSS_BUMPENVMAT11);
         }
-        p_glUniform4fv(e->loc_bump_env, 4, &c[0][0]);
+        program_uniform4fv(e, e->loc_bump_env, 4, &c[0][0]);
     }
     if (e->loc_bump_lum >= 0) {
         float lum[4][2];
@@ -3024,7 +3188,7 @@ static void upload_ps_uniforms(const program_entry *e)
             lum[s][0] = tss_float(s, D3DTSS_BUMPENVLSCALE);
             lum[s][1] = tss_float(s, D3DTSS_BUMPENVLOFFSET);
         }
-        p_glUniform2fv(e->loc_bump_lum, 4, &lum[0][0]);
+        program_uniform2fv(e, e->loc_bump_lum, 4, &lum[0][0]);
     }
     /* Fog parameters reach the program through gl_Fog. */
     color4(c[0], RS(D3DRS_FOGCOLOR));
@@ -3039,6 +3203,7 @@ static void upload_ps_uniforms(const program_entry *e)
    program 0; draws leave their program bound. */
 static void program_off(void)
 {
+    hud_batch_flush();
     if (cur_program) p_glUseProgram(0);
     cur_program = 0;
     glDisable(GL_VERTEX_PROGRAM_POINT_SIZE);
@@ -3074,17 +3239,28 @@ static bool fixed_lighting_supported(void)
 
 static GLuint fixed_lighting_shader(void)
 {
-    static GLuint object;
-    static bool attempted;
+    static GLuint objects[128];
+    static bool attempted[128];
     if (!fixed_lighting_supported()) return 0;
-    if (!attempted) {
-        attempted = true;
-        object = compile_shader(GL_VERTEX_SHADER, ff_lighting_source);
+    /* One program per set of inputs the draw has (FF_INPUTS): the shader
+       then reads no attribute the vertex lacks, and VC4 stays within its
+       eight attributes. */
+    unsigned key = (ff_texture_units & 15) | (RS(118 /* VERTEXBLEND */) != 0) << 4 | ff_secondary_present << 5
+                   | ff_primary_present << 6;
+    if (!attempted[key]) {
+        attempted[key] = true;
+        size_t size = sizeof ff_lighting_source + 64;
+        char *source = malloc(size);
+        if (!source) return 0;
+        snprintf(source, size, "#version 120\n#define FF_INPUTS %u\n%s", key,
+                 ff_lighting_source + 13);   /* past its own #version line */
+        objects[key] = compile_shader(GL_VERTEX_SHADER, source);
+        free(source);
     }
-    return object;
+    return objects[key];
 }
 
-static void upload_fixed_lighting(const program_entry *e)
+static void upload_fixed_lighting(program_entry *e)
 {
     if (e->loc_ff_lighting < 0) return;
     float state[FF_LIGHTING_VECTORS][4] = { { 0 } };
@@ -3098,7 +3274,7 @@ static void upload_fixed_lighting(const program_entry *e)
             ULONG flags = TSS(i, 21 /* TEXTURETRANSFORMFLAGS */);
             counts[i] = (float)(flags & 0xFF) * ((flags & 0x100) ? 1 : -1);
         }
-        p_glUniform4fv(e->loc_ff_texcount, 1, counts);
+        program_uniform4fv(e, e->loc_ff_texcount, 1, counts);
     }
     for (int i = 0; i < 4; i++) state[8][i] = TSS(i, D3DTSS_TEXCOORDINDEX) >> 16;
     if (blend && e->loc_ff_transform >= 0) {
@@ -3121,7 +3297,7 @@ static void upload_fixed_lighting(const program_entry *e)
                     for (int col = 0; col < 3; col++)
                         transform[7*i+4+row][col] = cofactor[row][col]/det;
         }
-        p_glUniform4fv(e->loc_ff_transform, 28, &transform[0][0]);
+        program_uniform4fv(e, e->loc_ff_transform, 28, &transform[0][0]);
     }
     state[0][0] = RS(D3DRS_SPECULARENABLE) != 0;
     state[0][1] = RS(D3DRS_NORMALIZENORMALS) != 0;
@@ -3158,7 +3334,7 @@ static void upload_fixed_lighting(const program_entry *e)
         memcpy(state[base + 4], light->attenuation, 12);
         state[base + 4][3] = light->range;
     }
-    p_glUniform4fv(e->loc_ff_lighting, FF_LIGHTING_VECTORS, &state[0][0]);
+    program_uniform4fv(e, e->loc_ff_lighting, FF_LIGHTING_VECTORS, &state[0][0]);
 }
 
 /* Select the program for a draw: `vs` is the vertex shader object (0 for
@@ -3198,7 +3374,7 @@ static bool use_program(GLuint vs, program_entry **out)
         bool factor = programmable_vertex && fs && RS(D3DRS_FOGENABLE)
             && mode >= 1 && mode <= 3
             && (mode != 3 || rs_float(D3DRS_FOGSTART) != rs_float(D3DRS_FOGEND));
-        p_glUniform1f(e->loc_fog_vertex_mode, factor ? mode : 0);
+        program_uniform1f(e, e->loc_fog_vertex_mode, factor ? mode : 0);
     }
     upload_fixed_lighting(e);
     *out = e;
@@ -3323,7 +3499,7 @@ static conv_entry *index_entry(const USHORT *ix, ULONG count, bool upload)
         if (!e->buf) p_glGenBuffers(1, &e->buf);
         gc_bind_buffer(GL_ELEMENT_ARRAY_BUFFER, e->buf);
         if (detail_on) { cache_uploads++; cache_upload_bytes += count * 2; }
-        p_glBufferData(GL_ELEMENT_ARRAY_BUFFER, count * 2, ix, GL_STATIC_DRAW);
+        DETAIL_TIMED(t_buffer_upload, p_glBufferData(GL_ELEMENT_ARRAY_BUFFER, count * 2, ix, GL_STATIC_DRAW));
     }
     if (same) return e;
     ULONG lo = 0xFFFF, hi = 0;
@@ -3369,11 +3545,16 @@ static GLuint stream_buffer(const UCHAR *base, ULONG stride, vrange r, size_t ne
         size_t from = (size_t)r.lo * stride, to = need;
         if (conv_full_due(e)) from = 0, to = e->span;
         else if (conv_sampled_same(e->raw + from, base + from, to - from, stride, 4)) return e->buf;
-        if (conv_refresh(e->raw + from, base + from, to - from)) {
-            gc_bind_buffer(GL_ARRAY_BUFFER, e->buf);
-            if (detail_on) { cache_uploads++; cache_upload_bytes += to - from; }
-            p_glBufferSubData(GL_ARRAY_BUFFER, from, to - from, base + from);
-        }
+        if (!conv_refresh(e->raw + from, base + from, to - from)) return e->buf;
+        /* The bytes outside from..to were only sampled, so bring the whole
+           copy current before it becomes the buffer's new store. */
+        memcpy(e->raw, base, e->span);
+        gc_bind_buffer(GL_ARRAY_BUFFER, e->buf);
+        if (detail_on) { cache_uploads++; cache_upload_bytes += e->span; }
+        /* Orphan the store instead of BufferSubData: patching a buffer an
+           earlier draw may still read makes the driver wait for that draw. */
+        DETAIL_TIMED(t_buffer_upload,
+                     p_glBufferData(GL_ARRAY_BUFFER, e->span, e->raw, GL_STREAM_DRAW));
         return e->buf;
     }
     if (need < e->span) need = e->span;
@@ -3386,7 +3567,7 @@ static GLuint stream_buffer(const UCHAR *base, ULONG stride, vrange r, size_t ne
     if (!e->buf) p_glGenBuffers(1, &e->buf);
     gc_bind_buffer(GL_ARRAY_BUFFER, e->buf);
     if (detail_on) { cache_uploads++; cache_upload_bytes += need; }
-    p_glBufferData(GL_ARRAY_BUFFER, need, base, GL_STATIC_DRAW);
+    DETAIL_TIMED(t_buffer_upload, p_glBufferData(GL_ARRAY_BUFFER, need, base, GL_STATIC_DRAW));
     return e->buf;
 }
 
@@ -3418,13 +3599,15 @@ static const void *convert_cached(const UCHAR *src, ULONG stride, vrange r, ULON
             conv(src + (size_t)lo * stride, stride, hi - lo, out);
             if (e->buf) {
                 gc_bind_buffer(GL_ARRAY_BUFFER, e->buf);
-                if (detail_on) { cache_uploads++; cache_upload_bytes += (size_t)(hi - lo) * size; }
-                p_glBufferSubData(GL_ARRAY_BUFFER, (size_t)lo * size, (size_t)(hi - lo) * size, out);
+                if (detail_on) { cache_uploads++; cache_upload_bytes += (size_t)(e->hi - e->lo) * size; }
+                DETAIL_TIMED(t_buffer_upload, p_glBufferData(GL_ARRAY_BUFFER, (size_t)e->hi * size, NULL, GL_STREAM_DRAW));
+                DETAIL_TIMED(t_buffer_upload, p_glBufferSubData(GL_ARRAY_BUFFER, (size_t)e->lo * size, (size_t)(e->hi - e->lo) * size, e->out));
             }
         }
         goto done;
     }
-    /* Not covered yet: grow the entry to cover both ranges and convert it all. */
+    /* Not covered yet: grow the entry to cover both ranges and convert it
+       all. */
     if (e->out) {
         if (e->lo < r.lo) r.lo = e->lo;
         if (e->hi > r.hi) r.hi = e->hi;
@@ -3446,9 +3629,9 @@ static const void *convert_cached(const UCHAR *src, ULONG stride, vrange r, ULON
         /* Sized from vertex 0 so offsets match the indices; only lo..hi is filled. */
         if (!e->buf) p_glGenBuffers(1, &e->buf);
         gc_bind_buffer(GL_ARRAY_BUFFER, e->buf);
-        p_glBufferData(GL_ARRAY_BUFFER, (size_t)r.hi * size, NULL, GL_STATIC_DRAW);
+        DETAIL_TIMED(t_buffer_upload, p_glBufferData(GL_ARRAY_BUFFER, (size_t)r.hi * size, NULL, GL_STATIC_DRAW));
         if (detail_on) { cache_uploads++; cache_upload_bytes += (size_t)(r.hi - r.lo) * size; }
-        p_glBufferSubData(GL_ARRAY_BUFFER, (size_t)r.lo * size, (size_t)(r.hi - r.lo) * size, e->out);
+        DETAIL_TIMED(t_buffer_upload, p_glBufferSubData(GL_ARRAY_BUFFER, (size_t)r.lo * size, (size_t)(r.hi - r.lo) * size, e->out));
     }
 done:
     if (buf) *buf = e->buf;
@@ -3495,22 +3678,26 @@ static const void *rgba_colors(const UCHAR *src, ULONG stride, vrange r, GLuint 
 
 /* Bind the generic attribute arrays of a declared vertex layout.  `up` is
    the user-pointer data for stream 0 (DrawVerticesUP), else streams come
-   from SetStreamSource. */
+   from SetStreamSource. Register r goes to its location in `e`'s program. */
 /* Set by draw(): the `up` pointer of this draw is stream 0's vertex buffer. */
 static bool up_is_vb;
 
-static void bind_attributes(const vshader *sh, const UCHAR *up, ULONG up_stride, ULONG first_vertex, ULONG first,
+static void bind_attributes(const vshader *sh, const program_entry *e, const UCHAR *up, ULONG up_stride, ULONG first_vertex, ULONG first,
                             ULONG count, const USHORT *indices)
 {
     vrange verts = { 0, 0 };
     bool have_range = false;
 #define VERTS (have_range ? verts : (have_range = true, verts = vertex_range(first, count, indices)))
+    for (int loc = 0; loc < host_vertex_attribs; loc++)
+        if (!(e->attr_mask >> loc & 1)) p_glDisableVertexAttribArray(loc);
     for (int r = 0; r < 16; r++) {
+        GLint loc = e->attr[r];
+        if (loc < 0) continue;
         const vattr *a = &sh->attr[r];
         if (a->stream < 0) {
-            p_glDisableVertexAttribArray(r);
+            p_glDisableVertexAttribArray(loc);
             static const float def[4] = { 0, 0, 0, 1 };
-            p_glVertexAttrib4fv(r, def);
+            p_glVertexAttrib4fv(loc, def);
             continue;
         }
         const UCHAR *base;
@@ -3520,16 +3707,16 @@ static void bind_attributes(const vshader *sh, const UCHAR *up, ULONG up_stride,
             stride = up_stride;
         } else {
             D3DResource *vb = d3d.streams[a->stream].vb;
-            if (!vb) { p_glDisableVertexAttribArray(r); continue; }
+            if (!vb) { p_glDisableVertexAttribArray(loc); continue; }
             base = resource_data(vb);
             stride = d3d.streams[a->stream].stride;
         }
-        p_glEnableVertexAttribArray(r);
+        p_glEnableVertexAttribArray(loc);
         if ((a->type & 0xF) == 6) {
             GLuint buf;
             const void *p = unpack_normpacked3(base + a->offset + first_vertex * stride, stride, VERTS, &buf);
             gc_bind_buffer(GL_ARRAY_BUFFER, buf);
-            p_glVertexAttribPointer(r, 3, GL_FLOAT, GL_FALSE, 12, buf ? NULL : p);
+            p_glVertexAttribPointer(loc, 3, GL_FLOAT, GL_FALSE, 12, buf ? NULL : p);
             continue;
         }
         /* D3DCOLOR is stored B, G, R, A and reaches the shader as (R, G, B, A). */
@@ -3537,7 +3724,7 @@ static void bind_attributes(const vshader *sh, const UCHAR *up, ULONG up_stride,
             GLuint buf;
             const void *p = rgba_colors(base + a->offset + first_vertex * stride, stride, VERTS, &buf);
             gc_bind_buffer(GL_ARRAY_BUFFER, buf);
-            p_glVertexAttribPointer(r, 4, GL_UNSIGNED_BYTE, GL_TRUE, 4, buf ? NULL : p);
+            p_glVertexAttribPointer(loc, 4, GL_UNSIGNED_BYTE, GL_TRUE, 4, buf ? NULL : p);
             continue;
         }
         const UCHAR *ptr = base + a->offset + first_vertex * stride;
@@ -3548,7 +3735,7 @@ static void bind_attributes(const vshader *sh, const UCHAR *up, ULONG up_stride,
         }
         gc_bind_buffer(GL_ARRAY_BUFFER, buf);
         if (buf) ptr = (const UCHAR *)(uintptr_t)a->offset;
-        p_glVertexAttribPointer(r, a->type == 0x40 ? GL_BGRA : a->components, a->gl_type, a->normalized, stride, ptr);
+        p_glVertexAttribPointer(loc, a->type == 0x40 ? GL_BGRA : a->components, a->gl_type, a->normalized, stride, ptr);
     }
 }
 
@@ -3587,9 +3774,9 @@ static void upload_constants(const vshader *sh, program_entry *e)
         p_glUniform4fv(e->loc_c + lo, hi - lo + 1, &c[lo][0]);
     }
 uploaded:
-    if (e->loc_flip_y >= 0) p_glUniform1f(e->loc_flip_y, d3d.rt_texture ? -1.0f : 1.0f);
-    if (e->loc_vp_scale >= 0) p_glUniform4fv(e->loc_vp_scale, 1, vp[0]);
-    if (e->loc_vp_offset >= 0) p_glUniform4fv(e->loc_vp_offset, 1, vp[1]);
+    if (e->loc_flip_y >= 0) program_uniform1f(e, e->loc_flip_y, d3d.rt_texture ? -1.0f : 1.0f);
+    if (e->loc_vp_scale >= 0) program_uniform4fv(e, e->loc_vp_scale, 1, vp[0]);
+    if (e->loc_vp_offset >= 0) program_uniform4fv(e, e->loc_vp_offset, 1, vp[1]);
     if (e->loc_wdepth >= 0) {
         /* D3DZB_USEW: the NV2A depth-tests w and ignores oPos.z, which
            W-buffered titles leave unscaled (Splinter Cell's z/w is 0..1, not
@@ -3603,7 +3790,7 @@ uploaded:
             wd[1] = p->m[2][2] / p->m[2][3];
             wd[2] = p->m[3][2];
         }
-        p_glUniform4fv(e->loc_wdepth, 1, wd);
+        program_uniform4fv(e, e->loc_wdepth, 1, wd);
     }
 }
 
@@ -3649,8 +3836,10 @@ static void draw_programmable_(vshader *sh, ULONG PrimitiveType, const UCHAR *up
     /* Indices from a GL buffer too (kept like the vertices, see stream_buffer). */
     conv_entry *ix;
     DETAIL_TIMED(t_indices, ix = indices && count && p_glGenBuffers ? index_entry(indices + first, count, true) : NULL);
-    DETAIL_TIMED(t_attributes, bind_attributes(sh, up, up_stride, 0, first, count, indices));
+    DETAIL_TIMED(t_attributes, bind_attributes(sh, e, up, up_stride, 0, first, count, indices));
     gc_bind_buffer(GL_ELEMENT_ARRAY_BUFFER, ix ? ix->buf : 0);
+    shader_diagnostics_mark(d3d.frame, ++shader_diag_draw, d3d.vertex_shader, d3d.pixel_shader, cur_program,
+                            "programmable");
     TIMED(t_gl, if (ix) glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, NULL);
                 else if (indices) glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, indices + first);
                 else glDrawArrays(gl_primitive(PrimitiveType), first, count));
@@ -3800,17 +3989,74 @@ static void draw_declared_(const vshader *sh, ULONG PrimitiveType, const UCHAR *
     if (!use_program(0, &e)) return;
     TRACE_ALL("D3D: draw(declared) prim %u count %u stride %u indices %p shader %#x", PrimitiveType, count, stride,
           indices ? indices + first : NULL, d3d.vertex_shader);
+    shader_diagnostics_mark(d3d.frame, ++shader_diag_draw, d3d.vertex_shader, d3d.pixel_shader, cur_program,
+                            "declared");
     TIMED(t_gl, if (indices) glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, indices + first);
                 else glDrawArrays(gl_primitive(PrimitiveType), first, count));
     end_program(e);
 }
 
-/* `vb`: base is stream 0's vertex buffer (plus the base vertex), not
-   title memory passed to a ...UP draw, so it can be kept in a GL buffer. */
+#include "fvf_plan.h"
+#include "fvf_batch.h"
+#include "hud_shader.h"
+static GLuint hud_vertex_object, hud_fragment_object;
+static program_entry *hud_program;
+static GLint hud_tex_uniform;
+
+static bool hud_shader_supported(void)
+{
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char *e = getenv("XBCOMPAT_HUD_SHADER");
+        enabled = e && *e && *e != '0';
+    }
+    if (!enabled || d3d.vertex_shader != 0x144 || d3d.pixel_shader || d3d.bb_cpu_dirty || RS(D3DRS_SPECULARENABLE)
+        || RS(D3DRS_FOGENABLE) || RS(D3DRS_STENCILENABLE)
+        || RS(D3DRS_POINTSCALEENABLE) || RS(D3DRS_POINTSPRITEENABLE) || RS(D3DRS_ALPHATESTENABLE)
+        || RS(118 /* VERTEXBLEND */) || RS(122 /* TWOSIDEDLIGHTING */) || RS(D3DRS_ZENABLE) == 2 /* USEW */
+        || RS(D3DRS_SHADEMODE) == 0x1D00 /* FLAT */ || !d3d.textures[0]
+        || tex_target((const D3DPixelContainer *)d3d.textures[0]) != GL_TEXTURE_2D) return false;
+    for (int s = 0; s < 4; s++)
+        if (TSS(s, 21 /* TEXTURETRANSFORMFLAGS */) || TSS(s, D3DTSS_TEXCOORDINDEX) >> 16
+            || (s == 0 ? TSS(s, D3DTSS_TEXCOORDINDEX) != 0
+                       : TSS(s, D3DTSS_COLOROP) != 1 /* DISABLE */)) return false;
+    return TSS(0, D3DTSS_COLORARG1) == 2 /* TEXTURE */ && TSS(0, D3DTSS_COLORARG2) == 1 /* CURRENT */
+        && TSS(0, D3DTSS_ALPHAOP) == 4 /* MODULATE */ && TSS(0, D3DTSS_ALPHAARG1) == 2
+        && TSS(0, D3DTSS_ALPHAARG2) == 0 /* DIFFUSE */ && !TSS(0, D3DTSS_ALPHAKILL)
+        && TSS(0, D3DTSS_COLOROP) == 4 && !TSS(0, D3DTSS_COLORKEYOP);
+}
+
+static bool hud_shader_bind(void)
+{
+    static bool failed;
+    if (failed || !hud_shader_supported()) return false;
+    if (!hud_program) {
+        hud_vertex_object = compile_shader(GL_VERTEX_SHADER, hud_vs_source);
+        hud_fragment_object = compile_shader(GL_FRAGMENT_SHADER, hud_fs_source);
+        if (!hud_vertex_object || !hud_fragment_object) { failed = true; return false; }
+        hud_program = program_for(hud_vertex_object, hud_fragment_object);
+        if (!hud_program->prog) { failed = true; return false; }
+        hud_tex_uniform = p_glGetUniformLocation(hud_program->prog, "hud_tex");
+    }
+    if (cur_program != hud_program->prog) p_glUseProgram(hud_program->prog);
+    cur_program = hud_program->prog;
+    program_uniform1i(hud_program, hud_tex_uniform, 0);
+    return true;
+}
+
+static bool hud_prepared_program(ULONG primitive)
+{
+    return !cur_program || ((primitive == 8 || primitive == 5) && hud_program && cur_program == hud_program->prog
+                            && hud_shader_supported());
+}
+
+/* `vb`: base is stream 0's vertex buffer, not a ...UP draw's title memory. */
+static void draw_fvf(ULONG prim, const UCHAR *base, ULONG stride, ULONG first, ULONG count, const USHORT *indices);
 static void draw(ULONG PrimitiveType, const UCHAR *base, ULONG stride, ULONG first, ULONG count,
                  const USHORT *indices, bool vb)
 {
     if (d3d.vertex_shader & 1) {
+        hud_batch_flush();
         vshader *sh = (vshader *)(d3d.vertex_shader & ~1u);
         up_is_vb = vb;
         if (sh->code) draw_programmable(sh, PrimitiveType, base, stride, first, count, indices);
@@ -3818,10 +4064,55 @@ static void draw(ULONG PrimitiveType, const UCHAR *base, ULONG stride, ULONG fir
         up_is_vb = false;
         return;
     }
+    n_draws++;
+    TIMED(t_draw, draw_fvf(PrimitiveType, base, stride, first, count, indices); if (prof_sync) glFinish());
+}
+
+static void NTAPI D3DDevice_DrawVertices(ULONG, UINT_, UINT_), D3DDevice_DrawVerticesUP(ULONG, UINT_, const void *, UINT_),
+    D3DDevice_SetVertexShaderConstant(LONG, const float *, ULONG);   /* the packets know these by address */
+static void FASTCALL SetVertexShaderConstantNotInline(LONG, const float *, ULONG),
+    SetVertexShaderConstant1(LONG, const float *), SetVertexShaderConstant4(LONG, const float *);
+#include "hud_packet.h"
+#include "state_packet.h"
+static void draw_fvf(ULONG PrimitiveType, const UCHAR *base, ULONG stride, ULONG first, ULONG count,
+                     const USHORT *indices)
+{
     fvf_layout l = parse_fvf(d3d.vertex_shader);
     conv_serial++;
+    fvf_plan_key key;
+    bool eligible = fvf_plan_capture(&key, &l);
+    hud_batch_key batch_key;
+    bool batchable = hud_batch_capture_key(&batch_key, &key, PrimitiveType, stride, count, indices, eligible);
+    if (hud_batch.count && (!batchable
+        || memcmp(&batch_key.state, &hud_batch.key.state, sizeof(batch_key.state)) || batch_key.target != hud_batch.key.target
+        || batch_key.depth != hud_batch.key.depth || batch_key.stride != hud_batch.key.stride
+        /* units follow from the state, and the program is set as the draw joins */
+        || memcmp(batch_key.textures, hud_batch.key.textures, sizeof(batch_key.textures))
+        || memcmp(batch_key.screen_offset, hud_batch.key.screen_offset, sizeof(batch_key.screen_offset))
+        || memcmp(batch_key.backbuffer_scale, hud_batch.key.backbuffer_scale, sizeof(batch_key.backbuffer_scale))))
+        hud_batch_flush();
+    bool reuse = fvf_plan.valid && fvf_plan.serial == conv_serial - 1 && fvf_plan.epoch == gc_epoch
+                 && eligible && hud_prepared_program(PrimitiveType)
+                 && !memcmp(&key, &fvf_plan.key, sizeof(key));
+    if (reuse && batchable) {
+        batch_key.units = fvf_plan.units;
+        batch_key.program = cur_program;
+        if (hud_batch_append(&batch_key, base, first, count)) {
+            fvf_plan_hits++;
+            fvf_plan.serial = conv_serial;
+            return;
+        }
+    }
+    /* The same state as the last draw, right after it: only the textures
+       are bound again (the title may have rewritten one in place). */
+    if (reuse) fvf_plan_resources(fvf_plan.units);
+    /* Binding them may upload, which moves gc_epoch: then nothing is kept. */
+    reuse = reuse && fvf_plan.epoch == gc_epoch && hud_prepared_program(PrimitiveType);
+
+    if (reuse) fvf_plan_hits++; else fvf_plan_misses++;
+    fvf_plan.valid = false;
     gc_disable_attrib_arrays();
-    apply_render_states(l.pretransformed, l.normal_off >= 0);
+    if (!reuse) apply_render_states(l.pretransformed, l.normal_off >= 0);
     ff_primary_present = l.diffuse_off >= 0;
     ff_secondary_present = l.specular_off >= 0;
     if (ff_secondary_present) {
@@ -3871,7 +4162,8 @@ static void draw(ULONG PrimitiveType, const UCHAR *base, ULONG stride, ULONG fir
                         GL_UNSIGNED_BYTE, 4);
     else
         secondary_color(lit, l.specular_off >= 0 ? base + l.specular_off : NULL, GL_BGRA, GL_UNSIGNED_BYTE, stride);
-    unsigned units = d3d.pixel_shader ? 0xF : apply_textures();
+    unsigned units = reuse ? fvf_plan.units : d3d.pixel_shader ? 0xF : apply_textures();
+    /* Texture coordinates are per draw (the vertices moved), even reused. */
     for (int u = 0; u < 4; u++) {
         ULONG tci = TSS(u, D3DTSS_TEXCOORDINDEX) & 0xFFFF;
         p_glClientActiveTexture(GL_TEXTURE0 + u);
@@ -3884,7 +4176,7 @@ static void draw(ULONG PrimitiveType, const UCHAR *base, ULONG stride, ULONG fir
         }
     }
     p_glClientActiveTexture(GL_TEXTURE0);
-    {
+    if (!reuse) {
         int tsize[4];
         for (int u = 0; u < 4; u++) {
             ULONG tci = TSS(u, D3DTSS_TEXCOORDINDEX) & 0xFFFF;
@@ -3893,14 +4185,25 @@ static void draw(ULONG PrimitiveType, const UCHAR *base, ULONG stride, ULONG fir
         apply_texture_transforms(units, tsize);
     }
 
-    program_entry *e;
-    if (!use_program(0, &e)) return;
+    program_entry *e = NULL;
+    if (!reuse && !use_program(0, &e)) return;
+    if ((PrimitiveType == 8 || PrimitiveType == 5) && hud_shader_supported()) hud_shader_bind();
     TRACE_ALL("D3D: draw prim %u count %u base %p stride %u indices %p fvf %#x", PrimitiveType, count, base, stride,
           indices ? indices + first : NULL, d3d.vertex_shader);
-    if (indices)
-        glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, indices + first);
-    else
-        glDrawArrays(gl_primitive(PrimitiveType), first, count);
+    batch_key.units = units;
+    batch_key.program = cur_program;
+    bool batched = batchable && !e && hud_batch_append(&batch_key, base, first, count);
+    if (!batched) {
+        hud_batch_flush();
+        shader_diagnostics_mark(d3d.frame, ++shader_diag_draw, d3d.vertex_shader, d3d.pixel_shader, cur_program,
+                                "fvf");
+        TIMED(t_gl, if (indices) glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, indices + first);
+                    else glDrawArrays(gl_primitive(PrimitiveType), first, count));
+    }
+    if (eligible && !e) {
+        memcpy(&fvf_plan.key, &key, sizeof(key)); fvf_plan.epoch = gc_epoch;
+        fvf_plan.units = units; fvf_plan.valid = true; fvf_plan.serial = conv_serial;
+    }
     debug_dump_draw();
     end_program(e);
 }
@@ -4064,7 +4367,14 @@ static void draw_patch_mesh(vshader *layout, vshader *real, const float (*verts)
                             const USHORT *idx, ULONG nidx)
 {
     (void)nverts;
+    /* The copy below draws with the real shader's GL objects: compile them
+       there first, so they are kept with the shader rather than the copy. */
+    if (real && layout->code) vertex_shader_object(real);
     vshader tmp = *layout;
+    if (real) {
+        tmp.vs = real->vs; tmp.vs_z = real->vs_z;
+        tmp.failed = real->failed; tmp.vs_z_attempted = real->vs_z_attempted;
+    }
     for (int r = 0; r < 16; r++) {
         bool generated = r == layout->tess_normal_out || r == layout->tess_uv_out;
         if (layout->attr[r].stream < 0 && !generated) { tmp.attr[r].stream = -1; continue; }
@@ -4075,7 +4385,6 @@ static void draw_patch_mesh(vshader *layout, vshader *real, const float (*verts)
     }
     if (tmp.code) {
         draw_programmable(&tmp, 5, (const UCHAR *)verts, 256, 0, nidx, idx);
-        if (real && !real->vs) real->vs = tmp.vs;
     } else {
         draw_declared(&tmp, 5, (const UCHAR *)verts, 256, 0, nidx, idx);
     }
@@ -4331,6 +4640,9 @@ static void (APIENTRY *p_glGenRenderbuffers)(GLsizei, GLuint *);
 static void (APIENTRY *p_glBindRenderbuffer)(GLenum, GLuint);
 static void (APIENTRY *p_glRenderbufferStorage)(GLenum, GLenum, GLsizei, GLsizei);
 static GLenum (APIENTRY *p_glCheckFramebufferStatus)(GLenum);
+static void (APIENTRY *p_glDeleteFramebuffers)(GLsizei, const GLuint *);
+static void (APIENTRY *p_glDeleteRenderbuffers)(GLsizei, const GLuint *);
+static void (APIENTRY *p_glGetRenderbufferParameteriv)(GLenum, GLenum, GLint *);
 
 static void load_fbo_functions(void)
 {
@@ -4338,6 +4650,8 @@ static void load_fbo_functions(void)
     LOAD(glGenFramebuffers); LOAD(glBindFramebuffer); LOAD(glFramebufferTexture2D);
     LOAD(glFramebufferRenderbuffer); LOAD(glGenRenderbuffers); LOAD(glBindRenderbuffer);
     LOAD(glRenderbufferStorage); LOAD(glCheckFramebufferStatus);
+    LOAD(glDeleteFramebuffers); LOAD(glDeleteRenderbuffers);
+    LOAD(glGetRenderbufferParameteriv);
 #undef LOAD
 }
 
@@ -4363,10 +4677,13 @@ static void load_fbo_functions(void)
 #ifndef GL_CLAMP_TO_EDGE
 #define GL_CLAMP_TO_EDGE 0x812F
 #endif
+#define GL_RGB565 0x8D62
 static struct {
     GLuint fbo;                  /* the back buffer (multisampled when samples > 1) */
     GLuint resolve;              /* single-sample copy of a multisampled back buffer */
     GLuint tex;                  /* the finished frame: resolve's (or fbo's) color */
+    GLuint color_rb, depth_rb, resolve_depth_rb;
+    GLenum color_storage, depth_storage;   /* the GL formats standing in for the title's */
     int w, h, samples;
     float soft;                  /* weight of each neighbour in the downsample filter */
     GLuint prog;
@@ -4375,6 +4692,62 @@ static struct {
     void (APIENTRY *bind)(GLenum, GLuint);
     void (APIENTRY *blit)(GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield, GLenum);
 } window_fb;
+
+/* The back buffer keeps the title's formats where GL has them: R5G6B5
+   stays 16-bit (its banding and its blending are the title's), X8R8G8B8
+   has no alpha for destination-alpha blending to find, D16 keeps its
+   precision.  Anything else is approximated and says so, once, at
+   device creation.  XBCOMPAT_BACKBUFFER_FORMAT=rgba8 asks for RGBA8
+   color always, the storage before formats were followed.  0 depth is
+   no depth buffer. */
+static GLenum backbuffer_color_storage(ULONG fmt)
+{
+    const char *override = getenv("XBCOMPAT_BACKBUFFER_FORMAT");
+    if (override && !strcmp(override, "rgba8")) return GL_RGBA8;
+    if (fmt == 0x05 || fmt == 0x11) return GL_RGB565;   /* R5G6B5, LIN_R5G6B5 */
+    /* X8R8G8B8, LIN_X8R8G8B8: the alpha a blend reads back is 1 */
+    if (fmt == 0x07 || fmt == 0x1E) return GL_RGB8;
+    if (fmt == 0x06 || fmt == 0x12 || (fmt >= 0x3A && fmt <= 0x3C) || (fmt >= 0x3F && fmt <= 0x41))
+        return GL_RGBA8;   /* A8R8G8B8 and its other byte orders */
+    /* X1R5G5B5, A1R5G5B5, A4R4G4B4 and the rest */
+    xlog("D3D: unsupported back-buffer format %#x, explicit legacy RGBA8 approximation", fmt);
+    return GL_RGBA8;
+}
+
+/* F16 and F24S8 have no integer format that orders the same way. */
+static GLenum backbuffer_depth_storage(ULONG fmt)
+{
+    switch (fmt) {
+    case 0: return 0;
+    case 0x2C: case 0x30: return 0x81A5;   /* D16, LIN_D16: GL_DEPTH_COMPONENT16 */
+    case 0x2A: case 0x2E: return GL_DEPTH24_STENCIL8;   /* D24S8, LIN_D24S8 */
+    case 0x2D: case 0x31:   /* F16, LIN_F16 */
+        xlog("D3D: floating depth %#x uses legacy integer D16 approximation", fmt);
+        return 0x81A5;
+    default:
+        xlog("D3D: depth %#x uses legacy integer D24S8 approximation", fmt);
+        return GL_DEPTH24_STENCIL8;
+    }
+}
+
+static void destroy_window_framebuffer(void)
+{
+    if (window_fb.bind) p_glBindFramebuffer = window_fb.bind;
+    if (p_glBindFramebuffer) p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    if (p_glDeleteFramebuffers) {
+        if (window_fb.resolve) p_glDeleteFramebuffers(1, &window_fb.resolve);
+        if (window_fb.fbo) p_glDeleteFramebuffers(1, &window_fb.fbo);
+    }
+    if (window_fb.tex) glDeleteTextures(1, &window_fb.tex);
+    if (p_glDeleteRenderbuffers) {
+        if (window_fb.color_rb) p_glDeleteRenderbuffers(1, &window_fb.color_rb);
+        if (window_fb.depth_rb) p_glDeleteRenderbuffers(1, &window_fb.depth_rb);
+        if (window_fb.resolve_depth_rb) p_glDeleteRenderbuffers(1, &window_fb.resolve_depth_rb);
+    }
+    window_fb.fbo = window_fb.resolve = window_fb.tex = 0;
+    window_fb.color_rb = window_fb.depth_rb = window_fb.resolve_depth_rb = 0;
+    window_fb.bind = NULL;
+}
 
 static void APIENTRY bind_framebuffer(GLenum target, GLuint fb)
 {
@@ -4401,21 +4774,34 @@ static GLuint make_renderbuffer(int samples, GLenum format, int w, int h)
 {
     static void (APIENTRY *storage_ms)(GLenum, GLsizei, GLenum, GLsizei, GLsizei);
     if (!storage_ms) storage_ms = SDL_GL_GetProcAddress("glRenderbufferStorageMultisample");
-    GLuint rb;
+    GLuint rb = 0;
     p_glGenRenderbuffers(1, &rb);
     p_glBindRenderbuffer(GL_RENDERBUFFER, rb);
     if (samples > 1 && storage_ms) storage_ms(GL_RENDERBUFFER, samples, format, w, h);
     else p_glRenderbufferStorage(GL_RENDERBUFFER, format, w, h);
+    /* (the host may give fewer samples: create_window_framebuffer asks) */
     return rb;
 }
 
-/* A framebuffer with a color texture (and depth/stencil) of the back buffer's size. */
 static GLuint make_texture_framebuffer(GLuint *tex)
 {
     GLuint fb;
     glGenTextures(1, tex);
     glBindTexture(GL_TEXTURE_2D, *tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, d3d.width, d3d.height, 0, GL_BGRA, GL_UNSIGNED_BYTE, NULL);
+    glTexImage2D(GL_TEXTURE_2D, 0, window_fb.color_storage, d3d.width, d3d.height, 0,
+                 window_fb.color_storage == GL_RGB565 ? GL_RGB : GL_BGRA,
+                 window_fb.color_storage == GL_RGB565 ? GL_UNSIGNED_SHORT_5_6_5 : GL_UNSIGNED_BYTE, NULL);
+    if (window_fb.color_storage == GL_RGB565) {
+        GLint r = 0, g = 0, b = 0, a = 0;
+        glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_RED_SIZE, &r);
+        glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_GREEN_SIZE, &g);
+        glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_BLUE_SIZE, &b);
+        glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_ALPHA_SIZE, &a);
+        if (r != 5 || g != 6 || b != 5 || a) {
+            xlog("D3D: host cannot allocate exact RGB565 texture (%d/%d/%d/%d bits)", r, g, b, a);
+            glDeleteTextures(1, tex); *tex = 0; return 0;
+        }
+    }
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -4424,40 +4810,88 @@ static GLuint make_texture_framebuffer(GLuint *tex)
     p_glGenFramebuffers(1, &fb);
     p_glBindFramebuffer(GL_FRAMEBUFFER, fb);
     p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, *tex, 0);
-    p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER,
-                                make_renderbuffer(1, GL_DEPTH24_STENCIL8, d3d.width, d3d.height));
+    if (window_fb.depth_storage) {
+        window_fb.resolve_depth_rb = make_renderbuffer(1, window_fb.depth_storage, d3d.width, d3d.height);
+        p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, window_fb.depth_storage == GL_DEPTH24_STENCIL8
+                                    ? GL_DEPTH_STENCIL_ATTACHMENT : GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER,
+                                    window_fb.resolve_depth_rb);
+    }
     return fb;
 }
 
-static void create_window_framebuffer(void)
+static bool create_window_framebuffer(void)
 {
+    destroy_window_framebuffer();
     SDL_GL_GetDrawableSize(d3d.window, &window_fb.w, &window_fb.h);
     window_fb.blit = SDL_GL_GetProcAddress("glBlitFramebuffer");
-    if (!p_glGenFramebuffers || !window_fb.blit) return;
+    window_fb.color_storage = backbuffer_color_storage(d3d.color_format);
+    window_fb.depth_storage = backbuffer_depth_storage(d3d.depth_format);
+    if (!p_glGenFramebuffers || !window_fb.blit) {
+        xlog("D3D: host lacks framebuffer support for title storage"); return false;
+    }
     window_fb.samples = multisample_samples(d3d.multisample_type, &window_fb.soft);
-    /* On VC4, 4x multisampling cost two thirds of the dashboard's frame
-       rate (3 fps against 10): draw single-sampled but keep the title's
-       soft downsample filter, which carries most of its look. */
-    bool keep_soft = vc4 && !getenv("XBCOMPAT_MSAA");
-    if (vc4) window_fb.samples = 1;
-    window_fb.samples = env_int("XBCOMPAT_MSAA", window_fb.samples);
-    if (window_fb.samples <= 1) window_fb.samples = 1, window_fb.soft = keep_soft ? window_fb.soft : 0;
+    const char *msaa = getenv("XBCOMPAT_MSAA");
+    if (msaa && *msaa && strcmp(msaa, "auto") && strcmp(msaa, "title")) {
+        char *end;
+        long n = strtol(msaa, &end, 10);
+        if (!*end && n >= 0 && n <= 64) window_fb.samples = n < 1 ? 1 : n;
+        else xlog("D3D: invalid XBCOMPAT_MSAA=%s, honoring title", msaa);
+    }
+    if (window_fb.samples <= 1) window_fb.samples = 1, window_fb.soft = 0;
     GLint max = 0;
     glGetIntegerv(GL_MAX_SAMPLES, &max);
-    if (window_fb.samples > max) window_fb.samples = max > 1 ? max : 1;
+    if (window_fb.samples > max) {
+        xlog("D3D: requested %d samples, host maximum %d", window_fb.samples, max);
+        window_fb.samples = max > 1 ? max : 1;
+    }
+    if (window_fb.samples > 1 && !SDL_GL_GetProcAddress("glRenderbufferStorageMultisample")) {
+        xlog("D3D: host lacks multisample storage; falling back to one sample");
+        window_fb.samples = 1;
+    }
+    if (window_fb.samples == 1) window_fb.soft = 0;
 
     window_fb.resolve = make_texture_framebuffer(&window_fb.tex);
+    if (!window_fb.resolve || p_glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        xlog("D3D: cannot allocate requested back-buffer storage");
+        destroy_window_framebuffer(); return false;
+    }
     if (window_fb.samples > 1) {
         p_glGenFramebuffers(1, &window_fb.fbo);
         p_glBindFramebuffer(GL_FRAMEBUFFER, window_fb.fbo);
-        p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER,
-                                    make_renderbuffer(window_fb.samples, GL_RGBA8, d3d.width, d3d.height));
-        p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER,
-                                    make_renderbuffer(window_fb.samples, GL_DEPTH24_STENCIL8, d3d.width, d3d.height));
-        if (p_glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        window_fb.color_rb = make_renderbuffer(window_fb.samples, window_fb.color_storage, d3d.width, d3d.height);
+        GLint actual_samples = 0;
+        if (p_glGetRenderbufferParameteriv)
+            p_glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_SAMPLES, &actual_samples);
+        bool exact_color = actual_samples > 1;
+        if (actual_samples != window_fb.samples)
+            xlog("D3D: multisample storage requested %d samples, host allocated %d", window_fb.samples, actual_samples);
+        if (actual_samples > 1) window_fb.samples = actual_samples;
+        if (window_fb.color_storage == GL_RGB565) {
+            GLint r = 0, g = 0, b = 0, a = 0;
+            if (p_glGetRenderbufferParameteriv) {
+                p_glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_RED_SIZE, &r);
+                p_glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_GREEN_SIZE, &g);
+                p_glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_BLUE_SIZE, &b);
+                p_glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_ALPHA_SIZE, &a);
+            }
+            bool exact_bits = r == 5 && g == 6 && b == 5 && !a;
+            exact_color = exact_color && exact_bits;
+            if (!exact_bits) xlog("D3D: host multisample storage is not RGB565 (%d/%d/%d/%d bits)", r, g, b, a);
+        }
+        p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, window_fb.color_rb);
+        if (window_fb.depth_storage) {
+            window_fb.depth_rb = make_renderbuffer(window_fb.samples, window_fb.depth_storage, d3d.width, d3d.height);
+            p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, window_fb.depth_storage == GL_DEPTH24_STENCIL8
+                                        ? GL_DEPTH_STENCIL_ATTACHMENT : GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER,
+                                        window_fb.depth_rb);
+        }
+        if (!exact_color || p_glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
             xlog("D3D: no %d-sample back buffer, drawing without antialiasing", window_fb.samples);
             window_fb.samples = 1;
             window_fb.soft = 0;
+            p_glDeleteFramebuffers(1, &window_fb.fbo); window_fb.fbo = 0;
+            p_glDeleteRenderbuffers(1, &window_fb.color_rb); window_fb.color_rb = 0;
+            if (window_fb.depth_rb) { p_glDeleteRenderbuffers(1, &window_fb.depth_rb); window_fb.depth_rb = 0; }
         }
     }
     if (window_fb.samples <= 1) {
@@ -4469,14 +4903,15 @@ static void create_window_framebuffer(void)
         xlog("D3D: no back buffer framebuffer, drawing %dx%d into the corner of a %dx%d window", d3d.width,
              d3d.height, window_fb.w, window_fb.h);
         p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
-        window_fb.fbo = 0;
-        return;
+        destroy_window_framebuffer(); return false;
     }
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
     window_fb.bind = p_glBindFramebuffer;
     p_glBindFramebuffer = bind_framebuffer;
-    xlog("D3D: %dx%d back buffer (%d sample%s) stretched over a %dx%d window", d3d.width, d3d.height,
-         window_fb.samples, window_fb.samples > 1 ? "s" : "", window_fb.w, window_fb.h);
+    xlog("D3D: %dx%d back buffer title color %#x depth %#x multisample %#x; host color %#x depth %#x %d samples (%s), window %dx%d",
+         d3d.width, d3d.height, d3d.color_format, d3d.depth_format, d3d.multisample_type, window_fb.color_storage,
+         window_fb.depth_storage, window_fb.samples, msaa && *msaa ? msaa : "title", window_fb.w, window_fb.h);
+    return true;
 }
 
 /* Bring a multisampled back buffer's samples down into the resolve framebuffer. */
@@ -4546,39 +4981,28 @@ static const char present_vs[] =
     "#version 120\n"
     "varying vec2 uv;\n"
     "void main() { uv = gl_Vertex.xy * 0.5 + 0.5; gl_Position = gl_Vertex; }\n";
-/* A 3x3 tap filter, separable: each axis weighs its neighbours by weight. */
-static const char present_fs[] =
-    "#version 120\n"
-    "uniform sampler2D tex, lut;\n"
-    "uniform vec2 texel, weight;\n"
-    "uniform float gamma;\n"
-    "varying vec2 uv;\n"
-    "void main() {\n"
-    "    vec3 kx = vec3(weight.x, 1.0 - 2.0 * weight.x, weight.x);\n"
-    "    vec3 ky = vec3(weight.y, 1.0 - 2.0 * weight.y, weight.y);\n"
-    "    vec3 c = vec3(0.0);\n"
-    "    for (int y = 0; y < 3; y++)\n"
-    "        for (int x = 0; x < 3; x++)\n"
-    "            c += kx[x] * ky[y] * texture2D(tex, uv + vec2(float(x - 1), float(y - 1)) * texel).rgb;\n"
-    "    if (gamma > 0.5) {\n"
-    "        vec3 i = clamp(c, 0.0, 1.0) * (255.0 / 256.0) + 0.5 / 256.0;\n"
-    "        c = vec3(texture2D(lut, vec2(i.r, 0.5)).r, texture2D(lut, vec2(i.g, 0.5)).g,\n"
-    "                 texture2D(lut, vec2(i.b, 0.5)).b);\n"
-    "    }\n"
-    "    gl_FragColor = vec4(c, 1.0);\n"
-    "}\n";
+#include "present_shader.h"
+#include "present_target.h"
 
-static bool present_program(void)
+static bool present_program(unsigned variant)
 {
-    static bool failed;
-    if (window_fb.prog || failed || !p_glCreateProgram) return window_fb.prog != 0;
-    GLuint vs = compile_shader(GL_VERTEX_SHADER, present_vs), fs = compile_shader(GL_FRAGMENT_SHADER, present_fs);
-    GLuint prog = vs && fs ? p_glCreateProgram() : 0;
+    static GLuint programs[8];   /* by variant: bit 0 FILTER_X, 1 FILTER_Y, 2 FILTER_GAMMA */
+    static unsigned failed;
+    GLuint prog = programs[variant];
+    if (prog && prog == window_fb.prog) return true;
+    if (failed >> variant & 1 || !p_glCreateProgram) return false;
+    if (prog) goto ready;
+    char source[sizeof present_fs + 128];
+    snprintf(source, sizeof source, "#version 120\n#define FILTER_X %u\n#define FILTER_Y %u\n#define FILTER_GAMMA %u\n%s",
+             variant & 1, variant >> 1 & 1, variant >> 2 & 1, present_fs);
+    GLuint vs = compile_shader(GL_VERTEX_SHADER, present_vs), fs = compile_shader(GL_FRAGMENT_SHADER, source);
+    prog = vs && fs ? p_glCreateProgram() : 0;
     GLint ok = 0;
     if (prog) {
         p_glAttachShader(prog, vs);
         p_glAttachShader(prog, fs);
         p_glLinkProgram(prog);
+        shader_diagnostics_link(prog, vs, fs);
         p_glGetProgramiv(prog, GL_LINK_STATUS, &ok);
     }
     if (vs) p_glDeleteShader(vs);
@@ -4586,9 +5010,11 @@ static bool present_program(void)
     if (!ok) {
         xlog("D3D: no present filter program, the frame goes out unfiltered");
         if (prog) p_glDeleteProgram(prog);
-        failed = true;
+        failed |= 1u << variant;
         return false;
     }
+    programs[variant] = prog;
+ready:
     window_fb.prog = prog;
     window_fb.u_tex = p_glGetUniformLocation(prog, "tex");
     window_fb.u_step = p_glGetUniformLocation(prog, "texel");
@@ -4616,7 +5042,8 @@ static void present_window_framebuffer(void)
     static int filter_enabled = -1;
     if (filter_enabled < 0) filter_enabled = env_int("XBCOMPAT_PRESENT_FILTER", 1);
     if (!filter_enabled) wx = wy = 0;
-    if ((wx <= 0 && wy <= 0 && !d3d.gamma_set) || !present_program()) {
+    if ((wx <= 0 && wy <= 0 && !d3d.gamma_set) || !present_program((wx > 0) | (wy > 0) << 1 | d3d.gamma_set << 2)) {
+        shader_diagnostics_mark(d3d.frame, ++shader_diag_draw, 0, 0, 0, "present-blit");
         GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
         glDisable(GL_SCISSOR_TEST);
         window_fb.bind(GL_READ_FRAMEBUFFER, window_fb.resolve ? window_fb.resolve : window_fb.fbo);
@@ -4637,6 +5064,7 @@ static void present_window_framebuffer(void)
     for (int i = 0; i < 6; i++) glDisable(GL_CLIP_PLANE0 + i);
     glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    if (present_target_clear_enabled()) present_target_clear_color();
     p_glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, window_fb.tex);
     GLuint saved_sampler[2] = { bound_sampler[0], bound_sampler[1] };
@@ -4673,6 +5101,7 @@ static void present_window_framebuffer(void)
         p_glUniform1i(window_fb.u_lut, 1);
         p_glActiveTexture(GL_TEXTURE0);
     }
+    shader_diagnostics_mark(d3d.frame, ++shader_diag_draw, 0, 0, window_fb.prog, "present-filter");
     glBegin(GL_TRIANGLE_STRIP);
     glVertex2f(-1, -1); glVertex2f(1, -1); glVertex2f(-1, 1); glVertex2f(1, 1);
     glEnd();
@@ -4846,6 +5275,7 @@ static void create_device_surfaces(ULONG format, ULONG depth_format)
     d3d.rt_height = d3d.height;
     d3d.rt_texture = false;
     d3d.target_zmax = d3d.zscale;
+    d3d.host_zmax = window_fb.depth_storage == 0x81A5 /* GL_DEPTH_COMPONENT16 */ ? 65535.0f : 16777215.0f;
 }
 
 static void NTAPI D3DDevice_GetBackBuffer(LONG BackBuffer, ULONG Type, D3DSurface **pp)
@@ -4857,8 +5287,9 @@ static void NTAPI D3DDevice_GetBackBuffer(LONG BackBuffer, ULONG Type, D3DSurfac
 
 static LONG NTAPI D3DDevice_GetDepthStencilSurface(D3DSurface **pp)
 {
-    d3d.depth->Common++;
-    *pp = d3d.depth;
+    if (!(*pp = d3d.target_depth)) return D3DERR_NOTFOUND;
+    d3d.target_depth->Common++;
+    /* The current depth surface, which SetRenderTarget may have changed or removed. */
     return D3D_OK;
 }
 
@@ -4943,6 +5374,7 @@ static GLuint surface_rt_texture(D3DSurface *s, ULONG w, ULONG h)
     tex_entry *e = malloc(sizeof(*e));
     *e = (tex_entry){ s->Data, s->Format, s->Size, 0, id, GL_TEXTURE_2D, tex_cache };
     tex_cache = e;
+    tex_cache_version++;
     return id;
 }
 
@@ -4975,6 +5407,7 @@ static tex_entry *surface_image(D3DSurface *s, GLenum *face, ULONG *level)
    GL row zero is the Xbox top row for these render targets. */
 static bool readback_rt_surface(D3DSurface *s)
 {
+    hud_batch_flush();
     if (s == d3d.backbuffer) return false;
     ULONG fmt = (s->Format >> 8) & 0xFF, level;
     GLenum transfer_format, transfer_type;
@@ -5021,9 +5454,26 @@ static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
         if (target != d3d.backbuffer)
             xlog("D3D: no framebuffer objects, rendering a standalone surface into the back buffer");
         if (p_glBindFramebuffer) p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        if (target == d3d.backbuffer && window_fb.fbo && (!z || z == d3d.depth)) {
+            /* The window framebuffer's depth follows the title's: the device's
+               own depth surface attaches it, none detaches it. */
+            GLenum attachment = window_fb.depth_storage == GL_DEPTH24_STENCIL8
+                                ? GL_DEPTH_STENCIL_ATTACHMENT : GL_DEPTH_ATTACHMENT;
+            p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, 0);
+            if (z) p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, attachment, GL_RENDERBUFFER,
+                                              window_fb.depth_rb ? window_fb.depth_rb : window_fb.resolve_depth_rb);
+            if (window_fb.resolve) {
+                window_fb.bind(GL_FRAMEBUFFER, window_fb.resolve);
+                p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, 0);
+                if (z) p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, attachment, GL_RENDERBUFFER, window_fb.resolve_depth_rb);
+                window_fb.bind(GL_FRAMEBUFFER, window_fb.fbo);
+            }
+        }
         d3d.rt_width = d3d.width;
         d3d.rt_height = d3d.height;
         d3d.rt_texture = false;
+        d3d.target_zmax = z ? depth_format_max((z->Format >> 8) & 0xFF) : d3d.zscale;
+        d3d.host_zmax = window_fb.depth_storage == 0x81A5 /* GL_DEPTH_COMPONENT16 */ ? 65535.0f : 16777215.0f;
         d3d.viewport = (D3DVIEWPORT8){ 0, 0, d3d.rt_width, d3d.rt_height, 0, 1 };
         return;
     }
@@ -5064,6 +5514,7 @@ static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
             return;
         }
         bool d24 = depth_format_max((z->Format >> 8) & 0xFF) > 65535.0f;
+        d3d.host_zmax = d24 ? 16777215.0f : 65535.0f;
         p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, 0);
         p_glFramebufferTexture2D(GL_FRAMEBUFFER, d24 ? GL_DEPTH_STENCIL_ATTACHMENT : GL_DEPTH_ATTACHMENT,
                                  depth_face, dt, depth_level);
@@ -5075,16 +5526,24 @@ static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
         d3d.viewport = (D3DVIEWPORT8){ 0, 0, w, h, 0, 1 };
         return;
     }
-    /* A depth buffer always comes along: titles clear z without checking. */
+    /* Any other depth surface gets a scratch renderbuffer in its own format;
+       with none, the target has no depth at all, as on the Xbox. */
+    p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
+    p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, 0);
     static GLuint rb; static ULONG rb_w, rb_h;
-    if (!rb || rb_w != w || rb_h != h) {
+    static GLenum rb_format;
+    GLenum depth_storage = z ? backbuffer_depth_storage((z->Format >> 8) & 0xFF) : 0;
+    d3d.host_zmax = depth_storage == 0x81A5 /* GL_DEPTH_COMPONENT16 */ ? 65535.0f : 16777215.0f;
+    if (z && (!rb || rb_w != w || rb_h != h || rb_format != depth_storage)) {
         if (!rb) p_glGenRenderbuffers(1, &rb);
         p_glBindRenderbuffer(GL_RENDERBUFFER, rb);
-        p_glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h);
+        p_glRenderbufferStorage(GL_RENDERBUFFER, depth_storage, w, h);
         rb_w = w; rb_h = h;
+        rb_format = depth_storage;
     }
     p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
-    p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, rb);
+    if (z) p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, depth_storage == GL_DEPTH24_STENCIL8
+                                       ? GL_DEPTH_STENCIL_ATTACHMENT : GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, rb);
     GLenum st = p_glCheckFramebufferStatus(GL_FRAMEBUFFER);
     if (st != GL_FRAMEBUFFER_COMPLETE) xlog("D3D: render target framebuffer incomplete (%#x)", st);
     d3d.rt_width = w;
@@ -5119,17 +5578,25 @@ static void NTAPI D3DSurface_LockRect(D3DSurface *s, ULONG *locked, const LONG *
            reading GL back would erase them.  XFONT locks once per TextOut,
            so every string but a frame's last went missing. */
         uint8_t *px = (uint8_t *)(s->Data | CONTIG_BASE);
-        uint8_t *tmp = malloc(w * h * 4);
+        GLenum format, type; unsigned bytes;
+        if (!surface_color_transfer((s->Format >> 8) & 0xFF, &format, &type, &bytes)) {
+            xlog("D3D: unsupported back-buffer lock transfer format"); return;
+        }
+        uint8_t *tmp = malloc((size_t)w * h * bytes);
+        if (!tmp) return;
         backbuffer_read_begin(GL_COLOR_BUFFER_BIT);
-        glReadPixels(0, 0, w, h, GL_BGRA, GL_UNSIGNED_BYTE, tmp);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadPixels(0, 0, w, h, format, type, tmp);
         backbuffer_read_end();
-        for (ULONG y = 0; y < h; y++) memcpy(px + y * pitch, tmp + (h - 1 - y) * w * 4, w * 4);
+        for (ULONG y = 0; y < h; y++) memcpy(px + y * pitch, tmp + (h - 1 - y) * w * bytes, w * bytes);
         free(tmp);
     }
     if (s != d3d.backbuffer) readback_rt_surface(s);
     if (s == d3d.backbuffer && !(flags & 0x80 /* D3DLOCK_READONLY */)) d3d.bb_cpu_dirty = true;
     if (s->Parent && !(flags & 0x80)) tex_invalidate(s->Parent->res.Data);
-    ULONG fmt = (s->Format >> 8) & 0xFF, offset = rect ? rect[1] * pitch + rect[0] * (pitch / w) : 0;
+    ULONG fmt = (s->Format >> 8) & 0xFF;
+    bool linear;
+    ULONG offset = rect ? rect[1] * pitch + rect[0] * (format_bits(fmt, &linear) / 8) : 0;
     if (fmt == 0x0C || fmt == 0x0E || fmt == 0x0F) {   /* rows of 4x4 blocks, as in lock_level */
         ULONG block = fmt == 0x0C ? 8 : 16;
         pitch = ((w + 3) / 4) * block;
@@ -5805,6 +6272,7 @@ static void NTAPI D3DDevice_GetScissors(ULONG *Count, ULONG *Exclusive, D3DRECT 
 /* Callbacks run "when the GPU gets there": we run them at the next sync point. */
 static void run_callbacks(void)
 {
+    hud_batch_flush();
     for (unsigned i = 0; i < d3d.ncallbacks; i++) {
 #ifdef XBC_TRANSLATED
         CPU_CALL(d3d.callbacks[i].fn, CONV_CDECL, (uint32_t)d3d.callbacks[i].ctx);
@@ -5835,7 +6303,8 @@ static void NTAPI D3DDevice_SetDebugMarker(ULONG v) { (void)v; }
 static void NTAPI D3DDevice_SetTile(ULONG i, const void *t) { (void)i; (void)t; }
 static void NTAPI D3DDevice_GetTile(ULONG i, ULONG *t) { (void)i; memset(t, 0, 24); }
 static void NTAPI D3DDevice_KickPushBuffer(void) { pusher_drain(); }
-static ULONG NTAPI D3DDevice_InsertFence(void) { return ++d3d.frame * 0 + 1; }
+/* Drawing is synchronous, so every fence has already passed. */
+static ULONG NTAPI D3DDevice_InsertFence(void) { return 1; }
 static BOOLEAN NTAPI D3DDevice_IsFencePending(ULONG f) { (void)f; return 0; }
 static void NTAPI D3DDevice_BlockOnFence(ULONG f) { (void)f; }
 /* The ramp the video DAC applied on the Xbox (the dashboard's screen saver
@@ -6551,8 +7020,9 @@ static void NTAPI D3DPushBuffer_Verify(D3DPushBuffer *pb, ULONG StampResources) 
 /* ---- running ---- */
 
 static void pb_interpret(const ULONG *p, unsigned n);
+static void pb_run(D3DPushBuffer *b, D3DFixup *fx, int depth);
 
-static void pb_run(D3DPushBuffer *b, D3DFixup *fx, int depth)
+static void pb_run_body(D3DPushBuffer *b, D3DFixup *fx, int depth)
 {
     pb_stream *pb = pb_stream_of(b, false);
     if (!pb || !pb->ops || depth > 8) return;
@@ -6614,6 +7084,15 @@ static void pb_run(D3DPushBuffer *b, D3DFixup *fx, int depth)
     }
 }
 
+static void pb_run(D3DPushBuffer *b, D3DFixup *fx, int depth)
+{
+    hud_batch_flush();
+    bool previous = hud_raw_active;
+    hud_raw_active = true;
+    pb_run_body(b, fx, depth);
+    hud_raw_active = previous;
+}
+
 static void NTAPI D3DDevice_RunPushBuffer(D3DPushBuffer *pb, D3DFixup *fx)
 {
     pusher_drain();
@@ -6659,7 +7138,7 @@ static vshader inline_layout(const vshader *sh, ULONG *stride)
     return tmp;
 }
 
-static void pb_interpret(const ULONG *p, unsigned n)
+static void pb_interpret_body(const ULONG *p, unsigned n)
 {
     static uint8_t *inline_buf;
     static unsigned inline_n, inline_cap;
@@ -6789,6 +7268,18 @@ static void pb_interpret(const ULONG *p, unsigned n)
     }
 }
 
+static void pb_interpret(const ULONG *p, unsigned n)
+{
+    /* Raw methods and recorded push buffers draw outside the API calls the
+       HUD batch and the packet captures watch: flush what is queued, and
+       keep both off until the run is over. */
+    hud_batch_flush();
+    bool previous = hud_raw_active;
+    hud_raw_active = true;
+    pb_interpret_body(p, n);
+    hud_raw_active = previous;
+}
+
 static void NTAPI D3DDevice_EndPush(ULONG *end)
 {
     unsigned n = end - push_scratch;
@@ -6807,7 +7298,7 @@ static void NTAPI D3DDevice_EndPush(ULONG *end)
    second).  Give it a buffer there and run what it wrote through the same
    interpreter as BeginPush before anything that depends on it. */
 #define PUSHER_BYTES (1u << 20)
-static ULONG *pusher_buf;
+/* pusher_buf itself is in hud_packet.h: the packet captures read it too. */
 
 static void pusher_init(ULONG *dev)
 {
@@ -6939,14 +7430,17 @@ static GLuint vis_active;
 static void NTAPI D3DDevice_BeginVisibilityTest(void)
 {
     pusher_drain();
+    hud_batch_flush();
     if (!p_glGenQueries || vis_active) return;
     p_glGenQueries(1, &vis_active);
     p_glBeginQuery(0x8914 /* GL_SAMPLES_PASSED */, vis_active);
+    hud_query_active = true;
 }
 
 static LONG NTAPI D3DDevice_EndVisibilityTest(ULONG index)
 {
     pusher_drain();
+    hud_batch_flush();
     if (!vis_active) return D3DERR_INVALIDCALL;
     p_glEndQuery(0x8914);
     unsigned slot = index % VIS_SLOTS;
@@ -6959,6 +7453,7 @@ static LONG NTAPI D3DDevice_EndVisibilityTest(ULONG index)
     vis[slot].query = vis_active;
     vis[slot].used = true;
     vis_active = 0;
+    hud_query_active = false;
     return D3D_OK;
 }
 

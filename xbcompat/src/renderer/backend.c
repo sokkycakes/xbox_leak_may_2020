@@ -1,4 +1,5 @@
 /* Native half: render code stays unchanged; only its runtime services cross. */
+#define _GNU_SOURCE /* pthread_setname_np */
 #include "../xbcompat.h"
 #include "../cpu.h"
 #include "../hle/hle.h"
@@ -17,6 +18,49 @@ const char *g_screenshot_path;
 volatile unsigned g_guest_traps;
 void (*g_vblank_hook)(void); /* Native hook, distinct from the x86 kernel thunk. */
 
+static void invoke_now(uint32_t index, struct xbr_call *call);
+static void control_now(uint32_t op, uint32_t *a);
+#include "worker.h"
+/* Runs one request where it was drained; nested runs restore renderer_current. */
+static void renderer_execute(struct xbr_request *r)
+{
+    struct xbr_request *parent = renderer_enabled ? renderer_current : NULL;
+    if (renderer_enabled) renderer_current = r;
+    if (r->kind == XBR_REQUEST_DRAW) {
+        d3d_draw_packet_run(r->packet);
+        d3d_draw_packet_free(r->packet);
+    } else if (r->kind == XBR_REQUEST_STATE) {
+        unsigned category = d3d_state_packet_category(r->state);
+        /* Render and texture-stage state (2, 3) only feed later draws; anything
+           else may be read by work a pending HUD batch has not flushed. */
+        if (category != 2 && category != 3) d3d_renderer_barrier();
+        d3d_state_packet_run(r->state);
+        d3d_state_packet_free(r->state);
+    } else if (r->kind == XBR_REQUEST_CALL) {
+        if (renderer_barriers && renderer_call_barrier[r->op]) d3d_renderer_barrier();
+        invoke_now(r->op, r->call);
+    } else {
+        if (renderer_barriers && r->op != XBR_VBLANK) d3d_renderer_barrier();
+        control_now(r->op, r->args);
+    }
+    if (renderer_enabled) renderer_current = parent;
+    if (!renderer_enabled) return;
+    pthread_mutex_lock(&renderer_lock);
+    if (r->kind == XBR_REQUEST_CONTROL && r->op == XBR_SHUTDOWN) renderer_stopping = true;
+    /* A call that drained an empty queue leaves the device as the guest will see
+       it next: snapshot that as the front later captures build on. */
+    if (r->kind == XBR_REQUEST_CALL && !parent && !renderer_head && !renderer_stopping
+        && !renderer_front) {
+        renderer_front = renderer_queue_state ? d3d_state_front_create(d3d8_funcs[r->op].impl)
+                                              : d3d_draw_front_create(d3d8_funcs[r->op].impl);
+        renderer_front_origin = r->origin;
+    }
+    if (r->detached) free(r);
+    else r->done = true;
+    pthread_cond_broadcast(&renderer_cond);
+    pthread_mutex_unlock(&renderer_lock);
+}
+#define host_call(op, a) renderer_host_service(op, a) /* Calls below go via the owner. */
 void xa_register(const struct xa_entry *tbl, size_t n)
 {
     if (n > 1024 - nentries) abort();
@@ -35,14 +79,23 @@ int xbr_init(uint32_t abi, xbr_host_fn host)
         if (j == nentries) return -3;
         adapters[nexports] = entries[j].adapter;
         conventions[nexports] = entries[j].conv;
+        const char *name = d3d8_funcs[nexports].name; /* Batched draws need no flush. */
+        renderer_call_barrier[nexports] = !strstr(name, "DrawVertices") && !strstr(name, "DrawIndexedVertices");
     }
+    const char *worker = getenv("XBCOMPAT_RENDER_WORKER");
+    renderer_enabled = worker && *worker && *worker != '0';
+    renderer_profile = getenv("XBCOMPAT_PROFILE_RENDERER") != NULL;
+    const char *state = getenv("XBCOMPAT_RENDER_QUEUE_STATE");
+    renderer_queue_state = renderer_enabled && state && *state && *state != '0';
+    const char *batch = getenv("XBCOMPAT_HUD_BATCH");
+    renderer_barriers = renderer_enabled || (batch && *batch && *batch != '0');
     return 0;
 }
 const char *xbr_name(uint32_t index)
 {
     return index < nexports ? d3d8_funcs[index].name : NULL;
 }
-void xbr_invoke(uint32_t index, struct xbr_call *call)
+static void invoke_now(uint32_t index, struct xbr_call *call)
 {
     if (!host_call || index >= nexports || !call) abort();
     struct xa_frame f = {
@@ -57,7 +110,7 @@ void xbr_invoke(uint32_t index, struct xbr_call *call)
     memcpy(&call->fret_lo, &f.fret, 8);
     call->pop_bytes = conventions[index] == CONV_CDECL ? 0 : f.used * 4;
 }
-void xbr_control(uint32_t op, uint32_t *a)
+static void control_now(uint32_t op, uint32_t *a)
 {
     if (!host_call) abort();
     switch (op) {
@@ -75,8 +128,31 @@ void xbr_control(uint32_t op, uint32_t *a)
         if (hook) hook();
         break;
     }
+    case XBR_READ_PIXELS: d3d_backend_read_pixels(a); break;
+    case XBR_RENDER_STATS:
+        d3d_backend_stats(a);
+        pthread_mutex_lock(&renderer_lock);
+        a[2] = renderer_async_count; a[3] = renderer_sync_count;
+        a[4] = renderer_enabled; a[5] = renderer_queue_bytes;
+        pthread_mutex_unlock(&renderer_lock);
+        break;
+    case XBR_SHUTDOWN: d3d_backend_shutdown(); break;
     default: abort();
     }
+}
+void xbr_invoke(uint32_t index, struct xbr_call *call)
+{
+    if (!host_call || index >= nexports || !call) abort();
+    renderer_dispatch(XBR_REQUEST_CALL, index, call, NULL);
+}
+void xbr_control(uint32_t op, uint32_t *args)
+{
+    if (!host_call) abort();
+    if (op == XBR_FRAME_COUNT) { /* A plain counter: no need to wait for the queue. */
+        args[0] = d3d_frame_count();
+        return;
+    }
+    renderer_dispatch(XBR_REQUEST_CONTROL, op, NULL, args);
 }
 static void message(uint32_t op, const char *fmt, va_list ap)
 {

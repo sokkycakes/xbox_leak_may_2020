@@ -22,11 +22,13 @@
  * fog colour by the fog factor when D3DRS_FOGENABLE is set.  (The
  * fixed-function path also adds specular when D3DRS_SPECULARENABLE is set.)
  */
+#include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "nv2a_shaders.h"
+#include "psh_range.h"
 
 /* ---- render state slots we read ---------------------------------------- */
 #define RS_PSALPHAINPUTS0        0
@@ -152,6 +154,8 @@ typedef struct {
     int use_eye_vector, use_key_color;
     int dot_defined[4];
 
+    psh_range ranges[16][2], next_ranges[16][2];   /* [register][rgb, alpha] before / after this stage */
+
     sbuf tex;                /* texture shader stage code */
     sbuf comb;               /* combiner code */
 } psh_ctx;
@@ -222,6 +226,19 @@ static void reg_name(psh_ctx *c, char *out, size_t n, int reg, int where, int st
     }
 }
 
+/* The range of a register as read here: V1R0 and EF_PROD exist only in
+   the final combiner and read as zero elsewhere. */
+static psh_range register_range(psh_ctx *c, int reg, int alpha, int where)
+{
+    if (reg == REG_V1R0_SUM || reg == REG_EF_PROD)
+        return where == 1 ? c->ranges[reg][alpha] : (psh_range){ 0.0, 0.0 };
+    return c->ranges[reg][alpha];
+}
+static psh_range input_range(psh_ctx *c, psh_input in, int where)
+{
+    return range_input_map(register_range(c, in.reg, in.chan != 0, where), in.map);
+}
+
 /* A mapped input: `vec3` for the RGB half (and the final combiner's colour
    inputs), `float` for the alpha half. */
 static void input_expr(psh_ctx *c, char *out, size_t n, psh_input in, int is_alpha, int where, int stage)
@@ -239,29 +256,36 @@ static void input_expr(psh_ctx *c, char *out, size_t n, psh_input in, int is_alp
     reg_name(c, reg, sizeof reg, in.reg, where, stage);
     snprintf(x, sizeof x, "%s%s", reg,
              is_alpha ? (in.chan ? ".a" : ".b") : (in.chan ? ".aaa" : ".rgb"));
+    psh_range r = register_range(c, in.reg, in.chan != 0, where);
+    char positive[96], unit[128];   /* x clamped at 0, and to 0..1, only where it can leave them */
+    if (r.lo >= 0.0) snprintf(positive, sizeof positive, "%s", x);
+    else snprintf(positive, sizeof positive, "max(%s, 0.0)", x);
+    range_clip_expr(unit, sizeof unit, x, r, 0.0, 1.0);
     switch (in.map) {
-    case MAP_UNSIGNED_INVERT:  snprintf(out, n, "(1.0 - clamp(%s, 0.0, 1.0))", x); break;
-    case MAP_EXPAND_NORMAL:    snprintf(out, n, "(2.0 * max(%s, 0.0) - 1.0)", x); break;
-    case MAP_EXPAND_NEGATE:    snprintf(out, n, "(1.0 - 2.0 * max(%s, 0.0))", x); break;
-    case MAP_HALFBIAS_NORMAL:  snprintf(out, n, "(max(%s, 0.0) - 0.5)", x); break;
-    case MAP_HALFBIAS_NEGATE:  snprintf(out, n, "(0.5 - max(%s, 0.0))", x); break;
+    case MAP_UNSIGNED_INVERT:  snprintf(out, n, "(1.0 - %s)", unit); break;
+    case MAP_EXPAND_NORMAL:    snprintf(out, n, "(2.0 * %s - 1.0)", positive); break;
+    case MAP_EXPAND_NEGATE:    snprintf(out, n, "(1.0 - 2.0 * %s)", positive); break;
+    case MAP_HALFBIAS_NORMAL:  snprintf(out, n, "(%s - 0.5)", positive); break;
+    case MAP_HALFBIAS_NEGATE:  snprintf(out, n, "(0.5 - %s)", positive); break;
     case MAP_SIGNED_IDENTITY:  snprintf(out, n, "%s", x); break;
     case MAP_SIGNED_NEGATE:    snprintf(out, n, "(-%s)", x); break;
-    default:                   snprintf(out, n, "max(%s, 0.0)", x); break;
+    default:                   snprintf(out, n, "%s", positive); break;
     }
 }
 
 /* Output scale / bias, then the clamp every combiner output gets. */
-static void output_expr(char *out, size_t n, const char *x, int mapping)
+static void output_expr(char *out, size_t n, const char *x, int mapping, psh_range r)
 {
+    char mapped[192];
     switch (mapping) {
-    case OUT_BIAS:             snprintf(out, n, "clamp(%s - 0.5, -1.0, 1.0)", x); break;
-    case OUT_SHIFTLEFT_1:      snprintf(out, n, "clamp(%s * 2.0, -1.0, 1.0)", x); break;
-    case OUT_SHIFTLEFT_1_BIAS: snprintf(out, n, "clamp((%s - 0.5) * 2.0, -1.0, 1.0)", x); break;
-    case OUT_SHIFTLEFT_2:      snprintf(out, n, "clamp(%s * 4.0, -1.0, 1.0)", x); break;
-    case OUT_SHIFTRIGHT_1:     snprintf(out, n, "clamp(%s * 0.5, -1.0, 1.0)", x); break;
-    default:                   snprintf(out, n, "clamp(%s, -1.0, 1.0)", x); break;
+    case OUT_BIAS:             snprintf(mapped, sizeof mapped, "(%s - 0.5)", x); break;
+    case OUT_SHIFTLEFT_1:      snprintf(mapped, sizeof mapped, "(%s * 2.0)", x); break;
+    case OUT_SHIFTLEFT_1_BIAS: snprintf(mapped, sizeof mapped, "((%s - 0.5) * 2.0)", x); break;
+    case OUT_SHIFTLEFT_2:      snprintf(mapped, sizeof mapped, "(%s * 4.0)", x); break;
+    case OUT_SHIFTRIGHT_1:     snprintf(mapped, sizeof mapped, "(%s * 0.5)", x); break;
+    default:                   snprintf(mapped, sizeof mapped, "%s", x); break;
     }
+    range_clip_expr(out, n, mapped, range_output_map(r, mapping), -1.0, 1.0);
 }
 
 /* Writable registers: R0, R1, V0, V1, T0..T3.  Anything else is a discard. */
@@ -540,17 +564,22 @@ static void emit_half(psh_ctx *c, sbuf *calc, sbuf *store, int stage, uint32_t i
     else
         sb_fmt(calc, "    %s SUM%s = AB%s + CD%s;\n", T, sfx, sfx, sfx);
 
+    psh_range rab = range_mul(input_range(c, a, 0), input_range(c, b, 0));
+    psh_range rcd = range_mul(input_range(c, cc, 0), input_range(c, d, 0));
+    if (!is_alpha && out.ab_dot) rab = range_scale(rab, 3.0);
+    if (!is_alpha && out.cd_dot) rcd = range_scale(rcd, 3.0);
+    psh_range rsum = out.mux ? range_union(rab, rcd) : range_add(rab, rcd);
     dab = dest_name(out.ab);
     dcd = dest_name(out.cd);
     dsum = dest_name(out.sum);
     /* The scaled, clamped outputs are computed before any register is
        written so that both halves see the stage's input values. */
     snprintf(tmp, sizeof tmp, "AB%s", sfx);
-    output_expr(ea, sizeof ea, tmp, out.mapping);
+    output_expr(ea, sizeof ea, tmp, out.mapping, rab);
     snprintf(tmp, sizeof tmp, "CD%s", sfx);
-    output_expr(eb, sizeof eb, tmp, out.mapping);
+    output_expr(eb, sizeof eb, tmp, out.mapping, rcd);
     snprintf(tmp, sizeof tmp, "SUM%s", sfx);
-    output_expr(ec, sizeof ec, tmp, out.mapping);
+    output_expr(ec, sizeof ec, tmp, out.mapping, rsum);
     if (dab) sb_fmt(calc, "    %s oAB%s = %s;\n", T, sfx, ea);
     if (dcd) sb_fmt(calc, "    %s oCD%s = %s;\n", T, sfx, eb);
     if (dsum) sb_fmt(calc, "    %s oSUM%s = %s;\n", T, sfx, ec);
@@ -559,6 +588,15 @@ static void emit_half(psh_ctx *c, sbuf *calc, sbuf *store, int stage, uint32_t i
     if (dcd) sb_fmt(store, "    %s%s = oCD%s;\n", dcd, wm, sfx);
     if (!is_alpha && out.cd_b2a && dcd) sb_fmt(store, "    %s.a = oCD.b;\n", dcd);
     if (dsum) sb_fmt(store, "    %s%s = oSUM%s;\n", dsum, wm, sfx);
+    rab = range_clip(range_output_map(rab, out.mapping), -1.0, 1.0);
+    rcd = range_clip(range_output_map(rcd, out.mapping), -1.0, 1.0);
+    rsum = range_clip(range_output_map(rsum, out.mapping), -1.0, 1.0);
+    /* What the written registers hold from the next stage on. */
+    if (dab) c->next_ranges[out.ab][is_alpha] = rab;
+    if (!is_alpha && out.ab_b2a && dab) c->next_ranges[out.ab][1] = rab;
+    if (dcd) c->next_ranges[out.cd][is_alpha] = rcd;
+    if (!is_alpha && out.cd_b2a && dcd) c->next_ranges[out.cd][1] = rcd;
+    if (dsum) c->next_ranges[out.sum][is_alpha] = rsum;
 }
 
 static void emit_stage(psh_ctx *c, int i)
@@ -580,12 +618,14 @@ static void emit_stage(psh_ctx *c, int i)
     /* The RGB and alpha halves run in parallel on the hardware: both read
        the registers as they were before the stage, then the results are
        written. */
+    memcpy(c->next_ranges, c->ranges, sizeof c->ranges);
     sb_init(&calc);
     sb_init(&store);
     emit_half(c, &calc, &store, i, rs[RS_PSRGBINPUTS0 + i], rs[RS_PSRGBOUTPUTS0 + i], 0);
     emit_half(c, &calc, &store, i, rs[RS_PSALPHAINPUTS0 + i], rs[RS_PSALPHAOUTPUTS0 + i], 1);
     sb_cat(o, calc.s);
     sb_cat(o, store.s);
+    memcpy(c->ranges, c->next_ranges, sizeof c->ranges);
     sb_free(&calc);
     sb_free(&store);
     sb_fmt(o, "    }\n");
@@ -600,6 +640,14 @@ static void emit_final(psh_ctx *c, uint32_t abcd, uint32_t efg)
 
     parse_inputs(abcd, &a, &b, &cc, &d);
     parse_inputs(efg, &e, &f, &g, &unused);
+    psh_range rv1 = c->ranges[REG_V1][0], rr0 = c->ranges[REG_R0][0];
+    if (settings & FCS_COMPLEMENT_V1) rv1 = range_input_map(rv1, MAP_UNSIGNED_INVERT);
+    if (settings & FCS_COMPLEMENT_R0) rr0 = range_input_map(rr0, MAP_UNSIGNED_INVERT);
+    psh_range rsum = range_add(rv1, rr0);
+    if (settings & FCS_CLAMP_SUM) rsum = range_clip(rsum, 0.0, 1.0);
+    c->ranges[REG_V1R0_SUM][0] = rsum;
+    c->ranges[REG_EF_PROD][0] = range_mul(input_range(c, e, 2), input_range(c, f, 2));
+    c->ranges[REG_EF_PROD][1] = (psh_range){ 0.0, 0.0 };
     input_expr(c, ee, sizeof ee, e, 0, 2, 8);
     input_expr(c, ef, sizeof ef, f, 0, 2, 8);
     input_expr(c, ea, sizeof ea, a, 0, 1, 8);
@@ -621,7 +669,16 @@ static void emit_final(psh_ctx *c, uint32_t abcd, uint32_t efg)
     if (c->use_efprod)
         sb_fmt(o, "    vec4 efprod = vec4(%s * %s, 0.0);\n", ee, ef);
     sb_fmt(o, "    vec3 fA = %s;\n    vec3 fB = %s;\n    vec3 fC = %s;\n    vec3 fD = %s;\n", ea, eb, ec, ed);
-    sb_fmt(o, "    gl_FragColor = clamp(vec4(fD + mix(fC, fB, fA), %s), 0.0, 1.0);\n", eg);
+    /* fA * fB + (1 - fA) * fC + fD, and G: clamp to 0..1 only where the
+       result can leave it. */
+    psh_range ra = input_range(c, a, 1), rb = input_range(c, b, 1);
+    psh_range rc = input_range(c, cc, 1), rd = input_range(c, d, 1);
+    psh_range rgb = range_add(range_add(range_mul(ra, rb), range_mul((psh_range){ 1.0 - ra.hi, 1.0 - ra.lo }, rc)),
+                              rd);
+    char result[256], bounded[320];
+    snprintf(result, sizeof result, "vec4(fD + mix(fC, fB, fA), %s)", eg);
+    range_clip_expr(bounded, sizeof bounded, result, range_union(rgb, input_range(c, g, 2)), 0.0, 1.0);
+    sb_fmt(o, "    gl_FragColor = %s;\n", bounded);
     sb_fmt(o, "    }\n");
 }
 
@@ -638,6 +695,13 @@ char *psh_translate_ex(const uint32_t *rs, const psh_options *options)
     int fog_mode = rs[RS_FOGTABLEMODE];
 
     memset(c, 0, sizeof *c);
+    /* Register ranges at the start: colours, textures and constants are
+       0..1; zero, the two unassigned numbers and what r0 / r1 start as
+       (vec4(0.0, 0.0, 0.0, t0.a), vec4(0.0)) are 0. */
+    for (int r = 0; r < 16; r++) for (int a = 0; a < 2; a++) c->ranges[r][a] = (psh_range){ 0.0, 1.0 };
+    c->ranges[REG_ZERO][0] = c->ranges[REG_ZERO][1] = (psh_range){ 0.0, 0.0 };
+    c->ranges[6][0] = c->ranges[6][1] = c->ranges[7][0] = c->ranges[7][1] = (psh_range){ 0.0, 0.0 };
+    c->ranges[REG_R0][0] = c->ranges[REG_R1][0] = c->ranges[REG_R1][1] = (psh_range){ 0.0, 0.0 };
     c->rs = rs;
     if (options) c->options = *options;
     c->nstages = rs[RS_PSCOMBINERCOUNT] & 0xf;

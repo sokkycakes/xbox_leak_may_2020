@@ -49,6 +49,11 @@
  *   gl_PointSize                  oPts.x
  */
 char *vsh_translate(const uint32_t *code, unsigned count);
+/* Variants of the same program.  VSH_VARIANT_Z leaves out the w-buffer
+   depth rewrite (the wdepth uniform), so draws that use a z-buffer get a
+   program without the per-vertex test. */
+#define VSH_VARIANT_Z 1u
+char *vsh_translate_ex(const uint32_t *code, unsigned count, unsigned flags);
 extern char vsh_error[96];   /* why vsh_translate last returned NULL */
 
 /*

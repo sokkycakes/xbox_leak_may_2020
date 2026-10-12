@@ -16,7 +16,8 @@ struct xbr_call {
 _Static_assert(sizeof(struct xbr_call) == 36, "xbr_call wire layout");
 _Static_assert(offsetof(struct xbr_call, pop_bytes) == 32, "xbr_call field layout");
 enum xbr_control {
-    XBR_CONFIG, XBR_BIND_GLOBALS, XBR_FRAME_COUNT, XBR_VBLANK
+    XBR_CONFIG, XBR_BIND_GLOBALS, XBR_FRAME_COUNT, XBR_VBLANK, XBR_READ_PIXELS,
+    XBR_RENDER_STATS, XBR_SHUTDOWN
 };
 struct xbr_config { int32_t trace, shot_frame, exit_frames; uint32_t shot_path; };
 enum xbr_service {
