@@ -10,10 +10,12 @@
 #define _GNU_SOURCE
 #include <elf.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <sched.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/auxv.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/prctl.h>
 #include <time.h>
@@ -773,6 +775,86 @@ typedef void (NTAPI *dpc_fn)(KDPC *, PVOID, PVOID, PVOID);
 
 void (*g_vblank_hook)(void);
 
+/* The display's own vertical blanks, read from the DRM device. The Xbox's
+   vblank ran off the TV's: a free 60.000 Hz timer drifts against a real
+   59.94 Hz display, and a title that waits for a blank and then presents
+   (which waits for the display's flip) loses whole frames as the two slide
+   in and out of phase. DRM_IOCTL_WAIT_VBLANK with a relative count of 0
+   returns the last blank's number and CLOCK_MONOTONIC time without waiting;
+   the layout is the same on i386 and armhf (Box86 passes it through).
+   XBCOMPAT_VBLANK=timer keeps the free timer. */
+struct drm_vblank_query {
+    uint32_t type, sequence;
+    int32_t tv_sec, tv_usec;   /* reply; the request's third word is `signal` */
+};
+#define DRM_IOCTL_WAIT_VBLANK_ _IOWR('d', 0x3a, struct drm_vblank_query)
+#define DRM_VBLANK_RELATIVE_ 0x1
+#define DRM_VBLANK_HIGH_CRTC_SHIFT_ 1
+
+static int vbl_fd = -1;
+static uint32_t vbl_type;
+static ULONGLONG vbl_period = 166833;   /* 100 ns units; 59.94 Hz until measured */
+
+static bool vbl_query(uint32_t type, uint32_t *seq, ULONGLONG *when)
+{
+    struct drm_vblank_query q = { .type = type };
+    if (ioctl(vbl_fd, DRM_IOCTL_WAIT_VBLANK_, &q) != 0) return false;
+    *seq = q.sequence;
+    *when = (ULONGLONG)q.tv_sec * 10000000ULL + (ULONGLONG)q.tv_usec * 10;
+    return true;
+}
+
+/* Find a CRTC whose blanks are counting: the display that's lit. */
+static void vbl_open(void)
+{
+    const char *e = getenv("XBCOMPAT_VBLANK");
+    if (fixed_step || (e && !strcmp(e, "timer"))) return;
+    for (int card = 0; card < 4 && vbl_fd < 0; card++) {
+        char path[32];
+        snprintf(path, sizeof path, "/dev/dri/card%d", card);
+        int fd = open(path, O_RDWR | O_CLOEXEC);
+        if (fd < 0) continue;
+        vbl_fd = fd;
+        for (uint32_t crtc = 0; crtc < 4; crtc++) {
+            uint32_t type = DRM_VBLANK_RELATIVE_ | (crtc << DRM_VBLANK_HIGH_CRTC_SHIFT_);
+            uint32_t s0, s1;
+            ULONGLONG t0, t1;
+            if (!vbl_query(type, &s0, &t0)) continue;
+            struct timespec ts = { 0, 50000000 };
+            nanosleep(&ts, NULL);
+            if (!vbl_query(type, &s1, &t1) || s1 == s0) continue;
+            vbl_type = type;
+            vbl_period = (t1 - t0) / (s1 - s0);
+            xlog("vblank: following the display on %s (CRTC %u, %.2f Hz)", path, crtc, 1e7 / vbl_period);
+            return;
+        }
+        close(fd);
+        vbl_fd = -1;
+    }
+    xlog("vblank: no display blanks to follow, using a 60 Hz timer");
+}
+
+/* When to raise the next Xbox vblank after `now`: just after the display's
+   next blank, or 0 to use the timer. "Just after" (1 ms, then up to 1 ms of
+   this thread's polling) lets a present that waited for that blank's flip
+   return first, so a title that presents and then waits for a blank sees
+   this one, as it would on an Xbox, and doesn't sit out a whole frame. */
+#define VBL_LAG 10000   /* 1 ms in 100 ns units */
+static ULONGLONG vbl_next(ULONGLONG now)
+{
+    static uint32_t first_seq;
+    static ULONGLONG first_time;
+    uint32_t seq;
+    ULONGLONG last;
+    if (vbl_fd < 0 || !vbl_query(vbl_type, &seq, &last)) return 0;
+    /* Refine the period over a long run of blanks (a mode change resets it). */
+    if (!first_time || seq < first_seq || seq - first_seq > 36000) first_seq = seq, first_time = last;
+    else if (seq - first_seq >= 60 && last > first_time) vbl_period = (last - first_time) / (seq - first_seq);
+    ULONGLONG next = last + VBL_LAG;
+    while (next <= now) next += vbl_period;
+    return next;
+}
+
 /* The DPC thread: fires timers, runs DPCs and keeps KeTickCount moving. */
 static void *dpc_thread(void *arg)
 {
@@ -782,6 +864,7 @@ static void *dpc_thread(void *arg)
     thread_adopt_host("dpc");
     set_irql(2);
     ULONGLONG next_vblank = 0;
+    bool vbl_tried = false;
     pthread_mutex_lock(&dpc_lock);
     for (;;) {
         ULONGLONG now = mono_100ns();
@@ -825,10 +908,21 @@ static void *dpc_thread(void *arg)
         /* Vertical blanks, 60 a second. */
         void (*vblank_hook)(void) = __atomic_load_n(&g_vblank_hook, __ATOMIC_ACQUIRE);
         if (vblank_hook) {
+            if (!vbl_tried) {
+                vbl_tried = true;
+                pthread_mutex_unlock(&dpc_lock);
+                vbl_open();
+                pthread_mutex_lock(&dpc_lock);
+                now = mono_100ns();
+            }
             if (!next_vblank) next_vblank = now;
             if (now >= next_vblank) {
-                next_vblank += 166667;
-                if (next_vblank + 100 * 10000ULL < now) next_vblank = now + 166667;
+                ULONGLONG display = vbl_next(now);
+                if (display) next_vblank = display;
+                else {
+                    next_vblank += 166667;
+                    if (next_vblank + 100 * 10000ULL < now) next_vblank = now + 166667;
+                }
                 pthread_mutex_unlock(&dpc_lock);
                 vblank_hook();
                 pthread_mutex_lock(&dpc_lock);

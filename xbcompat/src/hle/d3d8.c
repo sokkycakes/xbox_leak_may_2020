@@ -419,12 +419,19 @@ static void sync_device_surfaces(void)
     dev[0x1a14 / 4] = dev[0x1a18 / 4] = dev[0x1a1c / 4] = (ULONG)d3d.backbuffer;
 }
 
+/* Signalled at each vblank, for BlockUntilVerticalBlank (wait_vblank). */
+static pthread_mutex_t vblank_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t vblank_cond = PTHREAD_COND_INITIALIZER;
+
 /* A 60 Hz vertical blank, from the DPC thread (the GPU interrupt's DPC on an
    Xbox): sets the device's blank event and runs the title's callback. */
 static void d3d_vblank(void)
 {
     extern LONG NTAPI KeSetEvent(KEVENT *, LONG, BOOLEAN);
+    pthread_mutex_lock(&vblank_lock);
     ULONG n = ++d3d.vblank_count;
+    pthread_cond_broadcast(&vblank_cond);
+    pthread_mutex_unlock(&vblank_lock);
     ULONG flags = __atomic_exchange_n(&d3d.swapped, 0, __ATOMIC_ACQ_REL) ? 1 /* D3DVBLANK_SWAPDONE */ : 0;
     PVOID cb = d3d.vblank_callback;
     if (d3d.miniport_swap_cb) {
@@ -690,10 +697,27 @@ static void sleep_until(Uint64 t)
         SDL_Delay((Uint32)(((t - now) * 1000 + freq - 1) / freq));
 }
 
+/* BlockUntilVerticalBlank: wait for the next vblank the kernel raises
+   (d3d_vblank), which follows the display's own blanks where it can see
+   them. A clock of its own here drifted against the display's. With no
+   blanks arriving (before the kernel's thread runs, or a stalled fixed-step
+   clock), fall back to a free 60 Hz grid. */
+
 static void wait_vblank(void)
 {
     static Uint64 base;
     if (unpaced()) return;
+    cpu_block();
+    pthread_mutex_lock(&vblank_lock);
+    ULONG n = d3d.vblank_count;
+    struct timespec until;
+    clock_gettime(CLOCK_REALTIME, &until);
+    until.tv_nsec += 50000000;
+    if (until.tv_nsec >= 1000000000) until.tv_sec++, until.tv_nsec -= 1000000000;
+    int r = 0;
+    while (d3d.vblank_count == n && r == 0) r = pthread_cond_timedwait(&vblank_cond, &vblank_lock, &until);
+    pthread_mutex_unlock(&vblank_lock);
+    if (d3d.vblank_count != n) return;
     Uint64 now = SDL_GetPerformanceCounter(), period = SDL_GetPerformanceFrequency() / 60;
     if (!base) base = now;
     sleep_until(base + ((now - base) / period + 1) * period);
