@@ -193,6 +193,9 @@ static struct {
     struct D3DPalette *palettes[4];
     struct D3DPushBuffer *recording;   /* push buffer being recorded, if any */
     bool bb_cpu_dirty;           /* the title locked the back buffer and may have written it */
+    bool stipple_on;             /* NV097_SET_STIPPLE_CONTROL: polygon stipple */
+    bool stipple_dirty;          /* the pattern changed since GL last got it */
+    ULONG stipple[32];           /* NV097_SET_STIPPLE_PATTERN: one row of 32 pixels each */
 } d3d;
 
 /* Push buffer recording (see the push buffer section). */
@@ -706,7 +709,7 @@ static void draw_window_pixels_format(const uint8_t *tmp, GLenum format, GLenum 
     }
     glDisable(GL_DEPTH_TEST); glDisable(GL_BLEND); glDisable(GL_ALPHA_TEST); glDisable(GL_FOG);
     glDisable(GL_STENCIL_TEST); glDisable(GL_SCISSOR_TEST); glDisable(GL_LIGHTING);
-    glDisable(GL_DITHER);
+    glDisable(GL_DITHER); glDisable(GL_POLYGON_STIPPLE);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     if (p_glBindFramebuffer) p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -2164,6 +2167,14 @@ static bool pb_render_state(ULONG m, ULONG d)
     }
     if (m == 0x32C) { RS(D3DRS_STENCILENABLE) = d; return true; }   /* NV097_SET_STENCIL_TEST_ENABLE */
     if (m == 0x370) { RS(D3DRS_STENCILFAIL) = d; return true; }     /* NV097_SET_STENCIL_OP_FAIL */
+    /* Polygon stipple (Phantom Dust's arenas): the control word turns it on,
+       then 32 rows of pattern. */
+    if (m == 0x147C) { d3d.stipple_on = d & 1; return true; }       /* NV097_SET_STIPPLE_CONTROL */
+    if (m >= 0x1480 && m < 0x1500) {                                  /* NV097_SET_STIPPLE_PATTERN(i) */
+        unsigned i = (m - 0x1480) / 4;
+        if (d3d.stipple[i] != d) { d3d.stipple[i] = d; d3d.stipple_dirty = true; }
+        return true;
+    }
     if (m >= 0x1B0C && m < 0x1B0C + 4 * 0x40 && (m - 0x1B0C) % 0x40 == 0) {   /* NV097_SET_TEXTURE_CONTROL0(i) */
         /* Phantom Dust sets its cut-out textures' alpha kill this way. */
         unsigned i = (m - 0x1B0C) / 0x40;
@@ -2172,6 +2183,11 @@ static bool pb_render_state(ULONG m, ULONG d)
         return true;
     }
     return false;
+}
+
+static void NTAPI D3DDevice_SetStipple(const ULONG *pattern)
+{
+    for (unsigned i = 0; i < 32; i++) pb_render_state(0x1480 + 4 * i, pattern[i]);
 }
 
 static LONG NTAPI SetRenderState_ParameterCheck(ULONG State, ULONG Value)
@@ -2405,6 +2421,26 @@ static void apply_render_states(bool pretransformed, bool has_normal)
     else glDisable(GL_POINT_SPRITE);
     TRACE_ALL("D3D: points size %g scale %u sprite %u min %g max %g", psize, RS(D3DRS_POINTSCALEENABLE),
           RS(D3DRS_POINTSPRITEENABLE), pmin, pmax);
+
+    if (d3d.stipple_on && d3d.stipple_dirty) {
+        /* Bit 0 of a row is its leftmost pixel; rows count down the screen
+           as the title sees it, while GL counts them up from the bottom of
+           the window (and of a texture target, which is stored flipped). */
+        GLubyte rows[32][4];
+        for (int y = 0; y < 32; y++) {
+            ULONG v = d3d.stipple[d3d.rt_texture ? y : 31 - y];
+            for (int b = 0; b < 4; b++) rows[y][b] = (GLubyte)(v >> (8 * b));
+        }
+        GLint align;
+        glGetIntegerv(GL_UNPACK_ALIGNMENT, &align);
+        glPixelStorei(GL_UNPACK_LSB_FIRST, GL_TRUE);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+        glPolygonStipple(&rows[0][0]);
+        glPixelStorei(GL_UNPACK_LSB_FIRST, GL_FALSE);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, align);
+        d3d.stipple_dirty = false;
+    }
+    gc_enable(GL_POLYGON_STIPPLE, d3d.stipple_on);
 
     /* D3DCULL_CCW culls triangles that appear counter-clockwise on screen,
        so the GL front face is the opposite winding. */
@@ -5129,7 +5165,7 @@ static void present_window_framebuffer(void)
     window_fb.bind(GL_FRAMEBUFFER, 0);
     glViewport(0, 0, window_fb.w, window_fb.h);
     glDisable(GL_SCISSOR_TEST); glDisable(GL_DEPTH_TEST); glDisable(GL_STENCIL_TEST); glDisable(GL_BLEND);
-    glDisable(GL_ALPHA_TEST); glDisable(GL_CULL_FACE); glDisable(GL_COLOR_LOGIC_OP);
+    glDisable(GL_ALPHA_TEST); glDisable(GL_CULL_FACE); glDisable(GL_COLOR_LOGIC_OP); glDisable(GL_POLYGON_STIPPLE);
     for (int i = 0; i < 6; i++) glDisable(GL_CLIP_PLANE0 + i);
     glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
@@ -8087,7 +8123,7 @@ const struct hle_func d3d8_funcs[] = {
     F("_D3DDevice_Suspend@0", D3D_Nop0),
     F("_D3DDevice_FlushVertexCache@0", D3D_Nop0),
     F("_D3DDevice_PrimeVertexCache@8", D3D_Nop8),
-    F("_D3DDevice_SetStipple@4", D3D_Nop4),
+    F("_D3DDevice_SetStipple@4", D3DDevice_SetStipple),
     F("_D3DDevice_SetDepthClipPlanes@12", D3D_Nop12),
     F("_D3D_SetFence@4", D3D_SetFence),
     F("_D3D_BlockOnTime@8", D3D_BlockOnTime),
