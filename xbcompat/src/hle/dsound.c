@@ -360,7 +360,8 @@ static struct {
 /* Tests can drive the mixer by hand: set this before any DirectSound call. */
 int g_ds_no_audio_thread;
 
-#define LOCK()   pthread_mutex_lock(&g.lock)
+static void ds_lock(void);
+#define LOCK()   ds_lock()
 #define UNLOCK() pthread_mutex_unlock(&g.lock)
 
 static void NTAPI hdr_dtor(void *self) { (void)self; }
@@ -994,6 +995,63 @@ static uint64_t mono_ns(void)
     return (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec;
 }
 
+/* XBCOMPAT_LOG_FPS: every 5 seconds, how much of the time the mixer held
+   the DirectSound lock, what it mixed, and how long the title's calls
+   waited for that lock (the mixer runs with it held). */
+static struct {
+    int on;                      /* -1 unknown */
+    uint64_t start, mix_ns, mix_max, wait_ns, wait_max;
+    unsigned blocks, waits, calls;
+    unsigned long long voice_frames[4];   /* PCM, ADPCM, voice-processor, stream */
+    unsigned voices_max[4];
+} dstat = { .on = -1 };
+static __thread int ds_in_mixer;
+
+static bool dstat_on(void)
+{
+    if (dstat.on < 0) {
+        const char *e = getenv("XBCOMPAT_LOG_FPS");
+        dstat.on = e && *e && *e != '0';
+    }
+    return dstat.on;
+}
+
+static void ds_lock(void)
+{
+    if (!dstat_on() || ds_in_mixer) { pthread_mutex_lock(&g.lock); return; }
+    if (pthread_mutex_trylock(&g.lock) == 0) { dstat.calls++; return; }
+    uint64_t t = mono_ns();
+    pthread_mutex_lock(&g.lock);
+    uint64_t w = mono_ns() - t;
+    dstat.calls++; dstat.waits++;
+    dstat.wait_ns += w;
+    if (w > dstat.wait_max) dstat.wait_max = w;
+}
+
+/* With the lock held, at the end of a mixer block. */
+static void dstat_block(uint64_t t0, const unsigned voices[4])
+{
+    uint64_t now = mono_ns(), d = now - t0;
+    if (!dstat.start) dstat.start = now;
+    dstat.blocks++;
+    dstat.mix_ns += d;
+    if (d > dstat.mix_max) dstat.mix_max = d;
+    for (int i = 0; i < 4; i++) if (voices[i] > dstat.voices_max[i]) dstat.voices_max[i] = voices[i];
+    double span = (now - dstat.start) / 1e9;
+    if (span < 5) return;
+    xlog("DSound: mixer held the lock %.0f%% of the time (%.2f ms a block, worst %.2f, %u blocks); "
+         "voice frames/s pcm %.0f adpcm %.0f vp %.0f stream %.0f (most at once %u/%u/%u/%u); "
+         "title calls waited %.1f ms/s (%u of %u calls, worst %.2f ms)",
+         dstat.mix_ns / 1e7 / span, dstat.mix_ns / 1e6 / dstat.blocks, dstat.mix_max / 1e6, dstat.blocks,
+         dstat.voice_frames[0] / span, dstat.voice_frames[1] / span, dstat.voice_frames[2] / span,
+         dstat.voice_frames[3] / span, dstat.voices_max[0], dstat.voices_max[1], dstat.voices_max[2],
+         dstat.voices_max[3], dstat.wait_ns / 1e6 / span, dstat.waits, dstat.calls, dstat.wait_max / 1e6);
+    int on = dstat.on;
+    memset(&dstat, 0, sizeof dstat);
+    dstat.on = on;
+    dstat.start = now;
+}
+
 /* 48 kHz sample clock, interpolated between mixer blocks.  Lock held. */
 static uint64_t sample_time_locked(void)
 {
@@ -1305,7 +1363,10 @@ void ds_mix_block(float *out, int n)
     for (; n > MIX_FRAMES; n -= MIX_FRAMES, out += 2 * MIX_FRAMES) ds_mix_block(out, MIX_FRAMES);
     struct ds_events ev = { .n = 0 };
     memset(out, 0, (size_t)n * 2 * sizeof(float));
+    ds_in_mixer = 1;
     LOCK();
+    uint64_t t0 = dstat.on > 0 ? mono_ns() : 0;
+    unsigned voices[4] = { 0 };
     g.frames += (uint64_t)n;
     g.block_ns = mono_ns();
     int64_t now = reference_time_locked();
@@ -1324,9 +1385,13 @@ void ds_mix_block(float *out, int n)
                 buffer_play_locked(b, b->start_flags);
             }
             if (b->stop_at && now >= b->stop_at) { b->stop_at = 0; buffer_stopex_locked(b, b->stop_flags, &ev); }
+            if (t0 && b->playing && !b->paused && b->data && !(b->v.flags & DSBCAPS_SUBMIXMASK))
+                voices[voice_has_vp(&b->v) ? 2 : b->v.fmt.adpcm ? 1 : 0]++;
             render_buffer(b, out, n, &ev);
         } else if (e->kind == DS_STREAM) {
-            render_stream(e->obj, out, n);
+            struct ds_stream *st = e->obj;
+            if (t0 && st->active && !st->paused && !st->starved && st->count) voices[3]++;
+            render_stream(st, out, n);
         }
     }
     for (unsigned i = 0; i < g.nobjs; i++) {
@@ -1342,7 +1407,12 @@ void ds_mix_block(float *out, int n)
     }
     if (peak > g.peak) g.peak = peak;
     if (peak > 0) g.audible_frames += (uint64_t)n;
+    if (t0) {
+        for (int i = 0; i < 4; i++) dstat.voice_frames[i] += (unsigned long long)voices[i] * (unsigned)n;
+        dstat_block(t0, voices);
+    }
     UNLOCK();
+    ds_in_mixer = 0;
     events_signal(&ev);
 }
 
