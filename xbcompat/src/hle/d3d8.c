@@ -421,7 +421,7 @@ static void sync_device_surfaces(void)
 
 /* Signalled at each vblank, for BlockUntilVerticalBlank (wait_vblank). */
 static pthread_mutex_t vblank_lock = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t vblank_cond = PTHREAD_COND_INITIALIZER;
+static pthread_cond_t vblank_cond XBC_COND_ALIGN = PTHREAD_COND_INITIALIZER;
 
 /* A 60 Hz vertical blank, from the DPC thread (the GPU interrupt's DPC on an
    Xbox): sets the device's blank event and runs the title's callback. */

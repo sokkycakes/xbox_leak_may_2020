@@ -8,6 +8,7 @@
  * concept.
  */
 #define _GNU_SOURCE
+#include <dirent.h>
 #include <elf.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -790,6 +791,7 @@ struct drm_vblank_query {
 #define DRM_IOCTL_WAIT_VBLANK_ _IOWR('d', 0x3a, struct drm_vblank_query)
 #define DRM_VBLANK_RELATIVE_ 0x1
 #define DRM_VBLANK_HIGH_CRTC_SHIFT_ 1
+#define DRM_IOCTL_DROP_MASTER_ _IO('d', 0x1f)
 
 static int vbl_fd = -1;
 static uint32_t vbl_type;
@@ -804,16 +806,43 @@ static bool vbl_query(uint32_t type, uint32_t *seq, ULONGLONG *when)
     return true;
 }
 
-/* Find a CRTC whose blanks are counting: the display that's lit. */
-static void vbl_open(void)
+/* Whether SDL (or anything else in this process) has a DRM card open. */
+static bool display_open(void)
+{
+    DIR *d = opendir("/proc/self/fd");
+    struct dirent *e;
+    bool found = false;
+    while (d && !found && (e = readdir(d))) {
+        char link[64], target[64];
+        snprintf(link, sizeof link, "/proc/self/fd/%s", e->d_name);
+        ssize_t n = readlink(link, target, sizeof target - 1);
+        if (n <= 0) continue;
+        target[n] = 0;
+        found = !strncmp(target, "/dev/dri/card", 13) && atoi(e->d_name) != vbl_fd;
+    }
+    if (d) closedir(d);
+    return found;
+}
+
+/* Find a CRTC whose blanks are counting: the display that's lit. Returns
+   false to be asked again later: the display isn't SDL's yet.
+   The first process to open a DRM card while no one holds DRM master
+   becomes master. Between a title telling the display keeper (xbox-av) it
+   is starting and SDL opening the card, no one does: a descriptor opened
+   here then took master and SDL couldn't set the mode (the arcade
+   launcher's start crashed). So this waits until SDL has the card, and
+   hands master straight back if it got it anyway. */
+static bool vbl_open(void)
 {
     const char *e = getenv("XBCOMPAT_VBLANK");
-    if (fixed_step || (e && !strcmp(e, "timer"))) return;
+    if (fixed_step || (e && !strcmp(e, "timer"))) return true;
+    if (!display_open()) return false;
     for (int card = 0; card < 4 && vbl_fd < 0; card++) {
         char path[32];
         snprintf(path, sizeof path, "/dev/dri/card%d", card);
         int fd = open(path, O_RDWR | O_CLOEXEC);
         if (fd < 0) continue;
+        if (ioctl(fd, DRM_IOCTL_DROP_MASTER_, 0) == 0) xlog("vblank: handed back DRM master on %s", path);
         vbl_fd = fd;
         for (uint32_t crtc = 0; crtc < 4; crtc++) {
             uint32_t type = DRM_VBLANK_RELATIVE_ | (crtc << DRM_VBLANK_HIGH_CRTC_SHIFT_);
@@ -826,12 +855,13 @@ static void vbl_open(void)
             vbl_type = type;
             vbl_period = (t1 - t0) / (s1 - s0);
             xlog("vblank: following the display on %s (CRTC %u, %.2f Hz)", path, crtc, 1e7 / vbl_period);
-            return;
+            return true;
         }
         close(fd);
         vbl_fd = -1;
     }
     xlog("vblank: no display blanks to follow, using a 60 Hz timer");
+    return true;
 }
 
 /* When to raise the next Xbox vblank after `now`: just after the display's
@@ -864,7 +894,9 @@ static void *dpc_thread(void *arg)
     thread_adopt_host("dpc");
     set_irql(2);
     ULONGLONG next_vblank = 0;
-    bool vbl_tried = false;
+    bool vbl_done = false;
+    ULONGLONG vbl_retry = 0;
+    int vbl_waits = 0;
     pthread_mutex_lock(&dpc_lock);
     for (;;) {
         ULONGLONG now = mono_100ns();
@@ -908,12 +940,18 @@ static void *dpc_thread(void *arg)
         /* Vertical blanks, 60 a second. */
         void (*vblank_hook)(void) = __atomic_load_n(&g_vblank_hook, __ATOMIC_ACQUIRE);
         if (vblank_hook) {
-            if (!vbl_tried) {
-                vbl_tried = true;
+            /* Look for the display once a second until SDL has it (a
+               minute at most: a desktop SDL never opens a card). */
+            if (!vbl_done && now >= vbl_retry) {
                 pthread_mutex_unlock(&dpc_lock);
-                vbl_open();
+                vbl_done = vbl_open();
+                if (!vbl_done && ++vbl_waits >= 60) {
+                    vbl_done = true;
+                    xlog("vblank: no display opened, using a 60 Hz timer");
+                }
                 pthread_mutex_lock(&dpc_lock);
                 now = mono_100ns();
+                vbl_retry = now + 10000000;
             }
             if (!next_vblank) next_vblank = now;
             if (now >= next_vblank) {
