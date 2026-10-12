@@ -11,8 +11,6 @@
  * .map, xbcompat's own against its binary (addr2line). An address that is
  * not x86 code (a call into a native library under box86) is counted under
  * the x86 return address on top of the stack, marked "native call from".
- * XBCOMPAT_PROFILE_WORK=1 without XBCOMPAT_PROFILE samples to
- * /tmp/xbcompat-profile.txt.
  */
 #define _GNU_SOURCE
 #include <dlfcn.h>
@@ -167,12 +165,7 @@ void prof_thread_start(void)
 void prof_init(void)
 {
     out_path = getenv("XBCOMPAT_PROFILE");
-    if (!out_path || !*out_path) {
-        /* XBCOMPAT_PROFILE_WORK samples too, to a fixed file. */
-        const char *w = getenv("XBCOMPAT_PROFILE_WORK");
-        out_path = w && *w && *w != '0' ? "/tmp/xbcompat-profile.txt" : NULL;
-    }
-    if (!out_path) return;
+    if (!out_path || !*out_path) { out_path = NULL; return; }
     /* From librt: box86 wraps the timer calls there, not in libc. */
     void *rt = dlopen("librt.so.1", RTLD_NOW);
     if (rt) {
