@@ -233,8 +233,13 @@ uint64_t prof_wait_begin(void)
 
 /* Follow xbcompat's frame pointers from fp out to the title code that made
    the call: site[0] is that return address (0 if there is none, for a thread
-   of xbcompat's own), *own xbcompat's first caller above fp.  Title code may
-   not keep frame pointers, so the walk stops there; site[1..] stay 0. */
+   of xbcompat's own), *own xbcompat's first caller above fp.  A frame is
+   only followed out of while its return address is in xbcompat's own code,
+   whose frames keep their frame pointers: the walk stops at title code
+   (which may not keep them) and at the libc or box86 code that started the
+   thread, so it never runs off the top of a stack. */
+extern char __executable_start[], etext[];
+
 static void title_chain(uintptr_t *fp, uint32_t site[CHAIN], uint32_t *own)
 {
     *own = 0;
@@ -242,6 +247,7 @@ static void title_chain(uintptr_t *fp, uint32_t site[CHAIN], uint32_t *own)
     for (int depth = 0; depth < 16 && fp; depth++) {
         uintptr_t pc = fp[1];
         if (pc >= 0x10000 && pc < IMAGE_REGION_END) { site[0] = (uint32_t)pc; break; }
+        if (pc < (uintptr_t)__executable_start || pc >= (uintptr_t)etext) break;
         if (!*own && depth > 0) *own = (uint32_t)pc;
         uintptr_t *next = (uintptr_t *)fp[0];
         if (next <= fp || (uintptr_t)next - (uintptr_t)fp > (1u << 20)) break;
