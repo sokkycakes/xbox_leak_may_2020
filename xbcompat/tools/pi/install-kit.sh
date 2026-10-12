@@ -17,7 +17,9 @@ restore() {
 	else rm -f /etc/init.d/S02cpufreq; fi
 	sync
 }
-running() { pidof xbcompat-native.x86 xbcompat.x86 xbcompat.arm >/dev/null; }
+# Running, or about to: a title launch first builds its symbol map
+# (xbrun.py --map-only) with no emulator process.
+running() { pidof xbcompat-native.x86 xbcompat.x86 xbcompat.arm >/dev/null || ps | grep -q '[x]brun.py'; }
 if [ "$1" = undo ]; then
 	[ -d $B ] || { echo "No backup at $B." | tee $R; exit 1; }
 	restore; /etc/init.d/S98xbox restart >/dev/null 2>&1
