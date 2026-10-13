@@ -22,8 +22,7 @@ override CFLAGS += $(ARCH_FLAGS) -std=gnu11 -Wall -Wextra -Wno-unused-parameter 
     $(shell $(PKGCFG) --cflags sdl2 $(GL))
 LIBS = $(shell $(PKGCFG) --libs sdl2 $(GL)) -lpthread -lm
 OBJ = $(BUILD)/d3d8.o $(BUILD)/vsh.o $(BUILD)/vsh_interp.o $(BUILD)/psh.o $(BUILD)/backend.o $(BUILD)/dsmix.o
-HEADERS = src/xbcompat.h src/xbox.h src/cpu.h src/hle/hle.h src/hle/glcache.h \
-          src/hle/nv2a_shaders.h src/renderer/bridge.h
+HEADERS = src/xbcompat.h src/xbox.h src/cpu.h $(wildcard src/hle/*.h) $(wildcard src/renderer/*.h)
 .DEFAULT_GOAL := all
 all: $(BUILD)/libxbcompat_renderer.so.1
 $(BUILD)/d3d8.o: src/hle/d3d8.c src/hle/ff_vsh.h src/hle/dxt_decode.h tools/gen_adapters.py $(HEADERS)

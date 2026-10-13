@@ -157,7 +157,15 @@ static void renderer_dispatch(enum xbr_request_kind kind, uint32_t op,
 {
     if (!renderer_enabled) {
         struct xbr_request r = {.kind = kind, .op = op, .call = call, .args = args};
+        /* Without the worker, XBCOMPAT_PROFILE_RENDERER counts the calls and
+           their time per export (nested calls count in their callers too). */
+        uint64_t t0 = renderer_profile ? renderer_clock_ns() : 0;
         renderer_execute(&r);
+        unsigned slot = kind == XBR_REQUEST_CALL ? op : 1024 + op;
+        if (t0 && slot < RENDERER_SLOTS) {
+            renderer_op_count[slot]++;
+            renderer_op_blocked[slot] += renderer_clock_ns() - t0;
+        }
         return;
     }
     uint64_t started = renderer_profile ? renderer_clock_ns() : 0;
@@ -254,7 +262,23 @@ void xbr_worker_stats(uint32_t *stats)
    d3d8.c on the guest thread. */
 void xbr_worker_profile(double frames)
 {
-    if (!renderer_profile || !renderer_enabled || frames <= 0) return;
+    if (!renderer_profile || frames <= 0) return;
+    if (!renderer_enabled) {
+        /* Inline calls: the 25 that took longest, with their counts. */
+        static const char *controls[] = {"config", "bind-globals", "frame-count", "vblank", "read-pixels", "stats", "shutdown"};
+        for (unsigned rank = 0; rank < 25; rank++) {
+            unsigned top = 0;
+            for (unsigned i = 1; i < RENDERER_SLOTS; i++) if (renderer_op_blocked[i] > renderer_op_blocked[top]) top = i;
+            if (!renderer_op_blocked[top]) break;
+            const char *name = top < 1024 ? d3d8_funcs[top].name : top - 1024 < 7 ? controls[top - 1024] : "?";
+            fprintf(stderr, "D3D calls: %-40s %7.1f calls/frame %7.3f ms/frame\n", name,
+                    renderer_op_count[top] / frames, renderer_op_blocked[top] / (frames * 1e6));
+            renderer_op_blocked[top] = 0;
+        }
+        memset(renderer_op_count, 0, sizeof(renderer_op_count));
+        memset(renderer_op_blocked, 0, sizeof(renderer_op_blocked));
+        return;
+    }
     unsigned counts[RENDERER_SLOTS], state[8], draws; uint64_t blocked[RENDERER_SLOTS];
     pthread_mutex_lock(&renderer_lock);
     memcpy(state, renderer_state_count, sizeof(state));
