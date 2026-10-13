@@ -811,11 +811,27 @@ static uint64_t thread_cpu_ns(void)
 }
 
 static void program_profile_log(double frames);
+/* XBCOMPAT_WHATIF=1 (with XBCOMPAT_LOG_FPS): a measuring aid that cycles
+   through ways of leaving work out, two fps reports each, so one play
+   session shows what each costs.  The picture is wrong on purpose. */
+enum { WHATIF_NORMAL, WHATIF_NO_BBVIEW, WHATIF_FLAT_FS, WHATIF_BOTH, WHATIF_NO_DRAWS, WHATIF_MODES };
+static const char *const whatif_name[] = {
+    "normal", "no back-buffer views (draws sampling the frame skipped)", "flat pixel shaders",
+    "flat pixel shaders and no back-buffer views", "no draws reach the GPU"
+};
+static int whatif = -1;          /* the mode, -1 when off */
+static bool whatif_skip_draw;    /* this draw sampled a back-buffer view under WHATIF_NO_BBVIEW */
 static void log_fps(void)
 {
     static uint64_t since, cpu_since;
     static unsigned frames;
     profiling();
+    static bool whatif_read;
+    if (!whatif_read) {
+        const char *w = getenv("XBCOMPAT_WHATIF");
+        whatif_read = true;
+        if (w && *w && *w != '0' && work_on) { whatif = WHATIF_NORMAL; xlog("D3D what-if: now %s", whatif_name[0]); }
+    }
     if (!fps_on) return;
     uint64_t now = now_ns();
     if (!since) { since = now; cpu_since = work_on ? thread_cpu_ns() : 0; }
@@ -829,6 +845,7 @@ static void log_fps(void)
             n_draws = frames = 0;
             return;
         }
+        if (whatif >= 0) xlog("D3D what-if: the report below ran with %s", whatif_name[whatif]);
         xlog("D3D: %.1f fps: %.1f ms a frame, %u draws %.1f ms (GL calls %.1f), present+swap %.1f ms, "
              "pacing %.1f ms, other %.1f ms; GL state calls %u, %u skipped", 1000.0 / ms, ms, (unsigned)(n_draws / f),
              t_draw / 1e6 / f, t_gl / 1e6 / f, t_present / 1e6 / f, t_pace / 1e6 / f,
@@ -868,6 +885,11 @@ static void log_fps(void)
         }
         fvf_plan_hits = fvf_plan_misses = 0;
         gc_calls = gc_skipped = 0;
+        static unsigned whatif_reports;
+        if (whatif >= 0 && ++whatif_reports % 2 == 0) {
+            whatif = (whatif + 1) % WHATIF_MODES;
+            xlog("D3D what-if: now %s", whatif_name[whatif]);
+        }
         since = now;
         frames = 0;
         t_draw = t_gl = t_present = t_pace = 0;
@@ -1597,6 +1619,7 @@ static GLuint texture_for(D3DPixelContainer *t)
     bool on_color = d3d.backbuffer && va == (d3d.backbuffer->Data | CONTIG_BASE) && t != (D3DPixelContainer *)d3d.backbuffer;
     bool on_depth = d3d.depth && va == (d3d.depth->Data | CONTIG_BASE) && t != (D3DPixelContainer *)d3d.depth;
     if (on_color || on_depth) hud_batch_flush();   /* queued draws land in the frame first */
+    if (on_color && (whatif == WHATIF_NO_BBVIEW || whatif == WHATIF_BOTH)) { whatif_skip_draw = true; return 0; }
     if (on_color) {
         /* A 32-bit view of the back buffer (Phantom Dust filters the frame
            through three every frame): copy it on the GPU, no readback. */
@@ -3468,6 +3491,14 @@ static bool use_program(GLuint vs, program_entry **out)
     if (vs && RS(D3DRS_POINTSCALEENABLE)) glEnable(GL_VERTEX_PROGRAM_POINT_SIZE);
     else glDisable(GL_VERTEX_PROGRAM_POINT_SIZE);
     bool programmable_vertex = vs != 0;
+    if (fs && (whatif == WHATIF_FLAT_FS || whatif == WHATIF_BOTH)) {
+        static GLuint flat;
+        if (!flat)
+            flat = compile_shader(GL_FRAGMENT_SHADER,
+                                  "#version 120\nuniform sampler2D tex0;\nuniform vec4 tex_scale[4];\n"
+                                  "void main() { gl_FragColor = gl_Color * texture2D(tex0, gl_TexCoord[0].xy * tex_scale[0].xy); }\n");
+        if (flat) fs = flat;
+    }
     if (!vs) vs = fixed_lighting_shader();
     if (!vs && !fs) { program_off(); return true; }
     program_entry *e = program_for(vs, fs);
@@ -3950,6 +3981,7 @@ static void draw_programmable_(vshader *sh, ULONG PrimitiveType, const UCHAR *up
                                ULONG count, const USHORT *indices)
 {
     uint64_t t_begin = detail_on ? now_ns() : 0, t_gl0 = 0, t_gl1 = 0;
+    whatif_skip_draw = false;
     GLuint vs = vertex_shader_object(sh);
     if (!vs) return;
     DETAIL_TIMED(t_state, apply_render_states(false, false);
@@ -3982,6 +4014,7 @@ static void draw_programmable_(vshader *sh, ULONG PrimitiveType, const UCHAR *up
     gc_bind_buffer(GL_ELEMENT_ARRAY_BUFFER, ix ? ix->buf : 0);
     shader_diagnostics_mark(d3d.frame, ++shader_diag_draw, d3d.vertex_shader, d3d.pixel_shader, cur_program,
                             "programmable");
+    if (whatif_skip_draw || whatif == WHATIF_NO_DRAWS) return;
     if (detail_on) t_gl0 = now_ns();
     TIMED(t_gl, if (ix) glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, NULL);
                 else if (indices) glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, indices + first);
