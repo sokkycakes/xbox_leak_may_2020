@@ -810,6 +810,7 @@ static uint64_t thread_cpu_ns(void)
     return (uint64_t)ts.tv_sec * 1000000000u + ts.tv_nsec;
 }
 
+static void program_profile_log(double frames);
 static void log_fps(void)
 {
     static uint64_t since, cpu_since;
@@ -849,6 +850,7 @@ static void log_fps(void)
              prof_sync ? " [GPU synced per draw]" : "");
         traps = g_guest_traps;
         hud_profile_log(f);
+        if (detail_on) program_profile_log(f);
         memset(&prof, 0, sizeof(prof));
         memset(&stats, 0, sizeof(stats));
         if (detail_on) {
@@ -1330,6 +1332,7 @@ static void (APIENTRY *p_glPointParameterf)(GLenum, GLfloat);
 static void (APIENTRY *p_glUniform2fv)(GLint, GLsizei, const GLfloat *);
 static void (APIENTRY *p_glGenBuffers)(GLsizei, GLuint *);
 static void (APIENTRY *p_glGetActiveUniform)(GLuint, GLuint, GLsizei, GLsizei *, GLint *, GLenum *, char *);
+static void (APIENTRY *p_glGetShaderSource)(GLuint, GLsizei, GLsizei *, char *);
 static void (APIENTRY *p_glDeleteBuffers)(GLsizei, const GLuint *);
 static void (APIENTRY *p_glBufferData)(GLenum, GLsizeiptr, const void *, GLenum);
 static void (APIENTRY *p_glBufferSubData)(GLenum, GLintptr, GLsizeiptr, const void *);
@@ -2592,7 +2595,7 @@ static void load_shader_functions(void)
     LOAD(glVertexAttribPointer); LOAD(glVertexAttrib4fv); LOAD(glActiveTexture); LOAD(glClientActiveTexture);
     LOAD(glMultiTexCoord4fv); LOAD(glUniform2fv); LOAD(glPointParameterfv); LOAD(glPointParameterf);
     LOAD(glSecondaryColorPointer); LOAD(glBlendEquation); LOAD(glBlendColor);
-    LOAD(glGetActiveUniform); LOAD(glGenBuffers); LOAD(glDeleteBuffers); LOAD(glBindBuffer); LOAD(glBufferData); LOAD(glBufferSubData);
+    LOAD(glGetActiveUniform); LOAD(glGetShaderSource); LOAD(glGenBuffers); LOAD(glDeleteBuffers); LOAD(glBindBuffer); LOAD(glBufferData); LOAD(glBufferSubData);
     LOAD(glGenQueries); LOAD(glBeginQuery); LOAD(glEndQuery); LOAD(glGetQueryObjectuiv);
     LOAD(glGenSamplers); LOAD(glBindSampler); LOAD(glSamplerParameteri);
     LOAD(glSamplerParameterf); LOAD(glSamplerParameterfv);
@@ -2789,6 +2792,9 @@ typedef struct program_entry {
     float (*last_c)[4];   /* the constants last uploaded to the program */
     bool c_partial;
     int c_size;           /* active elements of c (the compiler drops unused trailing ones) */
+    /* XBCOMPAT_PROFILE_RENDERER: this program's draws since the last report. */
+    uint64_t prof_all_ns, prof_gl_ns;
+    unsigned prof_draws, prof_indices;
     struct program_entry *next;
 } program_entry;
 
@@ -3899,6 +3905,36 @@ uploaded:
     }
 }
 
+/* XBCOMPAT_PROFILE_RENDERER: the programs whose draws cost the most GL time,
+   with how many draws and indices, and whether the vertex program indexes
+   its constants with A0 (Mesa then keeps the whole array in memory the GPU
+   reads, instead of the few constants it uses). */
+static void program_profile_log(double frames)
+{
+    program_entry *top[8] = { 0 };
+    unsigned n = 0, total = 0;
+    for (program_entry *e = programs; e; e = e->next) {
+        if (!e->prof_draws) continue;
+        total++;
+        unsigned i = n < 8 ? n++ : 8;
+        while (i > 0 && top[i - 1]->prof_gl_ns < e->prof_gl_ns) { if (i < 8) top[i] = top[i - 1]; i--; }
+        if (i < 8) top[i] = e;
+    }
+    xlog("D3D programs: %u in use; top by GL draw time (ms/frame GL of all, draws, indices per frame):", total);
+    for (unsigned i = 0; i < n; i++) {
+        program_entry *e = top[i];
+        char src[32768];
+        GLsizei len = 0;
+        src[0] = 0;
+        if (e->vs && p_glGetShaderSource) p_glGetShaderSource(e->vs, sizeof src, &len, src);
+        xlog("D3D programs:   %u (vs %u fs %u): %.2f of %.2f ms, %.1f draws, %.0f indices%s%s", e->prog, e->vs, e->fs,
+             e->prof_gl_ns / 1e6 / frames, e->prof_all_ns / 1e6 / frames, e->prof_draws / frames,
+             e->prof_indices / frames, strstr(src, "[ridx(A0") ? ", A0-indexed constants" : "",
+             strstr(src, "gl_BackColor") ? ", two-sided" : "");
+    }
+    for (program_entry *e = programs; e; e = e->next) e->prof_all_ns = e->prof_gl_ns = 0, e->prof_draws = e->prof_indices = 0;
+}
+
 /* Draw with a programmable vertex shader: generic attributes + GLSL. */
 static void draw_programmable_(vshader *sh, ULONG PrimitiveType, const UCHAR *up, ULONG up_stride, ULONG first,
                                ULONG count, const USHORT *indices);
@@ -3913,6 +3949,7 @@ static void draw_programmable(vshader *sh, ULONG PrimitiveType, const UCHAR *up,
 static void draw_programmable_(vshader *sh, ULONG PrimitiveType, const UCHAR *up, ULONG up_stride, ULONG first,
                                ULONG count, const USHORT *indices)
 {
+    uint64_t t_begin = detail_on ? now_ns() : 0, t_gl0 = 0, t_gl1 = 0;
     GLuint vs = vertex_shader_object(sh);
     if (!vs) return;
     DETAIL_TIMED(t_state, apply_render_states(false, false);
@@ -3945,9 +3982,17 @@ static void draw_programmable_(vshader *sh, ULONG PrimitiveType, const UCHAR *up
     gc_bind_buffer(GL_ELEMENT_ARRAY_BUFFER, ix ? ix->buf : 0);
     shader_diagnostics_mark(d3d.frame, ++shader_diag_draw, d3d.vertex_shader, d3d.pixel_shader, cur_program,
                             "programmable");
+    if (detail_on) t_gl0 = now_ns();
     TIMED(t_gl, if (ix) glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, NULL);
                 else if (indices) glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, indices + first);
                 else glDrawArrays(gl_primitive(PrimitiveType), first, count));
+    if (detail_on && e) {
+        t_gl1 = now_ns();
+        e->prof_gl_ns += t_gl1 - t_gl0;
+        e->prof_all_ns += t_gl1 - t_begin;
+        e->prof_draws++;
+        e->prof_indices += count;
+    }
     /* The generic arrays stay bound for the next programmable draw; the
        fixed-function paths turn them off (gc_disable_attrib_arrays). */
     end_program(e);
@@ -6284,7 +6329,9 @@ static void NTAPI D3DDevice_GetVertexShaderConstant(LONG Register, float *data, 
 
 static void NTAPI D3DDevice_SetShaderConstantMode(ULONG mode)
 {
-    if (mode != d3d.constant_mode) xlog("D3D: shader constant mode %#x", mode);
+    /* Phantom Dust switches modes several times a frame: log the first few. */
+    static unsigned logged;
+    if (mode != d3d.constant_mode && logged < 8) { logged++; xlog("D3D: shader constant mode %#x", mode); }
     d3d.constant_mode = mode;
 }
 static void NTAPI D3DDevice_GetShaderConstantMode(ULONG *mode) { *mode = d3d.constant_mode; }
