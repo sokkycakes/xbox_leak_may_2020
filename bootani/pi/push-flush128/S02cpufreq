@@ -1,0 +1,14 @@
+#!/bin/sh
+# Run the CPU at full speed. The kernel's default ondemand governor saw the
+# idle time while xbcompat waits for the display and held the Pi 3 at
+# 1.0 GHz of its 1.2: Marble Blast took 20.9 ms a frame, 17.1 at full speed.
+# The firmware still slows the CPU itself on low voltage or heat.
+[ "$1" = start ] || exit 0
+for i in 1 2 3 4 5; do
+	[ -e /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor ] && break
+	sleep 1
+done
+for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+	[ -w "$g" ] && echo performance > "$g"
+done
+exit 0
