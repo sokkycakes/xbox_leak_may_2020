@@ -821,6 +821,16 @@ static const char *const whatif_name[] = {
     "flat pixel shaders and no back-buffer views", "no draws reach the GPU"
 };
 static int whatif = -1;          /* the mode, -1 when off */
+/* XBCOMPAT_FLUSH_DRAWS=n: hand the GPU the frame so far after every n draws
+   into the back buffer.  Mesa's VC4 driver otherwise starts on a frame only
+   when something flushes it, then makes the CPU wait for it once a burst of
+   small jobs (Phantom Dust's glow passes) follows; flushing early lets the
+   GPU draw the scene while the CPU is still producing it, at the cost of
+   storing and reloading the tiles at each split.  XBCOMPAT_WHATIF=flush
+   cycles through settings instead, like the other what-if modes. */
+static unsigned flush_every, flush_count;
+static const unsigned whatif_flush_steps[] = { 0, 64, 128, 256 };
+static int whatif_flush = -1;    /* index into whatif_flush_steps, -1 when off */
 static bool whatif_skip_draw;    /* this draw sampled a back-buffer view under WHATIF_NO_BBVIEW */
 static void log_fps(void)
 {
@@ -831,7 +841,16 @@ static void log_fps(void)
     if (!whatif_read) {
         const char *w = getenv("XBCOMPAT_WHATIF");
         whatif_read = true;
-        if (w && *w && *w != '0' && work_on) { whatif = WHATIF_NORMAL; xlog("D3D what-if: now %s", whatif_name[0]); }
+        const char *f = getenv("XBCOMPAT_FLUSH_DRAWS");
+        if (f) flush_every = (unsigned)atoi(f);
+        if (w && !strcmp(w, "flush") && work_on) {
+            whatif_flush = 0;
+            flush_every = whatif_flush_steps[0];
+            xlog("D3D what-if: now flushing every %u draws (0 = never)", flush_every);
+        } else if (w && *w && *w != '0' && work_on) {
+            whatif = WHATIF_NORMAL;
+            xlog("D3D what-if: now %s", whatif_name[0]);
+        }
     }
     if (!fps_on) return;
     uint64_t now = now_ns();
@@ -847,6 +866,7 @@ static void log_fps(void)
             return;
         }
         if (whatif >= 0) xlog("D3D what-if: the report below ran with %s", whatif_name[whatif]);
+        if (whatif_flush >= 0) xlog("D3D what-if: the report below ran flushing every %u draws (0 = never)", flush_every);
         xlog("D3D: %.1f fps: %.1f ms a frame, %u draws %.1f ms (GL calls %.1f), present+swap %.1f ms, "
              "pacing %.1f ms, other %.1f ms; GL state calls %u, %u skipped", 1000.0 / ms, ms, (unsigned)(n_draws / f),
              t_draw / 1e6 / f, t_gl / 1e6 / f, t_present / 1e6 / f, t_pace / 1e6 / f,
@@ -890,6 +910,11 @@ static void log_fps(void)
         if (whatif >= 0 && ++whatif_reports % 2 == 0) {
             whatif = (whatif + 1) % WHATIF_MODES;
             xlog("D3D what-if: now %s", whatif_name[whatif]);
+        }
+        if (whatif_flush >= 0 && ++whatif_reports % 2 == 0) {
+            whatif_flush = (whatif_flush + 1) % (int)(sizeof whatif_flush_steps / sizeof *whatif_flush_steps);
+            flush_every = whatif_flush_steps[whatif_flush];
+            xlog("D3D what-if: now flushing every %u draws (0 = never)", flush_every);
         }
         since = now;
         frames = 0;
@@ -1013,11 +1038,13 @@ static void apply_viewport(void)
     }
 }
 
+static unsigned clear_serial;   /* bumped per Clear: see backbuffer_copy_texture */
 static void NTAPI D3DDevice_Clear(ULONG Count, const D3DRECT *pRects, ULONG Flags, ULONG Color, float Z,
                                   ULONG Stencil)
 {
     pusher_drain();
     hud_batch_flush();
+    clear_serial++;
     if (d3d.recording) {
         ULONG h[5] = { Count, Flags, Color, 0, Stencil };
         memcpy(&h[3], &Z, 4);
@@ -4029,6 +4056,10 @@ static void draw_programmable_(vshader *sh, ULONG PrimitiveType, const UCHAR *up
     TIMED(t_gl, if (ix) glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, NULL);
                 else if (indices) glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, indices + first);
                 else glDrawArrays(gl_primitive(PrimitiveType), first, count));
+    if (flush_every && !d3d.rt_texture && ++flush_count >= flush_every) {
+        flush_count = 0;
+        glFlush();
+    }
     if (detail_on && e) {
         t_gl1 = now_ns();
         e->prof_gl_ns += t_gl1 - t_gl0;
@@ -5148,6 +5179,20 @@ static GLuint backbuffer_copy_texture(ULONG data, ULONG w, ULONG h)
     unsigned i = 0;
     while (i < 8 && slot[i].tex && !(slot[i].data == data && slot[i].w == w && slot[i].h == h)) i++;
     if (i == 8) i = data % 8;
+    /* Phantom Dust binds one view to two stages of a draw: the second asks
+       for the same pixels again.  While nothing has drawn, cleared or been
+       written by the CPU since, the copy made then still holds them.  On the
+       Pi each copy is a GPU job of its own, and Mesa's VC4 driver makes the
+       CPU wait for the GPU once more than five are in flight. */
+    static int last_slot = -1;
+    static unsigned last_draw, last_clear;
+    static ULONG last_frame;
+    if ((int)i == last_slot && slot[i].tex && slot[i].data == data && slot[i].w == w && slot[i].h == h
+        && last_draw == conv_serial && last_clear == clear_serial && last_frame == d3d.frame && !d3d.bb_cpu_dirty) {
+        TRACE_ALL("D3D: back buffer copy for a view at %#x reused (slot %u)", data, i);
+        return slot[i].tex;
+    }
+    last_slot = i; last_draw = conv_serial; last_clear = clear_serial; last_frame = d3d.frame;
     if (!slot[i].tex || slot[i].data != data || slot[i].w != w || slot[i].h != h) {
         if (!slot[i].tex) glGenTextures(1, &slot[i].tex);
         glBindTexture(GL_TEXTURE_2D, slot[i].tex);
