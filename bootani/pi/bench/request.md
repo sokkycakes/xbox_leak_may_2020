@@ -7,8 +7,9 @@ bootani/pi/bench at the commit this file was read from; check every md5.
 | file | md5 | what |
 |---|---|---|
 | libxbcompat_renderer.so.1 | 60c8502004c2ce069734351607d85d27 | push-async5 renderer + screenshots on request |
-| xbcompat-native.x86 | 3f780746d9e25ecee49955511aed4dc4 | x86 runtime + pad pipe |
+| xbcompat-native.x86 | adb2c39a6c27c2bbe5ccf0cab80d33d6 | x86 runtime + pad pipe, guest profiler lists every address |
 | xbprof | e0453100f2b93e91e2f354d450ee37c0 | whole-process profiler (static armhf) |
+| guest-report.py | 56181fdd3d3f1e4df88f2021240ab926 | adds up the guest profile (runs on the PC) |
 | push-vblank.sh | dd25777b766a67d5d9da536667a3795d | unchanged |
 | vblank.sh | 28cea926a04fcafd0b3b0d305dc863e0 | unchanged |
 | S02cpufreq | c385fd2c08ee04ef2c1b75b8f369b8d0 | unchanged |
@@ -54,8 +55,13 @@ A. Baseline: 60 s with the settings above. Report the median ms per frame
 B. Profiles: add `XBCOMPAT_PROFILE=/tmp/xbguest.txt` to /etc/default/xbox,
    restart, go back to the hub, wait 30 s, then run
    `/root/xbprof $(pidof xbcompat-native.x86) 30 1000 40` on the Pi.
-   Wait another 30 s and copy /tmp/xbguest.txt. Send xbprof's whole output
-   and the first 200 lines of xbguest.txt. Remove XBCOMPAT_PROFILE after.
+   Wait another 30 s, then copy to the PC: /tmp/xbguest.txt, the title's
+   library map (the file after `--hle` in
+   `tr '\0' ' ' < /proc/$(pidof xbcompat-native.x86)/cmdline`) and
+   E:\Games\Phantom Dust\default.xbe (read only). On the PC run
+   `python3 guest-report.py xbguest.txt TITLE.map default.xbe xbcompat-native.x86`.
+   Send xbprof's whole output, guest-report.py's whole output and the
+   first 60 lines of xbguest.txt. Remove XBCOMPAT_PROFILE after.
 
 C. box86 settings: one run each, restart and back to the hub, 45 s of fps,
    median ms per frame. Set each variable the same way as the others:
@@ -76,6 +82,6 @@ restart xbox, and send one message to the cloud session with:
     request 1: installed ok / rolled back (why)
     route to the hub: works / problems
     A: ms/frame, fps, state copying, presenting thread, worker blocked
-    B: xbprof output, xbguest.txt first 200 lines
+    B: xbprof output, guest-report.py output, xbguest.txt first 60 lines
     C: each variant's ms/frame (and crashes)
     anything odd (temperatures over 80 C, throttling, errors in the log)
