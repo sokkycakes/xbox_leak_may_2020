@@ -829,6 +829,10 @@ static int whatif = -1;          /* the mode, -1 when off */
    storing and reloading the tiles at each split.  XBCOMPAT_WHATIF=flush
    cycles through settings instead, like the other what-if modes. */
 static unsigned flush_every, flush_count;
+/* Draws in this frame and the last: only a busy frame gains from splitting
+   (the dashboard's ~200 draws lost 2 fps to it on the Pi). */
+#define FLUSH_MIN_DRAWS 400
+static unsigned frame_draws, last_frame_draws;
 static const unsigned whatif_flush_steps[] = { 0, 64, 128, 256 };
 static int whatif_flush = -1;    /* index into whatif_flush_steps, -1 when off */
 static bool whatif_skip_draw;    /* this draw sampled a back-buffer view under WHATIF_NO_BBVIEW */
@@ -957,6 +961,8 @@ static ULONG NTAPI D3DDevice_Swap(ULONG Flags)
     (void)Flags;
     flush_cpu_backbuffer();
     d3d.frame++;
+    last_frame_draws = frame_draws;
+    frame_draws = flush_count = 0;
     cpu_compare_audit_frame(d3d.frame);
     __atomic_store_n(&published_frame_count, d3d.frame, __ATOMIC_RELEASE);
     {
@@ -4063,7 +4069,8 @@ static void draw_programmable_(vshader *sh, ULONG PrimitiveType, const UCHAR *up
     TIMED(t_gl, if (ix) glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, NULL);
                 else if (indices) glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, indices + first);
                 else glDrawArrays(gl_primitive(PrimitiveType), first, count));
-    if (flush_every && !d3d.rt_texture && ++flush_count >= flush_every) {
+    frame_draws++;
+    if (flush_every && last_frame_draws >= FLUSH_MIN_DRAWS && !d3d.rt_texture && ++flush_count >= flush_every) {
         flush_count = 0;
         glFlush();
     }
