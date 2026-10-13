@@ -2,12 +2,13 @@
  * XBCOMPAT_PROFILE=FILE: a sampling profiler for finding where the CPU time
  * goes on a slow host (a Raspberry Pi under box86, where no perf runs).
  * Each thread xbcompat starts gets a timer on its own CPU clock that raises
- * SIGPROF every 10 ms of its CPU time (a process-wide one would also hit
+ * SIGPROF every 4 ms of its CPU time (a process-wide one would also hit
  * threads the native libraries start, which box86 can't hand to an x86
  * handler); the handler counts
  * the interrupted x86 address (box86 hands it the address of the x86 code it
  * was running) and the thread. Every five seconds FILE is rewritten with the
- * busiest addresses since the start: guest code resolves against the title's
+ * busiest addresses since the start (and at the end every address, for
+ * tools/pi/guest-report.py): guest code resolves against the title's
  * .map, xbcompat's own against its binary (addr2line). An address that is
  * not x86 code (a call into a native library under box86) is counted under
  * the x86 return address on top of the stack, marked "native call from".
@@ -28,6 +29,7 @@
 #ifdef XBC_NATIVE
 
 #define SLOTS 65536            /* power of two */
+#define PROF_MS 4              /* a sample per this much of a thread's CPU time */
 #define X86_CODE_END 0x10000000u /* the XBE and xbcompat itself; box86's bridges and libraries are above */
 
 typedef struct { uint32_t key, count; } slot;
@@ -107,7 +109,7 @@ static void dump(void)
     FILE *f = fopen(tmp, "w");
     if (!f) return;
     uint32_t n = total ? total : 1;
-    fprintf(f, "%u samples (1 per 10 ms of CPU), %u dropped\n\nthreads:\n", total, dropped);
+    fprintf(f, "%u samples (1 per %d ms of CPU), %u dropped\n\nthreads:\n", total, PROF_MS, dropped);
     for (int i = 0; i < 256 && tcopy[i].count; i++) {
         char path[64], name[32] = "?";
         snprintf(path, sizeof path, "/proc/self/task/%u/comm", tcopy[i].key);
@@ -128,6 +130,14 @@ static void dump(void)
     fprintf(f, "\ntitle code on the stack (the title's own time plus what it called):\n");
     for (int i = 0; i < 100 && i < used; i++)
         fprintf(f, "%6.2f%%  %08x\n", 100.0 * copy[i].count / n, copy[i].key);
+    /* Everything, for tools/pi/guest-report.py to add up by section and
+       function: samples, address (+1 for "native call from"). */
+    used = sorted(addrs, copy);
+    fprintf(f, "\nall addresses (samples, address):\n");
+    for (int i = 0; i < used; i++) fprintf(f, "%u %08x\n", copy[i].count, copy[i].key);
+    used = sorted(callers, copy);
+    fprintf(f, "\nall title code on the stack (samples, address):\n");
+    for (int i = 0; i < used; i++) fprintf(f, "%u %08x\n", copy[i].count, copy[i].key);
     fclose(f);
     rename(tmp, out_path);
 }
@@ -158,7 +168,7 @@ void prof_thread_start(void)
     ev._sigev_un._tid = syscall(SYS_gettid);
     timer_t timer;
     if (p_timer_create(CLOCK_THREAD_CPUTIME_ID, &ev, &timer) != 0) return;
-    struct itimerspec it = { { 0, 10000000 }, { 0, 10000000 } };
+    struct itimerspec it = { { 0, PROF_MS * 1000000 }, { 0, PROF_MS * 1000000 } };
     p_timer_settime(timer, 0, &it, NULL);
 }
 
