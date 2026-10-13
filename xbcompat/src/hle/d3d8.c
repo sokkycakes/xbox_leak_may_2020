@@ -822,7 +822,7 @@ static const char *const whatif_name[] = {
 };
 static int whatif = -1;          /* the mode, -1 when off */
 /* XBCOMPAT_FLUSH_DRAWS=n: hand the GPU the frame so far after every n draws
-   into the back buffer.  Mesa's VC4 driver otherwise starts on a frame only
+   into the back buffer (128 by default on the Pi's GPUs, 0 = never).  Mesa's VC4 driver otherwise starts on a frame only
    when something flushes it, then makes the CPU wait for it once a burst of
    small jobs (Phantom Dust's glow passes) follows; flushing early lets the
    GPU draw the scene while the CPU is still producing it, at the cost of
@@ -843,6 +843,13 @@ static void log_fps(void)
         whatif_read = true;
         const char *f = getenv("XBCOMPAT_FLUSH_DRAWS");
         if (f) flush_every = (unsigned)atoi(f);
+        else {
+            /* Measured on the Pi 3 in a Phantom Dust fight: never 5.9 fps,
+               every 64 draws 6.7, 128 7.1, 256 6.8.  Only tiling GPUs (the
+               Pi's VC4 and V3D) gain from it. */
+            const char *r = (const char *)glGetString(GL_RENDERER);
+            if (r && (strstr(r, "VC4") || strstr(r, "V3D"))) flush_every = 128;
+        }
         if (w && !strcmp(w, "flush") && work_on) {
             whatif_flush = 0;
             flush_every = whatif_flush_steps[0];
