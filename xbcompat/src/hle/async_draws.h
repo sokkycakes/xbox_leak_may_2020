@@ -470,6 +470,17 @@ int d3d_async_class(const char *name, const void *impl)
         (const void *)SetRenderStateNotInline, (const void *)D3DDevice_GetViewportOffsetAndScale,
         (const void *)D3DDevice_GetVisibilityTestResult, (const void *)D3DDevice_BlockUntilVerticalBlank,
         (const void *)D3DDevice_SetStipple,
+        /* Vertex program memory is read only by RunVertexStateShader,
+           which waits for the queue. */
+        (const void *)D3DDevice_SelectVertexShader, (const void *)D3DDevice_LoadVertexShader,
+        (const void *)D3DDevice_LoadVertexShaderProgram,
+        /* A fence number; waiting on one still drains the queue. */
+        (const void *)D3D_SetFence, (const void *)D3DDevice_InsertFence,
+        /* Exports that do nothing. */
+        (const void *)D3D_Nop0, (const void *)D3D_Nop4, (const void *)D3D_Nop8, (const void *)D3D_Nop12,
+        (const void *)D3D_FastNop, (const void *)D3DPERF_Zero, (const void *)D3DPERF_Zero4,
+        (const void *)D3DPERF_Zero8, (const void *)D3DPERF_Zero12, (const void *)D3DPERF_Zero16,
+        (const void *)D3DDevice_Nop,
         /* Fixed-function state and getters: front fields only. */
         (const void *)D3DDevice_SetLight,
         (const void *)D3DDevice_LightEnable,
@@ -522,6 +533,5 @@ int d3d_async_class(const char *name, const void *impl)
     for (unsigned i = 0; i < sizeof state / sizeof state[0]; i++) if (impl == state[i]) return 1;
     /* The render and texture stage state setters only store into the arrays. */
     if (strstr(name, "SetRenderState_") || strstr(name, "SetTextureState_")) return 1;
-    if (strstr(name, "Nop") || strstr(name, "D3DPERF_")) return 1;   /* nothing at all */
     return 0;
 }
