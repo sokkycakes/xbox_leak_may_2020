@@ -47,9 +47,13 @@ bool d3d_async_wanted(void), d3d_async_ready(void), d3d_async_active(void);
 void d3d_async_lock(void), d3d_async_unlock(void), d3d_async_before_sync(void), d3d_async_after_sync(void);
 int d3d_async_class(const char *name, const void *impl);
 uint64_t d3d_async_take_delta_ns(void);
+unsigned d3d_async_groups(const char *name, const void *impl);
+void d3d_async_touch(unsigned groups);
+extern const char *async_last_call;   /* for XBCOMPAT_ASYNC_CHECK's messages */
 void d3d_async_run(const uint32_t *buf, unsigned n);
 void d3d_worker_thread_init(void);
 static unsigned char renderer_async_class[1024];
+static unsigned short renderer_async_groups[1024];   /* state groups a front call writes */
 static bool renderer_async_wanted;
 static struct xbr_service_request *volatile renderer_async_service;
 static unsigned renderer_async_posts;
@@ -289,6 +293,8 @@ static void renderer_dispatch(enum xbr_request_kind kind, uint32_t op,
         d3d_async_lock();
         if (kind == XBR_REQUEST_CALL && renderer_async_class[op] && d3d_async_ready()) {
             invoke_now(op, call);
+            if (renderer_async_groups[op]) d3d_async_touch(renderer_async_groups[op]);
+            async_last_call = d3d8_funcs[op].name;
             d3d_async_unlock();
             return;
         }

@@ -40,21 +40,36 @@ static USHORT *async_back_index_data;
 static uint32_t *as_buf;
 static unsigned as_n, as_cap, as_draws;
 
-#define AF(f) { offsetof(d3d_state, f), sizeof(((d3d_state *)0)->f) }
+/* Which state the title's thread may have changed since the last delta,
+   by group: each front call marks the groups it writes (d3d_async_groups),
+   so a draw compares only those. */
+enum {
+    G_VSC = 1, G_PSC = 2, G_RS = 4, G_TSS = 8, G_TEX = 16, G_STREAM = 32, G_XFORM = 64, G_VIEW = 128,
+    G_OTHER = 256, G_ALL = 511,
+};
+static unsigned async_dirty = G_ALL;
+const char *async_last_call;   /* XBCOMPAT_ASYNC_CHECK: the last front call, for its messages */
+static uint32_t async_vs_rows[6];   /* vertex shader constant rows written, when G_VSC is set */
+
+#define AF(f, g) { offsetof(d3d_state, f), sizeof(((d3d_state *)0)->f), g }
 /* The fields the worker follows.  Not here: the GL objects and window
    (worker only), the title's array pointers (each copy has its own), the
    GL depth range (host_zmax: the worker works it out at each target
    switch), and flags the worker clears itself (bb_cpu_dirty, stipple_dirty,
    gamma_dirty). */
-static const struct { unsigned short off, size; } async_fields[] = {
-    AF(width), AF(height), AF(frame), AF(transforms), AF(viewport), AF(streams), AF(textures),
-    AF(vertex_shader), AF(indices), AF(base_vertex_index), AF(lights), AF(material), AF(material_power),
-    AF(back_material), AF(back_material_power), AF(backbuffer), AF(depth), AF(target), AF(target_depth),
-    AF(rt_width), AF(rt_height), AF(rt_texture), AF(target_zmax), AF(scissors),
-    AF(screen_offset), AF(backbuffer_scale), AF(multisample_type), AF(color_format), AF(depth_format),
-    AF(flicker_filter), AF(soft_display), AF(gamma), AF(gamma_set), AF(constant_mode), AF(vs_const),
-    AF(ps_const), AF(eye_vector), AF(pixel_shader), AF(zscale), AF(cpu_time), AF(callbacks), AF(ncallbacks),
-    AF(palettes), AF(stipple_on), AF(stipple),
+static const struct { unsigned short off, size, group; } async_fields[] = {
+    AF(width, G_OTHER), AF(height, G_OTHER), AF(frame, G_OTHER), AF(transforms, G_XFORM),
+    AF(viewport, G_VIEW), AF(streams, G_STREAM), AF(textures, G_TEX), AF(vertex_shader, G_STREAM),
+    AF(indices, G_STREAM), AF(base_vertex_index, G_STREAM), AF(lights, G_OTHER), AF(material, G_OTHER),
+    AF(material_power, G_OTHER), AF(back_material, G_OTHER), AF(back_material_power, G_OTHER),
+    AF(backbuffer, G_OTHER), AF(depth, G_OTHER), AF(target, G_OTHER), AF(target_depth, G_OTHER),
+    AF(rt_width, G_OTHER), AF(rt_height, G_OTHER), AF(rt_texture, G_OTHER), AF(target_zmax, G_OTHER),
+    AF(scissors, G_VIEW), AF(screen_offset, G_OTHER), AF(backbuffer_scale, G_OTHER),
+    AF(multisample_type, G_OTHER), AF(color_format, G_OTHER), AF(depth_format, G_OTHER),
+    AF(flicker_filter, G_OTHER), AF(soft_display, G_OTHER), AF(gamma, G_OTHER), AF(gamma_set, G_OTHER),
+    AF(constant_mode, G_OTHER), AF(vs_const, G_VSC), AF(ps_const, G_PSC), AF(eye_vector, G_OTHER),
+    AF(pixel_shader, G_RS), AF(zscale, G_OTHER), AF(cpu_time, G_OTHER), AF(callbacks, G_OTHER),
+    AF(ncallbacks, G_OTHER), AF(palettes, G_TEX), AF(stipple_on, G_RS), AF(stipple, G_RS),
 };
 #undef AF
 
@@ -90,11 +105,50 @@ static void async_delta(void)
     __atomic_fetch_add(&async_delta_ns, now_ns() - t0, __ATOMIC_RELAXED);
 }
 
+static void async_touch(unsigned groups)
+{
+    async_dirty |= groups;
+    if (groups & G_VSC) memset(async_vs_rows, 0xFF, sizeof async_vs_rows);
+}
+
+void d3d_async_touch(unsigned groups) { async_touch(groups); }
+
+/* A vertex shader constant row the title's thread wrote. */
+static void async_vs_touch(int slot)
+{
+    async_dirty |= G_VSC;
+    async_vs_rows[slot >> 5] |= 1u << (slot & 31);
+}
+
+static void async_clean(void)
+{
+    async_dirty = 0;
+    memset(async_vs_rows, 0, sizeof async_vs_rows);
+}
+
 static void async_delta_(void)
 {
+    unsigned dirty = async_dirty;
     const char *front = (const char *)&d3d_storage[0];
     char *sent = (char *)&async_sent;
-    for (unsigned i = 0; i < sizeof async_fields / sizeof async_fields[0]; i++)
+    if (dirty & G_VSC) {
+        /* Runs of written rows that differ from what the worker has. */
+        const float (*fv)[4] = d3d_storage[0].vs_const;
+        float (*sv)[4] = async_sent.vs_const;
+        for (unsigned r = 0; r < 192;) {
+            if (!(async_vs_rows[r >> 5] >> (r & 31) & 1) || !memcmp(fv[r], sv[r], 16)) { r++; continue; }
+            unsigned e = r + 1;
+            while (e < 192 && e - r < 16 && (async_vs_rows[e >> 5] >> (e & 31) & 1) && memcmp(fv[e], sv[e], 16)) e++;
+            memcpy(sv[r], fv[r], (e - r) * 16);
+            uint32_t *p = as_op(AS_FIELD, 2 + (e - r) * 4);
+            p[0] = offsetof(d3d_state, vs_const) + r * 16;
+            p[1] = (e - r) * 16;
+            memcpy(p + 2, fv[r], (e - r) * 16);
+            r = e;
+        }
+    }
+    for (unsigned i = 0; i < sizeof async_fields / sizeof async_fields[0]; i++) {
+        if (!(async_fields[i].group & dirty) || async_fields[i].group == G_VSC) continue;
         for (unsigned o = 0; o < async_fields[i].size; o += 64) {
             unsigned off = async_fields[i].off + o, n = async_fields[i].size - o < 64 ? async_fields[i].size - o : 64;
             if (!memcmp(front + off, sent + off, n)) continue;
@@ -104,7 +158,11 @@ static void async_delta_(void)
             p[1] = n;
             memcpy(p + 2, front + off, n);
         }
+    }
     const ULONG *rs = d3d_storage[0].render_state, *tss = d3d_storage[0].texture_state;
+    /* The render and texture stage state arrays are the title's own: its
+       inlined setters store into them without a call, so they are always
+       compared. */
     unsigned nrs = d3d_storage[0].rs_count;
     for (unsigned i = 0; i < nrs; i += 16) {
         unsigned n = nrs - i < 16 ? nrs - i : 16;
@@ -122,6 +180,20 @@ static void async_delta_(void)
         p[0] = i;
         p[1] = 16;
         memcpy(p + 2, tss + i, 64);
+    }
+    async_clean();
+    static int check = -1;
+    if (check < 0) check = getenv("XBCOMPAT_ASYNC_CHECK") != NULL;
+    if (check) {
+        /* Debug aid: anything the groups missed. */
+        for (unsigned i = 0; i < sizeof async_fields / sizeof async_fields[0]; i++)
+            if (memcmp(front + async_fields[i].off, sent + async_fields[i].off, async_fields[i].size))
+                fprintf(stderr, "D3D async check: field at %u (group %u) missed, last front call %s\n",
+                        async_fields[i].off, async_fields[i].group, async_last_call ? async_last_call : "?");
+        if (memcmp(rs, async_sent_rs, d3d_storage[0].rs_count * 4))
+            fprintf(stderr, "D3D async check: render state missed, last front call %s\n", async_last_call ? async_last_call : "?");
+        if (memcmp(tss, async_sent_tss, sizeof async_sent_tss))
+            fprintf(stderr, "D3D async check: texture state missed, last front call %s\n", async_last_call ? async_last_call : "?");
     }
 }
 
@@ -320,6 +392,7 @@ static ULONG async_swap(void)
     swap_begin_frame();
     ke_frame_presented();
     run_callbacks();
+    async_touch(G_OTHER);   /* the frame number and the callbacks */
     async_delta();
     as_op(AS_SWAP, 0);
     async_post();
@@ -337,18 +410,22 @@ void d3d_async_run(const uint32_t *buf, unsigned n)
 {
     d3d_state *back = &d3d_storage[1];
     async_replaying = true;
+    bool batch_flushed = false;   /* a pending HUD batch drew with the state before this run's changes */
     for (unsigned i = 0; i < n;) {
         unsigned op = buf[i] & 0xFF, len = buf[i] >> 8;
         const uint32_t *a = buf + i + 1;
+        if (op == AS_FIELD || op == AS_RS || op == AS_TSS) {
+            if (!batch_flushed) hud_batch_flush();
+            batch_flushed = true;
+        } else batch_flushed = false;
         switch (op) {
         case AS_FIELD:
-            hud_batch_flush();
             memcpy((char *)back + a[0], a + 2, a[1]);
             if (a[0] < offsetof(d3d_state, stipple) + sizeof back->stipple && a[0] + a[1] > offsetof(d3d_state, stipple))
                 back->stipple_dirty = true;
             break;
-        case AS_RS: hud_batch_flush(); memcpy(back->render_state + a[0], a + 2, a[1] * 4); break;
-        case AS_TSS: hud_batch_flush(); memcpy(back->texture_state + a[0], a + 2, a[1] * 4); break;
+        case AS_RS: memcpy(back->render_state + a[0], a + 2, a[1] * 4); break;
+        case AS_TSS: memcpy(back->texture_state + a[0], a + 2, a[1] * 4); break;
         case AS_DRAW: D3DDevice_DrawVertices(a[0], a[1], a[2]); break;
         case AS_DRAW_UP: D3DDevice_DrawVerticesUP(a[0], a[1], a + 3, a[2]); break;
         case AS_DRAW_INDEXED: D3DDevice_DrawIndexedVertices(a[0], a[1], (const USHORT *)(uintptr_t)a[2]); break;
@@ -424,6 +501,7 @@ bool d3d_async_ready(void)
     back->texture_state = async_back_tss;
     back->index_data = &async_back_index_data;
     async_sent = *front;
+    async_clean();
     async_frames_done = front->frame;
     async_on = true;
     xlog("D3D: queued drawing on (frame %u)", front->frame);
@@ -469,6 +547,7 @@ void d3d_async_after_sync(void)
     async_sent = *front;
     memcpy(async_sent_rs, front->render_state, front->rs_count * 4);
     memcpy(async_sent_tss, front->texture_state, sizeof async_sent_tss);
+    async_clean();
 }
 
 /* Which calls run on the title's thread: 1 state the front keeps, 2 work
@@ -567,4 +646,47 @@ int d3d_async_class(const char *name, const void *impl)
     /* The render and texture stage state setters only store into the arrays. */
     if (strstr(name, "SetRenderState_") || strstr(name, "SetTextureState_")) return 1;
     return 0;
+}
+
+/* The state groups a front call (class 1) may write; anything not listed
+   may write anything. */
+unsigned d3d_async_groups(const char *name, const void *impl)
+{
+    static const struct { const void *impl; unsigned groups; } known[] = {
+        /* These mark the vertex shader constant rows they write themselves. */
+        { (const void *)D3DDevice_SetVertexShaderConstant, 0 }, { (const void *)SetVertexShaderConstantNotInline, 0 },
+        { (const void *)SetVertexShaderConstant1, 0 }, { (const void *)SetVertexShaderConstant4, 0 },
+        { (const void *)D3DDevice_SetViewport, G_VIEW },
+        { (const void *)D3DDevice_SetPixelShaderConstant, G_PSC | G_RS },
+        { (const void *)D3DDevice_SetTexture, G_TEX }, { (const void *)D3DDevice_SetPalette, G_TEX },
+        { (const void *)D3DDevice_SetStreamSource, G_STREAM }, { (const void *)D3DDevice_SetVertexShader, G_STREAM },
+        { (const void *)D3DDevice_SetIndices, G_STREAM }, { (const void *)D3DDevice_SetVertexShaderInput, G_STREAM },
+        { (const void *)D3DDevice_SelectVertexShader, G_STREAM },
+        { (const void *)D3DDevice_SetTransform, G_XFORM }, { (const void *)D3DDevice_SetScissors, G_VIEW },
+        { (const void *)D3DDevice_SetPixelShader, G_RS }, { (const void *)D3DDevice_SetPixelShaderProgram, G_RS },
+        { (const void *)SetRenderStateNotInline, G_RS },
+        { (const void *)SetRenderState_Simple, G_RS | G_TSS }, { (const void *)D3DDevice_SetStipple, G_RS | G_TSS },
+        { (const void *)D3DDevice_SetTextureStageStateNotInline, G_TSS },
+        { (const void *)D3DDevice_SetShaderConstantMode, G_OTHER }, { (const void *)D3DDevice_SetLight, G_OTHER },
+        { (const void *)D3DDevice_LightEnable, G_OTHER }, { (const void *)D3DDevice_SetMaterial, G_OTHER },
+        { (const void *)D3DDevice_SetBackMaterial, G_OTHER },
+        /* Nothing on the device: counts, fences, program memory, and the
+           push buffer entry points (pusher_drain marks what it applies). */
+        { (const void *)D3DResource_AddRef, 0 }, { (const void *)D3DResource_Release, 0 },
+        { (const void *)D3D_SetFence, 0 }, { (const void *)D3DDevice_InsertFence, 0 },
+        { (const void *)D3DDevice_LoadVertexShader, 0 }, { (const void *)D3DDevice_LoadVertexShaderProgram, 0 },
+        { (const void *)D3D_LazySetState, 0 }, { (const void *)CDevice_SetStateVB, 0 },
+        { (const void *)CDevice_SetStateUP, 0 }, { (const void *)CDevice_KickOff, 0 },
+        { (const void *)D3D_MakeRequestedSpace, 0 }, { (const void *)D3DDevice_MakeSpace, 0 },
+        { (const void *)D3DDevice_BeginPushLTCG, 0 },
+        { (const void *)D3D_Nop0, 0 }, { (const void *)D3D_Nop4, 0 }, { (const void *)D3D_Nop8, 0 },
+        { (const void *)D3D_Nop12, 0 }, { (const void *)D3D_FastNop, 0 }, { (const void *)D3DPERF_Zero, 0 },
+        { (const void *)D3DPERF_Zero4, 0 }, { (const void *)D3DPERF_Zero8, 0 }, { (const void *)D3DPERF_Zero12, 0 },
+        { (const void *)D3DPERF_Zero16, 0 }, { (const void *)D3DDevice_Nop, 0 },
+    };
+    for (unsigned i = 0; i < sizeof known / sizeof known[0]; i++) if (impl == known[i].impl) return known[i].groups;
+    if (strstr(name, "SetRenderState_")) return G_RS;
+    if (strstr(name, "SetTextureState_")) return G_TSS;
+    if (strstr(name, "Get")) return 0;   /* the getters on the front list only read */
+    return G_ALL;
 }

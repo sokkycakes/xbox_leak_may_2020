@@ -222,6 +222,8 @@ static void async_vis_end(ULONG index);
 static LONG async_vis_result(ULONG index, UINT_ *result);
 static void async_release(D3DResource *r);
 static bool pb_state_only(const ULONG *p, unsigned n);
+static void async_touch(unsigned groups);
+static void async_vs_touch(int slot);
 static void pb_interpret_body(const ULONG *p, unsigned n);
 bool d3d_async_wanted(void);
 
@@ -2297,6 +2299,7 @@ static void NTAPI D3DDevice_SetViewport(const D3DVIEWPORT8 *v)
         float vp[2][4];
         viewport_constants(vp);
         memcpy(d3d.vs_const[58], vp, sizeof(vp));
+        if (async_front()) { async_vs_touch(58); async_vs_touch(59); }
     }
 }
 
@@ -6564,9 +6567,11 @@ static void NTAPI D3DDevice_SetVertexShaderConstant(LONG Register, const float *
     TRACE_ALL("D3D: vs constant %d x%u = %g %g %g %g", Register, count, data[0], data[1], data[2], data[3]);
     for (unsigned r = 1; r < count && r < 8; r++)
         TRACE_ALL("D3D:   +%u = %g %g %g %g", r, data[r * 4], data[r * 4 + 1], data[r * 4 + 2], data[r * 4 + 3]);
+    bool front = async_front();
     for (ULONG i = 0; i < count; i++) {
         int slot = constant_slot(Register + i);
         memcpy(d3d.vs_const[slot], data + i * 4, 16);
+        if (front) async_vs_touch(slot);
     }
 }
 
@@ -7748,7 +7753,7 @@ static void pusher_drain(void)
         dev[0] = (ULONG)pusher_buf;
         /* Methods that only set state set it on the front, and the next
            queued draw carries it; anything else goes to the worker. */
-        if (pb_state_only(put - n, n)) pb_interpret_body(put - n, n);
+        if (pb_state_only(put - n, n)) { pb_interpret_body(put - n, n); async_touch(~0u); }
         else async_raw_front(put - n, n);
         busy = false;
         return;

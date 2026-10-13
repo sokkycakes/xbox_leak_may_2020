@@ -98,7 +98,11 @@ int xbr_init(uint32_t abi, xbr_host_fn host)
     renderer_barriers = renderer_enabled || (batch && *batch && *batch != '0');
     renderer_async_wanted = renderer_enabled && d3d_async_wanted();
     for (size_t i = 0; renderer_async_wanted && i < nexports; i++)
+    {
         renderer_async_class[i] = (unsigned char)d3d_async_class(d3d8_funcs[i].name, d3d8_funcs[i].impl);
+        renderer_async_groups[i] = renderer_async_class[i] == 1
+            ? (unsigned short)d3d_async_groups(d3d8_funcs[i].name, d3d8_funcs[i].impl) : 0;
+    }
     return 0;
 }
 const char *xbr_name(uint32_t index)
