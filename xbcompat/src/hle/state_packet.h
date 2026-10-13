@@ -51,14 +51,16 @@ struct xbr_draw_front *d3d_state_front_create(void *impl)
     f->shader_ready = !shader_enabled || (hud_program && hud_program->prog);
     if (!hud_catalog || hud_catalog->version != tex_cache_version) {
         unsigned n = 0;
-        for (tex_entry *e = tex_cache; e && n < 512; e = e->next)
-            if (e->target == GL_TEXTURE_2D && !e->pal) n++;
+        for (unsigned b = 0; b < TEX_BUCKETS; b++)
+            for (tex_entry *e = tex_buckets[b]; e && n < 512; e = e->next)
+                if (e->target == GL_TEXTURE_2D && !e->pal) n++;
         struct xbr_catalog *c = malloc(sizeof(*c) + n * sizeof(c->entries[0]));
         if (c) {
             c->refs = 1; c->version = tex_cache_version; c->count = 0;
-            for (tex_entry *e = tex_cache; e && c->count < n; e = e->next)
-                if (e->target == GL_TEXTURE_2D && !e->pal)
-                    c->entries[c->count++] = (struct xbr_resident){ e->data, e->format, e->size, e->id };
+            for (unsigned b = 0; b < TEX_BUCKETS; b++)
+                for (tex_entry *e = tex_buckets[b]; e && c->count < n; e = e->next)
+                    if (e->target == GL_TEXTURE_2D && !e->pal)
+                        c->entries[c->count++] = (struct xbr_resident){ e->data, e->format, e->size, e->id };
             if (hud_catalog && !--hud_catalog->refs) free(hud_catalog);
             hud_catalog = c;
         }

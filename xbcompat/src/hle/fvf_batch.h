@@ -67,7 +67,7 @@ static bool hud_resident_textures(GLuint *ids, unsigned units)
         if (fmt == 0x0B /* P8 */ || tex_target(t) != GL_TEXTURE_2D
             || (d3d.backbuffer && (d3d.backbuffer->Data | CONTIG_BASE) == va)
             || (d3d.depth && (d3d.depth->Data | CONTIG_BASE) == va)) return false;
-        for (tex_entry *e = tex_cache; e; e = e->next)
+        for (tex_entry *e = *tex_bucket(t->res.Data); e; e = e->next)
             if (e->data == t->res.Data && e->format == t->Format && e->size == t->Size
                 && !e->pal) { ids[s] = e->id; break; }
         if (!ids[s]) return false;

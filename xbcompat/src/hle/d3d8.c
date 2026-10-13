@@ -793,6 +793,7 @@ static uint64_t t_draw, t_gl, t_present, t_pace;
 static uint64_t c_draw, c_present;
 static uint64_t t_resolve, t_filter, t_swap, t_restore;
 static uint64_t t_state, t_program, t_constants, t_attributes, t_indices, t_buffer_upload;
+static uint64_t t_fshader, t_textures;   /* parts of t_program */
 static unsigned n_draws;
 static unsigned cache_hits, cache_misses, cache_evicts, cache_uploads;
 static uint64_t cache_upload_bytes;
@@ -911,6 +912,9 @@ static void log_fps(void)
             cache_hits = cache_misses = cache_evicts = cache_uploads = 0; cache_upload_bytes = 0;
             t_resolve = t_filter = t_swap = t_restore = 0;
             xlog("D3D buffers: upload calls %.2f ms/frame", t_buffer_upload / 1e6 / f);
+            xlog("D3D program parts: fragment shader lookup %.2f, textures %.2f ms/frame", t_fshader / 1e6 / f,
+                 t_textures / 1e6 / f);
+            t_fshader = t_textures = 0;
             xlog("D3D prepared state: reused %.1f rebuilt %.1f per frame", fvf_plan_hits / f, fvf_plan_misses / f);
             t_buffer_upload = 0;
             t_state = t_program = t_constants = t_attributes = t_indices = 0;
@@ -1265,7 +1269,12 @@ typedef struct tex_entry {
     struct tex_entry *next;
 } tex_entry;
 
-static tex_entry *tex_cache;
+/* Kept in buckets by data address: a draw looks up each stage's texture,
+   and walking one list of every texture a level loaded (hundreds) per stage
+   per draw was a measurable part of the Pi's frame. */
+#define TEX_BUCKETS 1024
+static tex_entry *tex_buckets[TEX_BUCKETS];
+static inline tex_entry **tex_bucket(ULONG data) { return &tex_buckets[(data * 2654435761u) >> 22]; }
 static unsigned tex_cache_version;   /* bumped whenever a cached texture goes away */
 
 /* The palette of the stage whose texture is being bound (P8 textures). */
@@ -1292,7 +1301,7 @@ static void tex_invalidate(ULONG data)
 {
     tex_cache_version++;
     hud_batch_flush();
-    tex_entry **pp = &tex_cache;
+    tex_entry **pp = tex_bucket(data);
     while (*pp) {
         tex_entry *e = *pp;
         if (e->data == data) {
@@ -1710,7 +1719,7 @@ static GLuint texture_for(D3DPixelContainer *t)
     if (nocache) tex_invalidate(t->res.Data);
     ULONG fmt = (t->Format >> 8) & 0xFF, w, h, pitch;
     ULONG pal = fmt == 0x0B ? palette_hash() : 0;
-    for (tex_entry *e = tex_cache; e; e = e->next)
+    for (tex_entry *e = *tex_bucket(t->res.Data); e; e = e->next)
         if (e->data == t->res.Data && e->format == t->Format && e->size == t->Size && e->pal == pal) return e->id;
 
     hud_batch_flush();   /* uploading rebinds texture units a queued draw uses */
@@ -1748,8 +1757,8 @@ static GLuint texture_for(D3DPixelContainer *t)
     debug_dump_texture(target, t->res.Data, fmt, w, h);
 
     tex_entry *e = malloc(sizeof(*e));
-    *e = (tex_entry){ t->res.Data, t->Format, t->Size, pal, id, target, tex_cache };
-    tex_cache = e;
+    *e = (tex_entry){ t->res.Data, t->Format, t->Size, pal, id, target, *tex_bucket(t->res.Data) };
+    *tex_bucket(t->res.Data) = e;
     tex_cache_version++;
     return id;
 }
@@ -2919,6 +2928,7 @@ static void program_uniform1i(program_entry *e, GLint location, GLint value)
 }
 
 static program_entry *programs;
+static program_entry *program_lookup[256];
 
 static void NTAPI D3DDevice_DeleteVertexShader(ULONG handle)
 {
@@ -2936,6 +2946,7 @@ static void NTAPI D3DDevice_DeleteVertexShader(ULONG handle)
             free(e->last_c);
             free(e);
         }
+        memset(program_lookup, 0, sizeof program_lookup);
         if (sh->vs) p_glDeleteShader(sh->vs);
         if (sh->vs_z) p_glDeleteShader(sh->vs_z);
     }
@@ -3115,8 +3126,12 @@ static GLuint vertex_shader_object(vshader *sh)
 
 static program_entry *program_for(GLuint vs, GLuint fs)
 {
+    /* Every draw looks its program up; a direct-mapped table in front of the
+       list (cleared when programs are deleted) skips the walk. */
+    program_entry **slot = &program_lookup[(vs * 31u + fs) & 255];
+    if (*slot && (*slot)->vs == vs && (*slot)->fs == fs) return *slot;
     for (program_entry *e = programs; e; e = e->next)
-        if (e->vs == vs && e->fs == fs) return e;
+        if (e->vs == vs && e->fs == fs) return *slot = e;
     program_entry *e = calloc(1, sizeof(*e));
     e->vs = vs;
     e->fs = fs;
@@ -3177,7 +3192,7 @@ static program_entry *program_for(GLuint vs, GLuint fs)
     }
     e->next = programs;
     programs = e;
-    return e;
+    return *slot = e;
 }
 
 /* ---- pixel shaders: fragment programs from the combiner state ---------- */
@@ -3186,11 +3201,20 @@ static program_entry *program_for(GLuint vs, GLuint fs)
    minus the combiner constants, which are uniforms. */
 typedef struct fshader_entry {
     uint32_t key[64];
+    uint32_t hash;
     GLuint fs;
     struct fshader_entry *next;
 } fshader_entry;
 
 static fshader_entry *fshaders;
+static fshader_entry *fshader_lookup[256];   /* direct-mapped by hash, in front of the list */
+
+static uint32_t fshader_hash(const uint32_t *key)
+{
+    uint32_t h = 2166136261u;
+    for (int i = 0; i < 64; i++) h = (h ^ key[i]) * 16777619u;
+    return h;
+}
 
 /* PS_GLOBALFLAGS_TEXMODE_ADJUST (bit 8 of PSFinalCombinerConstants): like
    the real library's LazySetShaderStageProgram, pick each stage's texture
@@ -3270,12 +3294,15 @@ static GLuint fragment_shader_object(void)
     uint32_t key[64];
     psh_options options = fragment_shader_options();
     fshader_key(key, &options);
-    static fshader_entry *last;
-    if (last && gc_same(last->key, key, 64)) return last->fs;
+    uint32_t hash = fshader_hash(key);
+    fshader_entry **slot = &fshader_lookup[(hash ^ hash >> 16) & 255];
+    if (*slot && (*slot)->hash == hash && gc_same((*slot)->key, key, 64)) return (*slot)->fs;
     for (fshader_entry *e = fshaders; e; e = e->next)
-        if (gc_same(e->key, key, 64)) return (last = e)->fs;
+        if (e->hash == hash && gc_same(e->key, key, 64)) return (*slot = e)->fs;
     fshader_entry *e = calloc(1, sizeof(*e));
     memcpy(e->key, key, sizeof(key));
+    e->hash = hash;
+    *slot = e;
     ULONG modes = RS(D3DRS_PSTEXTUREMODES);
     RS(D3DRS_PSTEXTUREMODES) = key[57];
     ULONG rs[D3DRS_MAX];   /* psh.c reads 4400 numbering */
@@ -3383,7 +3410,7 @@ static void upload_ps_uniforms(program_entry *e)
     glFogf(GL_FOG_START, rs_float(D3DRS_FOGSTART));
     glFogf(GL_FOG_END, rs_float(D3DRS_FOGEND));
     glFogf(GL_FOG_DENSITY, rs_float(D3DRS_FOGDENSITY));
-    apply_shader_textures(e);
+    DETAIL_TIMED(t_textures, apply_shader_textures(e));
 }
 
 /* Fixed-function GL work (draws without shaders, glDrawPixels) needs
@@ -3533,7 +3560,7 @@ static bool use_program(GLuint vs, program_entry **out)
     *out = NULL;
     GLuint fs = 0;
     if (d3d.pixel_shader) {
-        fs = fragment_shader_object();
+        DETAIL_TIMED(t_fshader, fs = fragment_shader_object());
         if (!fs) return false;
     }
     /* NV2A programmable oPts is selected only with point parameters enabled.
@@ -3609,6 +3636,7 @@ typedef struct {
     ULONG checked;               /* frame of the last full compare */
     GLuint buf;                  /* CONV_RANGE: the indices; CONV_VBO: the vertices */
     size_t span;                 /* CONV_VBO: bytes from vertex 0 in buf and raw */
+    unsigned verified;           /* draw serial of the last check against the source */
 } conv_entry;
 
 #define CONV_SLOTS 1024
@@ -3640,7 +3668,7 @@ static conv_entry *conv_find(const UCHAR *src, ULONG stride, ULONG kind, ULONG c
     free(victim->raw);
     free(victim->out);
     if (victim->buf) { p_glDeleteBuffers(1, &victim->buf); gc_forget_buffer(victim->buf); }
-    *victim = (conv_entry){ src, stride, kind, count, 0, 0, NULL, 0, NULL, 0, d3d.frame, 0, 0 };
+    *victim = (conv_entry){ src, stride, kind, count, 0, 0, NULL, 0, NULL, 0, d3d.frame, 0, 0, 0 };
     return victim;
 }
 
@@ -3686,7 +3714,10 @@ static conv_entry *index_entry(const USHORT *ix, ULONG count, bool upload)
     conv_entry *e = conv_find((const UCHAR *)ix, 2, CONV_RANGE, count);
     e->used = conv_serial;
     bool same = false;
-    if (e->raw) {
+    /* A draw looks its indices up twice (the range, the buffer); the source
+       cannot change in between. */
+    if (e->raw && e->verified == conv_serial) same = true;
+    else if (e->raw) {
         if (conv_full_due(e)) same = !memcmp(e->raw, ix, count * 2);
         else same = conv_sampled_same(e->raw, (const UCHAR *)ix, count * 2, 2, 2) || !memcmp(e->raw, ix, count * 2);
     }
@@ -3696,6 +3727,7 @@ static conv_entry *index_entry(const USHORT *ix, ULONG count, bool upload)
         if (detail_on) { cache_uploads++; cache_upload_bytes += count * 2; }
         DETAIL_TIMED(t_buffer_upload, p_glBufferData(GL_ELEMENT_ARRAY_BUFFER, count * 2, ix, GL_STATIC_DRAW));
     }
+    e->verified = conv_serial;
     if (same) return e;
     ULONG lo = 0xFFFF, hi = 0;
     for (ULONG i = 0; i < count; i++) {
@@ -3736,6 +3768,9 @@ static GLuint stream_buffer(const UCHAR *base, ULONG stride, vrange r, size_t ne
     if (!p_glGenBuffers || r.hi <= r.lo || !stride) return 0;
     conv_entry *e = conv_find(base, stride, CONV_VBO, 0);
     e->used = conv_serial;
+    /* Attributes of one stream share the entry: check it once per draw. */
+    if (e->buf && need <= e->span && e->verified == conv_serial) return e->buf;
+    e->verified = conv_serial;
     if (e->buf && need <= e->span) {
         size_t from = (size_t)r.lo * stride, to = need;
         if (conv_full_due(e)) from = 0, to = e->span;
@@ -5608,7 +5643,7 @@ static bool surface_transfer(ULONG fmt, GLenum *format, GLenum *type, unsigned *
    texture cache under the surface's own memory so destroy_resource frees it. */
 static GLuint surface_rt_texture(D3DSurface *s, ULONG w, ULONG h)
 {
-    for (tex_entry *e = tex_cache; e; e = e->next)
+    for (tex_entry *e = *tex_bucket(s->Data); e; e = e->next)
         if (e->data == s->Data && e->format == s->Format && e->size == s->Size) return e->id;
     GLuint id;
     glGenTextures(1, &id);
@@ -5628,8 +5663,8 @@ static GLuint surface_rt_texture(D3DSurface *s, ULONG w, ULONG h)
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_BGRA, GL_UNSIGNED_BYTE, NULL);
     }
     tex_entry *e = malloc(sizeof(*e));
-    *e = (tex_entry){ s->Data, s->Format, s->Size, 0, id, GL_TEXTURE_2D, tex_cache };
-    tex_cache = e;
+    *e = (tex_entry){ s->Data, s->Format, s->Size, 0, id, GL_TEXTURE_2D, *tex_bucket(s->Data) };
+    *tex_bucket(s->Data) = e;
     tex_cache_version++;
     return id;
 }
@@ -5638,7 +5673,7 @@ static GLuint surface_rt_texture(D3DSurface *s, ULONG w, ULONG h)
 static tex_entry *surface_image(D3DSurface *s, GLenum *face, ULONG *level)
 {
     D3DPixelContainer *t = s->Parent ? s->Parent : (D3DPixelContainer *)s;
-    for (tex_entry *e = tex_cache; e; e = e->next) {
+    for (tex_entry *e = *tex_bucket(t->res.Data); e; e = e->next) {
         if (e->data != t->res.Data || e->format != t->Format || e->size != t->Size) continue;
         if (e->target != GL_TEXTURE_2D && e->target != GL_TEXTURE_CUBE_MAP) return NULL;
         ULONG offset = s->Data - t->res.Data;
