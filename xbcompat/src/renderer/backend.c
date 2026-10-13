@@ -162,6 +162,10 @@ void xbr_control(uint32_t op, uint32_t *args)
         args[0] = d3d_frame_count();
         return;
     }
+    if (op == XBR_DRAIN) {   /* from the kernel, on whichever thread frees */
+        renderer_async_drain();
+        return;
+    }
     if (op == XBR_DS_MIX) {   /* The sound mixer: no GL, so not the render queue's business. */
         renderer_ds_mix((struct dsmix_job *)args);
         return;

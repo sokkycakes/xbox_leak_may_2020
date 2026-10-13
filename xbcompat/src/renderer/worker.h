@@ -52,6 +52,7 @@ static unsigned char renderer_async_class[1024];
 static bool renderer_async_wanted;
 static struct xbr_service_request *volatile renderer_async_service;
 static unsigned renderer_async_posts;
+static __thread bool renderer_servicing;   /* running a host service the worker waits on */
 /* Defined in backend.c: runs one request on whichever thread drains it. */
 static void renderer_execute(struct xbr_request *r);
 static uint64_t renderer_clock_ns(void)
@@ -170,7 +171,9 @@ static void renderer_wait_locked(struct xbr_request *r)
             struct xbr_service_request *s = r->service;
             r->service = NULL;
             pthread_mutex_unlock(&renderer_lock);
+            renderer_servicing = true;
             host_call(s->op, s->args);
+            renderer_servicing = false;
             pthread_mutex_lock(&renderer_lock);
             s->done = true;
             pthread_cond_broadcast(&renderer_cond);
@@ -185,7 +188,9 @@ static bool renderer_run_async_service_locked(void)
     if (!s || renderer_is_owner) return false;
     renderer_async_service = NULL;
     pthread_mutex_unlock(&renderer_lock);
+    renderer_servicing = true;
     host_call(s->op, s->args);
+    renderer_servicing = false;
     pthread_mutex_lock(&renderer_lock);
     s->done = true;
     pthread_cond_broadcast(&renderer_cond);
@@ -226,6 +231,19 @@ void renderer_async_wait(volatile ULONG *counter, ULONG target)
     while ((LONG)(__atomic_load_n(counter, __ATOMIC_ACQUIRE) - target) < 0 && !renderer_stopping)
         if (!renderer_run_async_service_locked()) pthread_cond_wait(&renderer_cond, &renderer_lock);
     pthread_mutex_unlock(&renderer_lock);
+}
+/* Guest memory is about to be freed: let queued drawing finish with it.
+   Not from inside a host service the worker waits on: the drain would
+   wait for the worker, which waits for the service. */
+static void renderer_async_drain(void)
+{
+    if (!renderer_async_wanted || renderer_is_owner || renderer_servicing || !d3d_async_active()) return;
+    static unsigned logged;
+    if (logged < 4) { logged++; fprintf(stderr, "D3D: queued drawing finished before a free\n"); }
+    d3d_async_lock();
+    d3d_async_before_sync();
+    renderer_async_flush();
+    d3d_async_unlock();
 }
 /* Started lazily so the GL context is created on the render thread. */
 static void renderer_start_locked(void)

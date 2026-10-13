@@ -116,6 +116,7 @@ void apc_queue(xthread *t, PVOID routine, PVOID ctx, PVOID arg1, PVOID arg2, KAP
 ULONG NTAPI RtlNtStatusToDosError(NTSTATUS st);
 void timers_init(void);
 extern void (*g_vblank_hook)(void);   /* run 60 times a second on the DPC thread */
+extern void (*g_render_drain)(void);  /* before freeing guest memory queued drawing may still read */
 void ke_frame_presented(void);   /* XBCOMPAT_FIXED_FPS clock step */
 ULONGLONG system_time_now(void);   /* 100 ns units since 1601 */
 ULONGLONG ke_guest_tsc(void);      /* what a guest rdtsc reads */

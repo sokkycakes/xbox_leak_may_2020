@@ -104,6 +104,11 @@ static void native_vblank(void)
 {
     backend_control(XBR_VBLANK, NULL);
 }
+static void native_drain(void)
+{
+    backend_control(XBR_DRAIN, NULL);
+}
+extern void (*g_render_drain)(void) __attribute__((weak));
 void d3d_bind_globals(void)
 {
     ensure_backend();
@@ -112,6 +117,7 @@ void d3d_bind_globals(void)
     backend_control(XBR_CONFIG, (uint32_t *)&config);
     backend_control(XBR_BIND_GLOBALS, NULL);
     __atomic_store_n(&g_vblank_hook, native_vblank, __ATOMIC_RELEASE);
+    if (&g_render_drain) __atomic_store_n(&g_render_drain, native_drain, __ATOMIC_RELEASE);
 }
 /* dsound.c's mixer hands each block's voices to the native library. */
 struct dsmix_job;

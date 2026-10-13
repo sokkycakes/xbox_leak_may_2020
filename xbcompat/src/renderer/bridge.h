@@ -6,7 +6,7 @@
 #if __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__
 #error The renderer bridge requires a little-endian host
 #endif
-#define XBR_ABI 3u
+#define XBR_ABI 4u
 #define XBR_PUBLIC __attribute__((visibility("default")))
 _Static_assert(sizeof(void *) == 4, "renderer bridge requires 32-bit pointers");
 struct xbr_call {
@@ -18,7 +18,8 @@ _Static_assert(offsetof(struct xbr_call, pop_bytes) == 32, "xbr_call field layou
 enum xbr_control {
     XBR_CONFIG, XBR_BIND_GLOBALS, XBR_FRAME_COUNT, XBR_VBLANK, XBR_READ_PIXELS,
     XBR_RENDER_STATS, XBR_SHUTDOWN,
-    XBR_DS_MIX   /* args: a struct dsmix_job (hle/dsmix.h); runs on the caller's thread */
+    XBR_DS_MIX,  /* args: a struct dsmix_job (hle/dsmix.h); runs on the caller's thread */
+    XBR_DRAIN    /* guest memory is about to go: queued drawing finishes reading it first */
 };
 struct xbr_config { int32_t trace, shot_frame, exit_frames; uint32_t shot_path; };
 enum xbr_service {

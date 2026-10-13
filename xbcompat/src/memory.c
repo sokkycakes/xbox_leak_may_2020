@@ -149,12 +149,23 @@ out:
     return st;
 }
 
+void (*g_render_drain)(void);
+
+/* Queued drawing (XBCOMPAT_ASYNC_DRAWS) reads vertex and index data when it
+   gets to a draw: memory the title gives back must outlive that. */
+static void render_drain(void)
+{
+    void (*drain)(void) = __atomic_load_n(&g_render_drain, __ATOMIC_ACQUIRE);
+    if (drain) drain();
+}
+
 NTSTATUS NTAPI NtFreeVirtualMemory(PVOID *BaseAddress, SIZE_T *RegionSize, ULONG FreeType)
 {
     uint32_t base = (uint32_t)*BaseAddress & ~(PAGE_SIZE - 1), size = *RegionSize;
     TRACE_ALL("NtFreeVirtualMemory(%#x, %#x, %#x)", base, size, FreeType);
     if (!in_arena(base))
         return STATUS_INVALID_PARAMETER;
+    render_drain();
     pthread_mutex_lock(&mem_lock);
     uint32_t first = page_of(base);
     if (arena_state[first] == PG_FREE) {
@@ -392,6 +403,7 @@ void NTAPI MmFreeContiguousMemory(PVOID BaseAddress)
     int p = contig_page(BaseAddress);
     TRACE("MmFreeContiguousMemory(%p)", BaseAddress);
     if (p < 0 || !contig_len[p]) return;
+    render_drain();
     pthread_mutex_lock(&mem_lock);
     memset(&contig_used[p], 0, contig_len[p]);
     contig_len[p] = 0;
