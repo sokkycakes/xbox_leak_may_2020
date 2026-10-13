@@ -46,6 +46,7 @@ static uint64_t renderer_op_blocked[RENDERER_SLOTS];
 bool d3d_async_wanted(void), d3d_async_ready(void), d3d_async_active(void);
 void d3d_async_lock(void), d3d_async_unlock(void), d3d_async_before_sync(void), d3d_async_after_sync(void);
 int d3d_async_class(const char *name, const void *impl);
+uint64_t d3d_async_take_delta_ns(void);
 void d3d_async_run(const uint32_t *buf, unsigned n);
 void d3d_worker_thread_init(void);
 static unsigned char renderer_async_class[1024];
@@ -281,6 +282,10 @@ static void renderer_dispatch(enum xbr_request_kind kind, uint32_t op,
             renderer_run_async_service_locked();
             pthread_mutex_unlock(&renderer_lock);
         }
+        if (kind == XBR_REQUEST_CALL && renderer_async_class[op] == 3 && d3d_async_active()) {
+            invoke_now(op, call);
+            return;
+        }
         d3d_async_lock();
         if (kind == XBR_REQUEST_CALL && renderer_async_class[op] && d3d_async_ready()) {
             invoke_now(op, call);
@@ -419,7 +424,8 @@ void xbr_worker_profile(double frames)
             " vertex %.1f transform %.1f constants %.1f state-enabled %u\n", draws / frames, state[0] / frames,
             state[1] / frames, state[2] / frames, state[3] / frames, state[4] / frames, state[5] / frames, state[6] / frames, state[7] / frames, renderer_queue_state);
     if (renderer_async_wanted)
-        fprintf(stderr, "D3D queued drawing: %s, %.1f batches/frame\n", d3d_async_active() ? "on" : "off", posts / frames);
+        fprintf(stderr, "D3D queued drawing: %s, %.1f batches/frame, state copying %.2f ms/frame on the title's thread\n",
+                d3d_async_active() ? "on" : "off", posts / frames, d3d_async_take_delta_ns() / (frames * 1e6));
     if (getenv("XBCOMPAT_PROFILE_WORKER_OPS"))
         for (unsigned i = 0; i < RENDERER_SLOTS; i++) if (counts[i])
             fprintf(stderr, "D3D worker synchronous op %u calls/frame %.1f\n", i, counts[i] / frames);

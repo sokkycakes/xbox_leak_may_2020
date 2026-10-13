@@ -20,7 +20,7 @@
 
 enum {
     AS_FIELD = 1, AS_RS, AS_TSS, AS_DRAW, AS_DRAW_UP, AS_DRAW_INDEXED, AS_DRAW_INDEXED_UP, AS_CLEAR,
-    AS_TARGET, AS_VIS_BEGIN, AS_VIS_END, AS_SWAP, AS_RAW,
+    AS_TARGET, AS_VIS_BEGIN, AS_VIS_END, AS_SWAP, AS_RAW, AS_RELEASE,
 };
 
 #define ASYNC_DRAWS_PER_POST 8   /* draws queued before the batch goes to the worker */
@@ -74,8 +74,23 @@ static uint32_t *as_op(unsigned op, unsigned payload_dwords)
     return p + 1;
 }
 
-/* Front state the worker has not seen yet. */
+/* XBCOMPAT_PROFILE_RENDERER: the title's thread's time spent finding and
+   copying state changes, reported with the worker's numbers. */
+static uint64_t async_delta_ns;
+static int async_profiling = -1;
+uint64_t d3d_async_take_delta_ns(void) { return __atomic_exchange_n(&async_delta_ns, 0, __ATOMIC_RELAXED); }
+
+static void async_delta_(void);
 static void async_delta(void)
+{
+    if (async_profiling < 0) async_profiling = getenv("XBCOMPAT_PROFILE_RENDERER") != NULL;
+    if (!async_profiling) { async_delta_(); return; }
+    uint64_t t0 = now_ns();
+    async_delta_();
+    __atomic_fetch_add(&async_delta_ns, now_ns() - t0, __ATOMIC_RELAXED);
+}
+
+static void async_delta_(void)
 {
     const char *front = (const char *)&d3d_storage[0];
     char *sent = (char *)&async_sent;
@@ -233,6 +248,14 @@ static void async_target(D3DSurface *target, D3DSurface *z)
         memcpy((char *)&async_sent + async_fields[i].off, front + async_fields[i].off, async_fields[i].size);
 }
 
+/* A resource's last reference: the worker frees it after the draws queued
+   before it are done with it. */
+static void async_release(D3DResource *r)
+{
+    uint32_t *p = as_op(AS_RELEASE, 1);
+    p[0] = (uint32_t)(uintptr_t)r;
+}
+
 /* Visibility test results, filled in by the worker as the GPU finishes
    them; GetVisibilityTestResult reads them on the title's thread. */
 static struct { ULONG index; int state; ULONG result; } vis_shared[VIS_SLOTS];   /* state: 1 pending, 2 done */
@@ -354,6 +377,7 @@ void d3d_async_run(const uint32_t *buf, unsigned n)
             __atomic_store_n(&async_frames_done, back->frame, __ATOMIC_RELEASE);
             break;
         case AS_RAW: pb_interpret(a + 1, a[0]); break;
+        case AS_RELEASE: D3DResource_Release((D3DResource *)(uintptr_t)a[0]); break;
         default: fprintf(stderr, "D3D: bad queued op %u\n", op); abort();
         }
         i += len;
@@ -448,9 +472,12 @@ void d3d_async_after_sync(void)
 }
 
 /* Which calls run on the title's thread: 1 state the front keeps, 2 work
-   the front queues (the functions check async_front()), 0 the rest. */
+   the front queues (the functions check async_front()), 3 waits that touch
+   no device state and so run without the lock (a thread looping on the
+   vertical blank would keep every other thread out), 0 the rest. */
 int d3d_async_class(const char *name, const void *impl)
 {
+    if (impl == (const void *)D3DDevice_BlockUntilVerticalBlank) return 3;
     static const void *const queued[] = {
         (const void *)D3DDevice_DrawVertices, (const void *)D3DDevice_DrawVerticesUP,
         (const void *)D3DDevice_DrawIndexedVertices, (const void *)D3DDevice_DrawIndexedVerticesUP,
@@ -468,12 +495,18 @@ int d3d_async_class(const char *name, const void *impl)
         (const void *)D3DDevice_SetPixelShader, (const void *)D3DDevice_SetPixelShaderProgram,
         (const void *)D3DDevice_SetIndices, (const void *)D3DDevice_SetTextureStageStateNotInline,
         (const void *)SetRenderStateNotInline, (const void *)D3DDevice_GetViewportOffsetAndScale,
-        (const void *)D3DDevice_GetVisibilityTestResult, (const void *)D3DDevice_BlockUntilVerticalBlank,
+        (const void *)D3DDevice_GetVisibilityTestResult,
         (const void *)D3DDevice_SetStipple,
         /* Vertex program memory is read only by RunVertexStateShader,
            which waits for the queue. */
         (const void *)D3DDevice_SelectVertexShader, (const void *)D3DDevice_LoadVertexShader,
         (const void *)D3DDevice_LoadVertexShaderProgram,
+        /* Reference counts (the last Release is queued), and the device push
+           buffer's entry points, which only drain it (pusher_drain). */
+        (const void *)D3DResource_AddRef, (const void *)D3DResource_Release,
+        (const void *)D3D_LazySetState, (const void *)CDevice_SetStateVB, (const void *)CDevice_SetStateUP,
+        (const void *)CDevice_KickOff, (const void *)D3D_MakeRequestedSpace, (const void *)D3DDevice_MakeSpace,
+        (const void *)D3DDevice_BeginPushLTCG,
         /* A fence number; waiting on one still drains the queue. */
         (const void *)D3D_SetFence, (const void *)D3DDevice_InsertFence,
         /* Exports that do nothing. */

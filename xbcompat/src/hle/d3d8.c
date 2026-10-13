@@ -220,6 +220,9 @@ static void async_target(struct D3DSurface *target, struct D3DSurface *z);
 static void async_vis_begin(void);
 static void async_vis_end(ULONG index);
 static LONG async_vis_result(ULONG index, UINT_ *result);
+static void async_release(D3DResource *r);
+static bool pb_state_only(const ULONG *p, unsigned n);
+static void pb_interpret_body(const ULONG *p, unsigned n);
 bool d3d_async_wanted(void);
 
 /* The render worker's own copy, when drawing is queued. */
@@ -1299,6 +1302,12 @@ static ULONG NTAPI D3DResource_Release(D3DResource *r)
 {
     TRACE_ALL("D3D: Release(%p) type %#x refs %u from %p", (void *)r, r->Common & D3DCOMMON_TYPE_MASK,
           (r->Common & D3DCOMMON_REFCOUNT_MASK) - 1, __builtin_return_address(0));
+    /* Queued drawing: the last reference goes in the queue, after the draws
+       that may still use the resource; any other is only a count. */
+    if (async_front() && (r->Common & D3DCOMMON_REFCOUNT_MASK) == 1) {
+        async_release(r);
+        return 0;
+    }
     if ((r->Common & D3DCOMMON_REFCOUNT_MASK) == 1) {
         /* The last outside reference on a surface drops its parent's. */
         if ((r->Common & D3DCOMMON_TYPE_MASK) == D3DCOMMON_TYPE_SURFACE && ((D3DSurface *)r)->Parent)
@@ -7659,6 +7668,27 @@ static void pb_interpret_body(const ULONG *p, unsigned n)
     }
 }
 
+/* Whether a run of methods only sets state: no drawing, vertex data or
+   control words (pb_interpret_body then touches nothing but the device
+   state, so the title's thread can run it on its copy). */
+static bool pb_state_only(const ULONG *p, unsigned n)
+{
+    for (unsigned i = 0; i < n;) {
+        ULONG hdr = p[i++];
+        if ((hdr & 3) != 0 || hdr == 0x20000 || (hdr & 0xE0000000) == 0x20000000) return false;
+        unsigned method = hdr & 0x1FFC, count = (hdr >> 18) & 0x7FF;
+        bool noinc = hdr & 0x40000000;
+        if (i + count > n) return false;
+        i += count;
+        unsigned last = noinc || !count ? method : method + 4 * (count - 1);
+        /* BEGIN_END, DRAW_ARRAYS, ARRAY_ELEMENT16/32, INLINE_ARRAY and the
+           immediate vertex data all sit in 0x1800..0x1AFF, with the eye
+           vector between them. */
+        if (last >= 0x17FC && method < 0x1B00 && !(method >= 0x181C && last <= 0x1824)) return false;
+    }
+    return true;
+}
+
 static void pb_interpret(const ULONG *p, unsigned n)
 {
     /* Raw methods and recorded push buffers draw outside the API calls the
@@ -7716,7 +7746,10 @@ static void pusher_drain(void)
     busy = true;
     if (async_front()) {
         dev[0] = (ULONG)pusher_buf;
-        async_raw_front(put - n, n);
+        /* Methods that only set state set it on the front, and the next
+           queued draw carries it; anything else goes to the worker. */
+        if (pb_state_only(put - n, n)) pb_interpret_body(put - n, n);
+        else async_raw_front(put - n, n);
         busy = false;
         return;
     }
