@@ -954,6 +954,8 @@ static void pace_present(void)
     next += period;
 }
 
+#include "gpu_counters.h"
+
 static ULONG NTAPI D3DDevice_Swap(ULONG Flags)
 {
     pusher_drain();
@@ -963,6 +965,7 @@ static ULONG NTAPI D3DDevice_Swap(ULONG Flags)
     d3d.frame++;
     last_frame_draws = frame_draws;
     frame_draws = flush_count = 0;
+    gpu_counters_frame();
     cpu_compare_audit_frame(d3d.frame);
     __atomic_store_n(&published_frame_count, d3d.frame, __ATOMIC_RELEASE);
     {
