@@ -49,6 +49,71 @@ void disp_signal(void *object)
             }
 }
 
+/* XBCOMPAT_LATCH_TICKS=1: a periodic event (set or pulsed from the DPC
+   thread: vblank and timer callbacks) is remembered per waiting thread, and
+   a thread that waits on one after it fired again since the thread's last
+   wait on it returns at once instead of waiting for the next tick.  A title
+   that keeps time on the Xbox's 30 or 60 Hz ticks but overran (a 150 ms
+   frame on a Raspberry Pi) otherwise spends a part-tick asleep every frame
+   that its own clock already counted.  Titles that finish within a tick
+   never see the difference.  Guarded by g_disp_lock. */
+#define LATCH_SIGNALS 16
+#define LATCH_SEEN 8
+static int latch_on = -1;
+static __thread bool in_dpc_thread;
+static struct { const void *obj; unsigned serial; } latch_signals[LATCH_SIGNALS];
+static unsigned latch_next;
+static __thread struct { const void *obj; unsigned serial; } latch_seen[LATCH_SEEN];
+static __thread unsigned latch_seen_next;
+
+static bool latch_enabled(void)
+{
+    if (latch_on < 0) {
+        const char *e = getenv("XBCOMPAT_LATCH_TICKS");
+        latch_on = e && *e && *e != '0';
+    }
+    return latch_on;
+}
+
+/* A DPC-thread signal of obj.  g_disp_lock held. */
+static void latch_note_signal(const void *obj)
+{
+    if (!in_dpc_thread || !latch_enabled()) return;
+    for (unsigned i = 0; i < LATCH_SIGNALS; i++)
+        if (latch_signals[i].obj == obj) { latch_signals[i].serial++; return; }
+    unsigned i = latch_next++ % LATCH_SIGNALS;
+    latch_signals[i].obj = obj;
+    latch_signals[i].serial = 1;
+}
+
+/* obj's DPC signal count, 0 if it has none.  g_disp_lock held. */
+static unsigned latch_serial(const void *obj)
+{
+    for (unsigned i = 0; i < LATCH_SIGNALS; i++)
+        if (latch_signals[i].obj == obj) return latch_signals[i].serial;
+    return 0;
+}
+
+/* Whether obj fired since this thread's last wait on it ended; with
+   `record`, remember the count now as seen.  g_disp_lock held. */
+static bool latch_missed(const void *obj, bool record)
+{
+    unsigned serial = latch_serial(obj);
+    if (!serial) return false;
+    for (unsigned i = 0; i < LATCH_SEEN; i++)
+        if (latch_seen[i].obj == obj) {
+            bool missed = latch_seen[i].serial != serial;
+            if (record) latch_seen[i].serial = serial;
+            return missed;
+        }
+    if (record) {
+        unsigned i = latch_seen_next++ % LATCH_SEEN;
+        latch_seen[i].obj = obj;
+        latch_seen[i].serial = serial;
+    }
+    return false;
+}
+
 void disp_signal_all(void)
 {
     for (struct disp_waiter *w = disp_waiters; w; w = w->next) pthread_cond_signal(&w->cv);
@@ -403,7 +468,17 @@ NTSTATUS wait_objects(ULONG count, PVOID objects[], int wait_any, KPROCESSOR_MOD
     static __thread unsigned spins;
     bool spin_hit = false;
 
+    bool latch = latch_enabled() && count == 1 && objects[0]
+                 && (((DISPATCHER_HEADER *)objects[0])->Type == EventNotificationObject
+                     || ((DISPATCHER_HEADER *)objects[0])->Type == EventSynchronizationObject);
     pthread_mutex_lock(&g_disp_lock);
+    if (latch && !poll && latch_missed(objects[0], false)) {
+        /* The tick this wait is for already came while the thread was busy. */
+        DISPATCHER_HEADER *h = objects[0];
+        if (h->Type == EventSynchronizationObject) h->SignalState = 0;
+        st = STATUS_SUCCESS;
+        goto done;
+    }
     for (;;) {
         if (xt && xt->apc_head) apc_drain(xt, false);
         if (wait_any) {
@@ -452,6 +527,7 @@ NTSTATUS wait_objects(ULONG count, PVOID objects[], int wait_any, KPROCESSOR_MOD
         }
     }
 done:
+    if (latch) latch_missed(objects[0], true);
     if (listed)
         for (struct disp_waiter **w = &disp_waiters; *w; w = &(*w)->next)
             if (*w == &me) {
@@ -538,6 +614,7 @@ LONG NTAPI KeSetEvent(KEVENT *Event, LONG Increment, BOOLEAN Wait)
     pthread_mutex_lock(&g_disp_lock);
     LONG old = Event->Header.SignalState;
     Event->Header.SignalState = 1;
+    latch_note_signal(Event);
     disp_signal(Event);
     pthread_mutex_unlock(&g_disp_lock);
     return old;
@@ -561,6 +638,7 @@ LONG NTAPI KePulseEvent(KEVENT *Event, LONG Increment, BOOLEAN Wait)
     pthread_mutex_lock(&g_disp_lock);
     LONG old = Event->Header.SignalState;
     Event->Header.SignalState = 1;
+    latch_note_signal(Event);
     disp_signal(Event);
     pthread_mutex_unlock(&g_disp_lock);
     if (Event->Header.Type == EventNotificationObject) {
@@ -904,6 +982,7 @@ static ULONGLONG vbl_next(ULONGLONG now)
 static void *dpc_thread(void *arg)
 {
     pthread_setname_np(pthread_self(), "dpc");
+    in_dpc_thread = true;
     prof_thread_start();
     (void)arg;
     thread_adopt_host("dpc");
