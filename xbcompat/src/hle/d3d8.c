@@ -1036,9 +1036,33 @@ static void swap_present(void)
     pace_present();
 }
 
+/* XBCOMPAT_SHOT_ON_REQUEST=BASE: while BASE.req exists, the next frame is
+   saved to BASE.bmp and BASE.req removed, so a run can be looked at over ssh
+   (`touch BASE.req`, wait for it to go, fetch BASE.bmp). */
+static void shot_on_request(void)
+{
+    static const char *base;
+    static int checked;
+    if (!checked) {
+        checked = 1;
+        base = getenv("XBCOMPAT_SHOT_ON_REQUEST");
+        if (base && !*base) base = NULL;
+    }
+    if (!base) return;
+    char req[512], tmp[512], out[512];
+    snprintf(req, sizeof req, "%s.req", base);
+    if (access(req, F_OK) != 0) return;
+    snprintf(tmp, sizeof tmp, "%s.tmp.bmp", base);
+    snprintf(out, sizeof out, "%s.bmp", base);
+    save_screenshot(tmp);
+    rename(tmp, out);
+    unlink(req);
+}
+
 static void swap_screenshot(void)
 {
     present_overlay();
+    shot_on_request();
     if (g_screenshot_path && strstr(g_screenshot_path, "%d")) {
         /* A path with %d saves every --shot-frame frames, numbered by frame. */
         if (g_screenshot_frame > 0 && d3d.frame % g_screenshot_frame == 0) {

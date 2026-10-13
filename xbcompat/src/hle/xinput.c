@@ -68,12 +68,25 @@
  * ("t90:a/10") counts seconds since the first poll instead of frames, for
  * screens that wait on a button without presenting; a "w" ("w8:a/10")
  * presses it whenever no frame has been presented for that many seconds.
+ *
+ * XBCOMPAT_PAD_PIPE=PATH presses buttons written to a named pipe (made if it
+ * isn't there) on the pad in port 0, keyboard pad or controller, so a run
+ * can be driven over ssh: `echo a > PATH`, `echo "down down a/30" > PATH`.
+ * Each word is a button from the list above, "+" presses several together
+ * ("lt+rt"), "/HOLD" holds it HOLD 60ths of a second (default 12), and
+ * "wait/N" pauses N 60ths.  Words run one after another, each held and then
+ * let go for at least two presented frames, so a title drawing a few frames
+ * a second still sees every press.
  */
 #define _GNU_SOURCE
 #include <SDL.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "../xbcompat.h"
 #include "hle.h"
@@ -751,6 +764,35 @@ static void read_controller(SDL_GameController *gc, XINPUT_GAMEPAD *g)
 #undef AXIS
 }
 
+/* Holds down the button, or pushes the stick, NAME (see the top of the file). */
+static void press_named(XINPUT_GAMEPAD *g, const char *name)
+{
+    static const char *analog[] = { "a", "b", "x", "y", "black", "white", "lt", "rt" };
+    static const int analog_idx[] = { XINPUT_GAMEPAD_A, XINPUT_GAMEPAD_B, XINPUT_GAMEPAD_X, XINPUT_GAMEPAD_Y,
+                                      XINPUT_GAMEPAD_BLACK, XINPUT_GAMEPAD_WHITE,
+                                      XINPUT_GAMEPAD_LEFT_TRIGGER, XINPUT_GAMEPAD_RIGHT_TRIGGER };
+    static const char *digital[] = { "up", "down", "left", "right", "start", "back", "lthumb", "rthumb" };
+    static const USHORT digital_bit[] = { XINPUT_GAMEPAD_DPAD_UP, XINPUT_GAMEPAD_DPAD_DOWN,
+                                          XINPUT_GAMEPAD_DPAD_LEFT, XINPUT_GAMEPAD_DPAD_RIGHT,
+                                          XINPUT_GAMEPAD_START, XINPUT_GAMEPAD_BACK,
+                                          XINPUT_GAMEPAD_LEFT_THUMB, XINPUT_GAMEPAD_RIGHT_THUMB };
+    for (int i = 0; i < 8; i++) {
+        if (!strcmp(name, analog[i])) g->bAnalogButtons[analog_idx[i]] = 255;
+        if (!strcmp(name, digital[i])) g->wButtons |= digital_bit[i];
+    }
+    /* Sticks pushed all the way: lsup lsdown lsleft lsright, rs... likewise. */
+    if (name[0] && name[1] == 's' && (name[0] == 'l' || name[0] == 'r')) {
+        bool right = name[0] == 'r';
+        const char *dir = name + 2;
+        SHORT v = !strcmp(dir, "up") || !strcmp(dir, "right") ? 32767 : -32768;
+        if (!strcmp(dir, "up") || !strcmp(dir, "down")) {
+            if (right) g->sThumbRY = v; else g->sThumbLY = v;
+        } else if (!strcmp(dir, "left") || !strcmp(dir, "right")) {
+            if (right) g->sThumbRX = v; else g->sThumbLX = v;
+        }
+    }
+}
+
 /* XBCOMPAT_INPUT_SCRIPT (see the top of the file). */
 static void read_script(XINPUT_GAMEPAD *g, unsigned port)
 {
@@ -797,30 +839,108 @@ static void read_script(XINPUT_GAMEPAD *g, unsigned port)
             if (!pressed_at[n]) pressed_at[n] = ms;
             else if (ms - pressed_at[n] > hold * 1000ull / 60 + 50) continue;
         }
-        static const char *analog[] = { "a", "b", "x", "y", "black", "white", "lt", "rt" };
-        static const int analog_idx[] = { XINPUT_GAMEPAD_A, XINPUT_GAMEPAD_B, XINPUT_GAMEPAD_X, XINPUT_GAMEPAD_Y,
-                                          XINPUT_GAMEPAD_BLACK, XINPUT_GAMEPAD_WHITE,
-                                          XINPUT_GAMEPAD_LEFT_TRIGGER, XINPUT_GAMEPAD_RIGHT_TRIGGER };
-        static const char *digital[] = { "up", "down", "left", "right", "start", "back", "lthumb", "rthumb" };
-        static const USHORT digital_bit[] = { XINPUT_GAMEPAD_DPAD_UP, XINPUT_GAMEPAD_DPAD_DOWN,
-                                              XINPUT_GAMEPAD_DPAD_LEFT, XINPUT_GAMEPAD_DPAD_RIGHT,
-                                              XINPUT_GAMEPAD_START, XINPUT_GAMEPAD_BACK,
-                                              XINPUT_GAMEPAD_LEFT_THUMB, XINPUT_GAMEPAD_RIGHT_THUMB };
-        for (int i = 0; i < 8; i++) {
-            if (!strcmp(name, analog[i])) g->bAnalogButtons[analog_idx[i]] = 255;
-            if (!strcmp(name, digital[i])) g->wButtons |= digital_bit[i];
-        }
-        /* Sticks pushed all the way: lsup lsdown lsleft lsright, rs... likewise. */
-        if (name[1] == 's' && (name[0] == 'l' || name[0] == 'r')) {
-            bool right = name[0] == 'r';
-            const char *dir = name + 2;
-            SHORT v = !strcmp(dir, "up") || !strcmp(dir, "right") ? 32767 : -32768;
-            if (!strcmp(dir, "up") || !strcmp(dir, "down")) {
-                if (right) g->sThumbRY = v; else g->sThumbLY = v;
-            } else if (!strcmp(dir, "left") || !strcmp(dir, "right")) {
-                if (right) g->sThumbRX = v; else g->sThumbLX = v;
+        press_named(g, name);
+    }
+}
+
+/* XBCOMPAT_PAD_PIPE (see the top of the file). */
+#define PIPE_QUEUE 64
+static struct {
+    int fd;                                     /* -1: none */
+    bool checked;
+    char line[256];
+    unsigned len;
+    struct { char name[48]; unsigned ms; } q[PIPE_QUEUE];
+    unsigned head, tail;
+    int phase;                                  /* 0 next word, 1 held, 2 let go */
+    uint64_t phase_ms;
+    ULONG phase_frame;
+} pipe_pad = { .fd = -1 };
+
+static bool pipe_open(void)
+{
+    if (pipe_pad.checked) return pipe_pad.fd >= 0;
+    pipe_pad.checked = true;
+    const char *path = getenv("XBCOMPAT_PAD_PIPE");
+    if (!path || !*path) return false;
+    struct stat st;
+    if (stat(path, &st) != 0 && mkfifo(path, 0666) != 0) {
+        xlog("XInput: XBCOMPAT_PAD_PIPE: can't make %s: %s", path, strerror(errno));
+        return false;
+    }
+    if (stat(path, &st) != 0 || !S_ISFIFO(st.st_mode)) {
+        xlog("XInput: XBCOMPAT_PAD_PIPE: %s is not a named pipe", path);
+        return false;
+    }
+    /* Read and write, so the pipe never reads as closed between writers. */
+    pipe_pad.fd = open(path, O_RDWR | O_NONBLOCK | O_CLOEXEC);
+    if (pipe_pad.fd < 0) xlog("XInput: XBCOMPAT_PAD_PIPE: %s: %s", path, strerror(errno));
+    else xlog("XInput: port 0 also takes presses from %s", path);
+    return pipe_pad.fd >= 0;
+}
+
+static void pipe_queue_line(char *line)
+{
+    for (char *save, *tok = strtok_r(line, " \t\r,", &save); tok; tok = strtok_r(NULL, " \t\r,", &save)) {
+        unsigned n = pipe_pad.tail - pipe_pad.head;
+        if (n >= PIPE_QUEUE) break;
+        unsigned hold = 12;
+        char *slash = strchr(tok, '/');
+        if (slash) { *slash = 0; hold = (unsigned)strtoul(slash + 1, NULL, 10); }
+        typeof(pipe_pad.q[0]) *e = &pipe_pad.q[pipe_pad.tail % PIPE_QUEUE];
+        snprintf(e->name, sizeof e->name, "%s", tok);
+        e->ms = hold * 1000u / 60;
+        pipe_pad.tail++;
+    }
+}
+
+static void read_pipe(XINPUT_GAMEPAD *g)
+{
+    if (!pipe_open()) return;
+    char buf[256];
+    ssize_t got;
+    while ((got = read(pipe_pad.fd, buf, sizeof buf)) > 0)
+        for (ssize_t i = 0; i < got; i++) {
+            if (buf[i] != '\n' && pipe_pad.len < sizeof pipe_pad.line - 1) {
+                pipe_pad.line[pipe_pad.len++] = buf[i];
+                continue;
             }
+            pipe_pad.line[pipe_pad.len] = 0;
+            pipe_queue_line(pipe_pad.line);
+            pipe_pad.len = 0;
         }
+    uint64_t ms = now_us() / 1000;
+    ULONG frame = d3d_frame_count();
+    while (pipe_pad.head != pipe_pad.tail) {
+        typeof(pipe_pad.q[0]) *e = &pipe_pad.q[pipe_pad.head % PIPE_QUEUE];
+        bool wait = !strcmp(e->name, "wait");
+        if (pipe_pad.phase == 0) {
+            pipe_pad.phase = 1;
+            pipe_pad.phase_ms = ms;
+            pipe_pad.phase_frame = frame;
+        }
+        uint64_t in_phase = ms - pipe_pad.phase_ms;
+        /* Two presented frames, or 3 s for a screen that stopped presenting. */
+        bool seen = frame - pipe_pad.phase_frame >= 2 || in_phase >= 3000;
+        if (pipe_pad.phase == 1) {
+            if (in_phase < e->ms || (!wait && !seen)) {
+                if (!wait) {
+                    char names[48];
+                    snprintf(names, sizeof names, "%s", e->name);
+                    for (char *save, *b = strtok_r(names, "+", &save); b; b = strtok_r(NULL, "+", &save))
+                        press_named(g, b);
+                }
+                return;
+            }
+            if (wait) { pipe_pad.head++; pipe_pad.phase = 0; continue; }
+            pipe_pad.phase = 2;
+            pipe_pad.phase_ms = ms;
+            pipe_pad.phase_frame = frame;
+            return;
+        }
+        if (in_phase < 100 || !seen) return;
+        pipe_pad.head++;
+        pipe_pad.phase = 0;
     }
 }
 
@@ -836,6 +956,7 @@ static void read_port(const xi_port *p, XINPUT_GAMEPAD *g)
         /* The keyboard keeps working beside a controller in port 0. */
         if (p == &xi.port[0] && !xi.kbd_disabled) read_keyboard(g);
     }
+    if (p == &xi.port[0]) read_pipe(g);
 }
 
 /*
