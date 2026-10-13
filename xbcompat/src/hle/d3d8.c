@@ -20,6 +20,7 @@
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "../xbcompat.h"
 #include "hle.h"
@@ -931,6 +932,15 @@ static ULONG NTAPI D3DDevice_Swap(ULONG Flags)
         static long trace_frame = -2;
         if (trace_frame == -2) { const char *e = getenv("XBCOMPAT_TRACE_FRAME"); trace_frame = e ? atol(e) : -1; }
         if (trace_frame >= 0) g_trace = (long)d3d.frame == trace_frame;
+        /* Or trace the next frame whenever this file appears (it is removed):
+           for catching a frame in the middle of play. */
+        static int traced_by_file;
+        if (traced_by_file) { g_trace = 0; traced_by_file = 0; }
+        if (trace_frame < 0 && !access("/tmp/xbcompat-trace-frame", F_OK) && !unlink("/tmp/xbcompat-trace-frame")) {
+            g_trace = 1;
+            traced_by_file = 1;
+            xlog("D3D: tracing frame %lu", (unsigned long)d3d.frame);
+        }
     }
     ke_frame_presented();
     run_callbacks();
@@ -3990,8 +4000,8 @@ static void draw_programmable_(vshader *sh, ULONG PrimitiveType, const UCHAR *up
     bool ready;
     DETAIL_TIMED(t_program, ready = use_program(vs, &e));
     if (!ready) return;
-    TRACE_ALL("D3D: draw(program) prim %u count %u indices %p vs %u ps %#x z %u/%u/%u blend %u %u/%u atest %u cw %#x stencil %u vp %u,%u %ux%u %g-%g",
-          PrimitiveType, count, indices ? indices + first : NULL, vs, d3d.pixel_shader,
+    TRACE_ALL("D3D: draw(program %u) prim %u count %u indices %p vs %u ps %#x z %u/%u/%u blend %u %u/%u atest %u cw %#x stencil %u vp %u,%u %ux%u %g-%g",
+          e ? e->prog : 0, PrimitiveType, count, indices ? indices + first : NULL, vs, d3d.pixel_shader,
           RS(D3DRS_ZENABLE), RS(D3DRS_ZFUNC), RS(D3DRS_ZWRITEENABLE), RS(D3DRS_ALPHABLENDENABLE),
           RS(D3DRS_SRCBLEND), RS(D3DRS_DESTBLEND), RS(D3DRS_ALPHATESTENABLE), RS(D3DRS_COLORWRITEENABLE),
           RS(D3DRS_STENCILENABLE), d3d.viewport.X, d3d.viewport.Y, d3d.viewport.Width, d3d.viewport.Height,
@@ -5157,6 +5167,7 @@ static GLuint backbuffer_copy_texture(ULONG data, ULONG w, ULONG h)
     window_fb.bind(0x8CA9, draw);
     backbuffer_read_end();
     stats.readbacks++;
+    TRACE_ALL("D3D: back buffer copied for a view at %#x, %ux%u (slot %u)", data, w, h, i);
     return slot[i].tex;
 }
 
