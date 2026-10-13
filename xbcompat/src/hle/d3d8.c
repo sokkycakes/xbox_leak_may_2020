@@ -133,7 +133,7 @@ enum {
 
 /* ---- state ------------------------------------------------------------- */
 
-static struct {
+typedef struct d3d_state {
     SDL_Window *window;
     SDL_GLContext gl;
     int width, height;
@@ -184,10 +184,6 @@ static struct {
     float eye_vector[4];
     ULONG pixel_shader;
     float zscale;                /* depth range of the target: 2^24-1 or 2^16-1 */
-    PVOID vblank_callback, swap_callback;
-    ULONG *miniport_swap_cb;     /* the device's m_pSwapCallback when the title inlines its setters */
-    volatile ULONG vblank_count, vblank_at_swap;
-    volatile int swapped;        /* a Swap since the last vertical blank */
     ULONG *cpu_time;             /* the device's m_CpuTime, when its layout is known */
     struct { PVOID fn; ULONG ctx; } callbacks[64];
     unsigned ncallbacks;
@@ -197,7 +193,50 @@ static struct {
     bool stipple_on;             /* NV097_SET_STIPPLE_CONTROL: polygon stipple */
     bool stipple_dirty;          /* the pattern changed since GL last got it */
     ULONG stipple[32];           /* NV097_SET_STIPPLE_PATTERN: one row of 32 pixels each */
-} d3d;
+} d3d_state;
+
+/* The device state.  With XBCOMPAT_ASYNC_DRAWS the title's threads set
+   state in one copy (the front) while the render worker draws from another
+   (the back), brought up to date with each queued draw (async_draws.h);
+   otherwise every thread uses the first. */
+static d3d_state d3d_storage[2];
+static __thread d3d_state *d3d_cur __attribute__((tls_model("initial-exec"))) = &d3d_storage[0];
+#define d3d (*d3d_cur)
+
+/* XBCOMPAT_ASYNC_DRAWS (async_draws.h): on once the front copy exists.
+   async_worker_thread marks the render worker, async_replaying its replay
+   of queued work. */
+static bool async_on;
+static __thread bool async_worker_thread, async_replaying;
+static bool async_front(void);
+static ULONG async_swap(void);
+static void async_raw_front(const ULONG *p, unsigned n);
+static void async_draw(ULONG prim, ULONG start, ULONG count);
+static void async_draw_up(ULONG prim, ULONG count, const void *data, ULONG stride);
+static void async_draw_indexed(ULONG prim, ULONG count, const USHORT *indices);
+static void async_draw_indexed_up(ULONG prim, ULONG count, const USHORT *indices, const void *verts, ULONG stride);
+static void async_clear(ULONG count, const D3DRECT *rects, ULONG flags, ULONG color, float z, ULONG stencil);
+static void async_target(struct D3DSurface *target, struct D3DSurface *z);
+static void async_vis_begin(void);
+static void async_vis_end(ULONG index);
+static LONG async_vis_result(ULONG index, UINT_ *result);
+bool d3d_async_wanted(void);
+
+/* The render worker's own copy, when drawing is queued. */
+void d3d_worker_thread_init(void)
+{
+    async_worker_thread = true;
+    if (d3d_async_wanted()) d3d_cur = &d3d_storage[1];
+}
+
+/* Vertical blank and swap bookkeeping, shared by the title's threads, the
+   kernel's DPC thread and the render worker. */
+static struct {
+    PVOID vblank_callback, swap_callback;
+    ULONG *miniport_swap_cb;     /* the device's m_pSwapCallback when the title inlines its setters */
+    volatile ULONG vblank_count, vblank_at_swap;
+    volatile int swapped;        /* a Swap since the last vertical blank */
+} d3dv;
 
 /* Push buffer recording (see the push buffer section). */
 static void pb_record(unsigned op, const void *payload, unsigned bytes);
@@ -419,8 +458,8 @@ static void bind_miniport(ULONG *dev)
     const char *e = getenv("XBCOMPAT_MINIPORT_OFFSET");
     if (e) off = strtoul(e, NULL, 0);
     if (!off || off + 12 + sizeof(KEVENT) > 0x4000 || (d3d.device && dev != d3d.device)) return;
-    d3d.miniport_swap_cb = (ULONG *)((uint8_t *)dev + off);
-    KEVENT *ev = (KEVENT *)(d3d.miniport_swap_cb + 2);
+    d3dv.miniport_swap_cb = (ULONG *)((uint8_t *)dev + off);
+    KEVENT *ev = (KEVENT *)(d3dv.miniport_swap_cb + 2);
     ev->Header.Type = 0;   /* NotificationEvent, initially set (mpcore.cpp) */
     ev->Header.Size = sizeof(KEVENT) / 4;
     ev->Header.SignalState = 1;
@@ -450,14 +489,14 @@ static void d3d_vblank(void)
 {
     extern LONG NTAPI KeSetEvent(KEVENT *, LONG, BOOLEAN);
     pthread_mutex_lock(&vblank_lock);
-    ULONG n = ++d3d.vblank_count;
+    ULONG n = ++d3dv.vblank_count;
     pthread_cond_broadcast(&vblank_cond);
     pthread_mutex_unlock(&vblank_lock);
-    ULONG flags = __atomic_exchange_n(&d3d.swapped, 0, __ATOMIC_ACQ_REL) ? 1 /* D3DVBLANK_SWAPDONE */ : 0;
-    PVOID cb = d3d.vblank_callback;
-    if (d3d.miniport_swap_cb) {
-        KeSetEvent((KEVENT *)(d3d.miniport_swap_cb + 2), 1, 0);
-        if (d3d.miniport_swap_cb[1]) cb = (PVOID)d3d.miniport_swap_cb[1];
+    ULONG flags = __atomic_exchange_n(&d3dv.swapped, 0, __ATOMIC_ACQ_REL) ? 1 /* D3DVBLANK_SWAPDONE */ : 0;
+    PVOID cb = d3dv.vblank_callback;
+    if (d3dv.miniport_swap_cb) {
+        KeSetEvent((KEVENT *)(d3dv.miniport_swap_cb + 2), 1, 0);
+        if (d3dv.miniport_swap_cb[1]) cb = (PVOID)d3dv.miniport_swap_cb[1];
     }
     if (cb) {
         ULONG data[3] = { n, d3d.frame, flags };
@@ -769,15 +808,15 @@ static void wait_vblank_(void)
     if (unpaced()) return;
     cpu_block();
     pthread_mutex_lock(&vblank_lock);
-    ULONG n = d3d.vblank_count;
+    ULONG n = d3dv.vblank_count;
     struct timespec until;
     clock_gettime(CLOCK_REALTIME, &until);
     until.tv_nsec += 50000000;
     if (until.tv_nsec >= 1000000000) until.tv_sec++, until.tv_nsec -= 1000000000;
     int r = 0;
-    while (d3d.vblank_count == n && r == 0) r = pthread_cond_timedwait(&vblank_cond, &vblank_lock, &until);
+    while (d3dv.vblank_count == n && r == 0) r = pthread_cond_timedwait(&vblank_cond, &vblank_lock, &until);
     pthread_mutex_unlock(&vblank_lock);
-    if (d3d.vblank_count != n) return;
+    if (d3dv.vblank_count != n) return;
     Uint64 now = SDL_GetPerformanceCounter(), period = SDL_GetPerformanceFrequency() / 60;
     if (!base) base = now;
     sleep_until(base + ((now - base) / period + 1) * period);
@@ -960,17 +999,11 @@ static void pace_present(void)
 
 #include "gpu_counters.h"
 
-static ULONG NTAPI D3DDevice_Swap(ULONG Flags)
+/* Swap in three parts, so that with XBCOMPAT_ASYNC_DRAWS the title's thread
+   can run the first and last while the render worker presents. */
+static void swap_begin_frame(void)
 {
-    pusher_drain();
-    hud_batch_flush();
-    (void)Flags;
-    flush_cpu_backbuffer();
     d3d.frame++;
-    last_frame_draws = frame_draws;
-    frame_draws = flush_count = 0;
-    gpu_counters_frame();
-    cpu_compare_audit_frame(d3d.frame);
     __atomic_store_n(&published_frame_count, d3d.frame, __ATOMIC_RELEASE);
     {
         /* Debug aid: XBCOMPAT_TRACE_FRAME=n turns --trace on for frame n only. */
@@ -987,8 +1020,19 @@ static ULONG NTAPI D3DDevice_Swap(ULONG Flags)
             xlog("D3D: tracing frame %lu", (unsigned long)d3d.frame);
         }
     }
-    ke_frame_presented();
-    run_callbacks();
+}
+
+/* The GPU's part: the frame goes to the screen. */
+static void swap_present(void)
+{
+    TIMED_CPU(t_present, c_present, present_window_framebuffer(); cpu_block(); DETAIL_TIMED(t_swap, SDL_GL_SwapWindow(d3d.window));
+          DETAIL_TIMED(t_restore, restore_window_framebuffer()));
+    restore_overlay();
+    pace_present();
+}
+
+static void swap_screenshot(void)
+{
     present_overlay();
     if (g_screenshot_path && strstr(g_screenshot_path, "%d")) {
         /* A path with %d saves every --shot-frame frames, numbered by frame. */
@@ -1000,35 +1044,59 @@ static ULONG NTAPI D3DDevice_Swap(ULONG Flags)
     } else if (g_screenshot_path && (int)d3d.frame == g_screenshot_frame) {
         save_screenshot(g_screenshot_path);
     }
-    TIMED_CPU(t_present, c_present, present_window_framebuffer(); cpu_block(); DETAIL_TIMED(t_swap, SDL_GL_SwapWindow(d3d.window));
-          DETAIL_TIMED(t_restore, restore_window_framebuffer()));
-    restore_overlay();
-    pace_present();
-    d3d.swapped = 1;
-    PVOID swap_cb = d3d.miniport_swap_cb && d3d.miniport_swap_cb[0] ? (PVOID)d3d.miniport_swap_cb[0]
-                                                                     : d3d.swap_callback;
+}
+
+static void swap_gpu_frame_end(void)
+{
+    last_frame_draws = frame_draws;
+    frame_draws = flush_count = 0;
+    gpu_counters_frame();
+    cpu_compare_audit_frame(d3d.frame);
+}
+
+/* Window events; true when the window was closed. */
+static bool swap_window_events(void)
+{
+    SDL_Event e;
+    bool quit = false;
+    while (SDL_PollEvent(&e))
+        if (e.type == SDL_QUIT) quit = true;
+    return quit;
+}
+
+/* The title's part after the frame is presented. */
+static void swap_finish(void)
+{
+    d3dv.swapped = 1;
+    PVOID swap_cb = d3dv.miniport_swap_cb && d3dv.miniport_swap_cb[0] ? (PVOID)d3dv.miniport_swap_cb[0]
+                                                                     : d3dv.swap_callback;
     if (swap_cb) {
         /* D3DSWAPDATA: Swap, SwapVBlank, MissedVBlanks, TimeUntilSwapVBlank, TimeBetweenSwapVBlanks */
-        ULONG vb = d3d.vblank_count, missed = vb - d3d.vblank_at_swap > 1 ? vb - d3d.vblank_at_swap - 1 : 0;
+        ULONG vb = d3dv.vblank_count, missed = vb - d3dv.vblank_at_swap > 1 ? vb - d3dv.vblank_at_swap - 1 : 0;
         ULONG data[5] = { d3d.frame, vb, missed, 0, 16667 };
-        d3d.vblank_at_swap = vb;
+        d3dv.vblank_at_swap = vb;
 #ifdef XBC_TRANSLATED
         CPU_CALL(swap_cb, CONV_CDECL, (uint32_t)data);
 #else
         ((void (CDECLAPI *)(ULONG *))swap_cb)(data);
 #endif
     }
-    SDL_Event e;
-    while (SDL_PollEvent(&e)) {
-        if (e.type == SDL_QUIT) {
-            xlog("window closed");
-            xbc_exit(0);
-        }
+}
+
+static void swap_checks(bool quit)
+{
+    if (quit) {
+        xlog("window closed");
+        xbc_exit(0);
     }
     /* A keyboard plugged in mid-game makes SDL take the fault signals back. */
     install_fault_handlers();
     xinput_check_reset_combo();
     reset_check();
+}
+
+static void swap_exit_check(void)
+{
     if (g_exit_after_frames && (int)d3d.frame >= g_exit_after_frames) {
         xlog("D3D: %u frames presented, exiting", d3d.frame);
         /* Leave the way a title does: XBCOMPAT_PERSIST=1 persists the frame first. */
@@ -1036,6 +1104,24 @@ static ULONG NTAPI D3DDevice_Swap(ULONG Flags)
         av_hand_over();
         xbc_exit(0);
     }
+}
+
+static ULONG NTAPI D3DDevice_Swap(ULONG Flags)
+{
+    (void)Flags;
+    if (async_front()) return async_swap();
+    pusher_drain();
+    hud_batch_flush();
+    flush_cpu_backbuffer();
+    swap_begin_frame();
+    swap_gpu_frame_end();
+    ke_frame_presented();
+    run_callbacks();
+    swap_screenshot();
+    swap_present();
+    swap_finish();
+    swap_checks(swap_window_events());
+    swap_exit_check();
     return d3d.frame;
 }
 
@@ -1063,6 +1149,7 @@ static void NTAPI D3DDevice_Clear(ULONG Count, const D3DRECT *pRects, ULONG Flag
                                   ULONG Stencil)
 {
     pusher_drain();
+    if (async_front()) { async_clear(Count, pRects, Flags, Color, Z, Stencil); return; }
     hud_batch_flush();
     clear_serial++;
     if (d3d.recording) {
@@ -4836,6 +4923,7 @@ static void NTAPI D3DDevice_DeletePatch(UINT_ Handle)
 static void NTAPI D3DDevice_DrawVertices(ULONG PrimitiveType, UINT_ StartVertex, UINT_ VertexCount)
 {
     pusher_drain();
+    if (async_front()) { async_draw(PrimitiveType, StartVertex, VertexCount); return; }
     if (d3d.recording) { ULONG a[3] = { PrimitiveType, StartVertex, VertexCount }; pb_record(OP_DRAW, a, sizeof(a)); return; }
     D3DResource *vb = d3d.streams[0].vb;
     if (!vb) return;
@@ -4846,6 +4934,7 @@ static void NTAPI D3DDevice_DrawVerticesUP(ULONG PrimitiveType, UINT_ VertexCoun
                                            UINT_ Stride)
 {
     pusher_drain();
+    if (async_front()) { async_draw_up(PrimitiveType, VertexCount, pData, Stride); return; }
     if (d3d.recording) {
         ULONG h[3] = { PrimitiveType, VertexCount, Stride };
         pb_record2(OP_DRAW_UP, h, sizeof(h), pData, VertexCount * Stride);
@@ -4857,6 +4946,7 @@ static void NTAPI D3DDevice_DrawVerticesUP(ULONG PrimitiveType, UINT_ VertexCoun
 static void NTAPI D3DDevice_DrawIndexedVertices(ULONG PrimitiveType, UINT_ VertexCount, const USHORT *pIndexData)
 {
     pusher_drain();
+    if (async_front()) { async_draw_indexed(PrimitiveType, VertexCount, pIndexData); return; }
     if (d3d.recording) {
         ULONG h[2] = { PrimitiveType, VertexCount };
         pb_record2(OP_DRAW_INDEXED, h, sizeof(h), pIndexData, VertexCount * 2);
@@ -4872,6 +4962,7 @@ static void NTAPI D3DDevice_DrawIndexedVerticesUP(ULONG PrimitiveType, UINT_ Ver
                                                   const void *pVertexData, UINT_ Stride)
 {
     pusher_drain();
+    if (async_front()) { async_draw_indexed_up(PrimitiveType, VertexCount, pIndexData, pVertexData, Stride); return; }
     if (d3d.recording) {
         ULONG nverts = 0;
         for (UINT_ i = 0; i < VertexCount; i++) if (pIndexData[i] + 1u > nverts) nverts = pIndexData[i] + 1u;
@@ -5729,6 +5820,12 @@ static bool readback_rt_surface(D3DSurface *s)
 static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
 {
     pusher_drain();
+    if (async_front()) { async_target(target, z); return; }
+    if (async_replaying) {
+        /* The front took the references and told the title's device. */
+        d3d.target = target;
+        d3d.target_depth = z;
+    } else {
     if (d3d.recording) { ULONG a[2] = { (ULONG)target, (ULONG)z }; pb_record(OP_RENDER_TARGET, a, sizeof(a)); }
     if (!target) target = d3d.target;
     /* The device holds its targets with internal references, and resets the
@@ -5740,6 +5837,7 @@ static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
     d3d.target = target;
     d3d.target_depth = z;
     sync_device_surfaces();
+    }
     TRACE_ALL("D3D: render target %p (parent %p) depth %p", (void *)target, (void *)target->Parent, (void *)z);
     if (target == d3d.backbuffer || (!target->Parent && !p_glGenFramebuffers)) {
         if (target != d3d.backbuffer)
@@ -6586,8 +6684,8 @@ static void NTAPI D3DDevice_InsertCallback(ULONG Type, PVOID fn, ULONG Context)
     d3d.ncallbacks++;
 }
 
-static void NTAPI D3DDevice_SetVerticalBlankCallback(PVOID fn) { d3d.vblank_callback = fn; }
-static void NTAPI D3DDevice_SetSwapCallback(PVOID fn) { d3d.swap_callback = fn; }
+static void NTAPI D3DDevice_SetVerticalBlankCallback(PVOID fn) { d3dv.vblank_callback = fn; }
+static void NTAPI D3DDevice_SetSwapCallback(PVOID fn) { d3dv.swap_callback = fn; }
 static void NTAPI D3DDevice_GetDisplayFieldStatus(ULONG *st) { st[0] = 3; st[1] = d3d.frame; }
 static void NTAPI D3DDevice_SetScreenSpaceOffset(float x, float y) { d3d.screen_offset[0] = x; d3d.screen_offset[1] = y; }
 static void NTAPI D3DDevice_SetBackBufferScale(float x, float y) { d3d.backbuffer_scale[0] = x; d3d.backbuffer_scale[1] = y; }
@@ -7604,7 +7702,9 @@ static void pusher_drain(void)
 {
     static bool busy;
     ULONG *dev = d3d.device;
-    if (!pusher_buf || !dev || busy) return;
+    /* Queued drawing: the front hands the methods over, the worker runs
+       them in their place in the queue (async_draws.h). */
+    if (!pusher_buf || !dev || busy || (async_on && async_worker_thread)) return;
     ULONG *put = (ULONG *)dev[0];
     if (put < pusher_buf || put > pusher_buf + PUSHER_BYTES / 4) {
         xlog("D3D: push buffer pointer %p is outside the device's buffer", (void *)put);
@@ -7614,6 +7714,12 @@ static void pusher_drain(void)
     unsigned n = put - pusher_buf;
     if (!n) return;
     busy = true;
+    if (async_front()) {
+        dev[0] = (ULONG)pusher_buf;
+        async_raw_front(put - n, n);
+        busy = false;
+        return;
+    }
     if (d3d.recording) {
         ULONG h = n;
         pb_record2(OP_RAW, &h, 4, pusher_buf, n * 4);
@@ -7723,6 +7829,7 @@ static GLuint vis_active;
 static void NTAPI D3DDevice_BeginVisibilityTest(void)
 {
     pusher_drain();
+    if (async_front()) { async_vis_begin(); return; }
     hud_batch_flush();
     if (!p_glGenQueries || vis_active) return;
     p_glGenQueries(1, &vis_active);
@@ -7733,6 +7840,7 @@ static void NTAPI D3DDevice_BeginVisibilityTest(void)
 static LONG NTAPI D3DDevice_EndVisibilityTest(ULONG index)
 {
     pusher_drain();
+    if (async_front()) { async_vis_end(index); return D3D_OK; }
     hud_batch_flush();
     if (!vis_active) return D3DERR_INVALIDCALL;
     p_glEndQuery(0x8914);
@@ -7754,6 +7862,7 @@ static LONG NTAPI D3DDevice_GetVisibilityTestResult(ULONG index, UINT_ *result, 
 {
     unsigned slot = index % VIS_SLOTS;
     if (stamp) *stamp = d3d.frame;
+    if (async_front()) return async_vis_result(index, result);
     if (!vis[slot].used || vis[slot].index != index) { if (result) *result = 0; return D3DERR_INVALIDCALL; }
     GLuint avail = 0, n = 0;
     p_glGetQueryObjectuiv(vis[slot].query, 0x8867 /* GL_QUERY_RESULT_AVAILABLE */, &avail);
@@ -8134,6 +8243,8 @@ static ULONG NTAPI D3D_GetAdapterModeCount2(UINT_ Adapter, ULONG Format)
     (void)Format;
     return Direct3D_GetAdapterModeCount(Adapter);
 }
+
+#include "async_draws.h"
 
 const struct hle_func d3d8_funcs[] = {
     F("_Direct3DCreate8@4", Direct3DCreate8),

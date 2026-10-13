@@ -6,7 +6,7 @@
 #define RENDERER_QUEUE_MAX 1024u        /* Requests in flight. */
 /* Profile slots: one per d3d8 export, then one per xbr_control op. */
 #define RENDERER_SLOTS (1024 + XBR_SHUTDOWN + 1)
-enum xbr_request_kind { XBR_REQUEST_CALL, XBR_REQUEST_CONTROL, XBR_REQUEST_DRAW, XBR_REQUEST_STATE };
+enum xbr_request_kind { XBR_REQUEST_CALL, XBR_REQUEST_CONTROL, XBR_REQUEST_DRAW, XBR_REQUEST_STATE, XBR_REQUEST_ASYNC };
 struct xbr_service_request { uint32_t op; uint32_t *args; bool done; };
 struct xbr_request {
     struct xbr_request *next;
@@ -17,6 +17,8 @@ struct xbr_request {
     struct xbr_draw_packet *packet;
     struct xbr_state_packet *state;
     struct xbr_service_request *service; /* Host call the worker wants run on this caller. */
+    uint32_t *queued;                    /* XBR_REQUEST_ASYNC: work d3d8.c queued, or none */
+    unsigned nqueued;
     size_t bytes;
     bool done, detached;
     pthread_t origin;
@@ -38,6 +40,18 @@ static bool renderer_enabled, renderer_started, renderer_stopping, renderer_stop
 static bool renderer_profile;
 static unsigned renderer_op_count[RENDERER_SLOTS];
 static uint64_t renderer_op_blocked[RENDERER_SLOTS];
+/* XBCOMPAT_ASYNC_DRAWS (hle/async_draws.h): which calls run on the title's
+   thread once queued drawing is on (1 state, 2 queued work), and a host
+   service queued work wants, run by whichever title thread comes by next. */
+bool d3d_async_wanted(void), d3d_async_ready(void), d3d_async_active(void);
+void d3d_async_lock(void), d3d_async_unlock(void), d3d_async_before_sync(void), d3d_async_after_sync(void);
+int d3d_async_class(const char *name, const void *impl);
+void d3d_async_run(const uint32_t *buf, unsigned n);
+void d3d_worker_thread_init(void);
+static unsigned char renderer_async_class[1024];
+static bool renderer_async_wanted;
+static struct xbr_service_request *volatile renderer_async_service;
+static unsigned renderer_async_posts;
 /* Defined in backend.c: runs one request on whichever thread drains it. */
 static void renderer_execute(struct xbr_request *r);
 static uint64_t renderer_clock_ns(void)
@@ -81,8 +95,24 @@ static void renderer_host_service(uint32_t op, uint32_t *args)
         host_call(op, args);
         return;
     }
-    if (!renderer_current || renderer_current->detached) abort();
+    if (!renderer_current) abort();
     struct xbr_service_request service = {.op = op, .args = args};
+    if (renderer_current->detached) {
+        /* Queued work: nobody waits on it.  Messages need no title thread;
+           anything else waits for the next one to come by. */
+        if (op == XBR_LOG || op == XBR_FATAL) {
+            fprintf(stderr, "%s\n", (const char *)(uintptr_t)args[0]);
+            return;
+        }
+        if (renderer_current->kind != XBR_REQUEST_ASYNC) abort();
+        pthread_mutex_lock(&renderer_lock);
+        while (renderer_async_service) pthread_cond_wait(&renderer_cond, &renderer_lock);
+        renderer_async_service = &service;
+        pthread_cond_broadcast(&renderer_cond);
+        while (!service.done) pthread_cond_wait(&renderer_cond, &renderer_lock);
+        pthread_mutex_unlock(&renderer_lock);
+        return;
+    }
     pthread_mutex_lock(&renderer_lock);
     renderer_current->service = &service;
     pthread_cond_broadcast(&renderer_cond);
@@ -101,6 +131,7 @@ static void *renderer_main(void *unused)
 {
     (void)unused;
     renderer_is_owner = true;
+    d3d_worker_thread_init();
     pthread_setname_np(pthread_self(), "xbc-render");
     pthread_mutex_lock(&renderer_lock);
     for (;;) {
@@ -130,9 +161,11 @@ static void renderer_enqueue_locked(struct xbr_request *r)
     pthread_cond_broadcast(&renderer_cond);
 }
 /* Waits for r, running any host service the worker hands back meanwhile. */
+static bool renderer_run_async_service_locked(void);
 static void renderer_wait_locked(struct xbr_request *r)
 {
     while (!r->done) {
+        if (renderer_run_async_service_locked()) continue;
         if (r->service) {
             struct xbr_service_request *s = r->service;
             r->service = NULL;
@@ -143,6 +176,56 @@ static void renderer_wait_locked(struct xbr_request *r)
             pthread_cond_broadcast(&renderer_cond);
         } else pthread_cond_wait(&renderer_cond, &renderer_lock);
     }
+}
+/* Runs a host service queued work asked for, on this title thread.
+   Caller holds renderer_lock; false when there was none. */
+static bool renderer_run_async_service_locked(void)
+{
+    struct xbr_service_request *s = renderer_async_service;
+    if (!s || renderer_is_owner) return false;
+    renderer_async_service = NULL;
+    pthread_mutex_unlock(&renderer_lock);
+    host_call(s->op, s->args);
+    pthread_mutex_lock(&renderer_lock);
+    s->done = true;
+    pthread_cond_broadcast(&renderer_cond);
+    return true;
+}
+static void renderer_start_locked(void);
+/* Queued work for the worker, from the title's thread; buf is the worker's
+   to free. */
+void renderer_post_async(uint32_t *buf, unsigned n)
+{
+    struct xbr_request *r = calloc(1, sizeof(*r));
+    if (!r) abort();
+    r->kind = XBR_REQUEST_ASYNC; r->queued = buf; r->nqueued = n; r->detached = true;
+    r->bytes = n * 4; r->origin = pthread_self();
+    pthread_mutex_lock(&renderer_lock);
+    renderer_start_locked();
+    /* Bounded like the other queue: wait (serving the worker) while full. */
+    while (renderer_queue_bytes > RENDERER_QUEUE_LIMIT * 8 && !renderer_stopping)
+        if (!renderer_run_async_service_locked()) pthread_cond_wait(&renderer_cond, &renderer_lock);
+    renderer_enqueue_locked(r);
+    renderer_async_count++; renderer_async_posts++;
+    pthread_mutex_unlock(&renderer_lock);
+}
+/* Waits until the worker has run everything queued so far. */
+void renderer_async_flush(void)
+{
+    struct xbr_request r = {.kind = XBR_REQUEST_ASYNC, .origin = pthread_self()};
+    pthread_mutex_lock(&renderer_lock);
+    renderer_start_locked();
+    renderer_enqueue_locked(&r); renderer_wait_locked(&r);
+    pthread_mutex_unlock(&renderer_lock);
+}
+/* Waits until *counter reaches target (the worker bumps it, then finishes
+   the request it was running, which wakes this). */
+void renderer_async_wait(volatile ULONG *counter, ULONG target)
+{
+    pthread_mutex_lock(&renderer_lock);
+    while ((LONG)(__atomic_load_n(counter, __ATOMIC_ACQUIRE) - target) < 0 && !renderer_stopping)
+        if (!renderer_run_async_service_locked()) pthread_cond_wait(&renderer_cond, &renderer_lock);
+    pthread_mutex_unlock(&renderer_lock);
 }
 /* Started lazily so the GL context is created on the render thread. */
 static void renderer_start_locked(void)
@@ -169,8 +252,28 @@ static void renderer_dispatch(enum xbr_request_kind kind, uint32_t op,
         return;
     }
     uint64_t started = renderer_profile ? renderer_clock_ns() : 0;
+    if (renderer_async_wanted) {
+        /* The DPC thread's vertical blank touches no GL. */
+        if (kind == XBR_REQUEST_CONTROL && op == XBR_VBLANK && d3d_async_active()) {
+            control_now(op, args);
+            return;
+        }
+        if (renderer_async_service) {
+            pthread_mutex_lock(&renderer_lock);
+            renderer_run_async_service_locked();
+            pthread_mutex_unlock(&renderer_lock);
+        }
+        d3d_async_lock();
+        if (kind == XBR_REQUEST_CALL && renderer_async_class[op] && d3d_async_ready()) {
+            invoke_now(op, call);
+            d3d_async_unlock();
+            return;
+        }
+        if (d3d_async_active()) d3d_async_before_sync();
+    }
     pthread_mutex_lock(&renderer_lock);
     if (renderer_stopping) {
+        if (renderer_async_wanted) d3d_async_unlock();
         pthread_mutex_unlock(&renderer_lock);
         if (kind == XBR_REQUEST_CONTROL && (op == XBR_VBLANK || op == XBR_SHUTDOWN)) return;
         abort();
@@ -184,7 +287,7 @@ static void renderer_dispatch(enum xbr_request_kind kind, uint32_t op,
         fprintf(stderr, "D3D worker draw route: %s convention %d front %u queue %zu\n",
                 d3d8_funcs[op].name, conventions[op], renderer_front != NULL, renderer_queue_bytes);
     }
-    if (kind == XBR_REQUEST_CALL && renderer_queue_state && renderer_front
+    if (kind == XBR_REQUEST_CALL && renderer_queue_state && renderer_front && !renderer_async_wanted
         && renderer_front_origin == pthread_self() && renderer_queue_requests < RENDERER_QUEUE_MAX
         && renderer_queue_bytes < RENDERER_QUEUE_LIMIT
         && (conventions[op] == CONV_STD
@@ -211,7 +314,7 @@ static void renderer_dispatch(enum xbr_request_kind kind, uint32_t op,
             d3d_state_packet_free(p);
         }
     }
-    if (kind == XBR_REQUEST_CALL && renderer_front && renderer_front_origin == pthread_self()
+    if (kind == XBR_REQUEST_CALL && renderer_front && !renderer_async_wanted && renderer_front_origin == pthread_self()
         && renderer_queue_bytes < RENDERER_QUEUE_LIMIT
         && renderer_queue_requests < RENDERER_QUEUE_MAX && conventions[op] == CONV_STD) {
         struct xa_frame f = {.stack = (const uint32_t *)(uintptr_t)call->stack};
@@ -245,6 +348,10 @@ static void renderer_dispatch(enum xbr_request_kind kind, uint32_t op,
     }
     bool shutdown = kind == XBR_REQUEST_CONTROL && op == XBR_SHUTDOWN;
     pthread_mutex_unlock(&renderer_lock);
+    if (renderer_async_wanted) {
+        if (d3d_async_active()) d3d_async_after_sync();
+        d3d_async_unlock();
+    }
     if (shutdown) pthread_join(renderer_thread, NULL);
 }
 /* async, sync, queued bytes, enabled: for the frame overlay. */
@@ -284,6 +391,7 @@ void xbr_worker_profile(double frames)
     memcpy(state, renderer_state_count, sizeof(state));
     memset(renderer_state_count, 0, sizeof(renderer_state_count));
     draws = renderer_draw_count; renderer_draw_count = 0;
+    unsigned posts = renderer_async_posts; renderer_async_posts = 0;
     memcpy(counts, renderer_op_count, sizeof(counts));
     memcpy(blocked, renderer_op_blocked, sizeof(blocked));
     memset(renderer_op_count, 0, sizeof(renderer_op_count));
@@ -292,6 +400,8 @@ void xbr_worker_profile(double frames)
     fprintf(stderr, "D3D worker queued/frame: draw %.1f viewport %.1f texture %.1f RS %.1f TSS %.1f stream %.1f"
             " vertex %.1f transform %.1f constants %.1f state-enabled %u\n", draws / frames, state[0] / frames,
             state[1] / frames, state[2] / frames, state[3] / frames, state[4] / frames, state[5] / frames, state[6] / frames, state[7] / frames, renderer_queue_state);
+    if (renderer_async_wanted)
+        fprintf(stderr, "D3D queued drawing: %s, %.1f batches/frame\n", d3d_async_active() ? "on" : "off", posts / frames);
     if (getenv("XBCOMPAT_PROFILE_WORKER_OPS"))
         for (unsigned i = 0; i < RENDERER_SLOTS; i++) if (counts[i])
             fprintf(stderr, "D3D worker synchronous op %u calls/frame %.1f\n", i, counts[i] / frames);

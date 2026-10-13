@@ -38,6 +38,11 @@ static void renderer_execute(struct xbr_request *r)
         if (category != 2 && category != 3) d3d_renderer_barrier();
         d3d_state_packet_run(r->state);
         d3d_state_packet_free(r->state);
+    } else if (r->kind == XBR_REQUEST_ASYNC) {
+        if (r->queued) {
+            d3d_async_run(r->queued, r->nqueued);
+            free(r->queued);
+        }
     } else if (r->kind == XBR_REQUEST_CALL) {
         if (renderer_barriers && renderer_call_barrier[r->op]) d3d_renderer_barrier();
         invoke_now(r->op, r->call);
@@ -52,7 +57,7 @@ static void renderer_execute(struct xbr_request *r)
     /* A call that drained an empty queue leaves the device as the guest will see
        it next: snapshot that as the front later captures build on. */
     if (r->kind == XBR_REQUEST_CALL && !parent && !renderer_head && !renderer_stopping
-        && !renderer_front) {
+        && !renderer_front && !renderer_async_wanted) {
         renderer_front = renderer_queue_state ? d3d_state_front_create(d3d8_funcs[r->op].impl)
                                               : d3d_draw_front_create(d3d8_funcs[r->op].impl);
         renderer_front_origin = r->origin;
@@ -91,6 +96,9 @@ int xbr_init(uint32_t abi, xbr_host_fn host)
     renderer_queue_state = renderer_enabled && state && *state && *state != '0';
     const char *batch = getenv("XBCOMPAT_HUD_BATCH");
     renderer_barriers = renderer_enabled || (batch && *batch && *batch != '0');
+    renderer_async_wanted = renderer_enabled && d3d_async_wanted();
+    for (size_t i = 0; renderer_async_wanted && i < nexports; i++)
+        renderer_async_class[i] = (unsigned char)d3d_async_class(d3d8_funcs[i].name, d3d8_funcs[i].impl);
     return 0;
 }
 const char *xbr_name(uint32_t index)
