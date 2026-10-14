@@ -337,6 +337,17 @@ NTSTATUS NTAPI ExQueryNonVolatileSetting(ULONG ValueIndex, ULONG *Type, PVOID Va
     const void *src;
     ULONG len, type = 4;   /* REG_DWORD */
 
+    /* XBCOMPAT_DASH_VIEW=4:3 sets bit 31 of the video flags, which no Xbox
+       flag uses (XGetVideoFlags masks it off, so titles never see it). The
+       dashboard dashbuild makes reads it and builds its 3D view for 640x480
+       instead of its usual 720x480, showing 1/8 less of the scene sideways. */
+    static int dash_view = -1;
+    if (dash_view < 0) {
+        const char *v = getenv("XBCOMPAT_DASH_VIEW");
+        dash_view = v && !strcmp(v, "4:3");
+        if (dash_view) user_settings.VideoFlags |= 0x80000000u;
+    }
+
     if (ValueIndex < sizeof(user) / sizeof(user[0])) {
         src = (const UCHAR *)&user_settings + user[ValueIndex].off;
         len = user[ValueIndex].len;
