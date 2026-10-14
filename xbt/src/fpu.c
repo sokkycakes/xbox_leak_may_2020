@@ -57,8 +57,11 @@ static double from_ext(const uint8_t *p)
     double v;
     if (exp == 0 && mant == 0)
         v = 0.0;
-    else if (exp == 0x7fff)
-        v = (mant << 1) ? NAN : INFINITY;
+    else if (exp == 0x7fff && (mant << 1)) {
+        uint64_t d = 0x7ff8000000000000ull | ((mant >> 11) & 0x000fffffffffffffull);
+        memcpy(&v, &d, 8);
+    } else if (exp == 0x7fff)
+        v = INFINITY;
     else
         v = ldexp((double)mant, exp - 16383 - 63);
     return sign ? -v : v;
@@ -69,7 +72,10 @@ static void to_ext(uint8_t *p, double v)
     uint64_t mant = 0;
     uint16_t se = signbit(v) ? 0x8000 : 0;
     if (isnan(v)) {
-        mant = 0xc000000000000000ull;
+        uint64_t d;
+        memcpy(&d, &v, 8);
+        /* keep the payload, as FLD m64 does; SNaNs become quiet */
+        mant = 0xc000000000000000ull | (d & 0x000fffffffffffffull) << 11;
         se |= 0x7fff;
     } else if (isinf(v)) {
         mant = 0x8000000000000000ull;

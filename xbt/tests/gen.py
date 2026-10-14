@@ -802,6 +802,9 @@ def g_x87_misc(g):
     r = g.r
     k = r.randint(0, 3)
     g.emit("fninit")
+    lo, hi = struct.unpack("<II", struct.pack("<d", fp_value(r)))
+    g.emit("mov dword [0x%x], 0x%x" % (FP_SRC, lo))
+    g.emit("mov dword [0x%x], 0x%x" % (FP_SRC + 4, hi))
     g.emit("fld qword [0x%x]" % (FP_SRC))
     g.emit("fld1")
     if k == 0:
