@@ -108,6 +108,9 @@ static bool hud_batch_capture_key(hud_batch_key *key, const fvf_plan_key *state,
 
 static void hud_batch_flush(void)
 {
+    /* A held run of programmable draws (d3d8.c) lands first: whatever made
+       this call is about to change GL state or look at the frame. */
+    merge_flush();
     /* Only the thread holding the context draws.  Anywhere else (the
        guest's thread while the worker owns GL) the batch stays queued for
        the worker's next flush; its barrier gets there before anything that

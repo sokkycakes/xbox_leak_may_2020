@@ -39,6 +39,11 @@ static GLint host_vertex_attribs;   /* GL_MAX_VERTEX_ATTRIBS */
 
 #include "glcache.h"
 
+/* memory.c's hook before guest memory is freed; absent from the native
+   renderer library, whose client installs its own (renderer/client.c). */
+extern void (*g_render_drain)(void) __attribute__((weak));
+void d3d_flush_held(void);
+
 typedef ULONG UINT_;
 
 #define D3D_OK 0
@@ -551,6 +556,11 @@ static LONG NTAPI Direct3D_CreateDevice(UINT_ Adapter, ULONG DeviceType, PVOID p
     if (!d3d.window) fatal("SDL_CreateWindow: %s", SDL_GetError());
     d3d.gl = SDL_GL_CreateContext(d3d.window);
     if (!d3d.gl) fatal("SDL_GL_CreateContext: %s", SDL_GetError());
+    /* memory.c calls this before the title frees memory: a held draw run
+       (merge_start) reads its vertices and indices first.  The native
+       renderer's client installs its own, which reaches d3d_flush_held. */
+    if (&g_render_drain && !__atomic_load_n(&g_render_drain, __ATOMIC_ACQUIRE))
+        __atomic_store_n(&g_render_drain, d3d_flush_held, __ATOMIC_RELEASE);
     shader_diagnostics_init();
     gc_reset();
     glGetIntegerv(GL_MAX_VERTEX_ATTRIBS, &host_vertex_attribs);
@@ -882,6 +892,9 @@ static unsigned flush_every, flush_count;
    (the dashboard's ~200 draws lost 2 fps to it on the Pi). */
 #define FLUSH_MIN_DRAWS 400
 static unsigned frame_draws, last_frame_draws;
+/* Merged draw runs (merge_start): the title's draws in them, and the GL
+   draws they became, since the last profile report. */
+static unsigned merge_title_draws, merge_gl_draws;
 static const unsigned whatif_flush_steps[] = { 0, 64, 128, 256 };
 static int whatif_flush = -1;    /* index into whatif_flush_steps, -1 when off */
 static bool whatif_skip_draw;    /* this draw sampled a back-buffer view under WHATIF_NO_BBVIEW */
@@ -960,6 +973,8 @@ static void log_fps(void)
             cache_hits = cache_misses = cache_evicts = cache_uploads = 0; cache_upload_bytes = 0;
             t_resolve = t_filter = t_swap = t_restore = 0;
             xlog("D3D buffers: upload calls %.2f ms/frame", t_buffer_upload / 1e6 / f);
+            xlog("D3D merged: %.1f title draws in %.1f GL draws per frame", merge_title_draws / f, merge_gl_draws / f);
+            merge_title_draws = merge_gl_draws = 0;
             xlog("D3D program parts: fragment shader lookup %.2f, textures %.2f ms/frame", t_fshader / 1e6 / f,
                  t_textures / 1e6 / f);
             t_fshader = t_textures = 0;
@@ -1247,6 +1262,7 @@ static LONG NTAPI D3DDevice_CreateVertexBuffer(UINT_ Length, ULONG Usage, ULONG 
 static void NTAPI D3DVertexBuffer_Lock(D3DResource *vb, UINT_ Offset, UINT_ Size, PVOID *ppbData, ULONG Flags)
 {
     (void)Size; (void)Flags;
+    hud_batch_flush();   /* held draws read the old contents first */
     *ppbData = (UCHAR *)resource_data(vb) + Offset;
 }
 
@@ -1378,6 +1394,7 @@ static void NTAPI D3D_FreeContiguousMemory(PVOID p)
 
 static void NTAPI D3DResource_Register(D3DResource *r, PVOID base)
 {
+    hud_batch_flush();   /* a held draw may read the resource where it was */
     ULONG mem = (ULONG)base + r->Data, type = r->Common & D3DCOMMON_TYPE_MASK;
     /* Push and index buffers keep a virtual address (the CPU reads them);
        everything else a GPU (physical) one. */
@@ -2491,9 +2508,9 @@ static void NTAPI D3DDevice_SetMaterial(const float *m)
     d3d.material_power = m[16];
 }
 
-static void NTAPI D3DDevice_BlockUntilIdle(void) { pusher_drain(); run_callbacks(); }
+static void NTAPI D3DDevice_BlockUntilIdle(void) { pusher_drain(); hud_batch_flush(); run_callbacks(); }
 static void NTAPI D3DDevice_BlockUntilVerticalBlank(void) { wait_vblank(); }
-static BOOLEAN NTAPI D3DDevice_IsBusy(void) { return 0; }
+static BOOLEAN NTAPI D3DDevice_IsBusy(void) { hud_batch_flush(); return 0; }
 /* The video encoder's filters, applied when the frame goes to the screen
    (present_window_framebuffer). */
 static void NTAPI D3DDevice_SetFlickerFilter(ULONG v) { d3d.flicker_filter = v > 5 ? 5 : v; }
@@ -3060,6 +3077,7 @@ static program_entry *program_lookup[256];
 static void NTAPI D3DDevice_DeleteVertexShader(ULONG handle)
 {
     if (!(handle & 1)) return;
+    hud_batch_flush();   /* a held draw may use it */
     vshader *sh = (vshader *)(handle & ~1u);
     if (sh->vs || sh->vs_z) {
         /* GL reuses the names, so programs linked with them must go too. */
@@ -3133,6 +3151,7 @@ static void vp_load(const uint32_t *code, unsigned n, ULONG address)
 {
     if (address >= 136) return;
     if (n > 136 - address) n = 136 - address;
+    hud_batch_flush();   /* a held draw's program may live here */
     memcpy(vp_mem[address], code, n * 16);
 }
 
@@ -4195,6 +4214,152 @@ static void program_profile_log(double frames)
     for (program_entry *e = programs; e; e = e->next) e->prof_all_ns = e->prof_gl_ns = 0, e->prof_draws = e->prof_indices = 0;
 }
 
+static void submit_programmable(vshader *sh, program_entry *e, ULONG PrimitiveType, const UCHAR *up, ULONG up_stride,
+                                ULONG first, ULONG count, const USHORT *indices, uint64_t t_begin, unsigned draws);
+
+/* Draw merging.  Torque titles (Think Tanks) draw a mesh as a run of small
+   triangle lists, one per primitive group, each with the same shader,
+   textures and state, their indices one after another in one index buffer:
+   in an xemu trace of a Think Tanks match, 434 of a frame's 727 draws set
+   nothing between them but the textures they already had.  Each GL draw
+   costs ~90 us of CPU on the Pi's VC4 driver, on top of the state work here,
+   so such a run goes to GL as a single glDrawElements.
+   A programmable triangle list is held back instead of drawn (merge_start);
+   the next draw joins it when its indices continue the run's and nothing a
+   draw reads has changed (merge_append); anything else lands it first
+   (merge_flush, from hud_batch_flush, which every operation that changes
+   GL state or reads the frame already calls).  The GL state the held draw
+   set up stays in place until then.  Real D3D copies a draw's indices into
+   the push buffer, so the title may reuse that memory as soon as the call
+   returns: the run keeps its own copy and draws from it if the title did.
+   XBCOMPAT_MERGE_DRAWS=0 turns this off. */
+#define MERGE_MAX_INDICES 65536
+static struct {
+    bool active;
+    vshader *sh;
+    program_entry *e;
+    const UCHAR *up;             /* stream 0's vertices (a VB: DrawIndexedVertices) */
+    ULONG up_stride;
+    bool up_is_vb;
+    const USHORT *start;         /* the run's indices in the title's memory */
+    ULONG count;
+    unsigned draws;              /* the title's draws in the run */
+    uint64_t t_begin;
+    USHORT copy[MERGE_MAX_INDICES];   /* the indices as each draw passed them */
+    unsigned rs_count, rows;     /* render states and constant rows compared */
+    ULONG rs[D3DRS_MAX + 64], tss[4 * 32];   /* the title's arrays (newer XDKs have more states) */
+    float vs_const[192][4];
+    d3d_state state;             /* the device as the run's first draw left it (see merge_regions) */
+} merge;
+
+/* The parts of the device a programmable draw reads.  Not the frame counter,
+   the window or gamma ramp; the vertex shader constants go row by row (only
+   the rows the program has). */
+static const struct { size_t off, len; } merge_regions[] = {
+#define MERGE_SPAN(a, b) { offsetof(d3d_state, a), offsetof(d3d_state, b) - offsetof(d3d_state, a) }
+    MERGE_SPAN(transforms, device_refs),        /* transforms .. materials */
+    MERGE_SPAN(backbuffer, gamma),              /* targets, scissors, screen mapping */
+    MERGE_SPAN(constant_mode, vs_const),
+    MERGE_SPAN(ps_const, callbacks),            /* pixel shader constants and handle, z scale */
+    { offsetof(d3d_state, palettes), sizeof(d3d_state) - offsetof(d3d_state, palettes) },
+#undef MERGE_SPAN
+};
+
+static bool merge_wanted(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("XBCOMPAT_MERGE_DRAWS");
+        on = !(e && *e == '0') && !getenv("XBCOMPAT_DUMP_DRAWS") && !prof_sync;
+    }
+    /* Not while tracing (one line per draw), under the XBCOMPAT_WHATIF
+       measuring aid, under queued drawing, or inside raw push buffer
+       methods and HUD packets. */
+    return on && !g_trace && whatif < 0 && !async_on && !hud_raw_active && !hud_packet_active;
+}
+
+static bool merge_same_state(void)
+{
+    for (unsigned i = 0; i < sizeof(merge_regions) / sizeof(merge_regions[0]); i++)
+        if (memcmp((const char *)&d3d + merge_regions[i].off, (const char *)&merge.state + merge_regions[i].off,
+                   merge_regions[i].len)) return false;
+    return d3d.rs_count == merge.rs_count && !memcmp(d3d.render_state, merge.rs, merge.rs_count * 4)
+        && !memcmp(d3d.texture_state, merge.tss, sizeof(merge.tss))
+        && !memcmp(d3d.vs_const, merge.vs_const, merge.rows * 16);
+}
+
+/* Hold this draw back as the start of a run, once its state is in GL.
+   False: draw it now. */
+static bool merge_start(vshader *sh, program_entry *e, ULONG PrimitiveType, const UCHAR *up, ULONG up_stride,
+                        ULONG first, ULONG count, const USHORT *indices, uint64_t t_begin)
+{
+    if (PrimitiveType != 5 /* TRIANGLELIST */ || !indices || !count || count > MERGE_MAX_INDICES || !e
+        || !p_glGenBuffers || (up && !up_is_vb) || whatif_skip_draw || d3d.rs_count > sizeof(merge.rs) / 4
+        || !merge_wanted()) return false;
+    merge.active = true;
+    merge.sh = sh;
+    merge.e = e;
+    merge.up = up;
+    merge.up_stride = up_stride;
+    merge.up_is_vb = up_is_vb;
+    merge.start = indices + first;
+    merge.count = count;
+    merge.draws = 1;
+    merge.t_begin = t_begin;
+    memcpy(merge.copy, indices + first, count * 2);
+    for (unsigned i = 0; i < sizeof(merge_regions) / sizeof(merge_regions[0]); i++)
+        memcpy((char *)&merge.state + merge_regions[i].off, (const char *)&d3d + merge_regions[i].off,
+               merge_regions[i].len);
+    merge.rs_count = d3d.rs_count;
+    memcpy(merge.rs, d3d.render_state, merge.rs_count * 4);
+    memcpy(merge.tss, d3d.texture_state, sizeof(merge.tss));
+    /* upload_constants sends the program's rows from d3d.vs_const; a
+       program without a constant array reads none. */
+    merge.rows = e->loc_c >= 0 ? (unsigned)e->c_size : 0;
+    if (merge.rows > 192) merge.rows = 192;
+    memcpy(merge.vs_const, d3d.vs_const, merge.rows * 16);
+    return true;
+}
+
+/* Add this draw to the held run if it continues it.  True: nothing more to
+   do for it now. */
+static bool merge_append(vshader *sh, ULONG PrimitiveType, const UCHAR *up, ULONG up_stride, ULONG first,
+                         ULONG count, const USHORT *indices, bool vb)
+{
+    if (!merge.active || PrimitiveType != 5 || sh != merge.sh || !indices || !count
+        || indices + first != merge.start + merge.count || merge.count + count > MERGE_MAX_INDICES
+        || up != merge.up || up_stride != merge.up_stride || vb != merge.up_is_vb || !merge_wanted()
+        || !merge_same_state()) return false;
+    memcpy(merge.copy + merge.count, indices + first, count * 2);
+    merge.count += count;
+    merge.draws++;
+    return true;
+}
+
+/* Draw the held run.  Only the thread that holds GL draws (see
+   hud_batch_flush). */
+static void merge_flush(void)
+{
+    if (!merge.active || !d3d.gl || SDL_GL_GetCurrentContext() != d3d.gl) return;
+    merge.active = false;
+    const USHORT *ix = merge.start;
+    if (memcmp(merge.copy, merge.start, merge.count * 2)) {
+        /* The title has written over its indices since: draw from the copy,
+           without the cache entry an earlier run made at the same address. */
+        ix = merge.copy;
+        conv_entry *stale = conv_find((const UCHAR *)ix, 2, CONV_RANGE, merge.count);
+        free(stale->raw);
+        stale->raw = NULL;
+    }
+    bool vb = up_is_vb;
+    up_is_vb = merge.up_is_vb;
+    conv_serial++;
+    submit_programmable(merge.sh, merge.e, 5, merge.up, merge.up_stride, 0, merge.count, ix, merge.t_begin,
+                        merge.draws);
+    up_is_vb = vb;
+    if (merge.draws > 1) merge_title_draws += merge.draws, merge_gl_draws++;
+}
+
 /* Draw with a programmable vertex shader: generic attributes + GLSL. */
 static void draw_programmable_(vshader *sh, ULONG PrimitiveType, const UCHAR *up, ULONG up_stride, ULONG first,
                                ULONG count, const USHORT *indices);
@@ -4209,7 +4374,7 @@ static void draw_programmable(vshader *sh, ULONG PrimitiveType, const UCHAR *up,
 static void draw_programmable_(vshader *sh, ULONG PrimitiveType, const UCHAR *up, ULONG up_stride, ULONG first,
                                ULONG count, const USHORT *indices)
 {
-    uint64_t t_begin = detail_on ? now_ns() : 0, t_gl0 = 0, t_gl1 = 0;
+    uint64_t t_begin = detail_on ? now_ns() : 0;
     whatif_skip_draw = false;
     GLuint vs = vertex_shader_object(sh);
     if (!vs) return;
@@ -4236,6 +4401,17 @@ static void draw_programmable_(vshader *sh, ULONG PrimitiveType, const UCHAR *up
                         t->Format, t->Size);
         }
     DETAIL_TIMED(t_constants, upload_constants(sh, e));
+    if (merge_start(sh, e, PrimitiveType, up, up_stride, first, count, indices, t_begin)) return;
+    submit_programmable(sh, e, PrimitiveType, up, up_stride, first, count, indices, t_begin, 1);
+}
+
+/* The rest of a programmable draw once its state is in GL: the indices and
+   vertex arrays, then the draw itself.  `draws` is how many of the title's
+   draws it stands for (a merged run, see merge_start). */
+static void submit_programmable(vshader *sh, program_entry *e, ULONG PrimitiveType, const UCHAR *up, ULONG up_stride,
+                                ULONG first, ULONG count, const USHORT *indices, uint64_t t_begin, unsigned draws)
+{
+    uint64_t t_gl0 = 0, t_gl1;
     /* Indices from a GL buffer too (kept like the vertices, see stream_buffer). */
     conv_entry *ix;
     DETAIL_TIMED(t_indices, ix = indices && count && p_glGenBuffers ? index_entry(indices + first, count, true) : NULL);
@@ -4248,8 +4424,10 @@ static void draw_programmable_(vshader *sh, ULONG PrimitiveType, const UCHAR *up
     TIMED(t_gl, if (ix) glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, NULL);
                 else if (indices) glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, indices + first);
                 else glDrawArrays(gl_primitive(PrimitiveType), first, count));
-    frame_draws++;
-    if (flush_every && last_frame_draws >= FLUSH_MIN_DRAWS && !d3d.rt_texture && ++flush_count >= flush_every) {
+    /* Counted in the title's draws, merged or not: the busy-frame rule and
+       the flush spacing were measured that way. */
+    frame_draws += draws;
+    if (flush_every && last_frame_draws >= FLUSH_MIN_DRAWS && !d3d.rt_texture && (flush_count += draws) >= flush_every) {
         flush_count = 0;
         glFlush();
     }
@@ -4257,7 +4435,7 @@ static void draw_programmable_(vshader *sh, ULONG PrimitiveType, const UCHAR *up
         t_gl1 = now_ns();
         e->prof_gl_ns += t_gl1 - t_gl0;
         e->prof_all_ns += t_gl1 - t_begin;
-        e->prof_draws++;
+        e->prof_draws += draws;
         e->prof_indices += count;
     }
     /* The generic arrays stay bound for the next programmable draw; the
@@ -4415,6 +4593,11 @@ static void draw_declared_(const vshader *sh, ULONG PrimitiveType, const UCHAR *
 
 #include "fvf_plan.h"
 #include "fvf_batch.h"
+
+/* Guest memory is about to be freed (memory.c, or the native renderer's
+   XBR_DRAIN): draw what is held back while its data is still there. */
+void d3d_flush_held(void) { hud_batch_flush(); }
+
 #include "hud_shader.h"
 static GLuint hud_vertex_object, hud_fragment_object;
 static program_entry *hud_program;
@@ -4473,14 +4656,19 @@ static void draw(ULONG PrimitiveType, const UCHAR *base, ULONG stride, ULONG fir
                  const USHORT *indices, bool vb)
 {
     if (d3d.vertex_shader & 1) {
-        hud_batch_flush();
         vshader *sh = (vshader *)(d3d.vertex_shader & ~1u);
+        if (sh->code && merge_append(sh, PrimitiveType, base, stride, first, count, indices, vb)) {
+            n_draws++;
+            return;
+        }
+        hud_batch_flush();
         up_is_vb = vb;
         if (sh->code) draw_programmable(sh, PrimitiveType, base, stride, first, count, indices);
         else draw_declared(sh, PrimitiveType, base, stride, first, count, indices);
         up_is_vb = false;
         return;
     }
+    merge_flush();
     n_draws++;
     TIMED_CPU(t_draw, c_draw, draw_fvf(PrimitiveType, base, stride, first, count, indices); if (prof_sync) glFinish());
 }
@@ -4784,6 +4972,7 @@ static void draw_patch_mesh(vshader *layout, vshader *real, const float (*verts)
                             const USHORT *idx, ULONG nidx)
 {
     (void)nverts;
+    hud_batch_flush();   /* held draws go first (this draws outside draw()) */
     /* The copy below draws with the real shader's GL objects: compile them
        there first, so they are kept with the shader rather than the copy. */
     if (real && layout->code) vertex_shader_object(real);
@@ -5875,6 +6064,7 @@ static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
 {
     pusher_drain();
     if (async_front()) { async_target(target, z); return; }
+    hud_batch_flush();   /* queued draws land in the old target */
     if (async_replaying) {
         /* The front took the references and told the title's device. */
         d3d.target = target;
@@ -6012,6 +6202,7 @@ static void tex_invalidate(ULONG data);
 
 static void NTAPI D3DSurface_LockRect(D3DSurface *s, ULONG *locked, const LONG *rect, ULONG flags)
 {
+    hud_batch_flush();
     ULONG w, h, pitch;
     container_size((D3DPixelContainer *)s, &w, &h, &pitch);
     if (s == d3d.backbuffer && !d3d.bb_cpu_dirty) {
@@ -6128,6 +6319,7 @@ static void NTAPI D3DDevice_CopyRects(D3DSurface *src, const LONG *rects, UINT_ 
                                       const LONG *points)
 {
     pusher_drain();
+    hud_batch_flush();
     ULONG sw, sh, sp, dw, dh, dp;
     container_size((D3DPixelContainer *)src, &sw, &sh, &sp);
     container_size((D3DPixelContainer *)dst, &dw, &dh, &dp);
@@ -6490,6 +6682,7 @@ static LONG NTAPI D3DDevice_CreateIndexBuffer(UINT_ Length, ULONG Usage, ULONG F
 static void NTAPI D3DIndexBuffer_Lock(D3DResource *ib, UINT_ Offset, UINT_ Size, PVOID *ppbData, ULONG Flags)
 {
     (void)Size; (void)Flags;
+    hud_batch_flush();
     *ppbData = (UCHAR *)ib->Data + Offset;
 }
 
@@ -6734,6 +6927,7 @@ static void run_callbacks(void)
 static void NTAPI D3DDevice_InsertCallback(ULONG Type, PVOID fn, ULONG Context)
 {
     (void)Type;
+    hud_batch_flush();
     if (d3d.ncallbacks == 64) run_callbacks();
     d3d.callbacks[d3d.ncallbacks].fn = fn;
     d3d.callbacks[d3d.ncallbacks].ctx = Context;
@@ -6749,13 +6943,13 @@ static void NTAPI D3DDevice_GetBackBufferScale(float *x, float *y) { *x = d3d.ba
 static void NTAPI D3DDevice_SetDebugMarker(ULONG v) { (void)v; }
 static void NTAPI D3DDevice_SetTile(ULONG i, const void *t) { (void)i; (void)t; }
 static void NTAPI D3DDevice_GetTile(ULONG i, ULONG *t) { (void)i; memset(t, 0, 24); }
-static void NTAPI D3DDevice_KickPushBuffer(void) { pusher_drain(); }
+static void NTAPI D3DDevice_KickPushBuffer(void) { pusher_drain(); hud_batch_flush(); }
 /* A fence: drawing that waits has passed it at once, queued drawing when
    the worker gets there (calls that wait for one drain the queue first). */
 static ULONG NTAPI D3D_SetFence(ULONG Flags);
 static ULONG NTAPI D3DDevice_InsertFence(void) { return D3D_SetFence(0); }
-static BOOLEAN NTAPI D3DDevice_IsFencePending(ULONG f) { (void)f; return 0; }
-static void NTAPI D3DDevice_BlockOnFence(ULONG f) { (void)f; }
+static BOOLEAN NTAPI D3DDevice_IsFencePending(ULONG f) { (void)f; hud_batch_flush(); return 0; }
+static void NTAPI D3DDevice_BlockOnFence(ULONG f) { (void)f; hud_batch_flush(); }
 /* The ramp the video DAC applied on the Xbox (the dashboard's screen saver
    dims the screen with it); Present applies it. */
 static void gamma_identity(void)
@@ -6869,8 +7063,8 @@ static ULONG NTAPI D3DPERF_Zero4(ULONG a) { (void)a; return 0; }
 static ULONG NTAPI D3DPERF_Zero8(ULONG a, ULONG b) { return 0; }
 static ULONG NTAPI D3DPERF_Zero12(ULONG a, ULONG b, ULONG c) { return 0; }
 static ULONG NTAPI D3DPERF_Zero16(ULONG a, ULONG b, ULONG c, ULONG d) { return 0; }
-static BOOLEAN NTAPI D3DResource_IsBusy(D3DResource *r) { (void)r; return 0; }
-static void NTAPI D3DResource_BlockUntilNotBusy(D3DResource *r) { (void)r; }
+static BOOLEAN NTAPI D3DResource_IsBusy(D3DResource *r) { (void)r; hud_batch_flush(); return 0; }
+static void NTAPI D3DResource_BlockUntilNotBusy(D3DResource *r) { (void)r; hud_batch_flush(); }
 static void NTAPI D3DResource_GetDevice(D3DResource *r, PVOID *dev) { (void)r; *dev = d3d.device; }
 static void NTAPI D3DResource_MoveResourceMemory(D3DResource *r, ULONG where) {}
 static LONG NTAPI D3DResource_SetPrivateData(D3DResource *r, const void *g, const void *d, ULONG s, ULONG f) { return D3D_OK; }
@@ -7074,6 +7268,7 @@ static void NTAPI D3DDevice_SetVertexDataColor(LONG r, ULONG color)
 static void imm_flush(ULONG prim)
 {
     if (!imm.n) return;
+    hud_batch_flush();   /* held draws go first (this draws outside draw()) */
     vshader *sh = (d3d.vertex_shader & 1) ? (vshader *)(d3d.vertex_shader & ~1u) : NULL;
     if (sh && sh->code) {
         /* Feed the vertex registers to the program as 16 float4 attributes.
@@ -7843,7 +8038,7 @@ static void NTAPI D3D_LazySetState(void)
 static void NTAPI D3D_DacProgramGammaRamp(PVOID miniport) { (void)miniport; }
 static void NTAPI CDevice_SetStateVB(PVOID self, ULONG x) { (void)self; (void)x; pusher_drain(); }
 static void NTAPI CDevice_SetStateUP(PVOID self) { (void)self; pusher_drain(); }
-static void NTAPI CDevice_KickOff(PVOID self) { (void)self; pusher_drain(); }
+static void NTAPI CDevice_KickOff(PVOID self) { (void)self; pusher_drain(); hud_batch_flush(); }
 
 static void NTAPI D3DDevice_Nop(void) {}
 
@@ -7860,6 +8055,7 @@ static void NTAPI D3DDevice_GetDirect3D(PVOID *pp) { *pp = direct3d_object; }
 static LONG NTAPI D3DDevice_PersistDisplay(void)
 {
     pusher_drain();
+    hud_batch_flush();
     if (!d3d.window) return D3DERR_INVALIDCALL;
     flush_cpu_backbuffer();
     int w = window_fb.fbo ? window_fb.w : (int)d3d.width, h = window_fb.fbo ? window_fb.h : (int)d3d.height;
@@ -8286,13 +8482,14 @@ static ULONG NTAPI D3D_SetFence(ULONG Flags)
 {
     (void)Flags;
     pusher_drain();
+    hud_batch_flush();   /* a fence passed means the draws before it read their data */
     ++fence;
     if (d3d.cpu_time) *d3d.cpu_time = fence;
     if (async_front()) async_fence(fence);
     else __atomic_store_n(&async_gpu_time, fence, __ATOMIC_RELEASE);
     return fence;
 }
-static void NTAPI D3D_BlockOnTime(ULONG Time, ULONG Flags) { (void)Time; (void)Flags; pusher_drain(); }
+static void NTAPI D3D_BlockOnTime(ULONG Time, ULONG Flags) { (void)Time; (void)Flags; pusher_drain(); hud_batch_flush(); }
 static void NTAPI D3D_BlockOnResource(D3DResource *r) { (void)r; }
 /* ---- LTCG builds: entry points the whole-program optimizer cut down ---- */
 

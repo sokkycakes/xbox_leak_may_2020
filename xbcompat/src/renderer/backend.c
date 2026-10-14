@@ -159,6 +159,7 @@ void xbr_invoke(uint32_t index, struct xbr_call *call)
     if (!host_call || index >= nexports || !call) abort();
     renderer_dispatch(XBR_REQUEST_CALL, index, call, NULL);
 }
+void d3d_flush_held(void);
 void xbr_control(uint32_t op, uint32_t *args)
 {
     if (!host_call) abort();
@@ -167,6 +168,7 @@ void xbr_control(uint32_t op, uint32_t *args)
         return;
     }
     if (op == XBR_DRAIN) {   /* from the kernel, on whichever thread frees */
+        d3d_flush_held();    /* a held draw run (d3d8.c); only the GL thread draws it */
         renderer_async_drain();
         return;
     }
