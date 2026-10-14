@@ -204,6 +204,10 @@ typedef struct d3d_state {
     bool gamma_dirty;            /* the ramp changed since Present last loaded it */
     ULONG constant_mode;
     float vs_const[192][4];      /* vertex shader constants, hardware numbering */
+    /* Bumped by each write to vs_const; a row's number is the write that
+       last touched it (see vsc_touch), so a program finds the rows written
+       since it last drew without comparing all 192. */
+    unsigned vsc_gen, vsc_row_gen[192];
     float ps_const[16][4];
     float eye_vector[4];
     ULONG pixel_shader;
@@ -226,6 +230,14 @@ typedef struct d3d_state {
 static d3d_state d3d_storage[2];
 static __thread d3d_state *d3d_cur __attribute__((tls_model("initial-exec"))) = &d3d_storage[0];
 #define d3d (*d3d_cur)
+
+/* Rows lo .. lo + n - 1 of the vertex shader constants were written. */
+static void vsc_touch_in(d3d_state *st, unsigned lo, unsigned n)
+{
+    unsigned g = ++st->vsc_gen;
+    for (unsigned r = lo; r < lo + n && r < 192; r++) st->vsc_row_gen[r] = g;
+}
+#define vsc_touch(lo, n) vsc_touch_in(d3d_cur, lo, n)
 
 /* XBCOMPAT_ASYNC_DRAWS (async_draws.h): on once the front copy exists.
    async_worker_thread marks the render worker, async_replaying its replay
@@ -909,6 +921,9 @@ static unsigned frame_draws, last_frame_draws;
 static const unsigned whatif_flush_steps[] = { 0, 64, 128, 256 };
 static int whatif_flush = -1;    /* index into whatif_flush_steps, -1 when off */
 static bool whatif_skip_draw;    /* this draw sampled a back-buffer view under WHATIF_NO_BBVIEW */
+/* XBCOMPAT_WHATIF=cuts: turns the per-draw savings that skip unchanged
+   constants and attribute pointers off and back on, two reports each. */
+static bool whatif_cuts, cuts_off;
 static void log_fps(void)
 {
     static uint64_t since, cpu_since;
@@ -927,7 +942,10 @@ static void log_fps(void)
             const char *r = (const char *)glGetString(GL_RENDERER);
             if (r && (strstr(r, "VC4") || strstr(r, "V3D"))) flush_every = 128;
         }
-        if (w && !strcmp(w, "flush") && work_on) {
+        if (w && !strcmp(w, "cuts") && work_on) {
+            whatif_cuts = true;
+            xlog("D3D what-if: now per-draw cuts on");
+        } else if (w && !strcmp(w, "flush") && work_on) {
             whatif_flush = 0;
             flush_every = whatif_flush_steps[0];
             xlog("D3D what-if: now flushing every %u draws (0 = never)", flush_every);
@@ -951,6 +969,7 @@ static void log_fps(void)
         }
         if (whatif >= 0) xlog("D3D what-if: the report below ran with %s", whatif_name[whatif]);
         if (whatif_flush >= 0) xlog("D3D what-if: the report below ran flushing every %u draws (0 = never)", flush_every);
+        if (whatif_cuts) xlog("D3D what-if: the report below ran with per-draw cuts %s", cuts_off ? "off" : "on");
         xlog("D3D: %.1f fps: %.1f ms a frame, %u draws %.1f ms (GL calls %.1f), present+swap %.1f ms, "
              "pacing %.1f ms, other %.1f ms; GL state calls %u, %u skipped", 1000.0 / ms, ms, (unsigned)(n_draws / f),
              t_draw / 1e6 / f, t_gl / 1e6 / f, t_present / 1e6 / f, t_pace / 1e6 / f,
@@ -1002,6 +1021,10 @@ static void log_fps(void)
             whatif_flush = (whatif_flush + 1) % (int)(sizeof whatif_flush_steps / sizeof *whatif_flush_steps);
             flush_every = whatif_flush_steps[whatif_flush];
             xlog("D3D what-if: now flushing every %u draws (0 = never)", flush_every);
+        }
+        if (whatif_cuts && ++whatif_reports % 2 == 0) {
+            cuts_off = gc_vap_bypass = !cuts_off;
+            xlog("D3D what-if: now per-draw cuts %s", cuts_off ? "off" : "on");
         }
         since = now;
         frames = 0;
@@ -2351,6 +2374,7 @@ static void NTAPI D3DDevice_SetViewport(const D3DVIEWPORT8 *v)
         float vp[2][4];
         viewport_constants(vp);
         memcpy(d3d.vs_const[58], vp, sizeof(vp));
+        vsc_touch(58, 2);
         if (async_front()) { async_vs_touch(58); async_vs_touch(59); }
     }
 }
@@ -3026,6 +3050,8 @@ typedef struct program_entry {
     struct { GLint location; unsigned words; uint32_t *value; } uniforms[32];   /* last values set */
     unsigned uniform_count;
     float (*last_c)[4];   /* the constants last uploaded to the program */
+    unsigned c_gen;       /* d3d.vsc_gen when they were */
+    const d3d_state *c_state;   /* the state copy they came from */
     bool c_partial;
     int c_size;           /* active elements of c (the compiler drops unused trailing ones) */
     /* XBCOMPAT_PROFILE_RENDERER: this program's draws since the last report. */
@@ -3181,6 +3207,7 @@ static void NTAPI D3DDevice_RunVertexStateShader(ULONG address, const float *dat
 {
     if (address >= 136) return;
     vsh_run_state(vp_mem[address], 136 - address, data, d3d.vs_const);
+    vsc_touch(0, 192);
 }
 
 static void NTAPI D3DDevice_SetVertexShaderInput(ULONG handle, UINT_ count, const ULONG *inputs)
@@ -4164,8 +4191,34 @@ static void upload_constants(const vshader *sh, program_entry *e)
        192 is 3 KB, through box86 and Mesa on a Raspberry Pi).  The rows are
        compared where they are, without first copying all 192 (that copy, on
        every draw, was much of this function's time on the Pi). */
+    if (e->loc_c >= 0 && e->c_partial && e->last_c && e->c_state == d3d_cur && !cuts_off) {
+        /* Only rows written since the program last drew can differ, besides
+           the shader's own and the viewport's (58 and 59 always: they swap
+           between the title's and the viewport with the constant mode).
+           Changed rows go up in runs, nearby runs merged into one call. */
+        int n = e->c_size, run_lo = -1, run_hi = -1;
+        unsigned since = e->c_gen;
+        for (int r = 0; r < n; r++) {
+            bool maybe = (int)(d3d.vsc_row_gen[r] - since) > 0 || (over[r >> 5] >> (r & 31) & 1) || r == 58 || r == 59;
+            if (!maybe) continue;
+            const float *row = CROW(r);
+            if (gc_same((const uint32_t *)row, e->last_c[r], 4)) continue;
+            memcpy(e->last_c[r], row, 16);
+            if (run_lo >= 0 && r - run_hi > 4) {
+                p_glUniform4fv(e->loc_c + run_lo, run_hi - run_lo + 1, &e->last_c[run_lo][0]);
+                run_lo = -1;
+            }
+            if (run_lo < 0) run_lo = r;
+            run_hi = r;
+        }
+        if (run_lo >= 0) p_glUniform4fv(e->loc_c + run_lo, run_hi - run_lo + 1, &e->last_c[run_lo][0]);
+        e->c_gen = d3d.vsc_gen;
+        goto uploaded;
+    }
     if (e->loc_c >= 0) {
         int n = e->c_size, lo = 0, hi = n - 1;
+        e->c_gen = d3d.vsc_gen;
+        e->c_state = d3d_cur;
         if (!e->c_partial) {
             float c[192][4];
             for (int r = 0; r < n; r++) memcpy(c[r], CROW(r), 16);
@@ -6654,6 +6707,7 @@ static void NTAPI D3DDevice_SetVertexShaderConstant(LONG Register, const float *
     for (ULONG i = 0; i < count; i++) {
         int slot = constant_slot(Register + i);
         memcpy(d3d.vs_const[slot], data + i * 4, 16);
+        vsc_touch(slot, 1);
         if (front) async_vs_touch(slot);
     }
 }
@@ -7358,6 +7412,7 @@ static LONG NTAPI D3DDevice_EndPushBuffer(void)
     memcpy(d3d.material, pb_saved.material, sizeof(pb_saved.material));
     d3d.material_power = pb_saved.material_power;
     memcpy(d3d.vs_const, pb_saved.vs_const, sizeof(pb_saved.vs_const));
+    vsc_touch(0, 192);
     memcpy(d3d.ps_const, pb_saved.ps_const, sizeof(pb_saved.ps_const));
     memcpy(d3d.eye_vector, pb_saved.eye_vector, sizeof(pb_saved.eye_vector));
     memcpy(d3d.palettes, pb_saved.palettes, sizeof(pb_saved.palettes));
@@ -7722,7 +7777,7 @@ static void pb_interpret_body(const ULONG *p, unsigned n)
                    moves on by the number of vec4s written. */
                 unsigned pos = noinc ? k : (m - 0xB80) / 4;
                 unsigned slot = const_load + pos / 4;
-                if (slot < 192) d3d.vs_const[slot][pos % 4] = f;
+                if (slot < 192) { d3d.vs_const[slot][pos % 4] = f; vsc_touch(slot, 1); }
                 if (k == count - 1) const_load += (pos + 1) / 4;
             } else if (m >= 0x1880 && m < 0x1900) {   /* NV097_SET_VERTEX_DATA2F_M */
                 unsigned slot = (m - 0x1880) / 8, c = ((m - 0x1880) % 8) / 4;
@@ -8057,6 +8112,7 @@ static void state_apply(const state_block *b)
     memcpy(d3d.back_material, b->back_material, sizeof(b->back_material));
     d3d.back_material_power = b->back_material_power;
     memcpy(d3d.vs_const, b->vs_const, sizeof(b->vs_const));
+    vsc_touch(0, 192);
     memcpy(d3d.ps_const, b->ps_const, sizeof(b->ps_const));
     memcpy(d3d.eye_vector, b->eye_vector, sizeof(b->eye_vector));
 }

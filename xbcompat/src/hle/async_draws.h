@@ -78,6 +78,7 @@ static const struct { unsigned short off, size, group; } async_fields[] = {
     AF(ncallbacks, G_OTHER), AF(palettes, G_TEX), AF(stipple_on, G_RS), AF(stipple, G_RS),
 };
 #undef AF
+_Static_assert(sizeof(d3d_state) <= 0xFFFF, "async_fields keeps offsets in 16 bits");
 
 static bool async_front(void) { return async_on && !async_worker_thread; }
 
@@ -439,6 +440,12 @@ void d3d_async_run(const uint32_t *buf, unsigned n)
         switch (op) {
         case AS_FIELD:
             memcpy((char *)back + a[0], a + 2, a[1]);
+            if (a[0] < offsetof(d3d_state, vs_const) + sizeof back->vs_const &&
+                a[0] + a[1] > offsetof(d3d_state, vs_const)) {
+                unsigned lo = a[0] > offsetof(d3d_state, vs_const) ? (a[0] - offsetof(d3d_state, vs_const)) / 16 : 0;
+                unsigned hi = (a[0] + a[1] - offsetof(d3d_state, vs_const) + 15) / 16;
+                vsc_touch_in(back, lo, hi - lo);
+            }
             if (a[0] < offsetof(d3d_state, stipple) + sizeof back->stipple && a[0] + a[1] > offsetof(d3d_state, stipple))
                 back->stipple_dirty = true;
             break;
