@@ -1249,6 +1249,80 @@ static void test_effects(void)
     free(img);
 }
 
+/* dsmix_quiet moves an inaudible voice a run of frames at a time; it must
+   leave the voice where the per-frame loop (dsmix_buffer_t with quiet set)
+   does: same frame count, control phase, envelope segments and counts,
+   positions and envelope values up to rounding, and the same block of
+   ending. */
+static void test_quiet_advance(void)
+{
+    static uint8_t data[64];
+    uint32_t seed = 12345;
+#define RND(n) ((seed = seed * 1103515245u + 12345u) >> 8) % (n)
+    int bad = 0;
+    for (int c = 0; c < 400 && bad < 5; c++) {
+        static struct dsmix_state sa, sb;
+        memset(&sa, 0, sizeof sa);
+        for (int e = 0; e < 2; e++) {
+            for (int d = EGD_DELAY; d <= EGD_RELEASE; d++) sa.eg[e].d[d] = RND(4) == 0 ? 0 : RND(3);
+            sa.eg[e].d[EGD_SUSTAIN] = RND(256);
+            sa.eg[e].d[EGD_PITCH] = RND(256);
+            sa.eg[e].d[EGD_FC] = RND(256);
+            dsmix_eg_enter(&sa.eg[e], EG_DELAY);
+        }
+        sa.fmode = RND(2);
+        sa.fc0 = RND(65536);
+        sa.fc1 = RND(65536);
+        sa.adpcm_block = -1;
+        sb = sa;
+        struct dsmix_voice ja = { 0 }, jb;
+        ja.st = &sa;
+        ja.data = data;
+        ja.kind = DSMIX_BUFFER;
+        ja.ch = 1; ja.bits = 16; ja.align = 2;
+        ja.total = 1000 + RND(40000);
+        ja.looping = RND(2);
+        ja.loop_start = RND(ja.total);
+        ja.loop_len = RND(ja.total - ja.loop_start + 1);
+        ja.pitch = (int32_t)RND(8193) - 4096;
+        ja.vp = RND(4) != 0;
+        ja.pos = RND(ja.total);
+        ja.quiet = 1;
+        jb = ja;
+        jb.st = &sb;
+        int noteoff_at = RND(30);
+        for (int blk = 0; blk < 30; blk++) {
+            if (blk == noteoff_at && ja.vp) {
+                sa.noteoff = sb.noteoff = 1;
+                dsmix_eg_enter(&sa.eg[DSEG_IDX_AMP], EG_RELEASE);
+                dsmix_eg_enter(&sb.eg[DSEG_IDX_AMP], EG_RELEASE);
+            }
+            float out[2 * 512] = { 0 };
+            if (ja.vp) dsmix_pcm16_1_vp(&ja, out, 512); else dsmix_pcm16_1(&ja, out, 512);
+            dsmix_quiet(&jb, 512);
+            bool same = ja.playing == jb.playing && fabs(ja.pos - jb.pos) <= 1e-6 * (1 + fabs(ja.pos));
+            if (same && ja.playing && ja.vp) {
+                same = sa.ctl == sb.ctl && fabs(sa.step_cur - sb.step_cur) <= 1e-6 * sa.step_cur;
+                for (int e = 0; e < 2; e++)
+                    same = same && sa.eg[e].seg == sb.eg[e].seg && sa.eg[e].count == sb.eg[e].count
+                           && fabsf(sa.eg[e].value - sb.eg[e].value) <= 1e-4f;
+            }
+            if (!same) {
+                CHECK(0, "quiet advance case %d block %d: playing %u/%u pos %f/%f ctl %u/%u step %.9f/%.9f "
+                      "amp seg %d/%d count %u/%u value %f/%f multi seg %d/%d count %u/%u value %f/%f",
+                      c, blk, ja.playing, jb.playing, ja.pos, jb.pos, sa.ctl, sb.ctl, sa.step_cur, sb.step_cur,
+                      sa.eg[1].seg, sb.eg[1].seg, sa.eg[1].count, sb.eg[1].count, sa.eg[1].value, sb.eg[1].value,
+                      sa.eg[0].seg, sb.eg[0].seg, sa.eg[0].count, sb.eg[0].count, sa.eg[0].value, sb.eg[0].value);
+                bad++;
+                break;
+            }
+            if (!ja.playing) break;
+        }
+    }
+#undef RND
+    CHECK(bad == 0, "quiet voices advance as the per-frame loop does");
+}
+
 static void test_sdl_device(void)
 {
     /* The real device: the dummy driver (or a silent clock) advances time. */
@@ -1276,6 +1350,7 @@ int main(int argc, char **argv)
     test_object_aliases();
     test_playback();
     test_quiet_voice();
+    test_quiet_advance();
     test_legacy_mixbin_headroom();
     test_dashboard_sound_boost();
     test_looping_and_regions();

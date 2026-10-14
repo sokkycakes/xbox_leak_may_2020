@@ -111,9 +111,7 @@ static unsigned live_blocks;
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static uint32_t stop_lo, stop_hi;
 static unsigned stop_live, unknown_live;
-/* XLAT_SAFE_FLAGS=call,ret,jmp,look,nzcv narrows XLAT_SAFE_FLAGS=1 down:
-   flags kept at calls, rets or indirect jumps only, past the lookahead
-   limit, or only SF ZF CF OF at the first three */
+/* the flags kept at calls, rets and indirect jumps (see jit_init) */
 static unsigned abi_call, abi_ret, abi_jmp;
 static bool flag_check;      /* XLAT_FLAG_CHECK: report blocks reading undefined flags */
 
@@ -251,9 +249,9 @@ static unsigned abi_flags(const xinsn *in, int kind)
 /* Flags the code at eip may read before writing them: liveness over the
    code reachable from eip (up to LOOK_NODES straight-line pieces of up to
    LOOK_INSNS instructions each), solved to a fixed point so loops don't
-   end the search.  Flags are dead at calls, rets and indirect jumps (the
-   MSVC ABI never passes them; XLAT_SAFE_FLAGS keeps them), and the ones a
-   piece past the limit might read count as live.  With sure set, only
+   end the search.  At calls, rets and indirect jumps only the flags
+   jit_init keeps there count as live, and the ones a piece past the limit
+   might read count as live.  With sure set, only
    reads the search reaches count (XLAT_FLAG_CHECK's view: a flag read that
    is certain, not assumed). */
 static unsigned flags_needed(uint32_t eip, bool sure)
@@ -353,6 +351,16 @@ static void invert_c(tctx *t)
     E(dp_i(C_AL, OP_EOR, 0, T3, T3, arm_imm(XF_C)));
     E(A_MSR(T3));
     t->cf_inv = !t->cf_inv;
+}
+
+/* CF and OF after a multiply, from a compare that set Z when the product
+   fits in its low half (x86 leaves SF ZF AF PF undefined there) */
+static void mul_flags(tctx *t)
+{
+    E(dp_i(C_NE, OP_MOV, 0, T3, 0, arm_imm(XF_C | XF_V)));
+    E(dp_i(C_EQ, OP_MOV, 0, T3, 0, arm_imm(0)));
+    E(A_MSR(T3));
+    t->cf_inv = false;
 }
 
 static void mov_imm(tctx *t, int rd, uint32_t v)
@@ -743,7 +751,8 @@ static bool emit_shift(tctx *t, const xinsn *in, int count, unsigned live)
     if (in->mod != 3 && (in->ad16 || (in->pfx & XP_LOCK))) return false;
     bool rot = sop < 2;
     if (count < 0) {
-        if (live & FL_ALL) return false;   /* a count of 0 leaves the flags */
+        /* a count of 0 leaves the flags: kept by hand below for SF ZF CF */
+        if ((live & FL_ALL) && (rot || (live & (FL_O | FL_P | FL_A)))) return false;
     } else {
         if (!count) return true;
         if (rot && (live & (FL_C | FL_O))) return false;
@@ -765,6 +774,21 @@ static bool emit_shift(tctx *t, const xinsn *in, int count, unsigned live)
         E(dp_r(C_AL, OP_MOV, s, r, 0, r, kind, amt));
         if (s) t->cf_inv = false;
         if (!rot && (live & FL_P)) store_pf(t, r, 0);
+    } else if (live & FL_ALL) {
+        /* shl, shr, sar by cl with SF ZF CF wanted: movs sets them as x86
+           does for counts 1-31; a count of 0 puts the old ones back */
+        E(A_MRS(T3));
+        if (t->cf_inv) E(dp_i(C_AL, OP_EOR, 0, T3, T3, arm_imm(XF_C)));
+        E(dp_i(C_AL, OP_AND, 1, T2, HR(XR_ECX), 31));
+        uint32_t *zero = t->a.p;
+        E(0);
+        E(dp_rr(C_AL, OP_MOV, 1, r, 0, r, kind, T2));
+        uint32_t *done = t->a.p;
+        E(0);
+        if (zero < t->a.end) *zero = a_b(C_EQ, zero, t->a.p);
+        E(A_MSR(T3));
+        if (done < t->a.end) *done = a_b(C_AL, done, t->a.p);
+        t->cf_inv = false;
     } else {
         if (sop == 0) E(dp_i(C_AL, OP_RSB, 0, T2, HR(XR_ECX), 0));
         else if (sop == 1) E(A_MOV(T2, HR(XR_ECX)));
@@ -1080,6 +1104,10 @@ static uint32_t *unaligned_stub(const uint32_t *site, uint32_t w)
     uint32_t *stub = cache_cur;
     cache_cur = a.p;
     flush_icache(stub, cache_cur);
+    if (perf_map) {   /* named, so a profile shows the time the reroutes cost */
+        fprintf(perf_map, "%x %x xlat_unaligned\n", (unsigned)(uintptr_t)stub, (unsigned)((cache_cur - stub) * 4));
+        fflush(perf_map);
+    }
     return stub;
 }
 
@@ -2222,7 +2250,7 @@ static bool native(tctx *t, const xinsn *in, unsigned live)
         E(A_PUSH1(T0, R8));
         return true;
     case 0x69: case 0x6B: {
-        if (osz != 4 || (live & (FL_C | FL_O))) return false;
+        if (osz != 4) return false;
         int src;
         if (m) {
             base = mem_addr(t, in, T0, 4095, &off);
@@ -2232,6 +2260,13 @@ static bool native(tctx *t, const xinsn *in, unsigned live)
             src = HR(in->rm);
         }
         mov_imm(t, T2, op == 0x6B ? (uint32_t)(int8_t)in->imm : in->imm);
+        if (live & (FL_C | FL_O)) {
+            E(A_SMULL(T0, T3, src, T2));
+            E(A_MOV(HR(in->reg), T0));
+            E(dp_r(C_AL, OP_CMP, 1, 0, T3, T0, SH_ASR, 31));
+            mul_flags(t);
+            return true;
+        }
         E(A_MUL(HR(in->reg), src, T2));
         return true;
     }
@@ -2454,7 +2489,7 @@ static bool native(tctx *t, const xinsn *in, unsigned live)
             return true;
         }
         case 4: case 5: {
-            if (sz != 4 || (live & (FL_C | FL_O))) return false;
+            if (sz != 4) return false;
             int src = HR(in->rm);
             if (m) {
                 base = mem_addr(t, in, T0, 4095, &off);
@@ -2462,6 +2497,11 @@ static bool native(tctx *t, const xinsn *in, unsigned live)
                 src = T1;
             }
             E(in->reg == 4 ? A_UMULL(R4, HR(XR_EDX), R4, src) : A_SMULL(R4, HR(XR_EDX), R4, src));
+            if (live & (FL_C | FL_O)) {   /* edx is more than eax's extension */
+                if (in->reg == 4) E(dp_i(C_AL, OP_CMP, 1, 0, HR(XR_EDX), arm_imm(0)));
+                else E(dp_r(C_AL, OP_CMP, 1, 0, HR(XR_EDX), R4, SH_ASR, 31));
+                mul_flags(t);
+            }
             return true;
         }
         case 6: case 7: {
@@ -2586,12 +2626,19 @@ static bool native(tctx *t, const xinsn *in, unsigned live)
         }
         return true;
     case 0x1AF: {
-        if (osz != 4 || (live & (FL_C | FL_O))) return false;
+        if (osz != 4) return false;
         int src = HR(in->rm);
         if (m) {
             base = mem_addr(t, in, T0, 4095, &off);
             E(A_LDR(T1, base, off));
             src = T1;
+        }
+        if (live & (FL_C | FL_O)) {
+            E(A_SMULL(T2, T3, HR(in->reg), src));
+            E(A_MOV(HR(in->reg), T2));
+            E(dp_r(C_AL, OP_CMP, 1, 0, T3, T2, SH_ASR, 31));
+            mul_flags(t);
+            return true;
         }
         E(A_MUL(HR(in->reg), HR(in->reg), src));
         return true;
@@ -3380,19 +3427,23 @@ void jit_init(uint32_t lo, uint32_t hi, bool flags_at_stop)
     stop_hi = hi;
     stop_live = flags_at_stop ? FL_ALL : 0;
     if (cache) return;
-    /* Flags are dead across calls, rets and indirect jumps (MSVC never
-       passes them there); where the lookahead gives up, SF ZF CF OF are
-       kept.  XLAT_SAFE_FLAGS=1 keeps every flag everywhere; naming any of
-       call, ret, jmp, look keeps them only there (nzcv: SF ZF CF OF only). */
+    /* SF ZF CF are kept across calls, rets and indirect jumps; where the
+       lookahead gives up, OF too.  The MSVC ABI never passes flags there,
+       but hand-written code does: Phantom Dust has a function that returns
+       its answer in ZF, and dropping it broke the characters' models.  ZF
+       and CF are the flags code returns answers in; keeping OF, PF and AF
+       as well would send more shifts to the interpreter.  XLAT_SAFE_FLAGS=1
+       keeps every flag everywhere; naming any of call, ret, jmp, look keeps
+       every flag only there. */
     const char *safe = getenv("XLAT_SAFE_FLAGS");
+    abi_call = abi_ret = abi_jmp = FL_C | FL_Z | FL_S;
     unknown_live = FL_NZCV;
     if (safe) {
         bool some = strstr(safe, "call") || strstr(safe, "ret") || strstr(safe, "jmp") || strstr(safe, "look");
-        unsigned keep = strstr(safe, "nzcv") ? FL_NZCV : FL_ALL;
-        abi_call = !some || strstr(safe, "call") ? keep : 0;
-        abi_ret = !some || strstr(safe, "ret") ? keep : 0;
-        abi_jmp = !some || strstr(safe, "jmp") ? keep : 0;
-        if (!some || strstr(safe, "look")) unknown_live = keep;
+        if (!some || strstr(safe, "call")) abi_call = FL_ALL;
+        if (!some || strstr(safe, "ret")) abi_ret = FL_ALL;
+        if (!some || strstr(safe, "jmp")) abi_jmp = FL_ALL;
+        if (!some || strstr(safe, "look")) unknown_live = FL_ALL;
         fprintf(stderr, "xlat: flags kept at calls %#x, rets %#x, indirect jumps %#x, past the lookahead %#x\n",
                 abi_call, abi_ret, abi_jmp, unknown_live);
     }

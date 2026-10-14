@@ -39,6 +39,30 @@ static GLint host_vertex_attribs;   /* GL_MAX_VERTEX_ATTRIBS */
 
 #include "glcache.h"
 
+/* !memcmp(a, b, n) without a call, 16 bytes a step (plain loads, which
+   may be unaligned).  The vertex and index caches and the queued-state
+   deltas compare thousands of short runs a frame, mostly equal; glibc's
+   ARM memcmp was a tenth of the render worker's time in Phantom Dust. */
+static inline bool same_bytes(const void *a, const void *b, size_t n)
+{
+    const uint8_t *p = a, *q = b;
+    for (; n >= 16; n -= 16, p += 16, q += 16) {
+        uint32_t x[4], y[4];
+        memcpy(x, p, 16);
+        memcpy(y, q, 16);
+        if ((x[0] ^ y[0]) | (x[1] ^ y[1]) | (x[2] ^ y[2]) | (x[3] ^ y[3])) return false;
+    }
+    for (; n >= 4; n -= 4, p += 4, q += 4) {
+        uint32_t x, y;
+        memcpy(&x, p, 4);
+        memcpy(&y, q, 4);
+        if (x != y) return false;
+    }
+    for (; n; n--)
+        if (*p++ != *q++) return false;
+    return true;
+}
+
 typedef ULONG UINT_;
 
 #define D3D_OK 0
@@ -2070,7 +2094,7 @@ static bool sampler_changed(int stage, GLenum name, const void *value, unsigned 
     for (unsigned i = 0; i < 16; i++) {
         if (cache[stage][i].name && cache[stage][i].name != name) continue;
         if (cache[stage][i].name == name && cache[stage][i].words == words
-            && !memcmp(cache[stage][i].value, value, words * 4)) return false;
+            && same_bytes(cache[stage][i].value, value, words * 4)) return false;
         cache[stage][i].name = name; cache[stage][i].words = words;
         memcpy(cache[stage][i].value, value, words * 4);
         return true;
@@ -3819,7 +3843,7 @@ static bool conv_full_due(conv_entry *e)
 #define CONV_WHOLE_BYTES 4096
 static bool conv_sampled_same(const UCHAR *copy, const UCHAR *cur, size_t len, size_t step, size_t size)
 {
-    if (len <= CONV_WHOLE_BYTES) return !memcmp(copy, cur, len);
+    if (len <= CONV_WHOLE_BYTES) return same_bytes(copy, cur, len);
     size_t units = (len - size) / step + 1;
     for (size_t i = 0; i <= 32; i++) {
         size_t off = (i == 32 ? units - 1 : units * i / 32) * step;
@@ -3855,8 +3879,8 @@ static conv_entry *index_entry(const USHORT *ix, ULONG count, bool upload)
        cannot change in between. */
     if (e->raw && e->verified == conv_serial) same = true;
     else if (e->raw) {
-        if (conv_full_due(e)) same = !memcmp(e->raw, ix, count * 2);
-        else same = conv_sampled_same(e->raw, (const UCHAR *)ix, count * 2, 2, 2) || !memcmp(e->raw, ix, count * 2);
+        if (conv_full_due(e) || count * 2 <= CONV_WHOLE_BYTES) same = same_bytes(e->raw, ix, count * 2);
+        else same = conv_sampled_same(e->raw, (const UCHAR *)ix, count * 2, 2, 2) || same_bytes(e->raw, ix, count * 2);
     }
     if (upload && (!same || !e->buf)) {
         if (!e->buf) p_glGenBuffers(1, &e->buf);
@@ -3891,7 +3915,7 @@ static vrange vertex_range(ULONG first, ULONG count, const USHORT *indices)
    changed (the caller then redoes what it made from them). */
 static bool conv_refresh(UCHAR *copy, const UCHAR *src, size_t len)
 {
-    if (!memcmp(copy, src, len)) return false;
+    if (same_bytes(copy, src, len)) return false;
     memcpy(copy, src, len);
     return true;
 }
@@ -4112,38 +4136,55 @@ static void bind_attributes(const vshader *sh, const program_entry *e, const UCH
 
 #undef VERTS
 
+/* Constant row r as the vertex program sees it: the title's, under the
+   shader's own (from its program; over marks their rows) and, in the 192
+   constant modes, the viewport in c[58] / c[59]. */
+static inline const float *constant_row(const vshader *sh, const uint32_t *over, const float (*vp)[4], int r)
+{
+    if (vp && (r == 58 || r == 59)) return vp[r - 58];
+    if (over[r >> 5] >> (r & 31) & 1)
+        for (unsigned i = sh->nconsts; i-- > 0;)
+            if (sh->const_slots[i] == r) return sh->consts[i];
+    return d3d.vs_const[r];
+}
+
 static void upload_constants(const vshader *sh, program_entry *e)
 {
-    float c[192][4];
-    memcpy(c, d3d.vs_const, sizeof(c));
+    uint32_t over[6] = { 0 };
     for (unsigned i = 0; i < sh->nconsts; i++)
-        if (sh->const_slots[i] < 192) memcpy(c[sh->const_slots[i]], sh->consts[i], 16);
+        if ((unsigned)sh->const_slots[i] < 192) over[sh->const_slots[i] >> 5] |= 1u << (sh->const_slots[i] & 31);
     /* The program's epilogue takes the viewport from its own uniforms;
        c[58] / c[59] are the title's in the 192 constant modes. */
     float vp[2][4];
     viewport_constants(vp);
-    if ((d3d.constant_mode & 0x1F) == 0) memcpy(c[58], vp, sizeof(vp));
+    const float (*vp_rows)[4] = (d3d.constant_mode & 0x1F) == 0 ? vp : NULL;
+#define CROW(r) constant_row(sh, over, vp_rows, r)
     /* Upload only the registers that changed since this program last drew:
        most draws change a few matrices, and every uniform call costs (all
-       192 is 3 KB, through box86 and Mesa on a Raspberry Pi). */
+       192 is 3 KB, through box86 and Mesa on a Raspberry Pi).  The rows are
+       compared where they are, without first copying all 192 (that copy, on
+       every draw, was much of this function's time on the Pi). */
     if (e->loc_c >= 0) {
         int n = e->c_size, lo = 0, hi = n - 1;
         if (!e->c_partial) {
+            float c[192][4];
+            for (int r = 0; r < n; r++) memcpy(c[r], CROW(r), 16);
             p_glUniform4fv(e->loc_c, n, &c[0][0]);
             goto uploaded;
         }
         if (e->last_c) {
             /* Word compares, not memcmp: a call per register crosses into
                native code under box86. */
-            while (lo < n && gc_same((const uint32_t *)c[lo], e->last_c[lo], 4)) lo++;
+            while (lo < n && gc_same((const uint32_t *)CROW(lo), e->last_c[lo], 4)) lo++;
             if (lo == n) goto uploaded;
-            while (gc_same((const uint32_t *)c[hi], e->last_c[hi], 4)) hi--;
+            while (gc_same((const uint32_t *)CROW(hi), e->last_c[hi], 4)) hi--;
         } else {
-            e->last_c = malloc(sizeof(c));
+            e->last_c = malloc(192 * sizeof(*e->last_c));
         }
-        memcpy(e->last_c[lo], c[lo], (hi - lo + 1) * 16);
-        p_glUniform4fv(e->loc_c + lo, hi - lo + 1, &c[lo][0]);
+        for (int r = lo; r <= hi; r++) memcpy(e->last_c[r], CROW(r), 16);
+        p_glUniform4fv(e->loc_c + lo, hi - lo + 1, &e->last_c[lo][0]);
     }
+#undef CROW
 uploaded:
     if (e->loc_flip_y >= 0) program_uniform1f(e, e->loc_flip_y, d3d.rt_texture ? -1.0f : 1.0f);
     if (e->loc_vp_scale >= 0) program_uniform4fv(e, e->loc_vp_scale, 1, vp[0]);
