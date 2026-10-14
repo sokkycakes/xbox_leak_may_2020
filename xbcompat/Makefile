@@ -94,6 +94,13 @@ ifeq ($(TRANSLATED),1)
 # adapters (tools/gen_adapters.py), from a wrapper that includes both.
 ifeq ($(CPU),xlat)
 XLATSRC  = src/xlat/decode.c src/xlat/interp.c src/xlat/fpu.c src/xlat/runtime.c
+ifeq ($(TARGET),armhf)
+# ... and on ARM the code generator, unless XLAT_INTERP=1 (the interpreter only)
+ifneq ($(XLAT_INTERP),1)
+XLATSRC += src/xlat/jit_arm.c
+XLATFLAGS = -DXLAT_JIT
+endif
+endif
 OBJ     += $(XLATSRC:%.c=$(BUILD)/%.o)
 else
 OBJ     += $(BUILD)/src/cpu_unicorn.o
@@ -115,7 +122,7 @@ $(BUILD)/src/xa_format.o: src/xa_format.c src/cpu.h
 ifeq ($(TARGET),i386)
 XLATFLAGS = -msse2 -mfpmath=sse
 endif
-$(BUILD)/src/xlat/%.o: src/xlat/%.c src/xlat/xlat.h src/cpu.h src/xbcompat.h
+$(BUILD)/src/xlat/%.o: src/xlat/%.c src/xlat/xlat.h src/xlat/arm.h src/cpu.h src/xbcompat.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(XLATFLAGS) -c -o $@ $<
 endif

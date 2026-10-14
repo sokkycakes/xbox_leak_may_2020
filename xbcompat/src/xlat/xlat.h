@@ -12,6 +12,7 @@
  *              generators are checked against and their fallback
  *   fpu.c      x87, MMX and SSE for the interpreter
  *   runtime.c  cpu.h: host functions (stubs), cpu_call, threads
+ *   jit_arm.c  the code generator for 32-bit ARM, with arm.h
  */
 #ifndef XLAT_H
 #define XLAT_H
@@ -80,6 +81,7 @@ typedef struct xcpu {
     uint32_t mxcsr;         /* 0x8c */
     mmx_t mm[8];            /* 0x90 */
     xmm_t xmm[8];           /* 0xd0 */
+    uint32_t jit_site;      /* 0x150 the code generator's last block exit (jit_arm.c) */
 } xcpu;
 
 _Static_assert(__builtin_offsetof(xcpu, st) == 0x40, "xcpu layout");
@@ -142,6 +144,19 @@ int xi_sse(xcpu *c, const xinsn *in, uint32_t ea);   /* 0F opcodes on MMX/XMM re
 void xi_fpu_push(xcpu *c, double v);
 double x87_load80(const void *p);
 void x87_store80(void *p, double v);
+
+/* ---- code generator (jit_arm.c) -------------------------------------- */
+
+/* Guest code runs until eip reaches [stop_lo, stop_hi) (host functions'
+   stubs); flags_at_stop: whether the code there reads the guest's flags.
+   Calling it again changes the stop range. */
+void jit_init(uint32_t stop_lo, uint32_t stop_hi, bool flags_at_stop);
+/* Runs this thread's guest code from c->eip until it reaches the stop range. */
+void jit_run(xcpu *c);
+/* Guest code in [addr, addr + len) changed: drops its translations. */
+void jit_invalidate(uint32_t addr, uint32_t len);
+/* XLAT_STATS: what was translated, and what still runs in the interpreter. */
+void jit_print_stats(void);
 
 /* ---- runtime services the interpreter calls (runtime.c) --------------- */
 

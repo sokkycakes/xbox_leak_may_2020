@@ -6,6 +6,7 @@
  *   difftest check FILE         run FILE's tests on xlat, report differences
  *   difftest run N SEED         both in one process (i386 only)
  *   ... -f FILTER               only templates whose name contains FILTER
+ *   ... -s                      sequences: up to two more instructions after it
  *
  * Each test is one instruction from a template list, with random operands
  * (registers, memory forms pointing into a test buffer, immediates) and a
@@ -18,6 +19,9 @@
  * Build (from xbcompat/):
  *   gcc -m32 -msse2 -mfpmath=sse -O1 -g -Isrc -o build-xlat/difftest tools/xlat/difftest.c \
  *       src/xlat/decode.c src/xlat/interp.c src/xlat/fpu.c -lm
+ * and the ARM checker, with the code generator:
+ *   arm-linux-gnueabihf-gcc -static -O1 -g -Isrc -DXLAT_RUN -o build-armhf-xlat/difftest \
+ *       tools/xlat/difftest.c src/xlat/decode.c src/xlat/interp.c src/xlat/fpu.c src/xlat/jit_arm.c -lm -lpthread
  */
 #define _GNU_SOURCE
 #include <math.h>
@@ -227,6 +231,9 @@ static const struct tmpl tmpls[] = {
     { "aaa", "37", C_INT, 0, EF_OF | EF_SF | EF_ZF | EF_PF }, { "aas", "3F", C_INT, 0, EF_OF | EF_SF | EF_ZF | EF_PF },
     { "aam", "D4 0A", C_INT, 0, EF_OF | EF_AF | EF_CF }, { "aad", "D5 0A", C_INT, 0, EF_OF | EF_AF | EF_CF },
     { "xlat", "D7", C_INT, T_EBX, 0 },
+    /* branches to the next instruction (both ways): the translation's exits */
+    { "jcc +0", "70+c 00", C_INT, 0, 0 }, { "jcc32 +0", "0F 80+c 00 00 00 00", C_INT, 0, 0 },
+    { "jmp +0", "EB 00", C_INT, 0, 0 }, { "loop +0", "E2 00", C_INT, 0, 0 }, { "jecxz +0", "E3 00", C_INT, 0, 0 },
 
     /* x87 */
     { "fop m32", "D8 /x", C_X87, T_MEM | T_CC, 0 }, { "fop st,st(i)", "D8 /x", C_X87, T_ST | T_CC, 0 },
@@ -296,32 +303,42 @@ static const struct tmpl tmpls[] = {
 
 /* ---- test cases ------------------------------------------------------- */
 
+/* Test files are written on i386 and read on ARM, where doubles and 64-bit
+   integers are 8-aligned: the padding keeps the layouts the same. */
 struct state {
     uint32_t r[8];
-    uint32_t eflags;
+    uint32_t eflags, pad0;
     double st[8];          /* by ST(i) */
     uint32_t top, ftag;    /* ftag by physical register, 1 = empty */
     uint32_t fpcw, fpsw;
     uint64_t mm[8];
     xmm_t xmm[8];
-    uint32_t mxcsr;
+    uint32_t mxcsr, pad1;
 };
 
 struct test {
     uint64_t seed;
     uint16_t tmpl;
-    uint8_t len;
-    uint8_t code[15];
+    uint16_t follow[2];    /* sequences: register-only instructions after it, or NO_TMPL */
+    uint8_t len, len1;     /* all the code; the first instruction */
+    uint8_t code[30];
+    uint8_t pad[2];
 };
+#define NO_TMPL 0xFFFF
 
 struct result {
     struct state s;
     uint16_t nmem;
     uint16_t mem_off[64];
     uint8_t mem_val[64];
+    uint8_t pad[6];
 };
 
+_Static_assert(sizeof(struct state) == 320 && sizeof(struct test) == 48 && sizeof(struct result) == 520,
+               "test file layout");
+
 static uint8_t mem_init[MEM_SIZE];
+static uint8_t *encode(const struct tmpl *tp, uint8_t *p, struct state *s, bool reg_only);
 
 /* Builds the instruction and the input state from t->seed. */
 static void make_test(struct test *t, struct state *s)
@@ -380,8 +397,35 @@ static void make_test(struct test *t, struct state *s)
         memcpy(mem_init + (STACK_TOP - MEM_ADDR), &f, 4);
     }
 
-    /* encode */
-    uint8_t *p = t->code;
+    uint8_t *p = encode(tp, t->code, s, false);
+    t->len = t->len1 = (uint8_t)(p - t->code);
+
+    /* registers the instruction uses as pointers */
+    if (fl & T_STR) {
+        s->r[XR_ESI] = DATA_PTR + rn(64) - 32;
+        s->r[XR_EDI] = DATA_PTR + rn(64) - 32 + (rn(2) ? 80 : 0);
+        s->r[XR_ECX] = rn(10);
+        if (s->eflags & EF_DF) { s->r[XR_ESI] += 64; s->r[XR_EDI] += 64; }
+    }
+    if (fl & T_EBP) s->r[XR_EBP] = STACK_TOP - 32 - rn(64);
+    if (fl & T_EBX) s->r[XR_EBX] = DATA_PTR - rn(128);
+    if (fl & T_DIV) {
+        /* keep quotients in range: a small dividend high part */
+        if (fl & T_B) s->r[XR_EAX] = (s->r[XR_EAX] & ~0xFF00u) | (rn(4) << 8);
+        else { s->r[XR_EDX] = rn(4); }
+        if (rn(2)) s->r[XR_EDX] = (uint32_t)-(int32_t)rn(3);
+    }
+    for (int i = 0; i < 2; i++)
+        if (t->follow[i] != NO_TMPL) p = encode(&tmpls[t->follow[i]], p, s, true);
+    t->len = (uint8_t)(p - t->code);
+}
+
+/* Encodes an instance of tp at p (its operands random, memory ones pointed
+   into the buffer through s's registers; reg_only: register operands only);
+   returns the end. */
+static uint8_t *encode(const struct tmpl *tp, uint8_t *p, struct state *s, bool reg_only)
+{
+    uint32_t fl = tp->flags;
     const char *e = tp->enc;
     int reg_field = -1;
     bool byteop = fl & T_B;
@@ -403,7 +447,7 @@ static void make_test(struct test *t, struct state *s)
             }
             reg_field = reg;
             bool mem = fl & T_MEM ? true : fl & T_REG ? false : fl & T_ST ? false : rn(5) < 3;
-            if (fl & T_ST) mem = false;
+            if ((fl & T_ST) || reg_only) mem = false;
             if (!mem) {
                 int rm = (int)rn(8);
                 if (fl & T_ST) rm = (int)rn(4);
@@ -487,24 +531,8 @@ static void make_test(struct test *t, struct state *s)
         *p++ = (uint8_t)v;
         e += 2;
     }
-    t->len = (uint8_t)(p - t->code);
-
-    /* registers the instruction uses as pointers */
-    if (fl & T_STR) {
-        s->r[XR_ESI] = DATA_PTR + rn(64) - 32;
-        s->r[XR_EDI] = DATA_PTR + rn(64) - 32 + (rn(2) ? 80 : 0);
-        s->r[XR_ECX] = rn(10);
-        if (s->eflags & EF_DF) { s->r[XR_ESI] += 64; s->r[XR_EDI] += 64; }
-    }
-    if (fl & T_EBP) s->r[XR_EBP] = STACK_TOP - 32 - rn(64);
-    if (fl & T_EBX) s->r[XR_EBX] = DATA_PTR - rn(128);
-    if (fl & T_DIV) {
-        /* keep quotients in range: a small dividend high part */
-        if (byteop) s->r[XR_EAX] = (s->r[XR_EAX] & ~0xFF00u) | (rn(4) << 8);
-        else { s->r[XR_EDX] = rn(4); }
-        if (rn(2)) s->r[XR_EDX] = (uint32_t)-(int32_t)rn(3);
-    }
     (void)reg_field;
+    return p;
 }
 
 /* ---- native execution (i386) ------------------------------------------ */
@@ -696,7 +724,16 @@ static uint8_t *xmem, *xcode;
 /* The xlat side: interpreter, or the code generator when built with one. */
 static int xlat_run(xcpu *c, uint32_t end);
 
-#ifndef XLAT_RUN
+#ifdef XLAT_RUN
+/* The code generator: each test's code replaces the last one's. */
+static int xlat_run(xcpu *c, uint32_t end)
+{
+    jit_init(end, end + 1, true);
+    jit_invalidate(CODE_ADDR, 64);
+    jit_run(c);
+    return c->eip == end ? 0 : -2;
+}
+#else
 static int xlat_run(xcpu *c, uint32_t end)
 {
     for (int n = 0; n < 64 && c->eip != end; n++)
@@ -765,13 +802,15 @@ static bool check_one(const struct test *t, const struct result *res)
         for (int i = 0; i < 8; i++)
             if (c.r[i] != o->r[i]) P(" %s %08x want %08x;", rn_[i], c.r[i], o->r[i]);
         uint32_t undef = tp->undef;
+        for (int i = 0; i < 2; i++)
+            if (t->follow[i] != NO_TMPL) undef |= tmpls[t->follow[i]].undef;
         if ((tp->flags & T_SHIFT1)) {
             /* OF is only defined for a count of 1 */
             const uint8_t *q = t->code;
             while (*q == 0x66 || *q == 0xF0) q++;
             unsigned cnt;
-            if (*q == 0x0F) cnt = (q[1] & 1) ? s.r[XR_ECX] & 31 : t->code[t->len - 1] & 31;
-            else if (*q == 0xC0 || *q == 0xC1) cnt = t->code[t->len - 1] & 31;
+            if (*q == 0x0F) cnt = (q[1] & 1) ? s.r[XR_ECX] & 31 : t->code[t->len1 - 1] & 31;
+            else if (*q == 0xC0 || *q == 0xC1) cnt = t->code[t->len1 - 1] & 31;
             else cnt = s.r[XR_ECX] & 31;
             if (cnt != 1) undef |= EF_OF;
             /* 16-bit shld/shrd past 16, rcl/rcr of bytes and words: CF too */
@@ -850,10 +889,14 @@ static bool check_one(const struct test *t, const struct result *res)
         }
     }
     if (pn) {
-        char text[64];
+        char text[100];
         int n = 0;
         for (int i = 0; i < t->len; i++) n += snprintf(text + n, sizeof(text) - n, "%02x ", t->code[i]);
-        printf("FAIL %-22s seed %-10llu %s:%s\n", tp->name, (unsigned long long)t->seed, text, problems);
+        char name[96];
+        snprintf(name, sizeof(name), "%s%s%s%s%s", tp->name, t->follow[0] != NO_TMPL ? " + " : "",
+                 t->follow[0] != NO_TMPL ? tmpls[t->follow[0]].name : "", t->follow[1] != NO_TMPL ? " + " : "",
+                 t->follow[1] != NO_TMPL ? tmpls[t->follow[1]].name : "");
+        printf("FAIL %-22s seed %-10llu %s:%s\n", name, (unsigned long long)t->seed, text, problems);
         if (verbose) {
             printf("   in: eax=%08x ecx=%08x edx=%08x ebx=%08x esp=%08x ebp=%08x esi=%08x edi=%08x efl=%08x\n",
                    s.r[0], s.r[1], s.r[2], s.r[3], s.r[4], s.r[5], s.r[6], s.r[7], s.eflags);
@@ -875,6 +918,47 @@ static void xlat_setup(void)
 
 /* ---- main ------------------------------------------------------------- */
 
+/* Sequence tests (-s): register-only instructions after the first one, so
+   the translator's flag bookkeeping between instructions is tested too.
+   Readers use flags an earlier instruction may have left undefined. */
+static const char *const follower_names[] = {
+    "add Ev,Gv", "add Gv,Ev", "sub Ev,Gv", "cmp Ev,Gv", "and Ev,Gv", "or Ev,Gv", "xor Ev,Gv", "add Eb,Gb",
+    "sub Eb,Gb", "cmp Eb,Gb", "test Ev,Gv", "test Eb,Gb", "cmp eax,id", "inc r", "dec r", "inc Ev", "dec Ev",
+    "neg Ev", "not Ev", "mov Ev,Gv", "imul Gv,Ev", "bt Ev,Gv", "clc", "stc", "cwde", "cdq", "xchg eax,r",
+    "bswap r", "movzx Gv,Eb", "sahf", "jcc +0", "jcc32 +0", "jmp +0", "loop +0",
+};
+static const char *const reader_names[] = {
+    "adc Ev,Gv", "adc Gv,Ev", "sbb Ev,Gv", "sbb Gv,Ev", "adc Eb,Gb", "sbb Eb,Gb", "grp1 Ev,ib", "grp1 Eb,ib",
+    "cmovcc Gv,Ev", "setcc Eb", "cmc", "lahf", "pushf", "grp2 Ev,1", "grp2 Eb,1",
+};
+#define NFOLLOW (sizeof(follower_names) / sizeof(follower_names[0]))
+#define NREAD (sizeof(reader_names) / sizeof(reader_names[0]))
+static uint16_t followers[NFOLLOW + NREAD];
+
+static uint16_t find_tmpl(const char *name)
+{
+    for (unsigned i = 0; i < NTMPL; i++)
+        if (!strcmp(tmpls[i].name, name)) return (uint16_t)i;
+    fprintf(stderr, "no template %s\n", name);
+    exit(2);
+}
+
+static void pick_followers(struct test *t)
+{
+    if (!followers[0] && !followers[1]) {
+        for (unsigned i = 0; i < NFOLLOW; i++) followers[i] = find_tmpl(follower_names[i]);
+        for (unsigned i = 0; i < NREAD; i++) followers[NFOLLOW + i] = find_tmpl(reader_names[i]);
+    }
+    const struct tmpl *tp = &tmpls[t->tmpl];
+    bool undef = tp->undef || (tp->flags & T_SHIFT1);
+    int n = (int)rn(3);
+    for (int i = 0; i < n; i++) {
+        uint16_t f = followers[rn(undef ? NFOLLOW : NFOLLOW + NREAD)];
+        t->follow[i] = f;
+        if (tmpls[f].undef) undef = true;
+    }
+}
+
 static int pick_template(const char *filter)
 {
     for (;;) {
@@ -886,15 +970,17 @@ static int pick_template(const char *filter)
 int main(int argc, char **argv)
 {
     const char *filter = NULL;
+    bool seq = false;
     int a = 1;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-f") && i + 1 < argc) { filter = argv[++i]; continue; }
+        if (!strcmp(argv[i], "-s")) { seq = true; continue; }
         if (!strcmp(argv[i], "-v")) { verbose = 1; continue; }
         argv[a++] = argv[i];
     }
     argc = a;
     if (argc < 2) {
-        fprintf(stderr, "usage: difftest gen N SEED FILE | check FILE | run N SEED [-f FILTER] [-v]\n");
+        fprintf(stderr, "usage: difftest gen N SEED FILE | check FILE | run N SEED [-f FILTER] [-s] [-v]\n");
         return 2;
     }
 #ifdef __i386__
@@ -908,9 +994,10 @@ int main(int argc, char **argv)
         long done = 0, faults = 0, fails = 0;
         uint64_t pick = seed * 7919 + 13;
         for (long i = 0; i < n; i++) {
-            struct test t = { .seed = seed + (uint64_t)i };
+            struct test t = { .seed = seed + (uint64_t)i, .follow = { NO_TMPL, NO_TMPL } };
             rs = pick++ * 0x9E3779B97F4A7C15ull + 7;
             t.tmpl = (uint16_t)pick_template(filter);
+            if (seq) pick_followers(&t);
             struct state s;
             make_test(&t, &s);
             struct result res;

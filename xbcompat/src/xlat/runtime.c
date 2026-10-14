@@ -201,7 +201,11 @@ void cpu_thread_detach(void)
 
 void cpu_code_changed(uint32_t addr, uint32_t len)
 {
+#ifdef XLAT_JIT
+    jit_invalidate(addr, len);
+#else
     (void)addr; (void)len;
+#endif
 }
 
 void cpu_block(void) {}
@@ -355,7 +359,11 @@ static void run_guest(struct xlat_thread *t)
             run_stub(t, idx);
             continue;
         }
+#ifdef XLAT_JIT
+        jit_run(c);   /* until it reaches the stub page */
+#else
         if (xi_step(c) != XI_OK) xrt_fault(c, "invalid instruction");
+#endif
     }
 }
 
@@ -427,5 +435,12 @@ void cpu_init(void)
     memset(stub_page, 0xF4, STUB_PAGE);
     for (unsigned i = 0; i < STUB_MAX; i += 2) { stub_page[i] = 0xEB; stub_page[i + 1] = 0xFE; }
     ret_addr = stub_base + RET_OFFSET;
+#ifdef XLAT_JIT
+    /* Host functions don't read the guest's flags. */
+    jit_init(stub_base, stub_base + STUB_PAGE, false);
+    if (getenv("XLAT_STATS")) xbc_at_exit(jit_print_stats);
+    xlog("cpu: x86 guest code runs in xlat, translated to ARM (%zu host functions)", nentries);
+#else
     xlog("cpu: x86 guest code runs in xlat, the interpreter (%zu host functions)", nentries);
+#endif
 }
