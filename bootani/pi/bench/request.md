@@ -1,4 +1,4 @@
-# Pi bench request 2
+# Pi bench request 3
 
 Written by the cloud Claude session for the Linux PC session, under sokky's
 standing approval. Measure only: nothing is built on the PC. Files are in
@@ -6,58 +6,96 @@ bootani/pi/bench at the commit this file was read from; check every md5.
 
 | file | md5 | what |
 |---|---|---|
-| guest-report.py | e22c44d5098f0bb29c2189c1ad7b4cf1 | adds up a profile by game code / library code / xbcompat code (runs on the PC) |
-| xbprof | e0453100f2b93e91e2f354d450ee37c0 | whole-process profiler (static armhf) |
+| xbcompat.xlat | 0b051a758f9723f1494591c896f1d3b0 | xbcompat built for ARM with its own Xbox translator (xlat), no box86 |
+| xlat.sh | 580174d36576a6eff073e6741a727da4 | runs on the Pi: installs it, `sh /root/xlat.sh undo` puts box86 back |
+| push-xlat.sh | d503e2c227e0aa7df142273ec5604036 | runs on the PC: sends the three files and runs xlat.sh |
+| xbprof | be0a3503bc9c5d1f130208244922ec2e | whole-process profiler; now names xlat's code from /tmp/perf-PID.map |
 
-Goal: how Phantom Dust's hub frame splits between the game's own x86 code,
-xbcompat's x86 code (both run through box86), box86 itself and native
-libraries (renderer, Mesa, libc, kernel). It decides what the cloud
-session's Xbox translator has to be good at.
+(xbcompat.xlat is xbcompat/ at commit 89bf8171, built in the cloud.)
 
-Don't use XBCOMPAT_PROFILE: its sampler hangs under box86. Use box86's
-own BOX86_PROFILE, which never runs x86 code from its signal handler.
+Goal: the first timing of the cloud's translator on the real Pi, against
+box86: dashboard and Phantom Dust's underground hub, frame times and where
+the CPU time goes.
 
-## 1. Setup
+If request 2 hasn't run yet, run it first (its files at commit
+651d6364): it is the box86 side of this comparison.
 
-If /opt/xbcompat/bin/xbcompat-native.x86 isn't md5 adb2c39a6c27c2bbe5ccf0cab80d33d6
-(the request 1 build, with the pad pipe), install request 1's kit first:
-its files at commit f591eeaa3550998c874db6e0dcd44ee6497570e7, `sh push-vblank.sh`.
+## 1. Install
 
-/etc/default/xbox: keep XBCOMPAT_RENDER_WORKER=1, XBCOMPAT_ASYNC_DRAWS=1,
-the latch and work-profile settings, XBCOMPAT_PAD_PIPE=/tmp/xbpad and
-XBCOMPAT_SHOT_ON_REQUEST=/tmp/xbshot, no BOX86_DYNAREC_ variants, and add,
-set the same way as the others:
+/etc/default/xbox: keep everything from request 2 except BOX86_PROFILE,
+and add, set the same way as the others:
 
-    BOX86_PROFILE=/tmp/box86prof.txt
+    XLAT_PERF_MAP=1
+    XLAT_STATS=60
 
-Copy xbprof to /root/xbprof on the Pi if it isn't there. Restart xbox.
+(XLAT_STATS makes the log print, every 60 s, the x86 instructions xlat
+still hands to its interpreter: lines starting with `xlat:`.)
 
-## 2. Measure in the hub
+On the PC, from bootani/pi/bench:
 
-Drive Phantom Dust to the underground hub (the route from request 1, or
-by pad pipe and screenshots) and stand still. Wait 30 s, then:
+    PI=192.168.1.128 sh push-xlat.sh
 
-    /root/xbprof $(pidof xbcompat-native.x86) 30 1000 40 > /tmp/xbprof.txt
+It keeps the Unicorn build as xbcompat.arm.unicorn, puts xbcompat.xlat in
+its place, sets XBOX_CPU=unicorn (the launcher then runs that slot) and
+restarts the dashboard. If the dashboard doesn't come up it puts box86
+back by itself. Its report is xlat.txt next to the script.
 
-Wait 10 s more (box86 rewrites its file every 5 s), then copy to the PC:
-/tmp/box86prof.txt, /tmp/xbprof.txt, the title's library map (the file
-after `--hle` in `tr '\0' ' ' < /proc/$(pidof xbcompat-native.x86)/cmdline`)
-and E:\Games\Phantom Dust\default.xbe (read only). On the PC:
+## 2. Dashboard
 
-    python3 guest-report.py box86prof.txt TITLE.map default.xbe xbcompat-native.x86
+On the main menu, untouched: the log's `D3D: ... fps` lines over 30 s
+(/var/log/xbox-session.log or /var/log/xbox.log), then
 
-(xbcompat-native.x86 from request 1's commit, for addr2line; skip it if
-addr2line isn't installed.) Also note the fps line from the log over the
-same minute.
+    /root/xbprof $(pidof xbcompat.arm) 20 1000 40 > /tmp/xbprof-dash.txt
 
-## 3. Leave and report
+## 3. Phantom Dust hub
 
-Remove BOX86_PROFILE, restart xbox. Send one message to the cloud session:
+Drive Phantom Dust to the underground hub by the route from request 1
+(pad pipe and screenshots) and stand still. Wait 30 s, then at the same
+time:
 
-    request 2: ok / problems
-    hub fps and ms per frame during the profile
-    xbprof.txt (whole)
-    guest-report.py output (whole)
-    box86prof.txt (whole)
+    /root/xbprof $(pidof xbcompat.arm) 30 1000 60 > /tmp/xbprof-hub.txt
+    sh /root/clocks.sh 30 > /tmp/clocks-hub.txt
 
-Then keep watching the branch for request 3.
+and `vcgencmd get_throttled` if the image has vcgencmd. Note the fps lines
+over that minute. Copy the title's library map (the file after `--hle` in
+`tr '\0' ' ' < /proc/$(pidof xbcompat.arm)/cmdline`) to the PC.
+
+Keep the `xlat:` lines the log printed while you stood in the hub (the
+last two `xlat: last 60 s:` groups).
+
+If Phantom Dust crashes, hangs or draws wrong on xlat, that's a result
+too: keep the last 80 lines of the log and a screenshot (touch
+/tmp/xbshot.req). Then add `XLAT_SAFE_FLAGS=1` (set the same way),
+restart xbox and try the hub once more; report both tries. If it still
+fails, go to step 4.
+
+## 3b. Hottest code in the hub
+
+Only if step 3 worked. Add, set the same way:
+
+    XLAT_COUNT=/tmp/xlathot
+
+`mkdir -p /tmp/xlathot` on the Pi, restart xbox, drive back to the hub
+and stand still for 70 s. Copy /tmp/xlathot/hot.txt to the PC (it's
+rewritten every 60 s with the blocks that ran most in that minute).
+Frame times in this run don't count: the counters slow it down.
+
+## 4. Leave and report
+
+    PI=192.168.1.128 sh push-xlat.sh undo
+
+remove XLAT_PERF_MAP, XLAT_STATS, XLAT_COUNT and XLAT_SAFE_FLAGS from
+/etc/default/xbox, restart xbox, and check the dashboard is back on
+box86. Send one message to the cloud session:
+
+    request 3: ok / problems
+    xlat.txt (whole)
+    dashboard fps lines on xlat (and the box86 ones from request 2 or earlier)
+    xbprof-dash.txt (whole)
+    hub fps lines on xlat and on box86
+    xbprof-hub.txt, clocks-hub.txt (whole), get_throttled
+    the hub's xlat: lines, hot.txt (whole)
+    the title's library map
+    log tail and screenshot if Phantom Dust failed
+
+Then keep watching the branch for request 4.
