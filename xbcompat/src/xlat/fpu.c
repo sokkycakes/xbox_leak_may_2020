@@ -322,8 +322,8 @@ static int x87_reg(xcpu *c, const xinsn *in)
         switch (in->reg) {
         case 0: c->ftag |= 1u << ((c->top + i) & 7); return XI_OK;   /* ffree */
         case 1: { double t = *s0; *s0 = *si; *si = t; return XI_OK; }
-        case 2: *si = *s0; return XI_OK;
-        case 3: *si = *s0; fpop(c); return XI_OK;
+        case 2: *si = *s0; c->ftag &= ~(1u << ((c->top + i) & 7)); return XI_OK;
+        case 3: *si = *s0; c->ftag &= ~(1u << ((c->top + i) & 7)); fpop(c); return XI_OK;
         case 4: fcom(c, *s0, *si); return XI_OK;
         case 5: fcom(c, *s0, *si); fpop(c); return XI_OK;
         }
@@ -346,7 +346,7 @@ static int x87_reg(xcpu *c, const xinsn *in)
         if (in->reg == 5 || in->reg == 6) { fcomi(c, *s0, *si); fpop(c); return XI_OK; }
         if (in->reg == 0) { c->ftag |= 1u << ((c->top + i) & 7); fpop(c); return XI_OK; }   /* ffreep */
         if (in->reg == 1) { double t = *s0; *s0 = *si; *si = t; return XI_OK; }
-        if (in->reg == 2 || in->reg == 3) { *si = *s0; fpop(c); return XI_OK; }
+        if (in->reg == 2 || in->reg == 3) { *si = *s0; c->ftag &= ~(1u << ((c->top + i) & 7)); fpop(c); return XI_OK; }
         return XI_INVALID;
     }
 }

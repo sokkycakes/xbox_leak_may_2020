@@ -83,6 +83,13 @@ static inline uint32_t a_ldst_r(int cond, int load, int byte, int rt, int rn, in
            (uint32_t)rt << 12 | (uint32_t)shift << 7 | (uint32_t)rm;
 }
 
+/* load/store word or byte, post-indexed by a register: rn += rm afterwards */
+static inline uint32_t a_ldst_post(int cond, int load, int byte, int rt, int rn, int rm)
+{
+    return (uint32_t)cond << 28 | 0x06800000u | (uint32_t)byte << 22 | (uint32_t)load << 20 | (uint32_t)rn << 16 |
+           (uint32_t)rt << 12 | (uint32_t)rm;
+}
+
 /* halfword and signed loads: kind 0xB = h, 0xD = sb, 0xF = sh; 8-bit offset */
 static inline uint32_t a_ldsth(int cond, int load, int kind, int rt, int rn, int32_t off)
 {
@@ -180,15 +187,19 @@ static inline uint32_t a_vstr(int d, int rn, int off)
 #define A_VABS(d, m)           (0xEEB00BC0u | VD(d) | VM(m))
 #define A_VSQRT(d, m)          (0xEEB10BC0u | VD(d) | VM(m))
 #define A_VMOV(d, m)           (0xEEB00B40u | VD(d) | VM(m))
+#define A_VMOV_IMM(d, imm8)    (0xEEB00B00u | ((uint32_t)(imm8) >> 4) << 16 | VD(d) | ((uint32_t)(imm8) & 15))
 #define A_VMOVc(c, d, m)       ((uint32_t)(c) << 28 | 0x0EB00B40u | VD(d) | VM(m))
 #define A_VCMP(d, m)           (0xEEB40B40u | VD(d) | VM(m))
 #define A_VCMP0(d)             (0xEEB50B40u | VD(d))
+#define A_VPUSH(d, n)          (0xED2D0B00u | VD(d) | 2u * (n))   /* vpush {d..d+n-1} */
+#define A_VPOP(d, n)           (0xECBD0B00u | VD(d) | 2u * (n))
 #define A_VMRS_APSR            0xEEF1FA10u
 #define A_VMRS(r)              (0xEEF10A10u | (r) << 12)    /* vmrs r, fpscr */
 #define A_VMSR(r)              (0xEEE10A10u | (r) << 12)    /* vmsr fpscr, r */
 #define A_VCVT_DS(d, s)        (0xEEB70AC0u | VD(d) | SM(s))   /* f64 <- f32 */
 #define A_VCVT_SD(s, d)        (0xEEB70BC0u | SD(s) | VM(d))   /* f32 <- f64 */
 #define A_VCVT_D_S32(d, s)     (0xEEB80BC0u | VD(d) | SM(s))   /* f64 <- s32 */
+#define A_VCVT_D_U32(d, s)     (0xEEB80B40u | VD(d) | SM(s))   /* f64 <- u32 */
 #define A_VCVT_S32_D_Z(s, d)   (0xEEBD0BC0u | SD(s) | VM(d))   /* s32 <- f64, toward zero */
 #define A_VCVT_S32_D_R(s, d)   (0xEEBD0B40u | SD(s) | VM(d))   /* s32 <- f64, FPSCR rounding */
 

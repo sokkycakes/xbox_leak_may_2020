@@ -6,7 +6,9 @@
  * of a core it used and the busiest files and functions: native libraries
  * resolve against their ELF symbols, kernel addresses against
  * /proc/kallsyms, and code that box86 generated at run time (anonymous
- * executable memory) shows as [jit].
+ * executable memory) shows as [jit].  A JIT that writes /tmp/perf-PID.map
+ * (perf's format: hex start, hex size, name a line; xbcompat's xlat does
+ * with XLAT_PERF_MAP=1) gets its [jit] code named from it.
  *
  * Built static so it runs on any Pi image:
  *   arm-linux-gnueabihf-gcc -O2 -static -o xbprof xbprof.c
@@ -164,6 +166,8 @@ static int nmaps;
 
 static sym_t *ksyms;
 static size_t nksyms;
+static sym_t *jsyms;     /* /tmp/perf-PID.map */
+static size_t njsyms;
 
 static int by_addr(const void *a, const void *b)
 {
@@ -285,6 +289,30 @@ static void load_kallsyms(void)
     qsort(ksyms, nksyms, sizeof(sym_t), by_addr);
 }
 
+static void load_perf_map(int pid)
+{
+    char path[64], line[256];
+    snprintf(path, sizeof path, "/tmp/perf-%d.map", pid);
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    size_t cap = 0;
+    while (fgets(line, sizeof line, f)) {
+        unsigned long long a, n;
+        char name[128];
+        if (sscanf(line, "%llx %llx %127s", &a, &n, name) != 3) continue;
+        if (njsyms == cap) {
+            cap = cap ? cap * 2 : 65536;
+            jsyms = realloc(jsyms, cap * sizeof *jsyms);
+        }
+        jsyms[njsyms].addr = a;
+        jsyms[njsyms].size = n;
+        jsyms[njsyms].name = strdup(name);
+        njsyms++;
+    }
+    fclose(f);
+    qsort(jsyms, njsyms, sizeof(sym_t), by_addr);
+}
+
 /* "file" and "function" for an address; each is valid until the next call. */
 static void place(uint64_t ip, char *file, size_t fsize, char *func, size_t nsize)
 {
@@ -299,7 +327,8 @@ static void place(uint64_t ip, char *file, size_t fsize, char *func, size_t nsiz
         if (ip < m->start || ip >= m->end) continue;
         if (!m->path[0] || m->path[0] == '[') {
             snprintf(file, fsize, "%s", m->exec ? "[jit]" : (m->path[0] ? m->path : "[anon]"));
-            snprintf(func, nsize, "-");
+            const sym_t *s = m->exec && njsyms ? find_sym(jsyms, njsyms, ip) : NULL;
+            snprintf(func, nsize, "%s", s ? s->name : "-");
             return;
         }
         const char *base = strrchr(m->path, '/');
@@ -349,7 +378,8 @@ static void report(int pid, double secs, unsigned hz, int top)
 {
     printf("xbprof: pid %d, %.1f s at %u Hz of each thread's CPU time, %zu samples, %llu lost\n",
            pid, secs, hz, nsamples, (unsigned long long)lost);
-    printf("(\"of a core\" is the thread's CPU time over the run; [jit] is code box86 generated)\n");
+    load_perf_map(pid);
+    printf("(\"of a core\" is the thread's CPU time over the run; [jit] is code box86 or xlat generated)\n");
     qsort(samples, nsamples, sizeof *samples, by_ip);
     /* Threads, busiest first. */
     uint32_t order[MAX_THREADS];

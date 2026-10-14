@@ -24,6 +24,7 @@
  * a jump back to the dispatcher, so threads still holding them are safe.
  */
 #define _GNU_SOURCE
+#include <math.h>
 #include <pthread.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -66,6 +67,11 @@ enum { EXIT_LINK = 1, EXIT_INDIRECT = 2 };
 #define O_DF   ((int)offsetof(xcpu, df))
 #define O_FS   ((int)offsetof(xcpu, fs_base))
 #define O_SITE ((int)offsetof(xcpu, jit_site))
+#define O_TOP  ((int)offsetof(xcpu, top))
+#define O_ST   ((int)offsetof(xcpu, st))
+#define O_FPCW ((int)offsetof(xcpu, fpcw))
+#define O_FPSW ((int)offsetof(xcpu, fpsw))
+#define O_FTAG ((int)offsetof(xcpu, ftag))
 
 struct block {
     uint32_t eip, end;           /* the guest bytes [eip, end) */
@@ -93,7 +99,7 @@ static unsigned stop_live, unknown_live;
 
 static bool stats;
 static FILE *perf_map;   /* XLAT_PERF_MAP: names blocks for perf */
-static uint64_t fb_count[0x200], n_blocks, n_insns, n_native, n_links, n_lookups;
+static uint64_t fb_count[0x200], fb_x87[8][16], n_blocks, n_insns, n_native, n_links, n_lookups;
 
 static inline bool in_stop(uint32_t a) { return a - stop_lo < stop_hi - stop_lo; }
 static inline unsigned islot(uint32_t eip) { return (eip ^ (eip >> ITAB_SHIFT)) & (ITAB_SIZE - 1); }
@@ -236,6 +242,11 @@ typedef struct {
     uint8_t live[MAX_INSNS + 1];   /* flags live before in[i]; live[n] after the block */
     int n;
     bool cf_inv;                   /* CPSR C holds NOT CF */
+    /* x87 registers cached in VFP registers (see x87_sync) */
+    int x_delta;                   /* net pushes */
+    uint8_t x_loaded, x_dirty;     /* by slot */
+    uint8_t x_tset, x_tempty;      /* slots whose tag changed, and those now empty */
+    uint8_t xreg[8];               /* each slot's VFP register */
 } tctx;
 
 #define E(w) emit(&t->a, (w))
@@ -585,6 +596,661 @@ static bool emit_shift(tctx *t, const xinsn *in, int count, unsigned live)
     return true;
 }
 
+/* ---- x87 ---------------------------------------------------------------- */
+
+/* A block keeps the x87 registers it uses in VFP registers d16-d23, loaded
+   when first read, and writes them back (with TOP and the tags) at its
+   exits and before the interpreter runs anything.  Slot q is the register
+   that was st(q) when the block started (or last synced): after delta net
+   pushes st(i) is slot (i - delta) & 7, whatever TOP is, so the translation
+   reads TOP only to find a slot's memory.  Popped values are dropped: an
+   empty register's contents don't matter. */
+
+#define XD_TMP 1    /* d1: a memory operand */
+#define XS_TMP 0    /* s0: single precision and integer conversions */
+
+static int xq(const tctx *t, int i) { return (i - t->x_delta) & 7; }
+
+static void x_reset(tctx *t)
+{
+    t->x_delta = 0;
+    t->x_loaded = t->x_dirty = t->x_tset = t->x_tempty = 0;
+    for (int q = 0; q < 8; q++) t->xreg[q] = (uint8_t)(16 + q);
+}
+
+/* the VFP register holding st(i), loaded (uses T3) */
+static int x_get(tctx *t, int i)
+{
+    int q = xq(t, i);
+    if (!(t->x_loaded >> q & 1)) {
+        E(A_LDR(T3, R0, O_TOP));
+        if (q) {
+            E(dp_i(C_AL, OP_ADD, 0, T3, T3, q));
+            E(dp_i(C_AL, OP_AND, 0, T3, T3, 7));
+        }
+        E(dp_r(C_AL, OP_ADD, 0, T3, R0, T3, SH_LSL, 3));
+        E(a_vldr(t->xreg[q], T3, O_ST));
+        t->x_loaded |= (uint8_t)(1u << q);
+    }
+    return t->xreg[q];
+}
+
+/* the VFP register for a new value of st(i) */
+static int x_put(tctx *t, int i)
+{
+    int q = xq(t, i);
+    t->x_loaded |= (uint8_t)(1u << q);
+    t->x_dirty |= (uint8_t)(1u << q);
+    return t->xreg[q];
+}
+
+/* push: the VFP register for the new st(0) */
+static int x_push(tctx *t)
+{
+    t->x_delta++;
+    int q = xq(t, 0);
+    t->x_tset |= (uint8_t)(1u << q);
+    t->x_tempty &= (uint8_t)~(1u << q);
+    return x_put(t, 0);
+}
+
+static void x_pop(tctx *t)
+{
+    uint8_t bit = (uint8_t)(1u << xq(t, 0));
+    t->x_tset |= bit;
+    t->x_tempty |= bit;
+    t->x_loaded &= (uint8_t)~bit;
+    t->x_dirty &= (uint8_t)~bit;
+    t->x_delta--;
+}
+
+/* rd = slot mask m as physical registers: rotated left by TOP (in tr) */
+static void x_rot(tctx *t, int rd, unsigned m, int tr)
+{
+    mov_imm(t, rd, m | m << 8);
+    E(dp_rr(C_AL, OP_MOV, 0, rd, 0, rd, SH_LSL, tr));
+    E(A_UBFX(rd, rd, 8, 8));
+}
+
+/* Writes the cache back to xcpu (flags kept; uses T1-T3) and empties it. */
+static void x87_sync(tctx *t)
+{
+    int delta = t->x_delta & 7;
+    if (t->x_dirty || t->x_tset || delta) {
+        E(A_LDR(T3, R0, O_TOP));
+        for (int q = 0; q < 8; q++) {
+            if (!(t->x_dirty >> q & 1)) continue;
+            int r = T3;
+            if (q) {
+                E(dp_i(C_AL, OP_ADD, 0, T2, T3, q));
+                E(dp_i(C_AL, OP_AND, 0, T2, T2, 7));
+                r = T2;
+            }
+            E(dp_r(C_AL, OP_ADD, 0, T2, R0, r, SH_LSL, 3));
+            E(a_vstr(t->xreg[q], T2, O_ST));
+        }
+        if (t->x_tset) {
+            E(A_LDR(T2, R0, O_FTAG));
+            x_rot(t, T1, t->x_tset, T3);
+            E(dp_r(C_AL, OP_BIC, 0, T2, T2, T1, SH_LSL, 0));
+            if (t->x_tempty) {
+                x_rot(t, T1, t->x_tempty, T3);
+                E(dp_r(C_AL, OP_ORR, 0, T2, T2, T1, SH_LSL, 0));
+            }
+            E(A_STR(T2, R0, O_FTAG));
+        }
+        if (delta) {
+            E(dp_i(C_AL, OP_SUB, 0, T3, T3, delta));
+            E(dp_i(C_AL, OP_AND, 0, T3, T3, 7));
+            E(A_STR(T3, R0, O_TOP));
+        }
+    }
+    x_reset(t);
+}
+
+/* VFP's 8-bit immediate for the double with bits v, or -1 */
+static int vfp_imm(uint64_t v)
+{
+    if (v & 0xFFFFFFFFFFFFull) return -1;
+    unsigned top = (unsigned)(v >> 48), b = top >> 6 & 1, rep = top >> 6 & 0xFF;
+    if (rep != (b ? 0xFFu : 0) || (top >> 14 & 1) == b) return -1;
+    return (int)((top >> 15) << 7 | b << 6 | (top & 0x3F));
+}
+
+static void x_const(tctx *t, int d, double v)
+{
+    uint64_t bits;
+    memcpy(&bits, &v, 8);
+    uint32_t lo = (uint32_t)bits, hi = (uint32_t)(bits >> 32);
+    int imm = vfp_imm(bits);
+    if (imm >= 0) {
+        E(A_VMOV_IMM(d, imm));
+        return;
+    }
+    mov_imm(t, T1, lo);
+    if (hi != lo) mov_imm(t, T2, hi);
+    E(A_VMOV_DRR(d, T1, hi != lo ? T2 : T1));
+}
+
+/* in's memory operand as a double in d: kind 0 m32 float, 1 m32 integer,
+   2 m64 float, 3 m16 integer (uses T0-T2, s0) */
+static void x_load(tctx *t, const xinsn *in, int kind, int d)
+{
+    int32_t off;
+    int base = mem_addr(t, in, T0, kind == 2 ? 4091 : kind == 3 ? 255 : 4095, &off);
+    if (kind == 2) {
+        /* through core registers: guest data needn't be aligned */
+        E(A_LDR(T1, base, off));
+        E(A_LDR(T2, base, off + 4));
+        E(A_VMOV_DRR(d, T1, T2));
+        return;
+    }
+    if (kind == 3) E(a_ldsth(C_AL, 1, 0xF, T1, base, off));
+    else E(A_LDR(T1, base, off));
+    E(A_VMOV_SR(XS_TMP, T1));
+    E(kind == 0 ? A_VCVT_DS(d, XS_TMP) : A_VCVT_D_S32(d, XS_TMP));
+}
+
+/* st(0) (in s) to in's memory operand: kind 0 m32, 2 m64 */
+static void x_store(tctx *t, const xinsn *in, int kind, int s)
+{
+    int32_t off;
+    if (kind == 2) {
+        E(A_VMOV_RRD(T1, T2, s));
+    } else {
+        E(A_VCVT_SD(XS_TMP, s));
+        E(A_VMOV_RS(T1, XS_TMP));
+    }
+    int base = mem_addr(t, in, T0, kind == 2 ? 4091 : 4095, &off);
+    E(A_STR(T1, base, off));
+    if (kind == 2) E(A_STR(T2, base, off + 4));
+}
+
+static void x_arith(tctx *t, int op, int d, int x, int y)
+{
+    switch (op) {
+    case 0: E(A_VADD(d, x, y)); break;
+    case 1: E(A_VMUL(d, x, y)); break;
+    case 4: E(A_VSUB(d, x, y)); break;
+    case 5: E(A_VSUB(d, y, x)); break;
+    case 6: E(A_VDIV(d, x, y)); break;
+    default: E(A_VDIV(d, y, x)); break;
+    }
+}
+
+/* fcom a, b (b < 0: with 0.0): C0 C2 C3 from the compare, C1 clear (uses T1, T4) */
+static void x_fcom(tctx *t, int a, int b, unsigned live)
+{
+    bool keep = live & FL_NZCV;
+    E(b < 0 ? A_VCMP0(a) : A_VCMP(a, b));
+    if (keep) E(A_MRS(T4));
+    E(A_VMRS_APSR);
+    E(A_LDR(T1, R0, O_FPSW));
+    E(dp_i(C_AL, OP_BIC, 0, T1, T1, arm_imm(0x4700)));
+    E(dp_i(C_MI, OP_ORR, 0, T1, T1, arm_imm(0x0100)));   /* less: C0 */
+    E(dp_i(C_EQ, OP_ORR, 0, T1, T1, arm_imm(0x4000)));   /* equal: C3 */
+    E(dp_i(C_VS, OP_ORR, 0, T1, T1, arm_imm(0x4500)));   /* unordered: all three */
+    E(A_STR(T1, R0, O_FPSW));
+    if (keep) E(A_MSR(T4));
+}
+
+/* fcomi a, b: ZF PF CF from the compare, OF SF AF clear, C1 clear */
+static void x_fcomi(tctx *t, int a, int b, unsigned live)
+{
+    E(A_VCMP(a, b));
+    E(A_VMRS(T1));
+    if (live & FL_NZCV) {
+        /* ARM NZCV: less 1000, equal 0110, greater 0010, unordered 0011.
+           x86 wants Z = ZF and C = NOT CF: unordered sets Z and clears C. */
+        E(dp_i(C_AL, OP_AND, 0, T2, T1, arm_imm(0x60000000)));
+        E(dp_i(C_AL, OP_AND, 0, T3, T1, arm_imm(0x10000000)));
+        E(dp_r(C_AL, OP_ORR, 0, T3, T3, T3, SH_LSL, 1));
+        E(dp_r(C_AL, OP_EOR, 0, T2, T2, T3, SH_LSL, 1));
+        E(A_MSR(T2));
+        t->cf_inv = true;
+    }
+    if (live & FL_P) {   /* pf_res 0 (PF set) when unordered, else 1 */
+        E(dp_i(C_AL, OP_MOV, 0, T3, 0, 1));
+        E(dp_r(C_AL, OP_BIC, 0, T3, T3, T1, SH_LSR, 28));
+        E(A_STR(T3, R0, O_PF));
+    }
+    if (live & FL_A) {
+        E(dp_i(C_AL, OP_MOV, 0, T3, 0, 0));
+        E(A_STR(T3, R0, O_AF));
+    }
+    E(A_LDR(T3, R0, O_FPSW));
+    E(dp_i(C_AL, OP_BIC, 0, T3, T3, arm_imm(0x0200)));
+    E(A_STR(T3, R0, O_FPSW));
+}
+
+/* T1 = s rounded to a 32-bit integer as the control word says (ARM rounds
+   as FPSCR says, so FPSCR gets the x87 mode for the conversion); T3 bit 0
+   set if it didn't fit (or s is a NaN). */
+static void x_cvt(tctx *t, int s)
+{
+    E(A_LDR(T1, R0, O_FPCW));
+    E(A_UBFX(T1, T1, 10, 2));                              /* x87: nearest, down, up, zero */
+    E(dp_r(C_AL, OP_ORR, 0, T1, T1, T1, SH_LSL, 2));
+    E(A_UBFX(T1, T1, 1, 2));                               /* ARM: nearest, up, down, zero */
+    E(A_VMRS(T2));
+    E(dp_i(C_AL, OP_BIC, 0, T3, T2, arm_imm(0x00C00000)));
+    E(dp_i(C_AL, OP_BIC, 0, T3, T3, 1));                   /* IOC */
+    E(dp_r(C_AL, OP_ORR, 0, T3, T3, T1, SH_LSL, 22));
+    E(A_VMSR(T3));
+    E(A_VCVT_S32_D_R(XS_TMP, s));
+    E(A_VMRS(T3));
+    E(A_VMSR(T2));
+    E(A_VMOV_RS(T1, XS_TMP));
+}
+
+/* fist m16/m32: T1 = s as a bits-wide integer, or the integer indefinite
+   value (uses T1-T4) */
+static void x_fist(tctx *t, int s, int bits)
+{
+    x_cvt(t, s);
+    E(dp_i(C_AL, OP_AND, 0, T3, T3, 1));
+    E(dp_i(C_AL, OP_RSB, 0, T3, T3, 0));                   /* all ones if it didn't fit */
+    if (bits == 16) {
+        E(A_SXTH(T2, T1));
+        E(dp_r(C_AL, OP_EOR, 0, T2, T2, T1, SH_LSL, 0));   /* nonzero if past 16 bits */
+        E(dp_i(C_AL, OP_RSB, 0, T4, T2, 0));
+        E(dp_r(C_AL, OP_ORR, 0, T2, T2, T4, SH_LSL, 0));
+        E(dp_r(C_AL, OP_ORR, 0, T3, T3, T2, SH_ASR, 31));
+    }
+    E(dp_r(C_AL, OP_BIC, 0, T1, T1, T3, SH_LSL, 0));
+    E(dp_r(C_AL, OP_ORR, 0, T1, T1, T3, SH_LSL, bits - 1));
+}
+
+/* fistp m64 outside 32 bits: v rounded as the control word fpcw says */
+uint64_t jit_fist64(double v, uint32_t fpcw);
+uint64_t jit_fist64(double v, uint32_t fpcw)
+{
+    double r;
+    switch ((fpcw >> 10) & 3) {
+    case 0: r = nearbyint(v); break;
+    case 1: r = floor(v); break;
+    case 2: r = ceil(v); break;
+    default: r = trunc(v); break;
+    }
+    if (!(r >= -0x1p63 && r < 0x1p63)) return 1ull << 63;
+    return (uint64_t)(int64_t)r;
+}
+
+/* fistp m64: values that fit in 32 bits here, the rest in jit_fist64 */
+static void x_fistp64(tctx *t, const xinsn *in, int s, unsigned live)
+{
+    bool keep = live & FL_NZCV;
+    x_cvt(t, s);
+    if (keep) E(A_MRS(T4));
+    E(dp_i(C_AL, OP_TST, 1, 0, T3, 1));
+    uint32_t *slow = t->a.p;
+    E(0);
+    E(dp_r(C_AL, OP_MOV, 0, T2, 0, T1, SH_ASR, 31));
+    uint32_t *join = t->a.p;
+    E(0);
+    if (slow < t->a.end) *slow = a_b(C_NE, slow, t->a.p);
+    if (keep) E(A_STR(T4, SP, 4));
+    E(A_VPUSH(16, 8));
+    E(A_VMOV(0, s));
+    E(A_LDR(R0, R0, O_FPCW));
+    mov_imm(t, R12, (uint32_t)(uintptr_t)jit_fist64);
+    E(A_BLX(R12));
+    E(A_VPOP(16, 8));
+    E(A_MOV(T1, R0));
+    E(A_MOV(T2, R1));
+    E(A_LDR(R0, SP, 0));
+    if (keep) E(A_LDR(T4, SP, 4));
+    if (join < t->a.end) *join = a_b(C_AL, join, t->a.p);
+    if (keep) E(A_MSR(T4));
+    int32_t off;
+    int base = mem_addr(t, in, T0, 4091, &off);
+    E(A_STR(T1, base, off));
+    E(A_STR(T2, base, off + 4));
+}
+
+/* fild m64: high word * 2^32 + low word, rounded once */
+static void x_fild64(tctx *t, const xinsn *in)
+{
+    int32_t off;
+    int base = mem_addr(t, in, T0, 4091, &off);
+    E(A_LDR(T1, base, off));
+    E(A_LDR(T2, base, off + 4));
+    E(A_VMOV_SR(0, T1));
+    E(A_VMOV_SR(1, T2));
+    E(A_VCVT_D_U32(2, 0));
+    E(A_VCVT_D_S32(3, 1));
+    x_const(t, 1, 0x1p32);
+    E(A_VMUL(3, 3, 1));
+    int d = x_push(t);
+    E(A_VADD(d, 3, 2));
+}
+
+/* rd = the status word with TOP (uses T3) */
+static void x_fsw(tctx *t, int rd)
+{
+    int delta = t->x_delta & 7;
+    E(A_LDR(T3, R0, O_TOP));
+    if (delta) {
+        E(dp_i(C_AL, OP_SUB, 0, T3, T3, delta));
+        E(dp_i(C_AL, OP_AND, 0, T3, T3, 7));
+    }
+    E(A_LDR(rd, R0, O_FPSW));
+    E(dp_i(C_AL, OP_BIC, 0, rd, rd, arm_imm(0x3800)));
+    E(dp_r(C_AL, OP_ORR, 0, rd, rd, T3, SH_LSL, 11));
+}
+
+static void x_fxch(tctx *t, int i)
+{
+    if (!i) return;
+    x_get(t, 0);
+    x_get(t, i);
+    int q0 = xq(t, 0), qi = xq(t, i);
+    uint8_t r = t->xreg[q0];
+    t->xreg[q0] = t->xreg[qi];
+    t->xreg[qi] = r;
+    t->x_dirty |= (uint8_t)(1u << q0 | 1u << qi);
+}
+
+/* st(i) = st(0) (st(i) is no longer empty), then pop if pop */
+static void x_fst_reg(tctx *t, int i, bool pop)
+{
+    if (i) {
+        int a = x_get(t, 0);
+        int d = x_put(t, i);
+        uint8_t bit = (uint8_t)(1u << xq(t, i));
+        E(A_VMOV(d, a));
+        t->x_tset |= bit;
+        t->x_tempty &= (uint8_t)~bit;
+    }
+    if (pop) x_pop(t);
+}
+
+static const double x87_consts[7] = {
+    1.0, 3.32192809488736234787, 1.44269504088896340736, 3.14159265358979323846,
+    0.30102999566398119521, 0.69314718055994530942, 0.0,
+};
+
+/* D8-DF; false (nothing emitted) for the ones left to the interpreter */
+static bool x87(tctx *t, const xinsn *in, unsigned live)
+{
+    unsigned grp = in->op - 0xD8, r = in->reg, i = in->rm;
+    int a, b, d;
+    int32_t off;
+    if (in->mod != 3) {
+        int base;
+        switch (grp) {
+        case 0: case 2: case 4: case 6:   /* st0 op= m32, m32 int, m64, m16 int */
+            x_load(t, in, grp == 0 ? 0 : grp == 2 ? 1 : grp == 4 ? 2 : 3, XD_TMP);
+            a = x_get(t, 0);
+            if (r == 2 || r == 3) {
+                x_fcom(t, a, XD_TMP, live);
+                if (r == 3) x_pop(t);
+            } else {
+                x_arith(t, (int)r, x_put(t, 0), a, XD_TMP);
+            }
+            return true;
+        case 1:
+            switch (r) {
+            case 0: x_load(t, in, 0, x_push(t)); return true;
+            case 2: case 3:
+                x_store(t, in, 0, x_get(t, 0));
+                if (r == 3) x_pop(t);
+                return true;
+            case 5:   /* fldcw */
+                base = mem_addr(t, in, T0, 255, &off);
+                E(a_ldsth(C_AL, 1, 0xB, T1, base, off));
+                E(A_STR(T1, R0, O_FPCW));
+                return true;
+            case 7:   /* fnstcw */
+                E(A_LDR(T1, R0, O_FPCW));
+                base = mem_addr(t, in, T0, 255, &off);
+                E(a_ldsth(C_AL, 0, 0xB, T1, base, off));
+                return true;
+            }
+            return false;
+        case 3:
+            switch (r) {
+            case 0: x_load(t, in, 1, x_push(t)); return true;
+            case 2: case 3:
+                x_fist(t, x_get(t, 0), 32);
+                base = mem_addr(t, in, T0, 4095, &off);
+                E(A_STR(T1, base, off));
+                if (r == 3) x_pop(t);
+                return true;
+            }
+            return false;
+        case 5:
+            switch (r) {
+            case 0: x_load(t, in, 2, x_push(t)); return true;
+            case 2: case 3:
+                x_store(t, in, 2, x_get(t, 0));
+                if (r == 3) x_pop(t);
+                return true;
+            case 7:   /* fnstsw m16 */
+                x_fsw(t, T1);
+                base = mem_addr(t, in, T0, 255, &off);
+                E(a_ldsth(C_AL, 0, 0xB, T1, base, off));
+                return true;
+            }
+            return false;
+        default:
+            switch (r) {
+            case 0: x_load(t, in, 3, x_push(t)); return true;
+            case 2: case 3:
+                x_fist(t, x_get(t, 0), 16);
+                base = mem_addr(t, in, T0, 255, &off);
+                E(a_ldsth(C_AL, 0, 0xB, T1, base, off));
+                if (r == 3) x_pop(t);
+                return true;
+            case 5: x_fild64(t, in); return true;
+            case 7:
+                x_fistp64(t, in, x_get(t, 0), live);
+                x_pop(t);
+                return true;
+            }
+            return false;
+        }
+    }
+    switch (grp) {
+    case 0: case 4: case 6:   /* D8 st0 op= st(i); DC st(i) op= st0; DE the same, then pop */
+        if (grp == 6 && r == 3) {   /* fcompp */
+            if (i != 1) return false;
+            a = x_get(t, 0);
+            b = x_get(t, 1);
+            x_fcom(t, a, b, live);
+            x_pop(t);
+            x_pop(t);
+            return true;
+        }
+        a = x_get(t, 0);
+        b = x_get(t, (int)i);
+        if (r == 2 || r == 3) {
+            x_fcom(t, a, b, live);
+            if (r == 3 || grp == 6) x_pop(t);
+            return true;
+        }
+        if (grp == 0) {
+            x_arith(t, (int)r, x_put(t, 0), a, b);
+        } else {
+            x_arith(t, r >= 4 ? (int)(r ^ 1) : (int)r, x_put(t, (int)i), b, a);
+            if (grp == 6) x_pop(t);
+        }
+        return true;
+    case 1:
+        switch (r) {
+        case 0:   /* fld st(i) */
+            a = x_get(t, (int)i);
+            d = x_push(t);
+            if (d != a) E(A_VMOV(d, a));
+            return true;
+        case 1: x_fxch(t, (int)i); return true;
+        case 2: return i == 0;   /* fnop */
+        case 4:
+            if (i == 0 || i == 1) {   /* fchs, fabs */
+                a = x_get(t, 0);
+                d = x_put(t, 0);
+                E(i ? A_VABS(d, a) : A_VNEG(d, a));
+                return true;
+            }
+            if (i == 4) {   /* ftst */
+                x_fcom(t, x_get(t, 0), -1, live);
+                return true;
+            }
+            return false;
+        case 5:
+            if (i < 7) {
+                x_const(t, x_push(t), x87_consts[i]);
+                return true;
+            }
+            return false;
+        case 7:
+            if (i == 2) {   /* fsqrt */
+                a = x_get(t, 0);
+                d = x_put(t, 0);
+                E(A_VSQRT(d, a));
+                return true;
+            }
+            return false;
+        }
+        return false;
+    case 2: case 3:
+        if (r < 4) {   /* fcmovcc */
+            static const uint8_t cc[3] = { 2, 4, 6 };   /* b, e, be (DB: not) */
+            if (r == 3) return false;   /* parity */
+            int c = cond_for(t, cc[r] | (grp - 2));
+            a = x_get(t, 0);
+            b = x_get(t, (int)i);
+            x_put(t, 0);
+            E(A_VMOVc(c, a, b));
+            return true;
+        }
+        if (grp == 2) {   /* fucompp */
+            if (r != 5 || i != 1) return false;
+            a = x_get(t, 0);
+            b = x_get(t, 1);
+            x_fcom(t, a, b, live);
+            x_pop(t);
+            x_pop(t);
+            return true;
+        }
+        if (r == 5 || r == 6) {   /* fucomi, fcomi */
+            a = x_get(t, 0);
+            b = x_get(t, (int)i);
+            x_fcomi(t, a, b, live);
+            return true;
+        }
+        return false;
+    case 5:
+        switch (r) {
+        case 0: {   /* ffree: st(i) empty, its value dropped */
+            uint8_t bit = (uint8_t)(1u << xq(t, (int)i));
+            t->x_tset |= bit;
+            t->x_tempty |= bit;
+            t->x_loaded &= (uint8_t)~bit;
+            t->x_dirty &= (uint8_t)~bit;
+            return true;
+        }
+        case 1: x_fxch(t, (int)i); return true;
+        case 2: case 3: x_fst_reg(t, (int)i, r == 3); return true;
+        case 4: case 5:   /* fucom, fucomp */
+            a = x_get(t, 0);
+            b = x_get(t, (int)i);
+            x_fcom(t, a, b, live);
+            if (r == 5) x_pop(t);
+            return true;
+        }
+        return false;
+    default:
+        switch (r) {
+        case 1: x_fxch(t, (int)i); return true;
+        case 2: case 3: x_fst_reg(t, (int)i, true); return true;
+        case 4:   /* fnstsw ax */
+            if (i) return false;
+            x_fsw(t, T1);
+            E(A_BFI(R4, T1, 0, 16));
+            return true;
+        case 5: case 6:   /* fucomip, fcomip */
+            a = x_get(t, 0);
+            b = x_get(t, (int)i);
+            x_fcomi(t, a, b, live);
+            x_pop(t);
+            return true;
+        }
+        return false;
+    }
+}
+
+/* T2 bit 0 = PF clear: the low byte of pf_res has odd parity (uses T1, T2) */
+static void parity_odd(tctx *t)
+{
+    E(A_LDRB(T1, R0, O_PF));
+    E(dp_r(C_AL, OP_EOR, 0, T1, T1, T1, SH_LSR, 4));
+    E(dp_i(C_AL, OP_AND, 0, T1, T1, 15));
+    mov_imm(t, T2, 0x6996);   /* bit n: n has odd parity */
+    E(dp_rr(C_AL, OP_MOV, 0, T2, 0, T2, SH_LSR, T1));
+}
+
+/* inc or dec r (a host register), CF kept */
+static void emit_incdec(tctx *t, int r, bool dec, unsigned live)
+{
+    int op = dec ? OP_SUB : OP_ADD;
+    if (live & FL_A) E(A_MOV(T2, r));
+    if (!(live & FL_C)) {
+        E(dp_i(C_AL, op, (live & FL_ALL) ? 1 : 0, r, r, 1));
+    } else if (live & FL_O) {
+        /* N Z V from the add, C from before */
+        E(A_MRS(T3));
+        E(dp_i(C_AL, op, 1, r, r, 1));
+        E(A_MRS(T4));
+        E(dp_i(C_AL, OP_AND, 0, T3, T3, arm_imm(XF_C)));
+        E(dp_i(C_AL, OP_BIC, 0, T4, T4, arm_imm(XF_C)));
+        E(dp_r(C_AL, OP_ORR, 0, T4, T4, T3, SH_LSL, 0));
+        E(A_MSR(T4));
+    } else {
+        E(dp_i(C_AL, op, 0, r, r, 1));
+        if (live & (FL_Z | FL_S)) E(dp_r(C_AL, OP_TST, 1, 0, r, r, SH_LSL, 0));   /* C and V untouched */
+    }
+    if (live & FL_A) {
+        E(dp_r(C_AL, OP_EOR, 0, T2, T2, r, SH_LSL, 0));
+        E(A_STR(T2, R0, O_AF));
+    }
+    if (live & FL_P) store_pf(t, r, 0);
+}
+
+/* movs, stos (and their rep forms) on bytes or dwords */
+static bool emit_string(tctx *t, const xinsn *in, unsigned live)
+{
+    bool movs = (in->op & ~1) == 0xA4, rep = in->pfx & XP_REP;
+    int sz = (in->op & 1) ? ((in->pfx & XP_OPSZ) ? 2 : 4) : 1;
+    if (sz == 2 || (in->pfx & (XP_ADSZ | XP_REPNE)) || (movs && in->seg == XSEG_FS)) return false;
+    bool keep = rep && (live & FL_NZCV);
+    uint32_t *skip = NULL, *loop = NULL;
+    /* T3 = the step: sz, or -sz when DF is set */
+    E(A_LDR(T2, R0, O_DF));
+    E(dp_i(C_AL, OP_MOV, 0, T3, 0, sz));
+    E(dp_r(C_AL, OP_SUB, 0, T3, T3, T2, SH_LSL, sz == 4 ? 3 : 1));
+    if (rep) {
+        if (keep) E(A_MRS(T4));
+        E(dp_i(C_AL, OP_CMP, 1, 0, HR(XR_ECX), 0));
+        skip = t->a.p;
+        E(0);
+        loop = t->a.p;
+    }
+    if (movs) {
+        E(a_ldst_post(C_AL, 1, sz == 1, T1, HR(XR_ESI), T3));
+        E(a_ldst_post(C_AL, 0, sz == 1, T1, HR(XR_EDI), T3));
+    } else {
+        E(a_ldst_post(C_AL, 0, sz == 1, R4, HR(XR_EDI), T3));
+    }
+    if (rep) {
+        E(dp_i(C_AL, OP_SUB, 1, HR(XR_ECX), HR(XR_ECX), 1));
+        E(a_b(C_NE, t->a.p, loop));
+        if (skip < t->a.end) *skip = a_b(C_EQ, skip, t->a.p);
+        if (keep) E(A_MSR(T4));
+    }
+    return true;
+}
+
 /* ---- native translations ---------------------------------------------- */
 
 /* Emits in natively, with the flags in live correct after it; false (and
@@ -598,6 +1264,7 @@ static bool native(tctx *t, const xinsn *in, unsigned live)
     int base = 0, c;
 
     if (m && in->ad16) return false;
+    if (op >= 0xD8 && op <= 0xDF) return x87(t, in, live);
     if (op < 0x40 && (op & 7) < 6) {
         int aop = op >> 3, form = op & 7, sz = (form & 1) ? osz : 1;
         switch (form) {
@@ -608,13 +1275,10 @@ static bool native(tctx *t, const xinsn *in, unsigned live)
     }
     switch (op) {
     case 0x40: case 0x41: case 0x42: case 0x43: case 0x44: case 0x45: case 0x46: case 0x47:
-    case 0x48: case 0x49: case 0x4A: case 0x4B: case 0x4C: case 0x4D: case 0x4E: case 0x4F: {
-        if (osz != 4 || (live & (FL_C | FL_A))) return false;
-        int r = HR(op & 7);
-        E(dp_i(C_AL, op < 0x48 ? OP_ADD : OP_SUB, (live & FL_ALL) ? 1 : 0, r, r, 1));
-        if (live & FL_P) store_pf(t, r, 0);
+    case 0x48: case 0x49: case 0x4A: case 0x4B: case 0x4C: case 0x4D: case 0x4E: case 0x4F:
+        if (osz != 4) return false;
+        emit_incdec(t, HR(op & 7), op >= 0x48, live);
         return true;
-    }
     case 0x50: case 0x51: case 0x52: case 0x53: case 0x54: case 0x55: case 0x56: case 0x57:
         if (osz != 4) return false;
         if (op == 0x54) {
@@ -715,7 +1379,7 @@ static bool native(tctx *t, const xinsn *in, unsigned live)
         base = mem_addr(t, in, T0, 4095, &off);
         E(A_STR(T1, base, off));
         return true;
-    case 0x90:
+    case 0x90: case 0x9B:   /* nop, fwait (exceptions are masked) */
         return true;
     case 0x91: case 0x92: case 0x93: case 0x94: case 0x95: case 0x96: case 0x97:
         if (osz != 4) return false;
@@ -745,6 +1409,8 @@ static bool native(tctx *t, const xinsn *in, unsigned live)
         }
         return true;
     }
+    case 0xA4: case 0xA5: case 0xAA: case 0xAB:
+        return emit_string(t, in, live);
     case 0xA8: case 0xA9:
         return emit_alu(t, in, 8, (op & 1) ? osz : 1, k_reg(XR_EAX), k_imm(in->imm), live);
     case 0xB0: case 0xB1: case 0xB2: case 0xB3: case 0xB4: case 0xB5: case 0xB6: case 0xB7:
@@ -846,7 +1512,6 @@ static bool native(tctx *t, const xinsn *in, unsigned live)
     case 0xFF: {
         if (osz != 4) return false;
         if (in->reg < 2) {
-            if (live & (FL_C | FL_A)) return false;
             if (m && (in->pfx & XP_LOCK)) return false;
             int r = HR(in->rm);
             if (m) {
@@ -854,8 +1519,7 @@ static bool native(tctx *t, const xinsn *in, unsigned live)
                 E(A_LDR(T1, base, off));
                 r = T1;
             }
-            E(dp_i(C_AL, in->reg ? OP_SUB : OP_ADD, (live & FL_ALL) ? 1 : 0, r, r, 1));
-            if (live & FL_P) store_pf(t, r, 0);
+            emit_incdec(t, r, in->reg, live);
             if (m) E(A_STR(T1, base, off));
             return true;
         }
@@ -887,10 +1551,15 @@ static bool native(tctx *t, const xinsn *in, unsigned live)
     }
     case 0x190: case 0x191: case 0x192: case 0x193: case 0x194: case 0x195: case 0x196: case 0x197:
     case 0x198: case 0x199: case 0x19A: case 0x19B: case 0x19C: case 0x19D: case 0x19E: case 0x19F:
-        if (((op & 15) >> 1) == 5) return false;
-        c = cond_for(t, op & 15);
-        E(dp_i(C_AL, OP_MOV, 0, T1, 0, 0));
-        E(dp_i(c, OP_MOV, 0, T1, 0, 1));
+        if (((op & 15) >> 1) == 5) {
+            parity_odd(t);
+            E(dp_i(C_AL, OP_AND, 0, T1, T2, 1));
+            if (!(op & 1)) E(dp_i(C_AL, OP_EOR, 0, T1, T1, 1));
+        } else {
+            c = cond_for(t, op & 15);
+            E(dp_i(C_AL, OP_MOV, 0, T1, 0, 0));
+            E(dp_i(c, OP_MOV, 0, T1, 0, 1));
+        }
         if (!m) {
             set_sub(t, in->rm, 1, T1);
         } else {
@@ -910,9 +1579,17 @@ static bool native(tctx *t, const xinsn *in, unsigned live)
         return true;
     }
     case 0x1B6: case 0x1B7: case 0x1BE: case 0x1BF: {
-        if (osz != 4) return false;
         bool word = op & 1, sx = op >= 0x1BE;
         int rd = HR(in->reg);
+        if (osz != 4) {
+            /* movzx/movsx r16, r/m8: the low word only */
+            if (word) return false;
+            if (!m) get_sub(t, T1, in->rm, 1);
+            else { base = mem_addr(t, in, T0, 4095, &off); E(A_LDRB(T1, base, off)); }
+            if (sx) E(A_SXTB(T1, T1));
+            E(A_BFI(rd, T1, 0, 16));
+            return true;
+        }
         if (!m) {
             int r = in->rm;
             if (word) E(sx ? A_SXTH(rd, HR(r)) : A_UXTH(rd, HR(r)));
@@ -954,11 +1631,28 @@ static bool emit_branch(tctx *t, const xinsn *in, int kind, uint32_t target, uns
 {
     uint32_t next = in->addr + in->len;
     if (in->pfx & XP_OPSZ) return false;
+    x87_sync(t);
     switch (kind) {
     case BR_JCC: {
         if (in->op >= 0xE0 && in->op <= 0xE3) return false;
         unsigned cc = in->op & 15;
-        if ((cc >> 1) == 5) return false;
+        if ((cc >> 1) == 5) {
+            /* parity: tst sets Z from PF (C and V untouched), so N and Z are
+               saved around it when either exit needs them */
+            bool keep = (lt | lf) & (FL_Z | FL_S);
+            parity_odd(t);
+            if (keep) E(A_MRS(T4));
+            E(dp_i(C_AL, OP_TST, 1, 0, T2, 1));
+            uint32_t *j = t->a.p;
+            E(0);
+            if (keep) E(A_MSR(T4));
+            emit_exit(t, next, lf, NULL);
+            bool norm = !t->cf_inv && (lt & FL_C);
+            if (j < t->a.end) *j = a_b((cc & 1) ? C_NE : C_EQ, j, t->a.p);
+            if (keep) E(A_MSR(T4));
+            emit_exit(t, target, lt, keep || norm ? NULL : j);
+            return true;
+        }
         int c = cond_for(t, cc);
         uint32_t *j = t->a.p;
         E(0);
@@ -1013,6 +1707,7 @@ static void emit_fallback(tctx *t, const xinsn *in)
     xinsn *copy = pool++;
     left--;
     *copy = *in;
+    x87_sync(t);
     E(a_bl(C_AL, t->a.p, t->cf_inv ? fb_tramp : fb_tramp_c));
     E((uint32_t)(uintptr_t)copy);
     t->cf_inv = true;
@@ -1089,6 +1784,7 @@ static struct block *translate(uint32_t eip)
 
     t->a = (asm_t){ cache_cur, cache_cur, cache_end };
     t->cf_inv = true;
+    x_reset(t);
     bool ended = false;
     for (int i = 0; i < n && !ended; i++) {
         const xinsn *in = &t->in[i];
@@ -1101,6 +1797,7 @@ static struct block *translate(uint32_t eip)
         else emit_fallback(t, in);
         if (!in->len) ended = true;
     }
+    if (!ended) x87_sync(t);
     if (!ended) emit_exit(t, next, kind == BR_NONE || kind == BR_OTHER ? lf : lt | lf, NULL);
     if (t->a.p > t->a.end) die("a block outgrew the code cache");
     flush_icache(t->a.start, t->a.p);
@@ -1227,7 +1924,10 @@ uintptr_t jit_fallback(xcpu *c, uint32_t *site)
 {
     const xinsn *in = (const xinsn *)(uintptr_t)site[0];
     c->eip = in->addr;
-    if (stats) fb_count[in->op & 0x1FF]++;
+    if (stats) {
+        fb_count[in->op & 0x1FF]++;
+        if (in->op >= 0xD8 && in->op <= 0xDF) fb_x87[in->op - 0xD8][in->reg + (in->mod == 3 ? 8 : 0)]++;
+    }
     if (!in->len || xi_exec(c, in) != XI_OK) xrt_fault(c, "invalid instruction");
     if (c->eip == in->addr + in->len) return (uintptr_t)(site + 1);
     return (uintptr_t)indirect;
@@ -1332,6 +2032,15 @@ void jit_print_stats(void)
         fprintf(stderr, "xlat:   %s%02x %12llu\n", best >= 0x100 ? "0f " : "", best & 0xFF,
                 (unsigned long long)fb_count[best]);
         fb_count[best] = 0;
+    }
+    for (int k = 0; k < 16; k++) {
+        int best = -1;
+        for (int i = 0; i < 128; i++)
+            if (fb_x87[i >> 4][i & 15] && (best < 0 || fb_x87[i >> 4][i & 15] > fb_x87[best >> 4][best & 15])) best = i;
+        if (best < 0) break;
+        fprintf(stderr, "xlat:   %02x /%d%s %12llu\n", 0xD8 + (best >> 4), best & 7, best & 8 ? " st(i)" : "",
+                (unsigned long long)fb_x87[best >> 4][best & 15]);
+        fb_x87[best >> 4][best & 15] = 0;
     }
 }
 

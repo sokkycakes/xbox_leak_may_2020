@@ -298,6 +298,15 @@ static const struct tmpl tmpls[] = {
     { "cmpps", "0F C2 /r ic", C_SSE, T_GX | T_EX, 0 }, { "cmpss", "F3 0F C2 /r ic", C_SSE, T_GX | T_EX, 0 },
     { "shufps", "0F C6 /r ib", C_SSE, T_GX | T_EX, 0 },
     { "ldmxcsr", "0F AE /2", C_SSE, T_MEM | T_FCW | T_RC, 0 }, { "stmxcsr", "0F AE /3", C_SSE, T_MEM, 0 },
+
+    /* x87 register forms one at a time (sequence followers; new templates go
+       at the end, so test files keep their template numbers) */
+    { "fadd st,st(i)", "D8 C0+i", C_X87, 0, 0 }, { "fmul st,st(i)", "D8 C8+i", C_X87, 0, 0 },
+    { "fsub st,st(i)", "D8 E0+i", C_X87, 0, 0 }, { "fdivr st,st(i)", "D8 F8+i", C_X87, 0, 0 },
+    { "fcom st(i)", "D8 D0+i", C_X87, T_CC, 0 }, { "fsubr st(i),st", "DC E0+i", C_X87, 0, 0 },
+    { "fmul st(i),st", "DC C8+i", C_X87, 0, 0 }, { "faddp st(i),st", "DE C0+i", C_X87, 0, 0 },
+    { "fmulp st(i),st", "DE C8+i", C_X87, 0, 0 },
+    { "movsx Gw,Eb", "66 0F BE /r", C_INT, 0, 0 }, { "stosd", "AB", C_INT, T_STR, 0 },
 };
 #define NTMPL (sizeof(tmpls) / sizeof(tmpls[0]))
 
@@ -799,8 +808,13 @@ static bool check_one(const struct test *t, const struct result *res)
     const struct state *o = &res->s;
     static const char *rn_[] = { "eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi" };
     if (!pn) {
+        /* fnstsw ax after other x87 instructions: the CPU's exception flags
+           and C1 (rounding) aren't kept, so only TOP */
+        uint32_t amask = 0xFFFFFFFFu;
+        for (int i = 0; i < 2; i++)
+            if (t->follow[i] != NO_TMPL && !strcmp(tmpls[t->follow[i]].name, "fnstsw ax")) amask = 0xFFFF3800u;
         for (int i = 0; i < 8; i++)
-            if (c.r[i] != o->r[i]) P(" %s %08x want %08x;", rn_[i], c.r[i], o->r[i]);
+            if ((c.r[i] ^ o->r[i]) & (i ? 0xFFFFFFFFu : amask)) P(" %s %08x want %08x;", rn_[i], c.r[i], o->r[i]);
         uint32_t undef = tp->undef;
         for (int i = 0; i < 2; i++)
             if (t->follow[i] != NO_TMPL) undef |= tmpls[t->follow[i]].undef;
@@ -844,6 +858,7 @@ static bool check_one(const struct test *t, const struct result *res)
                 if (q[0] == 0xD8 || q[0] == 0xDA || q[0] == 0xDC || q[0] == 0xDE) cmp = reg == 2 || reg == 3;
                 if (cmp) ccm = 0x4500;
                 if (strstr(tp->name, "fxam") || strstr(tp->name, "fprem")) ccm = 0x4700;
+                if (t->follow[0] != NO_TMPL) ccm &= ~0x200u;   /* followers set C1 their own way */
             }
             if (((c.fpsw ^ o->fpsw) & ccm)) P(" fpsw %04x want %04x;", c.fpsw & ccm, o->fpsw & ccm);
             if ((c.fpcw ^ o->fpcw) & 0xF3F) P(" fpcw %04x want %04x;", c.fpcw, o->fpcw);
@@ -931,9 +946,19 @@ static const char *const reader_names[] = {
     "adc Ev,Gv", "adc Gv,Ev", "sbb Ev,Gv", "sbb Gv,Ev", "adc Eb,Gb", "sbb Eb,Gb", "grp1 Ev,ib", "grp1 Eb,ib",
     "cmovcc Gv,Ev", "setcc Eb", "cmc", "lahf", "pushf", "grp2 Ev,1", "grp2 Eb,1",
 };
+/* after x87 instructions, most followers are x87 too: the translation
+   keeps the x87 registers in host registers across a block */
+static const char *const x87_follower_names[] = {
+    "fadd st,st(i)", "fmul st,st(i)", "fsub st,st(i)", "fdivr st,st(i)", "fcom st(i)", "fsubr st(i),st",
+    "fmul st(i),st", "faddp st(i),st", "fmulp st(i),st", "fld st(i)", "fxch", "fchs", "fabs", "fld1", "fldz",
+    "fst st(i)", "fstp st(i)", "fcomi", "fucomi", "fcomip", "fsqrt", "ftst", "fucompp", "fnstsw ax",
+};
+static const char *const x87_reader_names[] = { "fcmovb", "fcmove", "fcmovbe", "fcmovnb", "fcmovne", "fcmovnbe" };
 #define NFOLLOW (sizeof(follower_names) / sizeof(follower_names[0]))
 #define NREAD (sizeof(reader_names) / sizeof(reader_names[0]))
-static uint16_t followers[NFOLLOW + NREAD];
+#define NXFOLLOW (sizeof(x87_follower_names) / sizeof(x87_follower_names[0]))
+#define NXREAD (sizeof(x87_reader_names) / sizeof(x87_reader_names[0]))
+static uint16_t followers[NFOLLOW + NREAD], x87_followers[NXFOLLOW + NXREAD];
 
 static uint16_t find_tmpl(const char *name)
 {
@@ -948,12 +973,19 @@ static void pick_followers(struct test *t)
     if (!followers[0] && !followers[1]) {
         for (unsigned i = 0; i < NFOLLOW; i++) followers[i] = find_tmpl(follower_names[i]);
         for (unsigned i = 0; i < NREAD; i++) followers[NFOLLOW + i] = find_tmpl(reader_names[i]);
+        for (unsigned i = 0; i < NXFOLLOW; i++) x87_followers[i] = find_tmpl(x87_follower_names[i]);
+        for (unsigned i = 0; i < NXREAD; i++) x87_followers[NXFOLLOW + i] = find_tmpl(x87_reader_names[i]);
     }
     const struct tmpl *tp = &tmpls[t->tmpl];
     bool undef = tp->undef || (tp->flags & T_SHIFT1);
     int n = (int)rn(3);
     for (int i = 0; i < n; i++) {
-        uint16_t f = followers[rn(undef ? NFOLLOW : NFOLLOW + NREAD)];
+        uint16_t f;
+        /* not after 80-bit loads and rounding mode changes: x87 arithmetic
+           is double precision, rounded to nearest */
+        bool x87 = tp->cls == C_X87 && !(tp->flags & (T_RC | T_FCW)) && strcmp(tp->name, "fld m80");
+        if (x87 && rn(4)) f = x87_followers[rn(undef ? NXFOLLOW : NXFOLLOW + NXREAD)];
+        else f = followers[rn(undef ? NFOLLOW : NFOLLOW + NREAD)];
         t->follow[i] = f;
         if (tmpls[f].undef) undef = true;
     }
@@ -1003,6 +1035,8 @@ int main(int argc, char **argv)
             struct result res;
             memset(&res, 0, sizeof(res));
             if (!native_run(&t, &res)) { faults++; continue; }
+            /* a stack overflow or underflow (SF): xlat doesn't emulate those */
+            if (seq && tmpls[t.tmpl].cls == C_X87 && (res.s.fpsw & 0x40)) { faults++; continue; }
             done++;
             if (gen) {
                 fwrite(&t, sizeof(t), 1, f);
@@ -1015,7 +1049,7 @@ int main(int argc, char **argv)
             }
         }
         if (f) fclose(f);
-        fprintf(stderr, "%ld tests, %ld skipped (native fault), %ld failed\n", done, faults, fails);
+        fprintf(stderr, "%ld tests, %ld skipped (native fault, x87 stack fault), %ld failed\n", done, faults, fails);
         return fails != 0;
     }
 #endif
