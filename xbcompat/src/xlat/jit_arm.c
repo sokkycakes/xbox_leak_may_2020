@@ -73,6 +73,7 @@ enum { EXIT_LINK = 1, EXIT_INDIRECT = 2 };
 #define O_FPCW ((int)offsetof(xcpu, fpcw))
 #define O_FPSW ((int)offsetof(xcpu, fpsw))
 #define O_FTAG ((int)offsetof(xcpu, ftag))
+#define O_MXCSR ((int)offsetof(xcpu, mxcsr))
 #define O_XMM  ((int)offsetof(xcpu, xmm))
 
 struct block {
@@ -81,6 +82,7 @@ struct block {
     struct block *next;          /* hash chain */
     uint32_t count;              /* XLAT_COUNT: times run */
     uint16_t ninsns, nwords;     /* guest instructions, host words */
+    uint8_t kind;                /* how it ends (BR_*) */
     uint32_t *loop;              /* its branch back to itself past the x87 loads, or NULL */
 };
 
@@ -1054,11 +1056,10 @@ static int fcom_cond(const xinsn *ts, const xinsn *jc)
     return -1;
 }
 
-/* fcomi a, b: ZF PF CF from the compare, OF SF AF clear, C1 clear */
-static void x_fcomi(tctx *t, int a, int b, unsigned live)
+/* ZF PF CF from the vcmp whose FPSCR is in T1, OF SF AF clear (fcomi,
+   comiss) */
+static void vcmp_flags(tctx *t, unsigned live)
 {
-    E(A_VCMP(a, b));
-    E(A_VMRS(T1));
     if (live & FL_NZCV) {
         /* ARM NZCV: less 1000, equal 0110, greater 0010, unordered 0011.
            x86 wants Z = ZF and C = NOT CF: unordered sets Z and clears C. */
@@ -1078,6 +1079,14 @@ static void x_fcomi(tctx *t, int a, int b, unsigned live)
         E(dp_i(C_AL, OP_MOV, 0, T3, 0, 0));
         E(A_STR(T3, R0, O_AF));
     }
+}
+
+/* fcomi a, b: ZF PF CF from the compare, OF SF AF clear, C1 clear */
+static void x_fcomi(tctx *t, int a, int b, unsigned live)
+{
+    E(A_VCMP(a, b));
+    E(A_VMRS(T1));
+    vcmp_flags(t, live);
     E(A_LDR(T3, R0, O_FPSW));
     E(dp_i(C_AL, OP_BIC, 0, T3, T3, arm_imm(0x0200)));
     E(A_STR(T3, R0, O_FPSW));
@@ -1602,6 +1611,282 @@ static bool emit_sse_move(tctx *t, const xinsn *in)
     return false;
 }
 
+/* The Pentium III's SSE arithmetic, on the xmm registers in xcpu: VFP
+   single precision for + - * /, sqrt and compares (IEEE with denormals,
+   as SSE computes them), NEON for logic and the estimates.  The
+   destination goes in q0 (s0-s3), the source in q1 (s4-s7), results that
+   aren't in place in q2 (s8-s11), q3 is scratch. */
+
+/* in's xmm/m operand: base and offset for span bytes from it by vldr */
+static int sse_src(tctx *t, const xinsn *in, int span, int32_t *off)
+{
+    if (in->mod == 3) {
+        *off = O_XMM + 16 * in->rm;
+        return R0;
+    }
+    int base = mem_addr(t, in, T0, 1024 - span, off);
+    if (*off & 3) {
+        add_imm(t, T0, base, (uint32_t)*off, T0);
+        *off = 0;
+        base = T0;
+    }
+    return base;
+}
+
+/* lanes from xcpu's xmm at x, or from base + off, into s(first) */
+static void sse_load(tctx *t, int first, int lanes, int base, int32_t off)
+{
+    if (lanes == 1) {
+        E(a_vldr_s(first, base, off));
+    } else {
+        E(a_vldr(first / 2, base, off));
+        E(a_vldr(first / 2 + 1, base, off + 8));
+    }
+}
+
+static void sse_store(tctx *t, int first, int lanes, int32_t x)
+{
+    if (lanes == 1) {
+        E(a_vstr_s(first, R0, x));
+    } else {
+        E(a_vstr(first / 2, R0, x));
+        E(a_vstr(first / 2 + 1, R0, x + 8));
+    }
+}
+
+/* r = s1 as a 32-bit integer (toward zero, or as MXCSR rounds), the
+   integer indefinite value when it doesn't fit; the flags in live kept
+   (uses T1-T4).  Like x_cvt, FPSCR is only read unless the rounding isn't
+   to nearest or IOC was set. */
+static void sse_cvt(tctx *t, int r, bool trunc, unsigned live)
+{
+    bool keep = live & FL_NZCV;
+    if (keep) E(A_MRS(T4));
+    uint32_t *slow[2] = { NULL, NULL }, *join;
+    if (!trunc) {
+        E(A_LDR(T1, R0, O_MXCSR));
+        E(dp_i(C_AL, OP_TST, 1, 0, T1, arm_imm(0x6000)));
+        slow[0] = t->a.p;
+        E(0);
+    }
+    E(trunc ? A_VCVT_S32_S_Z(0, 1) : A_VCVT_S32_S_R(0, 1));
+    E(A_VMRS(T3));
+    E(dp_i(C_AL, OP_TST, 1, 0, T3, 1));
+    slow[1] = t->a.p;
+    E(0);
+    E(A_VMOV_RS(T1, 0));
+    join = t->a.p;
+    E(0);
+    for (int k = 0; k < 2; k++)
+        if (slow[k] && slow[k] < t->a.end) *slow[k] = a_b(C_NE, slow[k], t->a.p);
+    E(A_VMRS(T2));
+    E(dp_i(C_AL, OP_BIC, 0, T2, T2, 1));                   /* IOC, now and after */
+    if (trunc) {
+        E(A_VMSR(T2));
+        E(A_VCVT_S32_S_Z(0, 1));
+    } else {
+        E(A_LDR(T1, R0, O_MXCSR));
+        E(A_UBFX(T1, T1, 13, 2));                          /* SSE: nearest, down, up, zero */
+        E(dp_r(C_AL, OP_ORR, 0, T1, T1, T1, SH_LSL, 2));
+        E(A_UBFX(T1, T1, 1, 2));                           /* ARM: nearest, up, down, zero */
+        E(dp_i(C_AL, OP_BIC, 0, T3, T2, arm_imm(0x00C00000)));
+        E(dp_r(C_AL, OP_ORR, 0, T3, T3, T1, SH_LSL, 22));
+        E(A_VMSR(T3));
+        E(A_VCVT_S32_S_R(0, 1));
+    }
+    E(A_VMRS(T3));
+    E(A_VMSR(T2));
+    E(A_VMOV_RS(T1, 0));
+    E(dp_i(C_AL, OP_AND, 0, T3, T3, 1));
+    E(dp_i(C_AL, OP_RSB, 0, T3, T3, 0));                   /* all ones if it didn't fit */
+    E(dp_r(C_AL, OP_BIC, 0, T1, T1, T3, SH_LSL, 0));
+    E(dp_r(C_AL, OP_ORR, 0, T1, T1, T3, SH_LSL, 31));
+    if (join < t->a.end) *join = a_b(C_AL, join, t->a.p);
+    E(A_MOV(r, T1));
+    if (keep) E(A_MSR(T4));
+}
+
+static bool emit_sse_op(tctx *t, const xinsn *in, unsigned live)
+{
+    unsigned op = in->op & 0xFF;
+    bool ss = in->pfx & XP_REP, m = in->mod != 3;
+    if (in->pfx & (XP_OPSZ | XP_REPNE | XP_LOCK)) return false;
+    int x = O_XMM + 16 * in->reg, lanes = ss ? 1 : 4, q = !ss, base;
+    int32_t off;
+    switch (op) {
+    case 0x51: case 0x58: case 0x59: case 0x5C: case 0x5E:   /* sqrt add mul sub div */
+        base = sse_src(t, in, 4 * lanes, &off);
+        sse_load(t, 4, lanes, base, off);
+        if (op != 0x51) sse_load(t, 0, lanes, R0, x);
+        for (int i = 0; i < lanes; i++)
+            switch (op) {
+            case 0x51: E(A_VSQRT_S(i, 4 + i)); break;
+            case 0x58: E(A_VADD_S(i, i, 4 + i)); break;
+            case 0x59: E(A_VMUL_S(i, i, 4 + i)); break;
+            case 0x5C: E(A_VSUB_S(i, i, 4 + i)); break;
+            default: E(A_VDIV_S(i, i, 4 + i)); break;
+            }
+        sse_store(t, 0, lanes, x);
+        return true;
+    case 0x5D: case 0x5F: {   /* min, max */
+        /* d < s ? d : s and d > s ? d : s (s when unordered or both zero),
+           compared by VFP: NEON would see denormals as zero */
+        bool keep = live & FL_NZCV;
+        base = sse_src(t, in, 4 * lanes, &off);
+        sse_load(t, 4, lanes, base, off);
+        sse_load(t, 0, lanes, R0, x);
+        if (keep) E(A_MRS(T4));
+        for (int i = 0; i < lanes; i++) {
+            E(A_VCMP_S(i, 4 + i));
+            E(A_VMRS_APSR);
+            E(A_VMOVc_S(op == 0x5D ? C_PL : C_LE, i, 4 + i));
+        }
+        if (keep) E(A_MSR(T4));
+        sse_store(t, 0, lanes, x);
+        return true;
+    }
+    case 0x52: case 0x53:   /* rsqrt, rcp */
+        /* x86's estimates are good to 12 bits, NEON's to 8: one Newton step
+           makes 16.  Both see denormals as zero. */
+        base = sse_src(t, in, 4 * lanes, &off);
+        sse_load(t, 4, lanes, base, off);
+        if (op == 0x52) {
+            /* e * (3 - (x * e) * e) / 2 (e * e can underflow); x * e is a
+               NaN only for 0, infinity and NaN, where e is already right */
+            E(A_NRSQRTE(q, 4, 2));
+            E(A_NMUL_F(q, 6, 4, 2));
+            E(A_NCEQ_F(q, 0, 6, 6));
+            E(A_NRSQRTS(q, 6, 6, 4));
+            E(A_NMUL_F(q, 6, 4, 6));
+            E(A_NBSL(q, 0, 6, 4));
+            sse_store(t, 0, lanes, x);
+        } else {
+            E(A_NRECPE(q, 4, 2));   /* e * (2 - x * e) */
+            E(A_NRECPS(q, 6, 2, 4));
+            E(A_NMUL_F(q, 4, 4, 6));
+            sse_store(t, 8, lanes, x);
+        }
+        return true;
+    case 0x54: case 0x55: case 0x56: case 0x57:   /* and andn or xor */
+        if (ss) return false;
+        if (!m && in->rm == in->reg) {
+            if (op == 0x54 || op == 0x56) return true;
+            E(A_NZERO(1, 0));
+            E(a_vstr(0, R0, x));
+            E(a_vstr(0, R0, x + 8));
+            return true;
+        }
+        base = sse_src(t, in, 16, &off);
+        sse_load(t, 4, 4, base, off);
+        sse_load(t, 0, 4, R0, x);
+        switch (op) {
+        case 0x54: E(A_NAND(1, 0, 0, 2)); break;
+        case 0x55: E(A_NBIC(1, 0, 2, 0)); break;
+        case 0x56: E(A_NORR(1, 0, 0, 2)); break;
+        default: E(A_NEOR(1, 0, 0, 2)); break;
+        }
+        sse_store(t, 0, 4, x);
+        return true;
+    case 0xC2: {   /* cmpps, cmpss: a mask per lane from VFP's compare */
+        base = sse_src(t, in, 4 * lanes, &off);
+        sse_load(t, 4, lanes, base, off);
+        sse_load(t, 0, lanes, R0, x);
+        int pred = in->imm & 7;
+        for (int i = 0; i < lanes; i++) {
+            E(A_VCMP_S(i, 4 + i));
+            E(A_VMRS(T1));   /* NZCV: less 1000, equal 0110, greater 0010, unordered 0011 */
+            switch (pred & 3) {
+            case 0: E(A_SBFX(T1, T1, 30, 1)); break;   /* Z: eq, neq */
+            case 1: E(A_SBFX(T1, T1, 31, 1)); break;   /* N: lt, nlt */
+            case 2:                                    /* N or Z: le, nle */
+                E(dp_r(C_AL, OP_ORR, 0, T1, T1, T1, SH_LSL, 1));
+                E(A_SBFX(T1, T1, 31, 1));
+                break;
+            default: E(A_SBFX(T1, T1, 28, 1)); break;  /* V: unord, ord */
+            }
+            if (pred & 4) E(dp_r(C_AL, OP_MVN, 0, T1, 0, T1, SH_LSL, 0));
+            E(A_STR(T1, R0, x + 4 * i));
+        }
+        return true;
+    }
+    case 0xC6: {   /* shufps */
+        if (ss) return false;
+        base = sse_src(t, in, 16, &off);
+        unsigned k = in->imm;
+        E(A_LDR(T1, R0, x + 4 * (int)(k & 3)));
+        E(A_LDR(T2, R0, x + 4 * (int)(k >> 2 & 3)));
+        E(A_LDR(T3, base, off + 4 * (int)(k >> 4 & 3)));
+        E(A_LDR(T4, base, off + 4 * (int)(k >> 6 & 3)));
+        E(A_STR(T1, R0, x));
+        E(A_STR(T2, R0, x + 4));
+        E(A_STR(T3, R0, x + 8));
+        E(A_STR(T4, R0, x + 12));
+        return true;
+    }
+    case 0x14:   /* unpcklps: d0 s0 d1 s1 */
+        if (ss) return false;
+        base = sse_src(t, in, 16, &off);
+        E(A_LDR(T2, base, off));
+        E(A_LDR(T3, R0, x + 4));
+        E(A_LDR(T4, base, off + 4));
+        E(A_STR(T2, R0, x + 4));
+        E(A_STR(T3, R0, x + 8));
+        E(A_STR(T4, R0, x + 12));
+        return true;
+    case 0x15:   /* unpckhps: d2 s2 d3 s3 */
+        if (ss) return false;
+        base = sse_src(t, in, 16, &off);
+        E(A_LDR(T1, R0, x + 8));
+        E(A_LDR(T2, base, off + 8));
+        E(A_LDR(T3, R0, x + 12));
+        E(A_LDR(T4, base, off + 12));
+        E(A_STR(T1, R0, x));
+        E(A_STR(T2, R0, x + 4));
+        E(A_STR(T3, R0, x + 8));
+        E(A_STR(T4, R0, x + 12));
+        return true;
+    case 0x50: {   /* movmskps */
+        if (ss || m) return false;
+        int y = O_XMM + 16 * in->rm;
+        E(A_LDR(T1, R0, y));
+        E(dp_r(C_AL, OP_MOV, 0, T1, 0, T1, SH_LSR, 31));
+        for (int i = 1; i < 4; i++) {
+            E(A_LDR(T2, R0, y + 4 * i));
+            E(dp_r(C_AL, OP_MOV, 0, T2, 0, T2, SH_LSR, 31));
+            E(dp_r(C_AL, OP_ORR, 0, i == 3 ? HR(in->reg) : T1, T1, T2, SH_LSL, i));
+        }
+        return true;
+    }
+    case 0x2E: case 0x2F:   /* ucomiss, comiss */
+        if (ss) return false;
+        base = sse_src(t, in, 4, &off);
+        E(a_vldr_s(1, base, off));
+        E(a_vldr_s(0, R0, x));
+        E(A_VCMP_S(0, 1));
+        E(A_VMRS(T1));
+        vcmp_flags(t, live);
+        return true;
+    case 0x2A:   /* cvtsi2ss (cvtpi2ps reads MMX) */
+        if (!ss) return false;
+        if (m) {
+            base = sse_src(t, in, 4, &off);
+            E(a_vldr_s(0, base, off));
+        } else {
+            E(A_VMOV_SR(0, HR(in->rm)));
+        }
+        E(A_VCVT_S_S32(0, 0));
+        E(a_vstr_s(0, R0, x));
+        return true;
+    case 0x2C: case 0x2D:   /* cvttss2si, cvtss2si (the ps forms write MMX) */
+        if (!ss) return false;
+        base = sse_src(t, in, 4, &off);
+        E(a_vldr_s(1, base, off));
+        sse_cvt(t, HR(in->reg), op == 0x2C, live);
+        return true;
+    }
+    return false;
+}
+
 /* ---- native translations ---------------------------------------------- */
 
 static void emit_fallback(tctx *t, const xinsn *in);
@@ -1977,6 +2262,10 @@ static bool native(tctx *t, const xinsn *in, unsigned live)
     }
     case 0x110: case 0x111: case 0x112: case 0x113: case 0x116: case 0x117: case 0x128: case 0x129: case 0x12B:
         return emit_sse_move(t, in);
+    case 0x114: case 0x115: case 0x12A: case 0x12C: case 0x12D: case 0x12E: case 0x12F: case 0x150:
+    case 0x151: case 0x152: case 0x153: case 0x154: case 0x155: case 0x156: case 0x157: case 0x158:
+    case 0x159: case 0x15C: case 0x15D: case 0x15E: case 0x15F: case 0x1C2: case 0x1C6:
+        return emit_sse_op(t, in, live);
     case 0x118: case 0x119: case 0x11A: case 0x11B: case 0x11C: case 0x11D: case 0x11E: case 0x11F:
         return true;   /* prefetch and hint nops */
     case 0x140: case 0x141: case 0x142: case 0x143: case 0x144: case 0x145: case 0x146: case 0x147:
@@ -2368,6 +2657,7 @@ static struct block *translate(uint32_t eip)
     flush_icache(t->a.start, t->a.p);
 
     b->eip = eip;
+    b->kind = (uint8_t)kind;
     b->loop = t->loop;
     b->ninsns = (uint16_t)n;
     b->nwords = (uint16_t)(t->a.p - cache_cur);
@@ -2618,12 +2908,18 @@ static void print_hot_blocks(void)
     for (unsigned h = 0; h < (1u << HTAB_BITS); h++)
         for (struct block *b = htab[h]; b; b = b->next) n++;
     struct block **v = malloc((n ? n : 1) * sizeof(*v));
-    uint64_t total = 0;
+    uint64_t total = 0, runs = 0, by_kind[BR_OTHER + 1] = { 0 };
     for (unsigned h = 0; h < (1u << HTAB_BITS); h++)
         for (struct block *b = htab[h]; b; b = b->next) {
             v[k++] = b;
             total += (uint64_t)b->count * b->nwords;
+            runs += b->count;
+            by_kind[b->kind] += b->count;
         }
+    fprintf(stderr, "xlat: %llu block runs: %llu end in a call, %llu a ret, %llu an indirect jump, %llu a jcc, "
+            "%llu a jmp\n", (unsigned long long)runs, (unsigned long long)by_kind[BR_CALL],
+            (unsigned long long)by_kind[BR_RET], (unsigned long long)by_kind[BR_IND],
+            (unsigned long long)by_kind[BR_JCC], (unsigned long long)by_kind[BR_JMP]);
     qsort(v, n, sizeof(*v), by_work);
     char path[512];
     snprintf(path, sizeof(path), "%s/hot.txt", count_dir);

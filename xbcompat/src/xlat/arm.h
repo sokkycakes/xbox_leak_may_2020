@@ -217,4 +217,32 @@ static inline uint32_t a_vstr_s(int s, int rn, int off)
 #define A_VCVT_S32_D_Z(s, d)   (0xEEBD0BC0u | SD(s) | VM(d))   /* s32 <- f64, toward zero */
 #define A_VCVT_S32_D_R(s, d)   (0xEEBD0B40u | SD(s) | VM(d))   /* s32 <- f64, FPSCR rounding */
 
+/* VFP single precision: s = 0..31 */
+#define A_VADD_S(d, n, m)      (0xEE300A00u | SD(d) | SN(n) | SM(m))
+#define A_VSUB_S(d, n, m)      (0xEE300A40u | SD(d) | SN(n) | SM(m))
+#define A_VMUL_S(d, n, m)      (0xEE200A00u | SD(d) | SN(n) | SM(m))
+#define A_VDIV_S(d, n, m)      (0xEE800A00u | SD(d) | SN(n) | SM(m))
+#define A_VSQRT_S(d, m)        (0xEEB10AC0u | SD(d) | SM(m))
+#define A_VCMP_S(d, m)         (0xEEB40A40u | SD(d) | SM(m))
+#define A_VMOVc_S(c, d, m)     ((uint32_t)(c) << 28 | 0x0EB00A40u | SD(d) | SM(m))
+#define A_VCVT_S_S32(d, m)     (0xEEB80AC0u | SD(d) | SM(m))   /* f32 <- s32 */
+#define A_VCVT_S32_S_Z(d, m)   (0xEEBD0AC0u | SD(d) | SM(m))   /* s32 <- f32, toward zero */
+#define A_VCVT_S32_S_R(d, m)   (0xEEBD0A40u | SD(d) | SM(m))   /* s32 <- f32, FPSCR rounding */
+
+/* NEON on D registers 0..31; q set: the Q form, d n m even (q = d / 2).
+   Its float arithmetic and estimates treat denormals as zero. */
+#define NEON3(base, q, d, n, m) ((base) | (uint32_t)(q) << 6 | VD(d) | VN(n) | VM(m))
+#define A_NAND(q, d, n, m)     NEON3(0xF2000110u, q, d, n, m)
+#define A_NBIC(q, d, n, m)     NEON3(0xF2100110u, q, d, n, m)   /* d = n & ~m */
+#define A_NORR(q, d, n, m)     NEON3(0xF2200110u, q, d, n, m)
+#define A_NEOR(q, d, n, m)     NEON3(0xF3000110u, q, d, n, m)
+#define A_NBSL(q, d, n, m)     NEON3(0xF3100110u, q, d, n, m)   /* d = d ? n : m, bitwise */
+#define A_NCEQ_F(q, d, n, m)   NEON3(0xF2000E00u, q, d, n, m)
+#define A_NMUL_F(q, d, n, m)   NEON3(0xF3000D10u, q, d, n, m)
+#define A_NRECPE(q, d, m)      NEON3(0xF3BB0500u, q, d, 0, m)
+#define A_NRECPS(q, d, n, m)   NEON3(0xF2000F10u, q, d, n, m)   /* 2 - n * m */
+#define A_NRSQRTE(q, d, m)     NEON3(0xF3BB0580u, q, d, 0, m)
+#define A_NRSQRTS(q, d, n, m)  NEON3(0xF2200F10u, q, d, n, m)   /* (3 - n * m) / 2 */
+#define A_NZERO(q, d)          NEON3(0xF2800010u, q, d, 0, 0)   /* vmov.i32 d, #0 */
+
 #endif
