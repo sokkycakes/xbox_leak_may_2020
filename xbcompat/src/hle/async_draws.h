@@ -20,7 +20,7 @@
 
 enum {
     AS_FIELD = 1, AS_RS, AS_TSS, AS_DRAW, AS_DRAW_UP, AS_DRAW_INDEXED, AS_DRAW_INDEXED_UP, AS_CLEAR,
-    AS_TARGET, AS_VIS_BEGIN, AS_VIS_END, AS_SWAP, AS_RAW, AS_RELEASE,
+    AS_TARGET, AS_VIS_BEGIN, AS_VIS_END, AS_SWAP, AS_RAW, AS_RELEASE, AS_FENCE,
 };
 
 #define ASYNC_DRAWS_PER_POST 8   /* draws queued before the batch goes to the worker */
@@ -227,6 +227,18 @@ static void async_raw_front(const ULONG *p, unsigned n)
     async_post();
     renderer_async_flush();
     d3d_async_after_sync();
+}
+
+/* The title checks fences against the GPU's time (its inlined code reads
+   the device's m_pGpuTime) to know when it may rewrite a buffer the GPU is
+   reading.  Queued draws read buffers when the worker gets to them, so the
+   GPU's time is the last fence the worker passed.  Sent at once: a title
+   may spin on it. */
+static void async_fence(ULONG f)
+{
+    uint32_t *p = as_op(AS_FENCE, 1);
+    p[0] = f;
+    async_post();
 }
 
 static void async_drawn(void)
@@ -461,6 +473,10 @@ void d3d_async_run(const uint32_t *buf, unsigned n)
             break;
         case AS_RAW: pb_interpret(a + 1, a[0]); break;
         case AS_RELEASE: D3DResource_Release((D3DResource *)(uintptr_t)a[0]); break;
+        case AS_FENCE:
+            hud_batch_flush();   /* batched HUD draws have read their vertices */
+            __atomic_store_n(&async_gpu_time, a[0], __ATOMIC_RELEASE);
+            break;
         default: fprintf(stderr, "D3D: bad queued op %u\n", op); abort();
         }
         i += len;
@@ -509,6 +525,12 @@ bool d3d_async_ready(void)
     async_sent = *front;
     async_clean();
     async_frames_done = front->frame;
+    /* From now on the GPU's time is the worker's (bind_miniport pointed it
+       at the CPU's: m_pGpuTime follows m_CpuTime in the device). */
+    if (front->cpu_time) {
+        async_gpu_time = *front->cpu_time;
+        front->cpu_time[1] = (ULONG)(uintptr_t)&async_gpu_time;
+    }
     async_on = true;
     xlog("D3D: queued drawing on (frame %u)", front->frame);
     return true;
@@ -546,6 +568,7 @@ void d3d_async_before_sync(void)
 void d3d_async_after_sync(void)
 {
     d3d_state *back = &d3d_storage[1], *front = &d3d_storage[0];
+    __atomic_store_n(&async_gpu_time, fence, __ATOMIC_RELEASE);   /* everything has been drawn */
     for (unsigned i = 0; i < sizeof async_fields / sizeof async_fields[0]; i++)
         memcpy((char *)front + async_fields[i].off, (const char *)back + async_fields[i].off, async_fields[i].size);
     memcpy(front->render_state, back->render_state, front->rs_count * 4);

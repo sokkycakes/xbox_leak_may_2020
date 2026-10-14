@@ -432,6 +432,10 @@ static unsigned d3d_build(void)
    m_pVerticalBlankCallback, m_VerticalBlankEvent.  Their offset is per build
    (5849: from Phantom Dust's inlined code); XBCOMPAT_MINIPORT_OFFSET
    overrides it. */
+/* The GPU's time while drawing is queued (async_draws.h): the fence the
+   worker has got to.  Otherwise the device's GPU time is its CPU time. */
+static volatile ULONG async_gpu_time;
+
 static void bind_miniport(ULONG *dev)
 {
     static const struct { unsigned build, swap_cb; } layouts[] = { { 5849, 0x1db4 } };
@@ -3760,6 +3764,7 @@ typedef struct {
     GLuint buf;                  /* CONV_RANGE: the indices; CONV_VBO: the vertices */
     size_t span;                 /* CONV_VBO: bytes from vertex 0 in buf and raw */
     unsigned verified;           /* draw serial of the last check against the source */
+    size_t verified_to;          /* CONV_VBO: bytes from vertex 0 that check covered */
 } conv_entry;
 
 #define CONV_SLOTS 1024
@@ -3791,7 +3796,7 @@ static conv_entry *conv_find(const UCHAR *src, ULONG stride, ULONG kind, ULONG c
     free(victim->raw);
     free(victim->out);
     if (victim->buf) { p_glDeleteBuffers(1, &victim->buf); gc_forget_buffer(victim->buf); }
-    *victim = (conv_entry){ src, stride, kind, count, 0, 0, NULL, 0, NULL, 0, d3d.frame, 0, 0, 0 };
+    *victim = (conv_entry){ src, stride, kind, count, 0, 0, NULL, 0, NULL, 0, d3d.frame, 0, 0, 0, 0 };
     return victim;
 }
 
@@ -3806,13 +3811,22 @@ static bool conv_full_due(conv_entry *e)
     return true;
 }
 
-/* Whether 33 samples spread over `len` bytes of units `step` apart (the
-   first `size` bytes of each) match `copy`. */
+/* Whether `len` bytes of units `step` apart match `copy`: all of them when
+   there are few (a HUD's quads, whose texture coordinates and colors change
+   while the positions stay), else 33 samples of `size` bytes spread over
+   the data, each at a different place in its unit so that every field of a
+   vertex gets looked at, not only the first. */
+#define CONV_WHOLE_BYTES 4096
 static bool conv_sampled_same(const UCHAR *copy, const UCHAR *cur, size_t len, size_t step, size_t size)
 {
+    if (len <= CONV_WHOLE_BYTES) return !memcmp(copy, cur, len);
     size_t units = (len - size) / step + 1;
     for (size_t i = 0; i <= 32; i++) {
         size_t off = (i == 32 ? units - 1 : units * i / 32) * step;
+        if (step > size) {
+            size_t in = (i * size) % (step - size + 1) / size * size;
+            if (off + in + size <= len) off += in;
+        }
         /* Fixed-size copies compile to single loads (a variable size made
            byte loops). */
         if (size == 2) {
@@ -3891,14 +3905,18 @@ static GLuint stream_buffer(const UCHAR *base, ULONG stride, vrange r, size_t ne
     if (!p_glGenBuffers || r.hi <= r.lo || !stride) return 0;
     conv_entry *e = conv_find(base, stride, CONV_VBO, 0);
     e->used = conv_serial;
-    /* Attributes of one stream share the entry: check it once per draw. */
-    if (e->buf && need <= e->span && e->verified == conv_serial) return e->buf;
+    /* Attributes of one stream share the entry: check it once per draw, as
+       far as the attribute that reaches furthest (a later attribute of the
+       last vertex, its texture coordinates, lies past the position's). */
+    if (e->buf && need <= e->span && e->verified == conv_serial && need <= e->verified_to) return e->buf;
     e->verified = conv_serial;
     if (e->buf && need <= e->span) {
         size_t from = (size_t)r.lo * stride, to = need;
         if (conv_full_due(e)) from = 0, to = e->span;
-        else if (conv_sampled_same(e->raw + from, base + from, to - from, stride, 4)) return e->buf;
+        e->verified_to = to;
+        if (to == need && conv_sampled_same(e->raw + from, base + from, to - from, stride, 4)) return e->buf;
         if (!conv_refresh(e->raw + from, base + from, to - from)) return e->buf;
+        e->verified_to = e->span;
         /* The bytes outside from..to were only sampled, so bring the whole
            copy current before it becomes the buffer's new store. */
         memcpy(e->raw, base, e->span);
@@ -3915,7 +3933,7 @@ static GLuint stream_buffer(const UCHAR *base, ULONG stride, vrange r, size_t ne
     if (!raw) return 0;
     e->raw = raw;
     memcpy(e->raw, base, need);
-    e->span = need;
+    e->span = e->verified_to = need;
     e->checked = d3d.frame;
     if (!e->buf) p_glGenBuffers(1, &e->buf);
     gc_bind_buffer(GL_ARRAY_BUFFER, e->buf);
@@ -6732,8 +6750,10 @@ static void NTAPI D3DDevice_SetDebugMarker(ULONG v) { (void)v; }
 static void NTAPI D3DDevice_SetTile(ULONG i, const void *t) { (void)i; (void)t; }
 static void NTAPI D3DDevice_GetTile(ULONG i, ULONG *t) { (void)i; memset(t, 0, 24); }
 static void NTAPI D3DDevice_KickPushBuffer(void) { pusher_drain(); }
-/* Drawing is synchronous, so every fence has already passed. */
-static ULONG NTAPI D3DDevice_InsertFence(void) { return 1; }
+/* A fence: drawing that waits has passed it at once, queued drawing when
+   the worker gets there (calls that wait for one drain the queue first). */
+static ULONG NTAPI D3D_SetFence(ULONG Flags);
+static ULONG NTAPI D3DDevice_InsertFence(void) { return D3D_SetFence(0); }
 static BOOLEAN NTAPI D3DDevice_IsFencePending(ULONG f) { (void)f; return 0; }
 static void NTAPI D3DDevice_BlockOnFence(ULONG f) { (void)f; }
 /* The ramp the video DAC applied on the Xbox (the dashboard's screen saver
@@ -8260,12 +8280,17 @@ static void FASTCALL D3DDevice_SwitchTexture(ULONG Method, ULONG Data, ULONG For
 }
 
 static ULONG fence;
+static bool async_front(void);
+static void async_fence(ULONG f);
 static ULONG NTAPI D3D_SetFence(ULONG Flags)
 {
     (void)Flags;
     pusher_drain();
-    if (d3d.cpu_time) *d3d.cpu_time = fence + 1;
-    return ++fence;
+    ++fence;
+    if (d3d.cpu_time) *d3d.cpu_time = fence;
+    if (async_front()) async_fence(fence);
+    else __atomic_store_n(&async_gpu_time, fence, __ATOMIC_RELEASE);
+    return fence;
 }
 static void NTAPI D3D_BlockOnTime(ULONG Time, ULONG Flags) { (void)Time; (void)Flags; pusher_drain(); }
 static void NTAPI D3D_BlockOnResource(D3DResource *r) { (void)r; }
