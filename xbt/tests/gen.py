@@ -821,6 +821,8 @@ def g_x87_misc(g):
         g.emit("mov dword [0x%x], 0" % (DATA + 0x100 + 24))
         g.emit("and word [0x%x], 0x7d00" % (DATA + 0x100 + 4))
         g.emit("mov word [0x%x], 0" % (DATA + 0x100 + 8))     # tag word is not tracked
+        for off in range(28 + 20, 108, 4):                       # empty registers hold stale data
+            g.emit("mov dword [0x%x], 0" % (DATA + 0x100 + off))
     elif k == 2:
         g.emit("fstp tword [0x%x]" % (DATA + 0x200))
         g.emit("fld tword [0x%x]" % (DATA + 0x200))
@@ -829,6 +831,190 @@ def g_x87_misc(g):
         g.emit("fbld [0x%x]" % (DATA + 0x300))
     g.emit("fstp qword [0x%x]" % (FP_EXACT + 0x180))
     g.emit("fstp qword [0x%x]" % (FP_EXACT + 0x188))
+
+
+
+# --------------------------------------------------------------------------
+# SSE (single precision) and MMX
+SSE_SRC = DATA + 0x600
+MMX_OUT = DATA + 0xe00
+APPROX_XMM = 0x10000      # flags_mask marker: compare xmm lanes with a tolerance
+
+
+def f32_bits(v):
+    return struct.unpack("<I", struct.pack("<f", v))[0]
+
+
+class SSEGen:
+    def __init__(self, g):
+        self.g = g
+        self.r = g.r
+        self.n = 0
+
+    def emit(self, x):
+        self.g.emit(x)
+
+    def mem128(self, vals=None):
+        r = self.r
+        addr = SSE_SRC + 16 * (self.n % 32)
+        self.n += 1
+        for k in range(4):
+            v = fp_value(r) if vals is None else vals[k]
+            self.emit("mov dword [0x%x], 0x%x" % (addr + 4 * k, f32_bits(v)))
+        return addr
+
+    def xr(self):
+        return self.r.randint(0, 6)      # xmm7 only receives approximate (rcp/rsqrt) results
+
+    def src(self, width=16):
+        r = self.r
+        if r.random() < 0.6:
+            return "xmm%d" % self.xr()
+        a = self.mem128()
+        return {16: "oword", 8: "qword", 4: "dword"}[width] + " [0x%x]" % a
+
+
+def g_sse(g):
+    s = SSEGen(g)
+    r = g.r
+    for _ in range(r.randint(1, 4)):
+        k = r.randint(0, 13)
+        d = s.xr()
+        if k <= 2:
+            op = r.choice(["addps", "subps", "mulps", "divps", "minps", "maxps", "andps", "andnps",
+                           "orps", "xorps", "unpcklps", "unpckhps", "sqrtps"])
+            src = s.src()
+            if op == "sqrtps":
+                g.emit("andps xmm%d, [0x%x]" % (d, s.mem128([float('nan')] * 0 or [0] * 0) if 0 else s.mem128()))
+                g.emit("sqrtps xmm%d, %s" % (d, src)) if False else None
+            if op == "sqrtps":
+                # make the source non-negative
+                a = s.mem128([abs(fp_value(r)) for _ in range(4)])
+                g.emit("sqrtps xmm%d, oword [0x%x]" % (d, a))
+            else:
+                g.emit("%s xmm%d, %s" % (op, d, src.replace("oword ", "")))
+        elif k <= 4:
+            op = r.choice(["addss", "subss", "mulss", "divss", "minss", "maxss", "sqrtss"])
+            src = s.src(4)
+            if op == "sqrtss":
+                a = s.mem128([abs(fp_value(r)) for _ in range(4)])
+                src = "dword [0x%x]" % a
+            g.emit("%s xmm%d, %s" % (op, d, src.replace("dword ", "")))
+        elif k == 5:
+            src = s.src()
+            g.emit("shufps xmm%d, %s, 0x%x" % (d, src.replace("oword ", ""), r.randint(0, 255)))
+        elif k == 6:
+            op = r.choice(["cmpps", "cmpss"])
+            src = s.src(16 if op == "cmpps" else 4)
+            g.emit("%s xmm%d, %s, %d" % (op, d, src.replace("oword ", "").replace("dword ", ""), r.randint(0, 7)))
+        elif k == 7:
+            op = r.choice(["movaps", "movups", "movss", "movlps", "movhps", "movhlps", "movlhps"])
+            if op in ("movhlps", "movlhps"):
+                g.emit("%s xmm%d, xmm%d" % (op, d, s.xr()))
+            elif op in ("movlps", "movhps"):
+                a = s.mem128()
+                if r.random() < 0.5:
+                    g.emit("%s xmm%d, [0x%x]" % (op, d, a))
+                else:
+                    g.emit("%s [0x%x], xmm%d" % (op, a, d))
+            else:
+                if r.random() < 0.5:
+                    g.emit("%s xmm%d, %s" % (op, d, s.src(4 if op == "movss" else 16).replace("oword ", "").replace("dword ", "")))
+                else:
+                    a = SSE_SRC + 0x200 + 16 * r.randint(0, 15)
+                    g.emit("%s [0x%x], xmm%d" % (op, a, d))
+        elif k == 8:
+            op = r.choice(["comiss", "ucomiss"])
+            g.emit("%s xmm%d, %s" % (op, d, s.src(4).replace("dword ", "")))
+            g.write_flags(ALL)
+            c = r.choice(["b", "ae", "e", "ne", "be", "a", "p", "np"])
+            if r.random() < 0.5:
+                g.emit("set%s %s" % (c, R8[r.randint(0, 3)]))
+            else:
+                l = g.newlabel()
+                g.emit("j%s %s" % (c, l))
+                g.emit("inc esi")
+                g.emit("%s:" % l)
+        elif k == 9:
+            op = r.choice(["cvtsi2ss", "cvtss2si", "cvttss2si", "cvtpi2ps", "cvtps2pi", "cvttps2pi"])
+            if op == "cvtsi2ss":
+                g.emit("cvtsi2ss xmm%d, %s" % (d, R32[g.gpr()]))
+            elif op in ("cvtss2si", "cvttss2si"):
+                a = s.mem128([r.uniform(-1e6, 1e6) for _ in range(4)])
+                g.emit("%s %s, dword [0x%x]" % (op, R32[g.gpr()], a))
+            elif op == "cvtpi2ps":
+                g.emit("movq mm1, [0x%x]" % (DATA + 8 * r.randint(0, 100)))
+                g.emit("cvtpi2ps xmm%d, mm1" % d)
+                g.emit("emms")
+            else:
+                a = s.mem128([r.uniform(-1e6, 1e6) for _ in range(4)])
+                g.emit("%s mm2, qword [0x%x]" % (op, a))
+                g.emit("movq [0x%x], mm2" % (MMX_OUT + 0x80))
+                g.emit("emms")
+        elif k == 10:
+            g.emit("movmskps %s, xmm%d" % (R32[g.gpr()], d))
+        elif k == 11:
+            op = r.choice(["rcpps", "rsqrtps", "rcpss", "rsqrtss"])
+            a = s.mem128([abs(fp_value(r)) + 0.5 for _ in range(4)])
+            g.emit("%s xmm7, [0x%x]" % (op, a))
+            g.approx_xmm = True
+        elif k == 12:
+            g.emit("stmxcsr [0x%x]" % (DATA + 0xbe0))
+            g.emit("ldmxcsr [0x%x]" % (DATA + 0xbe0))
+            g.emit("and dword [0x%x], ~0x3f" % (DATA + 0xbe0))   # exception flags are not emulated
+        else:
+            g.emit("xorps xmm%d, xmm%d" % (d, d))
+
+
+def g_mmx(g):
+    r = g.r
+    used = set()
+    for i in range(r.randint(1, 3)):
+        m = r.randint(0, 7)
+        g.emit("movq mm%d, [0x%x]" % (m, DATA + 8 * r.randint(0, 200)))
+        used.add(m)
+    ops2 = ["paddb", "paddw", "paddd", "psubb", "psubw", "psubd", "paddsb", "paddsw", "paddusb", "paddusw",
+            "psubsb", "psubsw", "psubusb", "psubusw", "pmullw", "pmulhw", "pmulhuw", "pmaddwd", "pand", "pandn",
+            "por", "pxor", "pcmpeqb", "pcmpeqw", "pcmpeqd", "pcmpgtb", "pcmpgtw", "pcmpgtd", "punpcklbw",
+            "punpcklwd", "punpckldq", "punpckhbw", "punpckhwd", "punpckhdq", "packsswb", "packssdw", "packuswb",
+            "pminub", "pmaxub", "pminsw", "pmaxsw", "pavgb", "pavgw", "psadbw",
+            "psllw", "pslld", "psllq", "psrlw", "psrld", "psrlq", "psraw", "psrad"]
+    for _ in range(r.randint(1, 6)):
+        k = r.randint(0, 9)
+        d = r.choice(sorted(used))
+        if k <= 5:
+            op = r.choice(ops2)
+            if op.startswith("ps") and op[2] in "lr" and r.random() < 0.5:
+                g.emit("%s mm%d, %d" % (op, d, r.choice([0, 1, 3, 7, 8, 15, 16, 31, 32, 63, 64, 200])))
+            elif op.startswith("ps") and op[2] in "lr" and r.random() < 0.5:
+                g.emit("mov dword [0x%x], %d" % (DATA + 0xbd0, r.choice([0, 1, 5, 15, 16, 33, 64, 99])))
+                g.emit("mov dword [0x%x], %d" % (DATA + 0xbd4, r.choice([0, 0, 0, 1])))
+                g.emit("%s mm%d, [0x%x]" % (op, d, DATA + 0xbd0))
+            elif r.random() < 0.5:
+                s = r.randint(0, 7)
+                if s not in used:
+                    g.emit("movq mm%d, [0x%x]" % (s, DATA + 8 * r.randint(0, 200)))
+                    used.add(s)
+                g.emit("%s mm%d, mm%d" % (op, d, s))
+            else:
+                g.emit("%s mm%d, [0x%x]" % (op, d, DATA + 8 * r.randint(0, 200)))
+        elif k == 6:
+            g.emit("pshufw mm%d, [0x%x], 0x%x" % (d, DATA + 8 * r.randint(0, 200), r.randint(0, 255)))
+        elif k == 7:
+            g.emit("pinsrw mm%d, %s, %d" % (d, R32[g.gpr()], r.randint(0, 3)))
+            g.emit("pextrw %s, mm%d, %d" % (R32[g.gpr()], d, r.randint(0, 3)))
+        elif k == 8:
+            g.emit("pmovmskb %s, mm%d" % (R32[g.gpr()], d))
+            g.emit("movd %s, mm%d" % (R32[g.gpr()], d))
+        else:
+            g.emit("movd mm%d, %s" % (d, R32[g.gpr()]))
+            if r.random() < 0.5:
+                s = r.choice(sorted(used))
+                g.emit("mov edi, 0x%x" % (MMX_OUT + 0x100))
+                g.emit("maskmovq mm%d, mm%d" % (d, s))
+    for m in sorted(used):
+        g.emit("movq [0x%x], mm%d" % (MMX_OUT + 8 * m, m))
+    g.emit("emms")
 
 
 GROUPS = {
@@ -841,7 +1027,7 @@ GROUPS = {
     "bcd": (Gen.g_bcd, 1), "misc": (Gen.g_misc, 1), "jecxz": (Gen.g_jecxz, 1),
     "flagcross": (Gen.g_flagcross, 3),
 }
-FP_GROUPS = {"x87": (g_x87, 4), "x87misc": (g_x87_misc, 1)}
+FP_GROUPS = {"x87": (g_x87, 4), "x87misc": (g_x87_misc, 1), "sse": (g_sse, 4), "mmx": (g_mmx, 3)}
 
 EXTRA_GROUPS = {}   # filled by other modules (x87, sse)
 ABI = True          # flags are dead across call/ret (matches xbt default)
@@ -849,14 +1035,16 @@ ABI = True          # flags are dead across call/ret (matches xbt default)
 
 def make_test(rng, kinds, length):
     g = Gen(rng)
+    g.approx_xmm = False
     for _ in range(length):
         k = rng.choices(kinds, weights=[ALL_GROUPS[k][1] for k in kinds])[0]
         ALL_GROUPS[k][0](g)
     regs = [rng.getrandbits(32) for _ in range(8)]
     regs[4] = STACK_TOP
     eflags = rng.getrandbits(32) & ALL
-    xmm = bytes(rng.getrandbits(8) for _ in range(128))
-    return g.lines, regs, eflags, (ALL & ~g.undef) | DF, xmm
+    xmm = b"".join(struct.pack("<f", fp_value(rng)) for _ in range(32))
+    mask = (ALL & ~g.undef) | DF | (APPROX_XMM if g.approx_xmm else 0)
+    return g.lines, regs, eflags, mask, xmm
 
 
 ALL_GROUPS = dict(GROUPS)
@@ -904,7 +1092,7 @@ def main():
     global ABI
     ABI = not a.strict
     rng = random.Random(a.seed)
-    kinds = a.kinds.split(",") if a.kinds else list(GROUPS)
+    kinds = a.kinds.split(",") if a.kinds else list(ALL_GROUPS)
     tests = []
     for i in range(a.count):
         tests.append(make_test(rng, kinds, rng.randint(1, a.length)))

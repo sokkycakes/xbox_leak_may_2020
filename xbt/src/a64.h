@@ -464,6 +464,7 @@ static inline int a64_ldst_off(a64buf *b, int size, int opc, int rt, int rn, int
         a64_put(b, enc_ldst_simm9(size, opc, rt, rn, off, 0));
         return 1;
     }
+    __builtin_trap();         /* translator bug: callers must pass encodable offsets */
     return 0;
 }
 
@@ -496,6 +497,8 @@ static inline int a64_ldst_off(a64buf *b, int size, int opc, int rt, int rn, int
 /* Load/store pair. opc: 0 = 32-bit, 2 = 64-bit. mode: 2 = offset, 1 = post, 3 = pre */
 static inline uint32_t enc_ldp(int opc, int load, int mode, int rt, int rt2, int rn, int imm7)
 {
+    if (imm7 < -64 || imm7 > 63)
+        __builtin_trap();     /* translator bug: offset not encodable */
     return 0x28000000u | (uint32_t)opc << 30 | (uint32_t)mode << 23 |
            (uint32_t)load << 22 | ((uint32_t)imm7 & 0x7f) << 15 |
            (uint32_t)rt2 << 10 | (uint32_t)rn << 5 | (uint32_t)rt;
@@ -541,6 +544,7 @@ static inline int a64_fldst_off(a64buf *b, int sz, int load, int rt, int rn, int
         a64_put(b, enc_fldst_simm9(sz, load, rt, rn, off));
         return 1;
     }
+    __builtin_trap();
     return 0;
 }
 #define FSZ_B 0
@@ -750,6 +754,18 @@ static inline uint32_t enc_v2(uint32_t base, int q, int size, int rd, int rn)
 #define VI_SADDLP 0x0E202800u
 #define VI_UADDLP 0x2E202800u
 
+#define VF_RECPS  0x0E20FC00u
+#define VF_RSQRTS 0x0EA0FC00u
+#define VI_CMLT0  0x0E20A800u   /* compare signed less than zero (2-operand) */
+#define VS_USHL_D 0x7EE04400u   /* scalar ushl d, d, d */
+#define VS_SSHL_D 0x5EE04400u
+
+/* SHRN Vd.<narrow>, Vn.<wide>, #shift ; esize = narrow element size in bits */
+static inline void v_shrn(a64buf *b, int esize, int rd, int rn, int sh)
+{
+    a64_put(b, 0x0F008400u | (uint32_t)(2 * esize - sh) << 16 | (uint32_t)rn << 5 | (uint32_t)rd);
+}
+
 /* Shift by immediate: esize in bits (8,16,32,64). */
 static inline uint32_t enc_vshift(uint32_t base, int q, int esize, int shift_field, int rd, int rn)
 {
@@ -758,17 +774,22 @@ static inline uint32_t enc_vshift(uint32_t base, int q, int esize, int shift_fie
 #define VS_SHL  0x0F005400u
 #define VS_USHR 0x2F000400u
 #define VS_SSHR 0x0F000400u
+/* A 64-bit element with Q=0 is the scalar (D register) form. */
+static inline uint32_t vshift_base(uint32_t base, int q, int esize)
+{
+    return (esize == 64 && !q) ? (base | 0x50000000u) : base;
+}
 static inline void v_shl(a64buf *b, int q, int esize, int rd, int rn, int sh)
 {
-    a64_put(b, enc_vshift(VS_SHL, q, esize, esize + sh, rd, rn));
+    a64_put(b, enc_vshift(vshift_base(VS_SHL, q, esize), q, esize, esize + sh, rd, rn));
 }
 static inline void v_ushr(a64buf *b, int q, int esize, int rd, int rn, int sh)
 {
-    a64_put(b, enc_vshift(VS_USHR, q, esize, 2 * esize - sh, rd, rn));
+    a64_put(b, enc_vshift(vshift_base(VS_USHR, q, esize), q, esize, 2 * esize - sh, rd, rn));
 }
 static inline void v_sshr(a64buf *b, int q, int esize, int rd, int rn, int sh)
 {
-    a64_put(b, enc_vshift(VS_SSHR, q, esize, 2 * esize - sh, rd, rn));
+    a64_put(b, enc_vshift(vshift_base(VS_SSHR, q, esize), q, esize, 2 * esize - sh, rd, rn));
 }
 
 /* Element moves. imm5 encodes size+index. */

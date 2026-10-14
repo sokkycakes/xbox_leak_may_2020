@@ -82,12 +82,23 @@ def compare(cases, native, xbt, srcs, show, xmm_check=True):
         for r in range(8):
             if ra[0][r] != rb[0][r]:
                 diffs.append("%s: native %08x xbt %08x" % (R32[r], ra[0][r], rb[0][r]))
-        if (ra[1] ^ rb[1]) & m:
+        if (ra[1] ^ rb[1]) & m & 0xfff:
             diffs.append("flags (mask %s): native %s | xbt %s" % (flagstr(m), flagstr(ra[1] & m), flagstr(rb[1] & m)))
         if xmm_check and ra[3] != rb[3]:
             for r in range(8):
                 x, y = ra[3][16 * r:16 * r + 16], rb[3][16 * r:16 * r + 16]
-                if x != y:
+                if x == y:
+                    continue
+                ok = True
+                for k in range(4):
+                    fx = struct.unpack_from("<f", x, 4 * k)[0]
+                    fy = struct.unpack_from("<f", y, 4 * k)[0]
+                    if x[4 * k:4 * k + 4] == y[4 * k:4 * k + 4] or (fx != fx and fy != fy):
+                        continue      # identical, or both NaN (NaN sign is not emulated)
+                    if (m & 0x10000) and abs(fx - fy) <= 2.0 ** -11 * max(abs(fx), abs(fy)):
+                        continue      # rcpps/rsqrtps: approximation precision differs
+                    ok = False
+                if not ok:
                     diffs.append("xmm%d: native %s xbt %s" % (r, x.hex(), y.hex()))
         ma, mb = bytearray(ra[4]), bytearray(rb[4])
         # x87 transcendental results: relative tolerance on doubles
