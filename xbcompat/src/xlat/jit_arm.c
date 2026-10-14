@@ -113,6 +113,23 @@ static FILE *perf_map;   /* XLAT_PERF_MAP: names blocks for perf */
 static uint64_t fb_count[0x200], fb_x87[8][16], n_blocks, n_insns, n_native, n_links, n_lookups;
 
 static inline bool in_stop(uint32_t a) { return a - stop_lo < stop_hi - stop_lo; }
+
+/* XLAT_INTERP_OPS=x87,sse,int (any of them, or all): instructions of those
+   classes go to the interpreter, to tell which part of the code generator a
+   title's misbehaviour comes from.  sse covers MMX too; int is the rest
+   (branches that end a block stay translated). */
+enum { OPS_X87 = 1, OPS_SSE = 2, OPS_INT = 4 };
+static unsigned interp_ops;
+
+static unsigned op_class(const xinsn *in)
+{
+    unsigned op = in->op;
+    if (op >= 0xD8 && op <= 0xDF) return OPS_X87;
+    if ((op >= 0x110 && op <= 0x117) || (op >= 0x128 && op <= 0x12F) || (op >= 0x150 && op <= 0x17F)
+        || (op >= 0x1C2 && op <= 0x1C6) || op >= 0x1D0 || op == 0x1AE)
+        return OPS_SSE;
+    return OPS_INT;
+}
 static inline unsigned islot(uint32_t eip) { return (eip ^ (eip >> ITAB_SHIFT)) & (ITAB_SIZE - 1); }
 static inline unsigned hslot(uint32_t eip) { return (eip * 0x9E3779B1u) >> (32 - HTAB_BITS); }
 
@@ -2694,7 +2711,7 @@ static struct block *translate(uint32_t eip, unsigned top)
         }
         t->cur = i;
         t->skip = 0;
-        if (in->len && native(t, in, t->live[i + 1])) {
+        if (in->len && !(interp_ops & op_class(in)) && native(t, in, t->live[i + 1])) {
             nat += 1 + t->skip;
             i += t->skip;
         } else {
@@ -3068,6 +3085,15 @@ void jit_init(uint32_t lo, uint32_t hi, bool flags_at_stop)
     abi_live = safe ? FL_ALL : 0;
     stats = getenv("XLAT_STATS") != NULL;
     count_dir = getenv("XLAT_COUNT");
+    const char *ops = getenv("XLAT_INTERP_OPS");
+    if (ops) {
+        if (strstr(ops, "x87")) interp_ops |= OPS_X87;
+        if (strstr(ops, "sse")) interp_ops |= OPS_SSE;
+        if (strstr(ops, "int")) interp_ops |= OPS_INT;
+        if (strstr(ops, "all")) interp_ops = OPS_X87 | OPS_SSE | OPS_INT;
+        fprintf(stderr, "xlat: interpreting%s%s%s\n", interp_ops & OPS_X87 ? " x87" : "",
+                interp_ops & OPS_SSE ? " sse/mmx" : "", interp_ops & OPS_INT ? " integer" : "");
+    }
     cache = mmap(NULL, CACHE_BYTES, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (cache == MAP_FAILED) die("cannot map the code cache");
     cache_end = cache + CACHE_BYTES / 4;
