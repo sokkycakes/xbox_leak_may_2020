@@ -1,0 +1,55 @@
+#!/bin/sh
+#
+# Runs the dashboard once the boot animation is done, and starts it again
+# if it ever exits.
+#
+
+BOOTANI_PIDFILE=/var/run/bootani.pid
+
+# shellcheck source=/dev/null
+[ -r /etc/default/theseus ] && . /etc/default/theseus
+# The display mode bootani used (KMS_MODE=WxH), so the dashboard keeps it.
+# shellcheck source=/dev/null
+[ -r /etc/default/kms ] && . /etc/default/kms
+
+# Test builds, settings and logs through the boot stick (see theseus-stick).
+if [ -x /usr/libexec/theseus-stick ]; then
+	/usr/libexec/theseus-stick overlay
+	# shellcheck source=/dev/null
+	[ -r /var/run/theseus.env ] && . /var/run/theseus.env
+	/usr/libexec/theseus-stick logs &
+fi
+
+# bootani owns the display until its last frame; KMS allows one master.
+if [ -r "$BOOTANI_PIDFILE" ]; then
+	pid=$(cat "$BOOTANI_PIDFILE")
+	while [ -n "$pid" ] && [ -d "/proc/$pid" ]; do
+		sleep 0.1
+	done
+fi
+
+export HOME=/root
+# User data and shipped files are the same tree (see theseus.mk).
+export XDG_DATA_HOME=/opt
+export SDL_VIDEODRIVER=kmsdrm
+export KMS_MODE
+# Draw the dashboard at the Xbox's own 640x480 and stretch it over the
+# display mode, as the Xbox's video encoder did across 720x480 NTSC.
+# THESEUS_SCENE= (empty) draws at the display mode instead.
+export THESEUS_SCENE="${THESEUS_SCENE-640x480}"
+export SDL_AUDIODRIVER=alsa
+
+# Same output bootani picks: the ALSA default (card 0, device 0) if it
+# exists, otherwise the first HDMI/DisplayPort output of the Intel HD Audio
+# card. On the Chromebox only the HDMI codec is driven, so that's the usual
+# case there.
+if [ -z "$AUDIODEV" ] && ! grep -q '^00-00:.*playback' /proc/asound/pcm 2>/dev/null; then
+	if aplay -L 2>/dev/null | grep -q '^hdmi:CARD=PCH,DEV=0$'; then
+		export AUDIODEV=hdmi:CARD=PCH,DEV=0
+	fi
+fi
+
+while true; do
+	/opt/theseus/theseus --dashboard --no-toolbar --no-boot-anim $THESEUS_ARGS
+	sleep 1
+done

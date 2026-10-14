@@ -1,0 +1,22 @@
+From: bootani <bootani@localhost>
+Subject: [PATCH] kmsdrm: use XRGB8888 for the scanout surface
+
+SDL creates its GBM scanout surface as ARGB8888. Some KMS drivers
+(virtio-gpu, and primary planes on several others) only scan out
+XRGB8888, so drmModeSetCrtc fails with EINVAL and SDL reports
+"Could not set videomode on CRTC". The primary plane ignores alpha
+anyway, so ask for XRGB8888, which every driver accepts.
+
+Upstream-Status: Inappropriate [bootani-specific]
+---
+--- a/src/video/kmsdrm/SDL_kmsdrmvideo.c	2026-10-08 01:04:16.707042067 +0000
++++ b/src/video/kmsdrm/SDL_kmsdrmvideo.c	2026-10-08 01:04:16.711856344 +0000
+@@ -1193,7 +1193,7 @@
+     SDL_VideoDisplay *display = SDL_GetDisplayForWindow(window);
+     SDL_DisplayData *dispdata = (SDL_DisplayData *)display->driverdata;
+ 
+-    uint32_t surface_fmt = GBM_FORMAT_ARGB8888;
++    uint32_t surface_fmt = GBM_FORMAT_XRGB8888;
+     uint32_t surface_flags = GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING;
+ 
+     EGLContext egl_context;

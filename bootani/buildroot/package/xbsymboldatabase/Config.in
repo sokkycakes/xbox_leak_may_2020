@@ -1,0 +1,4 @@
+config BR2_PACKAGE_XBSYMBOLDATABASE
+	bool "XbSymbolDatabase command-line scanner"
+	help
+	  Native offline XDK library scanner used to prepare xbcompat HLE maps.

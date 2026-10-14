@@ -1,0 +1,23 @@
+From: Codex <codex@openai.com>
+Subject: [PATCH] Pad short library names without reading beyond string literals
+
+The filter stores eight bytes, while names such as CDX and XAPI can be
+shorter. Copy and zero-pad the field instead of reading eight bytes from
+a shorter literal. This also fixes GCC 12 ARM -Werror=stringop-overread.
+
+Upstream: not submitted
+Signed-off-by: Codex <codex@openai.com>
+
+diff --git a/src/lib/libXbSymbolDatabase.c b/src/lib/libXbSymbolDatabase.c
+index bdb743a..14f0569 100644
+--- a/src/lib/libXbSymbolDatabase.c
++++ b/src/lib/libXbSymbolDatabase.c
+@@ -622,7 +622,7 @@ uint32_t XbSDB_GenerateLibraryFilter(const void* xb_header_addr, XbSDBLibraryHea
+                 library_header->filters[count].flag = library_flag;
+                 library_header->filters[count].build_version = xb_library_versions[library_index].wBuildVersion;
+                 library_header->filters[count].qfe_version = xb_library_versions[library_index].wFlags.QFEVersion;
+-                memcpy(library_header->filters[count].name, XbSDB_LibraryToString(library_flag), 8);
++                strncpy(library_header->filters[count].name, XbSDB_LibraryToString(library_flag), 8);
+ 
+                 if ((library_flag & (XBSDBLIB_D3D8 | XBSDBLIB_D3D8LTCG)) > 0) {
+ 

@@ -1,0 +1,11 @@
+config BR2_PACKAGE_BOX86
+	bool "box86"
+	depends on BR2_arm
+	depends on BR2_TOOLCHAIN_USES_GLIBC
+	depends on BR2_TOOLCHAIN_HAS_THREADS
+	help
+	  box86, a Linux x86 userspace emulator for 32-bit ARM with a
+	  dynamic recompiler. It runs the i386 build of xbcompat on a
+	  Raspberry Pi, calling the Pi's own libc, SDL2 and GL.
+
+	  https://github.com/ptitSeb/box86

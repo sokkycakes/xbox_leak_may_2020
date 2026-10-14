@@ -1,0 +1,12 @@
+# Sion: root logs in with a key (sion/authorized_keys on the boot stick, or
+# /data/sion/ssh/authorized_keys) or with PASSWORD from sion/sion.conf.
+# Without either, nobody can log in.
+PermitRootLogin yes
+PubkeyAuthentication yes
+AuthorizedKeysFile .ssh/authorized_keys /data/sion/ssh/authorized_keys
+PasswordAuthentication yes
+PermitEmptyPasswords no
+KbdInteractiveAuthentication no
+UseDNS no
+ClientAliveInterval 30
+Subsystem sftp /usr/libexec/sftp-server

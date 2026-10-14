@@ -1,0 +1,136 @@
+#!/bin/sh
+#
+# Early setup from the boot disk, right after the boot animation starts:
+# - settings (sion/sion.conf) and SSH keys from the EFI partition
+# - the SIONDATA partition on /data, grown to fill the disk on first boot
+# - /data/overlay copied over the root filesystem
+# - the check that keeps or drops a trial image (see "sion update")
+#
+
+. /usr/lib/sion/sion-lib.sh
+
+# Grow SIONDATA over the free space after it (a fresh stick is mostly empty
+# space past the image). Runs before anything on the disk is mounted.
+grow_data() {
+	data=$1
+	disk=$(part_disk "$data")
+	n=$(part_num "$data")
+	sysd=/sys/class/block/${disk##*/}
+	sysp=/sys/class/block/${data##*/}
+	for p in "$sysd"/*/partition; do
+		[ "$(cat "$p")" -gt "$n" ] && return 0
+	done
+	end=$(( $(cat "$sysp/start") + $(cat "$sysp/size") ))
+	# GPT keeps a 33-sector backup at the end; grow only for more than 64 MiB.
+	free=$(( $(cat "$sysd/size") - end - 34 ))
+	[ "$free" -gt 131072 ] || return 0
+	# At most 16 GiB: growing ext4 over a whole large stick writes gigabytes
+	# of inode tables at once, which cheap sticks handle badly.
+	size=$(( $(cat "$sysp/size") + free ))
+	max=$(( 16 * 1024 * 1024 * 2 ))
+	[ "$size" -gt "$max" ] && size=$max
+	[ "$size" -gt "$(cat "$sysp/size")" ] || return 0
+	log "growing $data to $((size / 2048)) MiB"
+	sfdisk -q --relocate gpt-bak-std "$disk" >> "$SION_LOG" 2>&1
+	echo ", $size" | sfdisk -q --no-reread -N "$n" "$disk" >> "$SION_LOG" 2>&1
+	partx -u "$disk" >> "$SION_LOG" 2>&1
+	sleep 0.5
+	e2fsck -fy "$data" >> "$SION_LOG" 2>&1
+	resize2fs "$data" >> "$SION_LOG" 2>&1
+}
+
+copy_from_esp() {
+	m=$(esp_mount) || return 1
+	if [ -r "$m/sion/sion.conf" ]; then
+		tr -d '\r' < "$m/sion/sion.conf" > "$SION_RUN/sion.conf"
+	fi
+	for f in authorized_keys wpa_supplicant.conf; do
+		[ -r "$m/sion/$f" ] && tr -d '\r' < "$m/sion/$f" > "$SION_RUN/$f"
+	done
+	# Host keys live here when there is no data partition.
+	if [ -d "$m/sion/ssh" ]; then
+		mkdir -p "$SION_RUN/esp-ssh"
+		cp "$m"/sion/ssh/ssh_host_* "$SION_RUN/esp-ssh/" 2>/dev/null
+	fi
+	esp_umount "$m"
+}
+
+setup_data() {
+	data=$(find_data) || { log "no SIONDATA partition: nothing persists"; return 1; }
+	[ -e "$SION_RUN/grown" ] || { grow_data "$data"; touch "$SION_RUN/grown"; }
+	e2fsck -p "$data" >> "$SION_LOG" 2>&1
+	mkdir -p "$SION_DATA"
+	if ! mount -t ext4 -o noatime "$data" "$SION_DATA"; then
+		log "mounting $data failed; repairing it"
+		e2fsck -fy "$data" >> "$SION_LOG" 2>&1
+		mount -t ext4 -o noatime "$data" "$SION_DATA" || { log "mounting $data failed"; return 1; }
+	fi
+	mkdir -p "$SION_DATA/overlay" "$SION_DATA/sion/ssh"
+	chmod 700 "$SION_DATA/sion/ssh"
+	if [ -n "$(ls -A "$SION_DATA/overlay")" ]; then
+		log "applying /data/overlay"
+		cp -a "$SION_DATA/overlay/." /
+	fi
+}
+
+setup_ssh() {
+	keys=$SION_DATA/sion/ssh
+	mountpoint -q "$SION_DATA" || keys=$SION_RUN/esp-ssh
+	mkdir -p /etc/ssh "$keys"
+	cp "$keys"/ssh_host_* /etc/ssh/ 2>/dev/null
+	chmod 600 /etc/ssh/ssh_host_*_key 2>/dev/null
+	if ! ls /etc/ssh/ssh_host_ed25519_key >/dev/null 2>&1; then
+		ssh-keygen -A >> "$SION_LOG" 2>&1
+		if mountpoint -q "$SION_DATA"; then
+			cp /etc/ssh/ssh_host_* "$keys/"
+		else
+			# Keep them on the stick so the machine's identity survives a reboot.
+			m=$(esp_mount) && mkdir -p "$m/sion/ssh" && cp /etc/ssh/ssh_host_* "$m/sion/ssh/"
+			[ -n "$m" ] && esp_umount "$m"
+		fi
+	fi
+	mkdir -p /root/.ssh
+	chmod 700 /root/.ssh
+	[ -r "$SION_RUN/authorized_keys" ] && cp "$SION_RUN/authorized_keys" /root/.ssh/authorized_keys
+	touch "$SION_DATA/sion/ssh/authorized_keys" 2>/dev/null
+	chmod 600 /root/.ssh/authorized_keys "$SION_DATA/sion/ssh/authorized_keys" 2>/dev/null
+	if [ -n "$PASSWORD" ]; then
+		hash=$(mkpasswd -m sha512 "$PASSWORD")
+		sed -i "s|^root:[^:]*:|root:$hash:|" /etc/shadow
+	fi
+	if [ "$SSH" = no ]; then
+		chmod -x /etc/init.d/S50sshd 2>/dev/null
+	fi
+}
+
+start() {
+	printf 'Starting sion: '
+	mount_efivars
+	if ! find_esp > /dev/null; then
+		log "no boot EFI partition found"
+		echo "no boot disk"
+		return 0
+	fi
+	log "boot partition $(find_esp), BootCurrent=$(efi_boot_current)"
+	copy_from_esp
+	load_conf
+	hostname "$HOSTNAME"
+	echo "$HOSTNAME" > /etc/hostname
+	setup_data
+	setup_ssh
+	# Keeps or drops a trial image once the system is up.
+	start-stop-daemon -S -b -x /usr/sbin/sion -- boot-check
+	echo "OK"
+}
+
+case "$1" in
+	start)
+		start;;
+	stop)
+		sync
+		mountpoint -q "$SION_DATA" && umount "$SION_DATA"
+		;;
+	*)
+		echo "Usage: $0 {start|stop}"
+		exit 1
+esac

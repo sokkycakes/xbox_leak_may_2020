@@ -1,0 +1,34 @@
+From: Claude <noreply@anthropic.com>
+Subject: [PATCH] bgfx: load GL entry points through EGL when there is no libGL
+
+On Linux, bgfx's GL backend takes its entry points from libGL.so.1. A
+Mesa built for EGL only (no GLX) has no libGL, but EGL 1.5's
+eglGetProcAddress returns every GL function, core ones included, so
+fall back to it.
+
+Upstream: not sent
+Signed-off-by: Claude <noreply@anthropic.com>
+---
+diff --git a/theseus/third-party/bgfx/src/glcontext_egl.cpp b/theseus/third-party/bgfx/src/glcontext_egl.cpp
+index c722b45..48cb01e 100644
+--- a/theseus/third-party/bgfx/src/glcontext_egl.cpp
++++ b/theseus/third-party/bgfx/src/glcontext_egl.cpp
+@@ -800,11 +800,17 @@ WL_EGL_IMPORT
+ 
+ 		void* lib = bx::dlopen(LIBRARY_NAME);
+ 
++		// A Mesa without GLX ships no libGL.so.1, but EGL 1.5 hands out every
++		// GL entry point (core ones included) through eglGetProcAddress.
+ #		define GL_EXTENSION(_optional, _proto, _func, _import)                           \
+ 			{                                                                            \
+ 				if (NULL == _func)                                                       \
+ 				{                                                                        \
+-					_func = bx::dlsym<_proto>(lib, #_import);                            \
++					_func = NULL != lib ? bx::dlsym<_proto>(lib, #_import) : NULL;       \
++					if (NULL == _func)                                                   \
++					{                                                                    \
++						_func = reinterpret_cast<_proto>(eglGetProcAddress(#_import) );  \
++					}                                                                    \
+ 					BX_TRACE("\t%p " #_func " (" #_import ")", _func);                   \
+ 					BGFX_FATAL(_optional || NULL != _func                                \
+ 						, Fatal::UnableToInitialize                                      \

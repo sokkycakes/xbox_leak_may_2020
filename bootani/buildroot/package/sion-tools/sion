@@ -1,0 +1,383 @@
+#!/bin/sh
+#
+# sion: remote testing and updates for a Sion machine. Run over SSH, e.g.
+#   ssh root@sion.local sion status
+#
+
+. /usr/lib/sion/sion-lib.sh
+load_conf
+
+EFI_DIR=EFI/sion
+CURRENT=EFI/BOOT/BOOTX64.EFI
+TRIAL_LABEL="Sion trial"
+BOOT_LABEL="Sion"
+# How long a trial image gets to come up before the machine goes back to
+# the previous one, and how long it has to stay up before it's kept.
+TRIAL_TIMEOUT=${TRIAL_TIMEOUT:-300}
+TRIAL_STABLE=${TRIAL_STABLE:-30}
+
+usage() {
+	cat <<'EOF'
+Usage: sion COMMAND
+
+  status                 image version, boot disk, update state, addresses
+  update FILE [OPTIONS]  install FILE (a BOOTX64.EFI) as the system image
+      --no-reboot          install, but don't reboot into it yet
+      --direct             replace the image now, with no trial boot (for
+                           firmware that can't boot an entry once)
+      --sha256 HASH        refuse FILE unless it has this SHA-256
+  rollback [--no-reboot] swap back to the previous image
+  reboot                 reboot into this stick, whatever the boot order says
+  persist PATH...        keep files across reboots: copies them into
+                         /data/overlay, which is copied over / at every boot
+  overlay list|clear     show or empty /data/overlay
+  restart dashboard|xbox|theseus|net|ssh
+  logs [sion|xbox|xbox-session|theseus|bootani|messages|dmesg]
+  esp mount|umount       mount the boot stick's EFI partition on /boot
+
+A new image boots once on trial. It's kept when SSH (and the dashboard, if
+the image has one) has run for TRIAL_STABLE seconds; if it panics, hangs or
+doesn't get there within TRIAL_TIMEOUT seconds, the machine reboots into
+the previous image.
+EOF
+}
+
+die() {
+	echo "sion: $*" >&2
+	exit 1
+}
+
+uptime_s() {
+	cut -d. -f1 /proc/uptime
+}
+
+size_of() {
+	wc -c < "$1" | tr -d ' '
+}
+
+# A UEFI executable: "MZ", then "PE\0\0" where the DOS header points.
+is_efi_image() {
+	[ "$(dd if="$1" bs=2 count=1 2>/dev/null)" = MZ ] || return 1
+	off=$(od -An -tu4 -j60 -N4 "$1" | tr -d ' ')
+	[ "$(dd if="$1" bs=1 skip="$off" count=4 2>/dev/null | od -An -tx1 | tr -d ' ')" = 50450000 ]
+}
+
+# Boot entries with this label: "Boot0007* Sion trial<TAB>HD(...)" -> 0007
+entries_labeled() {
+	efibootmgr 2>/dev/null | sed -n "s/^Boot\([0-9A-Fa-f]\{4\}\)\*\{0,1\} $1\(	.*\)\{0,1\}\$/\1/p"
+}
+
+trial_entries() {
+	entries_labeled "$TRIAL_LABEL"
+}
+
+drop_trial_entries() {
+	for e in $(trial_entries); do
+		efibootmgr -q -b "$e" -B
+	done
+}
+
+update_log() {
+	local m
+	log "$*"
+	m=$(esp_mount) || return 0
+	mkdir -p "$m/sion/logs"
+	echo "$(date '+%F %T') $*" | sed 's/$/\r/' >> "$m/sion/logs/update.txt"
+	esp_umount "$m"
+}
+
+# Makes the trial image the current one and keeps the old one as previous.efi.
+# Only renames touch EFI/BOOT/BOOTX64.EFI, so it's never missing or half
+# written.
+promote() {
+	m=$1
+	rm -f "$m/$EFI_DIR/failed.efi" "$m/$EFI_DIR/previous.efi" "$m/$EFI_DIR/previous.tmp"
+	cp "$m/$CURRENT" "$m/$EFI_DIR/previous.tmp" || return 1
+	sync
+	mv "$m/$EFI_DIR/previous.tmp" "$m/$EFI_DIR/previous.efi"
+	mv "$m/$EFI_DIR/trial.efi" "$m/$CURRENT"
+	rm -f "$m/$EFI_DIR/trial.txt"
+	sync
+}
+
+cmd_update() {
+	file= reboot=yes direct= want_sha=
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--no-reboot) reboot= ;;
+			--direct) direct=yes ;;
+			--sha256) want_sha=$2; shift ;;
+			-*) die "unknown option $1" ;;
+			*) file=$1 ;;
+		esac
+		shift
+	done
+	[ -n "$file" ] || die "update needs a file (copy it over first, e.g. scp BOOTX64.EFI root@sion.local:/data/)"
+	[ -r "$file" ] || die "can't read $file"
+	is_efi_image "$file" || die "$file is not a UEFI executable"
+	sha=$(sha256sum "$file" | cut -d' ' -f1)
+	[ -z "$want_sha" ] || [ "$want_sha" = "$sha" ] || die "SHA-256 mismatch: $file is $sha"
+
+	m=$(esp_mount) || die "boot EFI partition not found"
+	trap 'esp_umount "$m"' EXIT
+	mkdir -p "$m/$EFI_DIR"
+	rm -f "$m/$EFI_DIR/trial.efi" "$m/$EFI_DIR/trial.tmp" "$m/$EFI_DIR/trial.txt" "$m/$EFI_DIR/failed.efi"
+	need=$(( $(size_of "$file") / 1024 + 1024 ))
+	free=$(df -k "$m" | awk 'NR == 2 { print $4 }')
+	[ "$free" -gt "$need" ] || die "not enough room on the EFI partition (${free} KiB free, ${need} KiB needed)"
+
+	echo "copying $(( $(size_of "$file") / 1048576 )) MiB to the boot disk..."
+	cp "$file" "$m/$EFI_DIR/trial.tmp" || die "copy failed"
+	sync
+	# Read it back from the disk, not the page cache.
+	echo 3 > /proc/sys/vm/drop_caches
+	[ "$(sha256sum "$m/$EFI_DIR/trial.tmp" | cut -d' ' -f1)" = "$sha" ] || die "the copy on the boot disk doesn't match; the stick may be failing"
+	mv "$m/$EFI_DIR/trial.tmp" "$m/$EFI_DIR/trial.efi"
+
+	if [ -n "$direct" ]; then
+		promote "$m" || die "replacing the image failed"
+		update_log "installed $sha directly (previous image kept as $EFI_DIR/previous.efi)"
+	else
+		mount_efivars || die "no UEFI variables; use --direct"
+		esp=$(find_esp)
+		drop_trial_entries
+		efibootmgr -q -C -d "$(part_disk "$esp")" -p "$(part_num "$esp")" \
+			-L "$TRIAL_LABEL" -l '\EFI\sion\trial.efi' || die "creating the trial boot entry failed; use --direct"
+		entry=$(trial_entries | head -n1)
+		[ -n "$entry" ] || die "the trial boot entry didn't stick; use --direct"
+		efibootmgr -q -n "$entry" || die "setting BootNext failed; use --direct"
+		printf 'ENTRY=%s\nSHA=%s\nINSTALLED="%s"\n' "$entry" "$sha" "$(date '+%F %T')" > "$m/$EFI_DIR/trial.txt"
+		update_log "installed $sha as a trial (Boot$entry, boots once)"
+	fi
+	trap - EXIT
+	esp_umount "$m"
+	if [ -n "$reboot" ]; then
+		echo "rebooting into the new image"
+		( sleep 1; reboot ) > /dev/null 2>&1 &
+	elif [ -n "$direct" ]; then
+		echo "installed; it runs from the next boot"
+	else
+		echo "installed; the next boot tries it once (reboot when ready)"
+	fi
+}
+
+# Reboots into this boot disk's current image, whatever the firmware's boot
+# order says, through a "Sion" boot entry (made on first use) and BootNext.
+cmd_reboot() {
+	mount_efivars || die "no UEFI variables"
+	if efibootmgr | grep -q '^BootNext:'; then
+		echo "the next boot is already set ($(efibootmgr | sed -n 's/^BootNext: //p')), e.g. a trial image; keeping it"
+	else
+		esp=$(find_esp) || die "boot EFI partition not found"
+		puuid=$(blkid -s PARTUUID -o value "$esp")
+		entry=
+		# Reuse an entry only if it points at this partition (the stick may
+		# have been rewritten, which gives it a new PARTUUID).
+		for e in $(entries_labeled "$BOOT_LABEL"); do
+			if [ -n "$puuid" ] && efibootmgr -v | grep "^Boot$e" | grep -qi "$puuid"; then
+				entry=$e
+			else
+				efibootmgr -q -b "$e" -B
+			fi
+		done
+		if [ -z "$entry" ]; then
+			efibootmgr -q -C -d "$(part_disk "$esp")" -p "$(part_num "$esp")" \
+				-L "$BOOT_LABEL" -l '\EFI\BOOT\BOOTX64.EFI' || die "creating the boot entry failed"
+			entry=$(entries_labeled "$BOOT_LABEL" | head -n1)
+			[ -n "$entry" ] || die "the boot entry didn't stick"
+		fi
+		efibootmgr -q -n "$entry" || die "setting BootNext failed"
+		log "rebooting into Boot$entry ($esp)"
+	fi
+	echo "rebooting"
+	sync
+	( sleep 1; reboot ) > /dev/null 2>&1 &
+}
+
+cmd_rollback() {
+	m=$(esp_mount) || die "boot EFI partition not found"
+	if [ ! -e "$m/$EFI_DIR/previous.efi" ]; then
+		esp_umount "$m"
+		die "there's no previous image"
+	fi
+	mv "$m/$CURRENT" "$m/$EFI_DIR/rollback.tmp"
+	mv "$m/$EFI_DIR/previous.efi" "$m/$CURRENT"
+	mv "$m/$EFI_DIR/rollback.tmp" "$m/$EFI_DIR/previous.efi"
+	esp_umount "$m"
+	update_log "rolled back to the previous image"
+	if [ "$1" != --no-reboot ]; then
+		echo "rebooting into the previous image"
+		( sleep 1; reboot ) > /dev/null 2>&1 &
+	fi
+}
+
+# The trial boot is healthy once sshd runs and, on images with the
+# dashboard, the same dashboard process has stayed up.
+healthy() {
+	if [ "$SSH" != no ]; then
+		pidof sshd > /dev/null || return 1
+	fi
+	dash=theseus
+	[ -x /usr/libexec/dashboard ] && dash=$(/usr/libexec/dashboard)
+	if [ "$dash" = xbox ]; then
+		# xbcompat keeps its pid when the dashboard starts a game.
+		pid=$(pidof xbcompat) || return 1
+		[ "$pid" = "$last_pid" ] || { last_pid=$pid; return 1; }
+	elif [ -x /etc/init.d/S99theseus ] && [ -x /opt/theseus/theseus ]; then
+		pid=$(pidof theseus) || return 1
+		[ "$pid" = "$last_pid" ] || { last_pid=$pid; return 1; }
+	fi
+	return 0
+}
+
+# Run once at boot (from S03sion), in the background.
+cmd_boot_check() {
+	m=$(esp_mount) || exit 0
+	state=$m/$EFI_DIR/trial.txt
+	if [ ! -r "$state" ]; then
+		esp_umount "$m"
+		exit 0
+	fi
+	. "$state"
+	esp_umount "$m"
+	mount_efivars
+	cur=$(efi_boot_current)
+	if [ "$cur" != "$ENTRY" ]; then
+		m=$(esp_mount) || exit 0
+		mv "$m/$EFI_DIR/trial.efi" "$m/$EFI_DIR/failed.efi" 2>/dev/null
+		rm -f "$m/$EFI_DIR/trial.txt"
+		esp_umount "$m"
+		drop_trial_entries
+		update_log "trial image $SHA did not come up (booted Boot$cur, not Boot$ENTRY); still on the previous image, the trial is kept as $EFI_DIR/failed.efi"
+		exit 0
+	fi
+
+	log "trial boot of $SHA: waiting for it to come up"
+	# The chipset watchdog resets the machine if this loop stops (the system
+	# hangs) before the image is kept.
+	if [ -c /dev/watchdog ]; then
+		exec 3> /dev/watchdog
+	fi
+	deadline=$(( $(uptime_s) + TRIAL_TIMEOUT ))
+	ok_since= last_pid=
+	while [ "$(uptime_s)" -lt "$deadline" ]; do
+		[ -e /proc/self/fd/3 ] && printf . >&3
+		if healthy; then
+			ok_since=${ok_since:-$(uptime_s)}
+			if [ $(( $(uptime_s) - ok_since )) -ge "$TRIAL_STABLE" ]; then
+				# Magic close: stop the watchdog before the slow copy.
+				[ -e /proc/self/fd/3 ] && printf V >&3 && exec 3>&-
+				m=$(esp_mount) && promote "$m"
+				esp_umount "$m"
+				drop_trial_entries
+				update_log "trial image $SHA came up; it's now the current image"
+				exit 0
+			fi
+		else
+			ok_since=
+		fi
+		sleep 5
+	done
+	update_log "trial image $SHA didn't come up within ${TRIAL_TIMEOUT}s; rebooting into the previous image"
+	reboot
+}
+
+cmd_status() {
+	echo "image:     $(cat /etc/sion-version 2>/dev/null || echo unknown)"
+	echo "kernel:    $(uname -r), up $(uptime_s)s"
+	echo "hostname:  $(hostname)"
+	echo "addresses: $(ip -4 -o addr show scope global | awk '{ printf "%s %s  ", $2, $4 }')"
+	esp=$(find_esp) && echo "boot disk: $esp (EFI partition)"
+	if mountpoint -q "$SION_DATA"; then
+		df -h "$SION_DATA" | awk 'NR == 2 { print "data:      " $1 " on /data, " $4 " free of " $2 }'
+	else
+		echo "data:      no /data partition (nothing persists)"
+	fi
+	[ -n "$(ls -A "$SION_DATA/overlay" 2>/dev/null)" ] && echo "overlay:   $(find "$SION_DATA/overlay" -type f | wc -l) files in /data/overlay"
+	mount_efivars && echo "uefi:      BootCurrent=$(efi_boot_current)"
+	m=$(esp_mount) || return 0
+	for f in "$CURRENT" "$EFI_DIR/previous.efi" "$EFI_DIR/trial.efi" "$EFI_DIR/failed.efi"; do
+		[ -e "$m/$f" ] && printf '  %-24s %s MiB\n' "$f" "$(( $(size_of "$m/$f") / 1048576 ))"
+	done
+	[ -r "$m/$EFI_DIR/trial.txt" ] && echo "trial pending: $(tr '\n' ' ' < "$m/$EFI_DIR/trial.txt")"
+	[ -r "$m/sion/logs/update.txt" ] && echo "last update: $(tail -n1 "$m/sion/logs/update.txt" | tr -d '\r')"
+	df -h "$m" | awk 'NR == 2 { print "EFI partition: " $4 " free of " $2 }'
+	esp_umount "$m"
+}
+
+cmd_persist() {
+	[ $# -gt 0 ] || die "persist needs paths"
+	mountpoint -q "$SION_DATA" || die "no /data partition"
+	for p in "$@"; do
+		r=$(realpath "$p") || die "no such file: $p"
+		mkdir -p "$SION_DATA/overlay$(dirname "$r")"
+		cp -a "$r" "$SION_DATA/overlay$(dirname "$r")/" && echo "kept $r"
+	done
+	sync
+}
+
+cmd_overlay() {
+	case "$1" in
+		list|"") (cd "$SION_DATA/overlay" 2>/dev/null && find . ! -type d | sed 's|^\.||') ;;
+		clear) rm -rf "${SION_DATA:?}/overlay" && mkdir -p "$SION_DATA/overlay" && sync && echo "cleared; reboot to drop the files from /" ;;
+		*) die "overlay list|clear" ;;
+	esac
+}
+
+cmd_restart() {
+	case "$1" in
+		theseus) /etc/init.d/S99theseus restart ;;
+		dashboard)
+			if [ -x /etc/init.d/S98xbox ] && [ "$(/usr/libexec/dashboard)" = xbox ]; then
+				/etc/init.d/S98xbox restart
+			else
+				/etc/init.d/S99theseus restart
+			fi ;;
+		xbox)
+			# Also after Theseus took over from a failing Xbox dashboard.
+			[ -x /etc/init.d/S98xbox ] || die "this image has no Xbox dashboard"
+			rm -f /var/run/xbox/dash-failed
+			[ "$(/usr/libexec/dashboard)" = xbox ] && /etc/init.d/S99theseus stop > /dev/null
+			/etc/init.d/S98xbox restart ;;
+		net) /etc/init.d/S41sion-net restart ;;
+		ssh) /etc/init.d/S50sshd restart ;;
+		*) die "restart dashboard|xbox|theseus|net|ssh" ;;
+	esac
+}
+
+cmd_logs() {
+	case "${1:-sion}" in
+		dmesg) dmesg ;;
+		*) cat "/var/log/${1:-sion}.log" 2>/dev/null || cat "/var/log/$1" ;;
+	esac
+}
+
+cmd_esp() {
+	case "$1" in
+		mount)
+			esp=$(find_esp) || die "boot EFI partition not found"
+			mkdir -p /boot
+			mountpoint -q /boot || mount -t vfat -o rw,noatime,flush "$esp" /boot || exit 1
+			echo "$esp on /boot; run 'sion esp umount' when done"
+			;;
+		umount) sync; umount /boot ;;
+		*) die "esp mount|umount" ;;
+	esac
+}
+
+cmd=$1
+[ $# -gt 0 ] && shift
+case "$cmd" in
+	status) cmd_status ;;
+	update) cmd_update "$@" ;;
+	rollback) cmd_rollback "$@" ;;
+	reboot) cmd_reboot ;;
+	boot-check) cmd_boot_check ;;
+	persist) cmd_persist "$@" ;;
+	overlay) cmd_overlay "$@" ;;
+	restart) cmd_restart "$@" ;;
+	logs) cmd_logs "$@" ;;
+	esp) cmd_esp "$@" ;;
+	help|-h|--help|"") usage ;;
+	*) usage; exit 1 ;;
+esac
