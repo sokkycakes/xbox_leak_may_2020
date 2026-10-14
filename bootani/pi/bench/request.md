@@ -1,82 +1,82 @@
-# Pi bench request 4
+# Pi bench request 5
 
-Written by the cloud Claude session for the Linux PC session, under sokky's
-standing approval. Measure only: nothing is built on the PC. Files are in
-bootani/pi/bench at the commit this file was read from; check every md5.
+Written by the cloud Claude session for the Linux PC session, to run when
+sokky approves it. Measure only: nothing is built on the PC. Files are in
+bootani/pi/bench at the commit this file was read from (branch
+claude/determined-bardeen-dw96cp); check every md5.
 
 | file | md5 | what |
 |---|---|---|
-| xbcompat.xlat | 4937f02ce3b962f6e2e5e64038b2dfac | the translator build again, newer: SSE arithmetic translated, faster x87 compares and loops |
-| xlat.sh | 580174d36576a6eff073e6741a727da4 | same as request 3 |
-| push-xlat.sh | d503e2c227e0aa7df142273ec5604036 | same as request 3 |
-| xbprof | be0a3503bc9c5d1f130208244922ec2e | same as request 3 |
+| xbcompat-native.x86 | fcb5229a9fd5fdaaeb1eb5d4d5aaa633 | the x86 client, xbcompat/ at b9048a43 (`make RENDERER=native`) |
+| libxbcompat_renderer.so.1 | d6a853958903a4d757af5b6c36cd7f60 | the ARM renderer for it (`native-renderer.mk TARGET=armhf GL=opengl`) |
+| merge.sh | 8d388f01b3f07849c1eba2a969295ecf | Pi side: backs up, installs, rolls back if the dashboard doesn't start |
+| push-merge.sh | b65cd189066c9963e557ddb3adb95ad5 | PC side |
+| clocks.sh | 65d695544dda3324b349b2480e371bd7 | same as before |
 
-(xbcompat.xlat is xbcompat/ at commit be4304d2, built in the cloud.)
+This build merges runs of same-state draws into one GL draw (commit
+b9048a43). In an xemu trace of a Think Tanks match, 434 of a frame's 727
+draws change nothing but re-set the textures they already had; under
+llvmpipe the build sends ~490 of ~850 draws a frame as ~28 GL draws, and
+its vertex/index uploads drop from ~12.7 MB to ~0.3 MB a frame.
+`XBCOMPAT_MERGE_DRAWS=0` turns it off in the same build, so the two runs
+below compare directly.
 
-Goal: request 3's Phantom Dust hub measurement with this newer translator
-build, so the two builds compare directly.
-
-If requests 2 and 3 haven't run yet, run them first, in order: request 2's
-files are at commit 651d6364 and request 3's at commit 6f0550ff. Their
-results come before this one.
+Requests 2 to 4 are separate (the xlat builds, at commits 651d6364,
+6f0550ff and 66b2753a on claude/project-thread-ohz82s). This one doesn't
+touch the xlat slot or the CPU governor.
 
 ## 1. Install
 
-/etc/default/xbox as for request 3: XLAT_PERF_MAP=1 and XLAT_STATS=60, no
-BOX86_PROFILE, no XLAT_COUNT. Add XLAT_SAFE_FLAGS=1 only if request 3
-needed it for Phantom Dust. On the PC, from bootani/pi/bench:
+On the PC, from bootani/pi/bench:
 
-    PI=192.168.1.128 sh push-xlat.sh
+    PI=192.168.1.128 sh push-merge.sh
 
-If the dashboard doesn't come up, it puts box86 back by itself. Its
-report is xlat.txt next to the script.
+Its report is merge.txt next to the script. If the dashboard doesn't come
+up, the earlier build goes back by itself; then stop and report.
 
-## 2. Phantom Dust hub
+## 2. Think Tanks with merging (the default)
 
-Exactly request 3's step 3: drive to the underground hub, stand still,
-wait 30 s, then at the same time
+In /etc/default/xbox set `XBCOMPAT_LOG_FPS=1` (and nothing else from the
+earlier requests), restart xbox, start Think Tanks from the Arcade card the
+usual way, then Single Player → A on the tank → QuickPlay (Battlemode,
+Medulla Mesa). Once in the match, press Y if the brain is out, stand still
+looking across the map for 10 s, then keep the fps lines from the next 60 s
+and run, at the same time:
 
-    /root/xbprof $(pidof xbcompat.arm) 30 1000 60 > /tmp/xbprof-hub.txt
-    sh /root/clocks.sh 30 > /tmp/clocks-hub.txt
+    sh /root/clocks.sh 30 > /tmp/clocks-tt.txt
 
-Note the fps lines over that minute and keep the `xlat:` lines from the
-last two `xlat: last 60 s:` groups. If Phantom Dust crashes, hangs or draws
-wrong, keep the last 80 lines of the log and a screenshot (touch
-/tmp/xbshot.req), and skip to step 4.
+Take a screenshot (touch /tmp/xbshot.req) and look at it: terrain, rocks,
+tanks and the HUD should look as they did before this build.
 
-## 3. Hottest code in the hub
+## 3. Same, with merging off
 
-Exactly request 3's step 3b: XLAT_COUNT=/tmp/xlathot (mkdir -p it on the
-Pi), restart xbox, back to the hub, stand still for 70 s, copy
-/tmp/xlathot/hot.txt to the PC.
+Add `XBCOMPAT_MERGE_DRAWS=0`, restart xbox, same match and spot, 60 s of
+fps lines. Then remove that line.
 
-## 3c. Where the draws' CPU goes
+## 4. Where the frame goes
 
-Remove XLAT_COUNT and add, set the same way:
+Add `XBCOMPAT_PROFILE_WORK=1` and `XBCOMPAT_PROFILE_RENDERER=1`, restart,
+same match, stand still 40 s, and keep every line starting with `D3D` from
+the last 30 s (the frame split, `D3D detail:`, `D3D cache:`, `D3D merged:`,
+`D3D programs:`). Then the same once more with `XBCOMPAT_MERGE_DRAWS=0`
+added. Frame times here don't count.
 
-    XBCOMPAT_PROFILE_WORK=1
-    XBCOMPAT_PROFILE_RENDERER=1
+## 5. GPU counters
 
-restart xbox, back to the hub, stand still for 40 s, and keep every log
-line starting with `D3D` from the last 30 s (every 5 s it prints the frame
-split, `D3D detail:`, `D3D cache:`, `D3D buffers:` and so on). Frame times
-here don't count either. Then remove both.
+Remove the profile and merge lines, add `XBCOMPAT_GPU_COUNTERS=1`, restart,
+same match, 30 s, keep the `D3D` GPU counter lines. Then remove it and
+`XBCOMPAT_LOG_FPS`.
 
-## 4. Leave and report
+## 6. Leave and report
 
-    PI=192.168.1.128 sh push-xlat.sh undo
+If Think Tanks and the dashboard looked right, leave this build installed;
+otherwise `PI=192.168.1.128 sh push-merge.sh undo`. Send one message to
+the cloud session:
 
-remove XLAT_PERF_MAP, XLAT_STATS, XLAT_COUNT, XLAT_SAFE_FLAGS,
-XBCOMPAT_PROFILE_WORK and XBCOMPAT_PROFILE_RENDERER from
-/etc/default/xbox, restart xbox, and check the dashboard is back on
-box86. Send one message to the cloud session:
-
-    request 4: ok / problems
-    xlat.txt (whole)
-    hub fps lines
-    xbprof-hub.txt, clocks-hub.txt (whole)
-    the hub's xlat: lines, hot.txt (whole)
-    the D3D lines from step 3c
-    log tail and screenshot if Phantom Dust failed
-
-Then keep watching the branch for request 5.
+    request 5: ok / problems
+    merge.txt (whole)
+    fps lines: step 2 (merging) and step 3 (off)
+    clocks-tt.txt
+    the D3D lines from step 4, both runs
+    the GPU counter lines from step 5
+    the screenshot, and the log tail if anything failed
