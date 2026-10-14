@@ -905,6 +905,7 @@ static unsigned frame_draws, last_frame_draws;
 /* Merged draw runs (merge_start): the title's draws in them, and the GL
    draws they became, since the last profile report. */
 static unsigned merge_title_draws, merge_gl_draws;
+static unsigned gl_draw_calls;   /* every glDraw* for the title's geometry, same interval */
 static const unsigned whatif_flush_steps[] = { 0, 64, 128, 256 };
 static int whatif_flush = -1;    /* index into whatif_flush_steps, -1 when off */
 static bool whatif_skip_draw;    /* this draw sampled a back-buffer view under WHATIF_NO_BBVIEW */
@@ -983,8 +984,9 @@ static void log_fps(void)
             cache_hits = cache_misses = cache_evicts = cache_uploads = 0; cache_upload_bytes = 0;
             t_resolve = t_filter = t_swap = t_restore = 0;
             xlog("D3D buffers: upload calls %.2f ms/frame", t_buffer_upload / 1e6 / f);
-            xlog("D3D merged: %.1f title draws in %.1f GL draws per frame", merge_title_draws / f, merge_gl_draws / f);
-            merge_title_draws = merge_gl_draws = 0;
+            xlog("D3D merged: %.1f title draws in %.1f GL draws per frame; %.1f GL draws in all", merge_title_draws / f,
+                 merge_gl_draws / f, gl_draw_calls / f);
+            merge_title_draws = merge_gl_draws = gl_draw_calls = 0;
             if (dxt16)
                 xlog("D3D DXT textures so far: %u opaque (RGB565), %u on/off alpha (RGB5_A1), %u partial alpha (%s)",
                      dxt16_counts[0], dxt16_counts[1], dxt16_counts[2], dxt16 >= 2 ? "RGBA4444" : "32-bit");
@@ -4321,6 +4323,8 @@ static void program_profile_log(double frames)
 
 static void submit_programmable(vshader *sh, program_entry *e, ULONG PrimitiveType, const UCHAR *up, ULONG up_stride,
                                 ULONG first, ULONG count, const USHORT *indices, uint64_t t_begin, unsigned draws);
+static void fvf_bind_arrays(const fvf_layout *lp, const UCHAR *base, ULONG stride, vrange r, unsigned units, bool lit);
+static bool ff_from_vb;   /* set by draw(): the fixed-function draw's vertices are a vertex buffer's */
 
 /* Draw merging.  Torque titles (Think Tanks) draw a mesh as a run of small
    triangle lists, one per primitive group, each with the same shader,
@@ -4337,10 +4341,14 @@ static void submit_programmable(vshader *sh, program_entry *e, ULONG PrimitiveTy
    set up stays in place until then.  Real D3D copies a draw's indices into
    the push buffer, so the title may reuse that memory as soon as the call
    returns: the run keeps its own copy and draws from it if the title did.
-   XBCOMPAT_MERGE_DRAWS=0 turns this off. */
+   Fixed-function fans, strips and lists from a vertex buffer (Think Tanks'
+   name tags and sprites, ~90 a frame with nothing set in between) merge
+   the same way into one indexed triangle list over that buffer
+   (merge_ff_start).  XBCOMPAT_MERGE_DRAWS=0 turns this off. */
 #define MERGE_MAX_INDICES 65536
 static struct {
     bool active;
+    bool ff;                     /* a fixed-function run: copy[] holds generated triangle indices */
     vshader *sh;
     program_entry *e;
     const UCHAR *up;             /* stream 0's vertices (a VB: DrawIndexedVertices) */
@@ -4355,6 +4363,11 @@ static struct {
     ULONG rs[D3DRS_MAX + 64], tss[4 * 32];   /* the title's arrays (newer XDKs have more states) */
     float vs_const[192][4];
     d3d_state state;             /* the device as the run's first draw left it (see merge_regions) */
+    ULONG prim;                  /* fixed function: the title's primitive type, the same throughout */
+    fvf_layout l;                /* fixed function: the layout, texture units and lighting the arrays need */
+    unsigned units;
+    bool lit;
+    ULONG lo, hi;                /* fixed function: the vertices the run reads */
 } merge;
 
 /* The parts of the device a programmable draw reads.  Not the frame counter,
@@ -4393,6 +4406,20 @@ static bool merge_same_state(void)
         && !memcmp(d3d.vs_const, merge.vs_const, merge.rows * 16);
 }
 
+/* Remember the device as a run's first draw left it, and the first `rows`
+   vertex shader constant rows. */
+static void merge_snapshot(unsigned rows)
+{
+    for (unsigned i = 0; i < sizeof(merge_regions) / sizeof(merge_regions[0]); i++)
+        memcpy((char *)&merge.state + merge_regions[i].off, (const char *)&d3d + merge_regions[i].off,
+               merge_regions[i].len);
+    merge.rs_count = d3d.rs_count;
+    memcpy(merge.rs, d3d.render_state, merge.rs_count * 4);
+    memcpy(merge.tss, d3d.texture_state, sizeof(merge.tss));
+    merge.rows = rows > 192 ? 192 : rows;
+    memcpy(merge.vs_const, d3d.vs_const, merge.rows * 16);
+}
+
 /* Hold this draw back as the start of a run, once its state is in GL.
    False: draw it now. */
 static bool merge_start(vshader *sh, program_entry *e, ULONG PrimitiveType, const UCHAR *up, ULONG up_stride,
@@ -4402,6 +4429,7 @@ static bool merge_start(vshader *sh, program_entry *e, ULONG PrimitiveType, cons
         || !p_glGenBuffers || (up && !up_is_vb) || whatif_skip_draw || d3d.rs_count > sizeof(merge.rs) / 4
         || !merge_wanted()) return false;
     merge.active = true;
+    merge.ff = false;
     merge.sh = sh;
     merge.e = e;
     merge.up = up;
@@ -4412,17 +4440,67 @@ static bool merge_start(vshader *sh, program_entry *e, ULONG PrimitiveType, cons
     merge.draws = 1;
     merge.t_begin = t_begin;
     memcpy(merge.copy, indices + first, count * 2);
-    for (unsigned i = 0; i < sizeof(merge_regions) / sizeof(merge_regions[0]); i++)
-        memcpy((char *)&merge.state + merge_regions[i].off, (const char *)&d3d + merge_regions[i].off,
-               merge_regions[i].len);
-    merge.rs_count = d3d.rs_count;
-    memcpy(merge.rs, d3d.render_state, merge.rs_count * 4);
-    memcpy(merge.tss, d3d.texture_state, sizeof(merge.tss));
     /* upload_constants sends the program's rows from d3d.vs_const; a
        program without a constant array reads none. */
-    merge.rows = e->loc_c >= 0 ? (unsigned)e->c_size : 0;
-    if (merge.rows > 192) merge.rows = 192;
-    memcpy(merge.vs_const, d3d.vs_const, merge.rows * 16);
+    merge_snapshot(e->loc_c >= 0 ? (unsigned)e->c_size : 0);
+    return true;
+}
+
+/* A fixed-function draw of `count` vertices from `first` as triangle-list
+   indices into out; returns how many.  Strips and fans keep GL's winding
+   and its provoking vertex (each triangle's last). */
+static ULONG merge_tri_indices(USHORT *out, ULONG prim, ULONG first, ULONG count)
+{
+    ULONG n = 0;
+    for (ULONG i = 0; i + 2 < count; i += prim == 5 ? 3 : 1) {
+        ULONG a = prim == 7 ? first : first + i, b = first + i + 1, c = first + i + 2;
+        if (prim == 6 && (i & 1)) { ULONG t = a; a = b; b = t; }
+        out[n++] = a; out[n++] = b; out[n++] = c;
+    }
+    return n;
+}
+
+static ULONG merge_tri_count(ULONG prim, ULONG count)
+{
+    return count < 3 ? 0 : prim == 5 ? count / 3 * 3 : (count - 2) * 3;
+}
+
+/* Hold a fixed-function draw back as the start of a run, once its state
+   and textures are in GL (draw_fvf).  False: draw it now. */
+static bool merge_ff_start(const fvf_layout *l, ULONG prim, const UCHAR *base, ULONG stride, ULONG first, ULONG count,
+                           const USHORT *indices, unsigned units, bool lit, program_entry *e)
+{
+    if ((prim != 5 && prim != 6 && prim != 7) || indices || !ff_from_vb || first + count > 0x10000
+        || !merge_tri_count(prim, count) || merge_tri_count(prim, count) > MERGE_MAX_INDICES
+        || d3d.rs_count > sizeof(merge.rs) / 4 || !merge_wanted()) return false;
+    merge.active = true;
+    merge.ff = true;
+    merge.e = e;
+    merge.up = base;
+    merge.up_stride = stride;
+    merge.prim = prim;
+    merge.l = *l;
+    merge.units = units;
+    merge.lit = lit;
+    merge.lo = first;
+    merge.hi = first + count;
+    merge.count = merge_tri_indices(merge.copy, prim, first, count);
+    merge.draws = 1;
+    merge_snapshot(0);
+    return true;
+}
+
+static bool merge_ff_append(ULONG prim, const UCHAR *base, ULONG stride, ULONG first, ULONG count,
+                            const USHORT *indices, bool vb)
+{
+    if (!merge.active || !merge.ff || prim != merge.prim || indices || !vb || base != merge.up
+        || stride != merge.up_stride || first + count > 0x10000 || !merge_tri_count(prim, count)
+        || merge.count + merge_tri_count(prim, count) > MERGE_MAX_INDICES || !merge_wanted()
+        || !merge_same_state()) return false;
+    merge.count += merge_tri_indices(merge.copy + merge.count, prim, first, count);
+    if (first < merge.lo) merge.lo = first;
+    if (first + count > merge.hi) merge.hi = first + count;
+    merge.draws++;
     return true;
 }
 
@@ -4431,7 +4509,7 @@ static bool merge_start(vshader *sh, program_entry *e, ULONG PrimitiveType, cons
 static bool merge_append(vshader *sh, ULONG PrimitiveType, const UCHAR *up, ULONG up_stride, ULONG first,
                          ULONG count, const USHORT *indices, bool vb)
 {
-    if (!merge.active || PrimitiveType != 5 || sh != merge.sh || !indices || !count
+    if (!merge.active || merge.ff || PrimitiveType != 5 || sh != merge.sh || !indices || !count
         || indices + first != merge.start + merge.count || merge.count + count > MERGE_MAX_INDICES
         || up != merge.up || up_stride != merge.up_stride || vb != merge.up_is_vb || !merge_wanted()
         || !merge_same_state()) return false;
@@ -4447,6 +4525,19 @@ static void merge_flush(void)
 {
     if (!merge.active || !d3d.gl || SDL_GL_GetCurrentContext() != d3d.gl) return;
     merge.active = false;
+    if (merge.ff) {
+        /* The arrays again, over every vertex the run reads, then its
+           triangles from client memory. */
+        gc_disable_attrib_arrays();
+        fvf_bind_arrays(&merge.l, merge.up, merge.up_stride, (vrange){ merge.lo, merge.hi }, merge.units, merge.lit);
+        shader_diagnostics_mark(d3d.frame, ++shader_diag_draw, d3d.vertex_shader, d3d.pixel_shader, cur_program, "fvf");
+        TIMED(t_gl, glDrawRangeElements(GL_TRIANGLES, merge.lo, merge.hi - 1, merge.count, GL_UNSIGNED_SHORT, merge.copy));
+        gl_draw_calls++;
+        if (merge.draws > 1) merge_title_draws += merge.draws, merge_gl_draws++;
+        end_program(merge.e);
+        debug_dump_draw();
+        return;
+    }
     const USHORT *ix = merge.start;
     if (memcmp(merge.copy, merge.start, merge.count * 2)) {
         /* The title has written over its indices since: draw from the copy,
@@ -4529,6 +4620,7 @@ static void submit_programmable(vshader *sh, program_entry *e, ULONG PrimitiveTy
     TIMED(t_gl, if (ix) glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, NULL);
                 else if (indices) glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, indices + first);
                 else glDrawArrays(gl_primitive(PrimitiveType), first, count));
+    gl_draw_calls++;
     /* Counted in the title's draws, merged or not: the busy-frame rule and
        the flush spacing were measured that way. */
     frame_draws += draws;
@@ -4693,6 +4785,7 @@ static void draw_declared_(const vshader *sh, ULONG PrimitiveType, const UCHAR *
                             "declared");
     TIMED(t_gl, if (indices) glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, indices + first);
                 else glDrawArrays(gl_primitive(PrimitiveType), first, count));
+    gl_draw_calls++;
     end_program(e);
 }
 
@@ -4773,9 +4866,15 @@ static void draw(ULONG PrimitiveType, const UCHAR *base, ULONG stride, ULONG fir
         up_is_vb = false;
         return;
     }
+    if (merge_ff_append(PrimitiveType, base, stride, first, count, indices, vb)) {
+        n_draws++;
+        return;
+    }
     merge_flush();
     n_draws++;
+    ff_from_vb = vb;
     TIMED_CPU(t_draw, c_draw, draw_fvf(PrimitiveType, base, stride, first, count, indices); if (prof_sync) glFinish());
+    ff_from_vb = false;
 }
 
 static void NTAPI D3DDevice_DrawVertices(ULONG, UINT_, UINT_), D3DDevice_DrawVerticesUP(ULONG, UINT_, const void *, UINT_),
@@ -4784,6 +4883,67 @@ static void FASTCALL SetVertexShaderConstantNotInline(LONG, const float *, ULONG
     SetVertexShaderConstant1(LONG, const float *), SetVertexShaderConstant4(LONG, const float *);
 #include "hud_packet.h"
 #include "state_packet.h"
+/* The client arrays of a fixed-function draw from `base`, for vertices
+   r.lo to r.hi - 1 (colors are converted for those only). */
+static void fvf_bind_arrays(const fvf_layout *lp, const UCHAR *base, ULONG stride, vrange r, unsigned units, bool lit)
+{
+    const fvf_layout l = *lp;
+    if (l.specular_off >= 0) {
+        gc_bind_buffer(GL_ARRAY_BUFFER, 0);
+        p_glEnableVertexAttribArray(6);
+        if (rgba_vertex_colors)
+            p_glVertexAttribPointer(6, 4, GL_UNSIGNED_BYTE, GL_TRUE, 4, rgba_colors(base + l.specular_off, stride, r, NULL));
+        else
+            p_glVertexAttribPointer(6, GL_BGRA, GL_UNSIGNED_BYTE, GL_TRUE, stride, base + l.specular_off);
+    }
+    if (RS(118) && ff_weight_components && ff_weight_components <= 4) {
+        gc_bind_buffer(GL_ARRAY_BUFFER, 0);
+        p_glEnableVertexAttribArray(1);
+        p_glVertexAttribPointer(1, ff_weight_components, GL_FLOAT, GL_FALSE, stride, base + 12);
+    }
+
+    glEnableClientState(GL_VERTEX_ARRAY);
+    glVertexPointer(l.pos_size, GL_FLOAT, stride, base);
+    if (l.normal_off >= 0) {
+        glEnableClientState(GL_NORMAL_ARRAY);
+        glNormalPointer(GL_FLOAT, stride, base + l.normal_off);
+    } else {
+        glDisableClientState(GL_NORMAL_ARRAY);
+    }
+    if (l.diffuse_off >= 0 && (!lit || RS(D3DRS_COLORVERTEX))) {
+        glEnableClientState(GL_COLOR_ARRAY);
+        if (rgba_vertex_colors)
+            glColorPointer(4, GL_UNSIGNED_BYTE, 4, rgba_colors(base + l.diffuse_off, stride, r, NULL));
+        else
+            glColorPointer(GL_BGRA, GL_UNSIGNED_BYTE, stride, base + l.diffuse_off);
+        if (lit) {
+            glEnable(GL_COLOR_MATERIAL);
+            glColorMaterial(GL_FRONT_AND_BACK, GL_DIFFUSE);
+        }
+    } else {
+        glDisableClientState(GL_COLOR_ARRAY);
+        glDisable(GL_COLOR_MATERIAL);
+        glColor4f(1, 1, 1, 1);
+    }
+    if (rgba_vertex_colors && l.specular_off >= 0)
+        secondary_color(lit, rgba_colors(base + l.specular_off, stride, r, NULL), 3, GL_UNSIGNED_BYTE, 4);
+    else
+        secondary_color(lit, l.specular_off >= 0 ? base + l.specular_off : NULL, GL_BGRA, GL_UNSIGNED_BYTE, stride);
+    /* Texture coordinates are per draw (the vertices moved), even reused. */
+    for (int u = 0; u < 4; u++) {
+        ULONG tci = TSS(u, D3DTSS_TEXCOORDINDEX) & 0xFFFF;
+        p_glClientActiveTexture(GL_TEXTURE0 + u);
+        if (((units >> u) & 1) && tci < (ULONG)l.ntex) {
+            glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+            glTexCoordPointer(l.tex_size[tci], GL_FLOAT, stride, base + l.tex_off[tci]);
+        } else {
+            glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+            p_glMultiTexCoord4fv(GL_TEXTURE0 + u, default_texcoord);
+        }
+    }
+    p_glClientActiveTexture(GL_TEXTURE0);
+}
+
 static void draw_fvf(ULONG PrimitiveType, const UCHAR *base, ULONG stride, ULONG first, ULONG count,
                      const USHORT *indices)
 {
@@ -4825,67 +4985,13 @@ static void draw_fvf(ULONG PrimitiveType, const UCHAR *base, ULONG stride, ULONG
     if (!reuse) apply_render_states(l.pretransformed, l.normal_off >= 0);
     ff_primary_present = l.diffuse_off >= 0;
     ff_secondary_present = l.specular_off >= 0;
-    if (ff_secondary_present) {
-        gc_bind_buffer(GL_ARRAY_BUFFER, 0);
-        p_glEnableVertexAttribArray(6);
-        if (rgba_vertex_colors)
-            p_glVertexAttribPointer(6, 4, GL_UNSIGNED_BYTE, GL_TRUE, 4,
-                rgba_colors(base+l.specular_off, stride, vertex_range(first,count,indices), NULL));
-        else
-            p_glVertexAttribPointer(6, GL_BGRA, GL_UNSIGNED_BYTE, GL_TRUE, stride, base+l.specular_off);
-    }
     ULONG position_kind = d3d.vertex_shader & D3DFVF_POSITION_MASK;
     ff_weight_components = position_kind >= D3DFVF_XYZB1 ? (position_kind-D3DFVF_XYZB1)/2+1 : 0;
-    if (RS(118) && ff_weight_components && ff_weight_components <= 4) {
-        gc_bind_buffer(GL_ARRAY_BUFFER, 0);
-        p_glEnableVertexAttribArray(1);
-        p_glVertexAttribPointer(1, ff_weight_components, GL_FLOAT, GL_FALSE, stride, base+12);
-    }
-
-    glEnableClientState(GL_VERTEX_ARRAY);
-    glVertexPointer(l.pos_size, GL_FLOAT, stride, base);
-    if (l.normal_off >= 0) {
-        glEnableClientState(GL_NORMAL_ARRAY);
-        glNormalPointer(GL_FLOAT, stride, base + l.normal_off);
-    } else {
-        glDisableClientState(GL_NORMAL_ARRAY);
-    }
     bool lit = glIsEnabled(GL_LIGHTING);
-    if (l.diffuse_off >= 0 && (!lit || RS(D3DRS_COLORVERTEX))) {
-        glEnableClientState(GL_COLOR_ARRAY);
-        if (rgba_vertex_colors)
-            glColorPointer(4, GL_UNSIGNED_BYTE, 4,
-                           rgba_colors(base + l.diffuse_off, stride, vertex_range(first, count, indices), NULL));
-        else
-            glColorPointer(GL_BGRA, GL_UNSIGNED_BYTE, stride, base + l.diffuse_off);
-        if (lit) {
-            glEnable(GL_COLOR_MATERIAL);
-            glColorMaterial(GL_FRONT_AND_BACK, GL_DIFFUSE);
-        }
-    } else {
-        glDisableClientState(GL_COLOR_ARRAY);
-        glDisable(GL_COLOR_MATERIAL);
-        glColor4f(1, 1, 1, 1);
-    }
-    if (rgba_vertex_colors && l.specular_off >= 0)
-        secondary_color(lit, rgba_colors(base + l.specular_off, stride, vertex_range(first, count, indices), NULL), 3,
-                        GL_UNSIGNED_BYTE, 4);
-    else
-        secondary_color(lit, l.specular_off >= 0 ? base + l.specular_off : NULL, GL_BGRA, GL_UNSIGNED_BYTE, stride);
+    /* Textures before the arrays: an upload can land a HUD batch, which
+       points the client arrays at its own vertices. */
     unsigned units = reuse ? fvf_plan.units : d3d.pixel_shader ? 0xF : apply_textures();
-    /* Texture coordinates are per draw (the vertices moved), even reused. */
-    for (int u = 0; u < 4; u++) {
-        ULONG tci = TSS(u, D3DTSS_TEXCOORDINDEX) & 0xFFFF;
-        p_glClientActiveTexture(GL_TEXTURE0 + u);
-        if (((units >> u) & 1) && tci < (ULONG)l.ntex) {
-            glEnableClientState(GL_TEXTURE_COORD_ARRAY);
-            glTexCoordPointer(l.tex_size[tci], GL_FLOAT, stride, base + l.tex_off[tci]);
-        } else {
-            glDisableClientState(GL_TEXTURE_COORD_ARRAY);
-            p_glMultiTexCoord4fv(GL_TEXTURE0 + u, default_texcoord);
-        }
-    }
-    p_glClientActiveTexture(GL_TEXTURE0);
+    fvf_bind_arrays(&l, base, stride, vertex_range(first, count, indices), units, lit);
     if (!reuse) {
         int tsize[4];
         for (int u = 0; u < 4; u++) {
@@ -4905,10 +5011,13 @@ static void draw_fvf(ULONG PrimitiveType, const UCHAR *base, ULONG stride, ULONG
     bool batched = batchable && !e && hud_batch_append(&batch_key, base, first, count);
     if (!batched) {
         hud_batch_flush();
-        shader_diagnostics_mark(d3d.frame, ++shader_diag_draw, d3d.vertex_shader, d3d.pixel_shader, cur_program,
-                                "fvf");
-        TIMED(t_gl, if (indices) glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, indices + first);
-                    else glDrawArrays(gl_primitive(PrimitiveType), first, count));
+        if (!merge_ff_start(&l, PrimitiveType, base, stride, first, count, indices, units, lit, e)) {
+            shader_diagnostics_mark(d3d.frame, ++shader_diag_draw, d3d.vertex_shader, d3d.pixel_shader, cur_program,
+                                    "fvf");
+            TIMED(t_gl, if (indices) glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, indices + first);
+                        else glDrawArrays(gl_primitive(PrimitiveType), first, count));
+            gl_draw_calls++;
+        }
     }
     if (eligible && !e) {
         memcpy(&fvf_plan.key, &key, sizeof(key)); fvf_plan.epoch = gc_epoch;

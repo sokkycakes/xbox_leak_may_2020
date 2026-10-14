@@ -144,6 +144,7 @@ static void hud_batch_flush(void)
     shader_diagnostics_mark(d3d.frame, ++shader_diag_draw, hud_batch.key.state.fvf, 0, hud_batch.key.program,
                             "fvf-batch");
     TIMED(t_gl, glDrawArrays(GL_TRIANGLES, 0, hud_batch.count));
+    gl_draw_calls++;
     hud_submitted_draws++;
 
     hud_batch.bytes = 0; hud_batch.count = 0;
