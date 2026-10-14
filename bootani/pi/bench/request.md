@@ -1,4 +1,4 @@
-# Pi bench request 6
+# Pi bench request 7
 
 Written by the cloud Claude session for the Linux PC session, under sokky's
 standing approval. Measure only: nothing is built on the PC. Files are in
@@ -6,110 +6,93 @@ bootani/pi/bench at the commit this file was read from; check every md5.
 
 | file | md5 | what |
 |---|---|---|
-| xbcompat.xlat | 6c6d2ad54fd75151ef7c7f9bb9b4925f | the translator build, with the flag check below, x87 sin/cos/atan/exp translated, and inaudible sound voices skipped |
-| xbprof | 14e38d6997c96a87bbdb7ae80699d44a | now reads every mapping (request 5's hub profile lost all past the 1024th) |
+| xbcompat.xlat | 88864fa5c5446fb6236728c8af8719bc | the translator build with the fixes below |
+| xbprof | 14e38d6997c96a87bbdb7ae80699d44a | same as request 6 |
 | xlat.sh | 580174d36576a6eff073e6741a727da4 | same as request 3 |
 | push-xlat.sh | d503e2c227e0aa7df142273ec5604036 | same as request 3 |
 
-(xbcompat.xlat is xbcompat/ at commit 04edcd33, built in the cloud with
+(xbcompat.xlat is xbcompat/ at commit 1cb7b97c, built in the cloud with
 RENDERER=native.)
 
-Thanks for request 5. What it showed and what changed since:
+Thanks for request 6. What it showed and what changed since:
 
-- The hub came up (260 s route) at 11.2-11.6 fps, then sank to ~8 over
-  two minutes; box86 holds ~9.9.
-- XLAT_SAFE_FLAGS=1 drew the characters right, so one of xlat's flag
-  shortcuts breaks them. This build can name the shortcut: with
-  XLAT_FLAG_CHECK=1 it reports each place where code read a flag the
-  code before it left undefined, and XLAT_SAFE_FLAGS can now turn off one
-  shortcut at a time.
-- In the hub, sound mixing took ~80% of a core (dsmix_adpcm1_vp on three
-  threads), with the title's calls waiting on the mixer's lock. Voices
-  turned all the way down are now advanced without being mixed.
-- xbprof showed the JIT and the libraries as [unmapped] in the hub: it
-  stopped reading /proc/PID/maps at 1024 entries. The new xbprof reads
-  them all.
+- The characters broke because Phantom Dust has a function that returns
+  its answer in a CPU flag, and xlat dropped flags at returns. xlat now
+  keeps those flags at every call, return and indirect jump, for every
+  game; no setting is needed any more.
+- The hub's SSE math now stays in ARM registers within a block (Phantom
+  Dust's hottest block went from 385 to 118 ARM instructions).
+- Inaudible sound voices still cost most of a core because they were
+  advanced one sample at a time; they now advance 32 samples or a whole
+  block at a time, so the mixer holds its lock for much less.
+- The game thread compared state with glibc's memcmp dozens of times a
+  draw, and the render worker copied 3 KB of shader constants per draw;
+  both are cheaper now.
+- The fps still sank from 11 to ~8.5 over three minutes. This request
+  checks whether box86 sinks the same way, and profiles the start and
+  the end of the sink separately to see what grows.
 
-## 1. Install
+## 1. box86 first
+
+The Pi is on box86 now; keep it that way for this step. Restart xbox,
+drive to the underground hub (~/Downloads/route-to-hub.sh) and stand
+still. From the moment the hub is up, keep every `D3D: ... fps` line and
+every `DSound:` line for three minutes.
+
+## 2. Install
 
 /etc/default/xbox: keep every renderer setting box86 runs with now
 (XBCOMPAT_RENDER_WORKER, XBCOMPAT_ASYNC_DRAWS, XBCOMPAT_LATCH_TICKS,
-XBCOMPAT_LOG_FPS and the rest) and add, set the same way, XLAT_PERF_MAP=1,
-XLAT_STATS=60 and XLAT_FLAG_CHECK=1. Nothing else from request 5. On the
-PC, from bootani/pi/bench:
+XBCOMPAT_LOG_FPS and the rest) and add, set the same way, XLAT_PERF_MAP=1
+and XLAT_STATS=60. No XLAT_SAFE_FLAGS, XLAT_FLAG_CHECK or
+XBCOMPAT_MIX_SILENT. On the PC, from bootani/pi/bench:
 
     PI=192.168.1.128 sh push-xlat.sh
 
 If the dashboard doesn't come up, it puts box86 back by itself. Its report
-is xlat.txt next to the script. The log should have the lines
-`D3D: native renderer bridge ABI 4, 312 exports, linked in` and
-`xlat: flag check on (each block checks the flags it reads)`.
+is xlat.txt next to the script. The log should have the line
+`D3D: native renderer bridge ABI 4, 312 exports, linked in`.
 
-## 2. Flag check in the hub
+## 3. xlat hub, three minutes, profiled twice
 
-Drive to the underground hub (~/Downloads/route-to-hub.sh) and stand
-still. Screenshot (touch /tmp/xbshot.req) as soon as the hub is up, wait
-60 s, and keep every line starting `xlat: flag check:` from the whole run
-(dashboard included), plus one hub fps line.
+Restart xbox, drive to the hub, stand still, and screenshot (touch
+/tmp/xbshot.req) as soon as it's up: the player and the NPC should now
+draw right with no flag setting. From that moment keep every fps and
+`DSound:` line for three minutes, and every `xlat:` line. Profile twice,
+each time with both commands at once:
 
-## 3. Which shortcut
+at 30 s:
 
-Remove XLAT_FLAG_CHECK. Then try each of these in turn, set the same way
-(one at a time, removing the previous one), restarting xbox and driving
-back to the hub each time:
+    /root/xbprof $(pidof xbcompat.arm) 30 1000 60 > /tmp/xbprof-early.txt
+    sh /root/clocks.sh 30 > /tmp/clocks-early.txt
 
-    XLAT_SAFE_FLAGS=ret
-    XLAT_SAFE_FLAGS=call
-    XLAT_SAFE_FLAGS=jmp
-    XLAT_SAFE_FLAGS=look
-    XLAT_SAFE_FLAGS=nzcv
+at 150 s:
 
-Do all five even if an early one fixes the characters (more than one may).
-For each keep the log's `xlat: flags kept at ...` line, a hub screenshot,
-one fps line, and whether the characters draw right. If Phantom Dust
-crashes or hangs, keep the last 80 lines of the log and go on. Remove
-XLAT_SAFE_FLAGS when done.
+    /root/xbprof $(pidof xbcompat.arm) 30 1000 60 > /tmp/xbprof-late.txt
+    sh /root/clocks.sh 30 > /tmp/clocks-late.txt
 
-## 4. Plain hub, three minutes
+If Phantom Dust crashes or hangs, keep the last 80 lines of the log.
 
-Restart xbox, drive to the hub, screenshot when it's up. From that moment
-keep every `D3D: ... fps` line and every `DSound:` line for three minutes
-(the fps sank last time; this shows whether the sound voices grow with
-it). At 60 s, at the same time:
-
-    /root/xbprof $(pidof xbcompat.arm) 30 1000 60 > /tmp/xbprof-hub.txt
-    sh /root/clocks.sh 30 > /tmp/clocks-hub.txt
-
-and keep every `xlat:` line from the three minutes.
-
-## 5. Sound mixed the old way
-
-Add XBCOMPAT_MIX_SILENT=1 (mixes the inaudible voices too, as before),
-restart, hub, stand still for two minutes, and keep every fps and
-`DSound:` line from the hub. Then remove it.
-
-## 6. Leave and report
+## 4. Leave and report
 
     PI=192.168.1.128 sh push-xlat.sh undo
 
-remove XLAT_PERF_MAP, XLAT_STATS, XLAT_FLAG_CHECK, XLAT_SAFE_FLAGS and
-XBCOMPAT_MIX_SILENT from /etc/default/xbox, restart xbox, and check the
-dashboard is back on box86.
+remove XLAT_PERF_MAP and XLAT_STATS from /etc/default/xbox, restart xbox,
+and check the dashboard is back on box86.
 
 Send the results to the cloud session in parts of at most 60 KB, each
-starting `request 6 part i/N`:
+starting `request 7 part i/N`:
 
-    request 6: ok / problems, how long the route to the hub took
+    request 7: ok / problems, how long the route to the hub took
+    step 1: box86 fps and DSound lines
     xlat.txt (whole)
-    step 2: every flag check line, the fps line, characters right or not
-    step 3: for each setting, the flags kept line, fps line, characters right or not
-    step 4: fps and DSound lines, xbprof-hub.txt and clocks-hub.txt (whole), the xlat: lines
-    step 5: fps and DSound lines
+    step 3: characters right or not, fps and DSound lines, the xlat: lines
+    step 3: xbprof-early.txt and xbprof-late.txt (whole, apart from the
+            dpc and SDLHotplugALSA threads' detail), clocks-early.txt and
+            clocks-late.txt
     log tails if anything failed
 
-For each screenshot, say in a line what it shows. If a step 3 try draws
-the characters right, also send its hub screenshot as a 320x240 JPEG,
-base64, in a part of its own
-(`convert hub.bmp -resize 320x240 -quality 70 jpg:- | base64 -w0`).
+Say in a line what the hub screenshot shows, and send it as a 160x120
+JPEG, base64, in a part of its own, as in request 6 part 4.
 
-Then keep watching the branch for request 7.
+Then keep watching the branch for request 8.
