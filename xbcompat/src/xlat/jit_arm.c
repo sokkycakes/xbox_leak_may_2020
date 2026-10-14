@@ -43,8 +43,8 @@
 #define ITAB_SIZE    (1u << ITAB_BITS)
 #define ITAB_SHIFT   13                 /* slot: (eip ^ eip >> 13) mod size */
 #define HTAB_BITS    16
-#define LOOK_INSNS   32                 /* instructions the flag lookahead reads per path */
-#define LOOK_DEPTH   2                  /* conditional branches it follows */
+#define LOOK_INSNS   64                 /* instructions the flag lookahead reads per piece */
+#define LOOK_NODES   24                 /* straight-line pieces it reads */
 
 enum { FL_C = 1, FL_P = 2, FL_A = 4, FL_Z = 8, FL_S = 16, FL_O = 32 };
 #define FL_ALL  63
@@ -91,14 +91,14 @@ typedef struct { uint32_t eip, code; } itab_entry;
 
 static uint32_t *cache, *cache_cur, *cache_end, *cache_blocks;
 static int (*enter)(xcpu *c, const void *code);
-static uint32_t *exit_common, *link_tramp, *indirect, *fb_tramp, *fb_tramp_c;
+static uint32_t *exit_common, *link_tramp, *indirect, *indirect_nf, *fb_tramp, *fb_tramp_c;
 static itab_entry *itab;
 static struct block *htab[1u << HTAB_BITS];
 static struct plist **pages;
 static unsigned live_blocks;
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static uint32_t stop_lo, stop_hi;
-static unsigned stop_live, unknown_live;
+static unsigned stop_live, unknown_live, abi_live;
 
 static bool stats;
 static const char *count_dir;   /* XLAT_COUNT=DIR: count block runs, dump the hottest there */
@@ -206,36 +206,68 @@ static int branch_kind(const xinsn *in, uint32_t *target)
     return BR_NONE;
 }
 
-/* Flags the code at eip may read before writing them. */
-static unsigned flags_needed(uint32_t eip, int depth)
+/* Flags the code at eip may read before writing them: liveness over the
+   code reachable from eip (up to LOOK_NODES straight-line pieces of up to
+   LOOK_INSNS instructions each), solved to a fixed point so loops don't
+   end the search.  Flags are dead at calls, rets and indirect jumps (the
+   MSVC ABI never passes them; XLAT_SAFE_FLAGS keeps them), and the ones a
+   piece past the limit might read count as live. */
+static unsigned flags_needed(uint32_t eip)
 {
-    unsigned need = 0, done = 0;
-    for (int k = 0; k < LOOK_INSNS; k++) {
-        if (in_stop(eip)) return need | (stop_live & ~done);
-        xinsn in;
-        if (!x86_decode(&in, eip)) return need | (FL_ALL & ~done);
-        unsigned r, w;
-        flag_info(&in, &r, &w);
-        need |= r & ~done;
-        done |= w;
-        if (done == FL_ALL) return need;
-        uint32_t target = 0;
-        switch (branch_kind(&in, &target)) {
-        case BR_NONE:
-            eip += in.len;
-            continue;
-        case BR_JMP: case BR_CALL:
-            eip = target;
-            continue;
-        case BR_JCC:
-            if (depth <= 0) break;
-            return need | ((flags_needed(target, depth - 1) | flags_needed(eip + in.len, depth - 1)) & ~done);
-        default:
+    struct { uint32_t addr; uint8_t need, done, end, in; int16_t succ[2]; } nd[LOOK_NODES];
+    int n = 1, work = 0;
+    nd[0].addr = eip;
+    for (; work < n; work++) {
+        uint32_t a = nd[work].addr;
+        unsigned need = 0, done = 0, end = unknown_live;
+        int16_t succ[2] = { -1, -1 };
+        uint32_t to[2];
+        int nto = 0;
+        for (int k = 0; k < LOOK_INSNS; k++) {
+            if (in_stop(a)) { end = stop_live; break; }
+            xinsn in;
+            if (!x86_decode(&in, a)) { end = FL_ALL; break; }
+            unsigned r, w;
+            flag_info(&in, &r, &w);
+            need |= r & ~done;
+            done |= w;
+            if (done == FL_ALL) { end = 0; break; }
+            uint32_t target = 0;
+            int kind = branch_kind(&in, &target);
+            if (kind == BR_NONE) { a += in.len; continue; }
+            if (kind == BR_JMP) { a = target; continue; }
+            if (kind == BR_JCC) { to[nto++] = target; to[nto++] = a + in.len; end = 0; }
+            else if (kind == BR_CALL || kind == BR_RET || kind == BR_IND) end = abi_live;
+            else end = FL_ALL;
             break;
         }
-        break;
+        for (int j = 0; j < nto; j++) {
+            int m = 0;
+            while (m < n && nd[m].addr != to[j]) m++;
+            if (m == n) {
+                if (n == LOOK_NODES) { end |= unknown_live; continue; }
+                nd[n++].addr = to[j];
+            }
+            succ[j] = (int16_t)m;
+        }
+        nd[work].need = (uint8_t)need;
+        nd[work].done = (uint8_t)done;
+        nd[work].end = (uint8_t)end;
+        nd[work].succ[0] = succ[0];
+        nd[work].succ[1] = succ[1];
+        nd[work].in = (uint8_t)(need | (end & ~done));
     }
-    return need | (unknown_live & ~done);
+    for (bool changed = true; changed; ) {
+        changed = false;
+        for (int i = n - 1; i >= 0; i--) {
+            unsigned out = nd[i].end;
+            for (int j = 0; j < 2; j++)
+                if (nd[i].succ[j] >= 0) out |= nd[nd[i].succ[j]].in;
+            unsigned in = nd[i].need | (out & ~nd[i].done);
+            if (in != nd[i].in) { nd[i].in = (uint8_t)in; changed = true; }
+        }
+    }
+    return nd[0].in;
 }
 
 /* ---- translation context and emitters --------------------------------- */
@@ -250,6 +282,7 @@ typedef struct {
     int x_delta;                   /* net pushes */
     uint8_t x_loaded, x_dirty;     /* by slot */
     uint8_t x_tset, x_tempty;      /* slots whose tag changed, and those now empty */
+    uint8_t x_tknown, x_tentry;    /* slots whose tag at entry is known, and those empty then */
     uint8_t xreg[8];               /* each slot's VFP register */
 } tctx;
 
@@ -504,10 +537,86 @@ static xop k_reg(int r) { return (xop){ K_REG, r, 0 }; }
 static xop k_imm(uint32_t v) { return (xop){ K_IMM, 0, v }; }
 static xop k_e(const xinsn *in) { return in->mod == 3 ? k_reg(in->rm) : (xop){ K_MEM, 0, 0 }; }
 
+/* T0 = the address of in's memory operand (exclusive loads take no offset) */
+static void addr_t0(tctx *t, const xinsn *in)
+{
+    int32_t off;
+    int base = mem_addr(t, in, T0, 4095, &off);
+    if (off || base != T0) add_imm(t, T0, base, (uint32_t)off, T0);
+}
+
+/* Atomic read-modify-write on the address in T0: an ldrex/strex loop
+   between excl_begin (returns the loop's start) and excl_end.  Exclusive
+   accesses fault when unaligned, so for a dword excl_begin branches to
+   *plain (patched by excl_plain) for a plain load and store instead: the
+   CPU makes those atomic too, ARM can't.  tst and teq change N and Z only. */
+static uint32_t *excl_begin(tctx *t, bool word, uint32_t **plain)
+{
+    *plain = NULL;
+    if (word) {
+        E(dp_i(C_AL, OP_TST, 1, 0, T0, 3));
+        *plain = t->a.p;
+        E(0);
+    }
+    E(A_DMB);
+    return t->a.p;
+}
+
+/* strex's status is in T3; returns the branch to patch past the plain code */
+static uint32_t *excl_end(tctx *t, uint32_t *retry, uint32_t *plain)
+{
+    E(dp_i(C_AL, OP_TEQ, 1, 0, T3, 0));
+    E(a_b(C_NE, t->a.p, retry));
+    E(A_DMB);
+    if (!plain) return NULL;
+    uint32_t *join = t->a.p;
+    E(0);
+    if (plain < t->a.end) *plain = a_b(C_NE, plain, t->a.p);
+    return join;
+}
+
+static void excl_join(tctx *t, uint32_t *join)
+{
+    if (join && join < t->a.end) *join = a_b(C_AL, join, t->a.p);
+}
+
+/* lock add/or/and/sub/xor [mem], r or imm on a dword: an ldrex/strex loop
+   without flags, then the flags from the value it read */
+static bool emit_lock_alu(tctx *t, const xinsn *in, int aop, xop s, unsigned live)
+{
+    op2_t b;
+    if (s.k == K_REG) {
+        b = o_reg(HR(s.r), 0);
+    } else {
+        b = o_imm(s.imm);
+        if (arm_imm(s.imm) < 0 && !alt_imm(aop, s.imm)) {
+            if (live & FL_A) return false;
+            mov_imm(t, T4, s.imm);
+            b = o_reg(T4, 0);
+        }
+    }
+    addr_t0(t, in);
+    uint32_t *plain, *retry = excl_begin(t, true, &plain);
+    E(A_LDREX(T1, T0));
+    alu_core(t, aop, T2, T1, b, 0, 0);
+    E(A_STREX(T3, T2, T0));
+    uint32_t *join = excl_end(t, retry, plain);
+    E(A_LDR(T1, T0, 0));
+    alu_core(t, aop, T2, T1, b, 0, 0);
+    E(A_STR(T2, T0, 0));
+    excl_join(t, join);
+    if (live & FL_ALL) alu_core(t, aop, T2, T1, b, live, 0);
+    return true;
+}
+
 static bool emit_alu(tctx *t, const xinsn *in, int aop, int sz, xop d, xop s, unsigned live)
 {
     bool mem = d.k == K_MEM || s.k == K_MEM, wb = aop != 7 && aop != 8;
-    if (mem && (in->ad16 || (in->pfx & XP_LOCK))) return false;
+    if (mem && (in->pfx & XP_LOCK)) {
+        if (in->ad16 || sz != 4 || d.k != K_MEM || aop == 2 || aop == 3 || !wb) return false;
+        return emit_lock_alu(t, in, aop, s, live);
+    }
+    if (mem && in->ad16) return false;
     if (sz != 4 && (aop == 2 || aop == 3)) return false;
     int base = 0, sh = 32 - 8 * sz;
     int32_t off = 0;
@@ -618,7 +727,7 @@ static int xq(const tctx *t, int i) { return (i - t->x_delta) & 7; }
 static void x_reset(tctx *t)
 {
     t->x_delta = 0;
-    t->x_loaded = t->x_dirty = t->x_tset = t->x_tempty = 0;
+    t->x_loaded = t->x_dirty = t->x_tset = t->x_tempty = t->x_tknown = t->x_tentry = 0;
     for (int q = 0; q < 8; q++) t->xreg[q] = (uint8_t)(16 + q);
 }
 
@@ -648,21 +757,36 @@ static int x_put(tctx *t, int i)
     return t->xreg[q];
 }
 
+/* Slot q's tag becomes empty or valid.  entry is what its first change
+   says the tag was when the block started: compiled code never pushes onto
+   a full register or pops an empty one, so a push means it was empty and a
+   pop that it was valid (-1: unknown).  A slot that ends as it started
+   needs no tag write: a push and its pop leave the tags alone. */
+static void x_tag(tctx *t, int q, bool empty, int entry)
+{
+    uint8_t bit = (uint8_t)(1u << q);
+    if (!(t->x_tset & bit) && entry >= 0) {
+        t->x_tknown |= bit;
+        if (entry) t->x_tentry |= bit;
+        else t->x_tentry &= (uint8_t)~bit;
+    }
+    t->x_tset |= bit;
+    if (empty) t->x_tempty |= bit;
+    else t->x_tempty &= (uint8_t)~bit;
+}
+
 /* push: the VFP register for the new st(0) */
 static int x_push(tctx *t)
 {
     t->x_delta++;
-    int q = xq(t, 0);
-    t->x_tset |= (uint8_t)(1u << q);
-    t->x_tempty &= (uint8_t)~(1u << q);
+    x_tag(t, xq(t, 0), false, 1);
     return x_put(t, 0);
 }
 
 static void x_pop(tctx *t)
 {
     uint8_t bit = (uint8_t)(1u << xq(t, 0));
-    t->x_tset |= bit;
-    t->x_tempty |= bit;
+    x_tag(t, xq(t, 0), true, 0);
     t->x_loaded &= (uint8_t)~bit;
     t->x_dirty &= (uint8_t)~bit;
     t->x_delta--;
@@ -680,7 +804,9 @@ static void x_rot(tctx *t, int rd, unsigned m, int tr)
 static void x87_sync(tctx *t)
 {
     int delta = t->x_delta & 7;
-    if (t->x_dirty || t->x_tset || delta) {
+    uint8_t same = t->x_tknown & (uint8_t)~(t->x_tentry ^ t->x_tempty);
+    uint8_t tset = t->x_tset & (uint8_t)~same, tempty = t->x_tempty & tset;
+    if (t->x_dirty || tset || delta) {
         E(A_LDR(T3, R0, O_TOP));
         for (int q = 0; q < 8; q++) {
             if (!(t->x_dirty >> q & 1)) continue;
@@ -693,12 +819,14 @@ static void x87_sync(tctx *t)
             E(dp_r(C_AL, OP_ADD, 0, T2, R0, r, SH_LSL, 3));
             E(a_vstr(t->xreg[q], T2, O_ST));
         }
-        if (t->x_tset) {
+        if (tset) {
             E(A_LDR(T2, R0, O_FTAG));
-            x_rot(t, T1, t->x_tset, T3);
-            E(dp_r(C_AL, OP_BIC, 0, T2, T2, T1, SH_LSL, 0));
-            if (t->x_tempty) {
-                x_rot(t, T1, t->x_tempty, T3);
+            if (tset != tempty) {
+                x_rot(t, T1, tset, T3);
+                E(dp_r(C_AL, OP_BIC, 0, T2, T2, T1, SH_LSL, 0));
+            }
+            if (tempty) {
+                x_rot(t, T1, tempty, T3);
                 E(dp_r(C_AL, OP_ORR, 0, T2, T2, T1, SH_LSL, 0));
             }
             E(A_STR(T2, R0, O_FTAG));
@@ -961,10 +1089,8 @@ static void x_fst_reg(tctx *t, int i, bool pop)
     if (i) {
         int a = x_get(t, 0);
         int d = x_put(t, i);
-        uint8_t bit = (uint8_t)(1u << xq(t, i));
         E(A_VMOV(d, a));
-        t->x_tset |= bit;
-        t->x_tempty &= (uint8_t)~bit;
+        x_tag(t, xq(t, i), false, -1);
     }
     if (pop) x_pop(t);
 }
@@ -1148,8 +1274,7 @@ static bool x87(tctx *t, const xinsn *in, unsigned live)
         switch (r) {
         case 0: {   /* ffree: st(i) empty, its value dropped */
             uint8_t bit = (uint8_t)(1u << xq(t, (int)i));
-            t->x_tset |= bit;
-            t->x_tempty |= bit;
+            x_tag(t, xq(t, (int)i), true, -1);
             t->x_loaded &= (uint8_t)~bit;
             t->x_dirty &= (uint8_t)~bit;
             return true;
@@ -1370,12 +1495,46 @@ static bool native(tctx *t, const xinsn *in, unsigned live)
     }
     case 0x84: case 0x85:
         return emit_alu(t, in, 8, (op & 1) ? osz : 1, k_e(in), k_reg(in->reg), live);
-    case 0x87:
-        if (osz != 4 || m) return false;
-        E(A_MOV(T0, HR(in->rm)));
-        E(A_MOV(HR(in->rm), HR(in->reg)));
-        E(A_MOV(HR(in->reg), T0));
+    case 0x86:
+        if (!m) {
+            get_sub(t, T1, in->rm, 1);
+            get_sub(t, T2, in->reg, 1);
+            set_sub(t, in->rm, 1, T2);
+            set_sub(t, in->reg, 1, T1);
+            return true;
+        }
+        /* fall through */
+    case 0x87: {
+        if (op == 0x87 && osz != 4) return false;
+        if (!m) {
+            E(A_MOV(T0, HR(in->rm)));
+            E(A_MOV(HR(in->rm), HR(in->reg)));
+            E(A_MOV(HR(in->reg), T0));
+            return true;
+        }
+        /* with memory: always atomic */
+        bool keep = live & (FL_Z | FL_S), byte = op == 0x86;
+        int src = HR(in->reg);
+        addr_t0(t, in);
+        if (byte && in->reg >= 4) {
+            E(A_UBFX(T2, HR(in->reg - 4), 8, 8));
+            src = T2;
+        }
+        if (keep) E(A_MRS(T4));
+        uint32_t *plain, *retry = excl_begin(t, !byte, &plain);
+        E(byte ? A_LDREXB(T1, T0) : A_LDREX(T1, T0));
+        E(byte ? A_STREXB(T3, src, T0) : A_STREX(T3, src, T0));
+        uint32_t *join = excl_end(t, retry, plain);
+        if (plain) {
+            E(A_LDR(T1, T0, 0));
+            E(A_STR(src, T0, 0));
+        }
+        excl_join(t, join);
+        if (keep) E(A_MSR(T4));
+        if (byte) set_sub(t, in->reg, 1, T1);
+        else E(A_MOV(HR(in->reg), T1));
         return true;
+    }
     case 0x88: case 0x89: case 0x8A: case 0x8B: {
         int sz = (op & 1) ? osz : 1;
         bool to_e = !(op & 2);
@@ -1564,7 +1723,20 @@ static bool native(tctx *t, const xinsn *in, unsigned live)
     case 0xFF: {
         if (osz != 4) return false;
         if (in->reg < 2) {
-            if (m && (in->pfx & XP_LOCK)) return false;
+            if (m && (in->pfx & XP_LOCK)) {
+                addr_t0(t, in);
+                uint32_t *plain, *retry = excl_begin(t, true, &plain);   /* C and V untouched, as inc/dec needs */
+                E(A_LDREX(T1, T0));
+                E(dp_i(C_AL, in->reg ? OP_SUB : OP_ADD, 0, T2, T1, 1));
+                E(A_STREX(T3, T2, T0));
+                uint32_t *join = excl_end(t, retry, plain);
+                E(A_LDR(T1, T0, 0));
+                E(dp_i(C_AL, in->reg ? OP_SUB : OP_ADD, 0, T2, T1, 1));
+                E(A_STR(T2, T0, 0));
+                excl_join(t, join);
+                if (live & FL_ALL) emit_incdec(t, T1, in->reg, live);
+                return true;
+            }
             int r = HR(in->rm);
             if (m) {
                 base = mem_addr(t, in, T0, 4095, &off);
@@ -1632,6 +1804,59 @@ static bool native(tctx *t, const xinsn *in, unsigned live)
         E(A_MUL(HR(in->reg), HR(in->reg), src));
         return true;
     }
+    case 0x1B1: {   /* cmpxchg r/m32, r32 */
+        if (osz != 4) return false;
+        if (!m) {
+            alu_core(t, 7, 0, R4, o_reg(HR(in->rm), 0), live | FL_Z, 0);
+            E(A_MOVc(C_EQ, HR(in->rm), HR(in->reg)));
+            E(A_MOVc(C_NE, R4, HR(in->rm)));
+            return true;
+        }
+        addr_t0(t, in);
+        uint32_t *plain, *retry = excl_begin(t, true, &plain);
+        E(A_LDREX(T1, T0));
+        E(dp_r(C_AL, OP_CMP, 1, 0, T1, R4, SH_LSL, 0));
+        uint32_t *fail = t->a.p;
+        E(0);
+        E(A_STREX(T3, HR(in->reg), T0));
+        E(dp_i(C_AL, OP_TEQ, 1, 0, T3, 0));
+        E(a_b(C_NE, t->a.p, retry));
+        if (fail < t->a.end) *fail = a_b(C_NE, fail, t->a.p);
+        E(A_CLREX);
+        E(A_DMB);
+        uint32_t *join = t->a.p;
+        E(0);
+        if (plain < t->a.end) *plain = a_b(C_NE, plain, t->a.p);
+        E(A_LDR(T1, T0, 0));
+        E(dp_r(C_AL, OP_CMP, 1, 0, T1, R4, SH_LSL, 0));
+        E(a_ldst(C_EQ, 0, 0, HR(in->reg), T0, 0, 1, 0));
+        excl_join(t, join);
+        alu_core(t, 7, 0, R4, o_reg(T1, 0), live, 0);
+        E(A_MOV(R4, T1));   /* the value read: eax's own when they matched */
+        return true;
+    }
+    case 0x1C1: {   /* xadd r/m32, r32 */
+        if (osz != 4) return false;
+        if (!m) {
+            alu_core(t, 0, T2, HR(in->rm), o_reg(HR(in->reg), 0), live, 0);
+            E(A_MOV(HR(in->reg), HR(in->rm)));
+            E(A_MOV(HR(in->rm), T2));
+            return true;
+        }
+        addr_t0(t, in);
+        uint32_t *plain, *retry = excl_begin(t, true, &plain);
+        E(A_LDREX(T1, T0));
+        E(dp_r(C_AL, OP_ADD, 0, T2, T1, HR(in->reg), SH_LSL, 0));
+        E(A_STREX(T3, T2, T0));
+        uint32_t *join = excl_end(t, retry, plain);
+        E(A_LDR(T1, T0, 0));
+        E(dp_r(C_AL, OP_ADD, 0, T2, T1, HR(in->reg), SH_LSL, 0));
+        E(A_STR(T2, T0, 0));
+        excl_join(t, join);
+        if (live & FL_ALL) alu_core(t, 0, T2, T1, o_reg(HR(in->reg), 0), live, 0);
+        E(A_MOV(HR(in->reg), T1));
+        return true;
+    }
     case 0x1B6: case 0x1B7: case 0x1BE: case 0x1BF: {
         bool word = op & 1, sx = op >= 0x1BE;
         int rd = HR(in->reg);
@@ -1677,8 +1902,8 @@ static void emit_exit(tctx *t, uint32_t target, unsigned live, uint32_t *alt)
 /* jump to the guest address in T0 */
 static void emit_indirect(tctx *t)
 {
-    if (!t->cf_inv && (unknown_live & FL_C)) invert_c(t);
-    E(a_b(C_AL, t->a.p, indirect));
+    if (!t->cf_inv && (abi_live & FL_C)) invert_c(t);
+    E(a_b(C_AL, t->a.p, abi_live ? indirect : indirect_nf));
 }
 
 static bool emit_branch(tctx *t, const xinsn *in, int kind, uint32_t target, unsigned lt, unsigned lf)
@@ -1827,10 +2052,10 @@ static struct block *translate(uint32_t eip)
     int kind = last->len ? branch_kind(last, &target) : BR_OTHER;
     unsigned lt = 0, lf = 0;
     switch (kind) {
-    case BR_NONE: lf = flags_needed(next, LOOK_DEPTH); break;
-    case BR_JCC: lt = flags_needed(target, LOOK_DEPTH); lf = flags_needed(next, LOOK_DEPTH); break;
-    case BR_JMP: case BR_CALL: lt = flags_needed(target, LOOK_DEPTH); break;
-    case BR_RET: case BR_IND: lt = unknown_live; break;
+    case BR_NONE: lf = flags_needed(next); break;
+    case BR_JCC: lt = flags_needed(target); lf = flags_needed(next); break;
+    case BR_JMP: lt = flags_needed(target); break;
+    case BR_CALL: case BR_RET: case BR_IND: lt = abi_live; break;
     default: lt = lf = FL_ALL; break;
     }
     t->live[n] = (uint8_t)(lt | lf);
@@ -2033,22 +2258,27 @@ static void gen_trampolines(void)
     emit(&a, dp_i(C_AL, OP_MOV, 0, R0, 0, EXIT_LINK));
     emit(&a, a_b(C_AL, a.p, exit_common));
 
-    /* indirect exit: r1 = the target eip; flags kept */
-    indirect = a.p;
-    emit(&a, A_MRS(LR));
-    emit(&a, dp_r(C_AL, OP_EOR, 0, R2, R1, R1, SH_LSR, ITAB_SHIFT));
-    emit(&a, a_movw(C_AL, R3, (uint32_t)(uintptr_t)itab & 0xFFFF));
-    emit(&a, a_movt(C_AL, R3, (uint32_t)(uintptr_t)itab >> 16));
-    emit(&a, A_UBFX(R2, R2, 0, ITAB_BITS));
-    emit(&a, dp_r(C_AL, OP_ADD, 0, R3, R3, R2, SH_LSL, 3));
-    emit(&a, A_LDRD(R2, R3));                         /* r2 = eip, r3 = code */
-    emit(&a, dp_r(C_AL, OP_CMP, 1, 0, R2, R1, SH_LSL, 0));
-    uint32_t *miss = a.p;
-    emit(&a, 0);
+    /* indirect exit: r1 = the target eip; flags kept (indirect_nf: not) */
+    uint32_t *miss[2];
+    for (int keep = 1; keep >= 0; keep--) {
+        if (keep) indirect = a.p;
+        else indirect_nf = a.p;
+        if (keep) emit(&a, A_MRS(LR));
+        emit(&a, dp_r(C_AL, OP_EOR, 0, R2, R1, R1, SH_LSR, ITAB_SHIFT));
+        emit(&a, a_movw(C_AL, R3, (uint32_t)(uintptr_t)itab & 0xFFFF));
+        emit(&a, a_movt(C_AL, R3, (uint32_t)(uintptr_t)itab >> 16));
+        emit(&a, A_UBFX(R2, R2, 0, ITAB_BITS));
+        emit(&a, dp_r(C_AL, OP_ADD, 0, R3, R3, R2, SH_LSL, 3));
+        emit(&a, A_LDRD(R2, R3));                     /* r2 = eip, r3 = code */
+        emit(&a, dp_r(C_AL, OP_CMP, 1, 0, R2, R1, SH_LSL, 0));
+        miss[keep] = a.p;
+        emit(&a, 0);
+        if (keep) emit(&a, A_MSR(LR));
+        emit(&a, A_BX(R3));
+    }
+    *miss[1] = a_b(C_NE, miss[1], a.p);
     emit(&a, A_MSR(LR));
-    emit(&a, A_BX(R3));
-    *miss = a_b(C_NE, miss, a.p);
-    emit(&a, A_MSR(LR));
+    *miss[0] = a_b(C_NE, miss[0], a.p);
     emit(&a, A_STR(R1, R0, O_EIP));
     save_state(&a, true);
     emit(&a, dp_i(C_AL, OP_MOV, 0, R0, 0, EXIT_INDIRECT));
@@ -2144,6 +2374,21 @@ void jit_print_stats(void)
                 (unsigned long long)fb_x87[best >> 4][best & 15]);
         fb_x87[best >> 4][best & 15] = 0;
     }
+    memset(fb_count, 0, sizeof(fb_count));
+    memset(fb_x87, 0, sizeof(fb_x87));
+}
+
+/* XLAT_STATS=N with N > 1: also print every N seconds, counting from the
+   last print, for runs that never exit cleanly. */
+static void *stats_thread(void *arg)
+{
+    unsigned secs = (unsigned)(uintptr_t)arg;
+    for (;;) {
+        sleep(secs);
+        fprintf(stderr, "xlat: last %u s:\n", secs);
+        jit_print_stats();
+    }
+    return NULL;
 }
 
 void jit_init(uint32_t lo, uint32_t hi, bool flags_at_stop)
@@ -2152,7 +2397,12 @@ void jit_init(uint32_t lo, uint32_t hi, bool flags_at_stop)
     stop_hi = hi;
     stop_live = flags_at_stop ? FL_ALL : 0;
     if (cache) return;
-    unknown_live = getenv("XLAT_SAFE_FLAGS") ? FL_ALL : FL_NZCV;
+    /* Flags are dead across ret and indirect jumps (MSVC never passes them
+       there); where the lookahead gives up, SF ZF CF OF are kept.
+       XLAT_SAFE_FLAGS keeps every flag everywhere. */
+    bool safe = getenv("XLAT_SAFE_FLAGS") != NULL;
+    unknown_live = safe ? FL_ALL : FL_NZCV;
+    abi_live = safe ? FL_ALL : 0;
     stats = getenv("XLAT_STATS") != NULL;
     count_dir = getenv("XLAT_COUNT");
     cache = mmap(NULL, CACHE_BYTES, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -2163,7 +2413,12 @@ void jit_init(uint32_t lo, uint32_t hi, bool flags_at_stop)
     if (!itab || !pages) die("out of memory");
     for (unsigned i = 0; i < ITAB_SIZE; i++) itab[i] = (itab_entry){ 0xFFFFFFFFu, 0 };
     gen_trampolines();
-    if (stats) atexit(jit_print_stats);
+    if (stats) {
+        unsigned secs = (unsigned)atoi(getenv("XLAT_STATS"));
+        pthread_t th;
+        if (secs > 1 && !pthread_create(&th, NULL, stats_thread, (void *)(uintptr_t)secs)) pthread_detach(th);
+        else atexit(jit_print_stats);
+    }
     if (getenv("XLAT_PERF_MAP")) {
         char path[64];
         snprintf(path, sizeof(path), "/tmp/perf-%d.map", (int)getpid());

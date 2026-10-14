@@ -153,6 +153,9 @@ static inline bool a_b_in_range(const uint32_t *at, const void *target)
 #define A_DMB                    0xF57FF05Bu                 /* dmb ish */
 #define A_LDREX(rt, rn)          (0xE1900F9Fu | (rn) << 16 | (rt) << 12)
 #define A_STREX(rd, rt, rn)      (0xE1800F90u | (rn) << 16 | (rd) << 12 | (rt))
+#define A_LDREXB(rt, rn)         (0xE1D00F9Fu | (rn) << 16 | (rt) << 12)
+#define A_STREXB(rd, rt, rn)     (0xE1C00F90u | (rn) << 16 | (rd) << 12 | (rt))
+#define A_CLREX                  0xF57FF01Fu
 #define A_LDRD(rt, rn)           (0xE1C000D0u | (rn) << 16 | (rt) << 12)   /* ldrd rt, rt+1, [rn] (aligned host data only) */
 #define A_NOP                    0xE320F000u
 
