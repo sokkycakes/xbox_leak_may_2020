@@ -690,7 +690,7 @@ static bool profiling(void)
 
 static Uint64 prof_draw_begin(void)
 {
-    return profiling() ? SDL_GetPerformanceCounter() : 0;
+    return profiling() && work_on ? SDL_GetPerformanceCounter() : 0;
 }
 
 /* Draws and clears that reached the device's own depth buffer, so a
@@ -1015,10 +1015,13 @@ static void log_fps(void)
 }
 #define DETAIL_TIMED(acc, ...) do { if (detail_on) { uint64_t td_ = now_ns(); __VA_ARGS__; acc += now_ns() - td_; } \
                                     else { __VA_ARGS__; } } while (0)
-#define TIMED(acc, ...) do { if (profiling()) { uint64_t t0_ = now_ns(); __VA_ARGS__; acc += now_ns() - t0_; } \
+/* Only for the PROFILE_WORK split: XBCOMPAT_LOG_FPS alone reports the rate,
+   and two clock reads per draw cost more than that (a system call each for
+   a 32-bit process where the kernel has no 32-bit vDSO). */
+#define TIMED(acc, ...) do { if (profiling() && work_on) { uint64_t t0_ = now_ns(); __VA_ARGS__; acc += now_ns() - t0_; } \
                              else { __VA_ARGS__; } } while (0)
 /* TIMED, and the thread's CPU time into cacc when PROFILE_WORK is on. */
-#define TIMED_CPU(acc, cacc, ...) do { if (profiling()) { uint64_t c0_ = work_on ? thread_cpu_ns() : 0; \
+#define TIMED_CPU(acc, cacc, ...) do { if (profiling() && work_on) { uint64_t c0_ = thread_cpu_ns(); \
                                            uint64_t t0_ = now_ns(); __VA_ARGS__; acc += now_ns() - t0_; \
                                            if (work_on) cacc += thread_cpu_ns() - c0_; } \
                                        else { __VA_ARGS__; } } while (0)
