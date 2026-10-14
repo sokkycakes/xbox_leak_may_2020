@@ -649,6 +649,12 @@ static bool emit_alu(tctx *t, const xinsn *in, int aop, int sz, xop d, xop s, un
         if (wb && d.k == K_MEM) E(A_STR(T1, base, off));
         return true;
     }
+    if (aop == 8 && d.k == K_REG && s.k == K_REG && s.r == d.r && (sz == 2 || d.r < 4) &&
+        !(live & (FL_C | FL_O | FL_P | FL_A))) {
+        /* test r16, r16 (or r8, r8) for SF and ZF only: movs sets N and Z */
+        if (live & FL_ALL) E(dp_r(C_AL, OP_MOV, 1, T1, 0, HR(d.r), SH_LSL, sh));
+        return true;
+    }
     /* bytes and words, shifted to the top of the register */
     if (d.k == K_REG) {
         if (sz == 2 || d.r < 4) {
@@ -792,18 +798,35 @@ static void x_pop(tctx *t)
    new TOP. */
 static void x87_sync(tctx *t)
 {
-    uint8_t done = 0;
+    /* Registers fxch renamed go home, but not the ones popped since: an
+       empty register's value doesn't matter.  A parallel move: a register
+       is written once no move still to come reads it, and a cycle goes
+       through XD_TMP. */
+    uint8_t dead = t->x_tset & t->x_tempty;
+    int src[8], pending = 0;
     for (int p = 0; p < 8; p++) {
-        if ((done >> p & 1) || t->xreg[p] == 16 + p) continue;
-        /* a cycle of fxch swaps: d(16 + p) to the side, then each register
-           takes its value from the one holding it */
-        E(A_VMOV(XD_TMP, 16 + p));
-        for (int cur = p;;) {
-            done |= (uint8_t)(1u << cur);
-            int src = t->xreg[cur];
-            if (src == 16 + p) { E(A_VMOV(16 + cur, XD_TMP)); break; }
-            E(A_VMOV(16 + cur, src));
-            cur = src - 16;
+        src[p] = (dead >> p & 1) || t->xreg[p] == 16 + p ? -1 : t->xreg[p];
+        if (src[p] >= 0) pending++;
+    }
+    while (pending) {
+        bool moved = false;
+        for (int p = 0; p < 8; p++) {
+            if (src[p] < 0) continue;
+            bool read = false;
+            for (int q = 0; q < 8; q++) read |= q != p && src[q] == 16 + p;
+            if (read) continue;
+            E(A_VMOV(16 + p, src[p]));
+            src[p] = -1;
+            pending--;
+            moved = true;
+        }
+        if (moved) continue;
+        for (int p = 0; p < 8; p++) {
+            if (src[p] < 0) continue;
+            E(A_VMOV(XD_TMP, 16 + p));
+            for (int q = 0; q < 8; q++)
+                if (src[q] == 16 + p) src[q] = XD_TMP;
+            break;
         }
     }
     uint8_t same = t->x_tknown & (uint8_t)~(t->x_tentry ^ t->x_tempty);
@@ -1860,6 +1883,19 @@ static bool native(tctx *t, const xinsn *in, unsigned live)
     case 0x40: case 0x41: case 0x42: case 0x43: case 0x44: case 0x45: case 0x46: case 0x47:
     case 0x48: case 0x49: case 0x4A: case 0x4B: case 0x4C: case 0x4D: case 0x4E: case 0x4F:
         if (osz != 4) return false;
+        {
+            /* the same inc or dec again and again, no flag but CF read
+               after: one add (CF is left alone either way) */
+            int k = 1;
+            while (t->cur + k < t->n && k < 64 && t->in[t->cur + k].op == op && t->in[t->cur + k].pfx == in->pfx)
+                k++;
+            while (k > 1 && (t->live[t->cur + k] & FL_ALL & ~FL_C)) k--;
+            if (k > 1) {
+                E(dp_i(C_AL, op >= 0x48 ? OP_SUB : OP_ADD, 0, HR(op & 7), HR(op & 7), k));
+                t->skip = k - 1;
+                return true;
+            }
+        }
         emit_incdec(t, HR(op & 7), op >= 0x48, live);
         return true;
     case 0x50: case 0x51: case 0x52: case 0x53: case 0x54: case 0x55: case 0x56: case 0x57:
