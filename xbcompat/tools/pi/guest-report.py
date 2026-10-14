@@ -3,7 +3,10 @@
 
     guest-report.py PROFILE TITLE.map default.xbe [xbcompat-native.x86]
 
-PROFILE is the file XBCOMPAT_PROFILE wrote (src/prof.c), TITLE.map the
+PROFILE is the file XBCOMPAT_PROFILE wrote (src/prof.c) or, safer under
+box86 (whose x86 signal handling the XBCOMPAT_PROFILE sampler can hang),
+the one BOX86_PROFILE wrote (package/box86/0001-xbcompat-fixes.patch: no
+x86 handler, x86 addresses only for the busiest 150).  TITLE.map is the
 library map xbcompat made for the title (XDG_CACHE_HOME/xbcompat/maps or the
 cache folder beside it), default.xbe the title itself and
 xbcompat-native.x86 the unstripped x86 runtime that ran (for addr2line).
@@ -21,22 +24,35 @@ from collections import defaultdict
 
 
 def read_profile(path):
+    """Either profile: XBCOMPAT_PROFILE's (every address at the end) or
+    box86's BOX86_PROFILE (the busiest 150 x86 addresses as percentages,
+    after the per-library native split, which is kept as the header)."""
     addrs, callers, header = [], [], []
     mode = None
+    box86 = False
     for line in open(path, errors="replace"):
         line = line.rstrip("\n")
+        if line.startswith("recompiled x86 code:"):
+            box86 = True
         if line.startswith("all addresses"):
             mode = "a"; continue
         if line.startswith("all title code on the stack"):
             mode = "c"; continue
+        if box86 and line.startswith("x86 addresses:"):
+            mode = "p"; continue
         if mode is None:
             header.append(line)
+            continue
+        if mode == "p":
+            m = re.match(r"\s*([0-9.]+)%\s+([0-9a-f]{8})$", line)
+            if m:
+                addrs.append((int(round(float(m.group(1)) * 100)), int(m.group(2), 16)))
             continue
         m = re.match(r"(\d+) ([0-9a-f]{8})$", line)
         if not m:
             continue
         (addrs if mode == "a" else callers).append((int(m.group(1)), int(m.group(2), 16)))
-    return header, addrs, callers
+    return header, addrs, callers, box86
 
 
 def read_map(path):
@@ -101,7 +117,7 @@ def main():
     if len(sys.argv) < 4:
         print(__doc__)
         sys.exit(2)
-    header, addrs, callers = read_profile(sys.argv[1])
+    header, addrs, callers, box86 = read_profile(sys.argv[1])
     syms = read_map(sys.argv[2])
     sym_addrs = [a for a, _ in syms]
     d, secs = read_xbe(sys.argv[3])
@@ -163,8 +179,16 @@ def main():
             regions[kind] += n
             funcs[(kind, fn)] += n
 
-    print("\n".join(header[:1]))
-    print("\nby region (share of all sampled guest-thread CPU time):")
+    if box86:
+        # Shares are of the whole process's CPU time; only the busiest x86
+        # addresses are listed, so the regions below cover that much.
+        print("\n".join(l for l in header if l.strip()))
+        print("\nby region (share of the whole process's CPU time, busiest x86 addresses only, %.1f%% listed):"
+              % (sum(n for n, _ in addrs) / 100.0))
+        total = 10000
+    else:
+        print("\n".join(header[:1]))
+        print("\nby region (share of all sampled guest-thread CPU time):")
     for k, n in sorted(regions.items(), key=lambda x: -x[1]):
         print("%6.2f%%  %s" % (100.0 * n / total, k))
     print("\nbusiest functions:")
