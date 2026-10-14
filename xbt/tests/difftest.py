@@ -89,11 +89,31 @@ def compare(cases, native, xbt, srcs, show, xmm_check=True):
                 x, y = ra[3][16 * r:16 * r + 16], rb[3][16 * r:16 * r + 16]
                 if x != y:
                     diffs.append("xmm%d: native %s xbt %s" % (r, x.hex(), y.hex()))
-        if ra[4] != rb[4]:
-            for off in range(len(ra[4])):
-                if ra[4][off] != rb[4][off]:
+        ma, mb = bytearray(ra[4]), bytearray(rb[4])
+        # x87 transcendental results: relative tolerance on doubles
+        for off in range(0xd00, 0xe00, 8):
+            x = struct.unpack_from("<d", ma, off)[0]
+            y = struct.unpack_from("<d", mb, off)[0]
+            if x != y and abs(x - y) <= 1e-12 * max(abs(x), abs(y)):
+                mb[off:off + 8] = ma[off:off + 8]
+        # NaN sign/payload is not emulated (x87 "real indefinite" is negative)
+        for off in range(0xc00, 0xe00, 8):
+            x = struct.unpack_from("<d", ma, off)[0]
+            y = struct.unpack_from("<d", mb, off)[0]
+            if x != x and y != y:
+                mb[off:off + 8] = ma[off:off + 8]
+        for off in range(0xc40, 0xc80, 4):
+            x = struct.unpack_from("<f", ma, off)[0]
+            y = struct.unpack_from("<f", mb, off)[0]
+            if x != x and y != y:
+                mb[off:off + 4] = ma[off:off + 4]
+        if ma != mb:
+            for off in range(len(ma)):
+                if ma[off] != mb[off]:
                     where = ("data+0x%x" % off) if off < 0x1000 else ("stack-0x%x" % (0x1000 + 512 - off))
-                    diffs.append("memory %s: native %02x xbt %02x" % (where, ra[4][off], rb[4][off]))
+                    o8 = off & ~7
+                    diffs.append("memory %s: native %02x xbt %02x (qword native %s xbt %s)" % (
+                        where, ma[off], mb[off], ma[o8:o8 + 8].hex(), mb[o8:o8 + 8].hex()))
                     break
         if diffs:
             bad += 1

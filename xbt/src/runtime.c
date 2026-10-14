@@ -53,8 +53,9 @@ static void gen_stubs(void)
     a64buf *b = &bb;
     const int r0 = CPUOFF(r);
 
+    /* frame: x29,x30 | x19..x28 | host fpcr */
     xbt_stub.enter = b->p;
-    x_stp_pre(b, 29, 30, SP, -96);
+    x_stp_pre(b, 29, 30, SP, -112);
     x_mov_sp(b, 29, SP);
     x_stp(b, 19, 20, SP, 16);
     x_stp(b, 21, 22, SP, 32);
@@ -62,6 +63,10 @@ static void gen_stubs(void)
     x_stp(b, 25, 26, SP, 64);
     x_stp(b, 27, 28, SP, 80);
     x_mov(b, RCPU, 0);
+    x_mrs_fpcr(b, 9);
+    x_str(b, 9, SP, 96);
+    w_ldr(b, 9, RCPU, CPUOFF(fpcr));
+    x_msr_fpcr(b, 9);
     for (int r = 0; r < 8; r += 2)
         w_ldp(b, GREG(r), GREG(r + 1), RCPU, r0 + 4 * r);
     w_ldr(b, RTOP, RCPU, CPUOFF(ftop));
@@ -72,12 +77,16 @@ static void gen_stubs(void)
     for (int r = 0; r < 8; r += 2)
         w_stp(b, GREG(r), GREG(r + 1), RCPU, r0 + 4 * r);
     w_str(b, RTOP, RCPU, CPUOFF(ftop));
+    x_mrs_fpcr(b, 9);
+    w_str(b, 9, RCPU, CPUOFF(fpcr));
+    x_ldr(b, 9, SP, 96);
+    x_msr_fpcr(b, 9);
     x_ldp(b, 19, 20, SP, 16);
     x_ldp(b, 21, 22, SP, 32);
     x_ldp(b, 23, 24, SP, 48);
     x_ldp(b, 25, 26, SP, 64);
     x_ldp(b, 27, 28, SP, 80);
-    x_ldp_post(b, 29, 30, SP, 96);
+    x_ldp_post(b, 29, 30, SP, 112);
     a64_ret(b);
 
     /* reached with `bl` from a per-exit stub: [x30] = target, [x30+4] = site */

@@ -501,6 +501,333 @@ class Gen:
         self.g_cond()
 
 
+
+# --------------------------------------------------------------------------
+# x87: values stay finite (x87 and AArch64 produce different default NaNs).
+# Precision control is set to double so basic arithmetic must match exactly;
+# results of transcendental instructions are compared with a tolerance.
+FP_SRC = DATA + 0xa00      # input constants
+FP_EXACT = DATA + 0xc00    # results compared bit-exactly
+FP_APPROX = DATA + 0xd00   # results compared with a relative tolerance
+FP_CW = DATA + 0xbf0
+
+
+def fp_value(r):
+    c = r.random()
+    if c < 0.15:
+        return r.choice([0.0, -0.0, 1.0, -1.0, 0.5, 2.0, 3.0, 10.0, 1e10, -1e-10, 123456.789])
+    if c < 0.5:
+        return float(r.randint(-1000, 1000)) / r.choice([1, 2, 4, 8, 3, 7])
+    return r.uniform(-1000.0, 1000.0) * 10.0 ** r.randint(-3, 3)
+
+
+class FPGen:
+    def __init__(self, g):
+        self.g = g
+        self.r = g.r
+        self.depth = 0
+        self.vals = []           # python mirror of the stack (approximate)
+        self.nsrc = 0
+        self.approx = False
+        self.nout = 0
+
+    def emit(self, x):
+        self.g.emit(x)
+
+    def const(self, v, size=8):
+        addr = FP_SRC + 8 * (self.nsrc % 48)
+        self.nsrc += 1
+        if size == 8:
+            lo, hi = struct.unpack("<II", struct.pack("<d", v))
+            self.emit("mov dword [0x%x], 0x%x" % (addr, lo))
+            self.emit("mov dword [0x%x], 0x%x" % (addr + 4, hi))
+        else:
+            self.emit("mov dword [0x%x], 0x%x" % (addr, struct.unpack("<I", struct.pack("<f", v))[0]))
+        return addr
+
+    def push_val(self, v):
+        self.depth += 1
+        self.vals.insert(0, v)
+
+    def pop_val(self):
+        self.depth -= 1
+        return self.vals.pop(0)
+
+    def load(self):
+        r = self.r
+        k = r.randint(0, 6)
+        v = fp_value(r)
+        if k == 0:
+            self.emit("fld qword [0x%x]" % self.const(v))
+        elif k == 1:
+            v = struct.unpack("<f", struct.pack("<f", v))[0]
+            self.emit("fld dword [0x%x]" % self.const(v, 4))
+        elif k == 2:
+            iv = r.randint(-100000, 100000)
+            a = self.const(0.0)
+            self.emit("mov dword [0x%x], %d" % (a, iv))
+            self.emit("fild dword [0x%x]" % a)
+            v = float(iv)
+        elif k == 3:
+            iv = r.randint(-30000, 30000)
+            a = self.const(0.0)
+            self.emit("mov word [0x%x], %d" % (a, iv & 0xffff))
+            self.emit("fild word [0x%x]" % a)
+            v = float(iv)
+        elif k == 4:
+            iv = r.randint(-(1 << 52), 1 << 52)
+            a = self.const(0.0)
+            self.emit("mov dword [0x%x], 0x%x" % (a, iv & 0xffffffff))
+            self.emit("mov dword [0x%x], 0x%x" % (a + 4, (iv >> 32) & 0xffffffff))
+            self.emit("fild qword [0x%x]" % a)
+            v = float(iv)
+        elif k == 5:
+            op, v = r.choice([("fld1", 1.0), ("fldz", 0.0), ("fldpi", 3.14159265358979), ("fldl2e", 1.4427),
+                              ("fldln2", 0.693), ("fldlg2", 0.30103), ("fldl2t", 3.3219)])
+            self.emit(op)
+            if op not in ("fld1", "fldz"):
+                # the x87 constant ROM holds 64-bit mantissas; doubles lose the last bits
+                self.approx = True
+        else:
+            if self.depth == 0:
+                return self.load()
+            i = r.randint(0, self.depth - 1)
+            self.emit("fld st%d" % i)
+            v = self.vals[i]
+        self.push_val(v)
+
+    def arith(self):
+        r = self.r
+        op = r.choice(["fadd", "fsub", "fsubr", "fmul", "fdiv", "fdivr"])
+        form = r.randint(0, 4)
+        if form <= 1 or self.depth < 2:
+            v = fp_value(r)
+            if op in ("fdiv", "fdivr") and v == 0:
+                v = 3.0
+            if form == 0:
+                self.emit("%s qword [0x%x]" % (op, self.const(v)))
+            else:
+                v = struct.unpack("<f", struct.pack("<f", v))[0]
+                self.emit("%s dword [0x%x]" % (op, self.const(v, 4)))
+        elif form == 2:
+            i = r.randint(0, self.depth - 1)
+            if i == 0 and op in ("fdiv", "fdivr"):
+                op = "fmul"                     # 0/0 gives x87's negative default NaN
+            self.emit("%s st0, st%d" % (op, i))
+        elif form == 3:
+            i = r.randint(0, self.depth - 1)
+            self.emit("%s st%d, st0" % (op, i))
+        else:
+            i = r.randint(1, self.depth - 1)
+            self.emit("%sp st%d, st0" % (op, i))
+            self.pop_val()
+
+    def compare(self):
+        r = self.r
+        g = self.g
+        k = r.randint(0, 3)
+        if self.depth < 2:
+            self.load()
+        i = r.randint(1, self.depth - 1)
+        if k == 0:
+            op = r.choice(["fcomi", "fucomi"])
+            if r.random() < 0.5 and self.depth > 2:
+                op += "p"
+                self.emit("%s st0, st%d" % (op, i))
+                self.pop_val()
+            else:
+                self.emit("%s st0, st%d" % (op, i))
+            g.write_flags(ALL)
+            c = r.choice(["b", "ae", "e", "ne", "be", "a", "p", "np"])
+            if r.random() < 0.5:
+                self.emit("set%s %s" % (c, R8[r.randint(0, 3)]))
+            else:
+                l = g.newlabel()
+                self.emit("j%s %s" % (c, l))
+                self.emit("inc esi")
+                self.emit("%s:" % l)
+        elif k == 1:
+            op = r.choice(["fcom", "fcomp", "fucom", "fucomp"])
+            self.emit("%s st%d" % (op, i))
+            if op.endswith("p"):
+                self.pop_val()
+            self.emit("fnstsw ax")
+            self.emit("and ax, 0x7d00")
+            g.write_flags(ALL, AF)
+            if r.random() < 0.5:
+                self.emit("sahf")
+                c = r.choice(["b", "ae", "e", "ne", "be", "a", "p", "np"])
+                self.emit("set%s dl" % c)
+            else:
+                self.emit("test ah, 0x%x" % r.choice([0x41, 0x05, 0x44, 0x01, 0x40, 0x45]))
+                c = r.choice(["e", "ne", "p", "np"])
+                l = g.newlabel()
+                self.emit("j%s %s" % (c, l))
+                self.emit("inc edi")
+                self.emit("%s:" % l)
+        elif k == 2:
+            v = fp_value(r)
+            self.emit("%s qword [0x%x]" % (r.choice(["fcom", "fcomp"]), self.const(v)))
+            if self.g.lines[-1].startswith("fcomp"):
+                self.pop_val()
+            self.emit("fnstsw ax")
+            self.emit("and ax, 0x7d00")
+        else:
+            # fcmov after a compare
+            self.emit("fucomi st0, st%d" % i)
+            g.write_flags(ALL)
+            c = r.choice(["b", "e", "be", "u", "nb", "ne", "nbe", "nu"])
+            self.emit("fcmov%s st0, st%d" % (c, r.randint(1, self.depth - 1)))
+
+    def unary(self):
+        r = self.r
+        op = r.choice(["fchs", "fabs", "fsqrt", "frndint", "fxch"])
+        if op == "fsqrt":
+            self.emit("fabs")
+        if op == "fxch":
+            if self.depth < 2:
+                return
+            i = r.randint(1, self.depth - 1)
+            self.emit("fxch st%d" % i)
+            self.vals[0], self.vals[i] = self.vals[i], self.vals[0]
+            return
+        self.emit(op)
+
+    def fist(self):
+        r = self.r
+        rc = r.randint(0, 3)
+        self.emit("mov word [0x%x], 0x%x" % (FP_CW, 0x27f | rc << 10))
+        self.emit("fldcw [0x%x]" % FP_CW)
+        size = r.choice([2, 4, 8])
+        out = FP_EXACT + 0x80 + 8 * (self.nout % 16)
+        self.nout += 1
+        kw = {2: "word", 4: "dword", 8: "qword"}[size]
+        # keep values in range: scale down first
+        self.emit("fld qword [0x%x]" % self.const(0.001 if size == 2 else 1.0))
+        self.emit("fmulp st1, st0")
+        if r.random() < 0.5 and size != 8:      # no fist m64, only fistp
+            self.emit("fist %s [0x%x]" % (kw, out))
+        else:
+            self.emit("fistp %s [0x%x]" % (kw, out))
+            self.pop_val()
+        self.emit("mov word [0x%x], 0x27f" % FP_CW)
+        self.emit("fldcw [0x%x]" % FP_CW)
+
+    def transcendental(self):
+        r = self.r
+        op = r.choice(["fsin", "fcos", "fptan", "fpatan", "f2xm1", "fyl2x", "fscale", "fsincos",
+                       "fprem", "fprem1", "fxtract", "fyl2xp1"])
+        self.approx = True
+        if op in ("fsin", "fcos", "fsincos", "fptan"):
+            self.emit("fld qword [0x%x]" % self.const(r.uniform(-3.0, 3.0)))
+            self.push_val(0)
+            self.emit(op)
+            if op in ("fsincos", "fptan"):
+                self.push_val(0)
+        elif op == "f2xm1":
+            self.emit("fld qword [0x%x]" % self.const(r.uniform(-0.99, 0.99)))
+            self.push_val(0)
+            self.emit(op)
+        elif op in ("fyl2x", "fyl2xp1"):
+            self.emit("fld qword [0x%x]" % self.const(r.uniform(-50, 50)))
+            self.emit("fld qword [0x%x]" % self.const(r.uniform(0.01, 0.25) if op == "fyl2xp1" else r.uniform(0.1, 1000)))
+            self.emit(op)
+            self.push_val(0)
+        elif op == "fpatan":
+            self.emit("fld qword [0x%x]" % self.const(r.uniform(-50, 50)))
+            self.emit("fld qword [0x%x]" % self.const(r.uniform(-50, 50)))
+            self.emit(op)
+            self.push_val(0)
+        elif op == "fscale":
+            self.emit("fld qword [0x%x]" % self.const(float(r.randint(-20, 20))))
+            self.emit("fld qword [0x%x]" % self.const(fp_value(r)))
+            self.emit(op)
+            self.emit("fstp st1")
+            self.push_val(0)
+        elif op in ("fprem", "fprem1"):
+            self.emit("fld qword [0x%x]" % self.const(r.uniform(0.5, 20) * r.choice([1, -1])))
+            self.emit("fld qword [0x%x]" % self.const(r.uniform(-1000, 1000)))
+            self.emit(op)
+            self.emit("fnstsw ax")              # before fstp, which rewrites C1
+            self.emit("and ax, 0x4700")
+            self.emit("fstp st1")
+            self.push_val(0)
+        else:
+            self.emit("fld qword [0x%x]" % self.const(fp_value(r) or 2.0))
+            self.push_val(0)
+            self.emit(op)
+            self.push_val(0)
+
+    def finish(self):
+        base = FP_APPROX if self.approx else FP_EXACT
+        k = 0
+        while self.depth > 0:
+            if self.r.random() < 0.2 and not self.approx:
+                self.emit("fst dword [0x%x]" % (base + 0x40 + 4 * k))
+            self.emit("fstp qword [0x%x]" % (base + 8 * k))
+            self.pop_val()
+            k += 1
+
+
+def g_x87(g):
+    f = FPGen(g)
+    r = g.r
+    g.emit("mov word [0x%x], 0x27f" % FP_CW)
+    g.emit("fldcw [0x%x]" % FP_CW)
+    for _ in range(r.randint(1, 3)):
+        f.load()
+    for _ in range(r.randint(2, 8)):
+        k = r.random()
+        if f.depth >= 6:
+            g.emit("fstp qword [0x%x]" % (FP_EXACT + 0x100 + 8 * (f.nout % 16)))
+            f.nout += 1
+            f.pop_val()
+        elif k < 0.25:
+            f.load()
+        elif k < 0.55 and f.depth > 0:
+            f.arith()
+        elif k < 0.7 and f.depth > 0:
+            f.compare()
+        elif k < 0.82 and f.depth > 0:
+            f.unary()
+        elif k < 0.92 and f.depth > 0 and not f.approx:
+            f.fist()
+        elif f.depth < 4:
+            f.transcendental()
+    f.finish()
+
+
+def g_x87_misc(g):
+    """state save/restore and control/status words"""
+    r = g.r
+    k = r.randint(0, 3)
+    g.emit("fninit")
+    g.emit("fld qword [0x%x]" % (FP_SRC))
+    g.emit("fld1")
+    if k == 0:
+        g.emit("fnstcw [0x%x]" % (DATA + 0xb00))
+        g.emit("fnstsw [0x%x]" % (DATA + 0xb04))
+        g.emit("and word [0x%x], 0x7d00" % (DATA + 0xb04))
+    elif k == 1:
+        g.emit("fnsave [0x%x]" % (DATA + 0x100))
+        g.emit("fld1")
+        g.emit("frstor [0x%x]" % (DATA + 0x100))
+        g.emit("mov dword [0x%x], 0" % (DATA + 0x100 + 12))   # FIP/FDP differ by design
+        g.emit("mov dword [0x%x], 0" % (DATA + 0x100 + 16))
+        g.emit("mov dword [0x%x], 0" % (DATA + 0x100 + 20))
+        g.emit("mov dword [0x%x], 0" % (DATA + 0x100 + 24))
+        g.emit("and word [0x%x], 0x7d00" % (DATA + 0x100 + 4))
+        g.emit("mov word [0x%x], 0" % (DATA + 0x100 + 8))     # tag word is not tracked
+    elif k == 2:
+        g.emit("fstp tword [0x%x]" % (DATA + 0x200))
+        g.emit("fld tword [0x%x]" % (DATA + 0x200))
+    else:
+        g.emit("fbstp [0x%x]" % (DATA + 0x300))
+        g.emit("fbld [0x%x]" % (DATA + 0x300))
+    g.emit("fstp qword [0x%x]" % (FP_EXACT + 0x180))
+    g.emit("fstp qword [0x%x]" % (FP_EXACT + 0x188))
+
+
 GROUPS = {
     "alu": (Gen.g_alu, 10), "test": (Gen.g_test, 3), "incdec": (Gen.g_incdec, 3),
     "negnot": (Gen.g_negnot, 2), "mul": (Gen.g_mul, 3), "div": (Gen.g_div, 2),
@@ -511,6 +838,7 @@ GROUPS = {
     "bcd": (Gen.g_bcd, 1), "misc": (Gen.g_misc, 1), "jecxz": (Gen.g_jecxz, 1),
     "flagcross": (Gen.g_flagcross, 3),
 }
+FP_GROUPS = {"x87": (g_x87, 4), "x87misc": (g_x87_misc, 1)}
 
 EXTRA_GROUPS = {}   # filled by other modules (x87, sse)
 ABI = True          # flags are dead across call/ret (matches xbt default)
@@ -529,6 +857,7 @@ def make_test(rng, kinds, length):
 
 
 ALL_GROUPS = dict(GROUPS)
+ALL_GROUPS.update(FP_GROUPS)
 
 
 def assemble(tests):

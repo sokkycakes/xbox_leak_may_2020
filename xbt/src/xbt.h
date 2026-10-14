@@ -128,7 +128,7 @@ typedef struct xbt_cpu {
     uint32_t exit_info;
     uint32_t link_site;     /* host address of the branch to patch (EXIT_LINK) */
     uint32_t stop_eip;      /* EXIT_STOP when reached (test harness) */
-    uint32_t pad1;
+    uint32_t fpcr;          /* guest FPCR (rounding mode from FCW) outside translated code */
     /* ---- larger state ---- */
     uint8_t  xmm[8][16] __attribute__((aligned(16)));
     uint64_t mm[8];
@@ -199,8 +199,11 @@ struct xbt_block {
 xbt_block *xbt_translate(uint32_t eip, uint32_t **cache_ptr, uint32_t *cache_end);
 void xbt_translate_init(void);
 
-/* helpers.c */
+/* helpers.c / fpu.c */
 void xbt_helpers_install(xbt_cpu *cpu);
+void xbt_fpcr_from_fcw(xbt_cpu *cpu);
+void xbt_fxsave(xbt_cpu *cpu, uint8_t *p);
+void xbt_fxrstor(xbt_cpu *cpu, const uint8_t *p);
 
 #define XBT_LOG(...) fprintf(stderr, "[xbt] " __VA_ARGS__)
 
