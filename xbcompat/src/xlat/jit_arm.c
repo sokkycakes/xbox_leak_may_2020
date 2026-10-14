@@ -292,6 +292,8 @@ typedef struct {
     int8_t ea_b, ea_x, ea_s;
     int cur, skip;                 /* in[cur] is being translated; skip: in[cur + 1] went with it */
     uint8_t xreg[8];               /* each slot's VFP register */
+    int fcom_at;                   /* in[fcom_at] left vcmp's result in the CPSR */
+    int force_cond;                /* the block's jcc uses this ARM condition (-1: its own) */
 } tctx;
 
 #define E(w) emit(&t->a, (w))
@@ -998,6 +1000,54 @@ static void x_fcom(tctx *t, int a, int b, unsigned live)
     E(dp_i(C_VS, OP_ORR, 0, T1, T1, arm_imm(0x4500)));   /* unordered: all three */
     E(A_STR(T1, R0, O_FPSW));
     if (keep) E(A_MSR(T4));
+    t->fcom_at = keep ? -1 : t->cur;
+}
+
+/* The ARM condition, on vcmp's flags, for "fcom; fnstsw ax; test ah, imm
+   (or sahf); jcc" (ts the test or sahf, jc the jcc), or -1.  The status
+   word's C0 C2 C3 (bits 0, 2, 6 of ah) give the x86 flags, so for each
+   outcome of the compare the jump is taken or not; some ARM condition may
+   be true for exactly the same outcomes. */
+static int fcom_cond(const xinsn *ts, const xinsn *jc)
+{
+    static const uint8_t ah[4] = { 0x00, 0x01, 0x40, 0x45 };   /* greater, less, equal, unordered */
+    static const uint8_t nzcv[4] = { 0x2, 0x8, 0x6, 0x3 };
+    unsigned cc = jc->op & 15, want = 0;
+    bool sahf = ts->op == 0x9E;
+    /* sahf leaves OF, and SF comes from the busy bit; test's imm mustn't
+       look at TOP or busy (C1 is clear after a compare) */
+    if (sahf ? cc < 2 || cc == 8 || cc == 9 || cc >= 12 : (ts->imm & ~0x47u) != 0) return -1;
+    for (int k = 0; k < 4; k++) {
+        unsigned cf, zf, pf, r = ah[k] & ts->imm, v;
+        if (sahf) { cf = ah[k] & 1; zf = ah[k] >> 6 & 1; pf = ah[k] >> 2 & 1; }
+        else { cf = 0; zf = !r; pf = !__builtin_parity(r); }
+        switch (cc >> 1) {
+        case 1: v = cf; break;
+        case 2: v = zf; break;
+        case 3: v = cf | zf; break;
+        case 5: v = pf; break;
+        default: v = 0; break;   /* o, s, l, le: SF = OF = 0 after test */
+        }
+        want |= (v ^ (cc & 1)) << k;
+    }
+    for (int c = 0; c < 14; c++) {
+        unsigned got = 0;
+        for (int k = 0; k < 4; k++) {
+            unsigned f = nzcv[k], n = f >> 3, z = f >> 2 & 1, cy = f >> 1 & 1, v = f & 1, r;
+            switch (c >> 1) {
+            case 0: r = z; break;
+            case 1: r = cy; break;
+            case 2: r = n; break;
+            case 3: r = v; break;
+            case 4: r = cy && !z; break;
+            case 5: r = n == v; break;
+            default: r = !z && n == v; break;
+            }
+            got |= (r ^ (c & 1)) << k;
+        }
+        if (got == want) return c;
+    }
+    return -1;
 }
 
 /* fcomi a, b: ZF PF CF from the compare, OF SF AF clear, C1 clear */
@@ -1029,31 +1079,63 @@ static void x_fcomi(tctx *t, int a, int b, unsigned live)
     E(A_STR(T3, R0, O_FPSW));
 }
 
-/* T1 = s rounded to a 32-bit integer as the control word says (ARM rounds
-   as FPSCR says, so FPSCR gets the x87 mode for the conversion); T3 bit 0
-   set if it didn't fit (or s is a NaN). */
-static void x_cvt(tctx *t, int s)
+/* T1 = s rounded to a 32-bit integer as the control word says; T3 bit 0
+   set if it didn't fit (or s is a NaN); the flags in live kept (uses T1-T4).
+   With the x87 rounding to nearest (FPSCR's mode) or toward zero (vcvt's
+   own), as it nearly always does, the conversion only reads FPSCR after
+   for IOC.  Otherwise, or when IOC is set (maybe left over), FPSCR gets
+   the x87 mode and a clear IOC for the conversion, and keeps IOC clear. */
+static void x_cvt(tctx *t, int s, unsigned live)
 {
+    bool keep = live & FL_NZCV;
     E(A_LDR(T1, R0, O_FPCW));
+    if (keep) E(A_MRS(T4));
+    uint32_t *slow[5], *join[2], *alt;
+    E(dp_i(C_AL, OP_TST, 1, 0, T1, arm_imm(0xC00)));
+    alt = t->a.p;
+    E(0);
+    for (int k = 0; k < 2; k++) {
+        if (k) {
+            if (alt < t->a.end) *alt = a_b(C_NE, alt, t->a.p);
+            E(dp_i(C_AL, OP_AND, 0, T3, T1, arm_imm(0xC00)));
+            E(dp_i(C_AL, OP_CMP, 1, 0, T3, arm_imm(0xC00)));
+            slow[4] = t->a.p;
+            E(0);
+        }
+        E(k ? A_VCVT_S32_D_Z(XS_TMP, s) : A_VCVT_S32_D_R(XS_TMP, s));
+        E(A_VMRS(T3));
+        E(dp_i(C_AL, OP_TST, 1, 0, T3, 1));
+        slow[k] = t->a.p;
+        E(0);
+        E(A_VMOV_RS(T1, XS_TMP));
+        join[k] = t->a.p;
+        E(0);
+    }
+    slow[2] = slow[4];
+    for (int k = 0; k < 3; k++)
+        if (slow[k] < t->a.end) *slow[k] = a_b(C_NE, slow[k], t->a.p);
     E(A_UBFX(T1, T1, 10, 2));                              /* x87: nearest, down, up, zero */
     E(dp_r(C_AL, OP_ORR, 0, T1, T1, T1, SH_LSL, 2));
     E(A_UBFX(T1, T1, 1, 2));                               /* ARM: nearest, up, down, zero */
     E(A_VMRS(T2));
+    E(dp_i(C_AL, OP_BIC, 0, T2, T2, 1));                   /* IOC, now and after */
     E(dp_i(C_AL, OP_BIC, 0, T3, T2, arm_imm(0x00C00000)));
-    E(dp_i(C_AL, OP_BIC, 0, T3, T3, 1));                   /* IOC */
     E(dp_r(C_AL, OP_ORR, 0, T3, T3, T1, SH_LSL, 22));
     E(A_VMSR(T3));
     E(A_VCVT_S32_D_R(XS_TMP, s));
     E(A_VMRS(T3));
     E(A_VMSR(T2));
     E(A_VMOV_RS(T1, XS_TMP));
+    for (int k = 0; k < 2; k++)
+        if (join[k] < t->a.end) *join[k] = a_b(C_AL, join[k], t->a.p);
+    if (keep) E(A_MSR(T4));
 }
 
 /* fist m16/m32: T1 = s as a bits-wide integer, or the integer indefinite
    value (uses T1-T4) */
-static void x_fist(tctx *t, int s, int bits)
+static void x_fist(tctx *t, int s, int bits, unsigned live)
 {
-    x_cvt(t, s);
+    x_cvt(t, s, live);
     E(dp_i(C_AL, OP_AND, 0, T3, T3, 1));
     E(dp_i(C_AL, OP_RSB, 0, T3, T3, 0));                   /* all ones if it didn't fit */
     if (bits == 16) {
@@ -1086,7 +1168,7 @@ uint64_t jit_fist64(double v, uint32_t fpcw)
 static void x_fistp64(tctx *t, const xinsn *in, int s, unsigned live)
 {
     bool keep = live & FL_NZCV;
-    x_cvt(t, s);
+    x_cvt(t, s, live);
     if (keep) E(A_MRS(T4));
     E(dp_i(C_AL, OP_TST, 1, 0, T3, 1));
     uint32_t *slow = t->a.p;
@@ -1216,7 +1298,7 @@ static bool x87(tctx *t, const xinsn *in, unsigned live)
             switch (r) {
             case 0: x_load(t, in, 1, x_push(t)); return true;
             case 2: case 3:
-                x_fist(t, x_get(t, 0), 32);
+                x_fist(t, x_get(t, 0), 32, live);
                 base = mem_addr(t, in, T0, 4095, &off);
                 E(A_STR(T1, base, off));
                 if (r == 3) x_pop(t);
@@ -1241,7 +1323,7 @@ static bool x87(tctx *t, const xinsn *in, unsigned live)
             switch (r) {
             case 0: x_load(t, in, 3, x_push(t)); return true;
             case 2: case 3:
-                x_fist(t, x_get(t, 0), 16);
+                x_fist(t, x_get(t, 0), 16, live);
                 base = mem_addr(t, in, T0, 255, &off);
                 E(a_ldsth(C_AL, 0, 0xB, T1, base, off));
                 if (r == 3) x_pop(t);
@@ -2046,7 +2128,7 @@ static bool emit_branch(tctx *t, const xinsn *in, int kind, uint32_t target, uns
     case BR_JCC: {
         if (in->op >= 0xE0 && in->op <= 0xE3) return false;
         unsigned cc = in->op & 15;
-        if ((cc >> 1) == 5) {
+        if ((cc >> 1) == 5 && t->force_cond < 0) {
             /* parity: tst sets Z from PF (C and V untouched), so N and Z are
                saved around it when either exit needs them */
             bool keep = (lt | lf) & (FL_Z | FL_S);
@@ -2063,7 +2145,7 @@ static bool emit_branch(tctx *t, const xinsn *in, int kind, uint32_t target, uns
             emit_exit(t, target, lt, keep || norm ? NULL : j);
             return true;
         }
-        int c = cond_for(t, cc);
+        int c = t->force_cond >= 0 ? t->force_cond : cond_for(t, cc);
         uint32_t *j = t->a.p;
         E(0);
         emit_exit(t, next, lf, NULL);
@@ -2121,6 +2203,7 @@ static void emit_fallback(tctx *t, const xinsn *in)
     E(a_bl(C_AL, t->a.p, t->cf_inv ? fb_tramp : fb_tramp_c));
     E((uint32_t)(uintptr_t)copy);
     t->cf_inv = true;
+    t->fcom_at = -1;
 }
 
 /* ---- blocks ------------------------------------------------------------- */
@@ -2203,6 +2286,7 @@ static struct block *translate(uint32_t eip)
         x_reset(t);
         t->x_first = 0;
         t->x_synced = false;
+        t->fcom_at = t->force_cond = -1;
         if (count_dir) {
             mov_imm(t, T3, (uint32_t)(uintptr_t)&b->count);
             E(A_LDR(T2, T3, 0));
@@ -2217,6 +2301,16 @@ static struct block *translate(uint32_t eip)
             const xinsn *in = &t->in[i];
             /* only x87 instructions keep T0's address (fnstsw ax writes eax) */
             if (in->op < 0xD8 || in->op > 0xDF || (in->op == 0xDF && in->mod == 3)) t->ea_ok = false;
+            /* fcom; fnstsw ax; test ah, imm (or sahf); jcc with no flags
+               live after: the jcc tests the compare's own result */
+            if (i == n - 2 && i >= 2 && kind == BR_JCC && !(lt | lf) && t->fcom_at == i - 2 &&
+                t->in[i - 1].op == 0xDF && t->in[i - 1].mod == 3 && t->in[i - 1].reg == 4 && t->in[i - 1].rm == 0 &&
+                (in->op == 0x9E || (in->op == 0xF6 && in->mod == 3 && in->reg == 0 && in->rm == 4)) &&
+                !(t->in[n - 1].pfx & XP_OPSZ) && (t->in[n - 1].op < 0xE0 || t->in[n - 1].op > 0xE3) &&
+                (t->force_cond = fcom_cond(in, &t->in[n - 1])) >= 0) {
+                nat++;
+                continue;
+            }
             if (i == n - 1 && kind != BR_NONE && kind != BR_OTHER && emit_branch(t, in, kind, target, lt, lf)) {
                 nat++;
                 ended = true;

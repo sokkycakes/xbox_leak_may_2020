@@ -106,10 +106,11 @@ enum { C_INT, C_X87, C_MMX, C_SSE };
 #define T_DIV    0x100000 /* divisor nonzero, quotient small */
 #define T_RC     0x200000 /* the rounding mode decides the result: test them all */
 #define T_SMALL  0x400000 /* st0 in [-1, 1] (f2xm1, fyl2xp1, transcendentals) */
+#define T_FSWAX  0x800000 /* has fnstsw ax: only C0-C3 and TOP of ax are kept */
 
 struct tmpl {
     const char *name;
-    const char *enc;    /* hex bytes; /r /0-/7 ModRM; ib iw id; +r (opcode+reg) +i (st index) */
+    const char *enc;    /* hex bytes; /r /0-/7 ModRM; ib iw id ih; +r (opcode+reg) +i (st index) */
     int cls;
     uint32_t flags;
     uint32_t undef;     /* EFLAGS bits left undefined */
@@ -315,6 +316,18 @@ static const struct tmpl tmpls[] = {
     { "fld st(i) + fop st", "D9 C0+i D8 /x", C_X87, T_ST | T_CC, 0 },
     { "fop m32 x2", "D8 /x D8 /=x", C_X87, T_MEM | T_CC, 0 },
     { "fld m64 + fmul + fstp", "DD /0 DC /=1 D9 /=3", C_X87, T_MEM, 0 },
+    /* compiled float compares: fcom, fnstsw ax, test ah / sahf, jcc over an
+       add, then cmp (flags from the path taken) */
+    { "fcom st(i) + test ah + jcc", "D8 D0+i DF E0 F6 C4 ih 70+c 03 83 C1 01 39 D1", C_X87, T_CC | T_FSWAX, 0 },
+    { "fcomp m32 + test ah + jcc", "D8 /3 DF E0 F6 C4 ih 70+c 03 83 C1 01 39 D1", C_X87, T_MEM | T_CC | T_FSWAX, 0 },
+    { "fcom m64 + test ah + jcc32", "DC /2 DF E0 F6 C4 ih 0F 80+c 03 00 00 00 83 C1 01 39 D1", C_X87,
+      T_MEM | T_CC | T_FSWAX, 0 },
+    { "fcompp + test ah + jcc", "DE D9 DF E0 F6 C4 ih 70+c 03 83 C1 01 39 D1", C_X87, T_CC | T_FSWAX, 0 },
+    { "fucomp + test ah + jcc", "DD E8+i DF E0 F6 C4 ih 70+c 03 83 C1 01 39 D1", C_X87, T_CC | T_FSWAX, 0 },
+    { "fucompp + test ah + jcc", "DA E9 DF E0 F6 C4 ih 70+c 03 83 C1 01 39 D1", C_X87, T_CC | T_FSWAX, 0 },
+    { "ftst + test ah + jcc", "D9 E4 DF E0 F6 C4 ih 70+c 03 83 C1 01 39 D1", C_X87, T_CC | T_FSWAX, 0 },
+    { "fcomp st(i) + sahf + jcc", "D8 D8+i DF E0 9E 70+c 03 83 C1 01 39 D1", C_X87, T_CC | T_FSWAX, 0 },
+    { "fcom m32 + sahf + jcc", "D8 /2 DF E0 9E 70+c 03 83 C1 01 39 D1", C_X87, T_MEM | T_CC | T_FSWAX, 0 },
 };
 #define NTMPL (sizeof(tmpls) / sizeof(tmpls[0]))
 
@@ -520,10 +533,14 @@ static uint8_t *encode(const struct tmpl *tp, uint8_t *p, struct state *s, bool 
             }
             continue;
         }
-        if (e[0] == 'i' && (e[1] == 'b' || e[1] == 'w' || e[1] == 'd' || e[1] == 'c')) {
+        if (e[0] == 'i' && (e[1] == 'b' || e[1] == 'w' || e[1] == 'd' || e[1] == 'c' || e[1] == 'h')) {
             uint32_t v = rand_int();
             int n = e[1] == 'w' ? 2 : e[1] == 'd' ? 4 : 1;
             if (e[1] == 'c') v = rn(8);
+            if (e[1] == 'h') {   /* the masks compilers test the condition codes with, or any */
+                static const uint8_t ah[] = { 0x41, 0x05, 0x01, 0x45, 0x44, 0x04, 0x40, 0x00 };
+                v = rn(8) ? ah[rn(sizeof(ah))] : rnd();
+            }
             if ((fl & T_SHIFT1) && n == 1 && rn(2)) v = rn(40);
             if (fl & T_ENTER) { v = n == 2 ? rn(64) : rn(4); }
             memcpy(p, &v, n);
@@ -855,7 +872,7 @@ static bool check_one(const struct test *t, const struct result *res)
     if (!pn) {
         /* fnstsw ax after other x87 instructions: the CPU's exception flags
            and C1 (rounding) aren't kept, so only TOP */
-        uint32_t amask = 0xFFFFFFFFu;
+        uint32_t amask = (tp->flags & T_FSWAX) ? 0xFFFF7F00u : 0xFFFFFFFFu;
         for (int i = 0; i < 2; i++)
             if (t->follow[i] != NO_TMPL && !strcmp(tmpls[t->follow[i]].name, "fnstsw ax")) amask = 0xFFFF3800u;
         for (int i = 0; i < 8; i++)
