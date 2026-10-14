@@ -286,6 +286,11 @@ typedef struct {
     uint8_t x_tknown, x_tentry;    /* slots whose tag at entry is known, and those empty then */
     uint8_t x_first;               /* slots loaded before the first sync */
     bool x_synced;                 /* a sync has happened */
+    /* T0 = ea_b + (ea_x << ea_s), left by an x87 memory operand, while
+       ea_ok: the next one with the same base and index reuses it */
+    bool ea_ok;
+    int8_t ea_b, ea_x, ea_s;
+    int cur, skip;                 /* in[cur] is being translated; skip: in[cur + 1] went with it */
     uint8_t xreg[8];               /* each slot's VFP register */
 } tctx;
 
@@ -341,6 +346,7 @@ static void add_imm(tctx *t, int rd, int rn, uint32_t v, int scratch)
 static int mem_addr(tctx *t, const xinsn *in, int scratch, int maxoff, int32_t *off)
 {
     int b = in->base >= 0 ? HR(in->base) : -1, x = in->index >= 0 ? HR(in->index) : -1, base = -1;
+    t->ea_ok = false;
     int32_t d = in->disp;
     if (in->seg == XSEG_FS) {
         E(A_LDR(scratch, R0, O_FS));
@@ -880,11 +886,21 @@ static void x_const(tctx *t, int d, double v)
    and jit_fix_unaligned finishes it. */
 static int vfp_addr(tctx *t, const xinsn *in, int32_t *off)
 {
+    bool reuse = in->index >= 0 && in->seg != XSEG_FS && !(in->disp & 3) && in->disp >= -1020 && in->disp <= 1020;
+    if (reuse && t->ea_ok && t->ea_b == in->base && t->ea_x == in->index && t->ea_s == in->scale) {
+        *off = in->disp;
+        return T0;
+    }
     int base = mem_addr(t, in, T0, 1020, off);
     if (*off & 3) {
         add_imm(t, T0, base, (uint32_t)*off, T0);
         *off = 0;
         base = T0;
+    } else if (reuse && base == T0 && *off == in->disp) {
+        t->ea_ok = true;
+        t->ea_b = (int8_t)in->base;
+        t->ea_x = (int8_t)in->index;
+        t->ea_s = (int8_t)in->scale;
     }
     return base;
 }
@@ -1266,11 +1282,25 @@ static bool x87(tctx *t, const xinsn *in, unsigned live)
         return true;
     case 1:
         switch (r) {
-        case 0:   /* fld st(i) */
+        case 0: {   /* fld st(i) */
             a = x_get(t, (int)i);
+            /* followed by st0 op= m32, m64 or st(j): the copy and the
+               operation in one */
+            const xinsn *nx = t->cur + 1 < t->n ? &t->in[t->cur + 1] : NULL;
+            bool fuse = nx && nx->len && !nx->ad16 && (nx->reg < 2 || nx->reg >= 4) &&
+                        (nx->op == 0xD8 || (nx->op == 0xDC && nx->mod != 3));
+            if (fuse) {
+                if (nx->mod != 3) x_load(t, nx, nx->op == 0xD8 ? 0 : 2, XD_TMP);
+                d = x_push(t);
+                b = nx->mod != 3 ? XD_TMP : nx->rm ? x_get(t, (int)nx->rm) : a;
+                x_arith(t, (int)nx->reg, d, a, b);
+                t->skip = 1;
+                return true;
+            }
             d = x_push(t);
             if (d != a) E(A_VMOV(d, a));
             return true;
+        }
         case 1: x_fxch(t, (int)i); return true;
         case 2: return i == 0;   /* fnop */
         case 4:
@@ -2182,15 +2212,25 @@ static struct block *translate(uint32_t eip)
         if (pre) x_preload(t, pre);
         bool ended = false;
         unsigned nat = 0;
+        t->ea_ok = false;
         for (int i = 0; i < n && !ended; i++) {
             const xinsn *in = &t->in[i];
+            /* only x87 instructions keep T0's address (fnstsw ax writes eax) */
+            if (in->op < 0xD8 || in->op > 0xDF || (in->op == 0xDF && in->mod == 3)) t->ea_ok = false;
             if (i == n - 1 && kind != BR_NONE && kind != BR_OTHER && emit_branch(t, in, kind, target, lt, lf)) {
                 nat++;
                 ended = true;
                 break;
             }
-            if (in->len && native(t, in, t->live[i + 1])) nat++;
-            else emit_fallback(t, in);
+            t->cur = i;
+            t->skip = 0;
+            if (in->len && native(t, in, t->live[i + 1])) {
+                nat += 1 + t->skip;
+                i += t->skip;
+            } else {
+                t->ea_ok = false;
+                emit_fallback(t, in);
+            }
             if (!in->len) ended = true;
         }
         if (!ended) x87_sync(t);

@@ -309,6 +309,12 @@ static const struct tmpl tmpls[] = {
     { "movsx Gw,Eb", "66 0F BE /r", C_INT, 0, 0 }, { "stosd", "AB", C_INT, T_STR, 0 },
     { "movaps st", "0F 29 /r", C_SSE, T_GX | T_EX, 0 }, { "movntps", "0F 2B /r", C_SSE, T_GX | T_MEM, 0 },
     { "movaps ld", "0F 28 /r", C_SSE, T_GX | T_EX, 0 },
+    /* pairs xlat translates as one, and x87 operands sharing an address */
+    { "fld st(i) + fop m32", "D9 C0+i D8 /x", C_X87, T_MEM | T_CC, 0 },
+    { "fld st(i) + fop m64", "D9 C0+i DC /x", C_X87, T_MEM | T_CC, 0 },
+    { "fld st(i) + fop st", "D9 C0+i D8 /x", C_X87, T_ST | T_CC, 0 },
+    { "fop m32 x2", "D8 /x D8 /=x", C_X87, T_MEM | T_CC, 0 },
+    { "fld m64 + fmul + fstp", "DD /0 DC /=1 D9 /=3", C_X87, T_MEM, 0 },
 };
 #define NTMPL (sizeof(tmpls) / sizeof(tmpls[0]))
 
@@ -434,6 +440,8 @@ static void make_test(struct test *t, struct state *s)
 /* Encodes an instance of tp at p (its operands random, memory ones pointed
    into the buffer through s's registers; reg_only: register operands only);
    returns the end. */
+static int last_base, last_index = -1, last_scale;   /* the last memory operand encode made */
+
 static uint8_t *encode(const struct tmpl *tp, uint8_t *p, struct state *s, bool reg_only)
 {
     uint32_t fl = tp->flags;
@@ -443,6 +451,22 @@ static uint8_t *encode(const struct tmpl *tp, uint8_t *p, struct state *s, bool 
     while (*e) {
         while (*e == ' ') e++;
         if (!*e) break;
+        if (e[0] == '/' && e[1] == '=') {
+            /* /=k: the previous memory operand's base and index again, a new
+               disp8, reg field as /k */
+            char k = e[2];
+            e += 3;
+            int reg = k >= '0' && k <= '7' ? k - '0' : (int)rn(8);
+            int32_t disp = (int32_t)rn(64) * 4 - 128;
+            if (last_index >= 0) {
+                *p++ = (uint8_t)(0x44 | reg << 3);
+                *p++ = (uint8_t)(last_scale << 6 | last_index << 3 | last_base);
+            } else {
+                *p++ = (uint8_t)(0x40 | reg << 3 | last_base);
+            }
+            *p++ = (uint8_t)disp;
+            continue;
+        }
         if (e[0] == '/') {
             char k = e[1];
             e += 2;
@@ -472,6 +496,8 @@ static uint8_t *encode(const struct tmpl *tp, uint8_t *p, struct state *s, bool 
                 int form = (int)rn(3);
                 int32_t disp = (int32_t)rn(256) - 128;
                 uint32_t bval = DATA_PTR + rn(128) - 64;
+                last_base = base;
+                last_index = -1;
                 if (form == 0 && base != XR_EBP) {
                     *p++ = (uint8_t)(0x00 | reg << 3 | base);
                     disp = 0;
@@ -487,6 +513,8 @@ static uint8_t *encode(const struct tmpl *tp, uint8_t *p, struct state *s, bool 
                     *p++ = (uint8_t)(scale << 6 | index << 3 | base);
                     *p++ = (uint8_t)disp;
                     s->r[index] = ival;
+                    last_index = index;
+                    last_scale = scale;
                 }
                 s->r[base] = bval;
             }
