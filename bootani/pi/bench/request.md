@@ -50,11 +50,24 @@ Exactly request 3's step 3b: XLAT_COUNT=/tmp/xlathot (mkdir -p it on the
 Pi), restart xbox, back to the hub, stand still for 70 s, copy
 /tmp/xlathot/hot.txt to the PC.
 
+## 3c. Where the draws' CPU goes
+
+Remove XLAT_COUNT and add, set the same way:
+
+    XBCOMPAT_PROFILE_WORK=1
+    XBCOMPAT_PROFILE_RENDERER=1
+
+restart xbox, back to the hub, stand still for 40 s, and keep every log
+line starting with `D3D` from the last 30 s (every 5 s it prints the frame
+split, `D3D detail:`, `D3D cache:`, `D3D buffers:` and so on). Frame times
+here don't count either. Then remove both.
+
 ## 4. Leave and report
 
     PI=192.168.1.128 sh push-xlat.sh undo
 
-remove XLAT_PERF_MAP, XLAT_STATS, XLAT_COUNT and XLAT_SAFE_FLAGS from
+remove XLAT_PERF_MAP, XLAT_STATS, XLAT_COUNT, XLAT_SAFE_FLAGS,
+XBCOMPAT_PROFILE_WORK and XBCOMPAT_PROFILE_RENDERER from
 /etc/default/xbox, restart xbox, and check the dashboard is back on
 box86. Send one message to the cloud session:
 
@@ -63,6 +76,7 @@ box86. Send one message to the cloud session:
     hub fps lines
     xbprof-hub.txt, clocks-hub.txt (whole)
     the hub's xlat: lines, hot.txt (whole)
+    the D3D lines from step 3c
     log tail and screenshot if Phantom Dust failed
 
 Then keep watching the branch for request 5.
