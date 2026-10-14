@@ -400,6 +400,32 @@ static void test_playback(void)
     free(pcm); free(pcm2);
 }
 
+/* A voice at minimum volume is advanced without being mixed: silent, and
+   its position moves on as an audible one's would. */
+static void test_quiet_voice(void)
+{
+    WAVEFORMATEX w = pcm_format(1, 48000, 16);
+    short *pcm = calloc(4000, 2);
+    for (int i = 0; i < 4000; i++) pcm[i] = 16384;           /* 0.5 */
+    uint32_t b = make_buffer(&w, 0);
+    unity(b);
+    CHECK(Voice_SetVolume((void *)b, DSBVOLUME_MIN) == DS_OK, "SetVolume min");
+    CHECK(Buf_SetBufferData((void *)b, pcm, 8000) == DS_OK, "SetBufferData");
+    CHECK(Buf_Play((void *)b, 0, 0, 0) == DS_OK, "Play");
+    mix(512);
+    float peak = 0;
+    for (int i = 0; i < 1024; i++) if (fabsf(out[i]) > peak) peak = fabsf(out[i]);
+    DWORD play = 0, write = 0;
+    CHECK(peak == 0.0f, "quiet voice is silent: %f", peak);
+    CHECK(Buf_GetCurrentPosition((void *)b, &play, &write) == DS_OK && play == 1024, "quiet cursor %u", play);
+    CHECK(Voice_SetVolume((void *)b, 0) == DS_OK, "SetVolume 0");
+    mix(512);
+    CHECK(near(out[0], 0.25f, 1e-4f) && near(out[1023], 0.25f, 1e-4f), "audible again: %f %f", out[0], out[1023]);
+    CHECK(Buf_GetCurrentPosition((void *)b, &play, &write) == DS_OK && play == 2048, "cursor after %u", play);
+    CHECK(Obj_Release((void *)b) == 0, "released");
+    free(pcm);
+}
+
 static void test_legacy_mixbin_headroom(void)
 {
     uint32_t ds = 0;
@@ -1249,6 +1275,7 @@ int main(int argc, char **argv)
     test_formats();
     test_object_aliases();
     test_playback();
+    test_quiet_voice();
     test_legacy_mixbin_headroom();
     test_dashboard_sound_boost();
     test_looping_and_regions();

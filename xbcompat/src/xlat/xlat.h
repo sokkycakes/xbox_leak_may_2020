@@ -87,6 +87,9 @@ typedef struct xcpu {
     mmx_t mm[8];            /* 0x150 */
     xmm_t xmm[8];           /* 0x190 */
     uint32_t jit_site;      /* 0x210 the code generator's last block exit (jit_arm.c) */
+    /* XLAT_FLAG_CHECK (jit_arm.c): the flags the last block exit left
+       defined and that block's address; a block that then read others */
+    uint32_t jit_fvalid, jit_fexit, jit_fbad_at, jit_fbad_from, jit_fbad_mask;
 } xcpu;
 
 _Static_assert(__builtin_offsetof(xcpu, st) == 0x80, "xcpu layout");

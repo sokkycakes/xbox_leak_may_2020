@@ -161,8 +161,8 @@ typedef struct {
     char *strtab_copy;
     int64_t bias;          /* file vaddr = address - start + offset + bias */
 } map_t;
-static map_t maps[1024];
-static int nmaps;
+static map_t *maps;      /* a game under xlat can have thousands of mappings */
+static int nmaps, cap_maps;
 
 static sym_t *ksyms;
 static size_t nksyms;
@@ -181,10 +181,15 @@ static void read_maps(int pid)
     snprintf(path, sizeof path, "/proc/%d/maps", pid);
     FILE *f = fopen(path, "r");
     if (!f) return;
-    while (fgets(line, sizeof line, f) && nmaps < (int)(sizeof maps / sizeof maps[0])) {
+    while (fgets(line, sizeof line, f)) {
         unsigned long s, e, off;
         char perms[8], file[256] = "";
         if (sscanf(line, "%lx-%lx %7s %lx %*s %*s %255[^\n]", &s, &e, perms, &off, file) < 4) continue;
+        if (nmaps == cap_maps) {
+            cap_maps = cap_maps ? cap_maps * 2 : 1024;
+            maps = realloc(maps, (size_t)cap_maps * sizeof *maps);
+            if (!maps) { fprintf(stderr, "xbprof: out of memory\n"); exit(1); }
+        }
         map_t *m = &maps[nmaps++];
         memset(m, 0, sizeof *m);
         m->start = (uint32_t)s;

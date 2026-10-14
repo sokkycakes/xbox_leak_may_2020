@@ -84,7 +84,8 @@ struct dsmix_voice {
     uint32_t playing;                 /* out, buffer: still playing */
     uint32_t consumed;                /* out, stream: packets played to the end */
     uint32_t ran_out;                 /* out, stream: every packet was played */
-    uint32_t reserved[2];
+    uint32_t quiet;                   /* in, buffer: every gain under 2^-16: advance it, mix nothing */
+    uint32_t reserved;
 };
 
 struct dsmix_job { struct dsmix_voice *voices; uint32_t nvoices; float *out; uint32_t frames; };
@@ -320,7 +321,7 @@ dsmix_buffer_t(struct dsmix_voice *j, float *out, int n, int fmt, int ch, int vp
     struct dsmix_src src = { j->data, j, v };
     float *sub = j->sub;
     double pos = j->pos;
-    int playing = 1;
+    int playing = 1, quiet = (int)j->quiet;
     float a[6], c[6], gl[6], gr[6], gm[6];
     for (int k = 0; k < ch; k++) { gl[k] = j->gain[k][0]; gr[k] = j->gain[k][1]; gm[k] = j->subgain[k]; }
     if (fmt == DSMIX_ADPCM) dsmix_adpcm_begin(v, j->data);
@@ -332,31 +333,34 @@ dsmix_buffer_t(struct dsmix_voice *j, float *out, int n, int fmt, int ch, int vp
         uint32_t nxt = idx + 1;
         if (looping && nxt >= le) nxt = ls;
         if (nxt >= total) nxt = idx;
-        dsmix_fetch_t(&src, idx, a, fmt, ch);
-        dsmix_fetch_t(&src, nxt, c, fmt, ch);
-        float l = 0, r = 0, m = 0, amp = 1.0f;
+        float amp = 1.0f;
         if (vp) {
             if ((v->ctl++ & 31) == 0) dsmix_frame_params(v, pitch);
             step = v->step_cur;
             amp = dsmix_eg_tick(&v->eg[DSEG_IDX_AMP]);
             dsmix_eg_tick(&v->eg[DSEG_IDX_MULTI]);
         }
-        for (int k = 0; k < ch; k++) {
-            float s = a[k] + (c[k] - a[k]) * frac;
-            if (filt) {   /* Chamberlin state-variable low-pass */
-                v->low[k] += v->svf_f * v->band[k];
-                float high = s - v->low[k] - v->svf_q * v->band[k];
-                v->band[k] += v->svf_f * high;
-                s = v->low[k];
+        if (!quiet) {   /* quiet: only the position and the envelopes move */
+            dsmix_fetch_t(&src, idx, a, fmt, ch);
+            dsmix_fetch_t(&src, nxt, c, fmt, ch);
+            float l = 0, r = 0, m = 0;
+            for (int k = 0; k < ch; k++) {
+                float s = a[k] + (c[k] - a[k]) * frac;
+                if (filt) {   /* Chamberlin state-variable low-pass */
+                    v->low[k] += v->svf_f * v->band[k];
+                    float high = s - v->low[k] - v->svf_q * v->band[k];
+                    v->band[k] += v->svf_f * high;
+                    s = v->low[k];
+                }
+                s *= amp;
+                l += s * gl[k];
+                r += s * gr[k];
+                if (sub) m += s * gm[k];
             }
-            s *= amp;
-            l += s * gl[k];
-            r += s * gr[k];
-            if (sub) m += s * gm[k];
+            out[2 * i] += l;
+            out[2 * i + 1] += r;
+            if (sub) sub[i] += m;
         }
-        out[2 * i] += l;
-        out[2 * i + 1] += r;
-        if (sub) sub[i] += m;
         if (v->noteoff && v->eg[DSEG_IDX_AMP].seg == EG_OFF) {   /* end of release: voice off */
             playing = 0;
             break;
