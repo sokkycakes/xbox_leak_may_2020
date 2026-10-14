@@ -72,12 +72,51 @@ small draw had its own index entry, and ~700 of them didn't fit.
 Changes, measured under llvmpipe in the cloud (Pi results pending,
 bootani/pi/bench request 5):
 
-- Draw merging (b9048a43, `XBCOMPAT_MERGE_DRAWS=0` turns it off): such a
-  run goes to GL as one glDrawElements. ~490 of ~850 draws a frame become
-  ~28 GL draws; cache uploads fall to ~30 (0.3 MB) a frame; xbcompat's draw
-  time from ~150 to ~65 ms. Merged and unmerged frames match where the
-  scene doesn't move.
+- Draw merging (b9048a43 for shader draws, dba23f0a for fixed-function
+  fans, strips and lists; `XBCOMPAT_MERGE_DRAWS=0` turns both off): such
+  a run goes to GL as one draw. GL draws a frame in a match fall from
+  660-865 to 115-195; cache uploads fall to ~30 (0.3 MB) a frame. Merged
+  and unmerged frames match where the scene doesn't move, and the 75 ATG
+  samples render pixel for pixel as before.
 - 16-bit DXT (d119671c, `XBCOMPAT_DXT16`): on VC4/V3D, opaque DXT textures
   go up as RGB565 and on/off-alpha ones as RGB5_A1 instead of Mesa's 32-bit
   expansion: 54 of the match's 95 DXT textures, at most 3/255 off per
   channel. `XBCOMPAT_DXT16=2` also sends the other 41 as RGBA4444.
+
+What that is worth here, measured without profiling (QuickPlay match,
+20 s, same input script; per-thread CPU from /proc):
+
+| | merging on | merging off |
+|---|---|---|
+| title thread (game, D3D, Mesa's front end) | 10.4 ms CPU a frame, ~790 draws | 14.7 ms, ~650 draws |
+| llvmpipe's four raster threads | 45.6 ms | 44.8 ms |
+| frame rate | 41.6 fps | 35.7 fps |
+
+So per title draw the title thread spends ~13 us instead of ~23 us: each
+GL draw merging removes saves it ~12 us here (xbcompat and Mesa together).
+Under llvmpipe the frame is mostly rasterising, which merging doesn't
+touch. VC4's driver alone charges ~90 us of CPU a GL draw: that, not the
+frame rate here, is what merging is for, and only the Pi shows it
+(request 5).
+
+A measuring trap, fixed in ff7cdabd: `XBCOMPAT_LOG_FPS=1` used to time
+every draw even though its rate-only report reads none of it. In this
+container a 32-bit process has no vDSO, so each clock read is a system
+call, and in a match they took 41% of the title thread. The draw times
+first reported for merging (~150 ms a frame off, ~65 ms on) came from
+that build. `XBCOMPAT_PROFILE_WORK` still times every draw, so its
+numbers are inflated in proportion to the draw count.
+
+What's left after merging (a traced match frame, 641 draws): 416 indexed
+lists (now ~25 GL draws), 58 fixed-function quads (a handful), and 165
+indexed triangle strips, now most of the GL draws. Each strip is an
+object with its own vertex and index buffer (52-byte vertices); before
+each one the title loads vertex constants 0-7, 12-24, 27 and 40-41 (the
+object's matrices and lighting), sets pixel shader constants 0-3 and 6
+(the same values but for c6, whose upper components look unused), and
+often changes the stage 0 texture. The vertex program, pixel shader and
+render state stay the same. Grouped by state and texture in draw order
+the strips make 51 runs; sorted, 21 (they are opaque with LEQUAL depth
+test and write, so order only matters on exact depth ties). One GL draw
+per run would need the per-object constants in a uniform array indexed
+per vertex, and the strips' vertices copied into one buffer.
