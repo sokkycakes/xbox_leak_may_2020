@@ -307,6 +307,8 @@ static const struct tmpl tmpls[] = {
     { "fmul st(i),st", "DC C8+i", C_X87, 0, 0 }, { "faddp st(i),st", "DE C0+i", C_X87, 0, 0 },
     { "fmulp st(i),st", "DE C8+i", C_X87, 0, 0 },
     { "movsx Gw,Eb", "66 0F BE /r", C_INT, 0, 0 }, { "stosd", "AB", C_INT, T_STR, 0 },
+    { "movaps st", "0F 29 /r", C_SSE, T_GX | T_EX, 0 }, { "movntps", "0F 2B /r", C_SSE, T_GX | T_MEM, 0 },
+    { "movaps ld", "0F 28 /r", C_SSE, T_GX | T_EX, 0 },
 };
 #define NTMPL (sizeof(tmpls) / sizeof(tmpls[0]))
 

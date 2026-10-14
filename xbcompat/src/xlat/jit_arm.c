@@ -72,11 +72,14 @@ enum { EXIT_LINK = 1, EXIT_INDIRECT = 2 };
 #define O_FPCW ((int)offsetof(xcpu, fpcw))
 #define O_FPSW ((int)offsetof(xcpu, fpsw))
 #define O_FTAG ((int)offsetof(xcpu, ftag))
+#define O_XMM  ((int)offsetof(xcpu, xmm))
 
 struct block {
     uint32_t eip, end;           /* the guest bytes [eip, end) */
     uint32_t *code;
     struct block *next;          /* hash chain */
+    uint32_t count;              /* XLAT_COUNT: times run */
+    uint16_t ninsns, nwords;     /* guest instructions, host words */
 };
 
 struct plist {                   /* blocks with code in one guest page */
@@ -98,6 +101,7 @@ static uint32_t stop_lo, stop_hi;
 static unsigned stop_live, unknown_live;
 
 static bool stats;
+static const char *count_dir;   /* XLAT_COUNT=DIR: count block runs, dump the hottest there */
 static FILE *perf_map;   /* XLAT_PERF_MAP: names blocks for perf */
 static uint64_t fb_count[0x200], fb_x87[8][16], n_blocks, n_insns, n_native, n_links, n_lookups;
 
@@ -1251,6 +1255,54 @@ static bool emit_string(tctx *t, const xinsn *in, unsigned live)
     return true;
 }
 
+/* n dwords from [sb, #so] to [db, #do_] through T1-T4 (all loaded first) */
+static void copy_words(tctx *t, int n, int sb, int32_t so, int db, int32_t do_)
+{
+    static const int tr[4] = { T1, T2, T3, T4 };
+    for (int i = 0; i < n; i++) E(A_LDR(tr[i], sb, so + 4 * i));
+    for (int i = 0; i < n; i++) E(A_STR(tr[i], db, do_ + 4 * i));
+}
+
+/* the Pentium III's SSE moves (no 66 or F2 forms: those are SSE2) */
+static bool emit_sse_move(tctx *t, const xinsn *in)
+{
+    unsigned op = in->op;
+    bool ss = in->pfx & XP_REP, m = in->mod != 3;
+    if (in->pfx & (XP_OPSZ | XP_REPNE | XP_LOCK)) return false;
+    if (ss && op != 0x110 && op != 0x111) return false;
+    int x = O_XMM + 16 * in->reg, y = O_XMM + 16 * in->rm, base = R0;
+    int32_t off = y;
+    if (m) base = mem_addr(t, in, T0, 4083, &off);
+    switch (op) {
+    case 0x110: case 0x128:   /* movups, movaps, movss xmm, xmm/m */
+        if (!ss) {
+            copy_words(t, 4, base, off, R0, x);
+        } else if (m) {
+            copy_words(t, 1, base, off, R0, x);
+            E(dp_i(C_AL, OP_MOV, 0, T1, 0, 0));
+            for (int i = 1; i < 4; i++) E(A_STR(T1, R0, x + 4 * i));
+        } else {
+            copy_words(t, 1, R0, y, R0, x);
+        }
+        return true;
+    case 0x111: case 0x129: case 0x12B:   /* movups, movaps, movss, movntps xmm/m, xmm */
+        if (op == 0x12B && !m) return false;
+        copy_words(t, ss ? 1 : 4, R0, x, base, off);
+        return true;
+    case 0x112:   /* movlps xmm, m64; movhlps xmm, xmm */
+        copy_words(t, 2, base, m ? off : y + 8, R0, x);
+        return true;
+    case 0x116:   /* movhps xmm, m64; movlhps xmm, xmm */
+        copy_words(t, 2, base, off, R0, x + 8);
+        return true;
+    case 0x113: case 0x117:   /* movlps, movhps m64, xmm */
+        if (!m) return false;
+        copy_words(t, 2, R0, op == 0x113 ? x : x + 8, base, off);
+        return true;
+    }
+    return false;
+}
+
 /* ---- native translations ---------------------------------------------- */
 
 /* Emits in natively, with the flags in live correct after it; false (and
@@ -1534,6 +1586,8 @@ static bool native(tctx *t, const xinsn *in, unsigned live)
         E(A_PUSH1(T1, R8));
         return true;
     }
+    case 0x110: case 0x111: case 0x112: case 0x113: case 0x116: case 0x117: case 0x128: case 0x129: case 0x12B:
+        return emit_sse_move(t, in);
     case 0x118: case 0x119: case 0x11A: case 0x11B: case 0x11C: case 0x11D: case 0x11E: case 0x11F:
         return true;   /* prefetch and hint nops */
     case 0x140: case 0x141: case 0x142: case 0x143: case 0x144: case 0x145: case 0x146: case 0x147:
@@ -1782,9 +1836,17 @@ static struct block *translate(uint32_t eip)
     t->live[n] = (uint8_t)(lt | lf);
     for (int i = n - 1; i >= 0; i--) t->live[i] = (uint8_t)((t->live[i + 1] & ~wr[i]) | rd[i]);
 
+    struct block *b = calloc(1, sizeof(*b));
+    if (!b) die("out of memory");
     t->a = (asm_t){ cache_cur, cache_cur, cache_end };
     t->cf_inv = true;
     x_reset(t);
+    if (count_dir) {
+        mov_imm(t, T3, (uint32_t)(uintptr_t)&b->count);
+        E(A_LDR(T2, T3, 0));
+        E(dp_i(C_AL, OP_ADD, 0, T2, T2, 1));
+        E(A_STR(T2, T3, 0));
+    }
     bool ended = false;
     for (int i = 0; i < n && !ended; i++) {
         const xinsn *in = &t->in[i];
@@ -1802,8 +1864,9 @@ static struct block *translate(uint32_t eip)
     if (t->a.p > t->a.end) die("a block outgrew the code cache");
     flush_icache(t->a.start, t->a.p);
 
-    struct block *b = malloc(sizeof(*b));
     b->eip = eip;
+    b->ninsns = (uint16_t)n;
+    b->nwords = (uint16_t)(t->a.p - cache_cur);
     b->end = next > eip ? next : eip + 1;
     b->code = cache_cur;
     cache_cur = t->a.p;
@@ -2016,8 +2079,47 @@ static void gen_trampolines(void)
     flush_icache(cache, cache_cur);
 }
 
+static int by_work(const void *x, const void *y)
+{
+    const struct block *a = *(struct block *const *)x, *b = *(struct block *const *)y;
+    uint64_t wa = (uint64_t)a->count * a->nwords, wb = (uint64_t)b->count * b->nwords;
+    return wa < wb ? 1 : wa > wb ? -1 : 0;
+}
+
+/* XLAT_COUNT: the blocks that ran the most host code, each dumped as
+   DIR/x86_EIP.s (.word lines: assemble and disassemble to read it). */
+static void print_hot_blocks(void)
+{
+    size_t n = 0, k = 0;
+    for (unsigned h = 0; h < (1u << HTAB_BITS); h++)
+        for (struct block *b = htab[h]; b; b = b->next) n++;
+    struct block **v = malloc((n ? n : 1) * sizeof(*v));
+    uint64_t total = 0;
+    for (unsigned h = 0; h < (1u << HTAB_BITS); h++)
+        for (struct block *b = htab[h]; b; b = b->next) {
+            v[k++] = b;
+            total += (uint64_t)b->count * b->nwords;
+        }
+    qsort(v, n, sizeof(*v), by_work);
+    fprintf(stderr, "xlat: hottest blocks (host words run, of %llu):\n", (unsigned long long)total);
+    for (size_t i = 0; i < n && i < 40; i++) {
+        struct block *b = v[i];
+        uint64_t w = (uint64_t)b->count * b->nwords;
+        fprintf(stderr, "xlat:   x86_%08x %5.2f%% %10u runs %3u insns %4u words\n", b->eip,
+                total ? 100.0 * (double)w / (double)total : 0.0, b->count, b->ninsns, b->nwords);
+        char path[512];
+        snprintf(path, sizeof(path), "%s/x86_%08x.s", count_dir, b->eip);
+        FILE *f = fopen(path, "w");
+        if (!f) continue;
+        for (unsigned j = 0; j < b->nwords; j++) fprintf(f, ".word 0x%08x\n", b->code[j]);
+        fclose(f);
+    }
+    free(v);
+}
+
 void jit_print_stats(void)
 {
+    if (count_dir) print_hot_blocks();
     fprintf(stderr, "xlat: %llu blocks, %llu instructions (%llu native), %u KB of code, %llu links, %llu C lookups\n",
             (unsigned long long)n_blocks, (unsigned long long)n_insns, (unsigned long long)n_native,
             (unsigned)((cache_cur - cache) * 4 / 1024), (unsigned long long)n_links, (unsigned long long)n_lookups);
@@ -2052,6 +2154,7 @@ void jit_init(uint32_t lo, uint32_t hi, bool flags_at_stop)
     if (cache) return;
     unknown_live = getenv("XLAT_SAFE_FLAGS") ? FL_ALL : FL_NZCV;
     stats = getenv("XLAT_STATS") != NULL;
+    count_dir = getenv("XLAT_COUNT");
     cache = mmap(NULL, CACHE_BYTES, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (cache == MAP_FAILED) die("cannot map the code cache");
     cache_end = cache + CACHE_BYTES / 4;
