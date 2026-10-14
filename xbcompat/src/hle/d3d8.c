@@ -35,6 +35,14 @@ static unsigned shader_diag_draw;   /* draws seen, for XBCOMPAT_SHADER_DIAGNOSTI
 /* Set at device creation: see rgba_colors. */
 static bool rgba_vertex_colors;
 static bool vc4;   /* the Raspberry Pi's GPU */
+/* Decode DXT textures to 16 bits a texel (see dxt16_kind): on by default
+   where the GPU has no S3TC (VC4, V3D); XBCOMPAT_DXT16=0 turns it off, 1 on,
+   and 2 also sends textures with partial alpha as RGBA4444 (fewer color
+   bits: an image quality trade).  dxt16_internal is the format for the
+   texture being uploaded, 0 for none. */
+static int dxt16;
+static GLenum dxt16_internal;
+static unsigned dxt16_counts[3];   /* DXT textures by dxt16_kind (profile report) */
 static GLint host_vertex_attribs;   /* GL_MAX_VERTEX_ATTRIBS */
 
 #include "glcache.h"
@@ -575,6 +583,8 @@ static LONG NTAPI Direct3D_CreateDevice(UINT_ Adapter, ULONG DeviceType, PVOID p
        draws from client arrays). Swizzle them ourselves instead. */
     const char *renderer = (const char *)glGetString(GL_RENDERER);
     vc4 = renderer && strstr(renderer, "VC4");
+    const char *dxt16_env = getenv("XBCOMPAT_DXT16");
+    dxt16 = dxt16_env ? atoi(dxt16_env) : renderer && (strstr(renderer, "VC4") || strstr(renderer, "V3D"));
     rgba_vertex_colors = vc4 || getenv("XBCOMPAT_RGBA_VERTEX_COLORS");
 
     for (int i = 0; i < 10; i++) identity(&d3d.transforms[i]);
@@ -975,6 +985,9 @@ static void log_fps(void)
             xlog("D3D buffers: upload calls %.2f ms/frame", t_buffer_upload / 1e6 / f);
             xlog("D3D merged: %.1f title draws in %.1f GL draws per frame", merge_title_draws / f, merge_gl_draws / f);
             merge_title_draws = merge_gl_draws = 0;
+            if (dxt16)
+                xlog("D3D DXT textures so far: %u opaque (RGB565), %u on/off alpha (RGB5_A1), %u partial alpha (%s)",
+                     dxt16_counts[0], dxt16_counts[1], dxt16_counts[2], dxt16 >= 2 ? "RGBA4444" : "32-bit");
             xlog("D3D program parts: fragment shader lookup %.2f, textures %.2f ms/frame", t_fshader / 1e6 / f,
                  t_textures / 1e6 / f);
             t_fshader = t_textures = 0;
@@ -1582,6 +1595,70 @@ static GLenum tex_target(const D3DPixelContainer *t)
 static bool is_depth_format(ULONG fmt) { return fmt >= 0x2A && fmt <= 0x31; }
 static float depth_format_max(ULONG fmt) { return (fmt & ~4u) == 0x2A || (fmt & ~4u) == 0x2B ? 16777215.0f : 65535.0f; }
 
+/* What alpha a DXT texture's blocks hold: 0 every texel opaque, 1 only
+   fully transparent or opaque ones, 2 anything in between. */
+static int dxt16_kind(ULONG fmt, const uint8_t *p, size_t blocks)
+{
+    int kind = 0;
+    for (size_t b = 0; b < blocks; b++, p += fmt == 0x0C ? 8 : 16) {
+        if (fmt == 0x0C) {
+            /* Three colors and transparent black when c0 <= c1 (index 3). */
+            if ((p[0] | p[1] << 8) > (p[2] | p[3] << 8)) continue;
+            uint32_t sel = p[4] | p[5] << 8 | p[6] << 16 | (uint32_t)p[7] << 24;
+            for (int i = 0; i < 16; i++)
+                if ((sel >> (2 * i) & 3) == 3) kind = 1;
+        } else if (fmt == 0x0E) {
+            for (int i = 0; i < 16; i++) {
+                unsigned a = p[i / 2] >> (4 * (i % 2)) & 15;
+                if (a == 15) continue;
+                if (a) return 2;
+                kind = 1;
+            }
+        } else {
+            uint8_t rgba[16][4];
+            dxt_decode_block(fmt, p, rgba);
+            for (int i = 0; i < 16; i++) {
+                if (rgba[i][3] == 255) continue;
+                if (rgba[i][3]) return 2;
+                kind = 1;
+            }
+        }
+    }
+    return kind;
+}
+
+/* One DXT level as RGB565, RGB5_A1 or RGBA4 (dxt16_internal).  The
+   endpoints are 5:6:5 already: in the first two only the blended colors
+   lose their low bits. */
+static void upload_dxt16(GLenum target, GLint level, ULONG fmt, ULONG w, ULONG h, const uint8_t *src)
+{
+    uint16_t *px = malloc((size_t)w * h * 2);
+    if (!px) return;
+    bool alpha = dxt16_internal == 0x8057 /* GL_RGB5_A1 */, a4 = dxt16_internal == 0x8056 /* GL_RGBA4 */;
+    ULONG bw = (w + 3) / 4, bh = (h + 3) / 4;
+    for (ULONG by = 0; by < bh; by++)
+        for (ULONG bx = 0; bx < bw; bx++, src += fmt == 0x0C ? 8 : 16) {
+            uint8_t rgba[16][4];
+            dxt_decode_block(fmt, src, rgba);
+            for (int i = 0; i < 16; i++) {
+                ULONG x = bx * 4 + i % 4, y = by * 4 + i / 4;
+                if (x >= w || y >= h) continue;
+                const uint8_t *c = rgba[i];
+                unsigned r = (c[0] * 31 + 127) / 255, b = (c[2] * 31 + 127) / 255;
+                if (a4)
+                    px[y * w + x] = (c[0] * 15 + 127) / 255 << 12 | (c[1] * 15 + 127) / 255 << 8
+                                  | (c[2] * 15 + 127) / 255 << 4 | (c[3] * 15 + 127) / 255;
+                else
+                    px[y * w + x] = alpha ? r << 11 | (c[1] * 31 + 127) / 255 << 6 | b << 1 | (c[3] >= 128)
+                                          : r << 11 | (c[1] * 63 + 127) / 255 << 5 | b;
+            }
+        }
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 2);
+    glTexImage2D(target, level, dxt16_internal, w, h, 0, alpha || a4 ? GL_RGBA : GL_RGB,
+                 a4 ? GL_UNSIGNED_SHORT_4_4_4_4 : alpha ? GL_UNSIGNED_SHORT_5_5_5_1 : GL_UNSIGNED_SHORT_5_6_5, px);
+    free(px);
+}
+
 static void upload_image3(GLenum target, GLint level, ULONG fmt, ULONG w, ULONG h, ULONG d, ULONG pitch, const uint8_t *src)
 {
     if (is_depth_format(fmt) && target == GL_TEXTURE_2D) {
@@ -1669,6 +1746,7 @@ static void upload_image3(GLenum target, GLint level, ULONG fmt, ULONG w, ULONG 
             return;
         }
         /* DXT1/3/5 are stored linearly in 4x4 blocks, like on the PC. */
+        if (dxt16_internal) { upload_dxt16(target, level, fmt, w, h, src); return; }
         static const GLenum dxt[] = { 0x83F1, 0x83F2, 0x83F3 };  /* GL_COMPRESSED_RGBA_S3TC_DXT{1,3,5}_EXT */
         GLenum internal = dxt[fmt == 0x0C ? 0 : fmt == 0x0E ? 1 : 2];
         ULONG block = fmt == 0x0C ? 8 : 16;
@@ -1883,6 +1961,29 @@ static GLuint texture_for(D3DPixelContainer *t)
     /* Cube faces each contain a whole mip chain, 128-byte aligned. */
     ULONG face_bytes = target == GL_TEXTURE_CUBE_MAP ? (level_offset(t, levels) + 127) & ~127u : 0;
     int faces = target == GL_TEXTURE_CUBE_MAP ? 6 : 1;
+    /* Without S3TC hardware, Mesa would expand DXT to 32 bits a texel, and
+       VC4 fragments mostly wait on texture fetches.  A texture whose texels
+       are all opaque goes up as RGB565, one with only on/off alpha as
+       RGB5_A1; any other alpha keeps the 32-bit path (RGBA4444 with
+       XBCOMPAT_DXT16=2).  One format for every level and face: GL won't
+       sample a chain whose levels differ. */
+    dxt16_internal = 0;
+    if (dxt16 && (fmt == 0x0C || fmt == 0x0E || fmt == 0x0F) && target != GL_TEXTURE_3D) {
+        int kind = 0;
+        for (int f = 0; f < faces && kind < 2; f++) {
+            ULONG lw = w, lh = h;
+            for (ULONG level = 0; level < levels && kind < 2; level++) {
+                int k = dxt16_kind(fmt, src + f * face_bytes + level_offset(t, level),
+                                   (size_t)((lw + 3) / 4) * ((lh + 3) / 4));
+                if (k > kind) kind = k;
+                if (lw > 1) lw >>= 1;
+                if (lh > 1) lh >>= 1;
+            }
+        }
+        dxt16_internal = kind == 0 ? 0x8D62 /* GL_RGB565 */ : kind == 1 ? 0x8057 /* GL_RGB5_A1 */
+                       : dxt16 >= 2 ? 0x8056 /* GL_RGBA4 */ : 0;
+        dxt16_counts[kind]++;
+    }
     for (int f = 0; f < faces; f++) {
         ULONG lw = w, lh = h;
         ULONG ld = target == GL_TEXTURE_3D ? 1u << ((t->Format >> 28) & 0xF) : 1;
@@ -1895,6 +1996,7 @@ static GLuint texture_for(D3DPixelContainer *t)
             if (ld > 1) ld >>= 1;
         }
     }
+    dxt16_internal = 0;
     stats.uploads++;
     TRACE_ALL("D3D: uploaded %ux%u texture format %#x%s", w, h, fmt, target == GL_TEXTURE_CUBE_MAP ? " (cube)" : "");
     debug_dump_texture(target, t->res.Data, fmt, w, h);
