@@ -3,12 +3,22 @@
 # runs in Unicorn instead (src/cpu.h); everything else stays the same.
 # TRANSLATED=1 on i386 runs the guest in Unicorn too (for testing the
 # translator, and timing it against native, on a PC).
+# CPU=xlat replaces Unicorn with xbcompat's own translator (src/xlat).
 RENDERER ?= builtin
 ifeq ($(RENDERER),native)
 BUILD ?= build-native-client
 endif
 TARGET  ?= i386
 UNICORN ?= /opt/unicorn-$(TARGET)
+CPU     ?= unicorn
+ifeq ($(CPU),xlat)
+ifeq ($(TARGET),armhf)
+BUILD   ?= build-armhf-xlat
+else
+BUILD   ?= build-xlat
+TRANSLATED = 1
+endif
+endif
 ifeq ($(TARGET),armhf)
 TRANSLATED = 1
 CROSS   ?= arm-linux-gnueabihf-
@@ -40,8 +50,10 @@ endif
 BUILD   ?= build
 endif
 ifeq ($(TRANSLATED),1)
+ifneq ($(CPU),xlat)
 override CFLAGS += -I$(UNICORN)/include
 LDLIBS  += $(UNICORN)/lib/libunicorn.a
+endif
 endif
 # GL=opengl links glvnd's libOpenGL, with no GLX (KMSDRM systems, see tools/sion).
 GL      ?= gl
@@ -80,7 +92,13 @@ endif
 ifeq ($(TRANSLATED),1)
 # Each source file is compiled together with its generated guest-call
 # adapters (tools/gen_adapters.py), from a wrapper that includes both.
+ifeq ($(CPU),xlat)
+XLATSRC  = src/xlat/decode.c src/xlat/interp.c src/xlat/fpu.c src/xlat/runtime.c
+OBJ     += $(XLATSRC:%.c=$(BUILD)/%.o)
+else
 OBJ     += $(BUILD)/src/cpu_unicorn.o
+endif
+OBJ     += $(BUILD)/src/xa_format.o
 $(BUILD)/src/%.o: src/%.c tools/gen_adapters.py src/xbcompat.h src/xbox.h src/cpu.h src/hle/hle.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -DXBC_GEN -E -o $(BUILD)/src/$*.i $<
@@ -90,6 +108,16 @@ $(BUILD)/src/%.o: src/%.c tools/gen_adapters.py src/xbcompat.h src/xbox.h src/cp
 $(BUILD)/src/cpu_unicorn.o: src/cpu_unicorn.c src/cpu.h src/xbcompat.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c -o $@ $<
+$(BUILD)/src/xa_format.o: src/xa_format.c src/cpu.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c -o $@ $<
+# On i386, SSE arithmetic: x87 excess precision would round twice.
+ifeq ($(TARGET),i386)
+XLATFLAGS = -msse2 -mfpmath=sse
+endif
+$(BUILD)/src/xlat/%.o: src/xlat/%.c src/xlat/xlat.h src/cpu.h src/xbcompat.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(XLATFLAGS) -c -o $@ $<
 endif
 
 .DEFAULT_GOAL := all
@@ -102,7 +130,7 @@ $(BUILD)/%.o: %.c src/xbcompat.h src/xbox.h src/hle/hle.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-$(BUILD)/src/hle/d3d8.o: src/hle/ff_vsh.h src/hle/dxt_decode.h src/hle/nv2a_shaders.h
+$(BUILD)/src/hle/d3d8.o: src/hle/ff_vsh.h src/hle/dxt_decode.h src/hle/nv2a_shaders.h src/hle/async_draws.h
 
 $(BUILD)/glslcheck: tools/glslcheck.c
 	@mkdir -p $(dir $@)

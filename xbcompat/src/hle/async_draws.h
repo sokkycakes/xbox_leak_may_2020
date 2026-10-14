@@ -25,10 +25,16 @@ enum {
 
 #define ASYNC_DRAWS_PER_POST 8   /* draws queued before the batch goes to the worker */
 
-/* Defined in renderer/worker.h. */
-void renderer_post_async(uint32_t *buf, unsigned n);
-void renderer_async_flush(void);
-void renderer_async_wait(volatile ULONG *counter, ULONG target);
+/* Defined in renderer/worker.h.  The builtin renderer has no worker (these
+   stand-ins only link it; queued drawing never turns on there). */
+__attribute__((weak)) void renderer_post_async(uint32_t *buf, unsigned n)
+{
+    (void)buf; (void)n;
+    fatal("XBCOMPAT_ASYNC_DRAWS needs the native renderer's worker");
+}
+__attribute__((weak)) void renderer_async_flush(void) {}
+__attribute__((weak)) bool renderer_has_worker(void) { return false; }
+__attribute__((weak)) void renderer_async_wait(volatile ULONG *counter, ULONG target) { (void)counter; (void)target; }
 
 static pthread_mutex_t async_lock;   /* recursive: the title's D3D calls, one at a time */
 static volatile ULONG async_frames_done;   /* frames the worker has presented */
@@ -470,7 +476,7 @@ bool d3d_async_wanted(void)
     static int wanted = -1;
     if (wanted < 0) {
         const char *e = getenv("XBCOMPAT_ASYNC_DRAWS");
-        wanted = e && *e && *e != '0';
+        wanted = e && *e && *e != '0' && renderer_has_worker();
     }
     return wanted;
 }

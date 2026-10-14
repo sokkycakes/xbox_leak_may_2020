@@ -204,6 +204,8 @@ static bool renderer_run_async_service_locked(void)
 static void renderer_start_locked(void);
 /* Queued work for the worker, from the title's thread; buf is the worker's
    to free. */
+bool renderer_has_worker(void) { return true; }
+
 void renderer_post_async(uint32_t *buf, unsigned n)
 {
     struct xbr_request *r = calloc(1, sizeof(*r));
