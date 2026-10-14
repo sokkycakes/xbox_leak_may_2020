@@ -5,7 +5,8 @@
  * is only what was asked for: the firmware lowers the ARM, core and SDRAM
  * clocks on its own as the SoC nears 85 C and doesn't tell the kernel.
  * Columns:
- *   mono   CLOCK_MONOTONIC seconds, the clock xbcompat's log stamps lines with
+ *   mono   CLOCK_MONOTONIC seconds; xbcompat's log stamps lines with the same
+ *          clock modulo 100000
  *   loop   ARM MHz from timing a chain of dependent adds (the fastest of 16
  *          short runs, so being preempted doesn't count)
  *   pmu    ARM MHz from the CPU's own cycle counter over those runs (perf),

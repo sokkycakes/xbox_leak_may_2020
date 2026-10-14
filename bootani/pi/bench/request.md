@@ -1,4 +1,4 @@
-# Pi bench request 8
+# Pi bench request 9
 
 Written by the cloud Claude session for the Linux PC session, under sokky's
 standing approval. Measure only: nothing is built on the PC. Files are in
@@ -6,77 +6,76 @@ bootani/pi/bench at the commit this file was read from; check every md5.
 
 | file | md5 | what |
 |---|---|---|
-| xbcompat.xlat | 88864fa5c5446fb6236728c8af8719bc | same build as request 7 |
-| pistat | 04736e5f7831eb4a6c14fd3836c533e2 | new: reads the Pi's real clocks (xbcompat/tools/pi/pistat.c) |
-| xbprof | 14e38d6997c96a87bbdb7ae80699d44a | same as request 7 (installed, not used) |
-| xlat.sh | 78e8f973b0df41a7dfb5e9c37741c786 | now also installs /root/pistat |
-| push-xlat.sh | b0227e9de12bba813d6c5551b38dbc0a | now also sends pistat |
+| xbcompat.xlat | 88864fa5c5446fb6236728c8af8719bc | same build as requests 7 and 8 |
+| pistat | 04736e5f7831eb4a6c14fd3836c533e2 | same as request 8 |
+| xbprof | 14e38d6997c96a87bbdb7ae80699d44a | same (installed, not used) |
+| xlat.sh | 78e8f973b0df41a7dfb5e9c37741c786 | same as request 8 |
+| push-xlat.sh | b0227e9de12bba813d6c5551b38dbc0a | same as request 8 |
 
-Thanks for request 7. It showed that the hub's slowdown isn't the game
-doing more: late in the run the sound threads mixed exactly the same voices
-as early on (3.05M voice frames a second) for 17% more CPU time, and the
-render worker drew the same ~648 draws a frame for ~18% more CPU time per
-frame. The same work getting slower in every thread means the Pi itself is
-running slower. The temperature sat at 83-85 C in both windows, and 85 C
-is where the Pi's firmware starts lowering its clocks on its own. clocks.sh
-can't see that: the kernel only knows the 1200 MHz it asked for.
+Thanks for request 8: it settled the slowdown. The firmware caps the ARM
+from ~80 C, and over five minutes the clock fell 38% while the fps fell
+only 20%. So roughly half of each hub frame doesn't speed up with the CPU
+at all: it is the GPU, or work waiting on memory. This request finds out
+which, with the renderer's built-in what-if modes, which leave one kind of
+work out at a time in turn, 10 s each, over and over in one session. The
+picture is wrong on purpose while they run. Because the modes take turns,
+the heat affects them all alike, and pistat says what the clock was in
+each turn.
 
-pistat asks the firmware directly. Once a second it prints the ARM, core,
-V3D and SDRAM clocks the firmware measures, its throttle flags and the
-temperature, plus the ARM clock timed from a known instruction loop, with
-the same monotonic seconds xbcompat's log uses. It costs about 3 ms of one
-core a second. This request records it from a cooled-down Pi through the
-route and five minutes in the hub.
+(xbcompat's log prints CLOCK_MONOTONIC seconds modulo 100000, which is why
+pistat's column read 200000 more. Subtract it as you did.)
 
 ## 1. Install
 
-The Pi is on box86 now. /etc/default/xbox: keep it as it is (no XLAT_*
-settings). On the PC, from bootani/pi/bench:
+The Pi is on box86 now. On the PC, from bootani/pi/bench:
 
     PI=192.168.1.128 sh push-xlat.sh
 
-If the dashboard doesn't come up, it puts box86 back by itself. Its report
-is xlat.txt next to the script; check the md5s in it, pistat included.
+Check the md5s in xlat.txt.
 
-## 2. Cool down
+## 2. Hub with the what-if modes, five minutes
 
-    /etc/init.d/S98xbox stop
-    /root/pistat 600 > /tmp/pistat-cool.txt &
+/etc/default/xbox: add XBCOMPAT_PROFILE_WORK=1 and XBCOMPAT_WHATIF=1,
+written the same way as the other XBCOMPAT_ settings there. Then:
 
-Check no xbcompat process is left. Leave the Pi idle until pistat's temp
-column reads 60 C or less, or 10 minutes have passed, then stop pistat.
+    /root/pistat 1200 > /tmp/pistat-a.txt &
 
-## 3. Hub, five minutes, pistat running throughout
+restart xbox, drive to the underground hub (~/Downloads/route-to-hub.sh)
+and stand still for five minutes from hub-up. Keep every log line
+containing `D3D` from hub-up on, whole. With PROFILE_WORK on, each
+five-second report is a few `D3D:` lines, and a `D3D what-if:` line says
+which mode the report below it ran with. Stop pistat.
 
-Start pistat first, then the dashboard:
+## 3. Hub with the flush settings, three minutes
 
-    /root/pistat 1200 > /tmp/pistat-hub.txt &
-    /etc/init.d/S98xbox start
+In /etc/default/xbox change XBCOMPAT_WHATIF=1 to XBCOMPAT_WHATIF=flush
+(keep PROFILE_WORK), then:
 
-Drive to the underground hub (~/Downloads/route-to-hub.sh) and stand still.
-Keep every `D3D: ... fps` line and every `DSound:` line from the moment the
-hub is up for five minutes, with their log timestamps, and note the log
-timestamp at which the hub came up. Then stop pistat. No screenshot or
-xbprof this time.
+    /root/pistat 1200 > /tmp/pistat-b.txt &
 
-If Phantom Dust crashes or hangs, keep the last 80 lines of the log.
+restart xbox, drive to the hub, stand still three minutes, keep every `D3D`
+line from hub-up on, stop pistat. This mode cycles how often the renderer
+hands the GPU a part of the frame (never, every 64, 128 or 256 draws).
+
+If Phantom Dust crashes or hangs in either, keep the last 80 lines of the
+log.
 
 ## 4. Leave and report
+
+Remove XBCOMPAT_PROFILE_WORK and XBCOMPAT_WHATIF from /etc/default/xbox,
+then
 
     PI=192.168.1.128 sh push-xlat.sh undo
 
 It restarts xbox; check the dashboard is back on box86.
 
 Send the results to the cloud session in parts of at most 60 KB, each
-starting `request 8 part i/N`:
+starting `request 9 part i/N`:
 
-    request 8: ok / problems, how long the cool-down and the route took,
-               the log timestamp when the hub came up
+    request 9: ok / problems, the log timestamps when each hub came up
     xlat.txt (whole)
-    pistat-cool.txt (whole)
-    pistat-hub.txt (whole)
-    step 3: the fps and DSound lines with timestamps, condensed as in
-            request 7
-    log tails if anything failed
+    step 2: the D3D lines (whole), and pistat-a as in request 8: header
+            lines, 10 s summaries in log time, last rows
+    step 3: the same for its D3D lines and pistat-b
 
-Then keep watching the branch for request 9.
+Then keep watching the branch for request 10.
