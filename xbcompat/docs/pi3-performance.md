@@ -70,7 +70,7 @@ xbcompat sent the same ~850 draws to GL, and its conversion cache missed
 small draw had its own index entry, and ~700 of them didn't fit.
 
 Changes, measured under llvmpipe in the cloud (Pi results pending,
-bootani/pi/bench request 5):
+bootani/pi/bench request TT1 on this branch):
 
 - Draw merging (b9048a43 for shader draws, dba23f0a for fixed-function
   fans, strips and lists; `XBCOMPAT_MERGE_DRAWS=0` turns both off): such
@@ -97,7 +97,7 @@ GL draw merging removes saves it ~12 us here (xbcompat and Mesa together).
 Under llvmpipe the frame is mostly rasterising, which merging doesn't
 touch. VC4's driver alone charges ~90 us of CPU a GL draw: that, not the
 frame rate here, is what merging is for, and only the Pi shows it
-(request 5).
+(request TT1).
 
 A measuring trap, fixed in ff7cdabd: `XBCOMPAT_LOG_FPS=1` used to time
 every draw even though its rate-only report reads none of it. In this

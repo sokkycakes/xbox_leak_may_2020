@@ -1,7 +1,19 @@
-# Pi bench request 5
+# Pi bench request TT1 (Think Tanks)
 
-Revised at dba23f0a: the renderer changed (md5 below). If the earlier
-version of this request already ran, run this one again from step 1.
+Not part of the Phantom Dust requests. Those come from another cloud
+session on branch claude/project-thread-ohz82s, which numbers its own
+(it is at request 9); this branch's request was first called request 5
+too, hence the new name. Revised at dba23f0a: the renderer changed (md5
+below). If the earlier version already ran, run this one again from
+step 1.
+
+Run it only when none of the Phantom Dust requests is in progress and the
+Pi is back on box86 (their `push-xlat.sh undo`): step 1 restarts xbox,
+which would end a run of theirs, and on xlat (XBOX_CPU=unicorn) this
+build wouldn't run at all. merge.sh refuses to install unless
+/etc/default/xbox selects box86 with the native renderer. Once installed,
+this is the box86 build every title runs, Phantom Dust too, until
+`push-merge.sh undo`.
 
 Written by the cloud Claude session for the Linux PC session, to run when
 sokky approves it. Measure only: nothing is built on the PC. Files are in
@@ -12,8 +24,8 @@ claude/determined-bardeen-dw96cp); check every md5.
 |---|---|---|
 | xbcompat-native.x86 | fcb5229a9fd5fdaaeb1eb5d4d5aaa633 | the x86 client (`make RENDERER=native`); unchanged since d119671c, as everything since is in the renderer |
 | libxbcompat_renderer.so.1 | dd87db240bf0254ac83c6210bc914650 | the ARM renderer, xbcompat/ at dba23f0a (`native-renderer.mk TARGET=armhf GL=opengl`) |
-| merge.sh | 8d388f01b3f07849c1eba2a969295ecf | Pi side: backs up, installs, rolls back if the dashboard doesn't start |
-| push-merge.sh | b65cd189066c9963e557ddb3adb95ad5 | PC side |
+| merge.sh | b3800efcc2e7b4015f87fc71063ce5cd | Pi side: refuses unless the Pi is on box86; backs up, installs, rolls back if the dashboard doesn't start |
+| push-merge.sh | 960d702ba7955e6020a559c5780a37e7 | PC side |
 | clocks.sh | 65d695544dda3324b349b2480e371bd7 | same as before |
 
 This build has two changes, each with a switch in the same build, so the
@@ -41,9 +53,8 @@ in the cloud those clock reads took 41% of the render thread. They now run
 only with `XBCOMPAT_PROFILE_WORK=1` (step 4), so compare fps only within
 this request, not with earlier ones.
 
-Requests 2 to 4 are separate (the xlat builds, at commits 651d6364,
-6f0550ff and 66b2753a on claude/project-thread-ohz82s). This one doesn't
-touch the xlat slot or the CPU governor.
+This request doesn't touch the xlat slot (xbcompat.arm) or the CPU
+governor.
 
 ## 1. Install
 
@@ -101,7 +112,7 @@ If Think Tanks and the dashboard looked right, leave this build installed;
 otherwise `PI=192.168.1.128 sh push-merge.sh undo`. Send one message to
 the cloud session:
 
-    request 5: ok / problems
+    request TT1: ok / problems
     merge.txt (whole)
     fps lines: step 2 (merging) and step 3 (off)
     clocks-tt.txt

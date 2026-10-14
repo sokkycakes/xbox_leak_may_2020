@@ -1,5 +1,5 @@
 #!/bin/sh
-# Runs on the Pi (see request.md, request 5). Installs the native client and
+# Runs on the Pi (see request.md, request TT1). Installs the native client and
 # ARM renderer that merge runs of same-state draws, after backing up what's
 # there. "sh merge.sh undo" puts the build that was installed before this
 # one back ("undo original": the first backup, kept forever). If the
@@ -30,6 +30,14 @@ if [ "$1" = undo ]; then
 	restore $D; restart
 	echo "Put the build from $D back." | tee $R
 	exit 0
+fi
+# The Phantom Dust requests put the Pi on xlat (XBOX_CPU=unicorn), where
+# this build doesn't run, and restarting would end their run: install only
+# while the launcher picks box86 with the native renderer.
+sel=$( [ -r /etc/default/xbox ] && . /etc/default/xbox >/dev/null 2>&1; echo "${XBOX_CPU:-box86}/${XBOX_RENDERER:-native}" )
+if [ "$sel" != box86/native ]; then
+	echo "Not installed: /etc/default/xbox selects $sel, not box86/native. Finish the other request and undo it (push-xlat.sh undo) first." | tee $R
+	exit 1
 fi
 {
 echo "== $(date)"

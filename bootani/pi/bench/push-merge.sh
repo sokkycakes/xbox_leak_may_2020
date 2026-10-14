@@ -1,5 +1,5 @@
 #!/bin/sh
-# Linux side of request 5: sends the files to the Pi over ssh and runs
+# Linux side of request TT1 (Think Tanks): sends the files to the Pi over ssh and runs
 # merge.sh there (pass "undo" to put the earlier build back). Saves the
 # report as merge.txt next to this script.
 #   PI=192.168.1.128 sh push-merge.sh [undo]
