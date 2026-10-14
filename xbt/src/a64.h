@@ -510,6 +510,18 @@ static inline uint32_t enc_ldp(int opc, int load, int mode, int rt, int rt2, int
 #define x_stp_pre(b, t, t2, n, off)  a64_put(b, enc_ldp(2, 0, 3, t, t2, n, (off) / 8))
 #define x_ldp_post(b, t, t2, n, off) a64_put(b, enc_ldp(2, 1, 1, t, t2, n, (off) / 8))
 
+/* SIMD&FP register pairs (D registers), signed offset */
+static inline uint32_t enc_dpair(int load, int rt, int rt2, int rn, int off)
+{
+    int imm7 = off / 8;
+    if (imm7 < -64 || imm7 > 63 || (off & 7))
+        __builtin_trap();
+    return 0x6D000000u | (uint32_t)load << 22 | ((uint32_t)imm7 & 0x7f) << 15 |
+           (uint32_t)rt2 << 10 | (uint32_t)rn << 5 | (uint32_t)rt;
+}
+#define d_stp(b, t, t2, n, off) a64_put(b, enc_dpair(0, t, t2, n, off))
+#define d_ldp(b, t, t2, n, off) a64_put(b, enc_dpair(1, t, t2, n, off))
+
 /* SIMD&FP loads/stores. sz: 0=B 1=H 2=S 3=D 4=Q */
 static inline uint32_t enc_fldst_uimm(int sz, int load, int rt, int rn, uint32_t imm12)
 {

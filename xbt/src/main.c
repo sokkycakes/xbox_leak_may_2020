@@ -139,25 +139,29 @@ static int run_tests(const char *in, const char *out, int only)
 }
 
 extern int xbe_main(const char *path, int argc, char **argv);
+extern int elf_main(const char *path);
 
 static void usage(void)
 {
     fprintf(stderr,
             "usage: xbt [options] game.xbe\n"
             "       xbt [options] --test cases.bin results.bin [--only N]\n"
+            "       xbt [options] --elf program   (static i386 Linux ELF, for benchmarking)\n"
             "options:\n"
             "  --no-link        do not link translated blocks to each other\n"
             "  --no-fusion      do not pass flags through host NZCV\n"
             "  --no-flag-elim   compute flags for every instruction\n"
             "  --strict-abi     do not assume flags are dead across call/ret\n"
             "  --max-insns N    guest instructions per block (default 200)\n"
+            "  --x86-nan        give SSE invalid operations x86's negative default NaN\n"
             "  --trace          log translated blocks\n"
+            "  --dump DIR       write each block's host code to DIR\n"
             "  --stats          print translation statistics on exit\n");
 }
 
 int main(int argc, char **argv)
 {
-    const char *test_in = NULL, *test_out = NULL, *xbe = NULL;
+    const char *test_in = NULL, *test_out = NULL, *xbe = NULL, *elf = NULL;
     int only = -1;
     int i;
     for (i = 1; i < argc; i++) {
@@ -168,6 +172,8 @@ int main(int argc, char **argv)
             xbt_opt.flag_fusion = 0;
         else if (!strcmp(a, "--no-flag-elim"))
             xbt_opt.flag_elim = 0;
+        else if (!strcmp(a, "--x86-nan"))
+            xbt_opt.x86_nan = 1;
         else if (!strcmp(a, "--strict-abi"))
             xbt_opt.abi_flags = 0;
         else if (!strcmp(a, "--trace"))
@@ -178,6 +184,8 @@ int main(int argc, char **argv)
             xbt_opt.stats = 1;
         else if (!strcmp(a, "--max-insns") && i + 1 < argc)
             xbt_opt.max_insns = atoi(argv[++i]);
+        else if (!strcmp(a, "--elf") && i + 1 < argc)
+            elf = argv[++i];
         else if (!strcmp(a, "--only") && i + 1 < argc)
             only = atoi(argv[++i]);
         else if (!strcmp(a, "--test") && i + 2 < argc) {
@@ -196,6 +204,8 @@ int main(int argc, char **argv)
     }
     if (test_in)
         return run_tests(test_in, test_out, only);
+    if (elf)
+        return elf_main(elf);
     if (xbe)
         return xbe_main(xbe, argc - i, argv + i);
     usage();

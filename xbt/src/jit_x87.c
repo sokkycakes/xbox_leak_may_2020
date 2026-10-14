@@ -23,41 +23,99 @@ enum {
 
 #define FSW_C_MASK 0x4700u
 
-/* index register for ST(i): w27 for i == 0, else tmp = (w27 + i) & 7 */
-static int st_idx(jit_t *j, int i, int tmp)
+/* ---- register cache ------------------------------------------------ */
+
+/* physical-register index (w27 + slot) & 7 into a W register */
+static int phys_idx(jit_t *j, int slot, int tmp)
 {
-    if ((i & 7) == 0)
+    if ((slot & 7) == 0)
         return RTOP;
     a64buf *b = JB(j);
-    w_addi(b, tmp, RTOP, (uint32_t)(i & 7));
+    w_addi(b, tmp, RTOP, (uint32_t)(slot & 7));
     w_andi(b, tmp, tmp, 7, tmp);
     return tmp;
 }
 
-static void ld_st(jit_t *j, int vd, int i)
+static int alloc_dreg(jit_t *j)
 {
-    int r = st_idx(j, i, 9);
-    a64_put(JB(j), enc_fldst_reg(FSZ_D, 1, vd, RCPU, r, EX_UXTW, 1));
+    for (int r = 8; r < 16; r++) {
+        int used = 0;
+        for (int s = 0; s < 8; s++)
+            if (j->x87_reg[s] == r)
+                used = 1;
+        if (!used)
+            return r;
+    }
+    return -1;   /* cannot happen: 8 slots, 8 registers */
 }
 
-static void st_st(jit_t *j, int vs, int i)
+/* host D register holding ST(i), loaded on first use */
+static int st_get(jit_t *j, int i)
 {
-    int r = st_idx(j, i, 9);
-    a64_put(JB(j), enc_fldst_reg(FSZ_D, 0, vs, RCPU, r, EX_UXTW, 1));
+    int slot = (j->x87_delta + i) & 7;
+    if (j->x87_reg[slot] < 0) {
+        int r = alloc_dreg(j);
+        int idx = phys_idx(j, slot, 9);
+        a64_put(JB(j), enc_fldst_reg(FSZ_D, 1, r, RCPU, idx, EX_UXTW, 1));
+        j->x87_reg[slot] = (int8_t)r;
+        j->x87_dirty[slot] = 0;
+    }
+    return j->x87_reg[slot];
+}
+
+/* host D register that will receive a new value of ST(i) */
+static int st_def(jit_t *j, int i)
+{
+    int slot = (j->x87_delta + i) & 7;
+    if (j->x87_reg[slot] < 0)
+        j->x87_reg[slot] = (int8_t)alloc_dreg(j);
+    j->x87_dirty[slot] = 1;
+    return j->x87_reg[slot];
+}
+
+static void ld_st(jit_t *j, int vd, int i)
+{
+    int r = st_get(j, i);
+    if (r != vd)
+        f_mov(JB(j), 1, vd, r);
 }
 
 static void x87_push(jit_t *j)
 {
-    a64buf *b = JB(j);
-    w_subi(b, RTOP, RTOP, 1);
-    w_andi(b, RTOP, RTOP, 7, RTOP);
+    j->x87_delta = (j->x87_delta - 1) & 7;
+    int slot = j->x87_delta;
+    j->x87_reg[slot] = -1;          /* old content of the new top is dead */
+    j->x87_dirty[slot] = 0;
 }
 
 static void x87_pop(jit_t *j)
 {
+    int slot = j->x87_delta;
+    j->x87_reg[slot] = -1;          /* a popped value is dead */
+    j->x87_dirty[slot] = 0;
+    j->x87_delta = (j->x87_delta + 1) & 7;
+}
+
+/* Write dirty slots back and make w27 the real TOP. */
+void jit_x87_flush(jit_t *j, int invalidate)
+{
     a64buf *b = JB(j);
-    w_addi(b, RTOP, RTOP, 1);
-    w_andi(b, RTOP, RTOP, 7, RTOP);
+    for (int s = 0; s < 8; s++) {
+        if (j->x87_reg[s] >= 0 && j->x87_dirty[s]) {
+            int idx = phys_idx(j, s, 9);
+            a64_put(b, enc_fldst_reg(FSZ_D, 0, j->x87_reg[s], RCPU, idx, EX_UXTW, 1));
+            j->x87_dirty[s] = 0;
+        }
+    }
+    if (j->x87_delta) {
+        w_addi(b, RTOP, RTOP, (uint32_t)j->x87_delta);
+        w_andi(b, RTOP, RTOP, 7, RTOP);
+        j->x87_delta = 0;
+        invalidate = 1;             /* slots are relative to the old TOP */
+    }
+    if (invalidate)
+        for (int s = 0; s < 8; s++)
+            j->x87_reg[s] = -1;
 }
 
 /* Load a memory operand as a double into vd. kind: 0 m32fp 1 m64fp 2 m32int 3 m16int 4 m64int */
@@ -267,8 +325,10 @@ void jit_x87_classify(jinsn *ji)
         ji->clobber = 1;
     if (op == 0xda && modrm == 0xe9)
         ji->clobber = 1;
-    if (op == 0xd9 && modrm >= 0xe4)
-        ji->clobber = 1;                        /* ftst fxam constants transcendental ... */
+    if (op == 0xd9 && (modrm == 0xe4 || modrm == 0xe5 || modrm >= 0xf0) &&
+        modrm != 0xf6 && modrm != 0xf7 && modrm != 0xfa && modrm != 0xfc)
+        ji->clobber = 1;                        /* ftst fxam transcendental ...; not the
+                                                   constants, fsqrt, frndint, fincstp/fdecstp */
     if (op == 0xdb && (modrm == 0xe2 || modrm == 0xe3))
         ji->clobber = 1;
 }
@@ -286,27 +346,26 @@ int jit_x87(jit_t *j, jinsn *ji)
         case 0xd8: case 0xdc: case 0xda: case 0xde: {
             int kind = op == 0xd8 ? 0 : op == 0xdc ? 1 : op == 0xda ? 2 : 3;
             ld_mem(j, in, kind, 1);
-            ld_st(j, 0, 0);
             if (reg == 2 || reg == 3) {
+                ld_st(j, 0, 0);
                 fcom_fsw(j);
                 if (reg == 3)
                     x87_pop(j);
             } else {
-                arith(j, reg, 0, 1);
-                st_st(j, 0, 0);
+                st_get(j, 0);
+                int r = st_def(j, 0);
+                arith(j, reg, r, 1);
             }
             return 1;
         }
         case 0xd9:
             switch (reg) {
             case 0:
-                ld_mem(j, in, 0, 0);
                 x87_push(j);
-                st_st(j, 0, 0);
+                ld_mem(j, in, 0, st_def(j, 0));
                 return 1;
             case 2: case 3:
-                ld_st(j, 0, 0);
-                f_cvt_d2s(b, 0, 0);
+                f_cvt_d2s(b, 0, st_get(j, 0));
                 jit_ea(j, in, &am);
                 jit_fst(j, FSZ_S, 0, am);
                 if (reg == 3)
@@ -333,9 +392,8 @@ int jit_x87(jit_t *j, jinsn *ji)
         case 0xdb:
             switch (reg) {
             case 0:
-                ld_mem(j, in, 2, 0);
                 x87_push(j);
-                st_st(j, 0, 0);
+                ld_mem(j, in, 2, st_def(j, 0));
                 return 1;
             case 2: case 3:
                 fist(j, in, 4);
@@ -353,38 +411,39 @@ int jit_x87(jit_t *j, jinsn *ji)
         case 0xdd:
             switch (reg) {
             case 0:
-                ld_mem(j, in, 1, 0);
                 x87_push(j);
-                st_st(j, 0, 0);
+                ld_mem(j, in, 1, st_def(j, 0));
                 return 1;
-            case 2: case 3:
-                ld_st(j, 0, 0);
+            case 2: case 3: {
+                int r = st_get(j, 0);
                 jit_ea(j, in, &am);
-                jit_fst(j, FSZ_D, 0, am);
+                jit_fst(j, FSZ_D, r, am);
                 if (reg == 3)
                     x87_pop(j);
                 return 1;
+            }
             case 4:
                 helper(j, X87M_FRSTOR, 1, in);
                 return 1;
             case 6:
                 helper(j, X87M_FNSAVE, 1, in);
                 return 1;
-            case 7:
+            case 7: {
+                int t = phys_idx(j, j->x87_delta, 2);
                 w_ldrh(b, 0, RCPU, CPUOFF(fsw));
                 w_andi(b, 0, 0, ~0x3800u & 0xffffu, 1);
-                w_orr_sh(b, 0, 0, RTOP, SH_LSL, 11);
+                w_orr_sh(b, 0, 0, t, SH_LSL, 11);
                 jit_ea(j, in, &am);
                 jit_st(j, 2, 0, am);
                 return 1;
+            }
             }
             return 0;
         case 0xdf:
             switch (reg) {
             case 0:
-                ld_mem(j, in, 3, 0);
                 x87_push(j);
-                st_st(j, 0, 0);
+                ld_mem(j, in, 3, st_def(j, 0));
                 return 1;
             case 2: case 3:
                 fist(j, in, 2);
@@ -395,9 +454,8 @@ int jit_x87(jit_t *j, jinsn *ji)
                 helper(j, X87M_FBLD, 1, in);
                 return 1;
             case 5:
-                ld_mem(j, in, 4, 0);
                 x87_push(j);
-                st_st(j, 0, 0);
+                ld_mem(j, in, 4, st_def(j, 0));
                 return 1;
             case 6:
                 helper(j, X87M_FBSTP, 1, in);
@@ -417,15 +475,17 @@ int jit_x87(jit_t *j, jinsn *ji)
     uint8_t modrm = (uint8_t)(0xc0 | reg << 3 | i);
     switch (op) {
     case 0xd8:
-        ld_st(j, 0, 0);
-        ld_st(j, 1, i);
         if (reg == 2 || reg == 3) {
+            ld_st(j, 0, 0);
+            ld_st(j, 1, i);
             fcom_fsw(j);
             if (reg == 3)
                 x87_pop(j);
         } else {
-            arith(j, reg, 0, 1);
-            st_st(j, 0, 0);
+            int rs = st_get(j, i);
+            st_get(j, 0);
+            int rd = st_def(j, 0);
+            arith(j, reg, rd, rs);
         }
         return 1;
     case 0xdc: case 0xde: {
@@ -447,32 +507,36 @@ int jit_x87(jit_t *j, jinsn *ji)
         }
         /* ST(i) = ST(i) op ST(0); sub/subr and div/divr are swapped here */
         static const int map[8] = { 0, 1, -1, -1, 5, 4, 7, 6 };
-        ld_st(j, 0, i);
-        ld_st(j, 1, 0);
-        arith(j, map[reg], 0, 1);
-        st_st(j, 0, i);
+        int rs = st_get(j, 0);
+        st_get(j, i);
+        int rd = st_def(j, i);
+        arith(j, map[reg], rd, rs);
         if (op == 0xde)
             x87_pop(j);
         return 1;
     }
     case 0xd9:
         if (reg == 0) {                             /* fld st(i) */
-            ld_st(j, 0, i);
+            int rs = st_get(j, i);
             x87_push(j);
-            st_st(j, 0, 0);
+            int rd = st_def(j, 0);
+            f_mov(b, 1, rd, rs);
             return 1;
         }
-        if (reg == 1) {                             /* fxch */
-            ld_st(j, 0, 0);
-            ld_st(j, 1, i);
-            st_st(j, 1, 0);
-            st_st(j, 0, i);
+        if (reg == 1) {                             /* fxch: renaming, no code */
+            int s0 = j->x87_delta & 7, si = (j->x87_delta + i) & 7;
+            st_get(j, 0);
+            st_get(j, i);
+            int8_t t = j->x87_reg[s0];
+            j->x87_reg[s0] = j->x87_reg[si];
+            j->x87_reg[si] = t;
+            j->x87_dirty[s0] = j->x87_dirty[si] = 1;
             return 1;
         }
         switch (modrm) {
         case 0xd0: return 1;                        /* fnop */
-        case 0xe0: ld_st(j, 0, 0); f_neg(b, 1, 0, 0); st_st(j, 0, 0); return 1;
-        case 0xe1: ld_st(j, 0, 0); f_abs(b, 1, 0, 0); st_st(j, 0, 0); return 1;
+        case 0xe0: { int r = st_get(j, 0); st_def(j, 0); f_neg(b, 1, r, r); return 1; }
+        case 0xe1: { int r = st_get(j, 0); st_def(j, 0); f_abs(b, 1, r, r); return 1; }
         case 0xe4:                                  /* ftst */
             ld_st(j, 0, 0);
             f_fmov_dx(b, 1, ZR);
@@ -484,9 +548,8 @@ int jit_x87(jit_t *j, jinsn *ji)
                 1.0, 3.32192809488736234787, 1.44269504088896340736, 3.14159265358979323846,
                 0.30102999566398119521, 0.69314718055994530942, 0.0
             };
-            load_const(j, 0, k[modrm - 0xe8]);
             x87_push(j);
-            st_st(j, 0, 0);
+            load_const(j, st_def(j, 0), k[modrm - 0xe8]);
             return 1;
         }
         case 0xf0: helper(j, X87H_F2XM1, 0, in); return 1;
@@ -495,13 +558,13 @@ int jit_x87(jit_t *j, jinsn *ji)
         case 0xf3: helper(j, X87H_FPATAN, 0, in); return 1;
         case 0xf4: helper(j, X87H_FXTRACT, 0, in); return 1;
         case 0xf5: helper(j, X87H_FPREM1, 0, in); return 1;
-        case 0xf6: w_subi(b, RTOP, RTOP, 1); w_andi(b, RTOP, RTOP, 7, RTOP); return 1;
-        case 0xf7: x87_pop(j); return 1;
+        case 0xf6: j->x87_delta = (j->x87_delta - 1) & 7; return 1;   /* fdecstp: values stay */
+        case 0xf7: j->x87_delta = (j->x87_delta + 1) & 7; return 1;   /* fincstp */
         case 0xf8: helper(j, X87H_FPREM, 0, in); return 1;
         case 0xf9: helper(j, X87H_FYL2XP1, 0, in); return 1;
-        case 0xfa: ld_st(j, 0, 0); f_sqrt(b, 1, 0, 0); st_st(j, 0, 0); return 1;
+        case 0xfa: { int r = st_get(j, 0); st_def(j, 0); f_sqrt(b, 1, r, r); return 1; }
         case 0xfb: helper(j, X87H_FSINCOS, 0, in); return 1;
-        case 0xfc: ld_st(j, 0, 0); f_frinti(b, 1, 0, 0); st_st(j, 0, 0); return 1;
+        case 0xfc: { int r = st_get(j, 0); st_def(j, 0); f_frinti(b, 1, r, r); return 1; }
         case 0xfd: helper(j, X87H_FSCALE, 0, in); return 1;
         case 0xfe: helper(j, X87H_FSIN, 0, in); return 1;
         case 0xff: helper(j, X87H_FCOS, 0, in); return 1;
@@ -510,18 +573,18 @@ int jit_x87(jit_t *j, jinsn *ji)
     case 0xda: case 0xdb:
         if (modrm < 0xe0) {                         /* fcmovcc */
             int hc = jit_cond(j, ji, ji->cc);
-            ld_st(j, 0, 0);
-            ld_st(j, 1, i);
+            int rs = st_get(j, i);
+            st_get(j, 0);
+            int rd = st_def(j, 0);
             if (hc == HC_EQ_OR_VS) {
-                f_csel(b, 1, 0, 1, 0, CC_EQ);
-                f_csel(b, 1, 0, 1, 0, CC_VS);
+                f_csel(b, 1, rd, rs, rd, CC_EQ);
+                f_csel(b, 1, rd, rs, rd, CC_VS);
             } else if (hc == HC_NE_AND_VC) {
-                f_csel(b, 1, 2, 1, 0, CC_NE);
-                f_csel(b, 1, 0, 2, 0, CC_VC);
+                f_csel(b, 1, 2, rs, rd, CC_NE);
+                f_csel(b, 1, rd, 2, rd, CC_VC);
             } else {
-                f_csel(b, 1, 0, 1, 0, hc);
+                f_csel(b, 1, rd, rs, rd, hc);
             }
-            st_st(j, 0, 0);
             return 1;
         }
         if (op == 0xda && modrm == 0xe9) {          /* fucompp */
@@ -556,12 +619,16 @@ int jit_x87(jit_t *j, jinsn *ji)
     case 0xdd:
         switch (reg) {
         case 0: return 1;                           /* ffree */
-        case 2: case 3:                             /* fst / fstp st(i) */
-            ld_st(j, 0, 0);
-            st_st(j, 0, i);
+        case 2: case 3: {                           /* fst / fstp st(i) */
+            int rs = st_get(j, 0);
+            if (i != 0) {
+                int rd = st_def(j, i);
+                f_mov(b, 1, rd, rs);
+            }
             if (reg == 3)
                 x87_pop(j);
             return 1;
+        }
         case 4: case 5:                             /* fucom / fucomp */
             ld_st(j, 0, 0);
             ld_st(j, 1, i);
@@ -573,9 +640,10 @@ int jit_x87(jit_t *j, jinsn *ji)
         return 0;
     case 0xdf:
         if (modrm == 0xe0) {                        /* fnstsw ax */
+            int t = phys_idx(j, j->x87_delta, 2);
             w_ldrh(b, 0, RCPU, CPUOFF(fsw));
             w_andi(b, 0, 0, ~0x3800u & 0xffffu, 1);
-            w_orr_sh(b, 0, 0, RTOP, SH_LSL, 11);
+            w_orr_sh(b, 0, 0, t, SH_LSL, 11);
             w_bfi(b, GREG(R_EAX), 0, 0, 16);
             return 1;
         }

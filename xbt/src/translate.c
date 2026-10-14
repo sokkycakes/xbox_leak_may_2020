@@ -174,14 +174,22 @@ void jit_ea(jit_t *j, const x86_insn *in, amode *am)
     }
     if (m->index >= 0) {
         if (m->base >= 0) {
-            w_add_sh(b, RA, GREG(m->base), GREG(m->index), SH_LSL, m->scale);
             /* small displacements stay in the load: base + index*s is already
-               a wrapped 32-bit pointer */
+               a wrapped 32-bit pointer; the sum is reused while it is valid */
             if (m->disp >= -256 && m->disp <= 4095) {
-                am->base = RA;
+                if (!(j->idx_valid && j->idx_base == m->base && j->idx_index == m->index &&
+                      j->idx_scale == (int8_t)m->scale)) {
+                    w_add_sh(b, RIDX, GREG(m->base), GREG(m->index), SH_LSL, m->scale);
+                    j->idx_valid = 1;
+                    j->idx_base = m->base;
+                    j->idx_index = m->index;
+                    j->idx_scale = (int8_t)m->scale;
+                }
+                am->base = RIDX;
                 am->off = m->disp;
                 return;
             }
+            w_add_sh(b, RA, GREG(m->base), GREG(m->index), SH_LSL, m->scale);
             w_addimm(b, RA, RA, disp, RB);
         } else {
             if (disp) {
@@ -195,12 +203,17 @@ void jit_ea(jit_t *j, const x86_insn *in, amode *am)
         am->off = 0;
         return;
     }
-    /* absolute address */
-    if (adrp_ok(j, disp)) {
+    /* absolute address: one adrp per 4K page while it stays valid */
+    if (j->abs_valid && j->abs_page == (disp & ~0xfffu)) {
+        am->base = RPAGE;
+        am->off = (int32_t)(disp & 0xfff);
+    } else if (adrp_ok(j, disp)) {
         intptr_t pc_page = (intptr_t)j->b.p & ~0xfffl;
         intptr_t d = ((intptr_t)disp & ~0xfffl) - pc_page;
-        a64_put(b, enc_adrp(RA, d >> 12));
-        am->base = RA;
+        a64_put(b, enc_adrp(RPAGE, d >> 12));
+        j->abs_valid = 1;
+        j->abs_page = disp & ~0xfffu;
+        am->base = RPAGE;
         am->off = (int32_t)(disp & 0xfff);
     } else {
         w_movi(b, RA, disp);
@@ -212,7 +225,7 @@ void jit_ea(jit_t *j, const x86_insn *in, amode *am)
 /* Make sure the address does not depend on a guest register (it may change). */
 void jit_ea_pin(jit_t *j, amode *am)
 {
-    if (am->base >= GREG(0) && am->base <= GREG(7)) {
+    if ((am->base >= GREG(0) && am->base <= GREG(7)) || am->base == RIDX) {
         w_addimm(JB(j), RA, am->base, (uint32_t)am->off, RB);
         am->base = RA;
         am->off = 0;
@@ -312,10 +325,54 @@ static void reload_regs(a64buf *b)
 
 void jit_nzcv_clobber(jit_t *j) { j->nzcv_owner = -1; }
 
+void jit_caches_flush(jit_t *j)
+{
+    jit_x87_flush(j, 1);
+    jit_xmm_flush(j, 1);
+}
+
+void jit_caches_reset(jit_t *j)
+{
+    for (int i = 0; i < 8; i++) {
+        j->x87_reg[i] = -1;
+        j->x87_dirty[i] = 0;
+    }
+    j->x87_delta = 0;
+    j->xmm_cached = j->xmm_dirty = 0;
+    j->abs_valid = j->idx_valid = 0;
+}
+
+/* Instructions that never write a general register (x87 except fnstsw ax,
+   SSE/MMX arithmetic and moves): the cached base + index stays valid. */
+static int keeps_gprs(const x86_insn *in)
+{
+    int op = in->op;
+    if (op >= 0xd8 && op <= 0xdf)
+        return !(op == 0xdf && !in->is_mem && in->reg == 4);
+    if (op < 0x100)
+        return 0;
+    op &= 0xff;
+    if ((op >= 0x10 && op <= 0x17) || (op >= 0x28 && op <= 0x2b) || op == 0x2e || op == 0x2f ||
+        (op >= 0x51 && op <= 0x5f) || op == 0xc2 || op == 0xc6)
+        return 1;
+    if (op == 0x2c || op == 0x2d)
+        return !(in->rep == REP_Z);      /* cvt(t)ss2si writes a GPR */
+    if ((op >= 0x60 && op <= 0x6f) || (op >= 0x70 && op <= 0x77) || op == 0x7f ||
+        (op >= 0xd1 && op <= 0xfe && op != 0xd7))
+        return 1;
+    return 0;
+}
+
 /* Call cpu->helpers[h](cpu, x1..x7). Arguments other than x0 must already be set. */
 void jit_call_helper(jit_t *j, int h, int spill)
 {
     a64buf *b = JB(j);
+    /* v16+ are caller-saved: the xmm cache never survives a call; the x87
+       cache (d8..d15) does, unless the helper works on the x87 state */
+    jit_xmm_flush(j, 1);
+    if (h == H_X87 || h == H_X87_MEM || h == H_SSE)
+        jit_x87_flush(j, 1);
+    j->abs_valid = j->idx_valid = 0;     /* x12/x13 are caller-saved */
     if (spill)
         spill_regs(b);
     x_mov(b, 0, RCPU);
@@ -343,6 +400,7 @@ void jit_stub(jit_t *j, uint32_t *site, int type, uint32_t eip, int reason, uint
 /* Unconditionally leave the block with a special exit reason. */
 void jit_exit_special(jit_t *j, uint32_t eip, int reason, uint32_t info)
 {
+    jit_caches_flush(j);
     uint32_t *site = a64_here(JB(j));
     a64_put(JB(j), enc_b(0));
     jit_stub(j, site, SITE_B, eip, reason, info);
@@ -827,7 +885,8 @@ static void classify(jinsn *ji)
 static uint8_t peek_live(uint32_t addr, int depth)
 {
     uint8_t live = 0, killed = 0;
-    for (int i = 0; i < 24; i++) {
+    /* long enough to get through x87/SSE loop bodies, which write no flags */
+    for (int i = 0; i < 96; i++) {
         if (!mem_readable(addr, 1) || (addr >= XBOX_HLE_BASE && addr < XBOX_HLE_BASE + XBOX_HLE_SIZE))
             return live | (FALL & ~killed);
         int avail = mem_readable(addr, 15) ? 15 : 1;
@@ -1237,12 +1296,15 @@ xbt_block *xbt_translate(uint32_t eip, uint32_t **cache_ptr, uint32_t *cache_end
         }
     }
 
+    jit_caches_reset(j);
     for (int i = 0; i < j->n && !j->b.overflow; i++) {
         jinsn *ji = &j->ji[i];
         j->cur = i;
         j->insn_off[i] = (uint16_t)(j->b.p - j->host_start);
         if (ji->sync && ji->need)
             jit_sync(j);
+        if (is_terminator(&ji->in))
+            jit_caches_flush(j);       /* no NZCV clobber: fused flags survive */
         int ok = 0;
         if (!ji->in.invalid) {
             ok = gen_control(j, ji);
@@ -1253,6 +1315,8 @@ xbt_block *xbt_translate(uint32_t eip, uint32_t **cache_ptr, uint32_t *cache_end
             if (!ok && ji->in.op >= 0x100)
                 ok = jit_sse(j, ji);
         }
+        if (!keeps_gprs(&ji->in))
+            j->idx_valid = 0;
         if (ok <= 0) {
             if (xbt_opt.trace || ok == 0) {
                 char buf[160];
@@ -1265,8 +1329,10 @@ xbt_block *xbt_translate(uint32_t eip, uint32_t **cache_ptr, uint32_t *cache_end
             break;
         }
     }
-    if (!j->ended && !j->b.overflow)
+    if (!j->ended && !j->b.overflow) {
+        jit_caches_flush(j);
         add_exit(j, j->end_eip);
+    }
     if (!j->b.overflow)
         emit_stubs(j);
     /* re-dispatch stub used when the block is invalidated */

@@ -786,8 +786,8 @@ def g_x87(g):
             f.load()
         elif k < 0.55 and f.depth > 0:
             f.arith()
-        elif k < 0.7 and f.depth > 0:
-            f.compare()
+        elif k < 0.7 and f.depth > 0 and not f.approx:
+            f.compare()      # extended-precision constants could flip a comparison
         elif k < 0.82 and f.depth > 0:
             f.unary()
         elif k < 0.92 and f.depth > 0 and not f.approx:

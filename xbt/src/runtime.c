@@ -93,9 +93,9 @@ static void gen_stubs(void)
     a64buf *b = &bb;
     const int r0 = CPUOFF(r);
 
-    /* frame: x29,x30 | x19..x28 | host fpcr */
+    /* frame: x29,x30 | x19..x28 | host fpcr | d8..d15 (the x87 cache lives there) */
     xbt_stub.enter = b->p;
-    x_stp_pre(b, 29, 30, SP, -112);
+    x_stp_pre(b, 29, 30, SP, -176);
     x_mov_sp(b, 29, SP);
     x_stp(b, 19, 20, SP, 16);
     x_stp(b, 21, 22, SP, 32);
@@ -103,6 +103,8 @@ static void gen_stubs(void)
     x_stp(b, 25, 26, SP, 64);
     x_stp(b, 27, 28, SP, 80);
     x_mov(b, RCPU, 0);
+    for (int r = 8; r < 16; r += 2)
+        d_stp(b, r, r + 1, SP, 112 + 8 * (r - 8));
     x_mrs_fpcr(b, 9);
     x_str(b, 9, SP, 96);
     w_ldr(b, 9, RCPU, CPUOFF(fpcr));
@@ -121,12 +123,14 @@ static void gen_stubs(void)
     w_str(b, 9, RCPU, CPUOFF(fpcr));
     x_ldr(b, 9, SP, 96);
     x_msr_fpcr(b, 9);
+    for (int r = 8; r < 16; r += 2)
+        d_ldp(b, r, r + 1, SP, 112 + 8 * (r - 8));
     x_ldp(b, 19, 20, SP, 16);
     x_ldp(b, 21, 22, SP, 32);
     x_ldp(b, 23, 24, SP, 48);
     x_ldp(b, 25, 26, SP, 64);
     x_ldp(b, 27, 28, SP, 80);
-    x_ldp_post(b, 29, 30, SP, 112);
+    x_ldp_post(b, 29, 30, SP, 176);
     a64_ret(b);
 
     /* reached with `bl` from a per-exit stub: [x30] = target, [x30+4] = site */

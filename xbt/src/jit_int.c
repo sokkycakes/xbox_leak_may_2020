@@ -292,7 +292,10 @@ static int gen_muldiv(jit_t *j, jinsn *ji, int size)
         return 1;
     }
 
-    /* div / idiv */
+    /* div / idiv: may leave the block through the #DE stub, so the
+       register caches must be written back (they stay valid) */
+    jit_x87_flush(j, 0);
+    jit_xmm_flush(j, 0);
     int sgn = reg == 7;
     uint32_t eip = in->addr;
     uint32_t *site = a64_here(b);

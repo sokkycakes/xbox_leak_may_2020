@@ -147,6 +147,7 @@ typedef struct xbt_options {
     int flag_fusion;    /* use host NZCV for in-block flag consumers */
     int flag_elim;      /* skip flag computation when no reader exists */
     int max_insns;      /* max guest instructions per block */
+    int x86_nan;        /* SSE invalid operations return x86's negative default NaN */
     int trace;          /* print each translated block */
     int stats;
     const char *dump_dir;   /* write each block's host code here (debugging) */

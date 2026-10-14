@@ -16,21 +16,54 @@
 
 enum { SSEH_FXSAVE = 1, SSEH_FXRSTOR, SSEH_MASKMOVQ };
 
-static void xmm_ld(a64buf *b, int sz, int v, int r, int off) { f_ldr(b, sz, v, RCPU, XOFF(r) + off); }
-static void xmm_st(a64buf *b, int sz, int v, int r, int off) { f_str(b, sz, v, RCPU, XOFF(r) + off); }
 static void mm_ld(a64buf *b, int v, int r) { f_ldr(b, FSZ_D, v, RCPU, MOFF(r)); }
 static void mm_st(a64buf *b, int v, int r) { f_str(b, FSZ_D, v, RCPU, MOFF(r)); }
 
-/* Load the xmm r/m operand (sz bytes as FSZ_*) into v. */
-static void ld_xrm(jit_t *j, const x86_insn *in, int sz, int v)
+/* ---- xmm register cache: xmm i lives in v16+i while cached ---- */
+
+static int xr_get(jit_t *j, int r)
 {
-    if (in->is_mem) {
-        amode am;
-        jit_ea(j, in, &am);
-        jit_fld(j, sz, v, am);
-    } else {
-        xmm_ld(JB(j), sz, v, in->rm, 0);
+    if (!(j->xmm_cached >> r & 1)) {
+        f_ldr(JB(j), FSZ_Q, 16 + r, RCPU, XOFF(r));
+        j->xmm_cached |= (uint8_t)(1u << r);
     }
+    return 16 + r;
+}
+
+static int xr_mod(jit_t *j, int r)
+{
+    xr_get(j, r);
+    j->xmm_dirty |= (uint8_t)(1u << r);
+    return 16 + r;
+}
+
+/* the whole register is about to be overwritten: no load needed */
+static int xr_def(jit_t *j, int r)
+{
+    j->xmm_cached |= (uint8_t)(1u << r);
+    j->xmm_dirty |= (uint8_t)(1u << r);
+    return 16 + r;
+}
+
+void jit_xmm_flush(jit_t *j, int invalidate)
+{
+    for (int r = 0; r < 8; r++)
+        if (j->xmm_dirty >> r & 1)
+            f_str(JB(j), FSZ_Q, 16 + r, RCPU, XOFF(r));
+    j->xmm_dirty = 0;
+    if (invalidate)
+        j->xmm_cached = 0;
+}
+
+/* xmm r/m source: cached register, or memory loaded into scratch v */
+static int src_x(jit_t *j, const x86_insn *in, int sz, int v)
+{
+    if (!in->is_mem)
+        return xr_get(j, in->rm);
+    amode am;
+    jit_ea(j, in, &am);
+    jit_fld(j, sz, v, am);
+    return v;
 }
 
 static void ld_mrm(jit_t *j, const x86_insn *in, int v)
@@ -44,59 +77,75 @@ static void ld_mrm(jit_t *j, const x86_insn *in, int v)
     }
 }
 
-static void st_xrm(jit_t *j, const x86_insn *in, int sz, int v)
+/*
+ * --x86-nan: an invalid operation on non-NaN inputs (0/0, inf-inf, sqrt(-1))
+ * gives the negative "real indefinite" 0xffc00000 on x86 but the positive
+ * default NaN 0x7fc00000 on AArch64. By default the sign is not emulated
+ * (nothing but bit tests can see it); this mode sets it on lanes whose
+ * inputs were ordered and whose result is the AArch64 default NaN.
+ * v4 = lanes with ordered inputs, v5/v6 scratch.
+ */
+static void nan_fix_pre(a64buf *b, int va, int vs)
 {
-    if (in->is_mem) {
-        amode am;
-        jit_ea(j, in, &am);
-        jit_fst(j, sz, v, am);
-    } else {
-        xmm_st(JB(j), sz, v, in->rm, 0);
+    V3(b, VF_CMEQ, 1, 0, 4, vs, vs);
+    if (va >= 0) {
+        V3(b, VF_CMEQ, 1, 0, 5, va, va);
+        V3(b, V_AND, 1, 0, 4, 4, 5);
     }
 }
 
-/* x86 minps/maxps: result = (d < s) ? d : s, i.e. the source on NaN or equality */
-static void minmax(a64buf *b, int is_max, int q)
+static void nan_fix_post(a64buf *b, int out)
 {
-    if (is_max)
-        V3(b, VF_CMGT, q, 0, 2, 0, 1);      /* d > s */
-    else
-        V3(b, VF_CMGT, q, 0, 2, 1, 0);      /* s > d */
-    V3(b, V_BSL, q, 0, 2, 0, 1);            /* v2 = mask ? d : s */
+    w_movi(b, 9, 0x7fc00000u);
+    v_dup_gen(b, 1, 2, 5, 9);
+    V3(b, VI_CMEQ, 1, 2, 6, out, 5);
+    V3(b, V_AND, 1, 0, 6, 6, 4);
+    v_shl(b, 1, 32, 6, 6, 31);
+    V3(b, V_ORR, 1, 0, out, out, 6);
 }
 
-/* cmpps predicate into v2 (v0 = d, v1 = s) */
-static void cmp_pred(a64buf *b, int pred)
+/* x86 minps/maxps: result = (d op s) ? d : s, i.e. the source on NaN or equality */
+static void minmax(a64buf *b, int is_max, int q, int vd, int vs, int out)
+{
+    if (is_max)
+        V3(b, VF_CMGT, q, 0, out, vd, vs);
+    else
+        V3(b, VF_CMGT, q, 0, out, vs, vd);
+    V3(b, V_BSL, q, 0, out, vd, vs);        /* out = mask ? d : s */
+}
+
+/* cmpps predicate into v2 */
+static void cmp_pred(a64buf *b, int pred, int vd, int vs)
 {
     switch (pred & 7) {
-    case 0: V3(b, VF_CMEQ, 1, 0, 2, 0, 1); break;
-    case 1: V3(b, VF_CMGT, 1, 0, 2, 1, 0); break;
-    case 2: V3(b, VF_CMGE, 1, 0, 2, 1, 0); break;
+    case 0: V3(b, VF_CMEQ, 1, 0, 2, vd, vs); break;
+    case 1: V3(b, VF_CMGT, 1, 0, 2, vs, vd); break;
+    case 2: V3(b, VF_CMGE, 1, 0, 2, vs, vd); break;
     case 3: case 7:
-        V3(b, VF_CMEQ, 1, 0, 2, 0, 0);
-        V3(b, VF_CMEQ, 1, 0, 3, 1, 1);
+        V3(b, VF_CMEQ, 1, 0, 2, vd, vd);
+        V3(b, VF_CMEQ, 1, 0, 3, vs, vs);
         V3(b, V_AND, 1, 0, 2, 2, 3);
         if ((pred & 7) == 3)
             V2(b, V_NOT, 1, 0, 2, 2);
         break;
-    case 4: V3(b, VF_CMEQ, 1, 0, 2, 0, 1); V2(b, V_NOT, 1, 0, 2, 2); break;
-    case 5: V3(b, VF_CMGT, 1, 0, 2, 1, 0); V2(b, V_NOT, 1, 0, 2, 2); break;
-    case 6: V3(b, VF_CMGE, 1, 0, 2, 1, 0); V2(b, V_NOT, 1, 0, 2, 2); break;
+    case 4: V3(b, VF_CMEQ, 1, 0, 2, vd, vs); V2(b, V_NOT, 1, 0, 2, 2); break;
+    case 5: V3(b, VF_CMGT, 1, 0, 2, vs, vd); V2(b, V_NOT, 1, 0, 2, 2); break;
+    case 6: V3(b, VF_CMGE, 1, 0, 2, vs, vd); V2(b, V_NOT, 1, 0, 2, 2); break;
     }
 }
 
-/* float -> int32 with x86 out-of-range behaviour (0x80000000). v0 lane 0 */
-static void cvt_s2i(jit_t *j, int trunc, int rd)
+/* float (lane 0 of vs) -> int32 with x86 out-of-range behaviour (0x80000000) */
+static void cvt_s2i(jit_t *j, int trunc, int rd, int vs)
 {
     a64buf *b = JB(j);
     if (trunc)
-        f_fcvtzs(b, 1, 0, 1, 0);
+        f_fcvtzs(b, 1, 0, 1, vs);
     else
-        f_fcvtns(b, 1, 0, 1, 0);
+        f_fcvtns(b, 1, 0, 1, vs);
     w_movi(b, 2, 0x80000000u);
     a64_put(b, enc_addsub_ereg(1, 1, 1, ZR, 1, 1, EX_SXTW, 0));     /* fits in int32? */
     w_csel(b, rd, 1, 2, CC_EQ);
-    f_cmp(b, 0, 0, 0);
+    f_cmp(b, 0, vs, vs);
     w_csel(b, rd, 2, rd, CC_VS);
     jit_nzcv_clobber(j);
 }
@@ -355,74 +404,89 @@ int jit_sse(jit_t *j, jinsn *ji)
     }
 
     switch (op) {
-    case 0x10:   /* movups / movss load */
-        if (scalar) {
+    case 0x10: case 0x28:   /* movups / movaps / movss load */
+        if (scalar && op == 0x10) {
             if (in->is_mem) {
                 jit_ea(j, in, &am);
-                jit_fld(j, FSZ_S, 0, am);    /* upper lanes zeroed */
-                xmm_st(b, FSZ_Q, 0, d, 0);
+                jit_fld(j, FSZ_S, xr_def(j, d), am);    /* upper lanes zeroed */
             } else {
-                xmm_ld(b, FSZ_S, 0, in->rm, 0);
-                xmm_st(b, FSZ_S, 0, d, 0);
+                int vs = xr_get(j, in->rm);
+                v_ins_elem(b, 2, xr_mod(j, d), 0, vs, 0);
             }
+        } else if (in->is_mem) {
+            jit_ea(j, in, &am);
+            jit_fld(j, FSZ_Q, xr_def(j, d), am);
         } else {
-            ld_xrm(j, in, FSZ_Q, 0);
-            xmm_st(b, FSZ_Q, 0, d, 0);
+            int vs = xr_get(j, in->rm);
+            if (in->rm != d)
+                v_mov(b, xr_def(j, d), vs);
         }
         return 1;
-    case 0x11:   /* movups / movss store */
-        xmm_ld(b, scalar ? FSZ_S : FSZ_Q, 0, d, 0);
-        st_xrm(j, in, scalar ? FSZ_S : FSZ_Q, 0);
+    case 0x11: case 0x29: case 0x2b: {   /* stores */
+        int vs = xr_get(j, d);
+        if (scalar && op == 0x11) {
+            if (in->is_mem) {
+                jit_ea(j, in, &am);
+                jit_fst(j, FSZ_S, vs, am);
+            } else {
+                v_ins_elem(b, 2, xr_mod(j, in->rm), 0, vs, 0);
+            }
+        } else if (in->is_mem) {
+            jit_ea(j, in, &am);
+            jit_fst(j, FSZ_Q, vs, am);
+        } else if (in->rm != d) {
+            v_mov(b, xr_def(j, in->rm), vs);
+        }
         return 1;
-    case 0x28:
-        ld_xrm(j, in, FSZ_Q, 0);
-        xmm_st(b, FSZ_Q, 0, d, 0);
-        return 1;
-    case 0x29: case 0x2b:
-        xmm_ld(b, FSZ_Q, 0, d, 0);
-        st_xrm(j, in, FSZ_Q, 0);
-        return 1;
+    }
     case 0x12:   /* movlps xmm, m64 / movhlps */
-        if (in->is_mem)
-            ld_xrm(j, in, FSZ_D, 0);
-        else
-            xmm_ld(b, FSZ_D, 0, in->rm, 8);
-        xmm_st(b, FSZ_D, 0, d, 0);
+        if (in->is_mem) {
+            jit_ea(j, in, &am);
+            jit_fld(j, FSZ_D, 0, am);
+            v_ins_elem(b, 3, xr_mod(j, d), 0, 0, 0);
+        } else {
+            int vs = xr_get(j, in->rm);
+            v_ins_elem(b, 3, xr_mod(j, d), 0, vs, 1);
+        }
         return 1;
     case 0x13:
         if (!in->is_mem)
             return -1;
-        xmm_ld(b, FSZ_D, 0, d, 0);
-        st_xrm(j, in, FSZ_D, 0);
+        jit_ea(j, in, &am);
+        jit_fst(j, FSZ_D, xr_get(j, d), am);
         return 1;
     case 0x16:   /* movhps xmm, m64 / movlhps */
-        if (in->is_mem)
-            ld_xrm(j, in, FSZ_D, 0);
-        else
-            xmm_ld(b, FSZ_D, 0, in->rm, 0);
-        xmm_st(b, FSZ_D, 0, d, 8);
+        if (in->is_mem) {
+            jit_ea(j, in, &am);
+            jit_fld(j, FSZ_D, 0, am);
+            v_ins_elem(b, 3, xr_mod(j, d), 1, 0, 0);
+        } else {
+            int vs = xr_get(j, in->rm);
+            v_ins_elem(b, 3, xr_mod(j, d), 1, vs, 0);
+        }
         return 1;
     case 0x17:
         if (!in->is_mem)
             return -1;
-        xmm_ld(b, FSZ_D, 0, d, 8);
-        st_xrm(j, in, FSZ_D, 0);
+        v_ins_elem(b, 3, 0, 0, xr_get(j, d), 1);
+        jit_ea(j, in, &am);
+        jit_fst(j, FSZ_D, 0, am);
         return 1;
-    case 0x14: case 0x15:
-        xmm_ld(b, FSZ_Q, 0, d, 0);
-        ld_xrm(j, in, FSZ_Q, 1);
-        V3(b, op == 0x14 ? VI_ZIP1 : VI_ZIP2, 1, 2, 0, 0, 1);
-        xmm_st(b, FSZ_Q, 0, d, 0);
+    case 0x14: case 0x15: {
+        int vs = src_x(j, in, FSZ_Q, 1);
+        int vd = xr_mod(j, d);
+        V3(b, op == 0x14 ? VI_ZIP1 : VI_ZIP2, 1, 2, vd, vd, vs);
         return 1;
+    }
     case 0xc6: { /* shufps */
-        xmm_ld(b, FSZ_Q, 0, d, 0);
-        ld_xrm(j, in, FSZ_Q, 1);
+        int vs = src_x(j, in, FSZ_Q, 1);
+        int vd = xr_mod(j, d);
         uint32_t imm = in->imm;
-        v_ins_elem(b, 2, 2, 0, 0, (int)imm & 3);
-        v_ins_elem(b, 2, 2, 1, 0, (int)(imm >> 2) & 3);
-        v_ins_elem(b, 2, 2, 2, 1, (int)(imm >> 4) & 3);
-        v_ins_elem(b, 2, 2, 3, 1, (int)(imm >> 6) & 3);
-        xmm_st(b, FSZ_Q, 2, d, 0);
+        v_ins_elem(b, 2, 2, 0, vd, (int)imm & 3);
+        v_ins_elem(b, 2, 2, 1, vd, (int)(imm >> 2) & 3);
+        v_ins_elem(b, 2, 2, 2, vs, (int)(imm >> 4) & 3);
+        v_ins_elem(b, 2, 2, 3, vs, (int)(imm >> 6) & 3);
+        v_mov(b, vd, 2);
         return 1;
     }
     case 0x51: case 0x52: case 0x53:
@@ -432,51 +496,61 @@ int jit_sse(jit_t *j, jinsn *ji)
         if (bitwise && scalar)
             return -1;
         if (op == 0x57 && !in->is_mem && in->rm == d) {   /* xorps x, x */
-            x_stp(b, ZR, ZR, RCPU, XOFF(d));
+            v_zero(b, xr_def(j, d));
             return 1;
         }
-        int sz = scalar ? FSZ_S : FSZ_Q;
-        int q = 1;
-        xmm_ld(b, FSZ_Q, 0, d, 0);
-        ld_xrm(j, in, sz, 1);
-        int res = 0;
+        int vs = src_x(j, in, scalar ? FSZ_S : FSZ_Q, 1);
+        int unary = op >= 0x51 && op <= 0x53;
+        int vd = unary && !scalar ? xr_def(j, d) : xr_mod(j, d);
+        /* packed: operate in place; scalar: compute lane 0 in v0, then insert */
+        int out = scalar ? 0 : vd;
+        int va = vd;
+        int arith = op == 0x51 || op == 0x58 || op == 0x59 || op == 0x5c || op == 0x5e;
+        if (xbt_opt.x86_nan && arith)
+            nan_fix_pre(b, op == 0x51 ? -1 : va, vs);
         switch (op) {
-        case 0x58: V3(b, VF_ADD, q, 0, 0, 0, 1); break;
-        case 0x59: V3(b, VF_MUL, q, 0, 0, 0, 1); break;
-        case 0x5c: V3(b, VF_SUB, q, 0, 0, 0, 1); break;
-        case 0x5e: V3(b, VF_DIV, q, 0, 0, 0, 1); break;
-        case 0x5d: minmax(b, 0, q); res = 2; break;
-        case 0x5f: minmax(b, 1, q); res = 2; break;
-        case 0x51: V2(b, VF_SQRT, q, 0, 0, 1); break;
+        case 0x58: V3(b, VF_ADD, 1, 0, out, va, vs); break;
+        case 0x59: V3(b, VF_MUL, 1, 0, out, va, vs); break;
+        case 0x5c: V3(b, VF_SUB, 1, 0, out, va, vs); break;
+        case 0x5e: V3(b, VF_DIV, 1, 0, out, va, vs); break;
+        case 0x5d: minmax(b, 0, 1, va, vs, scalar ? 0 : 2); if (!scalar) v_mov(b, vd, 2); break;
+        case 0x5f: minmax(b, 1, 1, va, vs, scalar ? 0 : 2); if (!scalar) v_mov(b, vd, 2); break;
+        case 0x51: V2(b, VF_SQRT, 1, 0, out, vs); break;
         case 0x53:   /* rcp: estimate refined by one Newton step (~16 bits; x86 gives 12) */
-            V2(b, VF_RECPE, q, 0, 2, 1);
-            V3(b, VF_RECPS, q, 0, 3, 1, 2);
-            V3(b, VF_MUL, q, 0, 0, 2, 3);
+            V2(b, VF_RECPE, 1, 0, 2, vs);
+            V3(b, VF_RECPS, 1, 0, 3, vs, 2);
+            V3(b, VF_MUL, 1, 0, out, 2, 3);
             break;
         case 0x52:   /* rsqrt */
-            V2(b, VF_RSQRTE, q, 0, 2, 1);
-            V3(b, VF_MUL, q, 0, 3, 1, 2);
-            V3(b, VF_RSQRTS, q, 0, 3, 3, 2);
-            V3(b, VF_MUL, q, 0, 0, 2, 3);
+            V2(b, VF_RSQRTE, 1, 0, 2, vs);
+            V3(b, VF_MUL, 1, 0, 3, vs, 2);
+            V3(b, VF_RSQRTS, 1, 0, 3, 3, 2);
+            V3(b, VF_MUL, 1, 0, out, 2, 3);
             break;
-        case 0x54: V3(b, V_AND, 1, 0, 0, 0, 1); break;
-        case 0x55: V3(b, V_BIC, 1, 0, 0, 1, 0); break;
-        case 0x56: V3(b, V_ORR, 1, 0, 0, 0, 1); break;
-        case 0x57: V3(b, V_EOR, 1, 0, 0, 0, 1); break;
+        case 0x54: V3(b, V_AND, 1, 0, vd, vd, vs); break;
+        case 0x55: V3(b, V_BIC, 1, 0, vd, vs, vd); break;
+        case 0x56: V3(b, V_ORR, 1, 0, vd, vd, vs); break;
+        case 0x57: V3(b, V_EOR, 1, 0, vd, vd, vs); break;
         }
-        xmm_st(b, sz, res, d, 0);
+        if (xbt_opt.x86_nan && arith)
+            nan_fix_post(b, out);
+        if (scalar)
+            v_ins_elem(b, 2, vd, 0, 0, 0);
         return 1;
     }
-    case 0xc2:   /* cmpps / cmpss */
-        xmm_ld(b, FSZ_Q, 0, d, 0);
-        ld_xrm(j, in, scalar ? FSZ_S : FSZ_Q, 1);
-        cmp_pred(b, (int)in->imm);
-        xmm_st(b, scalar ? FSZ_S : FSZ_Q, 2, d, 0);
+    case 0xc2: { /* cmpps / cmpss */
+        int vs = src_x(j, in, scalar ? FSZ_S : FSZ_Q, 1);
+        int vd = xr_mod(j, d);
+        cmp_pred(b, (int)in->imm, vd, vs);
+        if (scalar)
+            v_ins_elem(b, 2, vd, 0, 2, 0);
+        else
+            v_mov(b, vd, 2);
         return 1;
-    case 0x2e: case 0x2f:   /* ucomiss / comiss */
-        xmm_ld(b, FSZ_S, 0, d, 0);
-        ld_xrm(j, in, FSZ_S, 1);
-        f_cmp(b, 0, 0, 1);
+    }
+    case 0x2e: case 0x2f: {   /* ucomiss / comiss */
+        int vs = src_x(j, in, FSZ_S, 1);
+        f_cmp(b, 0, xr_get(j, d), vs);
         if (ji->hostfl)
             jit_flags_produced(j, ji);
         else
@@ -495,6 +569,7 @@ int jit_sse(jit_t *j, jinsn *ji)
             w_str(b, ZR, RCPU, CPUOFF(lf_op));
         }
         return 1;
+    }
     case 0x2a:
         if (scalar) {   /* cvtsi2ss xmm, r/m32 */
             int r;
@@ -506,35 +581,37 @@ int jit_sse(jit_t *j, jinsn *ji)
                 r = GREG(in->rm);
             }
             f_scvtf(b, 0, 0, 0, r);
-            xmm_st(b, FSZ_S, 0, d, 0);
+            v_ins_elem(b, 2, xr_mod(j, d), 0, 0, 0);
         } else {        /* cvtpi2ps xmm, mm/m64 */
             ld_mrm(j, in, 0);
             V2(b, VF_SCVTF, 0, 0, 0, 0);
-            xmm_st(b, FSZ_D, 0, d, 0);
+            v_ins_elem(b, 3, xr_mod(j, d), 0, 0, 0);
         }
         return 1;
     case 0x2c: case 0x2d:
         if (scalar) {   /* cvt(t)ss2si r32, xmm/m32 */
-            ld_xrm(j, in, FSZ_S, 0);
-            cvt_s2i(j, op == 0x2c, GREG(d));
+            int vs = src_x(j, in, FSZ_S, 1);
+            cvt_s2i(j, op == 0x2c, GREG(d), vs);
         } else {        /* cvt(t)ps2pi mm, xmm/m64 */
-            ld_xrm(j, in, FSZ_D, 0);
-            V2(b, op == 0x2c ? VF_FCVTZS : VF_FCVTNS, 0, 0, 0, 0);
+            int vs = src_x(j, in, FSZ_D, 1);
+            V2(b, op == 0x2c ? VF_FCVTZS : VF_FCVTNS, 0, 0, 0, vs);
             mm_st(b, 0, d);
         }
         return 1;
-    case 0x50:   /* movmskps */
+    case 0x50: { /* movmskps */
         if (in->is_mem)
             return -1;
-        x_ldp(b, 1, 2, RCPU, XOFF(in->rm));      /* lanes 0,1 in x1; 2,3 in x2 */
-        x_ubfx(b, 0, 1, 31, 1);
-        x_lsri(b, 3, 1, 63);
-        w_orr_sh(b, 0, 0, 3, SH_LSL, 1);
-        x_ubfx(b, 3, 2, 31, 1);
-        w_orr_sh(b, 0, 0, 3, SH_LSL, 2);
-        x_lsri(b, 3, 2, 63);
-        w_orr_sh(b, GREG(d), 0, 3, SH_LSL, 3);
+        int vs = xr_get(j, in->rm);
+        v_ushr(b, 1, 32, 0, vs, 31);
+        v_umov(b, 2, 1, 0, 0);
+        v_umov(b, 2, 2, 0, 1);
+        w_orr_sh(b, 1, 1, 2, SH_LSL, 1);
+        v_umov(b, 2, 2, 0, 2);
+        w_orr_sh(b, 1, 1, 2, SH_LSL, 2);
+        v_umov(b, 2, 2, 0, 3);
+        w_orr_sh(b, GREG(d), 1, 2, SH_LSL, 3);
         return 1;
+    }
     case 0xae:
         if (!in->is_mem)
             return 1;                  /* sfence / lfence / mfence: single core, nothing to order */

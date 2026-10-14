@@ -14,6 +14,8 @@
 #define RCPU     28             /* xbt_cpu * */
 #define RA       16             /* effective-address scratch */
 #define RB       17             /* secondary address scratch */
+#define RPAGE    12             /* cached page of an absolute address */
+#define RIDX     13             /* cached base + index << scale */
 #define CPUOFF(f) ((int)offsetof(xbt_cpu, f))
 
 /* compact flag masks used by the analysis */
@@ -96,6 +98,20 @@ typedef struct jit_t {
     uint16_t insn_off[JIT_MAX_INSNS];
     int ended;          /* last instruction transferred control */
     int x87_used;
+    /* register caches, valid within a block:
+       x87: relative stack slot r (ST(i) is slot (delta + i) & 7, physical
+       register (w27 + slot) & 7) cached in d8..d15 (callee-saved, survive
+       helper calls); xmm i cached in v16+i (caller-saved) */
+    int8_t x87_reg[8];
+    uint8_t x87_dirty[8];
+    int x87_delta;
+    uint8_t xmm_cached, xmm_dirty;
+    /* address reuse: x12 holds the 4K page of the last absolute address,
+       x13 holds base + index << scale of the last indexed address */
+    int abs_valid;
+    uint32_t abs_page;
+    int idx_valid;
+    int8_t idx_base, idx_index, idx_scale;
 } jit_t;
 
 /* stubs shared by all blocks (runtime.c) */
@@ -141,6 +157,12 @@ void jit_bcond(jit_t *j, int hc, uint32_t **site1, uint32_t **site2);
 
 /* jit_int.c */
 int  jit_int(jit_t *j, jinsn *ji);
+
+/* register caches */
+void jit_x87_flush(jit_t *j, int invalidate);
+void jit_xmm_flush(jit_t *j, int invalidate);
+void jit_caches_flush(jit_t *j);
+void jit_caches_reset(jit_t *j);
 
 /* jit_x87.c */
 int  jit_x87(jit_t *j, jinsn *ji);

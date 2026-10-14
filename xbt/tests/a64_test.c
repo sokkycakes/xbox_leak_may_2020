@@ -220,6 +220,8 @@ int main(int argc, char **argv)
     T("ushr d0, d1, #3", v_ushr(b, 0, 64, 0, 1, 3));
     T("shl d0, d1, #63", v_shl(b, 0, 64, 0, 1, 63));
     T("ushr v0.2d, v1.2d, #3", v_ushr(b, 1, 64, 0, 1, 3));
+    T("stp d8, d9, [sp, #112]", d_stp(b, 8, 9, SP, 112));
+    T("ldp d14, d15, [sp, #160]", d_ldp(b, 14, 15, SP, 160));
     T("frecps v0.4s, v1.4s, v2.4s", V3(b, VF_RECPS, 1, 0, 0, 1, 2));
     T("frsqrts v0.4s, v1.4s, v2.4s", V3(b, VF_RSQRTS, 1, 0, 0, 1, 2));
     T("cmlt v0.8b, v1.8b, #0", V2(b, VI_CMLT0, 0, 0, 0, 1));
