@@ -6,7 +6,11 @@
 # CPU=xlat replaces Unicorn with xbcompat's own translator (src/xlat).
 RENDERER ?= builtin
 ifeq ($(RENDERER),native)
+ifeq ($(TARGET)$(CPU),armhfxlat)
+BUILD ?= build-armhf-xlat-native
+else
 BUILD ?= build-native-client
+endif
 endif
 TARGET  ?= i386
 UNICORN ?= /opt/unicorn-$(TARGET)
@@ -65,19 +69,41 @@ KERNSRC  = src/kernel/ke.c src/kernel/ob.c src/kernel/io.c src/kernel/rtl.c src/
            src/kernel/kernel.c src/kernel/av.c src/kernel/reset.c src/kernel/exports.gen.c
 HLESRC   = src/hle/hle.c src/hle/d3d8.c src/hle/vsh.c src/hle/vsh_interp.c src/hle/psh.c src/hle/xinput.c src/hle/dsound.c
 ifeq ($(RENDERER),native)
+HLESRC := $(filter-out src/hle/d3d8.c src/hle/vsh.c src/hle/vsh_interp.c src/hle/psh.c,$(HLESRC)) src/renderer/client.c
+ifeq ($(TARGET)$(CPU),armhfxlat)
+# The native renderer's objects linked in, with their hidden symbols made
+# local (they keep their own copies of the services backend.c forwards), so
+# XBCOMPAT_RENDER_WORKER draws on its own thread here as under Box86.
+override CFLAGS += -DXBC_RENDERER_STATIC
+else
 ifneq ($(TARGET),i386)
-$(error RENDERER=native is the i386/Box86 client; build its ARM library with tools/native-renderer.mk)
+$(error RENDERER=native is the i386/Box86 client or the armhf xlat build; build the ARM library with tools/native-renderer.mk)
 endif
 ifeq ($(TRANSLATED),1)
 $(error RENDERER=native cannot be combined with Unicorn TRANSLATED=1)
 endif
-HLESRC := $(filter-out src/hle/d3d8.c src/hle/vsh.c src/hle/vsh_interp.c src/hle/psh.c,$(HLESRC)) src/renderer/client.c
 override CFLAGS += -Isrc
 LDLIBS += -ldl
+endif
 endif
 SRC      = src/main.c src/log.c src/prof.c src/loader.c src/memory.c src/thread.c $(KERNSRC) $(HLESRC)
 OBJ      = $(SRC:%.c=$(BUILD)/%.o)
 ifeq ($(RENDERER),native)
+ifeq ($(TARGET)$(CPU),armhfxlat)
+RBUILD = $(BUILD)/renderer
+OBJ += $(BUILD)/renderer_stubs.o $(BUILD)/renderer.o
+$(BUILD)/src/renderer/client.o: src/renderer/bridge.h src/cpu.h
+$(BUILD)/renderer.o: src/hle/*.c src/hle/*.h src/renderer/*.c src/renderer/*.h src/xbcompat.h src/xbox.h src/cpu.h \
+                     tools/native-renderer.mk tools/gen_adapters.py
+	$(MAKE) -f tools/native-renderer.mk TARGET=armhf BUILD=$(RBUILD) GL=$(GL) PKGCFG="$(PKGCFG)" objects
+	$(CROSS)ld -r -o $@ $(RBUILD)/d3d8.o $(RBUILD)/vsh.o $(RBUILD)/vsh_interp.o $(RBUILD)/psh.o \
+	    $(RBUILD)/backend.o $(RBUILD)/dsmix.o
+	$(CROSS)objcopy --localize-hidden $@
+$(BUILD)/renderer_stubs.c: src/hle/d3d8.c tools/gen_renderer_stubs.py $(BUILD)/renderer.o
+	python3 tools/gen_renderer_stubs.py --translated $< $(RBUILD)/d3d8.xa.inc > $@
+$(BUILD)/renderer_stubs.o: $(BUILD)/renderer_stubs.c src/cpu.h src/hle/hle.h
+	$(CC) $(CFLAGS) -c $< -o $@
+else
 OBJ += $(BUILD)/renderer_stubs.o $(BUILD)/renderer_entry.o
 $(BUILD)/src/renderer/client.o: src/renderer/bridge.h src/cpu.h
 $(BUILD)/renderer_stubs.c: src/hle/d3d8.c tools/gen_renderer_stubs.py
@@ -88,6 +114,7 @@ $(BUILD)/renderer_stubs.o: $(BUILD)/renderer_stubs.c src/renderer/bridge.h
 $(BUILD)/renderer_entry.o: src/renderer/entry.S
 	@mkdir -p $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
+endif
 endif
 ifeq ($(TRANSLATED),1)
 # Each source file is compiled together with its generated guest-call

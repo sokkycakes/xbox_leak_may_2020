@@ -1,4 +1,10 @@
-/* x86 half: only entry stubs and runtime services remain translated. */
+/* Guest half of the native renderer: D3D export stubs and the runtime
+   services the renderer calls back for.  Two builds:
+   - the i386 client under Box86, where the renderer is an ARM library
+     (libxbcompat_renderer.so.1) and only these stubs stay translated;
+   - XBC_RENDERER_STATIC, a translated build (xlat) with the renderer's
+     objects linked in (their hidden symbols made local), so the same
+     render worker draws on its own thread there too. */
 #include "../xbcompat.h"
 #include "../cpu.h"
 #include "../hle/hle.h"
@@ -6,8 +12,8 @@
 #include <dlfcn.h>
 #include <stdlib.h>
 #include <stdatomic.h>
-#ifndef XBC_NATIVE
-#error The native renderer client requires the i386/Box86 runtime
+#if !defined(XBC_NATIVE) && !defined(XBC_RENDERER_STATIC)
+#error The native renderer client is the i386/Box86 runtime or a translated build linking the renderer in
 #endif
 extern int g_screenshot_frame, g_exit_after_frames;
 extern const char *g_screenshot_path;
@@ -52,8 +58,14 @@ static void host_service(uint32_t op, uint32_t *a)
         if (a[1] != CONV_CDECL || a[2] != 1)
             fatal("native renderer: unsupported callback convention/count %u/%u", a[1], a[2]);
         const uint32_t *args = (const uint32_t *)a[3];
+#ifdef XBC_NATIVE
         ((void (CDECLAPI *)(uint32_t))a[0])(args[0]);
         a[4] = a[5] = 0;
+#else
+        uint64_t r = cpu_call(a[0], CONV_CDECL, 1, args);
+        a[4] = (uint32_t)r;
+        a[5] = (uint32_t)(r >> 32);
+#endif
         break;
     }
     default: fatal("native renderer: unknown host service %u", op);
@@ -61,6 +73,13 @@ static void host_service(uint32_t op, uint32_t *a)
 }
 static void load_backend(void)
 {
+#ifdef XBC_RENDERER_STATIC
+    const char *path = "linked in";
+    backend_init = xbr_init;
+    backend_name = xbr_name;
+    backend_invoke = xbr_invoke;
+    backend_control = xbr_control;
+#else
     const char *path = getenv("XBCOMPAT_RENDERER_LIBRARY");
     if (!path || !*path) path = "libxbcompat_renderer.so.1";
     void *lib = dlopen(path, RTLD_NOW | RTLD_LOCAL);
@@ -69,6 +88,7 @@ static void load_backend(void)
     if (!backend_##name) fatal("native renderer: missing xbr_" #name); } while (0)
     LOAD(init); LOAD(name); LOAD(invoke); LOAD(control);
 #undef LOAD
+#endif
     int rc = backend_init(XBR_ABI, host_service);
     if (rc) fatal("native renderer: incompatible backend/adapter table (%d)", rc);
     uint32_t i;
@@ -90,6 +110,7 @@ struct xbr_result { uint32_t lo, hi, fret_lo, fret_hi, fp, pop_bytes; };
 _Static_assert(sizeof(struct xbr_result) == 24, "assembly result layout");
 _Static_assert(offsetof(struct xbr_result, fp) == 16, "assembly fp offset");
 _Static_assert(offsetof(struct xbr_result, pop_bytes) == 20, "assembly pop offset");
+#ifdef XBC_NATIVE
 void xbr_do_call(uint32_t index, const uint32_t *stack, uint32_t ecx, uint32_t edx,
                  struct xbr_result *out)
 {
@@ -98,6 +119,35 @@ void xbr_do_call(uint32_t index, const uint32_t *stack, uint32_t ecx, uint32_t e
     backend_invoke(index, &call);
     *out = (struct xbr_result){call.lo, call.hi, call.fret_lo, call.fret_hi, call.fp, call.pop_bytes};
 }
+#else
+/* The adapter of export index's stub (tools/gen_renderer_stubs.py
+   --translated): the guest's frame goes to the renderer as it is, and its
+   adapter there reads the arguments and says how many stack bytes the
+   callee pops. */
+uint64_t xbr_forward(uint32_t index, int conv, struct xa_frame *f);
+uint64_t xbr_forward(uint32_t index, int conv, struct xa_frame *f)
+{
+    ensure_backend();
+    struct xbr_call call = {.stack = (uint32_t)(uintptr_t)f->stack, .ecx = f->ecx, .edx = f->edx};
+    if (conv == CONV_FAST && !f->fast) {   /* a regs= thunk: every argument is in f->stack */
+        call.ecx = f->stack[0];
+        call.edx = f->stack[1];
+        call.stack += 8;
+    }
+    backend_invoke(index, &call);
+    if (call.fp) {
+        f->fp = 1;
+        memcpy(&f->fret, &call.fret_lo, sizeof(f->fret));
+    }
+    f->used = call.pop_bytes / 4;
+    return call.lo | (uint64_t)call.hi << 32;
+}
+void xbr_stub_called(uint32_t index) __attribute__((noreturn));
+void xbr_stub_called(uint32_t index)
+{
+    fatal("native renderer: host code called the stub of %s directly", d3d8_funcs[index].name);
+}
+#endif
 /* The kernel owns an x86 function pointer; never publish an ARM address.
  * No bridge lock is held: vblank can call the guest and reenter D3D. */
 static void native_vblank(void)

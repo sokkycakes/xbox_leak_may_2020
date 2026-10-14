@@ -25,6 +25,8 @@ OBJ = $(BUILD)/d3d8.o $(BUILD)/vsh.o $(BUILD)/vsh_interp.o $(BUILD)/psh.o $(BUIL
 HEADERS = src/xbcompat.h src/xbox.h src/cpu.h $(wildcard src/hle/*.h) $(wildcard src/renderer/*.h)
 .DEFAULT_GOAL := all
 all: $(BUILD)/libxbcompat_renderer.so.1
+# Just the objects: the armhf xlat build links them in (Makefile, RENDERER=native).
+objects: $(OBJ)
 $(BUILD)/d3d8.o: src/hle/d3d8.c src/hle/ff_vsh.h src/hle/dxt_decode.h tools/gen_adapters.py $(HEADERS)
 	@mkdir -p $(BUILD)
 	$(CC) $(CFLAGS) -DXBC_GEN -E $< -o $(BUILD)/d3d8.i
@@ -43,7 +45,7 @@ $(BUILD)/dsmix.o: src/renderer/dsmix.c src/hle/dsmix.h
 	$(CC) $(CFLAGS) -ffp-contract=off -c $< -o $@
 $(BUILD)/libxbcompat_renderer.so.1: $(OBJ)
 	$(CC) $(ARCH_FLAGS) -shared -Wl,-z,defs,-Bsymbolic,-soname,libxbcompat_renderer.so.1 -o $@ $^ $(LIBS)
-.PHONY: all
+.PHONY: all objects
 
 ifeq ($(TARGET),i386)
 $(BUILD)/renderer-abi: tests/renderer_abi.c src/renderer/entry.S
