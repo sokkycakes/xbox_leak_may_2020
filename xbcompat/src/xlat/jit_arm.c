@@ -2694,5 +2694,15 @@ void jit_init(uint32_t lo, uint32_t hi, bool flags_at_stop)
         char path[64];
         snprintf(path, sizeof(path), "/tmp/perf-%d.map", (int)getpid());
         perf_map = fopen(path, "w");
+        /* the trampolines, so a profile shows the time in lookups and exits */
+        const struct { uint32_t *from, *to; const char *name; } tr[] = {
+            { (uint32_t *)(uintptr_t)enter, link_tramp, "xlat_enter_exit" }, { link_tramp, indirect, "xlat_link" },
+            { indirect, indirect_nf, "xlat_indirect" }, { indirect_nf, fb_tramp_c, "xlat_indirect_nf" },
+            { fb_tramp_c, cache_blocks, "xlat_fallback" },
+        };
+        for (unsigned i = 0; perf_map && i < sizeof(tr) / sizeof(tr[0]); i++)
+            fprintf(perf_map, "%x %x %s\n", (unsigned)(uintptr_t)tr[i].from,
+                    (unsigned)((tr[i].to - tr[i].from) * 4), tr[i].name);
+        if (perf_map) fflush(perf_map);
     }
 }
