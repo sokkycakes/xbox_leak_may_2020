@@ -1,87 +1,63 @@
-# Pi bench request 1
+# Pi bench request 2
 
 Written by the cloud Claude session for the Linux PC session, under sokky's
-standing approval ("Pi: run the speed tests on your own"). Files are in
+standing approval. Measure only: nothing is built on the PC. Files are in
 bootani/pi/bench at the commit this file was read from; check every md5.
 
 | file | md5 | what |
 |---|---|---|
-| libxbcompat_renderer.so.1 | 60c8502004c2ce069734351607d85d27 | push-async5 renderer + screenshots on request |
-| xbcompat-native.x86 | adb2c39a6c27c2bbe5ccf0cab80d33d6 | x86 runtime + pad pipe, guest profiler lists every address |
+| guest-report.py | e22c44d5098f0bb29c2189c1ad7b4cf1 | adds up a profile by game code / library code / xbcompat code (runs on the PC) |
 | xbprof | e0453100f2b93e91e2f354d450ee37c0 | whole-process profiler (static armhf) |
-| guest-report.py | 56181fdd3d3f1e4df88f2021240ab926 | adds up the guest profile (runs on the PC) |
-| push-vblank.sh | dd25777b766a67d5d9da536667a3795d | unchanged |
-| vblank.sh | 28cea926a04fcafd0b3b0d305dc863e0 | unchanged |
-| S02cpufreq | c385fd2c08ee04ef2c1b75b8f369b8d0 | unchanged |
-| clocks.sh | 65d695544dda3324b349b2480e371bd7 | unchanged |
 
-## 1. Install
+Goal: how Phantom Dust's hub frame splits between the game's own x86 code,
+xbcompat's x86 code (both run through box86), box86 itself and native
+libraries (renderer, Mesa, libc, kernel). It decides what the cloud
+session's Xbox translator has to be good at.
 
-Run `sh push-vblank.sh` from the download folder. Copy xbprof to
-/root/xbprof on the Pi (`chmod +x`).
+Don't use XBCOMPAT_PROFILE: its sampler hangs under box86. Use box86's
+own BOX86_PROFILE, which never runs x86 code from its signal handler.
 
-In /etc/default/xbox keep XBCOMPAT_RENDER_WORKER=1, XBCOMPAT_ASYNC_DRAWS=1,
-the latch and work-profile settings, and add, set the same way as those:
+## 1. Setup
 
-    XBCOMPAT_PAD_PIPE=/tmp/xbpad
-    XBCOMPAT_SHOT_ON_REQUEST=/tmp/xbshot
+If /opt/xbcompat/bin/xbcompat-native.x86 isn't md5 adb2c39a6c27c2bbe5ccf0cab80d33d6
+(the request 1 build, with the pad pipe), install request 1's kit first:
+its files at commit f591eeaa3550998c874db6e0dcd44ee6497570e7, `sh push-vblank.sh`.
 
-Restart xbox.
+/etc/default/xbox: keep XBCOMPAT_RENDER_WORKER=1, XBCOMPAT_ASYNC_DRAWS=1,
+the latch and work-profile settings, XBCOMPAT_PAD_PIPE=/tmp/xbpad and
+XBCOMPAT_SHOT_ON_REQUEST=/tmp/xbshot, no BOX86_DYNAREC_ variants, and add,
+set the same way as the others:
 
-## 2. Find the way to the hub
+    BOX86_PROFILE=/tmp/box86prof.txt
 
-- Press a button: `timeout 5 sh -c 'echo a > /tmp/xbpad'`. Without the
-  timeout, a write blocks while no xbcompat process has the pipe open
-  (between the dashboard and the game). Words run in order: `"down down
-  a/30"`. `/N` holds for N 60ths of a second; `wait/120` pauses 2 s; `lt+rt`
-  presses both. The buttons: a b x y black white lt rt start back up down
-  left right lthumb rthumb, and lsup/lsdown/lsleft/lsright (rs... too).
-- See the screen: `touch /tmp/xbshot.req`, wait until it disappears, then
-  fetch /tmp/xbshot.bmp (720x480, 32-bit BMP).
-- Launch Phantom Dust however is quickest (the dashboard's Games area, or
-  the run-phantom.sh you used before, pointed at E:\Games\Phantom Dust),
-  load the save and walk to the underground hub, the spot of the earlier
-  hub measurements. Keep the route as a script (on the PC is fine) with
-  generous waits, checked by screenshots, so later requests just run it.
+Copy xbprof to /root/xbprof on the Pi if it isn't there. Restart xbox.
 
-## 3. Measure (all in the hub, standing still)
+## 2. Measure in the hub
 
-A. Baseline: 60 s with the settings above. Report the median ms per frame
-   and fps, the "queued drawing" line (its state-copying figure), the
-   "presenting thread" line and any "worker blocked" lines over 1 ms.
-   Compare with push-async4 there (119.6-132 ms a frame). If push-async5
-   crashes or draws wrong, run `sh /root/vblank.sh undo` and report that.
+Drive Phantom Dust to the underground hub (the route from request 1, or
+by pad pipe and screenshots) and stand still. Wait 30 s, then:
 
-B. Profiles: add `XBCOMPAT_PROFILE=/tmp/xbguest.txt` to /etc/default/xbox,
-   restart, go back to the hub, wait 30 s, then run
-   `/root/xbprof $(pidof xbcompat-native.x86) 30 1000 40` on the Pi.
-   Wait another 30 s, then copy to the PC: /tmp/xbguest.txt, the title's
-   library map (the file after `--hle` in
-   `tr '\0' ' ' < /proc/$(pidof xbcompat-native.x86)/cmdline`) and
-   E:\Games\Phantom Dust\default.xbe (read only). On the PC run
-   `python3 guest-report.py xbguest.txt TITLE.map default.xbe xbcompat-native.x86`.
-   Send xbprof's whole output, guest-report.py's whole output and the
-   first 60 lines of xbguest.txt. Remove XBCOMPAT_PROFILE after.
+    /root/xbprof $(pidof xbcompat-native.x86) 30 1000 40 > /tmp/xbprof.txt
 
-C. box86 settings: one run each, restart and back to the hub, 45 s of fps,
-   median ms per frame. Set each variable the same way as the others:
-   1. BOX86_DYNAREC_BIGBLOCK=2
-   2. BOX86_DYNAREC_CALLRET=1
-   3. BOX86_DYNAREC_SAFEFLAGS=0
-   4. BOX86_DYNAREC_FORWARD=1024
-   5. all of 1-4 that were faster than A by 2% or more, together
-   If a variant crashes or draws wrong, note it and move on. Check the
-   process environment (`tr '\0' '\n' < /proc/$(pidof xbcompat-native.x86)/environ | grep BOX86`)
-   once to confirm the variables reach it.
+Wait 10 s more (box86 rewrites its file every 5 s), then copy to the PC:
+/tmp/box86prof.txt, /tmp/xbprof.txt, the title's library map (the file
+after `--hle` in `tr '\0' ' ' < /proc/$(pidof xbcompat-native.x86)/cmdline`)
+and E:\Games\Phantom Dust\default.xbe (read only). On the PC:
 
-## 4. Leave and report
+    python3 guest-report.py box86prof.txt TITLE.map default.xbe xbcompat-native.x86
 
-Leave /etc/default/xbox as in step 1 (no BOX86_ variants, no profiler),
-restart xbox, and send one message to the cloud session with:
+(xbcompat-native.x86 from request 1's commit, for addr2line; skip it if
+addr2line isn't installed.) Also note the fps line from the log over the
+same minute.
 
-    request 1: installed ok / rolled back (why)
-    route to the hub: works / problems
-    A: ms/frame, fps, state copying, presenting thread, worker blocked
-    B: xbprof output, guest-report.py output, xbguest.txt first 60 lines
-    C: each variant's ms/frame (and crashes)
-    anything odd (temperatures over 80 C, throttling, errors in the log)
+## 3. Leave and report
+
+Remove BOX86_PROFILE, restart xbox. Send one message to the cloud session:
+
+    request 2: ok / problems
+    hub fps and ms per frame during the profile
+    xbprof.txt (whole)
+    guest-report.py output (whole)
+    box86prof.txt (whole)
+
+Then keep watching the branch for request 3.
