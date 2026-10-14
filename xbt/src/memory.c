@@ -23,7 +23,9 @@
 static int ram_fd = -1;
 static uint32_t ram_size;
 static uint8_t code_pages[(XBOX_RAM_SIZE_DEVKIT >> 12) / 8];
+static uint8_t volatile_pages[(XBOX_RAM_SIZE_DEVKIT >> 12) / 8];
 static long host_page;
+static uint8_t *ram_alias;      /* RW view of physical RAM, never write-protected */
 
 uint32_t mem_ram_size(void) { return ram_size; }
 
@@ -65,6 +67,10 @@ int mem_init(uint32_t size)
         return -1;
     if (map_fixed(XBOX_WC_BASE, size, rw, MAP_SHARED, ram_fd, 0))
         return -1;
+    /* a fourth view, outside guest space, for emulating writes to protected code pages */
+    ram_alias = mmap(NULL, size, rw, MAP_SHARED, ram_fd, 0);
+    if (ram_alias == MAP_FAILED)
+        return -1;
     /* HLE kernel area: thunk call targets and kernel data visible to the title */
     if (map_fixed(XBOX_HLE_BASE, XBOX_HLE_SIZE, rw, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0))
         return -1;
@@ -85,7 +91,9 @@ int mem_map_anon(uint32_t addr, uint32_t size)
 }
 
 /* Return the physical offset for a guest address in one of the RAM views, or -1. */
-static int64_t guest_to_phys(uint32_t a)
+int64_t mem_guest_to_phys(uint32_t a);
+#define guest_to_phys mem_guest_to_phys
+int64_t mem_guest_to_phys(uint32_t a)
 {
     if (a >= XBOX_LOW_BASE && a < ram_size)
         return a;
@@ -125,12 +133,43 @@ void mem_protect_code_page(uint32_t guest_page_addr)
     uint32_t pg = (uint32_t)phys >> 12;
     if (code_pages[pg >> 3] & (1u << (pg & 7)))
         return;
+    if (volatile_pages[pg >> 3] & (1u << (pg & 7)))
+        return;     /* self-checked blocks instead of write protection */
     /* mark every 4K page covered by the host page (16K/64K page hosts) */
     uint32_t per = host_page > 4096 ? (uint32_t)(host_page >> 12) : 1;
     uint32_t first = pg & ~(per - 1);
     for (uint32_t i = first; i < first + per; i++)
         code_pages[i >> 3] |= (uint8_t)(1u << (i & 7));
     protect_views(pg, PROT_READ);
+}
+
+void *mem_alias(uint32_t pa) { return ram_alias + pa; }
+
+static uint32_t page_span(void) { return host_page > 4096 ? (uint32_t)(host_page >> 12) : 1; }
+
+/* Drop write protection of one physical page (and its host-page siblings). */
+void mem_unprotect_page(uint32_t pg)
+{
+    uint32_t per = page_span(), first = pg & ~(per - 1);
+    for (uint32_t i = first; i < first + per; i++)
+        code_pages[i >> 3] &= (uint8_t)~(1u << (i & 7));
+    protect_views(pg, PROT_READ | PROT_WRITE);
+}
+
+int mem_page_volatile(uint32_t guest_addr)
+{
+    int64_t phys = guest_to_phys(guest_addr);
+    if (phys < 0)
+        return 0;
+    uint32_t pg = (uint32_t)phys >> 12;
+    return (volatile_pages[pg >> 3] >> (pg & 7)) & 1;
+}
+
+void mem_set_page_volatile(uint32_t pg)
+{
+    uint32_t per = page_span(), first = pg & ~(per - 1);
+    for (uint32_t i = first; i < first + per; i++)
+        volatile_pages[i >> 3] |= (uint8_t)(1u << (i & 7));
 }
 
 void mem_unprotect_all_code(void)

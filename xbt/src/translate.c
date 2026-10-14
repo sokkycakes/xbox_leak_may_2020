@@ -1203,6 +1203,40 @@ xbt_block *xbt_translate(uint32_t eip, uint32_t **cache_ptr, uint32_t *cache_end
     j->b.overflow = 0;
     j->host_start = *cache_ptr;
 
+    /* blocks on pages that also hold hot data are not write-protected;
+       they verify their guest bytes on entry instead */
+    int selfcheck = 0;
+    for (uint32_t pg = eip & ~0xfffu; pg < j->end_eip; pg += 0x1000)
+        if (mem_page_volatile(pg))
+            selfcheck = 1;
+    uint32_t *lit_adr = NULL;
+    if (selfcheck) {
+        a64buf *b = JB(j);
+        uint32_t len = j->end_eip - eip, off = 0;
+        w_movi(b, 0, eip);
+        lit_adr = a64_here(b);
+        a64_put(b, enc_adr(1, 0));
+        while (len - off >= 8) {
+            x_ldr(b, 2, 0, (int32_t)off);
+            x_ldr(b, 3, 1, (int32_t)off);
+            a64_put(b, enc_addsub_sreg(1, 1, 1, ZR, 2, 3, SH_LSL, 0));
+            jit_stub(j, a64_here(b), SITE_BCOND, eip, EXIT_SMC, 0);
+            a64_put(b, enc_bcond(0, CC_NE));
+            off += 8;
+        }
+        for (int sz = 4; sz >= 1; sz >>= 1) {
+            if (len - off >= (uint32_t)sz) {
+                int l2 = sz == 4 ? 2 : sz == 2 ? 1 : 0;
+                a64_ldst_off(b, l2, LDST_LDR, 2, 0, (int32_t)off);
+                a64_ldst_off(b, l2, LDST_LDR, 3, 1, (int32_t)off);
+                w_cmp(b, 2, 3);
+                jit_stub(j, a64_here(b), SITE_BCOND, eip, EXIT_SMC, 0);
+                a64_put(b, enc_bcond(0, CC_NE));
+                off += (uint32_t)sz;
+            }
+        }
+    }
+
     for (int i = 0; i < j->n && !j->b.overflow; i++) {
         jinsn *ji = &j->ji[i];
         j->cur = i;
@@ -1235,6 +1269,23 @@ xbt_block *xbt_translate(uint32_t eip, uint32_t **cache_ptr, uint32_t *cache_end
         add_exit(j, j->end_eip);
     if (!j->b.overflow)
         emit_stubs(j);
+    /* re-dispatch stub used when the block is invalidated */
+    uint32_t *retrans = a64_here(JB(j));
+    w_movi(JB(j), 0, eip);
+    a64_put(JB(j), enc_b((intptr_t)xbt_stub.indirect_miss - (intptr_t)a64_here(JB(j))));
+    if (lit_adr && !j->b.overflow) {
+        /* copy of the guest bytes the prologue compares against */
+        if (((uintptr_t)j->b.p & 7) != 0)
+            a64_nop(JB(j));
+        uint32_t *lit = a64_here(JB(j));
+        *lit_adr = enc_adr(1, (intptr_t)lit - (intptr_t)lit_adr);
+        uint32_t len = j->end_eip - eip;
+        for (uint32_t o = 0; o < len; o += 4) {
+            uint32_t w = 0;
+            memcpy(&w, (const uint8_t *)(uintptr_t)(eip + o), len - o < 4 ? len - o : 4);
+            a64_put(JB(j), w);
+        }
+    }
     if (j->b.overflow)
         return NULL;
 
@@ -1244,6 +1295,8 @@ xbt_block *xbt_translate(uint32_t eip, uint32_t **cache_ptr, uint32_t *cache_end
     blk->host = j->host_start;
     blk->host_words = (uint32_t)(j->b.p - j->host_start);
     blk->ninsn = (uint16_t)j->n;
+    blk->retrans = retrans;
+    blk->selfcheck = (uint8_t)selfcheck;
     blk->insn_off = malloc(sizeof(uint16_t) * (size_t)j->n);
     blk->insn_eip = malloc(sizeof(uint32_t) * (size_t)j->n);
     for (int i = 0; i < j->n; i++) {

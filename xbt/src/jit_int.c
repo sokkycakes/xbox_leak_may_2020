@@ -1439,11 +1439,36 @@ int jit_int(jit_t *j, jinsn *ji)
     case 0x07: case 0x17: case 0x1f: case 0x1a1:
         w_addi(b, GREG(R_ESP), GREG(R_ESP), 4);
         return 1;
+    case 0x108: case 0x109:   /* invd / wbinvd: caches are coherent here */
+        return 1;
+    case 0x101:               /* invlpg (other system forms are not used by titles) */
+        return in->reg == 7 ? 1 : -1;
+    case 0x130:               /* wrmsr: MTRR/PAT setup, ignored */
+        return 1;
+    case 0x132:               /* rdmsr */
+        w_movi(b, GREG(R_EAX), 0);
+        w_movi(b, GREG(R_EDX), 0);
+        return 1;
+    case 0x120: {             /* mov r32, crN */
+        static const uint32_t cr[8] = { 0x80010033u, 0, 0, 0x0000f000u, 0x00000600u, 0, 0, 0 };
+        w_movi(b, GREG(in->rm), cr[in->reg]);
+        return 1;
+    }
+    case 0x121:               /* mov r32, drN */
+        w_movi(b, GREG(in->rm), 0);
+        return 1;
+    case 0x122: case 0x123:   /* mov crN/drN, r32: ignored */
+        return 1;
     case 0x1a2:
         jit_call_helper(j, H_CPUID, 1);
         return 1;
     case 0x131:
         jit_call_helper(j, H_RDTSC, 1);
+        return 1;
+    case 0xe4: case 0xe5: case 0xe6: case 0xe7: case 0xec: case 0xed: case 0xee: case 0xef:
+        w_movi(b, 1, (uint32_t)op | (uint32_t)in->opsize << 8);
+        w_movi(b, 2, in->imm & 0xff);
+        jit_call_helper(j, H_MISC, 1);
         return 1;
     case 0x27: case 0x2f: case 0x37: case 0x3f: case 0xd4: case 0xd5:
         w_movi(b, 1, (uint32_t)op);

@@ -85,6 +85,8 @@ enum {
     EXIT_UD,          /* undefined / unsupported instruction */
     EXIT_DIVIDE,      /* #DE */
     EXIT_STOP,        /* reached the configured stop address */
+    EXIT_YIELD,       /* an HLE call blocked or yielded: run the scheduler */
+    EXIT_SMC,         /* a self-checking block found its guest code modified */
 };
 
 /* Helper function table indices (called from translated code). */
@@ -157,6 +159,7 @@ typedef struct xbt_stats {
     uint64_t flag_producers, flag_elided, flag_fused_only, flag_stored;
     uint64_t consumers, consumers_fused, consumers_helper;
     uint64_t links, dispatches, indirect_miss, flushes, smc_faults;
+    uint64_t smc_data_writes, smc_invalidated, smc_volatile_pages;
     uint64_t exits_link, exits_indirect, exits_other;
 } xbt_stats;
 extern xbt_stats xbt_st;
@@ -167,6 +170,12 @@ void *mem_host(uint32_t guest);       /* identity: returns (void*)guest */
 int  mem_map_anon(uint32_t addr, uint32_t size);
 void mem_protect_code_page(uint32_t page);
 void mem_unprotect_all_code(void);
+void mem_unprotect_page(uint32_t phys_page);
+int  mem_is_code_page_fault(uint32_t addr);
+int64_t mem_guest_to_phys(uint32_t addr);
+void *mem_alias(uint32_t phys);
+int  mem_page_volatile(uint32_t guest_addr);
+void mem_set_page_volatile(uint32_t phys_page);
 int  mem_readable(uint32_t addr, uint32_t len);
 uint32_t mem_ram_size(void);
 
@@ -182,8 +191,16 @@ void xbt_cpu_init(xbt_cpu *cpu);
 int  xbt_run(xbt_cpu *cpu);           /* returns exit reason that stopped execution */
 void xbt_flush(const char *why);
 void xbt_print_stats(void);
+/* HLE call hook: return <0 to stop, 0 to continue, 1 to leave xbt_run with EXIT_YIELD */
 typedef int (*xbt_hle_fn)(xbt_cpu *cpu, uint32_t eip);
 void xbt_set_hle_handler(xbt_hle_fn fn);
+/* MMIO hook for accesses to trapped regions: returns 1 if handled */
+typedef int (*xbt_mmio_fn)(uint32_t addr, int size, int is_write, uint64_t *value);
+void xbt_set_mmio_handler(xbt_mmio_fn fn, uint32_t start, uint32_t end);
+extern volatile int xbt_preempt;
+/* port I/O hook (IN/OUT): returns the value read, ignored for writes */
+typedef uint32_t (*xbt_pio_fn)(uint16_t port, int size, int is_write, uint32_t value);
+void xbt_set_pio_handler(xbt_pio_fn fn);
 
 /* translate.c */
 typedef struct xbt_block xbt_block;
@@ -194,6 +211,9 @@ struct xbt_block {
     uint16_t ninsn;
     uint16_t *insn_off;     /* host word offset of each guest instruction */
     uint32_t *insn_eip;
+    uint32_t *retrans;      /* stub that re-dispatches to guest_start (invalidation) */
+    uint8_t dead;           /* invalidated: entry patched to `retrans` */
+    uint8_t selfcheck;      /* verifies its guest bytes on entry (volatile page) */
     xbt_block *next;
 };
 xbt_block *xbt_translate(uint32_t eip, uint32_t **cache_ptr, uint32_t *cache_end);

@@ -67,9 +67,32 @@ static uint32_t szf_pf(uint32_t v8)
     return f;
 }
 
-/* daa das aaa aas aam aad */
+static xbt_pio_fn pio_handler;
+void xbt_set_pio_handler(xbt_pio_fn fn) { pio_handler = fn; }
+
+/* in/out: op = opcode | opsize << 8, imm = immediate port (E4-E7) */
+static void h_pio(xbt_cpu *cpu, uint32_t op, uint32_t imm)
+{
+    int opc = op & 0xff, osz = (op >> 8) & 7;
+    uint16_t port = (opc & 8) ? (uint16_t)cpu->r[R_EDX] : (uint16_t)imm;
+    int size = (opc & 1) ? osz : 1;
+    uint32_t mask = size == 4 ? 0xffffffffu : (1u << (8 * size)) - 1;
+    if (opc & 2) {
+        if (pio_handler)
+            pio_handler(port, size, 1, cpu->r[R_EAX] & mask);
+    } else {
+        uint32_t v = pio_handler ? pio_handler(port, size, 0, 0) : mask;
+        cpu->r[R_EAX] = (cpu->r[R_EAX] & ~mask) | (v & mask);
+    }
+}
+
+/* daa das aaa aas aam aad (and port i/o) */
 static void h_misc(xbt_cpu *cpu, uint32_t op, uint32_t imm)
 {
+    if ((op & 0xf0) == 0xe0) {
+        h_pio(cpu, op, imm);
+        return;
+    }
     uint32_t fl = xbt_flags(cpu);
     uint32_t ax = cpu->r[R_EAX] & 0xffff;
     uint32_t al = ax & 0xff, ah = ax >> 8;

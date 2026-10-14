@@ -1017,6 +1017,37 @@ def g_mmx(g):
     g.emit("emms")
 
 
+def g_smc(g):
+    """self-modifying code: patch an already-executed instruction, and keep
+    data inside the code area (writes there must not break translations)"""
+    r = g.r
+    n = r.randint(2, 4)
+    g.emit("mov ecx, %d" % n)
+    lp, get, tgt, data, skip = (g.newlabel() for _ in range(5))
+    g.emit("%s:" % lp)
+    g.emit("push ecx")
+    g.emit("call %s" % get)
+    g.emit("%s:" % get)
+    g.emit("pop ebx")
+    g.emit("%s:" % tgt)
+    g.emit("mov eax, 0x%x" % r.getrandbits(32))
+    g.emit("add esi, eax")
+    g.emit("jmp %s" % skip)
+    g.emit("%s:" % data)
+    g.emit("dd 0")
+    g.emit("%s:" % skip)
+    g.emit("add [ebx + (%s - %s)], esi" % (data, get))
+    g.emit("mov edx, [ebx + (%s - %s)]" % (data, get))
+    if r.random() < 0.7:
+        g.emit("mov dword [ebx + (%s - %s) + 1], 0x%x" % (tgt, get, r.getrandbits(32)))
+    else:
+        g.emit("xor byte [ebx + (%s - %s) + %d], 0x%x" % (tgt, get, r.randint(1, 4), r.randint(1, 255)))
+    g.emit("pop ecx")
+    g.emit("dec ecx")
+    g.emit("jnz %s" % lp)
+    g.write_flags(ALL)
+
+
 GROUPS = {
     "alu": (Gen.g_alu, 10), "test": (Gen.g_test, 3), "incdec": (Gen.g_incdec, 3),
     "negnot": (Gen.g_negnot, 2), "mul": (Gen.g_mul, 3), "div": (Gen.g_div, 2),
@@ -1027,7 +1058,7 @@ GROUPS = {
     "bcd": (Gen.g_bcd, 1), "misc": (Gen.g_misc, 1), "jecxz": (Gen.g_jecxz, 1),
     "flagcross": (Gen.g_flagcross, 3),
 }
-FP_GROUPS = {"x87": (g_x87, 4), "x87misc": (g_x87_misc, 1), "sse": (g_sse, 4), "mmx": (g_mmx, 3)}
+FP_GROUPS = {"smc": (g_smc, 1), "x87": (g_x87, 4), "x87misc": (g_x87_misc, 1), "sse": (g_sse, 4), "mmx": (g_mmx, 3)}
 
 EXTRA_GROUPS = {}   # filled by other modules (x87, sse)
 ABI = True          # flags are dead across call/ret (matches xbt default)
