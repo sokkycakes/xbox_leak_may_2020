@@ -3260,13 +3260,22 @@ static bool conv_full_due(conv_entry *e)
     return true;
 }
 
-/* Whether 33 samples spread over `len` bytes of units `step` apart (the
-   first `size` bytes of each) match `copy`. */
+/* Whether `len` bytes of units `step` apart match `copy`: all of them when
+   there are few (a HUD's quads, whose texture coordinates and colors change
+   while the positions stay), else 33 samples of `size` bytes spread over
+   the data, each at a different place in its unit so that every field of a
+   vertex gets looked at, not only the first. */
+#define CONV_WHOLE_BYTES 4096
 static bool conv_sampled_same(const UCHAR *copy, const UCHAR *cur, size_t len, size_t step, size_t size)
 {
+    if (len <= CONV_WHOLE_BYTES) return !memcmp(copy, cur, len);
     size_t units = (len - size) / step + 1;
     for (size_t i = 0; i <= 32; i++) {
         size_t off = (i == 32 ? units - 1 : units * i / 32) * step;
+        if (step > size) {
+            size_t in = (i * size) % (step - size + 1) / size * size;
+            if (off + in + size <= len) off += in;
+        }
         /* Fixed-size copies compile to single loads (a variable size made
            byte loops). */
         if (size == 2) {
