@@ -24,7 +24,17 @@ build/%.o: src/%.c src/*.h
 build/xbt: $(OBJS)
 	$(CC) $(OBJS) -o $@ $(LDFLAGS)
 
+# Self-contained binary for a 64-bit kernel with a 32-bit (or no) AArch64
+# userland, e.g. a Raspberry Pi 3 image built for box86. It must be a
+# static PIE: a plain static binary loads at 0x400000, inside the guest's
+# identity-mapped address range.
+static: build/xbt-static
+
+build/xbt-static: $(SRCS) src/*.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -fPIE -static-pie $(SRCS) -o $@ $(LDFLAGS)
+
 clean:
 	rm -rf build
 
-.PHONY: all clean
+.PHONY: all static clean

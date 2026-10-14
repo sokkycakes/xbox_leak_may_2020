@@ -21,12 +21,14 @@ only on the platform, never on a particular game.
 
 ## Host requirements
 
-- **AArch64 Linux, 64-bit userland.** xbt identity-maps the guest's 4 GB
-  address space into the low 4 GB of the host process. That needs a 64-bit
-  host, so 32-bit Raspberry Pi OS and other ARMv7 systems are not supported.
+- **A 64-bit (AArch64) Linux kernel.** xbt identity-maps the guest's 4 GB
+  address space into the low 4 GB of the host process, which needs a 64-bit
+  process. The userland may be 32-bit: `make static` builds a self-contained
+  binary that runs on a 64-bit kernel with an armhf userland (check with
+  `uname -m`, which prints `aarch64`). A 32-bit kernel (`armv7l`) is not
+  supported.
 - **ARMv8.0 with Advanced SIMD (NEON) is enough.** No newer extensions are
-  used. A Raspberry Pi 3 (Cortex-A53) running a 64-bit OS meets this, as does
-  anything newer.
+  used. A Raspberry Pi 3 (Cortex-A53) meets this, as does anything newer.
 - **4K, 16K or 64K host pages.** Write protection for self-modifying code
   covers the whole host page.
 - **Not yet run on real hardware.** All development and measurement so far
@@ -38,7 +40,12 @@ only on the platform, never on a particular game.
 make                       # cross-compiles with aarch64-linux-gnu-gcc on x86-64
 build/xbt game/default.xbe # on an AArch64 host
 qemu-aarch64 -L /usr/aarch64-linux-gnu build/xbt game/default.xbe   # elsewhere
+make static                # build/xbt-static: no shared libraries needed
 ```
+
+To time xbt against box86 on the device itself, copy `build/xbt-static` (as
+`xbt`), `bench/build/b_*` and `bench/pi-run.sh` into one directory there and
+run `sh pi-run.sh`. Stop anything else that loads the CPU first.
 
 The game's directory becomes `D:`. The hard-disk partitions (`C:`, `E:`,
 the `Z:` cache and X/Y/F) are directories under `<game dir>/xbt_hdd/`.
