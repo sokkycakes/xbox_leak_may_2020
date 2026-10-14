@@ -107,6 +107,7 @@ enum { C_INT, C_X87, C_MMX, C_SSE };
 #define T_RC     0x200000 /* the rounding mode decides the result: test them all */
 #define T_SMALL  0x400000 /* st0 in [-1, 1] (f2xm1, fyl2xp1, transcendentals) */
 #define T_FSWAX  0x800000 /* has fnstsw ax: only C0-C3 and TOP of ax are kept */
+#define T_LOOP   0x1000000 /* a loop on ecx: 1 to 8 passes */
 
 struct tmpl {
     const char *name;
@@ -328,6 +329,10 @@ static const struct tmpl tmpls[] = {
     { "ftst + test ah + jcc", "D9 E4 DF E0 F6 C4 ih 70+c 03 83 C1 01 39 D1", C_X87, T_CC | T_FSWAX, 0 },
     { "fcomp st(i) + sahf + jcc", "D8 D8+i DF E0 9E 70+c 03 83 C1 01 39 D1", C_X87, T_CC | T_FSWAX, 0 },
     { "fcom m32 + sahf + jcc", "D8 /2 DF E0 9E 70+c 03 83 C1 01 39 D1", C_X87, T_MEM | T_CC | T_FSWAX, 0 },
+    /* x87 loops that branch back to their own start (the second swaps
+       registers, so its loop can't keep them) */
+    { "x87 loop fadd", "D9 C0 D8 C2 DD D9 49 75 F7", C_X87, T_LOOP, 0 },
+    { "x87 loop fxch", "D9 C1 D8 C9 D9 C9 DD DA 49 75 F5", C_X87, T_LOOP, 0 },
 };
 #define NTMPL (sizeof(tmpls) / sizeof(tmpls[0]))
 
@@ -438,6 +443,7 @@ static void make_test(struct test *t, struct state *s)
         if (s->eflags & EF_DF) { s->r[XR_ESI] += 64; s->r[XR_EDI] += 64; }
     }
     if (fl & T_EBP) s->r[XR_EBP] = STACK_TOP - 32 - rn(64);
+    if (fl & T_LOOP) s->r[XR_ECX] = 1 + rn(8);
     if (fl & T_EBX) s->r[XR_EBX] = DATA_PTR - rn(128);
     if (fl & T_DIV) {
         /* keep quotients in range: a small dividend high part */

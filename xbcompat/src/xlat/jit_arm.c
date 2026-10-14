@@ -81,6 +81,7 @@ struct block {
     struct block *next;          /* hash chain */
     uint32_t count;              /* XLAT_COUNT: times run */
     uint16_t ninsns, nwords;     /* guest instructions, host words */
+    uint32_t *loop;              /* its branch back to itself past the x87 loads, or NULL */
 };
 
 struct plist {                   /* blocks with code in one guest page */
@@ -294,6 +295,9 @@ typedef struct {
     uint8_t xreg[8];               /* each slot's VFP register */
     int fcom_at;                   /* in[fcom_at] left vcmp's result in the CPSR */
     int force_cond;                /* the block's jcc uses this ARM condition (-1: its own) */
+    uint32_t eip;                  /* the block's address */
+    uint8_t pre;                   /* x87 slots loaded at the start */
+    uint32_t *body, *loop;         /* code after those loads; the branch back to it */
 } tctx;
 
 #define E(w) emit(&t->a, (w))
@@ -2123,6 +2127,11 @@ static bool emit_branch(tctx *t, const xinsn *in, int kind, uint32_t target, uns
 {
     uint32_t next = in->addr + in->len;
     if (in->pfx & XP_OPSZ) return false;
+    /* A loop back to the block's own start can skip its x87 loads when the
+       registers still hold those slots: same TOP, same VFP registers. */
+    bool loop_ok = t->pre && !(t->x_delta & 7);
+    for (int q = 0; q < 8 && loop_ok; q++)
+        if ((t->pre >> q & 1) && (!(t->x_loaded >> q & 1) || t->xreg[q] != 16 + q)) loop_ok = false;
     x87_sync(t);
     switch (kind) {
     case BR_JCC: {
@@ -2146,15 +2155,26 @@ static bool emit_branch(tctx *t, const xinsn *in, int kind, uint32_t target, uns
             return true;
         }
         int c = t->force_cond >= 0 ? t->force_cond : cond_for(t, cc);
+        bool norm = !t->cf_inv && (lt & FL_C);
         uint32_t *j = t->a.p;
         E(0);
+        if (target == t->eip && loop_ok && !norm) {
+            if (j < t->a.end) *j = a_b(c, j, t->body);
+            t->loop = j;
+            emit_exit(t, next, lf, NULL);
+            return true;
+        }
         emit_exit(t, next, lf, NULL);
-        bool norm = !t->cf_inv && (lt & FL_C);
         if (j < t->a.end) *j = a_b(c, j, t->a.p);
         emit_exit(t, target, lt, norm ? NULL : j);
         return true;
     }
     case BR_JMP:
+        if (target == t->eip && loop_ok && !(!t->cf_inv && (lt & FL_C))) {
+            t->loop = t->a.p;
+            E(a_b(C_AL, t->a.p, t->body));
+            return true;
+        }
         emit_exit(t, target, lt, NULL);
         return true;
     case BR_CALL:
@@ -2287,13 +2307,17 @@ static struct block *translate(uint32_t eip)
         t->x_first = 0;
         t->x_synced = false;
         t->fcom_at = t->force_cond = -1;
+        t->eip = eip;
+        t->pre = (uint8_t)pre;
+        t->loop = NULL;
+        if (pre) x_preload(t, pre);
+        t->body = t->a.p;
         if (count_dir) {
             mov_imm(t, T3, (uint32_t)(uintptr_t)&b->count);
             E(A_LDR(T2, T3, 0));
             E(dp_i(C_AL, OP_ADD, 0, T2, T2, 1));
             E(A_STR(T2, T3, 0));
         }
-        if (pre) x_preload(t, pre);
         bool ended = false;
         unsigned nat = 0;
         t->ea_ok = false;
@@ -2344,6 +2368,7 @@ static struct block *translate(uint32_t eip)
     flush_icache(t->a.start, t->a.p);
 
     b->eip = eip;
+    b->loop = t->loop;
     b->ninsns = (uint16_t)n;
     b->nwords = (uint16_t)(t->a.p - cache_cur);
     b->end = next > eip ? next : eip + 1;
@@ -2458,6 +2483,11 @@ void jit_invalidate(uint32_t addr, uint32_t len)
             flush_icache(s, cache_cur);
             __atomic_store_n(b->code, a_b(C_AL, b->code, s), __ATOMIC_RELAXED);
             flush_icache(b->code, b->code + 1);
+            if (b->loop) {   /* a thread looping inside it leaves at the next pass */
+                __atomic_store_n(b->loop, (*b->loop & 0xF0000000u) | (a_b(C_AL, b->loop, b->code) & 0x0FFFFFFFu),
+                                 __ATOMIC_RELAXED);
+                flush_icache(b->loop, b->loop + 1);
+            }
             free(b);
             live_blocks--;
         }
