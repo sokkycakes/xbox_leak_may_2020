@@ -17,6 +17,7 @@
  */
 #define _GNU_SOURCE
 #include <pthread.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -209,6 +210,17 @@ void cpu_code_changed(uint32_t addr, uint32_t len)
 }
 
 void cpu_block(void) {}
+
+int cpu_fix_fault(int sig, void *ucontext)
+{
+#if defined(XLAT_JIT) && defined(__arm__)
+    return sig == SIGBUS && jit_fix_unaligned(ucontext);
+#else
+    (void)sig;
+    (void)ucontext;
+    return 0;
+#endif
+}
 
 /* ---- services --------------------------------------------------------- */
 

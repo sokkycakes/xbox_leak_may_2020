@@ -736,9 +736,24 @@ static uint8_t *xmem, *xcode;
 static int xlat_run(xcpu *c, uint32_t end);
 
 #ifdef XLAT_RUN
+static void on_sigbus(int sig, siginfo_t *si, void *uc)
+{
+    (void)si;
+    if (jit_fix_unaligned(uc)) return;
+    signal(sig, SIG_DFL);
+}
+
 /* The code generator: each test's code replaces the last one's. */
 static int xlat_run(xcpu *c, uint32_t end)
 {
+    static bool handler;
+    if (!handler) {
+        struct sigaction sa = { 0 };
+        sa.sa_sigaction = on_sigbus;
+        sa.sa_flags = SA_SIGINFO;
+        sigaction(SIGBUS, &sa, NULL);
+        handler = true;
+    }
     jit_init(end, end + 1, true);
     jit_invalidate(CODE_ADDR, 64);
     jit_run(c);

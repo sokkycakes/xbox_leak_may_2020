@@ -342,6 +342,8 @@ static void host_leave(struct cpu_thread *t)
     else maybe_yield(t);
 }
 
+int cpu_fix_fault(int sig, void *ucontext) { (void)sig; (void)ucontext; return 0; }
+
 void cpu_block(void)
 {
     struct cpu_thread *t = cur;

@@ -108,6 +108,7 @@ static void crash_handler(int sig, siginfo_t *si, void *uc_)
 static void crash_handler(int sig, siginfo_t *si, void *uc_)
 {
     ucontext_t *uc = uc_;
+    if (cpu_fix_fault(sig, uc_)) return;
     xlog("fatal signal %d (%s) accessing %p", sig, strsignal(sig), si->si_addr);
 #if defined(__arm__)
     xlog("  pc=%08lx lr=%08lx sp=%08lx", (unsigned long)uc->uc_mcontext.arm_pc,

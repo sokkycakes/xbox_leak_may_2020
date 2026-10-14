@@ -132,6 +132,7 @@ static inline bool a_b_in_range(const uint32_t *at, const void *target)
 #define A_MULS(rd, rn, rm)       (0xE0100090u | (rd) << 16 | (rm) << 8 | (rn))
 #define A_SMULL(lo, hi, rn, rm)  (0xE0C00090u | (hi) << 16 | (lo) << 12 | (rm) << 8 | (rn))
 #define A_UMULL(lo, hi, rn, rm)  (0xE0800090u | (hi) << 16 | (lo) << 12 | (rm) << 8 | (rn))
+#define A_MLS(d, n, m, a)        (0xE0600090u | (d) << 16 | (a) << 12 | (m) << 8 | (n))   /* d = a - n * m */
 #define A_SDIV(rd, rn, rm)       (0xE710F010u | (rd) << 16 | (rm) << 8 | (rn))
 #define A_UDIV(rd, rn, rm)       (0xE730F010u | (rd) << 16 | (rm) << 8 | (rn))
 
@@ -177,6 +178,16 @@ static inline uint32_t a_vstr(int d, int rn, int off)
 {
     uint32_t u = off >= 0, imm = (uint32_t)(off >= 0 ? off : -off) >> 2;
     return 0xED000B00u | u << 23 | VD(d) | (uint32_t)rn << 16 | imm;
+}
+static inline uint32_t a_vldr_s(int s, int rn, int off)
+{
+    uint32_t u = off >= 0, imm = (uint32_t)(off >= 0 ? off : -off) >> 2;
+    return 0xED100A00u | u << 23 | SD(s) | (uint32_t)rn << 16 | imm;
+}
+static inline uint32_t a_vstr_s(int s, int rn, int off)
+{
+    uint32_t u = off >= 0, imm = (uint32_t)(off >= 0 ? off : -off) >> 2;
+    return 0xED000A00u | u << 23 | SD(s) | (uint32_t)rn << 16 | imm;
 }
 #define A_VMOV_DRR(d, lo, hi)  (0xEC400B10u | (hi) << 16 | (lo) << 12 | VM(d))   /* d = lo:hi */
 #define A_VMOV_RRD(lo, hi, d)  (0xEC500B10u | (hi) << 16 | (lo) << 12 | VM(d))

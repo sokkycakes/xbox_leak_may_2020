@@ -31,6 +31,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <ucontext.h>
 #include <unistd.h>
 
 #include "xlat.h"
@@ -283,6 +284,8 @@ typedef struct {
     uint8_t x_loaded, x_dirty;     /* by slot */
     uint8_t x_tset, x_tempty;      /* slots whose tag changed, and those now empty */
     uint8_t x_tknown, x_tentry;    /* slots whose tag at entry is known, and those empty then */
+    uint8_t x_first;               /* slots loaded before the first sync */
+    bool x_synced;                 /* a sync has happened */
     uint8_t xreg[8];               /* each slot's VFP register */
 } tctx;
 
@@ -731,21 +734,33 @@ static void x_reset(tctx *t)
     for (int q = 0; q < 8; q++) t->xreg[q] = (uint8_t)(16 + q);
 }
 
+/* T3 = xcpu + 8 * TOP: slot q is then at [T3, #O_ST + 8 * q] */
+static void x_base(tctx *t)
+{
+    E(A_LDR(T3, R0, O_TOP));
+    E(dp_r(C_AL, OP_ADD, 0, T3, R0, T3, SH_LSL, 3));
+}
+
 /* the VFP register holding st(i), loaded (uses T3) */
 static int x_get(tctx *t, int i)
 {
     int q = xq(t, i);
     if (!(t->x_loaded >> q & 1)) {
-        E(A_LDR(T3, R0, O_TOP));
-        if (q) {
-            E(dp_i(C_AL, OP_ADD, 0, T3, T3, q));
-            E(dp_i(C_AL, OP_AND, 0, T3, T3, 7));
-        }
-        E(dp_r(C_AL, OP_ADD, 0, T3, R0, T3, SH_LSL, 3));
-        E(a_vldr(t->xreg[q], T3, O_ST));
+        x_base(t);
+        E(a_vldr(t->xreg[q], T3, O_ST + 8 * q));
         t->x_loaded |= (uint8_t)(1u << q);
+        if (!t->x_synced) t->x_first |= (uint8_t)(1u << q);
     }
     return t->xreg[q];
+}
+
+/* Loads the slots in m at the block's start, sharing one TOP read. */
+static void x_preload(tctx *t, unsigned m)
+{
+    x_base(t);
+    for (int q = 0; q < 8; q++)
+        if (m >> q & 1) E(a_vldr(t->xreg[q], T3, O_ST + 8 * q));
+    t->x_loaded = (uint8_t)m;
 }
 
 /* the VFP register for a new value of st(i) */
@@ -808,17 +823,12 @@ static void x87_sync(tctx *t)
     uint8_t tset = t->x_tset & (uint8_t)~same, tempty = t->x_tempty & tset;
     if (t->x_dirty || tset || delta) {
         E(A_LDR(T3, R0, O_TOP));
-        for (int q = 0; q < 8; q++) {
-            if (!(t->x_dirty >> q & 1)) continue;
-            int r = T3;
-            if (q) {
-                E(dp_i(C_AL, OP_ADD, 0, T2, T3, q));
-                E(dp_i(C_AL, OP_AND, 0, T2, T2, 7));
-                r = T2;
-            }
-            E(dp_r(C_AL, OP_ADD, 0, T2, R0, r, SH_LSL, 3));
-            E(a_vstr(t->xreg[q], T2, O_ST));
-        }
+        if (t->x_dirty) E(dp_r(C_AL, OP_ADD, 0, T2, R0, T3, SH_LSL, 3));
+        /* st[TOP + q] is register (TOP + q) & 7 or its copy 8 above: the
+           three stores write both */
+        for (int q = 0; q < 8; q++)
+            if (t->x_dirty >> q & 1)
+                for (int k = -1; k <= 1; k++) E(a_vstr(t->xreg[q], T2, O_ST + 64 * k + 8 * q));
         if (tset) {
             E(A_LDR(T2, R0, O_FTAG));
             if (tset != tempty) {
@@ -838,6 +848,7 @@ static void x87_sync(tctx *t)
         }
     }
     x_reset(t);
+    t->x_synced = true;
 }
 
 /* VFP's 8-bit immediate for the double with bits v, or -1 */
@@ -864,22 +875,38 @@ static void x_const(tctx *t, int d, double v)
     E(A_VMOV_DRR(d, T1, hi != lo ? T2 : T1));
 }
 
+/* in's memory operand for vldr/vstr: base register, *off a multiple of 4
+   (uses T0).  Guest data needn't be aligned: an unaligned access faults
+   and jit_fix_unaligned finishes it. */
+static int vfp_addr(tctx *t, const xinsn *in, int32_t *off)
+{
+    int base = mem_addr(t, in, T0, 1020, off);
+    if (*off & 3) {
+        add_imm(t, T0, base, (uint32_t)*off, T0);
+        *off = 0;
+        base = T0;
+    }
+    return base;
+}
+
 /* in's memory operand as a double in d: kind 0 m32 float, 1 m32 integer,
-   2 m64 float, 3 m16 integer (uses T0-T2, s0) */
+   2 m64 float, 3 m16 integer (uses T0-T1, s0) */
 static void x_load(tctx *t, const xinsn *in, int kind, int d)
 {
     int32_t off;
-    int base = mem_addr(t, in, T0, kind == 2 ? 4091 : kind == 3 ? 255 : 4095, &off);
-    if (kind == 2) {
-        /* through core registers: guest data needn't be aligned */
-        E(A_LDR(T1, base, off));
-        E(A_LDR(T2, base, off + 4));
-        E(A_VMOV_DRR(d, T1, T2));
+    if (kind == 3) {
+        int base = mem_addr(t, in, T0, 255, &off);
+        E(a_ldsth(C_AL, 1, 0xF, T1, base, off));
+        E(A_VMOV_SR(XS_TMP, T1));
+        E(A_VCVT_D_S32(d, XS_TMP));
         return;
     }
-    if (kind == 3) E(a_ldsth(C_AL, 1, 0xF, T1, base, off));
-    else E(A_LDR(T1, base, off));
-    E(A_VMOV_SR(XS_TMP, T1));
+    int base = vfp_addr(t, in, &off);
+    if (kind == 2) {
+        E(a_vldr(d, base, off));
+        return;
+    }
+    E(a_vldr_s(XS_TMP, base, off));
     E(kind == 0 ? A_VCVT_DS(d, XS_TMP) : A_VCVT_D_S32(d, XS_TMP));
 }
 
@@ -887,15 +914,46 @@ static void x_load(tctx *t, const xinsn *in, int kind, int d)
 static void x_store(tctx *t, const xinsn *in, int kind, int s)
 {
     int32_t off;
-    if (kind == 2) {
-        E(A_VMOV_RRD(T1, T2, s));
-    } else {
-        E(A_VCVT_SD(XS_TMP, s));
-        E(A_VMOV_RS(T1, XS_TMP));
+    if (kind != 2) E(A_VCVT_SD(XS_TMP, s));
+    int base = vfp_addr(t, in, &off);
+    E(kind == 2 ? a_vstr(s, base, off) : a_vstr_s(XS_TMP, base, off));
+}
+
+/* SIGBUS in translated code: an unaligned vldr or vstr (guest x87 data
+   can be anywhere).  Does the access through the signal frame and steps
+   past it. */
+bool jit_fix_unaligned(void *ucontext)
+{
+    ucontext_t *uc = ucontext;
+    unsigned long *r = &uc->uc_mcontext.arm_r0;
+    const uint32_t *pc = (const uint32_t *)uc->uc_mcontext.arm_pc;
+    if (!cache || pc < cache || pc >= cache_end) return false;
+    uint32_t w = *pc;
+    if ((w & 0xFF200E00u) != 0xED000A00u || (w >> 16 & 15) == 15) return false;
+    uint32_t off = (w & 0xFF) * 4;
+    uint32_t addr = (uint32_t)r[w >> 16 & 15] + ((w >> 23 & 1) ? off : -off);
+    unsigned long *p = uc->uc_regspace, *end = p + sizeof(uc->uc_regspace) / sizeof(*p);
+    while (p + 2 < end && p[0] != 0x56465001ul) {   /* VFP_MAGIC */
+        if (!p[0] || p[1] < 8) return false;
+        p += p[1] / sizeof(*p);
     }
-    int base = mem_addr(t, in, T0, kind == 2 ? 4091 : 4095, &off);
-    E(A_STR(T1, base, off));
-    if (kind == 2) E(A_STR(T2, base, off + 4));
+    if (p + 2 + 64 > end) return false;
+    uint64_t *d = (uint64_t *)(void *)(p + 2);       /* struct user_vfp's fpregs */
+    void *mem = (void *)(uintptr_t)addr, *reg;
+    size_t len;
+    unsigned vd = w >> 12 & 15, dbit = w >> 22 & 1;
+    if (w >> 8 & 1) {
+        reg = &d[dbit << 4 | vd];
+        len = 8;
+    } else {
+        unsigned n = vd << 1 | dbit;
+        reg = (uint32_t *)(void *)&d[n >> 1] + (n & 1);
+        len = 4;
+    }
+    if (w >> 20 & 1) memcpy(reg, mem, len);
+    else memcpy(mem, reg, len);
+    uc->uc_mcontext.arm_pc += 4;
+    return true;
 }
 
 static void x_arith(tctx *t, int op, int d, int x, int y)
@@ -1430,6 +1488,8 @@ static bool emit_sse_move(tctx *t, const xinsn *in)
 
 /* ---- native translations ---------------------------------------------- */
 
+static void emit_fallback(tctx *t, const xinsn *in);
+
 /* Emits in natively, with the flags in live correct after it; false (and
    nothing emitted) to leave it to the interpreter. */
 static bool native(tctx *t, const xinsn *in, unsigned live)
@@ -1715,6 +1775,47 @@ static bool native(tctx *t, const xinsn *in, unsigned live)
                 src = T1;
             }
             E(in->reg == 4 ? A_UMULL(R4, HR(XR_EDX), R4, src) : A_SMULL(R4, HR(XR_EDX), R4, src));
+            return true;
+        }
+        case 6: case 7: {
+            /* div and idiv when the quotient fits in 32 bits the easy way
+               (edx is 0, or eax's sign for idiv) with udiv/sdiv; the
+               interpreter takes the rest and the divide errors.  The flags
+               are undefined after either. */
+            if (sz != 4 || (in->pfx & XP_LOCK)) return false;
+            x87_sync(t);
+            int src = HR(in->rm), eax = HR(XR_EAX), edx = HR(XR_EDX);
+            if (m) {
+                base = mem_addr(t, in, T0, 4095, &off);
+                E(A_LDR(T1, base, off));
+                src = T1;
+            }
+            uint32_t *slow[3];
+            int ns = 0;
+            E(dp_i(C_AL, OP_CMP, 1, 0, src, 0));
+            slow[ns++] = t->a.p;
+            E(0);
+            if (in->reg == 6) {
+                E(dp_i(C_AL, OP_CMP, 1, 0, edx, 0));
+            } else {
+                E(dp_r(C_AL, OP_CMP, 1, 0, edx, eax, SH_ASR, 31));
+                slow[ns++] = t->a.p;
+                E(0);
+                E(dp_i(C_AL, OP_CMN, 1, 0, src, 1));
+                E(dp_i(C_EQ, OP_CMP, 1, 0, eax, arm_imm(0x80000000u)));
+            }
+            slow[ns++] = t->a.p;
+            E(0);
+            E(in->reg == 6 ? A_UDIV(T2, eax, src) : A_SDIV(T2, eax, src));
+            E(A_MLS(edx, T2, src, eax));
+            E(A_MOV(eax, T2));
+            uint32_t *done = t->a.p;
+            E(0);
+            for (int k = 0; k < ns; k++)
+                if (slow[k] < t->a.end) *slow[k] = a_b(k == ns - 1 && in->reg == 7 ? C_EQ : k ? C_NE : C_EQ, slow[k], t->a.p);
+            emit_fallback(t, in);
+            if (done < t->a.end) *done = a_b(C_AL, done, t->a.p);
+            t->cf_inv = true;
             return true;
         }
         }
@@ -2063,29 +2164,48 @@ static struct block *translate(uint32_t eip)
 
     struct block *b = calloc(1, sizeof(*b));
     if (!b) die("out of memory");
-    t->a = (asm_t){ cache_cur, cache_cur, cache_end };
-    t->cf_inv = true;
-    x_reset(t);
-    if (count_dir) {
-        mov_imm(t, T3, (uint32_t)(uintptr_t)&b->count);
-        E(A_LDR(T2, T3, 0));
-        E(dp_i(C_AL, OP_ADD, 0, T2, T2, 1));
-        E(A_STR(T2, T3, 0));
-    }
-    bool ended = false;
-    for (int i = 0; i < n && !ended; i++) {
-        const xinsn *in = &t->in[i];
-        if (i == n - 1 && kind != BR_NONE && kind != BR_OTHER && emit_branch(t, in, kind, target, lt, lf)) {
-            n_native++;
-            ended = true;
-            break;
+    /* When the first pass loads two or more x87 registers before its first
+       sync, the second loads them all at the start with one TOP read. */
+    unsigned pre = 0;
+    for (int pass = 0; pass < 2; pass++) {
+        t->a = (asm_t){ cache_cur, cache_cur, cache_end };
+        t->cf_inv = true;
+        x_reset(t);
+        t->x_first = 0;
+        t->x_synced = false;
+        if (count_dir) {
+            mov_imm(t, T3, (uint32_t)(uintptr_t)&b->count);
+            E(A_LDR(T2, T3, 0));
+            E(dp_i(C_AL, OP_ADD, 0, T2, T2, 1));
+            E(A_STR(T2, T3, 0));
         }
-        if (in->len && native(t, in, t->live[i + 1])) n_native++;
-        else emit_fallback(t, in);
-        if (!in->len) ended = true;
+        if (pre) x_preload(t, pre);
+        bool ended = false;
+        unsigned nat = 0;
+        for (int i = 0; i < n && !ended; i++) {
+            const xinsn *in = &t->in[i];
+            if (i == n - 1 && kind != BR_NONE && kind != BR_OTHER && emit_branch(t, in, kind, target, lt, lf)) {
+                nat++;
+                ended = true;
+                break;
+            }
+            if (in->len && native(t, in, t->live[i + 1])) nat++;
+            else emit_fallback(t, in);
+            if (!in->len) ended = true;
+        }
+        if (!ended) x87_sync(t);
+        if (!ended) emit_exit(t, next, kind == BR_NONE || kind == BR_OTHER ? lf : lt | lf, NULL);
+        if (pass) {
+            n_native += nat;
+        } else {
+            pre = t->x_first;
+            if (__builtin_popcount(pre) < 2) pre = 0;
+            if (!pre) {
+                n_native += nat;
+                break;
+            }
+        }
     }
-    if (!ended) x87_sync(t);
-    if (!ended) emit_exit(t, next, kind == BR_NONE || kind == BR_OTHER ? lf : lt | lf, NULL);
     if (t->a.p > t->a.end) die("a block outgrew the code cache");
     flush_icache(t->a.start, t->a.p);
 
@@ -2150,8 +2270,16 @@ static void link_exit(uint32_t *site, uint32_t *alt, const uint32_t *code)
     n_links++;
 }
 
+/* The x87 registers' copies the translated code reads past st[7] (C code
+   only writes st[0..7]). */
+static void st_mirror(xcpu *c)
+{
+    memcpy(c->st_hi, c->st, sizeof(c->st));
+}
+
 void jit_run(xcpu *c)
 {
+    st_mirror(c);
     for (;;) {
         uint32_t eip = c->eip;
         if (in_stop(eip)) return;
@@ -2217,6 +2345,7 @@ uintptr_t jit_fallback(xcpu *c, uint32_t *site)
         if (in->op >= 0xD8 && in->op <= 0xDF) fb_x87[in->op - 0xD8][in->reg + (in->mod == 3 ? 8 : 0)]++;
     }
     if (!in->len || xi_exec(c, in) != XI_OK) xrt_fault(c, "invalid instruction");
+    if ((in->op >= 0xD8 && in->op <= 0xDF) || in->op == 0x1AE) st_mirror(c);
     if (c->eip == in->addr + in->len) return (uintptr_t)(site + 1);
     return (uintptr_t)indirect;
 }
@@ -2316,8 +2445,9 @@ static int by_work(const void *x, const void *y)
     return wa < wb ? 1 : wa > wb ? -1 : 0;
 }
 
-/* XLAT_COUNT: the blocks that ran the most host code, each dumped as
-   DIR/x86_EIP.s (.word lines: assemble and disassemble to read it). */
+/* XLAT_COUNT: the blocks that ran the most host code since the last print,
+   listed in DIR/hot.txt with their x86 bytes and ARM words (tools/xlat/
+   hotdis.sh disassembles both). */
 static void print_hot_blocks(void)
 {
     size_t n = 0, k = 0;
@@ -2331,19 +2461,26 @@ static void print_hot_blocks(void)
             total += (uint64_t)b->count * b->nwords;
         }
     qsort(v, n, sizeof(*v), by_work);
+    char path[512];
+    snprintf(path, sizeof(path), "%s/hot.txt", count_dir);
+    FILE *f = fopen(path, "w");
     fprintf(stderr, "xlat: hottest blocks (host words run, of %llu):\n", (unsigned long long)total);
     for (size_t i = 0; i < n && i < 40; i++) {
         struct block *b = v[i];
         uint64_t w = (uint64_t)b->count * b->nwords;
-        fprintf(stderr, "xlat:   x86_%08x %5.2f%% %10u runs %3u insns %4u words\n", b->eip,
-                total ? 100.0 * (double)w / (double)total : 0.0, b->count, b->ninsns, b->nwords);
-        char path[512];
-        snprintf(path, sizeof(path), "%s/x86_%08x.s", count_dir, b->eip);
-        FILE *f = fopen(path, "w");
+        char line[160];
+        snprintf(line, sizeof(line), "x86_%08x %5.2f%% %10u runs %3u insns %4u words", b->eip,
+                 total ? 100.0 * (double)w / (double)total : 0.0, b->count, b->ninsns, b->nwords);
+        fprintf(stderr, "xlat:   %s\n", line);
         if (!f) continue;
-        for (unsigned j = 0; j < b->nwords; j++) fprintf(f, ".word 0x%08x\n", b->code[j]);
-        fclose(f);
+        fprintf(f, "%s\nx86:", line);
+        for (uint32_t a = b->eip; a < b->end; a++) fprintf(f, " %02x", *(const uint8_t *)(uintptr_t)a);
+        fprintf(f, "\narm:");
+        for (unsigned j = 0; j < b->nwords; j++) fprintf(f, " %08x", b->code[j]);
+        fprintf(f, "\n");
     }
+    if (f) fclose(f);
+    for (size_t i = 0; i < n; i++) v[i]->count = 0;
     free(v);
 }
 

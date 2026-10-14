@@ -123,6 +123,9 @@ int thread_guest_priority(void);
 void cpu_code_changed(uint32_t addr, uint32_t len);
 /* For crash reports: the guest registers of this thread, if it is in guest code. */
 void cpu_dump_guest(void);
+/* A fault signal the CPU backend handles itself (the translator's unaligned
+   VFP accesses); nonzero when it did and the thread can go on. */
+int cpu_fix_fault(int sig, void *ucontext);
 /* Host code called from the guest is about to block (a wait, a sleep, the
    vblank): let other threads run guest code meanwhile.  The thread keeps
    the guest CPU through host calls otherwise, so that short ones (most

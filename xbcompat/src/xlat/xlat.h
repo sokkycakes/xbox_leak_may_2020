@@ -74,18 +74,27 @@ typedef struct xcpu {
     uint32_t eflags;        /* 0x34 the other EFLAGS bits (IF, ID, AC, ...) */
     uint32_t fs_base;       /* 0x38 */
     uint32_t top;           /* 0x3c x87 TOP */
-    double st[8];           /* 0x40 x87 registers by physical number: st(i) is st[(top + i) & 7] */
-    uint32_t fpcw;          /* 0x80 */
-    uint32_t fpsw;          /* 0x84 status word without TOP */
-    uint32_t ftag;          /* 0x88 bit i set: physical register i is empty */
-    uint32_t mxcsr;         /* 0x8c */
-    mmx_t mm[8];            /* 0x90 */
-    xmm_t xmm[8];           /* 0xd0 */
-    uint32_t jit_site;      /* 0x150 the code generator's last block exit (jit_arm.c) */
+    union {
+        /* jit_arm.c reads st(i) as st[top + i], with no wrap: st[8..15]
+           repeat st[0..7] (it keeps them so; the interpreter needn't) */
+        double stx[32];
+        struct {
+            double st_lo[8];  /* 0x40 */
+            double st[8];     /* 0x80 x87 registers by physical number: st(i) is st[(top + i) & 7] */
+            double st_hi[16]; /* 0xc0 */
+        };
+    };
+    uint32_t fpcw;          /* 0x140 */
+    uint32_t fpsw;          /* 0x144 status word without TOP */
+    uint32_t ftag;          /* 0x148 bit i set: physical register i is empty */
+    uint32_t mxcsr;         /* 0x14c */
+    mmx_t mm[8];            /* 0x150 */
+    xmm_t xmm[8];           /* 0x190 */
+    uint32_t jit_site;      /* 0x210 the code generator's last block exit (jit_arm.c) */
 } xcpu;
 
-_Static_assert(__builtin_offsetof(xcpu, st) == 0x40, "xcpu layout");
-_Static_assert(__builtin_offsetof(xcpu, xmm) == 0xd0, "xcpu layout");
+_Static_assert(__builtin_offsetof(xcpu, st) == 0x80, "xcpu layout");
+_Static_assert(__builtin_offsetof(xcpu, xmm) == 0x190, "xcpu layout");
 
 /* ---- decoder ---------------------------------------------------------- */
 
@@ -157,6 +166,8 @@ void jit_run(xcpu *c);
 void jit_invalidate(uint32_t addr, uint32_t len);
 /* XLAT_STATS: what was translated, and what still runs in the interpreter. */
 void jit_print_stats(void);
+/* finishes an unaligned VFP access that faulted in translated code */
+bool jit_fix_unaligned(void *ucontext);
 
 /* ---- runtime services the interpreter calls (runtime.c) --------------- */
 
