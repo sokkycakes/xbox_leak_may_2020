@@ -7,19 +7,27 @@ claude/determined-bardeen-dw96cp); check every md5.
 
 | file | md5 | what |
 |---|---|---|
-| xbcompat-native.x86 | fcb5229a9fd5fdaaeb1eb5d4d5aaa633 | the x86 client, xbcompat/ at b9048a43 (`make RENDERER=native`) |
-| libxbcompat_renderer.so.1 | d6a853958903a4d757af5b6c36cd7f60 | the ARM renderer for it (`native-renderer.mk TARGET=armhf GL=opengl`) |
+| xbcompat-native.x86 | fcb5229a9fd5fdaaeb1eb5d4d5aaa633 | the x86 client, xbcompat/ at d119671c (`make RENDERER=native`) |
+| libxbcompat_renderer.so.1 | 49ef71ce68a2f3e035a8533e1d90090f | the ARM renderer for it (`native-renderer.mk TARGET=armhf GL=opengl`) |
 | merge.sh | 8d388f01b3f07849c1eba2a969295ecf | Pi side: backs up, installs, rolls back if the dashboard doesn't start |
 | push-merge.sh | b65cd189066c9963e557ddb3adb95ad5 | PC side |
 | clocks.sh | 65d695544dda3324b349b2480e371bd7 | same as before |
 
-This build merges runs of same-state draws into one GL draw (commit
-b9048a43). In an xemu trace of a Think Tanks match, 434 of a frame's 727
-draws change nothing but re-set the textures they already had; under
-llvmpipe the build sends ~490 of ~850 draws a frame as ~28 GL draws, and
-its vertex/index uploads drop from ~12.7 MB to ~0.3 MB a frame.
-`XBCOMPAT_MERGE_DRAWS=0` turns it off in the same build, so the two runs
-below compare directly.
+This build has two changes, each with a switch in the same build, so the
+runs below compare directly:
+
+- It merges runs of same-state draws into one GL draw (b9048a43). In an
+  xemu trace of a Think Tanks match, 434 of a frame's 727 draws change
+  nothing but re-set the textures they already had; under llvmpipe the
+  build sends ~490 of ~850 draws a frame as ~28 GL draws, and its
+  vertex/index uploads drop from ~12.7 MB to ~0.3 MB a frame.
+  `XBCOMPAT_MERGE_DRAWS=0` turns it off.
+- DXT textures go to the GPU as 16-bit texels when they are opaque or have
+  only on/off alpha (d119671c), instead of Mesa's 32-bit expansion: half
+  the texture traffic for 54 of Think Tanks' 95 DXT textures, at most
+  3/255 off per channel. `XBCOMPAT_DXT16=0` turns it off;
+  `XBCOMPAT_DXT16=2` also sends partial-alpha textures as RGBA4444, which
+  costs some image quality.
 
 Requests 2 to 4 are separate (the xlat builds, at commits 651d6364,
 6f0550ff and 66b2753a on claude/project-thread-ohz82s). This one doesn't
@@ -61,10 +69,18 @@ the last 30 s (the frame split, `D3D detail:`, `D3D cache:`, `D3D merged:`,
 `D3D programs:`). Then the same once more with `XBCOMPAT_MERGE_DRAWS=0`
 added. Frame times here don't count.
 
-## 5. GPU counters
+## 5. 16-bit DXT textures
 
-Remove the profile and merge lines, add `XBCOMPAT_GPU_COUNTERS=1`, restart,
-same match, 30 s, keep the `D3D` GPU counter lines. Then remove it and
+Remove the profile and merge lines. Three runs, each a restart, the same
+match and spot, 60 s of fps lines and the `D3D` GPU counter lines, with
+`XBCOMPAT_GPU_COUNTERS=1` set in all three:
+
+- as installed (opaque and on/off-alpha DXT as 16-bit),
+- with `XBCOMPAT_DXT16=0` (all DXT 32-bit, as before),
+- with `XBCOMPAT_DXT16=2` (partial alpha as RGBA4444 too); take a
+  screenshot here and look for banding on smoke, sky and the HUD.
+
+Then remove `XBCOMPAT_GPU_COUNTERS`, `XBCOMPAT_DXT16` and
 `XBCOMPAT_LOG_FPS`.
 
 ## 6. Leave and report
@@ -78,5 +94,6 @@ the cloud session:
     fps lines: step 2 (merging) and step 3 (off)
     clocks-tt.txt
     the D3D lines from step 4, both runs
-    the GPU counter lines from step 5
-    the screenshot, and the log tail if anything failed
+    step 5: fps and GPU counter lines for each of the three runs
+    the screenshots (step 2 and step 5's DXT16=2), and the log tail if
+    anything failed
