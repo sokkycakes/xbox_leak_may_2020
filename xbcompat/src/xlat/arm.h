@@ -207,6 +207,8 @@ static inline uint32_t a_vstr_s(int s, int rn, int off)
 #define A_VCMP0(d)             (0xEEB50B40u | VD(d))
 #define A_VPUSH(d, n)          (0xED2D0B00u | VD(d) | 2u * (n))   /* vpush {d..d+n-1} */
 #define A_VPOP(d, n)           (0xECBD0B00u | VD(d) | 2u * (n))
+#define A_VLDMIA(rn, d, n)     (0xEC900B00u | (uint32_t)(rn) << 16 | VD(d) | 2u * (n))   /* vldmia rn, {d..d+n-1} */
+#define A_VSTMIA(rn, d, n)     (0xEC800B00u | (uint32_t)(rn) << 16 | VD(d) | 2u * (n))
 #define A_VMRS_APSR            0xEEF1FA10u
 #define A_VMRS(r)              (0xEEF10A10u | (r) << 12)    /* vmrs r, fpscr */
 #define A_VMSR(r)              (0xEEE10A10u | (r) << 12)    /* vmsr fpscr, r */

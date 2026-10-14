@@ -83,7 +83,7 @@ struct block {
     uint32_t count;              /* XLAT_COUNT: times run */
     uint16_t ninsns, nwords;     /* guest instructions, host words */
     uint8_t kind;                /* how it ends (BR_*) */
-    uint32_t *loop;              /* its branch back to itself past the x87 loads, or NULL */
+    uint8_t top;                 /* the x87 TOP it was translated for */
 };
 
 struct plist {                   /* blocks with code in one guest page */
@@ -95,8 +95,11 @@ typedef struct { uint32_t eip, code; } itab_entry;
 
 static uint32_t *cache, *cache_cur, *cache_end, *cache_blocks;
 static int (*enter)(xcpu *c, const void *code);
-static uint32_t *exit_common, *link_tramp, *indirect, *indirect_nf, *fb_tramp, *fb_tramp_c;
-static itab_entry *itab;
+static uint32_t *exit_common, *link_tramp, *fb_tramp, *fb_tramp_c;
+/* indirect jumps by the TOP they leave with, flags kept (_nf: not), and
+   indirect_any for xcpu's TOP */
+static uint32_t *indirect[8], *indirect_nf[8], *indirect_any;
+static itab_entry *itab;   /* 8 tables of ITAB_SIZE, one per TOP */
 static struct block *htab[1u << HTAB_BITS];
 static struct plist **pages;
 static unsigned live_blocks;
@@ -282,24 +285,20 @@ typedef struct {
     uint8_t live[MAX_INSNS + 1];   /* flags live before in[i]; live[n] after the block */
     int n;
     bool cf_inv;                   /* CPSR C holds NOT CF */
-    /* x87 registers cached in VFP registers (see x87_sync) */
-    int x_delta;                   /* net pushes */
-    uint8_t x_loaded, x_dirty;     /* by slot */
-    uint8_t x_tset, x_tempty;      /* slots whose tag changed, and those now empty */
-    uint8_t x_tknown, x_tentry;    /* slots whose tag at entry is known, and those empty then */
-    uint8_t x_first;               /* slots loaded before the first sync */
-    bool x_synced;                 /* a sync has happened */
+    /* the x87 registers (see x87_sync) */
+    uint8_t top0, xtop;            /* TOP when the block starts, and at the last sync */
+    int x_delta;                   /* net pushes since then */
+    uint8_t x_tset, x_tempty;      /* registers whose tag changed, and those now empty */
+    uint8_t x_tknown, x_tentry;    /* registers whose tag at entry is known, and those empty then */
     /* T0 = ea_b + (ea_x << ea_s), left by an x87 memory operand, while
        ea_ok: the next one with the same base and index reuses it */
     bool ea_ok;
     int8_t ea_b, ea_x, ea_s;
     int cur, skip;                 /* in[cur] is being translated; skip: in[cur + 1] went with it */
-    uint8_t xreg[8];               /* each slot's VFP register */
+    uint8_t xreg[8];               /* each physical register's VFP register */
     int fcom_at;                   /* in[fcom_at] left vcmp's result in the CPSR */
     int force_cond;                /* the block's jcc uses this ARM condition (-1: its own) */
     uint32_t eip;                  /* the block's address */
-    uint8_t pre;                   /* x87 slots loaded at the start */
-    uint32_t *body, *loop;         /* code after those loads; the branch back to it */
 } tctx;
 
 #define E(w) emit(&t->a, (w))
@@ -728,68 +727,38 @@ static bool emit_shift(tctx *t, const xinsn *in, int count, unsigned live)
 
 /* ---- x87 ---------------------------------------------------------------- */
 
-/* A block keeps the x87 registers it uses in VFP registers d16-d23, loaded
-   when first read, and writes them back (with TOP and the tags) at its
-   exits and before the interpreter runs anything.  Slot q is the register
-   that was st(q) when the block started (or last synced): after delta net
-   pushes st(i) is slot (i - delta) & 7, whatever TOP is, so the translation
-   reads TOP only to find a slot's memory.  Popped values are dropped: an
+/* The x87 registers live in VFP registers d16-d23 while translated code
+   runs: physical register p (xcpu's st[p]) is d(16 + p).  enter loads them
+   from xcpu and every way out to C stores them back.  Blocks are translated
+   for the TOP they start with (struct block's top), so st(i) is a fixed
+   register and TOP and the tags are written as constants where they
+   change.  Within a block, fxch only swaps which register holds a slot
+   (xreg); x87_sync moves them home again.  Popped values are dropped: an
    empty register's contents don't matter. */
 
 #define XD_TMP 1    /* d1: a memory operand */
 #define XS_TMP 0    /* s0: single precision and integer conversions */
 
-static int xq(const tctx *t, int i) { return (i - t->x_delta) & 7; }
+/* the physical register that is st(i) now */
+static int xq(const tctx *t, int i) { return (t->xtop - t->x_delta + i) & 7; }
 
 static void x_reset(tctx *t)
 {
     t->x_delta = 0;
-    t->x_loaded = t->x_dirty = t->x_tset = t->x_tempty = t->x_tknown = t->x_tentry = 0;
+    t->x_tset = t->x_tempty = t->x_tknown = t->x_tentry = 0;
     for (int q = 0; q < 8; q++) t->xreg[q] = (uint8_t)(16 + q);
 }
 
-/* T3 = xcpu + 8 * TOP: slot q is then at [T3, #O_ST + 8 * q] */
-static void x_base(tctx *t)
-{
-    E(A_LDR(T3, R0, O_TOP));
-    E(dp_r(C_AL, OP_ADD, 0, T3, R0, T3, SH_LSL, 3));
-}
-
-/* the VFP register holding st(i), loaded (uses T3) */
-static int x_get(tctx *t, int i)
-{
-    int q = xq(t, i);
-    if (!(t->x_loaded >> q & 1)) {
-        x_base(t);
-        E(a_vldr(t->xreg[q], T3, O_ST + 8 * q));
-        t->x_loaded |= (uint8_t)(1u << q);
-        if (!t->x_synced) t->x_first |= (uint8_t)(1u << q);
-    }
-    return t->xreg[q];
-}
-
-/* Loads the slots in m at the block's start, sharing one TOP read. */
-static void x_preload(tctx *t, unsigned m)
-{
-    x_base(t);
-    for (int q = 0; q < 8; q++)
-        if (m >> q & 1) E(a_vldr(t->xreg[q], T3, O_ST + 8 * q));
-    t->x_loaded = (uint8_t)m;
-}
+/* the VFP register holding st(i) */
+static int x_get(tctx *t, int i) { return t->xreg[xq(t, i)]; }
 
 /* the VFP register for a new value of st(i) */
-static int x_put(tctx *t, int i)
-{
-    int q = xq(t, i);
-    t->x_loaded |= (uint8_t)(1u << q);
-    t->x_dirty |= (uint8_t)(1u << q);
-    return t->xreg[q];
-}
+static int x_put(tctx *t, int i) { return t->xreg[xq(t, i)]; }
 
-/* Slot q's tag becomes empty or valid.  entry is what its first change
+/* Register q's tag becomes empty or valid.  entry is what its first change
    says the tag was when the block started: compiled code never pushes onto
    a full register or pops an empty one, so a push means it was empty and a
-   pop that it was valid (-1: unknown).  A slot that ends as it started
+   pop that it was valid (-1: unknown).  A register that ends as it started
    needs no tag write: a push and its pop leave the tags alone. */
 static void x_tag(tctx *t, int q, bool empty, int entry)
 {
@@ -814,55 +783,44 @@ static int x_push(tctx *t)
 
 static void x_pop(tctx *t)
 {
-    uint8_t bit = (uint8_t)(1u << xq(t, 0));
     x_tag(t, xq(t, 0), true, 0);
-    t->x_loaded &= (uint8_t)~bit;
-    t->x_dirty &= (uint8_t)~bit;
     t->x_delta--;
 }
 
-/* rd = slot mask m as physical registers: rotated left by TOP (in tr) */
-static void x_rot(tctx *t, int rd, unsigned m, int tr)
-{
-    mov_imm(t, rd, m | m << 8);
-    E(dp_rr(C_AL, OP_MOV, 0, rd, 0, rd, SH_LSL, tr));
-    E(A_UBFX(rd, rd, 8, 8));
-}
-
-/* Writes the cache back to xcpu (flags kept; uses T1-T3) and empties it. */
+/* Puts every register back in d(16 + p), writes TOP and the tags to xcpu
+   where they changed (flags kept; uses T2, T3) and starts over from the
+   new TOP. */
 static void x87_sync(tctx *t)
 {
-    int delta = t->x_delta & 7;
-    uint8_t same = t->x_tknown & (uint8_t)~(t->x_tentry ^ t->x_tempty);
-    uint8_t tset = t->x_tset & (uint8_t)~same, tempty = t->x_tempty & tset;
-    if (t->x_dirty || tset || delta) {
-        E(A_LDR(T3, R0, O_TOP));
-        if (t->x_dirty) E(dp_r(C_AL, OP_ADD, 0, T2, R0, T3, SH_LSL, 3));
-        /* st[TOP + q] is register (TOP + q) & 7 or its copy 8 above: the
-           three stores write both */
-        for (int q = 0; q < 8; q++)
-            if (t->x_dirty >> q & 1)
-                for (int k = -1; k <= 1; k++) E(a_vstr(t->xreg[q], T2, O_ST + 64 * k + 8 * q));
-        if (tset) {
-            E(A_LDR(T2, R0, O_FTAG));
-            if (tset != tempty) {
-                x_rot(t, T1, tset, T3);
-                E(dp_r(C_AL, OP_BIC, 0, T2, T2, T1, SH_LSL, 0));
-            }
-            if (tempty) {
-                x_rot(t, T1, tempty, T3);
-                E(dp_r(C_AL, OP_ORR, 0, T2, T2, T1, SH_LSL, 0));
-            }
-            E(A_STR(T2, R0, O_FTAG));
-        }
-        if (delta) {
-            E(dp_i(C_AL, OP_SUB, 0, T3, T3, delta));
-            E(dp_i(C_AL, OP_AND, 0, T3, T3, 7));
-            E(A_STR(T3, R0, O_TOP));
+    uint8_t done = 0;
+    for (int p = 0; p < 8; p++) {
+        if ((done >> p & 1) || t->xreg[p] == 16 + p) continue;
+        /* a cycle of fxch swaps: d(16 + p) to the side, then each register
+           takes its value from the one holding it */
+        E(A_VMOV(XD_TMP, 16 + p));
+        for (int cur = p;;) {
+            done |= (uint8_t)(1u << cur);
+            int src = t->xreg[cur];
+            if (src == 16 + p) { E(A_VMOV(16 + cur, XD_TMP)); break; }
+            E(A_VMOV(16 + cur, src));
+            cur = src - 16;
         }
     }
+    uint8_t same = t->x_tknown & (uint8_t)~(t->x_tentry ^ t->x_tempty);
+    uint8_t tset = t->x_tset & (uint8_t)~same, tempty = t->x_tempty & tset;
+    if (tset) {
+        E(A_LDR(T2, R0, O_FTAG));
+        if (tset != tempty) E(dp_i(C_AL, OP_BIC, 0, T2, T2, tset));
+        if (tempty) E(dp_i(C_AL, OP_ORR, 0, T2, T2, tempty));
+        E(A_STR(T2, R0, O_FTAG));
+    }
+    int top = xq(t, 0);
+    if (top != t->xtop) {
+        E(dp_i(C_AL, OP_MOV, 0, T3, 0, top));
+        E(A_STR(T3, R0, O_TOP));
+    }
+    t->xtop = (uint8_t)top;
     x_reset(t);
-    t->x_synced = true;
 }
 
 /* VFP's 8-bit immediate for the double with bits v, or -1 */
@@ -1226,30 +1184,21 @@ static void x_fild64(tctx *t, const xinsn *in)
     E(A_VADD(d, 3, 2));
 }
 
-/* rd = the status word with TOP (uses T3) */
+/* rd = the status word with TOP */
 static void x_fsw(tctx *t, int rd)
 {
-    int delta = t->x_delta & 7;
-    E(A_LDR(T3, R0, O_TOP));
-    if (delta) {
-        E(dp_i(C_AL, OP_SUB, 0, T3, T3, delta));
-        E(dp_i(C_AL, OP_AND, 0, T3, T3, 7));
-    }
     E(A_LDR(rd, R0, O_FPSW));
     E(dp_i(C_AL, OP_BIC, 0, rd, rd, arm_imm(0x3800)));
-    E(dp_r(C_AL, OP_ORR, 0, rd, rd, T3, SH_LSL, 11));
+    if (xq(t, 0)) E(dp_i(C_AL, OP_ORR, 0, rd, rd, arm_imm((uint32_t)xq(t, 0) << 11)));
 }
 
 static void x_fxch(tctx *t, int i)
 {
     if (!i) return;
-    x_get(t, 0);
-    x_get(t, i);
     int q0 = xq(t, 0), qi = xq(t, i);
     uint8_t r = t->xreg[q0];
     t->xreg[q0] = t->xreg[qi];
     t->xreg[qi] = r;
-    t->x_dirty |= (uint8_t)(1u << q0 | 1u << qi);
 }
 
 /* st(i) = st(0) (st(i) is no longer empty), then pop if pop */
@@ -1455,13 +1404,9 @@ static bool x87(tctx *t, const xinsn *in, unsigned live)
         return false;
     case 5:
         switch (r) {
-        case 0: {   /* ffree: st(i) empty, its value dropped */
-            uint8_t bit = (uint8_t)(1u << xq(t, (int)i));
+        case 0:   /* ffree: st(i) empty, its value dropped */
             x_tag(t, xq(t, (int)i), true, -1);
-            t->x_loaded &= (uint8_t)~bit;
-            t->x_dirty &= (uint8_t)~bit;
             return true;
-        }
         case 1: x_fxch(t, (int)i); return true;
         case 2: case 3: x_fst_reg(t, (int)i, r == 3); return true;
         case 4: case 5:   /* fucom, fucomp */
@@ -2405,23 +2350,21 @@ static void emit_exit(tctx *t, uint32_t target, unsigned live, uint32_t *alt)
     E((uint32_t)(uintptr_t)alt);
 }
 
-/* jump to the guest address in T0 */
+/* jump to the guest address in T0 (after x87_sync) */
 static void emit_indirect(tctx *t)
 {
     if (!t->cf_inv && (abi_live & FL_C)) invert_c(t);
-    E(a_b(C_AL, t->a.p, abi_live ? indirect : indirect_nf));
+    E(a_b(C_AL, t->a.p, abi_live ? indirect[t->xtop] : indirect_nf[t->xtop]));
 }
 
 static bool emit_branch(tctx *t, const xinsn *in, int kind, uint32_t target, unsigned lt, unsigned lf)
 {
     uint32_t next = in->addr + in->len;
     if (in->pfx & XP_OPSZ) return false;
-    /* A loop back to the block's own start can skip its x87 loads when the
-       registers still hold those slots: same TOP, same VFP registers. */
-    bool loop_ok = t->pre && !(t->x_delta & 7);
-    for (int q = 0; q < 8 && loop_ok; q++)
-        if ((t->pre >> q & 1) && (!(t->x_loaded >> q & 1) || t->xreg[q] != 16 + q)) loop_ok = false;
     x87_sync(t);
+    /* a loop back to the block's own start with the TOP it starts with
+       branches there directly */
+    bool loop_ok = t->xtop == t->top0;
     switch (kind) {
     case BR_JCC: {
         if (in->op >= 0xE0 && in->op <= 0xE3) return false;
@@ -2448,8 +2391,7 @@ static bool emit_branch(tctx *t, const xinsn *in, int kind, uint32_t target, uns
         uint32_t *j = t->a.p;
         E(0);
         if (target == t->eip && loop_ok && !norm) {
-            if (j < t->a.end) *j = a_b(c, j, t->body);
-            t->loop = j;
+            if (j < t->a.end) *j = a_b(c, j, t->a.start);
             emit_exit(t, next, lf, NULL);
             return true;
         }
@@ -2460,8 +2402,7 @@ static bool emit_branch(tctx *t, const xinsn *in, int kind, uint32_t target, uns
     }
     case BR_JMP:
         if (target == t->eip && loop_ok && !(!t->cf_inv && (lt & FL_C))) {
-            t->loop = t->a.p;
-            E(a_b(C_AL, t->a.p, t->body));
+            E(a_b(C_AL, t->a.p, t->a.start));
             return true;
         }
         emit_exit(t, target, lt, NULL);
@@ -2496,6 +2437,42 @@ static bool emit_branch(tctx *t, const xinsn *in, int kind, uint32_t target, uns
     return false;
 }
 
+/* What an interpreted instruction does to TOP: net pops, or 8 + the TOP
+   it sets.  The block goes on with that TOP; jit_fallback checks it (and
+   looks the next block up again when it is not), so a wrong guess here
+   costs time only. */
+static int top_effect(const xinsn *in)
+{
+    unsigned op = in->op, r = in->reg, i = in->rm;
+    if ((op >= 0x160 && op <= 0x17F && op != 0x177) || op == 0x1C4 || op == 0x1C5 || (op >= 0x1D0 && op <= 0x1FF))
+        return 8;   /* MMX: TOP 0 */
+    if (op < 0xD8 || op > 0xDF) return 0;
+    unsigned grp = op - 0xD8;
+    if (in->mod != 3) {
+        if (r == 0 && (grp & 1)) return -1;                           /* fld, fild */
+        if (r == 1 && (grp & 1) && grp != 1) return 1;                /* fisttp */
+        if (r == 3) return 1;                                         /* fcomp, ficomp, fstp, fistp */
+        if (grp == 3) return r == 5 ? -1 : r == 7 ? 1 : 0;            /* fld m80, fstp m80 */
+        if (grp == 5 && r == 6) return 8;                             /* fnsave: then as fninit */
+        if (grp == 7) return r == 4 || r == 5 ? -1 : r == 6 || r == 7 ? 1 : 0;   /* fbld fild fbstp fistp */
+        return 0;
+    }
+    switch (grp) {
+    case 0: case 4: return r == 3;                                    /* fcomp */
+    case 1:
+        if (r == 0 || r == 5) return -1;                              /* fld st(i), constants */
+        if (r == 3) return 1;                                         /* fstp1 */
+        if (r == 6) { static const int8_t e[8] = { 0, 1, -1, 1, -1, 0, -1, 1 }; return e[i]; }
+        if (r == 7) { static const int8_t e[8] = { 0, 1, 0, -1, 0, 0, 0, 0 }; return e[i]; }
+        return 0;
+    case 2: return r == 5 && i == 1 ? 2 : 0;                          /* fucompp */
+    case 3: return r == 4 && i == 3 ? 8 : 0;                          /* fninit */
+    case 5: return r == 3 || r == 5;                                  /* fstp, fucomp */
+    case 6: return r == 3 ? 2 : 1;                                    /* fcompp, the p forms */
+    default: return r == 0 || r == 2 || r == 3 || r == 5 || r == 6;   /* ffreep, fstp, fucomip, fcomip */
+    }
+}
+
 static void emit_fallback(tctx *t, const xinsn *in)
 {
     static xinsn *pool;
@@ -2509,8 +2486,11 @@ static void emit_fallback(tctx *t, const xinsn *in)
     left--;
     *copy = *in;
     x87_sync(t);
+    int e = top_effect(in);
+    t->xtop = (uint8_t)(e >= 8 ? e - 8 : (t->xtop + e) & 7);
     E(a_bl(C_AL, t->a.p, t->cf_inv ? fb_tramp : fb_tramp_c));
     E((uint32_t)(uintptr_t)copy);
+    E(t->xtop);
     t->cf_inv = true;
     t->fcom_at = -1;
 }
@@ -2553,8 +2533,8 @@ static void page_remove(uint32_t page, struct block *b)
         if (p->v[i] == b) { p->v[i] = p->v[--p->n]; return; }
 }
 
-/* Translates the block at eip (with the lock held). */
-static struct block *translate(uint32_t eip)
+/* Translates the block at eip for x87 TOP top (with the lock held). */
+static struct block *translate(uint32_t eip, unsigned top)
 {
     static tctx tc;
     tctx *t = &tc;
@@ -2586,86 +2566,68 @@ static struct block *translate(uint32_t eip)
 
     struct block *b = calloc(1, sizeof(*b));
     if (!b) die("out of memory");
-    /* When the first pass loads two or more x87 registers before its first
-       sync, the second loads them all at the start with one TOP read. */
-    unsigned pre = 0;
-    for (int pass = 0; pass < 2; pass++) {
-        t->a = (asm_t){ cache_cur, cache_cur, cache_end };
-        t->cf_inv = true;
-        x_reset(t);
-        t->x_first = 0;
-        t->x_synced = false;
-        t->fcom_at = t->force_cond = -1;
-        t->eip = eip;
-        t->pre = (uint8_t)pre;
-        t->loop = NULL;
-        if (pre) x_preload(t, pre);
-        t->body = t->a.p;
-        if (count_dir) {
-            mov_imm(t, T3, (uint32_t)(uintptr_t)&b->count);
-            E(A_LDR(T2, T3, 0));
-            E(dp_i(C_AL, OP_ADD, 0, T2, T2, 1));
-            E(A_STR(T2, T3, 0));
-        }
-        bool ended = false;
-        unsigned nat = 0;
-        t->ea_ok = false;
-        for (int i = 0; i < n && !ended; i++) {
-            const xinsn *in = &t->in[i];
-            /* only x87 instructions keep T0's address (fnstsw ax writes eax) */
-            if (in->op < 0xD8 || in->op > 0xDF || (in->op == 0xDF && in->mod == 3)) t->ea_ok = false;
-            /* fcom; fnstsw ax; test ah, imm (or sahf); jcc with no flags
-               live after: the jcc tests the compare's own result */
-            if (i == n - 2 && i >= 2 && kind == BR_JCC && !(lt | lf) && t->fcom_at == i - 2 &&
-                t->in[i - 1].op == 0xDF && t->in[i - 1].mod == 3 && t->in[i - 1].reg == 4 && t->in[i - 1].rm == 0 &&
-                (in->op == 0x9E || (in->op == 0xF6 && in->mod == 3 && in->reg == 0 && in->rm == 4)) &&
-                !(t->in[n - 1].pfx & XP_OPSZ) && (t->in[n - 1].op < 0xE0 || t->in[n - 1].op > 0xE3) &&
-                (t->force_cond = fcom_cond(in, &t->in[n - 1])) >= 0) {
-                nat++;
-                continue;
-            }
-            if (i == n - 1 && kind != BR_NONE && kind != BR_OTHER && emit_branch(t, in, kind, target, lt, lf)) {
-                nat++;
-                ended = true;
-                break;
-            }
-            t->cur = i;
-            t->skip = 0;
-            if (in->len && native(t, in, t->live[i + 1])) {
-                nat += 1 + t->skip;
-                i += t->skip;
-            } else {
-                t->ea_ok = false;
-                emit_fallback(t, in);
-            }
-            if (!in->len) ended = true;
-        }
-        if (!ended) x87_sync(t);
-        if (!ended) emit_exit(t, next, kind == BR_NONE || kind == BR_OTHER ? lf : lt | lf, NULL);
-        if (pass) {
-            n_native += nat;
-        } else {
-            pre = t->x_first;
-            if (__builtin_popcount(pre) < 2) pre = 0;
-            if (!pre) {
-                n_native += nat;
-                break;
-            }
-        }
+    t->a = (asm_t){ cache_cur, cache_cur, cache_end };
+    t->cf_inv = true;
+    t->top0 = t->xtop = (uint8_t)top;
+    x_reset(t);
+    t->fcom_at = t->force_cond = -1;
+    t->eip = eip;
+    if (count_dir) {
+        mov_imm(t, T3, (uint32_t)(uintptr_t)&b->count);
+        E(A_LDR(T2, T3, 0));
+        E(dp_i(C_AL, OP_ADD, 0, T2, T2, 1));
+        E(A_STR(T2, T3, 0));
     }
+    bool ended = false;
+    unsigned nat = 0;
+    t->ea_ok = false;
+    for (int i = 0; i < n && !ended; i++) {
+        const xinsn *in = &t->in[i];
+        /* only x87 instructions keep T0's address (fnstsw ax writes eax) */
+        if (in->op < 0xD8 || in->op > 0xDF || (in->op == 0xDF && in->mod == 3)) t->ea_ok = false;
+        /* fcom; fnstsw ax; test ah, imm (or sahf); jcc with no flags
+           live after: the jcc tests the compare's own result */
+        if (i == n - 2 && i >= 2 && kind == BR_JCC && !(lt | lf) && t->fcom_at == i - 2 &&
+            t->in[i - 1].op == 0xDF && t->in[i - 1].mod == 3 && t->in[i - 1].reg == 4 && t->in[i - 1].rm == 0 &&
+            (in->op == 0x9E || (in->op == 0xF6 && in->mod == 3 && in->reg == 0 && in->rm == 4)) &&
+            !(t->in[n - 1].pfx & XP_OPSZ) && (t->in[n - 1].op < 0xE0 || t->in[n - 1].op > 0xE3) &&
+            (t->force_cond = fcom_cond(in, &t->in[n - 1])) >= 0) {
+            nat++;
+            continue;
+        }
+        if (i == n - 1 && kind != BR_NONE && kind != BR_OTHER && emit_branch(t, in, kind, target, lt, lf)) {
+            nat++;
+            ended = true;
+            break;
+        }
+        t->cur = i;
+        t->skip = 0;
+        if (in->len && native(t, in, t->live[i + 1])) {
+            nat += 1 + t->skip;
+            i += t->skip;
+        } else {
+            t->ea_ok = false;
+            emit_fallback(t, in);
+        }
+        if (!in->len) ended = true;
+    }
+    if (!ended) x87_sync(t);
+    if (!ended) emit_exit(t, next, kind == BR_NONE || kind == BR_OTHER ? lf : lt | lf, NULL);
+    n_native += nat;
     if (t->a.p > t->a.end) die("a block outgrew the code cache");
     flush_icache(t->a.start, t->a.p);
 
     b->eip = eip;
+    b->top = (uint8_t)top;
     b->kind = (uint8_t)kind;
-    b->loop = t->loop;
     b->ninsns = (uint16_t)n;
     b->nwords = (uint16_t)(t->a.p - cache_cur);
     b->end = next > eip ? next : eip + 1;
     b->code = cache_cur;
     cache_cur = t->a.p;
     if (perf_map) {
-        fprintf(perf_map, "%x %x x86_%08x\n", (unsigned)(uintptr_t)b->code, (unsigned)((t->a.p - b->code) * 4), eip);
+        fprintf(perf_map, top ? "%x %x x86_%08x_top%u\n" : "%x %x x86_%08x\n", (unsigned)(uintptr_t)b->code,
+                (unsigned)((t->a.p - b->code) * 4), eip, top);
         fflush(perf_map);
     }
     unsigned h = hslot(eip);
@@ -2679,28 +2641,31 @@ static struct block *translate(uint32_t eip)
     return b;
 }
 
-static struct block *find_block(uint32_t eip)
+static struct block *find_block(uint32_t eip, unsigned top)
 {
     for (struct block *b = htab[hslot(eip)]; b; b = b->next)
-        if (b->eip == eip) return b;
+        if (b->eip == eip && b->top == top) return b;
     return NULL;
 }
 
-static void itab_set(uint32_t eip, const uint32_t *code)
+/* The indirect lookup's entry for eip with x87 TOP top: one table per TOP. */
+static itab_entry *itab_at(uint32_t eip, unsigned top) { return &itab[top << ITAB_BITS | islot(eip)]; }
+
+static void itab_set(uint32_t eip, unsigned top, const uint32_t *code)
 {
     uint64_t e = eip | (uint64_t)(uint32_t)(uintptr_t)code << 32;
-    __atomic_store_n((uint64_t *)&itab[islot(eip)], e, __ATOMIC_RELEASE);
+    __atomic_store_n((uint64_t *)itab_at(eip, top), e, __ATOMIC_RELEASE);
 }
 
-static const uint32_t *code_for(uint32_t eip)
+static const uint32_t *code_for(uint32_t eip, unsigned top)
 {
-    uint64_t e = __atomic_load_n((uint64_t *)&itab[islot(eip)], __ATOMIC_ACQUIRE);
+    uint64_t e = __atomic_load_n((uint64_t *)itab_at(eip, top), __ATOMIC_ACQUIRE);
     if ((uint32_t)e == eip) return (const uint32_t *)(uintptr_t)(uint32_t)(e >> 32);
     pthread_mutex_lock(&lock);
     n_lookups++;
-    struct block *b = find_block(eip);
-    if (!b) b = translate(eip);
-    itab_set(eip, b->code);
+    struct block *b = find_block(eip, top);
+    if (!b) b = translate(eip, top);
+    itab_set(eip, top, b->code);
     pthread_mutex_unlock(&lock);
     return b->code;
 }
@@ -2719,28 +2684,20 @@ static void link_exit(uint32_t *site, uint32_t *alt, const uint32_t *code)
     n_links++;
 }
 
-/* The x87 registers' copies the translated code reads past st[7] (C code
-   only writes st[0..7]). */
-static void st_mirror(xcpu *c)
-{
-    memcpy(c->st_hi, c->st, sizeof(c->st));
-}
-
 void jit_run(xcpu *c)
 {
-    st_mirror(c);
     for (;;) {
         uint32_t eip = c->eip;
         if (in_stop(eip)) return;
-        const uint32_t *code = code_for(eip);
+        const uint32_t *code = code_for(eip, c->top & 7);
         if (enter(c, code) != EXIT_LINK) continue;   /* indirect: c->eip is the target */
         uint32_t *w = (uint32_t *)(uintptr_t)c->jit_site;
         uint32_t target = w[0];
         c->eip = target;
         if (in_stop(target)) continue;
         pthread_mutex_lock(&lock);
-        struct block *b = find_block(target);
-        if (!b) b = translate(target);
+        struct block *b = find_block(target, c->top & 7);
+        if (!b) b = translate(target, c->top & 7);
         link_exit(w - 1, (uint32_t *)(uintptr_t)w[1], b->code);
         pthread_mutex_unlock(&lock);
     }
@@ -2762,7 +2719,7 @@ void jit_invalidate(uint32_t addr, uint32_t len)
             *pp = b->next;
             page_remove(b->eip >> 12, b);
             if (((b->end - 1) >> 12) != (b->eip >> 12)) page_remove((b->end - 1) >> 12, b);
-            itab_entry *e = &itab[islot(b->eip)];
+            itab_entry *e = itab_at(b->eip, b->top);
             if (e->code == (uint32_t)(uintptr_t)b->code) __atomic_store_n((uint64_t *)e, 0xFFFFFFFFu, __ATOMIC_RELEASE);
             if (cache_end - cache_cur < 4) die("the code cache is full");
             uint32_t *s = cache_cur;
@@ -2773,11 +2730,6 @@ void jit_invalidate(uint32_t addr, uint32_t len)
             flush_icache(s, cache_cur);
             __atomic_store_n(b->code, a_b(C_AL, b->code, s), __ATOMIC_RELAXED);
             flush_icache(b->code, b->code + 1);
-            if (b->loop) {   /* a thread looping inside it leaves at the next pass */
-                __atomic_store_n(b->loop, (*b->loop & 0xF0000000u) | (a_b(C_AL, b->loop, b->code) & 0x0FFFFFFFu),
-                                 __ATOMIC_RELAXED);
-                flush_icache(b->loop, b->loop + 1);
-            }
             free(b);
             live_blocks--;
         }
@@ -2787,8 +2739,9 @@ void jit_invalidate(uint32_t addr, uint32_t len)
 }
 
 /* The interpreter runs the instruction whose copy site[0] points at; the
-   result is where the trampoline continues: past the call, or the indirect
-   lookup when the instruction jumped. */
+   result is where the trampoline continues: past the call (site[1] is the
+   TOP the code there was translated for), or the indirect lookup when the
+   instruction jumped or left another TOP. */
 uintptr_t jit_fallback(xcpu *c, uint32_t *site);
 uintptr_t jit_fallback(xcpu *c, uint32_t *site)
 {
@@ -2799,17 +2752,18 @@ uintptr_t jit_fallback(xcpu *c, uint32_t *site)
         if (in->op >= 0xD8 && in->op <= 0xDF) fb_x87[in->op - 0xD8][in->reg + (in->mod == 3 ? 8 : 0)]++;
     }
     if (!in->len || xi_exec(c, in) != XI_OK) xrt_fault(c, "invalid instruction");
-    if ((in->op >= 0xD8 && in->op <= 0xDF) || in->op == 0x1AE) st_mirror(c);
-    if (c->eip == in->addr + in->len) return (uintptr_t)(site + 1);
-    return (uintptr_t)indirect;
+    if (c->eip == in->addr + in->len && c->top == site[1]) return (uintptr_t)(site + 2);
+    return (uintptr_t)indirect_any;
 }
 
 /* ---- trampolines -------------------------------------------------------- */
 
-/* Guest registers and flags to xcpu (inv: C holds NOT CF). */
+/* Guest registers, x87 registers and flags to xcpu (inv: C holds NOT CF). */
 static void save_state(asm_t *a, bool inv)
 {
     emit(a, a_stm(R0, 0x0FF0));
+    emit(a, dp_i(C_AL, OP_ADD, 0, R2, R0, O_ST));
+    emit(a, A_VSTMIA(R2, 16, 8));
     emit(a, A_MRS(R2));
     if (inv) emit(a, dp_i(C_AL, OP_EOR, 0, R2, R2, arm_imm(XF_C)));
     emit(a, dp_i(C_AL, OP_AND, 0, R2, R2, arm_imm(0xF0000000u)));
@@ -2829,6 +2783,8 @@ static void gen_trampolines(void)
     emit(&a, dp_i(C_AL, OP_EOR, 0, R2, R2, arm_imm(XF_C)));
     emit(&a, A_MSR(R2));
     emit(&a, a_ldm(R0, 0x0FF0));
+    emit(&a, dp_i(C_AL, OP_ADD, 0, R3, R0, O_ST));
+    emit(&a, A_VLDMIA(R3, 16, 8));                    /* the x87 registers */
     emit(&a, A_BX(R1));
     exit_common = a.p;                                /* r0 = why */
     emit(&a, dp_i(C_AL, OP_ADD, 0, SP, SP, 12));
@@ -2841,27 +2797,39 @@ static void gen_trampolines(void)
     emit(&a, dp_i(C_AL, OP_MOV, 0, R0, 0, EXIT_LINK));
     emit(&a, a_b(C_AL, a.p, exit_common));
 
-    /* indirect exit: r1 = the target eip; flags kept (indirect_nf: not) */
-    uint32_t *miss[2];
-    for (int keep = 1; keep >= 0; keep--) {
-        if (keep) indirect = a.p;
-        else indirect_nf = a.p;
-        if (keep) emit(&a, A_MRS(LR));
-        emit(&a, dp_r(C_AL, OP_EOR, 0, R2, R1, R1, SH_LSR, ITAB_SHIFT));
-        emit(&a, a_movw(C_AL, R3, (uint32_t)(uintptr_t)itab & 0xFFFF));
-        emit(&a, a_movt(C_AL, R3, (uint32_t)(uintptr_t)itab >> 16));
-        emit(&a, A_UBFX(R2, R2, 0, ITAB_BITS));
-        emit(&a, dp_r(C_AL, OP_ADD, 0, R3, R3, R2, SH_LSL, 3));
-        emit(&a, A_LDRD(R2, R3));                     /* r2 = eip, r3 = code */
-        emit(&a, dp_r(C_AL, OP_CMP, 1, 0, R2, R1, SH_LSL, 0));
-        miss[keep] = a.p;
-        emit(&a, 0);
-        if (keep) emit(&a, A_MSR(LR));
-        emit(&a, A_BX(R3));
-    }
-    *miss[1] = a_b(C_NE, miss[1], a.p);
+    /* indirect exit: r1 = the target eip; flags kept (indirect_nf: not).
+       indirect[top] looks in TOP top's table, indirect_any in xcpu's. */
+    uint32_t *miss[2][9];
+    for (int top = 0; top < 9; top++)
+        for (int keep = 1; keep >= 0; keep--) {
+            if (top == 8 && !keep) continue;
+            if (top == 8) indirect_any = a.p;
+            else if (keep) indirect[top] = a.p;
+            else indirect_nf[top] = a.p;
+            if (keep) emit(&a, A_MRS(LR));
+            emit(&a, dp_r(C_AL, OP_EOR, 0, R2, R1, R1, SH_LSR, ITAB_SHIFT));
+            uintptr_t base = (uintptr_t)(itab + (top & 7) * ITAB_SIZE);
+            if (top == 8) base = (uintptr_t)itab;
+            emit(&a, a_movw(C_AL, R3, (uint32_t)base & 0xFFFF));
+            emit(&a, a_movt(C_AL, R3, (uint32_t)base >> 16));
+            emit(&a, A_UBFX(R2, R2, 0, ITAB_BITS));
+            if (top == 8) {
+                emit(&a, dp_r(C_AL, OP_ADD, 0, R3, R3, R2, SH_LSL, 3));
+                emit(&a, A_LDR(R2, R0, O_TOP));
+                emit(&a, dp_r(C_AL, OP_ADD, 0, R3, R3, R2, SH_LSL, ITAB_BITS + 3));
+            } else {
+                emit(&a, dp_r(C_AL, OP_ADD, 0, R3, R3, R2, SH_LSL, 3));
+            }
+            emit(&a, A_LDRD(R2, R3));                 /* r2 = eip, r3 = code */
+            emit(&a, dp_r(C_AL, OP_CMP, 1, 0, R2, R1, SH_LSL, 0));
+            miss[keep][top] = a.p;
+            emit(&a, 0);
+            if (keep) emit(&a, A_MSR(LR));
+            emit(&a, A_BX(R3));
+        }
+    for (int top = 0; top < 9; top++) *miss[1][top] = a_b(C_NE, miss[1][top], a.p);
     emit(&a, A_MSR(LR));
-    *miss[0] = a_b(C_NE, miss[0], a.p);
+    for (int top = 0; top < 8; top++) *miss[0][top] = a_b(C_NE, miss[0][top], a.p);
     emit(&a, A_STR(R1, R0, O_EIP));
     save_state(&a, true);
     emit(&a, dp_i(C_AL, OP_MOV, 0, R0, 0, EXIT_INDIRECT));
@@ -2885,6 +2853,8 @@ static void gen_trampolines(void)
     emit(&a, dp_i(C_AL, OP_EOR, 0, R2, R2, arm_imm(XF_C)));
     emit(&a, A_MSR(R2));
     emit(&a, a_ldm(R0, 0x0FF0));
+    emit(&a, dp_i(C_AL, OP_ADD, 0, R2, R0, O_ST));
+    emit(&a, A_VLDMIA(R2, 16, 8));
     emit(&a, A_LDR(R1, R0, O_EIP));
     emit(&a, A_BX(R12));
 
@@ -2929,8 +2899,9 @@ static void print_hot_blocks(void)
         struct block *b = v[i];
         uint64_t w = (uint64_t)b->count * b->nwords;
         char line[160];
-        snprintf(line, sizeof(line), "x86_%08x %5.2f%% %10u runs %3u insns %4u words", b->eip,
-                 total ? 100.0 * (double)w / (double)total : 0.0, b->count, b->ninsns, b->nwords);
+        int len = snprintf(line, sizeof(line), "x86_%08x %5.2f%% %10u runs %3u insns %4u words", b->eip,
+                           total ? 100.0 * (double)w / (double)total : 0.0, b->count, b->ninsns, b->nwords);
+        if (b->top) snprintf(line + len, sizeof(line) - (size_t)len, " top %u", b->top);
         fprintf(stderr, "xlat:   %s\n", line);
         if (!f) continue;
         fprintf(f, "%s\nx86:", line);
@@ -3005,10 +2976,10 @@ void jit_init(uint32_t lo, uint32_t hi, bool flags_at_stop)
     cache = mmap(NULL, CACHE_BYTES, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (cache == MAP_FAILED) die("cannot map the code cache");
     cache_end = cache + CACHE_BYTES / 4;
-    itab = aligned_alloc(64, ITAB_SIZE * sizeof(*itab));
+    itab = aligned_alloc(64, 8 * ITAB_SIZE * sizeof(*itab));
     pages = calloc(1u << 20, sizeof(*pages));
     if (!itab || !pages) die("out of memory");
-    for (unsigned i = 0; i < ITAB_SIZE; i++) itab[i] = (itab_entry){ 0xFFFFFFFFu, 0 };
+    for (unsigned i = 0; i < 8 * ITAB_SIZE; i++) itab[i] = (itab_entry){ 0xFFFFFFFFu, 0 };
     gen_trampolines();
     if (stats) {
         unsigned secs = (unsigned)atoi(getenv("XLAT_STATS"));
@@ -3022,9 +2993,8 @@ void jit_init(uint32_t lo, uint32_t hi, bool flags_at_stop)
         perf_map = fopen(path, "w");
         /* the trampolines, so a profile shows the time in lookups and exits */
         const struct { uint32_t *from, *to; const char *name; } tr[] = {
-            { (uint32_t *)(uintptr_t)enter, link_tramp, "xlat_enter_exit" }, { link_tramp, indirect, "xlat_link" },
-            { indirect, indirect_nf, "xlat_indirect" }, { indirect_nf, fb_tramp_c, "xlat_indirect_nf" },
-            { fb_tramp_c, cache_blocks, "xlat_fallback" },
+            { (uint32_t *)(uintptr_t)enter, link_tramp, "xlat_enter_exit" }, { link_tramp, indirect[0], "xlat_link" },
+            { indirect[0], fb_tramp_c, "xlat_indirect" }, { fb_tramp_c, cache_blocks, "xlat_fallback" },
         };
         for (unsigned i = 0; perf_map && i < sizeof(tr) / sizeof(tr[0]); i++)
             fprintf(perf_map, "%x %x %s\n", (unsigned)(uintptr_t)tr[i].from,

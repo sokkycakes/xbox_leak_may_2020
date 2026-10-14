@@ -74,16 +74,12 @@ typedef struct xcpu {
     uint32_t eflags;        /* 0x34 the other EFLAGS bits (IF, ID, AC, ...) */
     uint32_t fs_base;       /* 0x38 */
     uint32_t top;           /* 0x3c x87 TOP */
-    union {
-        /* jit_arm.c reads st(i) as st[top + i], with no wrap: st[8..15]
-           repeat st[0..7] (it keeps them so; the interpreter needn't) */
-        double stx[32];
-        struct {
-            double st_lo[8];  /* 0x40 */
-            double st[8];     /* 0x80 x87 registers by physical number: st(i) is st[(top + i) & 7] */
-            double st_hi[16]; /* 0xc0 */
-        };
-    };
+    double st_unused[8];    /* 0x40 */
+    /* 0x80 x87 registers by physical number: st(i) is st[(top + i) & 7].
+       While translated code runs they are in d16-d23 (jit_arm.c), and
+       written here whenever it calls out. */
+    double st[8];
+    double st_unused2[16];  /* 0xc0 */
     uint32_t fpcw;          /* 0x140 */
     uint32_t fpsw;          /* 0x144 status word without TOP */
     uint32_t ftag;          /* 0x148 bit i set: physical register i is empty */
