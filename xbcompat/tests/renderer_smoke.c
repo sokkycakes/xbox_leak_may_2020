@@ -294,6 +294,242 @@ int main(int argc, char **argv)
         texture_states[9] = texture_states[11] = 0;
         texture_states[5] = 2;
         puts("renderer shader controls: cached kill/key toggles and key uniform updates passed");
+        /* Flat strips/fans use the completing vertex's color, while texture
+         * coordinates still interpolate across each primitive. */
+        {
+            uint32_t saved_rs[256],saved_tss[128];
+            memcpy(saved_rs,render_states,sizeof saved_rs);memcpy(saved_tss,texture_states,sizeof saved_tss);
+            render_states[66]=GL_FLAT;render_states[59]=render_states[60]=0;
+            render_states[82]=render_states[92]=render_states[93]=render_states[124]=0;
+            render_states[67]=0xffffffffu;render_states[128]=1;
+            for(int unit=0;unit<4;unit++){set_tex(unit,NULL);texture_states[unit*32+12]=1;}
+            set_ps(0);set_vs(0x144);
+            struct tex_vertex strip[4]={
+                {4,4,.5f,1,0xffff0000,0,0},{60,4,.5f,1,0xff00ff00,1,0},
+                {4,60,.5f,1,0xff0000ff,0,0},{60,60,.5f,1,0xffffffff,1,0}
+            };
+            struct tex_vertex fan[4]={strip[0],strip[1],strip[3],strip[2]};
+            fan[2].color=0xff0000ff;fan[3].color=0xffffffff;
+            for(unsigned kind=0;kind<2;kind++){
+                clear(0,NULL,0xf3,0xff000000,1,0);
+                draw(kind?7:6,4,kind?fan:strip,sizeof strip[0]);
+                glReadPixels(kind?48:16,48,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                assert(pixel[0]<8 && pixel[1]<8 && pixel[2]>240);
+                glReadPixels(kind?16:48,16,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                assert(pixel[0]>240 && pixel[1]>240 && pixel[2]>240);
+            }
+            void *gradient=create_tex(4,1,1,1,0,6,3);ULONG locked[2];
+            lock_tex(gradient,0,locked,NULL,0);
+            const uint32_t colors[4]={0xffff0000,0xff00ff00,0xff0000ff,0xffffffff};
+            memcpy((void *)locked[1],colors,sizeof colors);set_tex(0,gradient);
+            texture_states[12]=texture_states[16]=2;texture_states[14]=texture_states[18]=2;
+            texture_states[0]=texture_states[1]=3;texture_states[3]=texture_states[4]=1;
+            texture_states[5]=texture_states[6]=texture_states[7]=texture_states[21]=0;texture_states[28]=0;
+            for(unsigned kind=0;kind<2;kind++){
+                clear(0,NULL,0xf3,0xff000000,1,0);
+                draw(kind?7:6,4,kind?fan:strip,sizeof strip[0]);
+                glReadPixels(12,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                assert(pixel[0]>240 && pixel[1]<8 && pixel[2]<8);
+                glReadPixels(52,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                assert(pixel[0]>240 && pixel[1]>240 && pixel[2]>240);
+            }
+            set_tex(0,tex);memcpy(render_states,saved_rs,sizeof saved_rs);memcpy(texture_states,saved_tss,sizeof saved_tss);
+            puts("renderer flat primitives: strips/fans completing colors and independent texture interpolation passed");
+        }
+
+        /* Texture transform counts select a projection divisor, which must
+         * remain a varying until fragment sampling. Each texel has a literal
+         * color, avoiding comparison against the renderer's matrix code. */
+        {
+            void (NTAPI *set_transform)(ULONG,const void *)=find("_D3DDevice_SetTransform@8");
+            void (NTAPI *get_transform)(ULONG,void *)=find("_D3DDevice_GetTransform@8");
+            uint32_t saved_tss[128];float saved_matrix[16];
+            memcpy(saved_tss,texture_states,sizeof saved_tss);get_transform(2,saved_matrix);
+            void *projection_tex=create_tex(4,1,1,1,0,6,3);ULONG locked[2];
+            lock_tex(projection_tex,0,locked,NULL,0);
+            const uint32_t colors[4]={0xffff0000,0xff00ff00,0xff0000ff,0xffffffff};
+            memcpy((void *)locked[1],colors,sizeof colors);
+            set_tex(0,projection_tex);set_vs(0x20144); /* four input components */
+            texture_states[0]=texture_states[1]=3;
+            texture_states[3]=texture_states[4]=1;
+            texture_states[5]=texture_states[6]=texture_states[7]=0;
+            texture_states[9]=texture_states[11]=0;texture_states[28]=0;
+            float matrix[16]={2,0,0,0,0,2,0,0,0,0,1,0,0,0,0,1};
+            set_transform(2,matrix);
+            struct {float p[4];uint32_t color;float uv[4];} vertices[4]={
+                {{4,4,.5f,1},0xffffffff,{.1875f,.375f,.5f,.75f}},
+                {{60,4,.5f,1},0xffffffff,{.1875f,.375f,.5f,.75f}},
+                {{4,60,.5f,1},0xffffffff,{.1875f,.375f,.5f,.75f}},
+                {{60,60,.5f,1},0xffffffff,{.1875f,.375f,.5f,.75f}}
+            };
+            const unsigned flags[7]={1,2,3,4,0x102,0x103,0x104};
+            const unsigned expected[7]={1,1,1,1,2,3,2};
+            for(unsigned fragment=0;fragment<2;fragment++){
+                set_ps(fragment?control_ps:0);
+                for(unsigned test=0;test<7;test++){
+                    texture_states[21]=flags[test];
+                    clear(0,NULL,0xf3,0xff000000,1,0);draw(6,4,vertices,sizeof vertices[0]);
+                    glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                    unsigned color=colors[expected[test]];
+                    if (pixel[0] != ((color>>16)&255) || pixel[1] != ((color>>8)&255) || pixel[2] != (color&255))
+                        fprintf(stderr,"projection fragment %u flags %x: %u %u %u expected %08x\\n",fragment,flags[test],pixel[0],pixel[1],pixel[2],color);
+                    assert(abs((int)pixel[0]-(int)((color>>16)&255))<8);
+                    assert(abs((int)pixel[1]-(int)((color>>8)&255))<8);
+                    assert(abs((int)pixel[2]-(int)(color&255))<8);
+                }
+                matrix[0]=matrix[5]=1;set_transform(2,matrix);
+                texture_states[21]=0x104;
+                for(int i=0;i<4;i++){vertices[i].uv[0]=.5f;vertices[i].uv[3]=(i&1)?2:.5f;}
+                clear(0,NULL,0xf3,0xff000000,1,0);draw(6,4,vertices,sizeof vertices[0]);
+                glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                assert(pixel[0]<8 && pixel[1]>240 && pixel[2]<8);
+                matrix[0]=matrix[5]=2;set_transform(2,matrix);
+                for(int i=0;i<4;i++){vertices[i].uv[0]=.1875f;vertices[i].uv[3]=.75f;}
+            }
+            set_transform(2,saved_matrix);set_ps(0);set_vs(0x144);set_tex(0,tex);
+            memcpy(texture_states,saved_tss,sizeof saved_tss);
+            puts("renderer projection: COUNT1-4, selected divisors and interpolation before divide passed");
+        }
+
+        /* Raw NV097 eye methods must survive capture/apply and recorded
+         * push replay. Deliberately leave device-pusher writes pending at
+         * capture, so stale CPU snapshots cannot accidentally pass. */
+        {
+            LONG (NTAPI *create_state)(ULONG,ULONG *)=find("_D3DDevice_CreateStateBlock@8");
+            LONG (NTAPI *capture_state)(ULONG)=find("_D3DDevice_CaptureStateBlock@4");
+            LONG (NTAPI *apply_state)(ULONG)=find("_D3DDevice_ApplyStateBlock@4");
+            LONG (NTAPI *delete_state)(ULONG)=find("_D3DDevice_DeleteStateBlock@4");
+            void (NTAPI *begin_push)(ULONG,ULONG **)=find("_D3DDevice_BeginPush@8");
+            void (NTAPI *end_push)(ULONG *)=find("_D3DDevice_EndPush@4");
+            LONG (NTAPI *create_push)(ULONG,BOOLEAN,void **)=find("_D3DDevice_CreatePushBuffer@12");
+            void (NTAPI *begin_record)(void *)=find("_D3DDevice_BeginPushBuffer@4");
+            LONG (NTAPI *end_record)(void)=find("_D3DDevice_EndPushBuffer@0");
+            void (NTAPI *run_push)(void *,void *)=find("_D3DDevice_RunPushBuffer@8");
+            LONG (NTAPI *cube_face)(void *,ULONG,ULONG,void **)=find("_D3DCubeTexture_GetCubeMapSurface@16");
+            void (NTAPI *lock_surface)(void *,ULONG *,const LONG *,ULONG)=find("_D3DSurface_LockRect@16");
+            ULONG original=0,eye_state=0;
+            assert(create_state(1,&original)==0);
+            void *cube=create_tex(4,4,1,1,0,6,5);
+            const uint32_t faces[6]={0xffff0000,0xff00ffff,0xff00ff00,0xffff00ff,0xff0000ff,0xffffff00};
+            for(unsigned face=0;face<6;face++){
+                void *view=NULL;ULONG locked[2];
+                assert(cube_face(cube,face,0,&view)==0);
+                lock_surface(view,locked,NULL,0);
+                for(int i=0;i<16;i++)((uint32_t *)locked[1])[i]=faces[face];
+            }
+            ULONG def[60]={0},reflection_ps=0;
+            def[8]=11;def[9]=0x1bu<<8;def[54]=4|(17<<5)|(17<<10)|(18<<15);
+            create_ps(def,&reflection_ps);assert(reflection_ps);
+            set_ps(reflection_ps);set_vs(0x22220444); /* four 4D coordinates */
+            for(int unit=0;unit<4;unit++){
+                set_tex(unit,unit==3?cube:NULL);
+                texture_states[unit*32+3]=texture_states[unit*32+4]=1;
+                texture_states[unit*32+5]=texture_states[unit*32+6]=texture_states[unit*32+7]=0;
+                texture_states[unit*32+9]=texture_states[unit*32+11]=texture_states[unit*32+21]=0;
+                texture_states[unit*32+28]=unit;
+            }
+            render_states[59]=render_states[60]=render_states[82]=render_states[92]=render_states[124]=0;
+            render_states[67]=0xffffffffu;
+            struct {float p[4];uint32_t color;float t[4][4];} vertices[3]={
+                {{4,4,.5f,1},0xffffffff,{{1,0,0,1},{2,0,0,7},{0,0,0,9},{0,0,0,11}}},
+                {{60,4,.5f,1},0xffffffff,{{1,0,0,1},{2,0,0,7},{0,0,0,9},{0,0,0,11}}},
+                {{32,60,.5f,1},0xffffffff,{{1,0,0,1},{2,0,0,7},{0,0,0,9},{0,0,0,11}}}
+            };
+            const ULONG eye_a[4]={(3u<<18)|0x181c,0x3e4ccccd,0x3f800000,0};
+            const ULONG eye_b[4]={(3u<<18)|0x181c,0xbf800000,0,0};
+            ULONG *pending=(ULONG *)((ULONG *)device)[0];
+            memcpy(pending,eye_a,sizeof eye_a);((ULONG *)device)[0]=(ULONG)(pending+4);
+            assert(create_state(1,&eye_state)==0);
+            void *recorded=NULL;assert(create_push(128,0,&recorded)==0 && recorded);
+            for(int pass=0;pass<7;pass++){
+                ULONG *raw;
+                if(pass==1){begin_push(4,&raw);memcpy(raw,eye_b,sizeof eye_b);end_push(raw+4);}
+                if(pass==2)assert(apply_state(eye_state)==0);
+                if(pass==3){
+                    pending=(ULONG *)((ULONG *)device)[0];
+                    memcpy(pending,eye_b,sizeof eye_b);((ULONG *)device)[0]=(ULONG)(pending+4);
+                    assert(capture_state(eye_state)==0);
+                    begin_push(4,&raw);memcpy(raw,eye_a,sizeof eye_a);end_push(raw+4);
+                    assert(apply_state(eye_state)==0);
+                }
+                if(pass==4){
+                    begin_record(recorded);begin_push(4,&raw);
+                    memcpy(raw,eye_a,sizeof eye_a);end_push(raw+4);assert(end_record()==0);
+                }
+                if(pass==5)run_push(recorded,NULL);
+                if(pass==6)assert(apply_state(eye_state)==0);
+                clear(0,NULL,0xf3,0xff000000,1,0);draw(5,3,vertices,sizeof vertices[0]);
+                glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                bool magenta=pass==0||pass==2||pass==5;
+                assert(pixel[magenta?0:1]>240 && pixel[magenta?1:0]<8 && pixel[2]>240);
+            }
+            assert(apply_state(original)==0);
+            delete_state(eye_state);delete_state(original);
+            puts("renderer reflection eye: pending raw methods, state capture/apply and push recording/replay passed");
+        }
+
+        /* LOD controls must affect both fragment paths and reset on cached
+         * images. A 16x16 chain uses red/green/blue authored levels. */
+        {
+            uint32_t saved_tss[128]; memcpy(saved_tss,texture_states,sizeof saved_tss);
+            void *lod_tex=create_tex(16,16,1,3,0,6,3);
+            const uint32_t colors[3]={0xffff0000,0xff00ff00,0xff0000ff};
+            for(unsigned level=0;level<3;level++){
+                ULONG locked[2];lock_tex(lod_tex,level,locked,NULL,0);
+                for(unsigned i=0;i<(16u>>level)*(16u>>level);i++)((uint32_t *)locked[1])[i]=colors[level];
+            }
+            set_tex(0,lod_tex);set_vs(0x144);
+            texture_states[3]=texture_states[4]=texture_states[5]=1;
+            texture_states[9]=texture_states[11]=0;
+            for(unsigned fragment=0;fragment<2;fragment++){
+                set_ps(fragment?control_ps:0);
+                /* rho=4 gives LOD 2; biases -2/-1/0 select levels 0/1/2. */
+                for(unsigned level=0;level<3;level++){
+                    float bias=(float)level-2;
+                    memcpy(&texture_states[6],&bias,4);texture_states[7]=0;
+                    textured[0].u=0;textured[0].v=0;
+                    textured[1].u=14;textured[1].v=0;
+                    textured[2].u=7;textured[2].v=14;
+                    clear(0,NULL,0xf3,0xff000000,1,0);
+                    draw(5,3,textured,sizeof textured[0]);
+                    glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                    assert(pixel[level]>240 && pixel[(level+1)%3]<8 && pixel[(level+2)%3]<8);
+                }
+                texture_states[6]=0;
+                for(unsigned pass=0;pass<4;pass++){
+                    unsigned level=pass==3?0:pass;
+                    texture_states[7]=level;
+                    for(int v=0;v<3;v++)textured[v].u=textured[v].v=.5f;
+                    clear(0,NULL,0xf3,0xff000000,1,0);draw(5,3,textured,sizeof textured[0]);
+                    glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                    assert(pixel[level]>240 && pixel[(level+1)%3]<8 && pixel[(level+2)%3]<8);
+                }
+            }
+            /* One image on two units must retain independent mip bounds. */
+            set_tex(1,lod_tex);texture_states[28]=texture_states[32+28]=0;
+            texture_states[32+3]=texture_states[32+4]=texture_states[32+5]=1;
+            texture_states[32+6]=0;
+            ULONG multi_def[60]={0},multi_ps=0;
+            multi_def[8]=(0x20u<<24)|(8u<<16)|9u; /* (1-zero)*T0 + T1 */
+            multi_def[9]=0x18u<<8;multi_def[54]=1|(1<<5);
+            create_ps(multi_def,&multi_ps);
+            texture_states[32+12]=7;texture_states[32+14]=2;texture_states[32+15]=1; /* texture + current */
+            texture_states[32+16]=2;texture_states[32+18]=2;
+            for(unsigned fragment=0;fragment<2;fragment++){
+                set_ps(fragment?multi_ps:0);
+                for(unsigned pass=0;pass<2;pass++){
+                    texture_states[7]=pass?2:0;texture_states[32+7]=pass?0:2;
+                    clear(0,NULL,0xf3,0xff000000,1,0);draw(5,3,textured,sizeof textured[0]);
+                    glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                    assert(pixel[0]>240 && pixel[1]<8 && pixel[2]>240);
+                }
+            }
+            set_tex(1,NULL);
+            set_ps(0);set_tex(0,tex);
+            memcpy(texture_states,saved_tss,sizeof saved_tss);
+            puts("renderer LOD: signed bias, minimum sampled mip and cached reset on both fragment paths passed");
+        }
+
         /* A partial CopyRects into the backbuffer must preserve untouched GPU
          * pixels before the full CPU image is flushed back to the renderer. */
         {
@@ -496,6 +732,44 @@ int main(int argc, char **argv)
             draw(5,3,plain,sizeof plain[0]);
             glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
             assert(pixel[0] > 240 && pixel[1] < 8 && pixel[2] < 8);
+
+            /* COLOR2 alpha must survive both native attribute layouts.
+             * Toggle COLORVERTEX without changing the cached program. */
+            {
+                LONG (NTAPI *create_color_vs)(const ULONG *,const ULONG *,ULONG *,ULONG) =
+                    find("_D3DDevice_CreateVertexShader@16");
+                void (NTAPI *delete_color_vs)(ULONG) = find("_D3DDevice_DeleteVertexShader@4");
+                const ULONG color_decl[] = {
+                    0x20000000,0x40320000,0x40320002,0x40400003,0x40400004,0xffffffff
+                };
+                ULONG color_vs = 0;
+                assert(create_color_vs(color_decl,NULL,&color_vs,0) == 0 && color_vs);
+                struct { float p[3],n[3]; uint32_t primary,secondary; } colors[3] = {
+                    {{-.75f,-.75f,2},{0,0,1},0xff0000ff,0x4000ff00},
+                    {{ .75f,-.75f,2},{0,0,1},0xff0000ff,0x4000ff00},
+                    {{0,.75f,2},{0,0,1},0xff0000ff,0x4000ff00}
+                };
+                render_states[67] = 0xffffffffu;
+                render_states[101] = 2;
+                for (unsigned layout = 0; layout < 2; layout++) {
+                    set_vs(layout ? color_vs : 0xd2); /* XYZ/NORMAL/DIFFUSE/SPECULAR */
+                    for (unsigned pass = 0; pass < 3; pass++) {
+                        render_states[95] = pass != 1;
+                        clear(0,NULL,0xf3,0xff000000,1,0);
+                        draw(5,3,colors,sizeof colors[0]);
+                        glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                        if (pass == 1)
+                            assert(pixel[0] > 240 && pixel[1] < 8 && pixel[3] > 240);
+                        else
+                            assert(pixel[0] < 8 && pixel[1] > 240 && abs((int)pixel[3]-64) <= 2);
+                        assert(pixel[2] < 8);
+                    }
+                }
+                set_vs(0x12);
+                delete_color_vs(color_vs);
+                render_states[101] = 1;
+                puts("renderer COLOR2: FVF/declaration RGBA and material-source toggles passed");
+            }
 
             /* Ambient point contribution isolates range from varying
              * vertex-to-light angles across the triangle. */
@@ -706,6 +980,99 @@ int main(int argc, char **argv)
             puts("renderer programmable points: oPts selection, toggles and fixed-function return passed");
         }
 
+
+        /* Logical constant endpoints and NORESERVEDCONSTANTS are independent
+         * of the low mode bits. Viewport updates and draws must both honor it. */
+        {
+            LONG (NTAPI *create_vshader)(const ULONG *,const ULONG *,ULONG *,ULONG) =
+                find("_D3DDevice_CreateVertexShader@16");
+            void (NTAPI *delete_vshader)(ULONG) = find("_D3DDevice_DeleteVertexShader@4");
+            void (NTAPI *set_mode)(ULONG) = find("_D3DDevice_SetShaderConstantMode@4");
+            void (NTAPI *get_mode)(ULONG *) = find("_D3DDevice_GetShaderConstantMode@4");
+            void (NTAPI *set_constant)(LONG,const float *,ULONG) = find("_D3DDevice_SetVertexShaderConstant@12");
+            void (NTAPI *get_constant)(LONG,float *,ULONG) = find("_D3DDevice_GetVertexShaderConstant@12");
+            void (NTAPI *set_viewport)(const void *) = find("_D3DDevice_SetViewport@4");
+            void (NTAPI *get_viewport)(void *) = find("_D3DDevice_GetViewport@4");
+            struct { ULONG x,y,w,h; float min,max; } viewport;
+            ULONG old_mode;
+            uint32_t saved_rs[256],saved_tss[128];
+            memcpy(saved_rs,render_states,sizeof saved_rs);
+            memcpy(saved_tss,texture_states,sizeof saved_tss);
+            get_mode(&old_mode); get_viewport(&viewport);
+            const LONG registers[4] = {-96,0,95,-38};
+            float saved[4][4],reserved[2][4];
+            for (int i=0;i<4;i++) get_constant(registers[i],saved[i],1);
+            get_constant(-38,&reserved[0][0],2);
+            const float green[4] = {0,1,0,1};
+            const ULONG decl[] = {0x20000000,0x40420000,0xffffffff};
+            ULONG shaders[4];
+            for (int i=0;i<4;i++) {
+                /* MOV oPos,v0; MOV oD0,c[physical slot]. */
+                ULONG code[] = {0x00022078,
+                    0,0x0020001b,0x08000000,0x0000f800,
+                    0,0x0020001b | ((registers[i]+96)<<13),0x0c000000,0x0000f819};
+                assert(create_vshader(decl,code,&shaders[i],0)==0 && shaders[i]);
+            }
+            ULONG def[60]={0},constant_ps=0;
+            def[8]=4;def[9]=0x14u<<8;
+            create_ps(def,&constant_ps);set_ps(constant_ps);
+            render_states[59]=render_states[60]=render_states[82]=0;
+            render_states[92]=render_states[93]=render_states[109]=render_states[124]=0;
+            render_states[67]=0xffffffffu;
+            render_states[106]=0x40800000u;
+            for(int unit=0;unit<4;unit++){set_tex(unit,NULL);texture_states[unit*32+12]=1;}
+            const float vertex[4]={32,32,.5f,1};
+            for(ULONG mode=0;mode<3;mode++) {
+                set_mode(mode|0x10);
+                ULONG actual;get_mode(&actual);assert(actual==(mode|0x10));
+                for(int i=0;i<4;i++) set_constant(registers[i],green,1);
+                set_viewport(&viewport);
+                for(int i=0;i<4;i++) {
+                    float value[4];get_constant(registers[i],value,1);
+                    assert(!memcmp(value,green,sizeof value));
+                    set_vs(shaders[i]);
+                    clear(0,NULL,0xf3,0xff000000,1,0);
+                    draw(1,1,vertex,sizeof vertex);
+                    glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                    assert(pixel[0]<8 && pixel[1]>240 && pixel[2]<8 && pixel[3]>240);
+                }
+                /* Interleave legacy and owned fixed-function vertex paths.
+                 * Neither may overwrite application constants or poison the
+                 * cached programmable upload when that program resumes. */
+                struct vertex fixed={32,32,.5f,1,0xffff0000};
+                for(int owned=0;owned<2;owned++){
+                    texture_states[21]=owned?2:0;
+                    set_vs(0x44);
+                    clear(0,NULL,0xf3,0xff000000,1,0);draw(1,1,&fixed,sizeof fixed);
+                    glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                    assert(pixel[0]>240 && pixel[1]<8 && pixel[2]<8);
+                    for(int i=0;i<4;i++){
+                        float value[4];get_constant(registers[i],value,1);
+                        assert(!memcmp(value,green,sizeof value));
+                    }
+                    set_vs(shaders[3]);
+                    clear(0,NULL,0xf3,0xff000000,1,0);draw(1,1,vertex,sizeof vertex);
+                    glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                    assert(pixel[0]<8 && pixel[1]>240 && pixel[2]<8);
+                }
+                texture_states[21]=0;
+                set_mode(mode);
+                set_viewport(&viewport);
+                float value[4];get_constant(-38,value,1);
+                assert(value[0]==viewport.w*.5f && value[1]==-(float)viewport.h*.5f);
+                get_constant(-37,value,1);
+                assert(value[0]==viewport.x+viewport.w*.5f && value[1]==viewport.y+viewport.h*.5f);
+            }
+            set_mode(old_mode);set_viewport(&viewport);
+            for(int i=0;i<4;i++)set_constant(registers[i],saved[i],1);
+            set_constant(-38,&reserved[0][0],2);
+            set_ps(0);set_vs(0x144);
+            for(int i=0;i<4;i++)delete_vshader(shaders[i]);
+            set_tex(0,tex);
+            memcpy(render_states,saved_rs,sizeof saved_rs);
+            memcpy(texture_states,saved_tss,sizeof saved_tss);
+            puts("renderer constants: endpoints, three modes and reserved viewport toggles passed");
+        }
 
         /* Programmable fog is evaluated before interpolation. Literal endpoint
          * factors separate exp/interpolate from interpolate/exp, and distinguish
@@ -1005,6 +1372,36 @@ int main(int argc, char **argv)
             render_states[92] = render_states[124] = 0;
             texture_states[3] = texture_states[4] = 1;
             texture_states[5] = texture_states[9] = texture_states[11] = texture_states[21] = 0;
+            LONG (NTAPI *create_image)(ULONG,ULONG,ULONG,void **)=find("_D3DDevice_CreateImageSurface@16");
+            void (NTAPI *lock_image)(void *,ULONG *,const LONG *,ULONG)=find("_D3DSurface_LockRect@16");
+            void (NTAPI *describe_image)(void *,ULONG *)=find("_D3DSurface_GetDesc@8");
+            for(unsigned f=0;f<sizeof formats/sizeof formats[0];f++){
+                void *image=NULL,*destination=create_tex(4,2,1,1,0,formats[f].swizzled,3),*view=NULL;
+                assert(create_image(4,2,formats[f].swizzled,&image)==0);
+                ULONG desc[7],locked[2];describe_image(image,desc);
+                assert(desc[0]==formats[f].linear && desc[5]==4 && desc[6]==2);
+                lock_image(image,locked,NULL,0);
+                unsigned char *data=(void *)locked[1];
+                memset(data,0xee,locked[0]*2);
+                for(int y=0;y<2;y++)for(int x=0;x<4;x++)
+                    memcpy(data+y*locked[0]+x*formats[f].bytes,&formats[f].texel,formats[f].bytes);
+                assert(surface(destination,0,&view)==0);copy_rects(image,NULL,0,view,NULL);
+                set_tex(0,destination);
+                for(int v=0;v<3;v++)textured[v].u=textured[v].v=.75f;
+                clear(0,NULL,0xf3,0xff000000,1,0);draw(5,3,textured,sizeof textured[0]);
+                glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                for(int channel=0;channel<4;channel++)
+                    assert(abs((int)pixel[channel]-formats[f].rgba[channel])<=3);
+            }
+            /* Equal byte size does not make L8 and AL8 interchangeable. */
+            {
+                void *a=NULL,*b=NULL;ULONG al[2],bl[2];
+                assert(create_image(4,2,0,&a)==0 && create_image(4,2,1,&b)==0);
+                lock_image(a,al,NULL,0);lock_image(b,bl,NULL,0);
+                memset((void *)al[1],0x11,al[0]*2);memset((void *)bl[1],0x77,bl[0]*2);
+                copy_rects(a,NULL,0,b,NULL);
+                for(unsigned i=0;i<bl[0]*2;i++)assert(((unsigned char *)bl[1])[i]==0x77);
+            }
             for (unsigned f = 0; f < sizeof formats/sizeof formats[0]; f++)
                 for (unsigned linear = 0; linear < 2; linear++) {
                     unsigned fmt = linear ? formats[f].linear : formats[f].swizzled;
@@ -1251,8 +1648,8 @@ int main(int argc, char **argv)
 
         /* Integer depth/stencil texture views retain independent mip contents,
          * and CopyRects preserves the untouched destination depth and stencil. */
-        {
-            void *color = create_tex(8,8,1,2,0,6,3), *depth = create_tex(8,8,1,2,0,0x2a,3);
+        for (unsigned depth_format=0x2a; depth_format<=0x2c; depth_format+=2) {
+            void *color = create_tex(8,8,1,2,0,6,3), *depth = create_tex(8,8,1,2,0,depth_format,3);
             void *color0=NULL,*color1=NULL,*depth0=NULL,*depth1=NULL;
             assert(surface(color,0,&color0)==0 && surface(color,1,&color1)==0);
             assert(surface(depth,0,&depth0)==0 && surface(depth,1,&depth1)==0);
@@ -1262,20 +1659,53 @@ int main(int argc, char **argv)
             set_rt(color0,depth0);
             float z=0; unsigned char stencil=0;
             glReadPixels(2,2,1,1,GL_DEPTH_COMPONENT,GL_FLOAT,&z);
-            glReadPixels(2,2,1,1,GL_STENCIL_INDEX,GL_UNSIGNED_BYTE,&stencil);
-            assert(z>.249f && z<.251f && stencil==0x12);
+            if (depth_format==0x2a) glReadPixels(2,2,1,1,GL_STENCIL_INDEX,GL_UNSIGNED_BYTE,&stencil);
+            assert(z>.249f && z<.251f && (depth_format!=0x2a || stencil==0x12));
             LONG rect[4]={0,0,2,2},point[2]={0,0};
             copy_rects(depth0,rect,1,depth1,point);
             set_rt(color1,depth1);
             glReadPixels(0,0,1,1,GL_DEPTH_COMPONENT,GL_FLOAT,&z);
-            glReadPixels(0,0,1,1,GL_STENCIL_INDEX,GL_UNSIGNED_BYTE,&stencil);
-            assert(z>.249f && z<.251f && stencil==0x12);
+            if (depth_format==0x2a) glReadPixels(0,0,1,1,GL_STENCIL_INDEX,GL_UNSIGNED_BYTE,&stencil);
+            assert(z>.249f && z<.251f && (depth_format!=0x2a || stencil==0x12));
             glReadPixels(3,3,1,1,GL_DEPTH_COMPONENT,GL_FLOAT,&z);
-            glReadPixels(3,3,1,1,GL_STENCIL_INDEX,GL_UNSIGNED_BYTE,&stencil);
-            assert(z>.749f && z<.751f && stencil==0x34);
+            if (depth_format==0x2a) glReadPixels(3,3,1,1,GL_STENCIL_INDEX,GL_UNSIGNED_BYTE,&stencil);
+            assert(z>.749f && z<.751f && (depth_format!=0x2a || stencil==0x34));
             set_rt(back,NULL); set_tex(0,tex);
-            puts("renderer depth views: D24S8 mip attachment and partial depth/stencil copy passed");
+            printf("renderer depth views: format %02x mip attachment and partial copy passed\n",depth_format);
         }
+
+        /* Distinct standalone depth surfaces must not share a scratch image.
+         * Copy into an already attached destination, then lock it read-only. */
+        for(unsigned format=0x2a;format<=0x2c;format+=2){
+            LONG (NTAPI *create_depth)(ULONG,ULONG,ULONG,ULONG,void **)=find("_D3DDevice_CreateDepthStencilSurface@20");
+            void (NTAPI *lock_surface)(void *,ULONG *,const LONG *,ULONG)=find("_D3DSurface_LockRect@16");
+            void *color=create_tex(8,8,1,1,0,6,3),*color_view=NULL,*depth_a=NULL,*depth_b=NULL;
+            assert(surface(color,0,&color_view)==0);
+            assert(create_depth(8,8,format,0,&depth_a)==0 && create_depth(8,8,format,0,&depth_b)==0);
+            set_tex(0,NULL);
+            set_rt(color_view,depth_a);clear(0,NULL,0xf3,0xff000000,.25f,0x12);
+            set_rt(color_view,depth_b);clear(0,NULL,0xf3,0xff000000,.75f,0x34);
+            set_rt(color_view,depth_a);
+            float z=0;glReadPixels(1,1,1,1,GL_DEPTH_COMPONENT,GL_FLOAT,&z);
+            assert(z>.249f && z<.251f);
+            set_rt(color_view,depth_b);
+            LONG rect[4]={0,0,2,2},point[2]={0,0};copy_rects(depth_a,rect,1,depth_b,point);
+            glReadPixels(0,0,1,1,GL_DEPTH_COMPONENT,GL_FLOAT,&z);assert(z>.249f && z<.251f);
+            glReadPixels(6,6,1,1,GL_DEPTH_COMPONENT,GL_FLOAT,&z);assert(z>.749f && z<.751f);
+            ULONG locked[2];lock_surface(depth_b,locked,NULL,0x80);
+            unsigned char *data=(void *)locked[1];
+            if(format==0x2a){
+                uint32_t copied=*(uint32_t *)data,untouched=*(uint32_t *)(data+6*locked[0]+6*4);
+                assert((copied&255)==0x12 && (untouched&255)==0x34);
+                assert((copied>>8)>4190000 && (copied>>8)<4200000);
+                assert((untouched>>8)>12580000 && (untouched>>8)<12590000);
+            }else{
+                uint16_t copied=*(uint16_t *)data,untouched=*(uint16_t *)(data+6*locked[0]+6*2);
+                assert(copied>16370 && copied<16400 && untouched>49140 && untouched<49170);
+            }
+            set_rt(back,NULL);set_tex(0,tex);
+        }
+        puts("renderer standalone depth: independent images, active partial copies and read-only locks passed");
 
         /* Same-format DXT copies preserve whole encoded blocks and support
          * cached destinations, overlap and the final sub-4x4 mip footprint. */
@@ -1342,6 +1772,8 @@ int main(int argc, char **argv)
         {
             void (NTAPI *lock_volume)(void *,ULONG,ULONG *,const LONG *,ULONG) =
                 find("_D3DVolumeTexture_LockBox@20");
+            LONG (NTAPI *get_volume)(void *,ULONG,void **)=find("_D3DVolumeTexture_GetVolumeLevel@12");
+            void (NTAPI *lock_view)(void *,ULONG *,const LONG *,ULONG)=find("_D3DVolume_LockBox@16");
             ULONG volume_def[60] = {0}, volume_ps = 0;
             volume_def[8] = 8;
             volume_def[9] = 0x18u << 8;
@@ -1383,6 +1815,21 @@ int main(int argc, char **argv)
                         entry[color_offset] = endpoint & 255;
                         entry[color_offset+1] = endpoint >> 8;
                     }
+                }
+                /* Whole-origin boxes and volume views must address the same
+                 * authored mip storage, including a final partial block.
+                 * These checks make no claim about nonzero packed-slab origins. */
+                for(unsigned level=0;level<2;level++){
+                    ULONG whole[3],boxed[3],view_lock[3];void *view=NULL;
+                    lock_volume(volume_tex,level,whole,NULL,0x80);
+                    LONG box[6]={0,0,4,4,0,1};
+                    lock_volume(volume_tex,level,boxed,box,0x80);
+                    assert(whole[2]==boxed[2]);
+                    assert(whole[0]==(level?1u:2u)*block_bytes);
+                    assert(whole[1]==(level?1u:4u)*block_bytes);
+                    assert(get_volume(volume_tex,level,&view)==0 && view);
+                    lock_view(view,view_lock,box,0x80);
+                    assert(!memcmp(view_lock,boxed,sizeof boxed));
                 }
                 set_tex(0,volume_tex);
                 texture_states[5] = 0;
