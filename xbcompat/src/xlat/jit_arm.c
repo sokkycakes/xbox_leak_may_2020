@@ -924,17 +924,73 @@ static void x_store(tctx *t, const xinsn *in, int kind, int s)
     E(kind == 2 ? a_vstr(s, base, off) : a_vstr_s(XS_TMP, base, off));
 }
 
-/* SIGBUS in translated code: an unaligned vldr or vstr (guest x87 data
-   can be anywhere).  Does the access through the signal frame and steps
-   past it. */
+/* An out-of-line copy of the vldr or vstr w at site that takes any
+   alignment: core loads and stores do, VFP ones fault unless word aligned.
+   Saves the core registers it uses on the host stack and branches back
+   past site.  NULL when the cache is full (with the lock held). */
+static uint32_t *unaligned_stub(const uint32_t *site, uint32_t w)
+{
+    if (cache_end - cache_cur < 9) return NULL;
+    int rn = w >> 16 & 15, load = w >> 20 & 1, dbl = w >> 8 & 1;
+    unsigned list = dbl && !load ? 1u << R10 | 1u << R11 | 1u << R12 : 1u << R11 | 1u << R12;
+    asm_t a = { cache_cur, cache_cur, cache_end };
+    emit(&a, A_PUSH(list));
+    emit(&a, dp_i(C_AL, (w >> 23 & 1) ? OP_ADD : OP_SUB, 0, R12, rn, arm_imm((w & 0xFF) * 4)));
+    if (!dbl) {
+        int s = (int)((w >> 12 & 15) << 1 | (w >> 22 & 1));
+        if (load) {
+            emit(&a, A_LDR(R11, R12, 0));
+            emit(&a, A_VMOV_SR(s, R11));
+        } else {
+            emit(&a, A_VMOV_RS(R11, s));
+            emit(&a, A_STR(R11, R12, 0));
+        }
+    } else {
+        int d = (int)((w >> 22 & 1) << 4 | (w >> 12 & 15));
+        if (load) {
+            emit(&a, A_LDR(R11, R12, 0));
+            emit(&a, A_LDR(R12, R12, 4));
+            emit(&a, A_VMOV_DRR(d, R11, R12));
+        } else {
+            emit(&a, A_VMOV_RRD(R10, R11, d));
+            emit(&a, A_STR(R10, R12, 0));
+            emit(&a, A_STR(R11, R12, 4));
+        }
+    }
+    emit(&a, A_POP(list));
+    emit(&a, a_b(C_AL, a.p, site + 1));
+    uint32_t *stub = cache_cur;
+    cache_cur = a.p;
+    flush_icache(stub, cache_cur);
+    return stub;
+}
+
+static uint64_t n_unaligned_sites, n_unaligned_slow;
+
+/* SIGBUS in translated code: an unaligned vldr or vstr (guest float data
+   can be anywhere, and some titles keep it packed).  The first fault at a
+   site points it at an unaligned_stub, so the access runs again through
+   the stub and later ones never fault; when the cache is full, the access
+   is done here through the signal frame instead. */
 bool jit_fix_unaligned(void *ucontext)
 {
     ucontext_t *uc = ucontext;
     unsigned long *r = &uc->uc_mcontext.arm_r0;
-    const uint32_t *pc = (const uint32_t *)uc->uc_mcontext.arm_pc;
+    uint32_t *pc = (uint32_t *)uc->uc_mcontext.arm_pc;
     if (!cache || pc < cache || pc >= cache_end) return false;
-    uint32_t w = *pc;
-    if ((w & 0xFF200E00u) != 0xED000A00u || (w >> 16 & 15) == 15) return false;
+    uint32_t w = __atomic_load_n(pc, __ATOMIC_RELAXED);
+    if ((w & 0x0F000000u) == 0x0A000000u) return true;   /* another thread patched it meanwhile */
+    if ((w & 0xFF200E00u) != 0xED000A00u || (w >> 16 & 15) == 15 || (w >> 16 & 15) == SP) return false;
+    pthread_mutex_lock(&lock);
+    uint32_t *stub = __atomic_load_n(pc, __ATOMIC_RELAXED) == w ? unaligned_stub(pc, w) : NULL;
+    if (stub) {
+        __atomic_store_n(pc, a_b(C_AL, pc, stub), __ATOMIC_RELAXED);
+        flush_icache(pc, pc + 1);
+        n_unaligned_sites++;
+    }
+    pthread_mutex_unlock(&lock);
+    if (stub || __atomic_load_n(pc, __ATOMIC_RELAXED) != w) return true;
+    n_unaligned_slow++;
     uint32_t off = (w & 0xFF) * 4;
     uint32_t addr = (uint32_t)r[w >> 16 & 15] + ((w >> 23 & 1) ? off : -off);
     unsigned long *p = uc->uc_regspace, *end = p + sizeof(uc->uc_regspace) / sizeof(*p);
@@ -2957,6 +3013,9 @@ void jit_print_stats(void)
     fprintf(stderr, "xlat: %llu blocks, %llu instructions (%llu native), %u KB of code, %llu links, %llu C lookups\n",
             (unsigned long long)n_blocks, (unsigned long long)n_insns, (unsigned long long)n_native,
             (unsigned)((cache_cur - cache) * 4 / 1024), (unsigned long long)n_links, (unsigned long long)n_lookups);
+    if (n_unaligned_sites || n_unaligned_slow)
+        fprintf(stderr, "xlat: %llu unaligned float access sites rerouted, %llu accesses done in the fault handler\n",
+                (unsigned long long)n_unaligned_sites, (unsigned long long)n_unaligned_slow);
     uint64_t total = 0;
     for (int i = 0; i < 0x200; i++) total += fb_count[i];
     fprintf(stderr, "xlat: %llu interpreted instructions; most frequent:\n", (unsigned long long)total);
