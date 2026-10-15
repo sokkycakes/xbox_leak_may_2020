@@ -155,6 +155,7 @@ static bool PickSion(Wifi_AccessPoint *out)
 // link screen can show whether the Sion's replies reach this DS at all.
 
 static u8 diag_bssid[6], diag_me[6];
+static u32 diag_hw_base[18];
 static volatile u32 diag_beacons, diag_auth, diag_assoc, diag_data,
                     diag_other_sion, diag_to_me, diag_total;
 
@@ -214,6 +215,12 @@ static void ShowRadio(void)
     printf("  other       %lu\n", (unsigned long)diag_other_sion);
     printf("To this DS:   %lu\n", (unsigned long)diag_to_me);
     printf("All frames:   %lu\n", (unsigned long)diag_total);
+
+    // The radio's own RX/TX statistics counters, registers 1B0-1C1
+    printf("\nRadio counters 1B0-1C1:\n");
+    for (int i = 0; i < 18; i++)
+        printf("%5lu%s", (unsigned long)(Wifi_GetStats(WSTAT_HW_1B0 + i) - diag_hw_base[i]),
+               (i % 6) == 5 ? "\n" : "");
 }
 
 static bool Join(Wifi_AccessPoint *ap)
@@ -224,6 +231,8 @@ static bool Join(Wifi_AccessPoint *ap)
     Wifi_GetData(WIFIGETDATA_MACADDRESS, 6, diag_me);
     diag_beacons = diag_auth = diag_assoc = diag_data = diag_other_sion = 0;
     diag_to_me = diag_total = 0;
+    for (int i = 0; i < 18; i++)
+        diag_hw_base[i] = Wifi_GetStats(WSTAT_HW_1B0 + i);
     Wifi_RawSetPacketHandler(RawFrame);
     Wifi_SetPromiscuousMode(1);
 
@@ -300,7 +309,7 @@ static void Linked(void)
             return;
         }
 
-        if (!welcomed && now - last_heard > 4000)
+        if (!welcomed && now - last_heard > 30000)
         {
             Title("The Sion didn't answer.\n\nPress any button.");
             ShowRadio();
