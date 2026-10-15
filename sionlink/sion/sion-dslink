@@ -81,7 +81,7 @@ do_start() {
     for a in "$@"; do
         case "$a" in --force) force=1 ;; *) want_ch=$a ;; esac
     done
-    [ -e "$RUN/hostapd.pid" ] && { log "already running"; return 0; }
+    [ -f "$RUN/hostapd.pid" ] && kill -0 "$(cat "$RUN/hostapd.pid")" 2>/dev/null && { log "already running"; return 0; }
     # sion-netd would otherwise treat the DS network as a second home Wi-Fi
     # and move the Sion's address and default route onto it.
     if ! grep -q 'ifc" = sionds' /usr/libexec/sion-netd; then
@@ -112,18 +112,21 @@ do_start() {
     fi
 
     mkdir -p "$RUN"
-    if ! iw dev "$AP_IF" info >/dev/null 2>&1; then
-        iw phy "$phy" interface add "$AP_IF" type __ap || { log "couldn't add $AP_IF"; return 1; }
-        # A different, locally administered MAC from the home interface
-        mac=$(cat /sys/class/net/$PHY_IF/address)
-        ip link set "$AP_IF" address "02:${mac#*:}" 2>/dev/null
-    fi
+    # Always start from a fresh interface: one left behind by a hostapd that
+    # died can still be beaconing, and a new hostapd then fails to start.
+    iw dev "$AP_IF" del 2>/dev/null
+    iw phy "$phy" interface add "$AP_IF" type __ap || { log "couldn't add $AP_IF"; return 1; }
+    # A different, locally administered MAC from the home interface
+    mac=$(cat /sys/class/net/$PHY_IF/address)
+    ip link set "$AP_IF" address "02:${mac#*:}" 2>/dev/null
 
     ve=$("$DIR/bin/sionlinkd" --vendor-element)
     sed -e "s/@IF@/$AP_IF/" -e "s/@CH@/$ch/" -e "s/@VE@/$ve/" \
         "$DIR/hostapd-sionlink.conf.in" > "$RUN/hostapd.conf"
-    "$DIR/bin/hostapd" -B -P "$RUN/hostapd.pid" -f "$RUN/hostapd.log" "$RUN/hostapd.conf" || {
-        log "hostapd failed, see $RUN/hostapd.log"; tail -5 "$RUN/hostapd.log"; iw dev "$AP_IF" del; return 1; }
+    # hostapd prints its startup errors before going to the background
+    rm -f "$RUN/hostapd.pid"
+    "$DIR/bin/hostapd" -B -P "$RUN/hostapd.pid" "$RUN/hostapd.conf" > "$RUN/hostapd.log" 2>&1 || {
+        log "hostapd failed:"; tail -8 "$RUN/hostapd.log"; iw dev "$AP_IF" del; return 1; }
 
     rm -f "$RUN/in"; mkfifo "$RUN/in"
     (

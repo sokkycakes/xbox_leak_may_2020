@@ -43,6 +43,19 @@ diff -ru a/src/ap/ieee802_11.c b/src/ap/ieee802_11.c
  	if (!ok) {
  		hostapd_logger(hapd, mgmt->da, HOSTAPD_MODULE_IEEE80211,
  			       HOSTAPD_LEVEL_DEBUG,
+diff -ru a/src/drivers/driver_nl80211.c b/src/drivers/driver_nl80211.c
+--- a/src/drivers/driver_nl80211.c
++++ b/src/drivers/driver_nl80211.c
+@@ -3083,7 +3083,8 @@
+ 	struct wpa_driver_nl80211_data *drv = bss->drv;
+ 	struct i802_link *link = nl80211_get_link(bss, link_id);
+ 
+-	if (!link->beacon_set)
++	/* Sion Link: NULL when an interface that failed to start is torn down */
++	if (!link || !link->beacon_set)
+ 		return 0;
+ 
+ 	wpa_printf(MSG_DEBUG, "nl80211: Remove beacon (ifindex=%d)",
 --- a/hostapd/config_file.c
 +++ b/hostapd/config_file.c
 @@ -2549,6 +2549,8 @@
