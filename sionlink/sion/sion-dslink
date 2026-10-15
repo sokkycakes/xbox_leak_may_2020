@@ -1,0 +1,153 @@
+#!/bin/sh
+# sion-dslink: DS local wireless for the Sion (Sion Link).
+#
+#   sion-dslink check        what the Wi-Fi card supports, nothing changes
+#   sion-dslink start [CH]   add a second, DS-only network next to the home
+#                            Wi-Fi and start sionlinkd
+#   sion-dslink stop
+#   sion-dslink status
+#   sion-dslink say TEXT     show TEXT on every linked DS
+#
+# The home Wi-Fi link (and SSH over it) is never touched: start refuses when
+# the card can't run an access point beside it, unless --force is given.
+
+DIR=/opt/sionlink
+RUN=/run/sionlink
+PHY_IF=${SIONLINK_WIFI:-wlan0}
+AP_IF=sionds
+
+log() { echo "sion-dslink: $*"; }
+
+phy_of() {
+    iw dev "$1" info 2>/dev/null | sed -n 's/^.*wiphy \([0-9]*\).*/phy\1/p'
+}
+
+home_freq() {
+    iw dev "$PHY_IF" link 2>/dev/null | sed -n 's/^.*freq: \([0-9]*\).*/\1/p'
+}
+
+freq_to_ch() {
+    f=$1
+    if [ "$f" -ge 2412 ] && [ "$f" -le 2472 ]; then echo $(( (f - 2407) / 5 ))
+    elif [ "$f" -eq 2484 ]; then echo 14
+    else echo 0; fi
+}
+
+# Prints the max number of distinct channels in a combination that allows
+# both a managed (station) and an AP interface, or 0 if none does.
+ap_combo_channels() {
+    iw phy "$1" info 2>/dev/null | awk '
+        /valid interface combinations/ { inc = 1; next }
+        inc && /^\t[A-Z]/ { inc = 0 }
+        inc && /\* #\{/ { line = $0; m = (line ~ /managed/); a = (line ~ /AP/) }
+        inc && /#channels <=/ {
+            if (m && a) { sub(/.*#channels <= /, ""); sub(/[^0-9].*/, ""); if ($0 + 0 > best) best = $0 + 0 }
+        }
+        END { print best + 0 }'
+}
+
+do_check() {
+    phy=$(phy_of "$PHY_IF")
+    [ -n "$phy" ] || { log "no Wi-Fi interface $PHY_IF"; return 1; }
+    log "card: $phy ($(cat /sys/class/net/$PHY_IF/device/uevent 2>/dev/null | sed -n 's/^DRIVER=//p'))"
+    f=$(home_freq)
+    if [ -n "$f" ]; then
+        log "home Wi-Fi on $f MHz (channel $(freq_to_ch "$f"); 0 means 5 GHz)"
+    else
+        log "home Wi-Fi not connected"
+    fi
+    iw phy "$phy" info | sed -n '/Supported interface modes/,/Band 1/p' | grep -E "^[[:space:]]+\* (AP|managed|monitor)$" | sed 's/^/    mode:/'
+    iw phy "$phy" info | sed -n '/valid interface combinations/,/^\t[A-Z]/p' | sed 's/^/    /'
+    ch=$(ap_combo_channels "$phy")
+    if [ "$ch" -gt 0 ]; then
+        log "OK: an access point can run beside the home Wi-Fi ($ch channel(s) at once)"
+    else
+        log "NO: this card can't run an access point beside the home Wi-Fi"
+    fi
+    [ -x "$DIR/bin/hostapd" ] && [ -x "$DIR/bin/sionlinkd" ] && log "programs installed in $DIR" || log "programs missing from $DIR"
+}
+
+do_start() {
+    force=0
+    want_ch=
+    for a in "$@"; do
+        case "$a" in --force) force=1 ;; *) want_ch=$a ;; esac
+    done
+    [ -e "$RUN/hostapd.pid" ] && { log "already running"; return 0; }
+
+    phy=$(phy_of "$PHY_IF")
+    [ -n "$phy" ] || { log "no Wi-Fi interface $PHY_IF"; return 1; }
+    maxch=$(ap_combo_channels "$phy")
+    f=$(home_freq)
+    home_ch=0
+    [ -n "$f" ] && home_ch=$(freq_to_ch "$f")
+
+    if [ "$maxch" -eq 0 ] && [ -n "$f" ] && [ $force -eq 0 ]; then
+        log "the card can't host beside the home Wi-Fi; not starting (SSH would drop). Use --force to try anyway."
+        return 1
+    fi
+
+    # The DS only does 2.4 GHz. With one channel at a time we must share the
+    # home network's channel, which then has to be 2.4 GHz.
+    if [ -n "$want_ch" ]; then ch=$want_ch
+    elif [ "$home_ch" -gt 0 ]; then ch=$home_ch
+    else ch=6; fi
+    if [ -n "$f" ] && [ "$maxch" -lt 2 ] && [ "$ch" != "$home_ch" ] && [ $force -eq 0 ]; then
+        log "home Wi-Fi is on ${f} MHz and the card can only use one channel at a time; the DS needs 2.4 GHz. Not starting."
+        return 1
+    fi
+
+    mkdir -p "$RUN"
+    if ! iw dev "$AP_IF" info >/dev/null 2>&1; then
+        iw phy "$phy" interface add "$AP_IF" type __ap || { log "couldn't add $AP_IF"; return 1; }
+        # A different, locally administered MAC from the home interface
+        mac=$(cat /sys/class/net/$PHY_IF/address)
+        ip link set "$AP_IF" address "02:${mac#*:}" 2>/dev/null
+    fi
+
+    ve=$("$DIR/bin/sionlinkd" --vendor-element)
+    sed -e "s/@IF@/$AP_IF/" -e "s/@CH@/$ch/" -e "s/@VE@/$ve/" \
+        "$DIR/hostapd-sionlink.conf.in" > "$RUN/hostapd.conf"
+    "$DIR/bin/hostapd" -B -P "$RUN/hostapd.pid" -f "$RUN/hostapd.log" "$RUN/hostapd.conf" || {
+        log "hostapd failed, see $RUN/hostapd.log"; tail -5 "$RUN/hostapd.log"; iw dev "$AP_IF" del; return 1; }
+
+    rm -f "$RUN/in"; mkfifo "$RUN/in"
+    (
+        exec 3<>"$RUN/in"
+        exec "$DIR/bin/sionlinkd" --if "$AP_IF" --name "${SIONLINK_NAME:-$(hostname)}" -v <&3 >>"$RUN/sionlinkd.log" 2>&1
+    ) &
+    echo $! > "$RUN/sionlinkd.pid"
+    sleep 1
+    log "DS network up on channel $ch ($AP_IF); logs in $RUN"
+}
+
+do_stop() {
+    for p in sionlinkd hostapd; do
+        [ -f "$RUN/$p.pid" ] && kill "$(cat "$RUN/$p.pid")" 2>/dev/null
+        rm -f "$RUN/$p.pid"
+    done
+    sleep 1
+    iw dev "$AP_IF" del 2>/dev/null
+    log "stopped"
+}
+
+do_status() {
+    if [ -f "$RUN/hostapd.pid" ] && kill -0 "$(cat "$RUN/hostapd.pid")" 2>/dev/null; then
+        log "running"
+        iw dev "$AP_IF" info 2>/dev/null | grep -E "channel|addr" | sed 's/^/    /'
+        iw dev "$AP_IF" station dump 2>/dev/null | grep -E "^Station|tx bitrate|rx bitrate" | sed 's/^/    /'
+        tail -5 "$RUN/sionlinkd.log" 2>/dev/null
+    else
+        log "not running"
+    fi
+}
+
+case "$1" in
+    check) do_check ;;
+    start) shift; do_start "$@" ;;
+    stop) do_stop ;;
+    restart) do_stop; shift; do_start "$@" ;;
+    status) do_status ;;
+    say) shift; [ -p "$RUN/in" ] && echo "$*" > "$RUN/in" || log "not running" ;;
+    *) echo "usage: sion-dslink check|start [CH] [--force]|stop|status|say TEXT"; exit 2 ;;
+esac
