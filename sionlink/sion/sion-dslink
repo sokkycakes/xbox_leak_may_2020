@@ -184,16 +184,38 @@ do_txtrace() {
     [ -e "$T/kprobe_events" ] || { log "this kernel has no kprobe tracing"; return 1; }
     [ -p "$RUN/in" ] || { log "not running"; return 1; }
     echo 0 > "$T/tracing_on"
-    [ -e "$T/events/kprobes/sltx" ] && { echo 0 > "$T/events/kprobes/sltx/enable"; echo '-:sltx' >> "$T/kprobe_events"; }
+    for e in "$T"/events/kprobes/sl*; do
+        [ -d "$e" ] || continue
+        echo 0 > "$e/enable"; echo "-:${e##*/}" >> "$T/kprobe_events"
+    done
+    # Hit counters along the TX path, mac80211 down to the card
+    probes=""
+    for f in ieee80211_subif_start_xmit iwl_mvm_mac_tx iwl_mvm_mac_itxq_xmit iwl_mvm_tx_skb_non_sta iwl_mvm_tx_skb_sta; do
+        if echo "p:sl_$f $f" >> "$T/kprobe_events" 2>/dev/null; then probes="$probes sl_$f"
+        else log "can't probe $f"; fi
+    done
     echo 'p:sltx iwl_trans_tx q=$arg4:s32 flags=+8($arg3):x32 rate=+16($arg3):x32 sta=+20($arg3):u8 fc=+60($arg3):x16 a1=+64($arg3):x16 a1b=+66($arg3):x32' >> "$T/kprobe_events" ||
-        { log "could not add the kprobe"; return 1; }
+        { log "could not add the iwl_trans_tx kprobe"; return 1; }
+    for p in $probes sltx; do echo 1 > "$T/events/kprobes/$p/enable"; done
+    grep "sl" "$T/kprobe_profile" > "$RUN/kp.before"
+    S=/sys/class/net/$AP_IF/statistics
+    tx0=$(cat $S/tx_packets); dr0=$(cat $S/tx_dropped); er0=$(cat $S/tx_errors)
     echo > "$T/trace"
-    echo 1 > "$T/events/kprobes/sltx/enable"
     echo 1 > "$T/tracing_on"
     i=0
     while [ $i -lt "$n" ]; do echo "trace $i" > "$RUN/in"; i=$((i + 1)); done
     sleep 3
-    echo 0 > "$T/events/kprobes/sltx/enable"
+    echo 0 > "$T/tracing_on"
+    for p in $probes sltx; do echo 0 > "$T/events/kprobes/$p/enable"; done
+    log "$AP_IF counters: tx +$(( $(cat $S/tx_packets) - tx0 )) dropped +$(( $(cat $S/tx_dropped) - dr0 )) errors +$(( $(cat $S/tx_errors) - er0 ))"
+    log "TX path hits (before -> after):"
+    grep "sl" "$T/kprobe_profile" | while read name hits miss; do
+        b=$(awk -v n="$name" '$1 == n { print $2 }' "$RUN/kp.before")
+        echo "    $name: ${b:-0} -> $hits"
+    done
+    log "linked DSes and sionlinkd:"
+    iw dev "$AP_IF" station dump 2>/dev/null | grep -E "^Station|authorized|tx packets|tx failed" | sed 's/^/    /'
+    tail -4 "$RUN/sionlinkd.log" 2>/dev/null | sed 's/^/    /'
     log "frames sent to the card while sending $n messages:"
     awk '
         function hex(s,   i, c, v) { v = 0; s = tolower(s); sub(/^0x/, "", s)
