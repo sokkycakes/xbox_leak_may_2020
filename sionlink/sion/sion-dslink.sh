@@ -4,6 +4,7 @@
 cd "$(dirname "$0")" || exit 1
 HOST=${1:-root@192.168.1.247}
 OPT="-o StrictHostKeyChecking=accept-new"
+echo "Sion Link kit 2 (2026-10-15)"
 echo "Copying to the Sion ($HOST)..."
 ssh $OPT "$HOST" 'mkdir -p /tmp/sionlink' &&
 scp -q $OPT files/* "$HOST:/tmp/sionlink/" || { echo 'Copy failed: is the Sion on and on the network?'; exit 1; }
