@@ -147,22 +147,94 @@ static bool PickSion(Wifi_AccessPoint *out)
     }
 }
 
+// Radio counters while linking
+// ============================
+//
+// Promiscuous mode hands every frame the radio kept to RawFrame(), so the
+// link screen can show whether the Sion's replies reach this DS at all.
+
+static u8 diag_bssid[6], diag_me[6], diag_last[24];
+static volatile u32 diag_beacons, diag_auth, diag_assoc, diag_other_sion,
+                    diag_to_me, diag_total;
+
+static void RawFrame(int base, int len)
+{
+    if (len < 24)
+        return;
+
+    u8 h[24];
+    Wifi_RxRawReadPacket(base, 24, h);
+    diag_total++;
+    memcpy(diag_last, h, 24);
+
+    u16 fc = h[0] | (h[1] << 8);
+    int type = (fc >> 2) & 3, subtype = (fc >> 4) & 15;
+    bool to_me = memcmp(h + 4, diag_me, 6) == 0;
+    bool from_sion = memcmp(h + 10, diag_bssid, 6) == 0;
+
+    if (to_me)
+        diag_to_me++;
+    if (!from_sion)
+        return;
+    if (type == 0 && subtype == 8)
+        diag_beacons++;
+    else if (type == 0 && subtype == 11)
+        diag_auth++;
+    else if (type == 0 && subtype == 1)
+        diag_assoc++;
+    else
+        diag_other_sion++;
+}
+
+static void ShowRadio(void)
+{
+    consoleSelect(&bottom);
+    consoleClear();
+    printf("Sion %02X:%02X:%02X:%02X:%02X:%02X\n", diag_bssid[0], diag_bssid[1],
+           diag_bssid[2], diag_bssid[3], diag_bssid[4], diag_bssid[5]);
+    printf("DS   %02X:%02X:%02X:%02X:%02X:%02X\n\n", diag_me[0], diag_me[1],
+           diag_me[2], diag_me[3], diag_me[4], diag_me[5]);
+    printf("From the Sion:\n");
+    printf("  beacons     %lu\n", (unsigned long)diag_beacons);
+    printf("  auth        %lu\n", (unsigned long)diag_auth);
+    printf("  assoc       %lu\n", (unsigned long)diag_assoc);
+    printf("  other       %lu\n", (unsigned long)diag_other_sion);
+    printf("To this DS:   %lu\n", (unsigned long)diag_to_me);
+    printf("All frames:   %lu\n", (unsigned long)diag_total);
+    printf("\nLast frame:\n");
+    for (int i = 0; i < 24; i++)
+        printf("%02X%s", diag_last[i], (i % 8) == 7 ? "\n" : " ");
+}
+
 static bool Join(Wifi_AccessPoint *ap)
 {
     Title("Linking...\n\nB: cancel");
+
+    memcpy(diag_bssid, ap->bssid, 6);
+    Wifi_GetData(WIFIGETDATA_MACADDRESS, 6, diag_me);
+    diag_beacons = diag_auth = diag_assoc = diag_other_sion = 0;
+    diag_to_me = diag_total = 0;
+    Wifi_RawSetPacketHandler(RawFrame);
+    Wifi_SetPromiscuousMode(1);
+
     Wifi_MultiplayerFromHostSetPacketHandler(FromHost);
     Wifi_ConnectOpenAP(ap);
 
+    bool ok = false;
     for (;;)
     {
         swiWaitForVBlank();
         scanKeys();
+        ShowRadio();
         if (keysDown() & KEY_B)
-            return false;
+            break;
 
         int status = Wifi_AssocStatus();
         if (status == ASSOCSTATUS_ASSOCIATED)
-            return true;
+        {
+            ok = true;
+            break;
+        }
         if (status == ASSOCSTATUS_CANNOTCONNECT)
         {
             Title("Couldn't link to that Sion.\n\nPress any button.");
@@ -171,10 +243,15 @@ static bool Join(Wifi_AccessPoint *ap)
                 swiWaitForVBlank();
                 scanKeys();
                 if (keysDown())
-                    return false;
+                    break;
             }
+            break;
         }
     }
+
+    Wifi_SetPromiscuousMode(0);
+    Wifi_RawSetPacketHandler(NULL);
+    return ok;
 }
 
 static void Linked(void)
