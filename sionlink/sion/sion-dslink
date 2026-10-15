@@ -7,6 +7,8 @@
 #   sion-dslink stop
 #   sion-dslink status
 #   sion-dslink say TEXT     show TEXT on every linked DS
+#   sion-dslink txtrace [N]  send N messages and show the rate each frame
+#                            goes out at (needs kprobe tracing)
 #
 # The home Wi-Fi link (and SSH over it) is never touched: start refuses when
 # the card can't run an access point beside it, unless --force is given.
@@ -167,12 +169,61 @@ do_status() {
     fi
 }
 
+# Sends N messages to the DS and shows, for every frame the Intel driver hands
+# to the card, the rate, antenna and station the card was told to use.
+# Uses a kprobe on iwl_trans_tx (TX command layout v6: tx_flags at +8,
+# rate_n_flags at +16, sta_id at +20, 802.11 header at +60 of dev_cmd).
+do_txtrace() {
+    n=${1:-50}
+    T=/sys/kernel/tracing
+    [ -e "$T/kprobe_events" ] || mount -t tracefs nodev "$T" 2>/dev/null
+    if [ ! -e "$T/kprobe_events" ]; then
+        mount -t debugfs nodev /sys/kernel/debug 2>/dev/null
+        T=/sys/kernel/debug/tracing
+    fi
+    [ -e "$T/kprobe_events" ] || { log "this kernel has no kprobe tracing"; return 1; }
+    [ -p "$RUN/in" ] || { log "not running"; return 1; }
+    echo 0 > "$T/tracing_on"
+    [ -e "$T/events/kprobes/sltx" ] && { echo 0 > "$T/events/kprobes/sltx/enable"; echo '-:sltx' >> "$T/kprobe_events"; }
+    echo 'p:sltx iwl_trans_tx q=$arg4:s32 flags=+8($arg3):x32 rate=+16($arg3):x32 sta=+20($arg3):u8 fc=+60($arg3):x16 a1=+64($arg3):x16 a1b=+66($arg3):x32' >> "$T/kprobe_events" ||
+        { log "could not add the kprobe"; return 1; }
+    echo > "$T/trace"
+    echo 1 > "$T/events/kprobes/sltx/enable"
+    echo 1 > "$T/tracing_on"
+    i=0
+    while [ $i -lt "$n" ]; do echo "trace $i" > "$RUN/in"; i=$((i + 1)); done
+    sleep 3
+    echo 0 > "$T/events/kprobes/sltx/enable"
+    log "frames sent to the card while sending $n messages:"
+    awk '
+        function hex(s,   i, c, v) { v = 0; s = tolower(s); sub(/^0x/, "", s)
+            for (i = 1; i <= length(s); i++) { c = index("0123456789abcdef", substr(s, i, 1)) - 1; v = v * 16 + c }
+            return v }
+        / sltx: / {
+            for (f = 1; f <= NF; f++) { split($f, kv, "="); if (kv[2] != "") v[kv[1]] = kv[2] }
+            r = hex(v["rate"]); fl = hex(v["flags"]); fc = hex(v["fc"])
+            a = hex(v["a1"]) % 256
+            plcp = r % 256
+            mod = (int(r / 512) % 2) ? "CCK" : "OFDM"
+            ant = int(r / 16384) % 4
+            if (fl % 32 >= 16) desc = "station rate table"
+            else desc = sprintf("%s plcp %d ant %s", mod, plcp, (ant == 1 ? "A" : ant == 2 ? "B" : ant == 3 ? "AB" : "none"))
+            type = int(fc / 4) % 4; sub_t = int(fc / 16) % 16
+            kind = (type == 0 ? "mgmt" : type == 2 ? "data" : "other") sub_t
+            key = sprintf("q %s sta %s %s to %s: %s", v["q"], v["sta"], kind, (a == 255 ? "bcast" : "unicast"), desc)
+            cnt[key]++
+        }
+        END { for (k in cnt) printf "  %4d x %s\n", cnt[k], k }' "$T/trace"
+    log "(CCK plcp 10 = 1 Mbit/s, 20 = 2 Mbit/s; anything OFDM the DS cannot hear)"
+}
+
 case "$1" in
     check) do_check ;;
     start) shift; do_start "$@" ;;
     stop) do_stop ;;
     restart) do_stop; shift; do_start "$@" ;;
     status) do_status ;;
+    txtrace) shift; do_txtrace "$@" ;;
     say) shift; [ -p "$RUN/in" ] && echo "$*" > "$RUN/in" || log "not running" ;;
-    *) echo "usage: sion-dslink check|start [CH] [--force]|stop|status|say TEXT"; exit 2 ;;
+    *) echo "usage: sion-dslink check|start [CH] [--force]|stop|status|say TEXT|txtrace [N]"; exit 2 ;;
 esac
