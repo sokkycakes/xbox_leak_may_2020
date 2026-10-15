@@ -209,6 +209,18 @@ static void broadcast_text(const char *s)
             send_sl(&clients[i], SL_TEXT, s, len);
 }
 
+// Test frames for "sion-dslink txtrace": N text packets to every DS, sent
+// whether or not one is linked
+static void blast(int n)
+{
+    client c;
+    memset(&c, 0, sizeof(c));
+    memset(c.mac, 0xFF, 6);
+    for (int i = 0; i < n; i++)
+        send_sl(&c, SL_TEXT, "blast", 5);
+    logf_("sent %d test broadcasts", n);
+}
+
 static void housekeeping(void)
 {
     static uint64_t last;
@@ -626,7 +638,10 @@ int main(int argc, char **argv)
             else
             {
                 line[strcspn(line, "\r\n")] = 0;
-                if (line[0])
+                int n;
+                if (sscanf(line, "!blast %d", &n) == 1)
+                    blast(n);
+                else if (line[0])
                     broadcast_text(line);
             }
         }
