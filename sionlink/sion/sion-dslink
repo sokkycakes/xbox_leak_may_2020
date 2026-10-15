@@ -13,7 +13,15 @@
 
 DIR=/opt/sionlink
 RUN=/run/sionlink
-PHY_IF=${SIONLINK_WIFI:-wlan0}
+# The home Wi-Fi interface: the first wireless one that isn't ours
+PHY_IF=$SIONLINK_WIFI
+if [ -z "$PHY_IF" ]; then
+    for p in /sys/class/net/*; do
+        i=${p##*/}
+        [ "$i" = sionds ] && continue
+        [ -e "$p/phy80211" ] && { PHY_IF=$i; break; }
+    done
+fi
 AP_IF=sionds
 
 log() { echo "sion-dslink: $*"; }
@@ -74,6 +82,12 @@ do_start() {
         case "$a" in --force) force=1 ;; *) want_ch=$a ;; esac
     done
     [ -e "$RUN/hostapd.pid" ] && { log "already running"; return 0; }
+    # sion-netd would otherwise treat the DS network as a second home Wi-Fi
+    # and move the Sion's address and default route onto it.
+    if ! grep -q 'ifc" = sionds' /usr/libexec/sion-netd; then
+        log "sion-netd doesn't know about the DS network yet; run install-sionlink.sh first"
+        return 1
+    fi
 
     phy=$(phy_of "$PHY_IF")
     [ -n "$phy" ] || { log "no Wi-Fi interface $PHY_IF"; return 1; }

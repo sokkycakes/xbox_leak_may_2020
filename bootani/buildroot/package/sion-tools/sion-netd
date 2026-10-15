@@ -130,6 +130,8 @@ while true; do
 		[ "$ifc" = lo ] && continue
 		# Skip virtual interfaces (bridges, tunnels); real ones have a device.
 		[ -e "$p/device" ] || continue
+		# sionds is Sion Link's DS access point (sion-dslink owns it)
+		[ "$ifc" = sionds ] && continue
 		bring_up "$ifc"
 	done
 	report
