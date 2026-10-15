@@ -155,8 +155,8 @@ static bool PickSion(Wifi_AccessPoint *out)
 // link screen can show whether the Sion's replies reach this DS at all.
 
 static u8 diag_bssid[6], diag_me[6];
-static volatile u32 diag_beacons, diag_auth, diag_assoc, diag_other_sion,
-                    diag_to_me, diag_total;
+static volatile u32 diag_beacons, diag_auth, diag_assoc, diag_data,
+                    diag_other_sion, diag_to_me, diag_total;
 
 static void RawFrame(int base, int len)
 {
@@ -186,7 +186,9 @@ static void RawFrame(int base, int len)
         if (!memcmp(to, diag_me, 6) || !memcmp(to, all, 6))
             QueuePacket(base + 24 + 6, len - 24 - 6);
     }
-    if (type == 0 && subtype == 8)
+    if (type == 2)
+        diag_data++;
+    else if (type == 0 && subtype == 8)
         diag_beacons++;
     else if (type == 0 && subtype == 11)
         diag_auth++;
@@ -208,6 +210,7 @@ static void ShowRadio(void)
     printf("  beacons     %lu\n", (unsigned long)diag_beacons);
     printf("  auth        %lu\n", (unsigned long)diag_auth);
     printf("  assoc       %lu\n", (unsigned long)diag_assoc);
+    printf("  data        %lu\n", (unsigned long)diag_data);
     printf("  other       %lu\n", (unsigned long)diag_other_sion);
     printf("To this DS:   %lu\n", (unsigned long)diag_to_me);
     printf("All frames:   %lu\n", (unsigned long)diag_total);
@@ -219,7 +222,7 @@ static bool Join(Wifi_AccessPoint *ap)
 
     memcpy(diag_bssid, ap->bssid, 6);
     Wifi_GetData(WIFIGETDATA_MACADDRESS, 6, diag_me);
-    diag_beacons = diag_auth = diag_assoc = diag_other_sion = 0;
+    diag_beacons = diag_auth = diag_assoc = diag_data = diag_other_sion = 0;
     diag_to_me = diag_total = 0;
     Wifi_RawSetPacketHandler(RawFrame);
     Wifi_SetPromiscuousMode(1);
@@ -255,10 +258,13 @@ static bool Join(Wifi_AccessPoint *ap)
         }
     }
 
-    // RawFrame() keeps receiving the Sion's data once linked
-    Wifi_SetPromiscuousMode(0);
+    // RawFrame() keeps receiving the Sion's data once linked, and keeps
+    // counting everything until the Sion's welcome arrives
     if (!ok)
+    {
+        Wifi_SetPromiscuousMode(0);
         Wifi_RawSetPacketHandler(NULL);
+    }
     return ok;
 }
 
@@ -337,6 +343,8 @@ static void Linked(void)
                     memcpy(&welcome, body, sizeof(welcome));
                     welcome.host[sizeof(welcome.host) - 1] = 0;
                     welcome.motd[sizeof(welcome.motd) - 1] = 0;
+                    if (!welcomed)
+                        Wifi_SetPromiscuousMode(0);
                     welcomed = true;
                 }
                 else if (h->type == SL_PONG && h->len >= sizeof(sl_ping))
@@ -393,6 +401,12 @@ static void Linked(void)
             printf("You are DS #%d (%d linked)\n\n", welcome.client_id,
                    welcome.clients);
             printf("%.64s\n", welcome.motd);
+        }
+
+        if (!welcomed)
+        {
+            ShowRadio();
+            continue;
         }
 
         consoleSelect(&bottom);

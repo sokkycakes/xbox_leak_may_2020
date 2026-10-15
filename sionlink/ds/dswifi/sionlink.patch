@@ -1,8 +1,8 @@
 diff --git a/source/arm7/ntr/update.c b/source/arm7/ntr/update.c
-index ddac61f..afe16ed 100644
+index ddac61f..44462cf 100644
 --- a/source/arm7/ntr/update.c
 +++ b/source/arm7/ntr/update.c
-@@ -393,6 +393,34 @@ void Wifi_NTR_Update(void)
+@@ -393,6 +393,38 @@ void Wifi_NTR_Update(void)
                  break;
              }
  
@@ -26,7 +26,11 @@ index ddac61f..afe16ed 100644
 +                else if (WifiData->authlevel == WIFI_AUTHLEVEL_AUTHENTICATED)
 +                {
 +                    WLOG_PUTS("W: No assoc reply, going on\n");
-+                    Wifi_NTR_SetAssociationID(0);
++                    // We never learn the AID the host gave us. With AID 0 the
++                    // hardware keeps ignoring data from the host, so use 1:
++                    // the AID only picks a reply slot in CMD/REPLY exchanges,
++                    // which the Sion doesn't use.
++                    Wifi_NTR_SetAssociationID(1);
 +                    Wifi_NTR_SetupTransferOptions(WIFI_TRANSFER_RATE_2MBPS, false);
 +                    WifiData->authlevel = WIFI_AUTHLEVEL_ASSOCIATED;
 +                    WifiData->authctr   = 0;
