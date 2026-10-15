@@ -156,6 +156,7 @@ static bool PickSion(Wifi_AccessPoint *out)
 
 static u8 diag_bssid[6], diag_me[6];
 static u32 diag_hw_base[18];
+static u32 diag_sec_start, diag_sec_last[3], diag_sec_rate[3], diag_sec_peak[3];
 static volatile u32 diag_beacons, diag_auth, diag_assoc, diag_data,
                     diag_other_sion, diag_to_me, diag_total;
 
@@ -215,6 +216,38 @@ static void ShowRadio(void)
     printf("  other       %lu\n", (unsigned long)diag_other_sion);
     printf("To this DS:   %lu\n", (unsigned long)diag_to_me);
     printf("All frames:   %lu\n", (unsigned long)diag_total);
+
+    // Y zeroes everything, so a burst from the Sion shows up on its own
+    if (keysDown() & KEY_Y)
+    {
+        diag_beacons = diag_auth = diag_assoc = diag_data = diag_other_sion = 0;
+        diag_to_me = diag_total = 0;
+        for (int i = 0; i < 18; i++)
+            diag_hw_base[i] = Wifi_GetStats(WSTAT_HW_1B0 + i);
+        diag_sec_peak[0] = diag_sec_peak[1] = diag_sec_peak[2] = 0;
+    }
+
+    // Per-second rates of 1B6 (bad FCS), 1B7 (received okay), 1BD
+    static const int sec_idx[3] = { 6, 7, 13 };
+    u32 now = Millis();
+    if (now - diag_sec_start >= 1000)
+    {
+        for (int k = 0; k < 3; k++)
+        {
+            u32 v = Wifi_GetStats(WSTAT_HW_1B0 + sec_idx[k]);
+            diag_sec_rate[k] = v - diag_sec_last[k];
+            diag_sec_last[k] = v;
+            if (diag_sec_rate[k] > diag_sec_peak[k])
+                diag_sec_peak[k] = diag_sec_rate[k];
+        }
+        diag_sec_start = now;
+    }
+    printf("\nPer second  bad FCS   ok   1BD\n");
+    printf("  now      %6lu %6lu %5lu\n", (unsigned long)diag_sec_rate[0],
+           (unsigned long)diag_sec_rate[1], (unsigned long)diag_sec_rate[2]);
+    printf("  peak     %6lu %6lu %5lu\n", (unsigned long)diag_sec_peak[0],
+           (unsigned long)diag_sec_peak[1], (unsigned long)diag_sec_peak[2]);
+    printf("Y: zero the counters\n");
 
     // The radio's own RX/TX statistics counters, registers 1B0-1C1
     printf("\nRadio counters 1B0-1C1:\n");
