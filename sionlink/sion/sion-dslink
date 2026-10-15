@@ -145,9 +145,10 @@ do_stop() {
     done
     # Also any copy that lost its pid file (a debug run, or a crash): a stray
     # hostapd takes the DS interface back the moment it's recreated.
+    # Matched by name: after a reinstall the old binary shows as "(deleted)".
     for d in /proc/[0-9]*; do
-        case "$(readlink "$d/exe" 2>/dev/null)" in
-            "$DIR/bin/hostapd"|"$DIR/bin/sionlinkd") kill "${d#/proc/}" 2>/dev/null ;;
+        case "$(cat "$d/comm" 2>/dev/null)" in
+            hostapd|sionlinkd) kill "${d#/proc/}" 2>/dev/null ;;
         esac
     done
     sleep 1
