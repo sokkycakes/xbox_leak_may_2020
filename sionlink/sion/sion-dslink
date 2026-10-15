@@ -143,6 +143,13 @@ do_stop() {
         [ -f "$RUN/$p.pid" ] && kill "$(cat "$RUN/$p.pid")" 2>/dev/null
         rm -f "$RUN/$p.pid"
     done
+    # Also any copy that lost its pid file (a debug run, or a crash): a stray
+    # hostapd takes the DS interface back the moment it's recreated.
+    for d in /proc/[0-9]*; do
+        case "$(readlink "$d/exe" 2>/dev/null)" in
+            "$DIR/bin/hostapd"|"$DIR/bin/sionlinkd") kill "${d#/proc/}" 2>/dev/null ;;
+        esac
+    done
     sleep 1
     iw dev "$AP_IF" del 2>/dev/null
     log "stopped"
