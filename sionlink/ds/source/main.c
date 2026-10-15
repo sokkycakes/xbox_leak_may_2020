@@ -258,8 +258,9 @@ static bool Join(Wifi_AccessPoint *ap)
         }
     }
 
-    // RawFrame() keeps receiving the Sion's data once linked, and keeps
-    // counting everything until the Sion's welcome arrives
+    // RawFrame() keeps receiving the Sion's data once linked. Promiscuous
+    // mode stays on too: our DSWifi then opens the radio's RX filters, which
+    // may be what the Sion's broadcasts need to get through.
     if (!ok)
     {
         Wifi_SetPromiscuousMode(0);
@@ -343,8 +344,6 @@ static void Linked(void)
                     memcpy(&welcome, body, sizeof(welcome));
                     welcome.host[sizeof(welcome.host) - 1] = 0;
                     welcome.motd[sizeof(welcome.motd) - 1] = 0;
-                    if (!welcomed)
-                        Wifi_SetPromiscuousMode(0);
                     welcomed = true;
                 }
                 else if (h->type == SL_PONG && h->len >= sizeof(sl_ping))
@@ -449,6 +448,7 @@ int main(int argc, char *argv[])
         if (Join(&ap))
             Linked();
         Wifi_RawSetPacketHandler(NULL);
+        Wifi_SetPromiscuousMode(0);
         Wifi_IdleMode();
     }
 

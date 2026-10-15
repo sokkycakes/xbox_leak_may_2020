@@ -1,5 +1,5 @@
 diff --git a/source/arm7/ntr/update.c b/source/arm7/ntr/update.c
-index ddac61f..44462cf 100644
+index ddac61f..57ada8a 100644
 --- a/source/arm7/ntr/update.c
 +++ b/source/arm7/ntr/update.c
 @@ -393,6 +393,38 @@ void Wifi_NTR_Update(void)
@@ -41,3 +41,36 @@ index ddac61f..44462cf 100644
              // If the process stops (for example, because we don't receive a
              // packet) retry manually every now and then.
              if ((W_US_COUNT1 - WifiData->counter7) > 20) // 20 units is 1 sec aprox
+@@ -538,6 +570,32 @@ void Wifi_NTR_Update(void)
+         }
+     }
+ 
++    // Sion Link: in promiscuous mode, also open the hardware RX filters so
++    // that every frame on the channel is received, whatever its BSSID or
++    // direction. Restore the filters of the current mode when it ends.
++    static bool rx_all = false;
++    if (WifiData->reqFlags & WFLAG_REQ_PROMISC)
++    {
++        W_RXFILTER  = RXFILTER_ALL;
++        W_RXFILTER2 = 0;
++        rx_all = true;
++    }
++    else if (rx_all)
++    {
++        rx_all = false;
++        if (WifiData->curMode == WIFIMODE_SCAN)
++            Wifi_SetupFilterMode(WIFI_FILTERMODE_SCAN);
++        else if (WifiData->curMode == WIFIMODE_ACCESSPOINT)
++            Wifi_SetupFilterMode(WIFI_FILTERMODE_MULTIPLAYER_HOST);
++        else if ((WifiData->curMode == WIFIMODE_CONNECTING) ||
++                 (WifiData->curMode == WIFIMODE_CONNECTED))
++            Wifi_SetupFilterMode(
++                (WifiData->curLibraryMode == DSWIFI_MULTIPLAYER_CLIENT) ?
++                WIFI_FILTERMODE_MULTIPLAYER_CLIENT : WIFI_FILTERMODE_INTERNET);
++        else
++            Wifi_SetupFilterMode(WIFI_FILTERMODE_IDLE);
++    }
++
+     // First, check if we have received anything and handle it
+     Wifi_RxQueueFlush();
+ 
