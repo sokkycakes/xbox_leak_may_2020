@@ -1,5 +1,5 @@
 diff --git a/source/arm7/ntr/update.c b/source/arm7/ntr/update.c
-index ddac61f..57ada8a 100644
+index ddac61f..d4cf3d4 100644
 --- a/source/arm7/ntr/update.c
 +++ b/source/arm7/ntr/update.c
 @@ -393,6 +393,38 @@ void Wifi_NTR_Update(void)
@@ -41,7 +41,7 @@ index ddac61f..57ada8a 100644
              // If the process stops (for example, because we don't receive a
              // packet) retry manually every now and then.
              if ((W_US_COUNT1 - WifiData->counter7) > 20) // 20 units is 1 sec aprox
-@@ -538,6 +570,32 @@ void Wifi_NTR_Update(void)
+@@ -538,6 +570,34 @@ void Wifi_NTR_Update(void)
          }
      }
  
@@ -51,7 +51,9 @@ index ddac61f..57ada8a 100644
 +    static bool rx_all = false;
 +    if (WifiData->reqFlags & WFLAG_REQ_PROMISC)
 +    {
-+        W_RXFILTER  = RXFILTER_ALL;
++        // Not RXFILTER_UPDATE_WRCSR: it moves the RX write pointer before a
++        // frame is complete, and the RX queue then reads half-written frames.
++        W_RXFILTER  = RXFILTER_ALL & ~RXFILTER_UPDATE_WRCSR;
 +        W_RXFILTER2 = 0;
 +        rx_all = true;
 +    }
