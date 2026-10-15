@@ -9,12 +9,29 @@ text the Sion sends.
 The Sion runs a second, DS-only access point next to its home Wi-Fi. Its
 beacon carries Nintendo's vendor element (OUI 00:09:BF, game ID `SION`), so
 the DS app sees it in DSWifi's local multiplayer scan like another DS host.
-The DS joins with the normal open auth/assoc, then both sides exchange plain
-802.11 data frames (DSWifi's "direct" multiplayer transfers). The
-CMD/REPLY/ACK cycle that needs microsecond host timing is never used, so the
-Sion's Intel card works with stock firmware. Protocol: `common/slproto.h`.
+Both sides exchange plain 802.11 data frames (DSWifi's "direct" multiplayer
+transfers). The CMD/REPLY/ACK cycle that needs microsecond host timing is
+never used, so the Sion's Intel card works with stock firmware. Protocol:
+`common/slproto.h`.
 
-- `ds/` BlockSDS app (`make`, needs `/opt/wonderful` BlockSDS).
+A real DS hears the Intel's broadcasts but none of its one-to-one frames
+(tested 2026-10-15: beacons arrive, auth replies never do, at any range or
+rate). So nothing from the Sion is one-to-one:
+
+- The DS joins without waiting for auth and assoc replies
+  (`ds/dswifi/sionlink.patch` on DSWifi, built by `ds/dswifi/build.sh`).
+- hostapd accepts it without hearing it acknowledge them
+  (`sion/hostapd-2.11-sionlink.patch`, `ignore_unacked_join=1`; build with
+  `sion/build-hostapd.sh`).
+- Every Sion Link packet from the Sion is a broadcast that names its DS.
+  Broadcasts aren't retried by the radio, so the DS says hello every 3 s
+  and the Sion answers with a fresh WELCOME.
+
+`sionlinkd --melon PORT --deaf` plays the same Intel in the emulator: it
+never answers auth or assoc.
+
+- `ds/` BlockSDS app with its own ARM7 and DSWifi build (`make`, needs
+  `/opt/wonderful` BlockSDS and git).
 - `host/sionlinkd.c` the Sion side. `--if IFACE` for real hardware (hostapd
   runs the AP; DS frames arrive as 802.3 frames with a length field on a
   packet socket), `--melon PORT` for emulator tests (a software AP).

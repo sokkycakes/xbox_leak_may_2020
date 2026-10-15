@@ -44,6 +44,7 @@
 static char host_name[24] = "Sion";
 static char motd[64] = "Hello from the Sion!";
 static int verbose;
+static bool deaf; // melon: act like the Intel, whose auth/assoc replies never reach the DS
 
 static void logf_(const char *fmt, ...)
 {
@@ -120,10 +121,14 @@ static client *find_client(const uint8_t *mac, bool create)
 static uint8_t ap_mac[6];
 static void (*backend_send)(const uint8_t *dst, const uint8_t *payload, int len);
 
+static const uint8_t bcast_mac[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+
+// Everything goes out as a broadcast naming its DS (see slproto.h)
 static void send_sl(client *c, int type, const void *body, int len)
 {
-    uint8_t buf[sizeof(sl_hdr) + SL_MAX_BODY];
-    sl_hdr *h = (sl_hdr *)buf;
+    uint8_t buf[6 + sizeof(sl_hdr) + SL_MAX_BODY];
+    memcpy(buf, c->mac, 6);
+    sl_hdr *h = (sl_hdr *)(buf + 6);
     h->magic[0] = SL_MAGIC0;
     h->magic[1] = SL_MAGIC1;
     h->version = SL_VERSION;
@@ -131,8 +136,8 @@ static void send_sl(client *c, int type, const void *body, int len)
     h->seq = c->seq++;
     h->len = len;
     if (len)
-        memcpy(buf + sizeof(sl_hdr), body, len);
-    backend_send(c->mac, buf, sizeof(sl_hdr) + len);
+        memcpy(buf + 6 + sizeof(sl_hdr), body, len);
+    backend_send(bcast_mac, buf, 6 + sizeof(sl_hdr) + len);
 }
 
 static void send_welcome(client *c)
@@ -360,13 +365,15 @@ static void melon_rx(uint8_t *buf, int n)
         case 0xB: // authentication
             if (!to_us)
                 break;
+            if (verbose)
+                logf_("auth from %s", mac_str(sa));
+            if (deaf)
+                break;
             m = mgmt_header(r, 0x00B0, sa);
             r[m++] = 0; r[m++] = 0;   // open system
             r[m++] = 2; r[m++] = 0;   // sequence 2
             r[m++] = 0; r[m++] = 0;   // success
             melon_tx(r, m);
-            if (verbose)
-                logf_("auth from %s", mac_str(sa));
             break;
         case 0x0: // association request
         {
@@ -385,7 +392,8 @@ static void melon_rx(uint8_t *buf, int n)
             r[m++] = aid ? 0 : 17; r[m++] = 0;         // status (17 = AP full)
             r[m++] = aid; r[m++] = aid ? 0xC0 : 0;     // AID
             r[m++] = 1; r[m++] = 2; r[m++] = 0x82; r[m++] = 0x84;
-            melon_tx(r, m);
+            if (!deaf)
+                melon_tx(r, m);
             logf_("DS %s associated, AID %d", mac_str(sa), aid);
             break;
         }
@@ -543,7 +551,7 @@ static void pkt_poll(void)
 static void usage(void)
 {
     fprintf(stderr,
-            "usage: sionlinkd (--if IFACE | --melon PORT) [--name NAME] [--motd TEXT] [-v]\n"
+            "usage: sionlinkd (--if IFACE | --melon PORT [--deaf]) [--name NAME] [--motd TEXT] [-v]\n"
             "       sionlinkd --vendor-element   print the hostapd vendor_elements hex\n");
     exit(2);
 }
@@ -563,6 +571,8 @@ int main(int argc, char **argv)
             snprintf(host_name, sizeof(host_name), "%s", argv[++i]);
         else if (!strcmp(argv[i], "--motd") && i + 1 < argc)
             snprintf(motd, sizeof(motd), "%s", argv[++i]);
+        else if (!strcmp(argv[i], "--deaf"))
+            deaf = true;
         else if (!strcmp(argv[i], "-v"))
             verbose++;
         else if (!strcmp(argv[i], "--vendor-element"))

@@ -2,12 +2,18 @@
 //
 // Transport: DS local wireless "direct" data frames. The Sion is an access
 // point whose beacon carries Nintendo's vendor element (OUI 00:09:BF) with
-// game ID SL_GAME_ID, so DSWifi's multiplayer client mode lists it. After a
-// normal open auth/assoc, both sides exchange plain 802.11 data frames:
+// game ID SL_GAME_ID, so DSWifi's multiplayer client mode lists it.
+//
+// The Sion's Intel radio reaches a DS with broadcasts only: the DS never
+// hears its one-to-one frames. So the DS joins without waiting for auth and
+// assoc replies (our DSWifi patch), hostapd accepts it without hearing it
+// acknowledge them (our hostapd patch), and everything from the Sion is a
+// broadcast data frame naming the DS it is for:
 //   DS -> Sion: [client AID (1 byte)] [pad (1 byte)] [sl_hdr] [body]
-//   Sion -> DS: [sl_hdr] [body]
+//   Sion -> DS: [to: DS MAC, or FF:FF:FF:FF:FF:FF for all] [sl_hdr] [body]
 // No CMD/REPLY multiplayer frames are used, so the host has no microsecond
-// timing to meet. All fields are little-endian.
+// timing to meet. Broadcasts aren't retried by the radio. All fields are
+// little-endian.
 
 #ifndef SLPROTO_H
 #define SLPROTO_H
@@ -17,7 +23,7 @@
 #define SL_GAME_ID      0x53494F4Eu // "SION"
 #define SL_MAGIC0       'S'
 #define SL_MAGIC1       'L'
-#define SL_VERSION      1
+#define SL_VERSION      2
 
 #define SL_MAX_BODY     1024
 

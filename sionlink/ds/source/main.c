@@ -21,9 +21,10 @@ static u8 rxq[RXQ_LEN][RXQ_MAX];
 static volatile u16 rxq_len[RXQ_LEN];
 static volatile int rxq_head, rxq_tail;
 
-static void FromHost(Wifi_MPPacketType type, int base, int len)
+// Queues one Sion Link packet (sl_hdr onwards). Runs in the IRQ handler.
+static void QueuePacket(int base, int len)
 {
-    if (type != WIFI_MPTYPE_DATA || len < (int)sizeof(sl_hdr))
+    if (len < (int)sizeof(sl_hdr))
         return;
     if (len > (int)RXQ_MAX)
         len = RXQ_MAX;
@@ -153,7 +154,7 @@ static bool PickSion(Wifi_AccessPoint *out)
 // Promiscuous mode hands every frame the radio kept to RawFrame(), so the
 // link screen can show whether the Sion's replies reach this DS at all.
 
-static u8 diag_bssid[6], diag_me[6], diag_last[24];
+static u8 diag_bssid[6], diag_me[6];
 static volatile u32 diag_beacons, diag_auth, diag_assoc, diag_other_sion,
                     diag_to_me, diag_total;
 
@@ -165,7 +166,6 @@ static void RawFrame(int base, int len)
     u8 h[24];
     Wifi_RxRawReadPacket(base, 24, h);
     diag_total++;
-    memcpy(diag_last, h, 24);
 
     u16 fc = h[0] | (h[1] << 8);
     int type = (fc >> 2) & 3, subtype = (fc >> 4) & 15;
@@ -176,6 +176,16 @@ static void RawFrame(int base, int len)
         diag_to_me++;
     if (!from_sion)
         return;
+
+    // Data from the Sion: a broadcast naming the DS it is for (slproto.h)
+    if (type == 2 && subtype == 0 && (fc & 0x0200) && len >= 24 + 6)
+    {
+        u8 to[6];
+        Wifi_RxRawReadPacket(base + 24, 6, to);
+        static const u8 all[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+        if (!memcmp(to, diag_me, 6) || !memcmp(to, all, 6))
+            QueuePacket(base + 24 + 6, len - 24 - 6);
+    }
     if (type == 0 && subtype == 8)
         diag_beacons++;
     else if (type == 0 && subtype == 11)
@@ -201,9 +211,6 @@ static void ShowRadio(void)
     printf("  other       %lu\n", (unsigned long)diag_other_sion);
     printf("To this DS:   %lu\n", (unsigned long)diag_to_me);
     printf("All frames:   %lu\n", (unsigned long)diag_total);
-    printf("\nLast frame:\n");
-    for (int i = 0; i < 24; i++)
-        printf("%02X%s", diag_last[i], (i % 8) == 7 ? "\n" : " ");
 }
 
 static bool Join(Wifi_AccessPoint *ap)
@@ -217,7 +224,6 @@ static bool Join(Wifi_AccessPoint *ap)
     Wifi_RawSetPacketHandler(RawFrame);
     Wifi_SetPromiscuousMode(1);
 
-    Wifi_MultiplayerFromHostSetPacketHandler(FromHost);
     Wifi_ConnectOpenAP(ap);
 
     bool ok = false;
@@ -249,8 +255,10 @@ static bool Join(Wifi_AccessPoint *ap)
         }
     }
 
+    // RawFrame() keeps receiving the Sion's data once linked
     Wifi_SetPromiscuousMode(0);
-    Wifi_RawSetPacketHandler(NULL);
+    if (!ok)
+        Wifi_RawSetPacketHandler(NULL);
     return ok;
 }
 
@@ -285,7 +293,23 @@ static void Linked(void)
             return;
         }
 
-        if (!welcomed && now - last_hello > 500)
+        if (!welcomed && now - last_heard > 4000)
+        {
+            Title("The Sion didn't answer.\n\nPress any button.");
+            ShowRadio();
+            for (;;)
+            {
+                swiWaitForVBlank();
+                scanKeys();
+                if (keysDown())
+                    return;
+            }
+        }
+
+        // Hello until welcomed, then every 3 s as a keepalive. Broadcasts from
+        // the Sion aren't retried, so the WELCOME it answers with also
+        // refreshes anything we missed.
+        if (now - last_hello > (welcomed ? 3000u : 500u))
         {
             Send(SL_HELLO, &hello, sizeof(hello));
             last_hello = now;
@@ -410,6 +434,7 @@ int main(int argc, char *argv[])
             break;
         if (Join(&ap))
             Linked();
+        Wifi_RawSetPacketHandler(NULL);
         Wifi_IdleMode();
     }
 

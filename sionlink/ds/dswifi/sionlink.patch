@@ -1,0 +1,39 @@
+diff --git a/source/arm7/ntr/update.c b/source/arm7/ntr/update.c
+index ddac61f..afe16ed 100644
+--- a/source/arm7/ntr/update.c
++++ b/source/arm7/ntr/update.c
+@@ -393,6 +393,34 @@ void Wifi_NTR_Update(void)
+                 break;
+             }
+ 
++            // Sion Link: some access points (Intel cards in AP mode) reach the
++            // DS with broadcasts only, so their auth and assoc replies never
++            // arrive. In multiplayer client mode, don't wait for them: after a
++            // short pause, go on as if they had arrived. The host accepts the
++            // DS without hearing it acknowledge those replies.
++            if ((WifiData->curLibraryMode == DSWIFI_MULTIPLAYER_CLIENT) &&
++                ((W_US_COUNT1 - WifiData->counter7) > 3)) // about 200 ms
++            {
++                WifiData->counter7 = W_US_COUNT1;
++
++                if (WifiData->authlevel == WIFI_AUTHLEVEL_DISCONNECTED)
++                {
++                    WLOG_PUTS("W: No auth reply, going on\n");
++                    WifiData->authlevel = WIFI_AUTHLEVEL_AUTHENTICATED;
++                    WifiData->realRates = true;
++                    Wifi_SendAssocPacket();
++                }
++                else if (WifiData->authlevel == WIFI_AUTHLEVEL_AUTHENTICATED)
++                {
++                    WLOG_PUTS("W: No assoc reply, going on\n");
++                    Wifi_NTR_SetAssociationID(0);
++                    Wifi_NTR_SetupTransferOptions(WIFI_TRANSFER_RATE_2MBPS, false);
++                    WifiData->authlevel = WIFI_AUTHLEVEL_ASSOCIATED;
++                    WifiData->authctr   = 0;
++                }
++                break;
++            }
++
+             // If the process stops (for example, because we don't receive a
+             // packet) retry manually every now and then.
+             if ((W_US_COUNT1 - WifiData->counter7) > 20) // 20 units is 1 sec aprox
