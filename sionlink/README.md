@@ -1,10 +1,8 @@
 # Sion Link
 
-DS local wireless between a Nintendo DS (or a 3DS running DS homebrew) and
-the Sion. Prototype 1: the DS finds the Sion, links to it, pings it and shows
-text the Sion sends.
+Local wireless between a Nintendo DS or Nintendo 3DS and the Sion.
 
-## How it works
+## How it works (DS)
 
 The Sion runs a second, DS-only access point next to its home Wi-Fi. Its
 beacon carries Nintendo's vendor element (OUI 00:09:BF, game ID `SION`), so
@@ -42,13 +40,47 @@ never answers auth or assoc.
 
 ## On the Sion
 
-    sion-dslink check        what the card supports (changes nothing)
-    sion-dslink start [CH]   DS network on the home Wi-Fi's channel
-    sion-dslink say TEXT     show TEXT on every linked DS
+    sion-dslink check                  what the card supports (changes nothing)
+    sion-dslink start [CH]             DS network on the home Wi-Fi's channel
+    sion-dslink 3ds [CH] [--dlp CIA]   3DS UDS network (with Download Play)
+    sion-dslink dlp-start              start 3DS Download Play distribution early
+    sion-dslink say TEXT               show TEXT on every linked DS/3DS
     sion-dslink status|stop
 
 `start` refuses (unless `--force`) when the card can't run an access point
 beside the home Wi-Fi, so SSH over Wi-Fi isn't dropped.
+
+## 3DS UDS and Download Play
+
+A 3DS uses Nintendo's UDS local wireless (`host/uds.h`, `host/uds.c`,
+`host/radio3ds.c`, `ctr/source/sllink3ds.c`): an open 802.11 AP whose beacons
+carry Nintendo's encrypted UDS vendor IEs (OUI `00:1F:32`), followed by a
+4-frame EAPoL-Start (`0x888E`) handshake that derives a per-client CCMP key
+from the network's passphrase (`"Sion Link"`, or the Download Play key).
+
+`sionlinkd --if3ds IFACE` spawns and drives `hostapd` over its control socket:
+
+- `sion/hostapd-2.11-sionlink.patch` adds `force_privacy=1` (sets the Privacy
+  capability bit on an open AP without configuring WEP), leaves the kernel's
+  `802.1X` control port off when `WPA_KEY_MGMT_NONE` so incoming `0x888E`
+  handshake frames reach `sionlinkd`'s packet socket instead of being eaten by
+  `mac80211`, and sets the kernel's `ASSOC` station flag before emitting
+  `AP-STA-CONNECTED` so `NL80211_CMD_NEW_KEY` succeeds for the pairwise CCMP
+  key.
+- With `--dlp FILE.cia` (`host/dlp.c`), `sionlinkd` first hosts the 3DS
+  Download Play network (`local_wlan_id` `0x00000121`), sends the child CIA in
+  paced 1440-byte broadcast fragments (`FRAGS_PER_TICK` per 2 ms tick), answers
+  retry block maps, hands the 3DS the `"Sion Link"` wireless reboot passphrase,
+  and switches the AP to the Sion Link UDS network (`0x53494F4E`) so the booted
+  CIA joins automatically. A 3DS needs custom firmware (Luma3DS) so Download
+  Play accepts a development-signed child CIA.
+- The 3DS hardware AES keys live in `/data/sionlink/3ds-keys.txt` on the Sion
+  (never in the repository; format in `host/uds.h`: `beacon_key`,
+  `uds_data_key`, `dlp_key`, `dlp_iv`).
+- `ctr/hwsim/fake3ds.c` tests both the UDS handshake and the full Download Play
+  CIA download against `sionlinkd --if3ds` over Linux `mac80211_hwsim`.
+- In Azahar (or on a 3DS without Download Play), `ctr/source/sllink3ds.c` falls
+  back to UDP port 9334 when UDS finds no Sion (`SIONLINK_UDP=1` on `sionlinkd`).
 
 ## The Intel 7265 rate bug
 

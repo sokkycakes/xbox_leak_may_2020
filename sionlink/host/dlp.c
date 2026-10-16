@@ -10,6 +10,7 @@
 #define HDR 16
 #define FRAG 1440      // CIA bytes per fragment
 #define BLOCK_FRAGS 182 // fragments per block
+#define FRAGS_PER_TICK 8 // fragments sent per DlpTick to avoid overflowing radio TX queues
 #define BROADCAST_MS 500
 #define REPEAT_MS 100  // how often an unanswered request is repeated
 #define START_AFTER_MS 4000 // distribution starts this long after the last join
@@ -41,6 +42,7 @@ typedef struct {
     uint8_t seq;      // our packet counter for it, bumped at each answer
     uint8_t resp[2];  // its response ID (from its auth answer)
     uint32_t block;   // next block to send
+    uint32_t frag;    // next fragment in block to send
     uint32_t asked;   // how many times we asked about blocks
     uint64_t last;    // when we last sent it something
 } client;
@@ -188,15 +190,15 @@ static void SendStartDist(dlp_host *d, int node, client *c)
     Send(d, node, DLP_CLIENT_CHANNEL, p, sizeof(p));
 }
 
-static void SendBlock(dlp_host *d, int node, client *c)
+static bool SendBlock(dlp_host *d, int node, client *c)
 {
     static const uint8_t zero[3];
     uint8_t p[28 + FRAG];
-    for (int i = 0; i < BLOCK_FRAGS; i++)
+    for (int k = 0; k < FRAGS_PER_TICK && c->frag < BLOCK_FRAGS; k++, c->frag++)
     {
-        uint32_t off = (c->block * BLOCK_FRAGS + i) * FRAG;
+        uint32_t off = (c->block * BLOCK_FRAGS + c->frag) * FRAG;
         if (off >= d->cia_size)
-            break;
+            return true;
         int n = d->cia_size - off < FRAG ? d->cia_size - off : FRAG;
         Header(p, PK_FRAGMENT, 28 + n, 1, zero);
         p[16] = 1;
@@ -204,11 +206,12 @@ static void SendBlock(dlp_host *d, int node, client *c)
         p[18] = 0x4A;
         p[19] = 0xE3;
         Put32(p + 20, c->block);
-        Put16(p + 24, i);
+        Put16(p + 24, c->frag);
         Put16(p + 26, n);
         memcpy(p + 28, d->cia + off, n);
         Send(d, node, DLP_CLIENT_CHANNEL, p, 28 + n);
     }
+    return c->frag >= BLOCK_FRAGS || (c->block * BLOCK_FRAGS + c->frag) * FRAG >= d->cia_size;
 }
 
 static void SendFinishDist(dlp_host *d, int node, client *c, uint32_t seq)
@@ -398,6 +401,7 @@ void DlpData(dlp_host *d, int node, int channel, const uint8_t *p, int len)
             c->seq++;
             c->state = Get16(p + 0x14) == 0x20 ? CL_SENDING : CL_NO_CONTENT;
             c->block = 0;
+            c->frag = 0;
             c->asked = 0;
             c->last = 0;
         }
@@ -414,12 +418,15 @@ void DlpData(dlp_host *d, int node, int channel, const uint8_t *p, int len)
             else if (seq == c->block)
             {
                 c->asked++;
+                c->frag = 0;
                 c->state = CL_SENDING;
             }
             else if (seq + 1 == c->block && !done_block)
             {
                 // It's missing fragments of the last block: send it again
+                c->asked++;
                 c->block--;
+                c->frag = 0;
                 c->state = CL_SENDING;
             }
         }
@@ -452,8 +459,13 @@ void DlpTick(dlp_host *d, uint64_t now)
             all_have_it = false;
         if (c->state == CL_SENDING)
         {
-            SendBlock(d, n, c);
+            if (c->last && now - c->last < 2)
+                continue;
+            c->last = now;
+            if (!SendBlock(d, n, c))
+                continue;
             c->block++;
+            c->frag = 0;
             c->state = CL_ASKED;
             c->last = 0;
         }

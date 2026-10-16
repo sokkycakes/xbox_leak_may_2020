@@ -71,6 +71,16 @@ diff -ru a/src/ap/ieee802_11.c b/src/ap/ieee802_11.c
  	if (!ok) {
  		hostapd_logger(hapd, mgmt->da, HOSTAPD_MODULE_IEEE80211,
  			       HOSTAPD_LEVEL_DEBUG,
+@@ -6632,6 +6655,9 @@
+ 		 * Open, static WEP, FT protocol, or FILS; no separate
+ 		 * authorization step.
+ 		 */
++		/* Sion Link: tell the kernel the station is associated before
++		 * AP-STA-CONNECTED triggers pairwise CCMP key installation */
++		hostapd_set_sta_flags(hapd, sta);
+ 		ap_sta_set_authorized(hapd, sta, 1);
+ 	}
+ 
 diff -ru a/src/drivers/driver_nl80211.c b/src/drivers/driver_nl80211.c
 --- a/src/drivers/driver_nl80211.c
 +++ b/src/drivers/driver_nl80211.c
@@ -84,3 +94,18 @@ diff -ru a/src/drivers/driver_nl80211.c b/src/drivers/driver_nl80211.c
  		return 0;
  
  	wpa_printf(MSG_DEBUG, "nl80211: Remove beacon (ifindex=%d)",
+@@ -5203,7 +5204,13 @@
+ 	if (nl80211_put_beacon_rate(msg, drv->capa.flags, drv, params) < 0)
+ 		goto fail;
+ 
+-	if (nl80211_put_control_port(drv, msg) < 0)
++	/* Sion Link: 3DS UDS uses 0x888E (EAPoL-Start/Logoff) for its own
++	 * handshake after 802.11 association. When no WPA/802.1X key
++	 * management is configured (WPA_KEY_MGMT_NONE), do not divert 0x888E
++	 * frames to the nl80211 control port so sionlinkd receives them on
++	 * AF_PACKET. */
++	if ((params->key_mgmt_suites & ~WPA_KEY_MGMT_NONE) &&
++	    nl80211_put_control_port(drv, msg) < 0)
+ 		goto fail;
+ 
+ 	if (params->key_mgmt_suites & WPA_KEY_MGMT_IEEE8021X_NO_WPA &&
