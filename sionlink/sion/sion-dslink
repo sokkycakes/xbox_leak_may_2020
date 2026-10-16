@@ -9,6 +9,8 @@
 #   sion-dslink 3ds [CH] [--dlp FILE.cia|--no-dlp] [--force]
 #                            shorthand for: sion-dslink start --3ds ...
 #   sion-dslink dlp-start    start 3DS Download Play distribution immediately
+#   sion-dslink diag         what the last run did: the radio, the 3DS
+#                            network's hostapd and sionlinkd's log
 #   sion-dslink stop
 #   sion-dslink status
 #   sion-dslink say TEXT     show TEXT on every linked DS/3DS
@@ -476,7 +478,27 @@ do_ffcc() {
     for p in $(pidof iw); do grep -q event /proc/$p/cmdline 2>/dev/null && kill $p; done
 }
 
+do_diag() {
+    echo "== sion-dslink diag, $(date)"
+    echo "== interfaces"; iw dev 2>&1
+    echo "== home Wi-Fi ($PHY_IF)"; iw dev "$PHY_IF" link 2>&1
+    echo "== $AP_IF"; iw dev "$AP_IF" info 2>&1; ip -br link show "$AP_IF" 2>&1
+    iw dev "$AP_IF" station dump 2>&1
+    echo "== processes"
+    for d in /proc/[0-9]*; do
+        case "$(cat "$d/comm" 2>/dev/null)" in
+            hostapd|sionlinkd|ffhost) echo "${d#/proc/}: $(tr '\0' ' ' < "$d/cmdline")" ;;
+        esac
+    done
+    for f in hostapd-3ds.conf hostapd-3ds.log hostapd.log; do
+        [ -f "$RUN/$f" ] && { echo "== $f"; tail -n 150 "$RUN/$f"; }
+    done
+    echo "== sionlinkd.log"; tail -n 300 "$RUN/sionlinkd.log" 2>&1
+    echo "== kernel"; dmesg 2>/dev/null | grep -iE "iwl|wlan|sionds|ieee80211|cfg80211" | tail -n 60
+}
+
 case "$1" in
+    diag) do_diag ;;
     check) do_check ;;
     start) shift; do_start "$@" ;;
     3ds) shift; do_start --3ds "$@" ;;

@@ -1428,6 +1428,10 @@ int main(int argc, char **argv)
     {
         if (!UdsLoadKeys(keys_path, &keys3))
             logf_("3DS: no keys file %s; a real 3DS won't accept this network", keys_path);
+        else
+            logf_("3DS: keys file %s: beacon_key %s, uds_data_key %s, dlp_key + dlp_iv %s", keys_path,
+                  keys3.have_beacon ? "found" : "MISSING", keys3.have_uds_data ? "found" : "MISSING",
+                  keys3.have_dlp ? "found" : "MISSING");
         if (air3_port && air3_init(air3_port) < 0)
             return 1;
         if (if3ds)
