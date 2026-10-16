@@ -140,7 +140,12 @@ static void (*backend_send)(const uint8_t *dst, const uint8_t *payload, int len)
 
 static const uint8_t bcast_mac[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 
-// Everything goes out as a broadcast naming its DS (see slproto.h)
+// With --unicast each DS's packets go to it directly, so the radio waits for
+// the DS's acknowledgement and retries on its own. The Intel radio can't
+// reach a DS that way, so by default everything goes out as a broadcast
+// naming its DS (see slproto.h). The payload is the same either way.
+static bool unicast;
+
 static void send_sl(client *c, int type, const void *body, int len)
 {
     uint8_t buf[6 + sizeof(sl_hdr) + SL_MAX_BODY];
@@ -154,7 +159,8 @@ static void send_sl(client *c, int type, const void *body, int len)
     h->len = len;
     if (len)
         memcpy(buf + 6 + sizeof(sl_hdr), body, len);
-    backend_send(bcast_mac, buf, 6 + sizeof(sl_hdr) + len);
+    bool to_all = !memcmp(c->mac, bcast_mac, 6);
+    backend_send(unicast && !to_all ? c->mac : bcast_mac, buf, 6 + sizeof(sl_hdr) + len);
 }
 
 static void send_welcome(client *c)
@@ -1063,7 +1069,7 @@ static void pkt_poll(void)
 static void usage(void)
 {
     fprintf(stderr,
-            "usage: sionlinkd (--if IFACE | --melon PORT [--deaf]) [--name NAME] [--motd TEXT]\n"
+            "usage: sionlinkd (--if IFACE [--unicast] | --melon PORT [--deaf]) [--name NAME] [--motd TEXT]\n"
             "                 [--game-sock PATH] [-v]\n"
             "       sionlinkd --vendor-element   print the hostapd vendor_elements hex\n");
     exit(2);
@@ -1089,6 +1095,8 @@ int main(int argc, char **argv)
             game_sock = argv[++i];
         else if (!strcmp(argv[i], "--deaf"))
             deaf = true;
+        else if (!strcmp(argv[i], "--unicast"))
+            unicast = true;
         else if (!strcmp(argv[i], "-v"))
             verbose++;
         else if (!strcmp(argv[i], "--vendor-element"))

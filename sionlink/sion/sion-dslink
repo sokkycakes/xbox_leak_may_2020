@@ -33,6 +33,8 @@ if [ -z "$PHY_IF" ]; then
     for p in /sys/class/net/*; do
         i=${p##*/}
         [ "$i" = sionds ] && continue
+        # not the Nintendo Wi-Fi USB Connector, which is only ever the DS radio
+        [ "$(basename "$(readlink "$p/device/driver" 2>/dev/null)")" = rt2500usb ] && continue
         [ -e "$p/phy80211" ] && { PHY_IF=$i; break; }
     done
 fi
@@ -99,6 +101,23 @@ load_ratefix() {
     log "rate fix loaded"
 }
 
+# The Nintendo Wi-Fi USB Connector (Buffalo, Ralink RT2570) as a radio of
+# its own for the DS network. Unlike the Intel card it reaches a DS
+# directly, so the radio acknowledges and retries every frame. Its driver
+# (rt2500usb) is built for the Sion's kernel and kept in $DIR/rt2x00.
+# Prints the connector's phy, or nothing. SIONLINK_RADIO=intel ignores it.
+ds_radio_phy() {
+    [ "$SIONLINK_RADIO" = intel ] && return 0
+    if [ ! -d /sys/bus/usb/drivers/rt2500usb ] && [ -f "$DIR/rt2x00/rt2500usb.ko" ]; then
+        for m in rt2x00lib rt2x00usb rt2500usb; do
+            insmod "$DIR/rt2x00/$m.ko" 2>/dev/null
+        done
+    fi
+    for p in /sys/class/ieee80211/phy*; do
+        [ "$(basename "$(readlink "$p/device/driver" 2>/dev/null)")" = rt2500usb ] && { echo "${p##*/}"; return 0; }
+    done
+}
+
 do_start() {
     force=0
     want_ch=
@@ -113,27 +132,50 @@ do_start() {
         return 1
     fi
 
-    phy=$(phy_of "$PHY_IF")
-    [ -n "$phy" ] || { log "no Wi-Fi interface $PHY_IF"; return 1; }
-    load_ratefix
-    maxch=$(ap_combo_channels "$phy")
-    f=$(home_freq)
-    home_ch=0
-    [ -n "$f" ] && home_ch=$(freq_to_ch "$f")
+    # Each mode the DS radio is driven in: the connector on its own channel
+    # with direct sends, or the Intel card beside the home Wi-Fi, by broadcast
+    unicast=
+    phy=$(ds_radio_phy)
+    if [ -n "$phy" ]; then
+        f=$(home_freq)
+        home_ch=0
+        [ -n "$f" ] && home_ch=$(freq_to_ch "$f")
+        # Clear of the home Wi-Fi: channels 1, 6 and 11 don't overlap
+        if [ -n "$want_ch" ]; then ch=$want_ch
+        elif [ "$home_ch" -ge 1 ] && [ "$home_ch" -le 3 ]; then ch=11
+        else ch=1; fi
+        # The connector does nothing else: drop the interface it came up
+        # with (sion-netd would try to join the home Wi-Fi on it)
+        for i in $(iw dev 2>/dev/null | awk -v p="phy#${phy#phy}" '$0 ~ "^" p { on = 1; next } /^phy#/ { on = 0 } on && $1 == "Interface" { print $2 }'); do
+            [ "$i" = "$AP_IF" ] && continue
+            [ -f "/var/run/sion/wpa.$i.pid" ] && kill "$(cat "/var/run/sion/wpa.$i.pid")" 2>/dev/null
+            iw dev "$i" del 2>/dev/null
+        done
+        unicast=--unicast
+        log "DS radio: Nintendo Wi-Fi USB Connector ($phy), direct sends"
+    else
+        phy=$(phy_of "$PHY_IF")
+        [ -n "$phy" ] || { log "no Wi-Fi interface $PHY_IF"; return 1; }
+        load_ratefix
+        maxch=$(ap_combo_channels "$phy")
+        f=$(home_freq)
+        home_ch=0
+        [ -n "$f" ] && home_ch=$(freq_to_ch "$f")
 
-    if [ "$maxch" -eq 0 ] && [ -n "$f" ] && [ $force -eq 0 ]; then
-        log "the card can't host beside the home Wi-Fi; not starting (SSH would drop). Use --force to try anyway."
-        return 1
-    fi
+        if [ "$maxch" -eq 0 ] && [ -n "$f" ] && [ $force -eq 0 ]; then
+            log "the card can't host beside the home Wi-Fi; not starting (SSH would drop). Use --force to try anyway."
+            return 1
+        fi
 
-    # The DS only does 2.4 GHz. With one channel at a time we must share the
-    # home network's channel, which then has to be 2.4 GHz.
-    if [ -n "$want_ch" ]; then ch=$want_ch
-    elif [ "$home_ch" -gt 0 ]; then ch=$home_ch
-    else ch=6; fi
-    if [ -n "$f" ] && [ "$maxch" -lt 2 ] && [ "$ch" != "$home_ch" ] && [ $force -eq 0 ]; then
-        log "home Wi-Fi is on ${f} MHz and the card can only use one channel at a time; the DS needs 2.4 GHz. Not starting."
-        return 1
+        # The DS only does 2.4 GHz. With one channel at a time we must share the
+        # home network's channel, which then has to be 2.4 GHz.
+        if [ -n "$want_ch" ]; then ch=$want_ch
+        elif [ "$home_ch" -gt 0 ]; then ch=$home_ch
+        else ch=6; fi
+        if [ -n "$f" ] && [ "$maxch" -lt 2 ] && [ "$ch" != "$home_ch" ] && [ $force -eq 0 ]; then
+            log "home Wi-Fi is on ${f} MHz and the card can only use one channel at a time; the DS needs 2.4 GHz. Not starting."
+            return 1
+        fi
     fi
 
     mkdir -p "$RUN"
@@ -142,8 +184,10 @@ do_start() {
     iw dev "$AP_IF" del 2>/dev/null
     iw phy "$phy" interface add "$AP_IF" type __ap || { log "couldn't add $AP_IF"; return 1; }
     # A different, locally administered MAC from the home interface
-    mac=$(cat /sys/class/net/$PHY_IF/address)
-    ip link set "$AP_IF" address "02:${mac#*:}" 2>/dev/null
+    if [ -z "$unicast" ]; then
+        mac=$(cat /sys/class/net/$PHY_IF/address)
+        ip link set "$AP_IF" address "02:${mac#*:}" 2>/dev/null
+    fi
 
     ve=$("$DIR/bin/sionlinkd" --vendor-element)
     sed -e "s/@IF@/$AP_IF/" -e "s/@CH@/$ch/" -e "s/@VE@/$ve/" \
@@ -156,7 +200,7 @@ do_start() {
     rm -f "$RUN/in"; mkfifo "$RUN/in"
     (
         exec 3<>"$RUN/in"
-        exec "$DIR/bin/sionlinkd" --if "$AP_IF" --name "${SIONLINK_NAME:-$(hostname)}" -v <&3 >>"$RUN/sionlinkd.log" 2>&1
+        exec "$DIR/bin/sionlinkd" --if "$AP_IF" $unicast --name "${SIONLINK_NAME:-$(hostname)}" -v <&3 >>"$RUN/sionlinkd.log" 2>&1
     ) &
     echo $! > "$RUN/sionlinkd.pid"
     sleep 1
