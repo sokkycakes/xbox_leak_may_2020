@@ -638,6 +638,10 @@ do_diag() {
             hostapd|sionlinkd|ffhost|sionsniff) echo "${d#/proc/}: $(tr '\0' ' ' < "$d/cmdline")" ;;
         esac
     done
+    if [ -s "$RUN/sniff.pcap" ] && [ -f /data/sionlink/3ds-keys.txt ]; then
+        echo "== 3DS beacons in the air recording"
+        "$DIR/bin/sionlinkd" --3ds-keys /data/sionlink/3ds-keys.txt --check-beacons "$RUN/sniff.pcap" 2>&1
+    fi
     for f in record.log sniff.log hostapd-3ds.conf hostapd-3ds.log hostapd.log; do
         [ -f "$RUN/$f" ] && { echo "== $f"; tail -n 150 "$RUN/$f"; }
     done

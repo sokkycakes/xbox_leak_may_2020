@@ -203,6 +203,41 @@ int UdsBeaconTags(uds_host *u, uint8_t *out)
     return p - out;
 }
 
+int UdsCheckBeacon(const uds_keys *k, const uint8_t mac[6], const uint8_t *ies, int len,
+                   uint32_t *network_id)
+{
+    const uint8_t *tag = NULL;
+    uint8_t nodes[2 * 0xFA];
+    int n = 0;
+    for (int i = 0; i + 2 <= len && i + 2 + ies[i + 1] <= len; i += 2 + ies[i + 1])
+    {
+        const uint8_t *e = ies + i + 2;
+        int el = ies[i + 1];
+        if (ies[i] != 0xDD || el < 4 || memcmp(e, nintendo_oui, 3))
+            continue;
+        if (e[3] == TAG_NETWORK && el >= 0x1F + 20)
+            tag = e;
+        else if ((e[3] == TAG_NODES0 || e[3] == TAG_NODES1) && n + el - 4 <= (int)sizeof(nodes))
+        {
+            memcpy(nodes + n, e + 4, el - 4);
+            n += el - 4;
+        }
+    }
+    if (!tag || n < 0x12)
+        return -1;
+    uint32_t comm_id = (uint32_t)tag[4] << 24 | tag[5] << 16 | tag[6] << 8 | tag[7];
+    *network_id = (uint32_t)tag[12] << 24 | tag[13] << 16 | tag[14] << 8 | tag[15];
+    uint8_t ctr[16] = { 0 };
+    memcpy(ctr, mac, 6);
+    PutLe32(ctr + 6, comm_id);
+    ctr[10] = tag[8];
+    PutLe32(ctr + 12, *network_id);
+    Aes128Ctr(k->beacon, ctr, nodes, n);
+    uint8_t md5[16];
+    Md5(nodes + 16, n - 16, md5);
+    return !memcmp(md5, nodes, 16);
+}
+
 int UdsBeaconBody(uds_host *u, uint8_t *out)
 {
     uint8_t *p = out;

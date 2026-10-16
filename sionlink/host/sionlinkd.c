@@ -1351,8 +1351,68 @@ static void usage(void)
             "                 [--if3ds IFACE [--hostapd PATH] [--3ds-channel N] [--3ds-group-key N]\n"
             "                  | --air3ds PORT] [--dlp CIA] [--3ds-keys FILE]\n"
             "                 [--name NAME] [--motd TEXT] [--game-sock PATH] [-v]\n"
-            "       sionlinkd --vendor-element   print the hostapd vendor_elements hex\n");
+            "       sionlinkd --vendor-element   print the hostapd vendor_elements hex\n"
+            "       sionlinkd [--3ds-keys FILE] --check-beacons PCAP\n"
+            "                 check recorded 3DS beacons' node data with the keys file\n");
     exit(2);
+}
+
+// Reads a radiotap pcap (sionsniff's) and checks the node data of the
+// first beacon of each 3DS network in it with the beacon key: a 3DS drops a
+// beacon whose node data doesn't check out
+static int check_beacons(const char *pcap, const char *keys_path)
+{
+    uds_keys k;
+    if (!UdsLoadKeys(keys_path, &k) || !k.have_beacon)
+    {
+        printf("no beacon_key in %s\n", keys_path);
+        return 1;
+    }
+    FILE *f = fopen(pcap, "rb");
+    if (!f)
+    {
+        perror(pcap);
+        return 1;
+    }
+    uint8_t gh[24], ph[16];
+    static uint8_t b[65536];
+    uint32_t seen[64];
+    int nseen = 0, checked = 0;
+    if (fread(gh, 1, 24, f) != 24)
+        return 1;
+    while (fread(ph, 1, 16, f) == 16)
+    {
+        uint32_t cl = ph[8] | ph[9] << 8 | ph[10] << 16 | (uint32_t)ph[11] << 24;
+        if (cl > sizeof(b) || fread(b, 1, cl, f) != cl)
+            break;
+        if (cl < 8)
+            continue;
+        int rt = b[2] | b[3] << 8;
+        uint32_t present = b[4] | b[5] << 8 | b[6] << 16 | (uint32_t)b[7] << 24;
+        // Flags come right after the header when there's no TSFT
+        bool fcs = (present & 2) && !(present & 1) && rt > 8 && (b[8] & 0x10);
+        int end = cl - (fcs ? 4 : 0);
+        if (rt + 36 > end || b[rt] != 0x80)
+            continue;
+        uint32_t id;
+        int r = UdsCheckBeacon(&k, b + rt + 10, b + rt + 36, end - rt - 36, &id);
+        if (r < 0)
+            continue;
+        bool dup = false;
+        for (int i = 0; i < nseen; i++)
+            dup |= seen[i] == id;
+        if (dup || nseen == 64)
+            continue;
+        seen[nseen++] = id;
+        checked++;
+        printf("beacon from %02x:%02x:%02x:%02x:%02x:%02x, network %08x: node data %s\n", b[rt + 10],
+               b[rt + 11], b[rt + 12], b[rt + 13], b[rt + 14], b[rt + 15], id,
+               r ? "checks out" : "DOESN'T check out (wrong beacon_key, or built wrong)");
+    }
+    fclose(f);
+    if (!checked)
+        printf("no 3DS beacons in %s\n", pcap);
+    return 0;
 }
 
 int main(int argc, char **argv)
@@ -1401,6 +1461,8 @@ int main(int argc, char **argv)
             beacon_ch = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-v"))
             verbose++;
+        else if (!strcmp(argv[i], "--check-beacons") && i + 1 < argc)
+            return check_beacons(argv[i + 1], keys_path);
         else if (!strcmp(argv[i], "--vendor-element"))
         {
             uint8_t e[48];

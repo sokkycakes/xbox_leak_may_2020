@@ -56,6 +56,13 @@ typedef struct {
 // Returns false if the file couldn't be read.
 bool UdsLoadKeys(const char *path, uds_keys *k);
 
+// Checks a recorded beacon's node data the way a 3DS does: decrypts it with
+// the beacon key and compares its MD5. ies are the beacon's elements after
+// the fixed fields; the network tag found goes in *network_id. Returns 1 if
+// it checks out, 0 if not, -1 if the beacon isn't a 3DS network's.
+int UdsCheckBeacon(const uds_keys *k, const uint8_t mac[6], const uint8_t *ies, int len,
+                   uint32_t *network_id);
+
 typedef struct uds_host uds_host;
 
 typedef struct {
