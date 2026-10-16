@@ -302,3 +302,16 @@ index 6f1c7735..a1160295 100644
  
      QStringList pathComponents = path.split(QLatin1Char('/'));
      if (pathComponents.last().isEmpty())
+diff --git a/tools/linguist/linguist/messagemodel.cpp b/tools/linguist/linguist/messagemodel.cpp
+index 815038b1..a72b36d4 100644
+--- a/tools/linguist/linguist/messagemodel.cpp
++++ b/tools/linguist/linguist/messagemodel.cpp
+@@ -183,7 +183,7 @@ static int calcMergeScore(const DataModel *one, const DataModel *two)
+         if (ContextItem *c = one->findContext(oc->context())) {
+             for (int j = 0; j < oc->messageCount(); ++j) {
+                 MessageItem *m = oc->messageItem(j);
+-                if (c->findMessage(m->text(), m->comment()) >= 0)
++                if (c->findMessage(m->text(), m->comment()))
+                     ++inBoth;
+             }
+         }

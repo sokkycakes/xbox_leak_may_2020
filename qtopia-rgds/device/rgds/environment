@@ -1,11 +1,9 @@
 #!/bin/sh
-# Cross build for the RG DS against a Buildroot staging dir.
-#   QTMOKO_BR_OUTPUT = Buildroot output dir (has host/ and staging/)
-QTMOKO_BR_OUTPUT=${QTMOKO_BR_OUTPUT:-/tmp/claude-0/br-qemu}
-QTMOKO_SYSROOT=$(readlink -f $QTMOKO_BR_OUTPUT/staging)
-QTMOKO_CROSS=$QTMOKO_BR_OUTPUT/host/bin/aarch64-linux-
-export QTMOKO_SYSROOT QTMOKO_CROSS
-
+# Cross build for the RG DS. The mkspec reaches the Buildroot toolchain and
+# staging dir through fixed links (see qtopia-rgds/setup-sdk.sh):
+#   /opt/rgds-sdk/host    -> <buildroot output>/host
+#   /opt/rgds-sdk/sysroot -> <buildroot output>/staging
+QTMOKO_SYSROOT=/opt/rgds-sdk/sysroot
 echo "Running environment script for device rgds with sysroot $QTMOKO_SYSROOT"
 
 PKG_CONFIG_PATH=$QTMOKO_SYSROOT/usr/lib/pkgconfig:$QTMOKO_SYSROOT/usr/share/pkgconfig
