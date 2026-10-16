@@ -24,6 +24,7 @@ if [ ! -d "$here/../ffcc/build/cli" ]; then
     python3 "$here/../ffcc/setup.py" ${FFCC_DISC:+--disc "$FFCC_DISC"} ${FFCC_DISC:---stub}
 fi
 make -C "$here/../ffcc/sion"
+cc -O2 -Wall -static -o "$here/sniff/sionsniff" "$here/sniff/sionsniff.c"
 PATH=/opt/wonderful/bin:$PATH make -C "$here/../ffcc/ds"
 DEVKITPRO=${DEVKITPRO:-/opt/devkitpro} DEVKITARM=${DEVKITARM:-/opt/devkitpro/devkitARM} \
     make -C "$here/../ffcc/ctr" all cia
@@ -34,7 +35,7 @@ cp "$here/../ds/sionlink.nds" "$here/../demo/sion-hello.nds" \
 cp "$here/../host/sionlinkd" "$HOSTAPD" "$here/sion-dslink" \
    "$here/hostapd-sionlink.conf.in" "$here/install-sionlink.sh" \
    "$here/../linktest/sion/linktest" "$here/../linktest/ds/linktest.nds" \
-   "$here/../ffcc/sion/ffhost" "$here/../ffcc/ds/ffcc-gba.nds" \
+   "$here/../ffcc/sion/ffhost" "$here/sniff/sionsniff" "$here/../ffcc/ds/ffcc-gba.nds" \
    "$here/../ffcc/ctr/ffcc-gba.cia" "$here/../ffcc/ctr/ffcc-gba.3dsx" \
    "$OUT/files/"
 [ -f "$here/ratefix/iwl_ratefix.ko" ] && cp "$here/ratefix/iwl_ratefix.ko" "$OUT/files/"
@@ -45,7 +46,7 @@ if [ -n "$KEYS_SRC" ] && [ -f "$KEYS_SRC" ]; then
     cp "$KEYS_SRC" "$OUT/files/3ds-keys.txt"
     chmod 600 "$OUT/files/3ds-keys.txt"
 fi
-strip "$OUT/files/hostapd" "$OUT/files/sionlinkd" "$OUT/files/linktest" "$OUT/files/ffhost"
+strip "$OUT/files/hostapd" "$OUT/files/sionlinkd" "$OUT/files/linktest" "$OUT/files/ffhost" "$OUT/files/sionsniff"
 cp "$here/sion-dslink.sh" "$here/sion-linktest.sh" "$here/sion-dslink.ps1" "$here/Sion DS link.cmd" "$OUT/"
 chmod 755 "$OUT/sion-dslink.sh" "$OUT/sion-linktest.sh" "$OUT/files/hostapd" \
           "$OUT/files/sionlinkd" "$OUT/files/linktest" "$OUT/files/ffhost" \

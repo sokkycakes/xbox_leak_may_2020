@@ -443,6 +443,33 @@ do_linktest() {
     fi
 }
 
+# With the Nintendo Wi-Fi USB Connector plugged in, a 3DS run also records
+# the air on its channel through the connector (sionsniff), to
+# $RUN/sniff.pcap, so what the Sion and the 3DS sent can be looked at after.
+SNIFF_IF=sionsniff
+start_sniff() {
+    [ -x "$DIR/bin/sionsniff" ] || return 0
+    sphy=$(ds_radio_phy)
+    [ -n "$sphy" ] || { log "no Wi-Fi USB Connector, so no air recording"; return 0; }
+    for i in $(iw dev 2>/dev/null | awk -v p="phy#${sphy#phy}" '$0 ~ "^" p { on = 1; next } /^phy#/ { on = 0 } on && $1 == "Interface" { print $2 }'); do
+        [ -f "/var/run/sion/wpa.$i.pid" ] && kill "$(cat "/var/run/sion/wpa.$i.pid")" 2>/dev/null
+        iw dev "$i" del 2>/dev/null
+    done
+    iw phy "$sphy" interface add "$SNIFF_IF" type monitor && take_name "$sphy" monitor "$SNIFF_IF" &&
+        ip link set "$SNIFF_IF" up && iw dev "$SNIFF_IF" set channel "$1" ||
+        { log "couldn't set up the air recording"; iw dev "$SNIFF_IF" del 2>/dev/null; return 0; }
+    "$DIR/bin/sionsniff" "$SNIFF_IF" "$RUN/sniff.pcap" 3600 > "$RUN/sniff.log" 2>&1 &
+    echo $! > "$RUN/sniff.pid"
+    log "recording the air on channel $1 with the Wi-Fi USB Connector"
+}
+stop_sniff() {
+    [ -f "$RUN/sniff.pid" ] || return 0
+    kill "$(cat "$RUN/sniff.pid")" 2>/dev/null
+    sleep 1
+    rm -f "$RUN/sniff.pid"
+    iw dev "$SNIFF_IF" del 2>/dev/null
+}
+
 # The FFCC demo host (ffcc/sion in the source). It has no picture, so the
 # dashboard keeps running.
 do_ffcc() {
@@ -458,6 +485,7 @@ do_ffcc() {
     if [ -n "$start_args" ]; then
         do_stop
         do_start "$start_args" || return 1
+        start_sniff "$ch"
     else
         [ -f "$RUN/sionlinkd.pid" ] && kill -0 "$(cat "$RUN/sionlinkd.pid")" 2>/dev/null ||
             do_start || return 1
@@ -476,6 +504,13 @@ do_ffcc() {
     trap - INT TERM
     kill $wifi 2>/dev/null
     for p in $(pidof iw); do grep -q event /proc/$p/cmdline 2>/dev/null && kill $p; done
+    if [ -n "$start_args" ]; then
+        stop_sniff
+        # The 3DS network had the radio; give it back to the DS network
+        do_stop >/dev/null
+        log "bringing the DS network back"
+        do_start
+    fi
 }
 
 do_diag() {
@@ -487,10 +522,10 @@ do_diag() {
     echo "== processes"
     for d in /proc/[0-9]*; do
         case "$(cat "$d/comm" 2>/dev/null)" in
-            hostapd|sionlinkd|ffhost) echo "${d#/proc/}: $(tr '\0' ' ' < "$d/cmdline")" ;;
+            hostapd|sionlinkd|ffhost|sionsniff) echo "${d#/proc/}: $(tr '\0' ' ' < "$d/cmdline")" ;;
         esac
     done
-    for f in hostapd-3ds.conf hostapd-3ds.log hostapd.log; do
+    for f in sniff.log hostapd-3ds.conf hostapd-3ds.log hostapd.log; do
         [ -f "$RUN/$f" ] && { echo "== $f"; tail -n 150 "$RUN/$f"; }
     done
     echo "== sionlinkd.log"; tail -n 300 "$RUN/sionlinkd.log" 2>&1

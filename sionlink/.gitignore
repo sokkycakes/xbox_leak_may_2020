@@ -20,3 +20,4 @@ ffcc/ctr/*.elf
 ffcc/ctr/*.smdh
 ffcc/ctr/*.cia
 ctr/azahar/azbridge
+sion/sniff/sionsniff

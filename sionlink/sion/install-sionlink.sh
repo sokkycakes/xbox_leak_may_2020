@@ -6,6 +6,7 @@ mkdir -p /opt/sionlink/bin /data/sionlink
 cd /tmp/sionlink
 cp hostapd sionlinkd linktest /opt/sionlink/bin/
 [ -f ffhost ] && cp ffhost /opt/sionlink/bin/
+[ -f sionsniff ] && cp sionsniff /opt/sionlink/bin/
 cp hostapd-sionlink.conf.in /opt/sionlink/
 cp linktest.nds /opt/sionlink/
 [ -f iwl_ratefix.ko ] && cp iwl_ratefix.ko /opt/sionlink/
@@ -21,7 +22,7 @@ chmod 755 /opt/sionlink/bin/* /usr/bin/sion-dslink
 persist_list="/opt/sionlink/bin/hostapd /opt/sionlink/bin/sionlinkd \
     /opt/sionlink/bin/linktest /opt/sionlink/linktest.nds \
     /opt/sionlink/hostapd-sionlink.conf.in /usr/bin/sion-dslink"
-for f in /opt/sionlink/bin/ffhost /opt/sionlink/iwl_ratefix.ko \
+for f in /opt/sionlink/bin/ffhost /opt/sionlink/bin/sionsniff /opt/sionlink/iwl_ratefix.ko \
          /opt/sionlink/ffcc-gba.nds /opt/sionlink/ffcc-gba.cia \
          /opt/sionlink/ffcc-gba.3dsx; do
     [ -f "$f" ] && persist_list="$persist_list $f"
