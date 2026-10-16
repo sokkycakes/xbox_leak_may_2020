@@ -208,6 +208,40 @@ static void InstallKey(radio3ds *r, const uint8_t *sta)
         r->log("3DS radio: making key %d the broadcast key: %s", idx, strerror(-err));
 }
 
+// mac80211 drops an access point's broadcasts while no station is
+// associated, but a 3DS looking for Download Play hosts listens to them
+// (the host's title info) without joining. So an authorized station that
+// doesn't exist is added behind hostapd's back to keep broadcasts going out.
+static const uint8_t anchor_mac[6] = { 0x02, 0x1D, 0x96, 0x00, 0x00, 0x01 };
+
+static void AddAnchor(radio3ds *r)
+{
+    uint8_t msg[256];
+    uint32_t ifindex = r->ifindex;
+    int len = GenlHeader(msg, r->nl80211, NL80211_CMD_DEL_STATION);
+    Attr(msg, &len, NL80211_ATTR_IFINDEX, &ifindex, 4);
+    Attr(msg, &len, NL80211_ATTR_MAC, anchor_mac, 6);
+    NlRequest(r, msg, len, NULL, 0);
+
+    static const uint8_t rates[] = { 0x16, 0x18, 0x24, 0x30, 0x48, 0x60, 0x6C };
+    uint16_t aid = 2007, listen = 1;
+    struct nl80211_sta_flag_update fl = { 0 };
+    fl.mask = fl.set = 1 << NL80211_STA_FLAG_AUTHENTICATED | 1 << NL80211_STA_FLAG_ASSOCIATED |
+                       1 << NL80211_STA_FLAG_AUTHORIZED;
+    len = GenlHeader(msg, r->nl80211, NL80211_CMD_NEW_STATION);
+    Attr(msg, &len, NL80211_ATTR_IFINDEX, &ifindex, 4);
+    Attr(msg, &len, NL80211_ATTR_MAC, anchor_mac, 6);
+    Attr(msg, &len, NL80211_ATTR_STA_SUPPORTED_RATES, rates, sizeof(rates));
+    Attr(msg, &len, NL80211_ATTR_STA_LISTEN_INTERVAL, &listen, 2);
+    Attr(msg, &len, NL80211_ATTR_STA_AID, &aid, 2);
+    Attr(msg, &len, NL80211_ATTR_STA_FLAGS2, &fl, sizeof(fl));
+    int err = NlRequest(r, msg, len, NULL, 0);
+    if (err < 0)
+        r->log("3DS radio: couldn't add the broadcast station: %s; a 3DS won't see the titles", strerror(-err));
+    else
+        r->log("3DS radio: broadcasts on (station %s)", Mac(anchor_mac));
+}
+
 // hostapd
 // =======
 
@@ -407,6 +441,7 @@ static void Event(radio3ds *r, const char *e)
         r->enabled = true;
         r->tags_len = -1; // send them again, in case they changed meanwhile
         InstallKey(r, NULL);
+        AddAnchor(r);
         UpdateBeacon(r);
     }
     else if (!strncmp(e, "AP-DISABLED", 11))

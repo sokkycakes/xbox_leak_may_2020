@@ -1378,6 +1378,9 @@ static int check_beacons(const char *pcap, const char *keys_path)
     static uint8_t b[65536];
     uint32_t seen[64];
     int nseen = 0, checked = 0;
+    // Broadcast data frames (title info) from each host, by its address
+    uint8_t host_mac[64][6];
+    int host_data[64] = { 0 }, nhosts = 0;
     if (fread(gh, 1, 24, f) != 24)
         return 1;
     while (fread(ph, 1, 16, f) == 16)
@@ -1392,6 +1395,17 @@ static int check_beacons(const char *pcap, const char *keys_path)
         // Flags come right after the header when there's no TSFT
         bool fcs = (present & 2) && !(present & 1) && rt > 8 && (b[8] & 0x10);
         int end = cl - (fcs ? 4 : 0);
+        if (rt + 24 <= end && ((b[rt] >> 2) & 3) == 2 && b[rt + 4] == 0xFF)
+        {
+            int h = 0;
+            while (h < nhosts && memcmp(host_mac[h], b + rt + 10, 6))
+                h++;
+            if (h == nhosts && nhosts < 64)
+                memcpy(host_mac[nhosts++], b + rt + 10, 6);
+            if (h < 64)
+                host_data[h]++;
+            continue;
+        }
         if (rt + 36 > end || b[rt] != 0x80)
             continue;
         uint32_t id;
@@ -1412,6 +1426,9 @@ static int check_beacons(const char *pcap, const char *keys_path)
     fclose(f);
     if (!checked)
         printf("no 3DS beacons in %s\n", pcap);
+    for (int h = 0; h < nhosts; h++)
+        printf("broadcast data frames from %02x:%02x:%02x:%02x:%02x:%02x: %d\n", host_mac[h][0], host_mac[h][1],
+               host_mac[h][2], host_mac[h][3], host_mac[h][4], host_mac[h][5], host_data[h]);
     return 0;
 }
 
