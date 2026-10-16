@@ -3,7 +3,7 @@
 #   QTMOKO_BR_OUTPUT = Buildroot output dir (has host/ and staging/)
 QTMOKO_BR_OUTPUT=${QTMOKO_BR_OUTPUT:-/tmp/claude-0/br-qemu}
 QTMOKO_SYSROOT=$(readlink -f $QTMOKO_BR_OUTPUT/staging)
-QTMOKO_CROSS=$QTMOKO_BR_OUTPUT/host/bin/aarch64-buildroot-linux-gnu-
+QTMOKO_CROSS=$QTMOKO_BR_OUTPUT/host/bin/aarch64-linux-
 export QTMOKO_SYSROOT QTMOKO_CROSS
 
 echo "Running environment script for device rgds with sysroot $QTMOKO_SYSROOT"

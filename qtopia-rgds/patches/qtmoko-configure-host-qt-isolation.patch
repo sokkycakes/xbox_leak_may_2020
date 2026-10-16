@@ -1,0 +1,26 @@
+diff --git a/src/build/bin/configure b/src/build/bin/configure
+index 9743ba1f..679236ef 100755
+--- a/src/build/bin/configure
++++ b/src/build/bin/configure
+@@ -4809,6 +4809,12 @@ END
+ 
+ sub bootstrap_qt
+ {
++    # The host Qt must not see the target sysroot through pkg-config.
++    local $ENV{PKG_CONFIG_PATH} = "";
++    local $ENV{PKG_CONFIG_LIBDIR};
++    delete $ENV{PKG_CONFIG_LIBDIR};
++    local $ENV{PKG_CONFIG_SYSROOT_DIR};
++    delete $ENV{PKG_CONFIG_SYSROOT_DIR};
+     print "\nBuilding Qt...\n";
+ 
+     my $qt_platform;
+@@ -4977,7 +4983,7 @@ sub setup_dqt_config
+     return if ( opt("dqt_config") );
+ 
+     my $args = "-platform $qt_platform ".
+-               "-no-stl -no-exceptions -no-webkit -no-xmlpatterns -no-phonon -fast ".
++               "-no-stl -no-exceptions -no-webkit -no-xmlpatterns -no-phonon -no-glib -fast ".
+                "-confirm-license -opensource";
+     if ( $qtVersionStr[1] >= 5 ) {
+         $args .= " -no-gtkstyle";
