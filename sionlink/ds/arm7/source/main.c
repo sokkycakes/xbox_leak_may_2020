@@ -3,6 +3,8 @@
 #include <dswifi7.h>
 #include <nds.h>
 
+#include "boot7.h"
+
 static volatile bool exit_loop = false;
 
 static void PowerButton(void)
@@ -29,6 +31,7 @@ int main(int argc, char *argv[])
     installWifiFIFO();
     installSoundFIFO();
     installSystemFIFO();
+    Boot7Install();
 
     setPowerButtonCB(PowerButton);
     initClockIRQTimer(LIBNDS_DEFAULT_TIMER_RTC);
@@ -37,7 +40,10 @@ int main(int argc, char *argv[])
     irqEnable(IRQ_VBLANK);
 
     while (!exit_loop)
+    {
         swiWaitForVBlank();
+        Boot7Poll();
+    }
 
     return 0;
 }

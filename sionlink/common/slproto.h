@@ -34,6 +34,21 @@ enum sl_type {
     SL_PONG    = 4, // Sion -> DS: sl_ping (echoed)
     SL_TEXT    = 5, // Sion -> DS: UTF-8 text, shown on the DS
     SL_BYE     = 6, // either way
+    SL_FILE_BEGIN = 7, // Sion -> DS: sl_file_begin, a program is coming
+    SL_FILE_DATA  = 8, // Sion -> DS: sl_file_data + bytes
+    SL_FILE_ACK   = 9, // DS -> Sion: sl_file_ack
+};
+
+// Download Play: the Sion sends a whole .nds into the DS's RAM, which then
+// boots it. Chunks are SL_FILE_CHUNK bytes; the DS keeps chunks that arrive
+// out of order and acknowledges the first one it is still missing.
+#define SL_FILE_CHUNK   (SL_MAX_BODY - 8)
+#define SL_FILE_MAX     (2560u * 1024u) // fits the DS's staging area
+
+enum sl_file_status {
+    SL_FILE_RECEIVING = 0,
+    SL_FILE_DONE      = 1, // all here; the DS is booting it
+    SL_FILE_REFUSED   = 2, // too big, or not something this DS can boot
 };
 
 typedef struct __attribute__((packed)) {
@@ -60,6 +75,25 @@ typedef struct __attribute__((packed)) {
     uint32_t stamp;     // sender's clock, echoed back unchanged
     uint32_t count;
 } sl_ping;
+
+typedef struct __attribute__((packed)) {
+    uint32_t id;        // transfer number, echoed in data and acks
+    uint32_t size;      // bytes
+    char     name[32];  // shown on the DS
+} sl_file_begin;
+
+typedef struct __attribute__((packed)) {
+    uint32_t id;
+    uint32_t offset;    // followed by up to SL_FILE_CHUNK bytes
+} sl_file_data;
+
+typedef struct __attribute__((packed)) {
+    uint32_t id;
+    uint32_t next;      // first byte not yet received
+    uint8_t  status;    // sl_file_status
+    uint8_t  reserved[3];
+    uint32_t ahead;     // bit i: the chunk i + 1 past "next" is here too
+} sl_file_ack;
 
 _Static_assert(sizeof(sl_hdr) == 8, "sl_hdr");
 _Static_assert(sizeof(sl_welcome) == 92, "sl_welcome");

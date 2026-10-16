@@ -60,3 +60,16 @@ it heard the Sion's beacons and nothing else. `sion/ratefix/iwl_ratefix.ko`
 kprobes `iwl_trans_tx()` and puts the intended rate back; `sion-dslink start`
 loads it. Build it against a linux-6.18.7 tree configured like the Sion
 (`KDIR=... make -C sion/ratefix KBUILD_MODPOST_WARN=1`).
+
+## Download Play
+
+`sion-dslink send FILE.nds` (or `ssh sion 'sion-dslink send -' < FILE.nds`)
+sends a program to every linked DS, which keeps it in RAM and boots it.
+Chunks go out as broadcasts in a sliding window; the DS acknowledges the
+first chunk it still lacks plus a bitmap of the 32 after it, and the Sion
+resends only what's missing (`SIONLINK_DROP=N` drops N% on purpose, for
+testing). Booting is in `ds/source/boot.c` and `ds/arm7/source/boot7.c`,
+handshaking over the IPC sync register (see `common/slboot.h`). Programs
+must load their ARM9 binary below 0x02380000 and their ARM7 binary at
+0x02380000 and up, which is what BlockSDS and devkitPro build by default,
+and fit in 2.5 MB. `demo/` builds `sion-hello.nds` to try it with.

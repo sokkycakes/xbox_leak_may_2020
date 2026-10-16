@@ -14,7 +14,8 @@
 //                trade raw DS radio frames with a melonDS built with the
 //                AirMP bridge (MELONDS_AIR=127.0.0.1:PORT).
 //
-// Lines typed on stdin are sent to every linked DS as SL_TEXT.
+// Lines typed on stdin are sent to every linked DS as SL_TEXT; "!send PATH"
+// sends a .nds for the DSes to boot (Download Play).
 
 #define _GNU_SOURCE
 #include <arpa/inet.h>
@@ -83,6 +84,12 @@ typedef struct {
     char name[21];
     uint64_t last_seen;
     uint16_t seq;
+    // Download Play transfer (see "File transfer" below)
+    bool in_file;       // taking part in the current transfer
+    bool file_begun;    // acknowledged SL_FILE_BEGIN
+    uint32_t file_next; // first byte it still needs
+    uint32_t file_ahead; // chunks past file_next it already has (sl_file_ack)
+    uint8_t file_status;
 } client;
 
 static client clients[MAX_CLIENTS];
@@ -158,6 +165,236 @@ static void drop_client(client *c, const char *why)
     c->used = false;
 }
 
+// File transfer (Download Play)
+// =============================
+//
+// "!send PATH" on stdin sends PATH to every linked DS. Chunks go out as
+// broadcasts in a window of FILE_WINDOW past the slowest DS's first missing
+// byte; with no progress for FILE_RESEND_MS the window is sent again.
+
+#define FILE_WINDOW     12
+#define FILE_RESEND_MS  80
+#define FILE_BEGIN_MS   200
+#define FILE_GIVEUP_MS  15000
+
+static struct {
+    bool active;
+    uint32_t id;
+    uint8_t *data;
+    uint32_t size;
+    char name[32];
+    uint32_t sent;          // next byte to send
+    uint32_t base;          // slowest DS's first missing byte
+    uint64_t started, last_progress, last_begin, last_resend;
+} xfer;
+
+static void send_file_begin(void)
+{
+    sl_file_begin b;
+    memset(&b, 0, sizeof(b));
+    b.id = xfer.id;
+    b.size = xfer.size;
+    memcpy(b.name, xfer.name, sizeof(b.name));
+    for (int i = 0; i < MAX_CLIENTS; i++)
+        if (clients[i].used && clients[i].in_file && !clients[i].file_begun)
+            send_sl(&clients[i], SL_FILE_BEGIN, &b, sizeof(b));
+}
+
+static int file_drop_pct; // testing: SIONLINK_DROP=N skips N% of chunks
+
+static void send_file_chunk(uint32_t off)
+{
+    if (file_drop_pct && rand() % 100 < file_drop_pct)
+        return;
+    uint8_t body[sizeof(sl_file_data) + SL_FILE_CHUNK];
+    sl_file_data *d = (sl_file_data *)body;
+    uint32_t n = xfer.size - off;
+    if (n > SL_FILE_CHUNK)
+        n = SL_FILE_CHUNK;
+    d->id = xfer.id;
+    d->offset = off;
+    memcpy(body + sizeof(*d), xfer.data + off, n);
+    client all;
+    memset(&all, 0, sizeof(all));
+    memset(all.mac, 0xFF, 6);
+    static uint16_t seq;
+    all.seq = seq++;
+    send_sl(&all, SL_FILE_DATA, body, sizeof(*d) + n);
+}
+
+static void file_finish(const char *why)
+{
+    uint64_t ms = now_ms() - xfer.started;
+    logf_("transfer of %s %s after %llu ms", xfer.name, why, (unsigned long long)ms);
+    for (int i = 0; i < MAX_CLIENTS; i++)
+        clients[i].in_file = false;
+    free(xfer.data);
+    memset(&xfer, 0, sizeof(xfer));
+}
+
+static void file_start(const char *path)
+{
+    if (xfer.active)
+    {
+        logf_("a transfer is already running");
+        return;
+    }
+    FILE *f = fopen(path, "rb");
+    if (!f)
+    {
+        logf_("%s: %s", path, strerror(errno));
+        return;
+    }
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (size < 0x200 || size > (long)SL_FILE_MAX)
+    {
+        logf_("%s: %ld bytes; must be 512 to %u", path, size, SL_FILE_MAX);
+        fclose(f);
+        return;
+    }
+    uint8_t *data = malloc(size);
+    if (!data || fread(data, 1, size, f) != (size_t)size)
+    {
+        logf_("%s: read failed", path);
+        free(data);
+        fclose(f);
+        return;
+    }
+    fclose(f);
+
+    int n = 0;
+    for (int i = 0; i < MAX_CLIENTS; i++)
+    {
+        client *c = &clients[i];
+        c->in_file = c->used && c->welcomed;
+        c->file_begun = false;
+        c->file_next = 0;
+        c->file_ahead = 0;
+        c->file_status = SL_FILE_RECEIVING;
+        n += c->in_file;
+    }
+    if (!n)
+    {
+        logf_("no DS linked; nothing sent");
+        free(data);
+        return;
+    }
+
+    static uint32_t next_id = 1;
+    memset(&xfer, 0, sizeof(xfer));
+    xfer.active = true;
+    xfer.id = (uint32_t)time(NULL) ^ (next_id++ << 24);
+    xfer.data = data;
+    xfer.size = (uint32_t)size;
+    const char *base = strrchr(path, '/');
+    snprintf(xfer.name, sizeof(xfer.name), "%.31s", base ? base + 1 : path);
+    xfer.started = xfer.last_progress = now_ms();
+    logf_("sending %s (%u bytes) to %d DS", xfer.name, xfer.size, n);
+}
+
+static void file_ack(client *c, const sl_file_ack *a)
+{
+    if (!xfer.active || !c->in_file || a->id != xfer.id)
+        return;
+    if (!c->file_begun)
+        logf_("DS %s (%s) is ready", mac_str(c->mac), c->name);
+    c->file_begun = true;
+    if (a->next >= c->file_next)
+    {
+        c->file_next = a->next;
+        c->file_ahead = a->ahead;
+    }
+    if (a->status != c->file_status)
+    {
+        if (a->status == SL_FILE_DONE)
+            logf_("DS %s (%s) has it all and is booting it", mac_str(c->mac), c->name);
+        else if (a->status == SL_FILE_REFUSED)
+            logf_("DS %s (%s) refused it (too big, or not bootable)", mac_str(c->mac), c->name);
+        c->file_status = a->status;
+    }
+}
+
+static void file_pump(void)
+{
+    if (!xfer.active)
+        return;
+    uint64_t now = now_ms();
+
+    // Who is still receiving, and has everyone said they're ready?
+    bool waiting_begin = false, any = false;
+    uint32_t base = xfer.size;
+    for (int i = 0; i < MAX_CLIENTS; i++)
+    {
+        client *c = &clients[i];
+        if (!c->used || !c->in_file || c->file_status != SL_FILE_RECEIVING)
+            continue;
+        any = true;
+        if (!c->file_begun)
+            waiting_begin = true;
+        else if (c->file_next < base)
+            base = c->file_next;
+    }
+    if (!any)
+    {
+        file_finish("finished");
+        return;
+    }
+    if (now - xfer.last_progress > FILE_GIVEUP_MS)
+    {
+        file_finish("given up (no progress)");
+        return;
+    }
+    if (waiting_begin)
+    {
+        if (now - xfer.last_begin >= FILE_BEGIN_MS)
+        {
+            send_file_begin();
+            xfer.last_begin = now;
+        }
+        if (now - xfer.started < 3000)
+            return; // give everyone a moment to get ready
+        for (int i = 0; i < MAX_CLIENTS; i++)
+            if (clients[i].in_file && !clients[i].file_begun)
+                clients[i].in_file = false; // left behind
+    }
+
+    if (base > xfer.base || now == xfer.started)
+    {
+        xfer.base = base;
+        xfer.last_progress = xfer.last_resend = now;
+    }
+    if (xfer.sent < base)
+        xfer.sent = base;
+    if (now - xfer.last_resend > FILE_RESEND_MS)
+    {
+        // Resend what any DS is still missing up to where we've sent
+        for (uint32_t off = base; off < xfer.sent && off < xfer.size; off += SL_FILE_CHUNK)
+        {
+            bool need = false;
+            for (int i = 0; i < MAX_CLIENTS && !need; i++)
+            {
+                client *c = &clients[i];
+                if (!c->used || !c->in_file || !c->file_begun
+                    || c->file_status != SL_FILE_RECEIVING || off < c->file_next)
+                    continue;
+                uint32_t k = (off - c->file_next) / SL_FILE_CHUNK;
+                need = k == 0 || k > 32 || !(c->file_ahead & (1u << (k - 1)));
+            }
+            if (need)
+                send_file_chunk(off);
+        }
+        xfer.last_resend = now;
+    }
+    uint32_t limit = base + FILE_WINDOW * SL_FILE_CHUNK;
+    while (xfer.sent < xfer.size && xfer.sent < limit)
+    {
+        send_file_chunk(xfer.sent);
+        xfer.sent += SL_FILE_CHUNK;
+    }
+}
+
 // Handles one Sion Link packet from a DS (payload after the client AID byte).
 static void handle_sl(const uint8_t *mac, const uint8_t *pkt, int len)
 {
@@ -195,6 +432,10 @@ static void handle_sl(const uint8_t *mac, const uint8_t *pkt, int len)
         break;
     case SL_BYE:
         drop_client(c, "unlinked");
+        break;
+    case SL_FILE_ACK:
+        if (h->len >= sizeof(sl_file_ack))
+            file_ack(c, (const sl_file_ack *)body);
         break;
     }
 }
@@ -604,6 +845,8 @@ int main(int argc, char **argv)
         usage();
 
     setvbuf(stdout, NULL, _IOLBF, 0);
+    if (getenv("SIONLINK_DROP"))
+        file_drop_pct = atoi(getenv("SIONLINK_DROP"));
     int fd = ifname ? pkt_init(ifname) : melon_init(melon_port);
     if (fd < 0)
         return 1;
@@ -613,7 +856,7 @@ int main(int argc, char **argv)
     for (;;)
     {
         struct pollfd pfd[2] = { { fd, POLLIN, 0 }, { 0, POLLIN, 0 } };
-        poll(pfd, stdin_open ? 2 : 1, 20);
+        poll(pfd, stdin_open ? 2 : 1, xfer.active ? 2 : 20);
 
         if (melon_port)
         {
@@ -632,7 +875,7 @@ int main(int argc, char **argv)
 
         if (stdin_open && (pfd[1].revents & (POLLIN | POLLHUP)))
         {
-            char line[128];
+            char line[512];
             if (!fgets(line, sizeof(line), stdin))
                 stdin_open = false;
             else
@@ -641,11 +884,14 @@ int main(int argc, char **argv)
                 int n;
                 if (sscanf(line, "!blast %d", &n) == 1)
                     blast(n);
+                else if (!strncmp(line, "!send ", 6))
+                    file_start(line + 6);
                 else if (line[0])
                     broadcast_text(line);
             }
         }
 
+        file_pump();
         housekeeping();
     }
 }

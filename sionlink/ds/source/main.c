@@ -2,11 +2,13 @@
 // and talks to it with direct data frames (see common/slproto.h).
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <nds.h>
 #include <dswifi9.h>
 
+#include "boot.h"
 #include "slproto.h"
 
 static PrintConsole top, bottom;
@@ -311,6 +313,152 @@ static bool Join(Wifi_AccessPoint *ap)
     return ok;
 }
 
+// Download Play: receiving a .nds from the Sion
+// ==============================================
+
+static u8 *stage; // SL_FILE_MAX bytes, taken from the heap at start-up
+
+static struct {
+    bool active;
+    u32 id, size, next, chunks, got;
+    u8 status;
+    bool changed;
+    u32 started, last_ack;
+    char name[33];
+} dl;
+static u8 dl_have[SL_FILE_MAX / SL_FILE_CHUNK / 8 + 1];
+
+static void DownloadAck(u32 now)
+{
+    sl_file_ack a = { 0 };
+    a.id = dl.id;
+    a.next = dl.next;
+    a.status = dl.status;
+    u32 k0 = dl.next / SL_FILE_CHUNK;
+    for (u32 i = 0; i < 32; i++)
+    {
+        u32 k = k0 + 1 + i;
+        if (k < dl.chunks && (dl_have[k / 8] & (1 << (k % 8))))
+            a.ahead |= 1u << i;
+    }
+    Send(SL_FILE_ACK, &a, sizeof(a));
+    dl.last_ack = now;
+    dl.changed = false;
+}
+
+static void DownloadBegin(const sl_file_begin *b, u32 now)
+{
+    if (!dl.active || b->id != dl.id)
+    {
+        memset(&dl, 0, sizeof(dl));
+        memset(dl_have, 0, sizeof(dl_have));
+        dl.active = true;
+        dl.id = b->id;
+        dl.size = b->size;
+        dl.chunks = (b->size + SL_FILE_CHUNK - 1) / SL_FILE_CHUNK;
+        memcpy(dl.name, b->name, 32);
+        dl.started = now;
+        dl.status = (stage && b->size >= 0x200 && b->size <= SL_FILE_MAX)
+                    ? SL_FILE_RECEIVING : SL_FILE_REFUSED;
+    }
+    DownloadAck(now);
+}
+
+static void DownloadData(const u8 *body, int len)
+{
+    if (!dl.active || dl.status != SL_FILE_RECEIVING || len < (int)sizeof(sl_file_data))
+        return;
+    sl_file_data d;
+    memcpy(&d, body, sizeof(d));
+    u32 n = len - sizeof(d);
+    u32 idx = d.offset / SL_FILE_CHUNK;
+    if (d.id != dl.id || d.offset % SL_FILE_CHUNK || idx >= dl.chunks
+        || n > dl.size - d.offset)
+        return;
+    if (dl_have[idx / 8] & (1 << (idx % 8)))
+        return;
+    memcpy(stage + d.offset, body + sizeof(d), n);
+    dl_have[idx / 8] |= 1 << (idx % 8);
+    dl.got++;
+    while (dl.next < dl.size)
+    {
+        u32 k = dl.next / SL_FILE_CHUNK;
+        if (!(dl_have[k / 8] & (1 << (k % 8))))
+            break;
+        dl.next += SL_FILE_CHUNK;
+    }
+    if (dl.next > dl.size)
+        dl.next = dl.size;
+    dl.changed = true;
+}
+
+static void Wait(int frames)
+{
+    while (frames--)
+        swiWaitForVBlank();
+}
+
+// Everything is here: check it, tell the Sion, and boot it. Returns only
+// if the file can't be booted.
+static void DownloadFinish(u32 now)
+{
+    const char *why = BootCheck(stage, dl.size);
+    if (why)
+    {
+        dl.status = SL_FILE_REFUSED;
+        DownloadAck(now);
+        Title("");
+        printf("Got %.32s, but can't\nboot it:\n%s\n\nPress any button.", dl.name, why);
+        for (;;)
+        {
+            swiWaitForVBlank();
+            scanKeys();
+            if (keysDown())
+                break;
+        }
+        dl.active = false;
+        return;
+    }
+
+    dl.status = SL_FILE_DONE;
+    for (int i = 0; i < 3; i++)
+    {
+        DownloadAck(now);
+        Wait(6);
+    }
+    Title("");
+    printf("Booting %.32s...\n", dl.name);
+    consoleSelect(&bottom);
+    consoleClear();
+    Wifi_RawSetPacketHandler(NULL);
+    Wifi_DisableWifi();
+    Wait(30);
+    BootNds(stage, dl.size);
+}
+
+static void DownloadScreen(u32 now)
+{
+    u32 pct = dl.size ? (u32)((u64)dl.next * 100 / dl.size) : 0;
+    u32 ms = now - dl.started;
+    u32 kbs = ms ? (u32)((u64)dl.got * SL_FILE_CHUNK / ms) : 0; // bytes/ms = KB/s
+
+    consoleSelect(&top);
+    consoleClear();
+    printf("\x1b[1;9H== Sion Link ==\n\n");
+    printf("Receiving from the Sion:\n%.32s\n\n", dl.name);
+    printf("%lu%%  %lu of %lu KB  %lu KB/s\n", (unsigned long)pct,
+           (unsigned long)(dl.next / 1024), (unsigned long)(dl.size / 1024),
+           (unsigned long)kbs);
+
+    consoleSelect(&bottom);
+    consoleClear();
+    printf("\x1b[10;2H[");
+    int bars = pct * 26 / 100;
+    for (int i = 0; i < 26; i++)
+        putchar(i < bars ? '#' : '.');
+    printf("]\n\x1b[22;0HB: unlink");
+}
+
 static void Linked(void)
 {
     sl_hello hello = { 0 };
@@ -325,6 +473,7 @@ static void Linked(void)
     char text[4][33] = { { 0 } };
 
     rxq_head = rxq_tail = 0;
+    dl.active = false;
 
     for (;;)
     {
@@ -402,6 +551,16 @@ static void Linked(void)
                     memcpy(text[3], body, n);
                     text[3][n] = 0;
                 }
+                else if (h->type == SL_FILE_BEGIN && h->len >= sizeof(sl_file_begin))
+                {
+                    sl_file_begin b;
+                    memcpy(&b, body, sizeof(b));
+                    DownloadBegin(&b, now);
+                }
+                else if (h->type == SL_FILE_DATA)
+                {
+                    DownloadData(body, h->len);
+                }
                 else if (h->type == SL_BYE)
                 {
                     Title("The Sion ended the link.\n\nPress any button.");
@@ -415,6 +574,17 @@ static void Linked(void)
                 }
             }
             rxq_tail = (rxq_tail + 1) % RXQ_LEN;
+        }
+
+        if (dl.active && dl.status == SL_FILE_RECEIVING)
+        {
+            if (dl.got == dl.chunks)
+            {
+                DownloadFinish(now);
+                continue;
+            }
+            if (dl.changed || now - dl.last_ack >= 100)
+                DownloadAck(now);
         }
 
         if (now - last_heard > 5000 && welcomed)
@@ -450,6 +620,12 @@ static void Linked(void)
             continue;
         }
 
+        if (dl.active && dl.status == SL_FILE_RECEIVING)
+        {
+            DownloadScreen(now);
+            continue;
+        }
+
         consoleSelect(&bottom);
         consoleClear();
         printf("Pings %lu  replies %lu\n", (unsigned long)pings,
@@ -473,6 +649,9 @@ int main(int argc, char *argv[])
     consoleInit(&bottom, 0, BgType_Text4bpp, BgSize_T_256x256, 31, 3, false, true);
 
     cpuStartTiming(0);
+
+    // Staging area for Download Play, taken now so it sits low in the heap
+    stage = malloc(SL_FILE_MAX);
 
     Title("Starting wireless...");
     if (!Wifi_InitDefault(INIT_ONLY | WIFI_LOCAL_ONLY))

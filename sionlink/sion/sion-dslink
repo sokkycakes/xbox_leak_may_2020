@@ -7,6 +7,8 @@
 #   sion-dslink stop
 #   sion-dslink status
 #   sion-dslink say TEXT     show TEXT on every linked DS
+#   sion-dslink send FILE    send a .nds to every linked DS, which boots it
+#                            (FILE - reads it from stdin)
 #   sion-dslink txtrace [N]  send N test broadcasts and show the rate each frame
 #                            goes out at (needs kprobe tracing)
 #
@@ -250,6 +252,35 @@ do_txtrace() {
     log "(CCK plcp 10 = 1 Mbit/s, 20 = 2 Mbit/s; anything OFDM the DS cannot hear)"
 }
 
+# Sends a .nds to every linked DS, which boots it (Download Play). FILE "-"
+# reads it from stdin, so a PC can do: ssh sion 'sion-dslink send -' < x.nds
+do_send() {
+    f=$1
+    [ -n "$f" ] || { echo "usage: sion-dslink send FILE.nds|-"; return 2; }
+    [ -p "$RUN/in" ] || { log "not running"; return 1; }
+    if [ "$f" = - ]; then
+        f=$RUN/send.nds
+        cat > "$f"
+    fi
+    case $f in /*) ;; *) f=$PWD/$f ;; esac
+    [ -f "$f" ] || { log "no such file: $f"; return 1; }
+    L=$RUN/sionlinkd.log
+    start=$(wc -l < "$L")
+    echo "!send $f" > "$RUN/in"
+    i=0
+    while [ $i -lt 600 ]; do
+        sleep 0.1 2>/dev/null || sleep 1
+        new=$(tail -n +$((start + 1)) "$L")
+        if echo "$new" | grep -qE "transfer of .* (finished|given up)|no DS linked|must be|read failed|already running|: No such"; then
+            echo "$new" | sed 's/^/    /'
+            return 0
+        fi
+        i=$((i + 1))
+    done
+    tail -n +$((start + 1)) "$L" | sed 's/^/    /'
+    log "still going after 60 s"
+}
+
 case "$1" in
     check) do_check ;;
     start) shift; do_start "$@" ;;
@@ -257,6 +288,7 @@ case "$1" in
     restart) do_stop; shift; do_start "$@" ;;
     status) do_status ;;
     txtrace) shift; do_txtrace "$@" ;;
+    send) shift; do_send "$@" ;;
     say) shift; [ -p "$RUN/in" ] && echo "$*" > "$RUN/in" || log "not running" ;;
-    *) echo "usage: sion-dslink check|start [CH] [--force]|stop|status|say TEXT|txtrace [N]"; exit 2 ;;
+    *) echo "usage: sion-dslink check|start [CH] [--force]|stop|status|say TEXT|send FILE.nds|txtrace [N]"; exit 2 ;;
 esac

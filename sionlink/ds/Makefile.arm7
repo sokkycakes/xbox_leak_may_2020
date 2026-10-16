@@ -1,4 +1,5 @@
 SOURCEDIRS	:= arm7/source
+INCLUDEDIRS	:= ../common
 LIBS		:= -ldswifi7 -lnds7
 LIBDIRS		:= $(CURDIR)/build/dswifi
 
