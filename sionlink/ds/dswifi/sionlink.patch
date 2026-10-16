@@ -1,3 +1,33 @@
+diff --git a/source/arm7/ntr/tx_queue.c b/source/arm7/ntr/tx_queue.c
+index d37ee99..478ab9b 100644
+--- a/source/arm7/ntr/tx_queue.c
++++ b/source/arm7/ntr/tx_queue.c
+@@ -167,6 +167,17 @@ static int Wifi_TxArm9QueueCopyFirstData(s32 macbase, u32 buffer_end)
+     size_t size = read_u32(txbufData + read_idx) & WFLAG_SEND_SIZE_MASK;
+     read_idx += sizeof(uint32_t);
+ 
++    // Sion Link: a size that runs past the end of the ring means the ring is
++    // out of step (seen on hardware under heavy traffic). Drop everything
++    // queued instead of asserting; the protocol above resends.
++    if (read_idx + round_up_32(size) > (WIFI_TXBUFFER_SIZE - sizeof(u32)))
++    {
++        WifiData->stats[WSTAT_TXQUEUEDREJECTED]++;
++        WifiData->txbufRead = WifiData->txbufWrite;
++        leaveCriticalSection(oldIME);
++        return 0;
++    }
++
+     if (size <= buffer_end) // The ARM9 includes the space required by the FCS
+     {
+         const u16 *source = (const u16 *)(txbufData + read_idx);
+@@ -195,6 +206,7 @@ static int Wifi_TxArm9QueueCopyFirstData(s32 macbase, u32 buffer_end)
+     else
+     {
+         WifiData->stats[WSTAT_TXQUEUEDREJECTED]++;
++        read_idx += round_up_32(size); // skip the packet, not just its size
+     }
+ 
+     assert(read_idx <= (WIFI_TXBUFFER_SIZE - sizeof(u32)));
 diff --git a/source/arm7/ntr/update.c b/source/arm7/ntr/update.c
 index ddac61f..c90acae 100644
 --- a/source/arm7/ntr/update.c
@@ -81,3 +111,24 @@ index ddac61f..c90acae 100644
      // First, check if we have received anything and handle it
      Wifi_RxQueueFlush();
  
+diff --git a/source/arm9/wifi_arm9.c b/source/arm9/wifi_arm9.c
+index c9176de..37c0504 100644
+--- a/source/arm9/wifi_arm9.c
++++ b/source/arm9/wifi_arm9.c
+@@ -50,6 +50,16 @@ static void Wifi_NTR_Update(void)
+         }
+         read_idx += sizeof(uint32_t);
+ 
++        // Sion Link: a size that runs past the end of the ring means the ring
++        // is out of step (seen on hardware under heavy traffic). This runs in
++        // an IRQ, where a failed assert can't even be reported, so drop what
++        // is queued instead.
++        if (read_idx + round_up_32(size) > (WIFI_RXBUFFER_SIZE - sizeof(u32)))
++        {
++            WifiData->rxbufRead = WifiData->rxbufWrite;
++            return;
++        }
++
+ #ifdef DSWIFI_ENABLE_LWIP
+         if (wifi_lwip_enabled)
+         {

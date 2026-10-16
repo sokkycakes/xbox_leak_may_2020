@@ -161,6 +161,13 @@ static void (*backend_send)(const uint8_t *dst, const uint8_t *payload, int len)
 
 static const uint8_t bcast_mac[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 
+// With --unicast each DS's packets go to it directly, so the radio waits for
+// the DS's acknowledgement and retries on its own. The Intel radio can't
+// reach a DS that way, so by default everything goes out as a broadcast
+// naming its DS (see slproto.h). The payload is the same either way.
+static bool unicast;
+
+
 static uds_host *uds3; // the 3DS network, when there is one
 static bool uds3_is_sl; // it's the Sion Link network (not Download Play)
 
@@ -190,8 +197,10 @@ static void send_sl(client *c, int type, const void *body, int len)
             UdsSend(uds3, c->node3ds, SL_UDS_CHANNEL, buf + 6, sizeof(sl_hdr) + len);
         return;
     }
-    if (backend_send)
-        backend_send(bcast_mac, buf, 6 + sizeof(sl_hdr) + len);
+    if (!backend_send)
+        return;
+    bool to_all = !memcmp(c->mac, bcast_mac, 6);
+    backend_send(unicast && !to_all ? c->mac : bcast_mac, buf, 6 + sizeof(sl_hdr) + len);
 }
 
 static void send_welcome(client *c)
@@ -807,6 +816,7 @@ static void nintendo_element(uint8_t *e)
 // ==========================
 
 #define MELON_CH 6
+static int beacon_ch = MELON_CH; // --channel: what the beacons announce
 static int melon_sock = -1;
 static struct sockaddr_in melon_peer;
 static bool melon_have_peer;
@@ -850,7 +860,7 @@ static int beacon_body(uint8_t *p)
     p[n++] = 0x21; p[n++] = 0x00;                     // ESS | short preamble
     p[n++] = 0; p[n++] = 4; memcpy(p + n, "Sion", 4); n += 4;
     p[n++] = 1; p[n++] = 2; p[n++] = 0x82; p[n++] = 0x84;
-    p[n++] = 3; p[n++] = 1; p[n++] = MELON_CH;
+    p[n++] = 3; p[n++] = 1; p[n++] = beacon_ch;
     p[n++] = 5; p[n++] = 4; p[n++] = 0; p[n++] = 1; p[n++] = 0; p[n++] = 0; // TIM
     p[n++] = 221; p[n++] = 48; nintendo_element(p + n); n += 48;
     return n;
@@ -1068,6 +1078,42 @@ static int pkt_init(const char *ifname)
     backend_send = pkt_send;
     logf_("listening on %s (%s)", ifname, mac_str(ap_mac));
     return pkt_sock;
+}
+
+// Beacons sent by us through a monitor interface on the AP's radio, for
+// radios whose own beaconing doesn't work (the Nintendo Wi-Fi USB Connector
+// on rt2500usb answers probes but never beacons).
+static int bcn_sock = -1;
+static int bcn_ifindex;
+
+static int beacon_init(const char *ifname)
+{
+    bcn_sock = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
+    struct ifreq ifr = { 0 };
+    snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", ifname);
+    if (bcn_sock < 0 || ioctl(bcn_sock, SIOCGIFINDEX, &ifr) < 0)
+    {
+        logf_("beacons on %s: %s", ifname, strerror(errno));
+        return -1;
+    }
+    bcn_ifindex = ifr.ifr_ifindex;
+    logf_("sending beacons on %s, channel %d", ifname, beacon_ch);
+    return 0;
+}
+
+static void pkt_beacon(void)
+{
+    static const uint8_t bcast[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+    uint8_t f[300];
+    // radiotap: rate 1 Mbit/s, TX flags no-ack
+    static const uint8_t rt[12] = { 0, 0, 12, 0, 0x04, 0x80, 0, 0, 2, 0, 0x08, 0 };
+    memcpy(f, rt, sizeof(rt));
+    int n = sizeof(rt);
+    n += mgmt_header(f + n, 0x0080, bcast);
+    n += beacon_body(f + n);
+    struct sockaddr_ll sll = { .sll_family = AF_PACKET, .sll_ifindex = bcn_ifindex };
+    if (sendto(bcn_sock, f, n, 0, (struct sockaddr *)&sll, sizeof(sll)) < 0 && verbose > 1)
+        logf_("beacon: %s", strerror(errno));
 }
 
 static void pkt_poll(void)
@@ -1299,7 +1345,7 @@ static void ctr_poll(void)
 static void usage(void)
 {
     fprintf(stderr,
-            "usage: sionlinkd [--if IFACE | --melon PORT [--deaf]]\n"
+            "usage: sionlinkd [--if IFACE [--unicast] [--beacon-if MONITOR --channel CH] | --melon PORT [--deaf]]\n"
             "                 [--if3ds IFACE [--hostapd PATH] [--3ds-channel N] [--3ds-group-key N]\n"
             "                  | --air3ds PORT] [--dlp CIA] [--3ds-keys FILE]\n"
             "                 [--name NAME] [--motd TEXT] [--game-sock PATH] [-v]\n"
@@ -1315,6 +1361,7 @@ int main(int argc, char **argv)
     int air3_port = 0, group_key = 0;
     const char *if3ds = NULL, *hostapd = "/opt/sionlink/hostapd";
     const char *dlp_path = NULL, *keys_path = "/data/sionlink/3ds-keys.txt";
+    const char *beacon_if = NULL;
 
     for (int i = 1; i < argc; i++)
     {
@@ -1344,6 +1391,12 @@ int main(int argc, char **argv)
             group_key = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--deaf"))
             deaf = true;
+        else if (!strcmp(argv[i], "--unicast"))
+            unicast = true;
+        else if (!strcmp(argv[i], "--beacon-if") && i + 1 < argc)
+            beacon_if = argv[++i];
+        else if (!strcmp(argv[i], "--channel") && i + 1 < argc)
+            beacon_ch = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-v"))
             verbose++;
         else if (!strcmp(argv[i], "--vendor-element"))
@@ -1368,6 +1421,8 @@ int main(int argc, char **argv)
         file_drop_pct = atoi(getenv("SIONLINK_DROP"));
     int fd = ifname ? pkt_init(ifname) : melon_port ? melon_init(melon_port) : -1;
     if (fd < 0 && (ifname || melon_port))
+        return 1;
+    if (beacon_if && (!ifname || beacon_init(beacon_if) < 0))
         return 1;
     if (ctr)
     {
@@ -1419,6 +1474,12 @@ int main(int argc, char **argv)
         else if (ifname)
         {
             pkt_poll();
+            uint64_t now = now_ms();
+            if (bcn_sock >= 0 && now >= next_beacon)
+            {
+                pkt_beacon();
+                next_beacon = now + 100;
+            }
         }
         ctr_poll();
 

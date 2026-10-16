@@ -64,6 +64,10 @@ typedef struct {
     uint16_t seq;
     bool waiting;           // a batch is out
     uint32_t sent_at;
+    uint32_t first_sent_at; // when the batch first went out
+    uint32_t srtt, rtt_max; // radio round trip, smoothed and worst, in ms
+    uint32_t last_reply;    // when the DS last answered
+    bool copy_due;          // the batch goes out twice (see send_batch)
     uint8_t batch[1024];
     int batch_len;
     int batch_writes;       // words of the batch from the queue

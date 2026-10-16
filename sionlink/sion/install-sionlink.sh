@@ -25,6 +25,16 @@ if ! grep -q 'ifc" = sionds' /usr/libexec/sion-netd; then
     start-stop-daemon -S -q -b -m -p /var/run/sion-netd.pid -x /usr/libexec/sion-netd
     echo "updated sion-netd"
 fi
+# ...and the connector's beacon interface (an earlier install only knew sionds)
+if ! grep -q 'ifc" = sionmon' /usr/libexec/sion-netd; then
+    awk '{ print } index($0, "ifc\" = sionds ]") { print "\t\t[ \"$ifc\" = sionmon ] && continue  # Sion Link beacons" }' \
+        /usr/libexec/sion-netd > /tmp/sion-netd.new
+    cat /tmp/sion-netd.new > /usr/libexec/sion-netd && rm -f /tmp/sion-netd.new
+    sion persist /usr/libexec/sion-netd >/dev/null
+    start-stop-daemon -K -q -p /var/run/sion-netd.pid
+    start-stop-daemon -S -q -b -m -p /var/run/sion-netd.pid -x /usr/libexec/sion-netd
+    echo "updated sion-netd for the beacon interface"
+fi
 cd / && rm -rf /tmp/sionlink
 echo
 sion-dslink check

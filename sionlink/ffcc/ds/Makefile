@@ -10,6 +10,11 @@ GAME_AUTHOR	:= Sion
 
 include $(BLOCKSDS)/sys/default_makefiles/rom_arm9arm7/Makefile
 
+# DS mode only, like the launcher: the launcher boots only the DS-mode
+# binaries, so a DSi or 3DS must never start this in DSi mode, where it
+# would look for DSi-only code that was never loaded.
+NDSTOOL_ARGS	+= -uc 0
+
 DSWIFI		:= ../../ds/build/dswifi
 
 $(DSWIFI)/lib/libdswifi7.a:

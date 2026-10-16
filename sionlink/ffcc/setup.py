@@ -100,6 +100,12 @@ def copy_sources(region):
     for off in ("AC", "C4", "C5", "C8"):
         edit(l, f'0x020000{off}', f'(MB_HEADER + 0x{off})', count=2 if off == "C4" else 1)
     edit(l, '0x080000AC', '(CART_HEADER + 0xAC)')
+    # The client drops the link after 10 frames without a JoyBus command. Over
+    # Sion Link the commands come in radio batches, and the Sion's radio can
+    # go quiet for seconds (it shares its channel time with the home Wi-Fi),
+    # so the DS drops the link only once the Sion has been silent for a while
+    edit(l, '    if (sLinkWork.watchdog > 10) {',
+         '#ifdef PORT_DS\n    if (PortHostSilent()) {\n#else\n    if (sLinkWork.watchdog > 10) {\n#endif')
 
     # The GameCube's bulk downloads land in EWRAM the DS program occupies (and
     # that the 3DS doesn't have)
