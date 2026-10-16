@@ -107,11 +107,27 @@ int SlKeepAlive(uint32_t app, uint32_t now)
 
 static bool b_quits = true;
 static volatile bool woke; // back from sleep: the system dropped the network
+static bool away;          // left the network for the HOME Menu
 static bool lid_closed;
 
 static void AptEvent(APT_HookType type, void *param)
 {
     if (type == APTHOOK_ONWAKEUP)
+        woke = true;
+    else if (type == APTHOOK_ONSUSPEND && !away)
+    {
+        // The HOME Menu won't open while the app holds a local wireless
+        // network, so leave it first; SlRejoin joins again on the way back
+        if (bound)
+        {
+            udsDisconnectNetwork();
+            udsUnbind(&link_bind);
+            bound = false;
+        }
+        udsExit();
+        away = true;
+    }
+    else if (type == APTHOOK_ONRESTORE)
         woke = true;
 }
 
@@ -160,8 +176,10 @@ bool SlRejoin(void (*status)(const char *text), uint32_t quiet_ms)
         if (bound)
             udsUnbind(&link_bind);
         bound = false;
-        udsExit();
+        if (!away)
+            udsExit();
         udsInit(0x3000, NULL);
+        away = false;
         woke = false;
     }
     b_quits = false;
@@ -241,5 +259,6 @@ void SlExit(void)
         udsUnbind(&link_bind);
         bound = false;
     }
-    udsExit();
+    if (!away)
+        udsExit();
 }

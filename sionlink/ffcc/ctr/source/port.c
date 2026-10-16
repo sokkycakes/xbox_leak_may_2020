@@ -361,7 +361,7 @@ static void Status(void)
     printf("\x1b[9;1Hpicture %4.1f ms (drawing %4.1f)   \n", ticks_ppu * ms, ticks_draw * ms);
     printf("\x1b[10;1Hgame %4.1f ms   \n", ticks_game * ms);
     ticks_ppu = ticks_draw = ticks_game = 0;
-    printf("\x1b[28;1HHOME: quit");
+    printf("\x1b[28;1HHOME or L+R+START+SELECT: HOME Menu");
 }
 
 static void Say(const char *s);
@@ -405,6 +405,10 @@ void VBlankIntrWait(void)
     Present();
     gspWaitForVBlank();
     hidScanInput();
+    // In case HOME doesn't get through: the same trip to the HOME Menu
+    const u32 home = KEY_L | KEY_R | KEY_START | KEY_SELECT;
+    if ((hidKeysHeld() & home) == home && (hidKeysDown() & home))
+        aptJumpToHomeMenu();
     ReadKeys();
     if ((gPortIE & 1) && gPortIME)
         VBlankIntr();
