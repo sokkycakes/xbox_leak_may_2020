@@ -524,6 +524,13 @@ find_nintendo_channel() {
         /Vendor specific: OUI 00:1f:32/ { tag = 1 }
         END { out() }'
 }
+# Checks the 3DS beacons and broadcast data in a recording with the keys
+# file on the Sion; prints only what checks out
+check_recording() {
+    [ -s "$1" ] || { echo "    (no recording)"; return 0; }
+    [ -f /data/sionlink/3ds-keys.txt ] || { echo "    (no keys file)"; return 0; }
+    "$DIR/bin/sionlinkd" --3ds-keys /data/sionlink/3ds-keys.txt --check-beacons "$1" 2>&1 | sed 's/^/    /'
+}
 do_record() {
     mkdir -p "$RUN"
     do_record_ "$@" 2>&1 | tee "$RUN/record.log"
@@ -579,6 +586,8 @@ do_record_() {
     done
     stop_sniff
     tail -n 3 "$RUN/sniff.log" 2>/dev/null
+    cp "$RUN/sniff.pcap" "$RUN/host.pcap" 2>/dev/null
+    check_recording "$RUN/host.pcap"
     log "bringing the DS network back"
     do_start >/dev/null
 }
@@ -638,10 +647,9 @@ do_diag() {
             hostapd|sionlinkd|ffhost|sionsniff) echo "${d#/proc/}: $(tr '\0' ' ' < "$d/cmdline")" ;;
         esac
     done
-    if [ -s "$RUN/sniff.pcap" ] && [ -f /data/sionlink/3ds-keys.txt ]; then
-        echo "== 3DS beacons in the air recording"
-        "$DIR/bin/sionlinkd" --3ds-keys /data/sionlink/3ds-keys.txt --check-beacons "$RUN/sniff.pcap" 2>&1
-    fi
+    echo "== 3DS networks in the air recording"; check_recording "$RUN/sniff.pcap"
+    echo "== 3DS networks in the last recording of another 3DS"; check_recording "$RUN/host.pcap"
+    echo "== 3DS networks in the first recording of another 3DS"; check_recording "$DIR/host-ref.pcap"
     for f in record.log sniff.log hostapd-3ds.conf hostapd-3ds.log hostapd.log; do
         [ -f "$RUN/$f" ] && { echo "== $f"; tail -n 150 "$RUN/$f"; }
     done

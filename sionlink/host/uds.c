@@ -203,6 +203,21 @@ int UdsBeaconTags(uds_host *u, uint8_t *out)
     return p - out;
 }
 
+int UdsNetworkTag(const uint8_t *ies, int len, uint32_t *comm_id, uint32_t *network_id, uint8_t *id8)
+{
+    for (int i = 0; i + 2 <= len && i + 2 + ies[i + 1] <= len; i += 2 + ies[i + 1])
+    {
+        const uint8_t *e = ies + i + 2;
+        if (ies[i] != 0xDD || ies[i + 1] < 0x1F + 20 || memcmp(e, nintendo_oui, 3) || e[3] != TAG_NETWORK)
+            continue;
+        *comm_id = (uint32_t)e[4] << 24 | e[5] << 16 | e[6] << 8 | e[7];
+        *network_id = (uint32_t)e[12] << 24 | e[13] << 16 | e[14] << 8 | e[15];
+        *id8 = e[8];
+        return 1;
+    }
+    return 0;
+}
+
 int UdsCheckBeacon(const uds_keys *k, const uint8_t mac[6], const uint8_t *ies, int len,
                    uint32_t *network_id)
 {
@@ -225,8 +240,9 @@ int UdsCheckBeacon(const uds_keys *k, const uint8_t mac[6], const uint8_t *ies, 
     }
     if (!tag || n < 0x12)
         return -1;
-    uint32_t comm_id = (uint32_t)tag[4] << 24 | tag[5] << 16 | tag[6] << 8 | tag[7];
-    *network_id = (uint32_t)tag[12] << 24 | tag[13] << 16 | tag[14] << 8 | tag[15];
+    uint32_t comm_id;
+    uint8_t id8;
+    UdsNetworkTag(ies, len, &comm_id, network_id, &id8);
     uint8_t ctr[16] = { 0 };
     memcpy(ctr, mac, 6);
     PutLe32(ctr + 6, comm_id);
@@ -271,20 +287,27 @@ void UdsTick(uds_host *u, uint64_t now)
     u->cfg.tx(u->cfg.ctx, UDS_BEACON, everyone, b, len);
 }
 
+void UdsDataKey(const uds_keys *k, uint32_t comm_id, uint32_t network_id, const uint8_t mac[6], uint8_t id8,
+                const void *passphrase, int passphrase_len, uint8_t key[16])
+{
+    uint8_t c[16];
+    PutLe32(c, comm_id);
+    PutLe32(c + 4, network_id);
+    memcpy(c + 8, mac, 6);
+    c[14] = id8;
+    c[15] = 0;
+    uint8_t ctr[16];
+    Md5(c, 16, ctr);
+    Md5(passphrase, passphrase_len, key);
+    Aes128Ctr(k->uds_data, ctr, key, 16);
+}
+
 bool UdsCcmpKey(uds_host *u, uint8_t key[16])
 {
     if (!u->cfg.keys->have_uds_data)
         return false;
-    uint8_t c[16];
-    PutLe32(c, u->cfg.comm_id);
-    PutLe32(c + 4, u->network_id);
-    memcpy(c + 8, u->cfg.mac, 6);
-    c[14] = u->cfg.id8;
-    c[15] = 0;
-    uint8_t ctr[16];
-    Md5(c, 16, ctr);
-    Md5(u->cfg.passphrase, u->cfg.passphrase_len, key);
-    Aes128Ctr(u->cfg.keys->uds_data, ctr, key, 16);
+    UdsDataKey(u->cfg.keys, u->cfg.comm_id, u->network_id, u->cfg.mac, u->cfg.id8, u->cfg.passphrase,
+               u->cfg.passphrase_len, key);
     return true;
 }
 

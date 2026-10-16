@@ -70,7 +70,7 @@ int main(int argc, char **argv)
     time_t end = time(NULL) + atoi(argv[3]);
     struct timeval tv = { 0, 200000 };
     setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    long kept = 0, seen = 0, beacons = 0, probes = 0;
+    long kept = 0, seen = 0, beacons = 0, probes = 0, data_bytes = 0;
     time_t next_report = time(NULL) + 5;
     uint8_t buf[4096];
     struct sigaction sa = { .sa_handler = Stop };
@@ -116,7 +116,9 @@ int main(int argc, char **argv)
             for (unsigned i = 0; i < sizeof(ouis) / 3 && !keep; i++)
                 for (int a = 4; a <= 16 && !keep; a += 6)
                     keep = !memcmp(h + a, ouis[i], 3);
-            if (type != 0)
+            // Data frames whole for the first few megabytes (to check
+            // their encryption after), then just their headers
+            if (type != 0 && (data_bytes += n) > 8 << 20)
                 cut = rt + 64 < n ? rt + 64 : n;
         }
         if (!keep)

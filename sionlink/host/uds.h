@@ -63,6 +63,14 @@ bool UdsLoadKeys(const char *path, uds_keys *k);
 int UdsCheckBeacon(const uds_keys *k, const uint8_t mac[6], const uint8_t *ies, int len,
                    uint32_t *network_id);
 
+// A beacon's network tag fields; returns 0 if it has none
+int UdsNetworkTag(const uint8_t *ies, int len, uint32_t *comm_id, uint32_t *network_id, uint8_t *id8);
+
+// The CCMP key of a network: from its tag fields, its host's MAC and the
+// passphrase
+void UdsDataKey(const uds_keys *k, uint32_t comm_id, uint32_t network_id, const uint8_t mac[6], uint8_t id8,
+                const void *passphrase, int passphrase_len, uint8_t key[16]);
+
 typedef struct uds_host uds_host;
 
 typedef struct {

@@ -58,6 +58,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "ctrcrypto.h"
 #include "dlp.h"
 #include "radio3ds.h"
 #include "slgame.h"
@@ -1357,9 +1358,155 @@ static void usage(void)
     exit(2);
 }
 
+// One pcap record: its radiotap header length and where the 802.11 frame
+// ends (without the FCS); false at the end of the file
+typedef struct {
+    uint8_t *b;
+    int rt, end;
+    bool whole; // not cut short by the recorder
+} pcap_frame;
+
+static bool next_frame(FILE *f, pcap_frame *p)
+{
+    static uint8_t b[65536];
+    uint8_t ph[16];
+    while (fread(ph, 1, 16, f) == 16)
+    {
+        uint32_t cl = ph[8] | ph[9] << 8 | ph[10] << 16 | (uint32_t)ph[11] << 24;
+        uint32_t ol = ph[12] | ph[13] << 8 | ph[14] << 16 | (uint32_t)ph[15] << 24;
+        if (cl > sizeof(b) || fread(b, 1, cl, f) != cl)
+            return false;
+        if (cl < 8)
+            continue;
+        int rt = b[2] | b[3] << 8;
+        uint32_t present = b[4] | b[5] << 8 | b[6] << 16 | (uint32_t)b[7] << 24;
+        // Flags come right after the header when there's no TSFT
+        bool fcs = (present & 2) && !(present & 1) && rt > 8 && (b[8] & 0x10);
+        p->b = b;
+        p->rt = rt;
+        p->whole = cl == ol;
+        p->end = cl - (fcs && p->whole ? 4 : 0);
+        return true;
+    }
+    return false;
+}
+
+// The ways the CCMP key's input could be laid out: the Sion's (tag fields
+// little-endian), then the other byte orders, to tell a wrong recipe from a
+// wrong key
+static const char *const key_recipes[] = { "the Sion's",
+                                           "network ID big-endian",
+                                           "comm ID big-endian",
+                                           "both big-endian",
+                                           "passphrase without its NUL",
+                                           "passphrase without its NUL, network ID big-endian",
+                                           "passphrase without its NUL, comm ID big-endian",
+                                           "passphrase without its NUL, both big-endian" };
+#define KEY_RECIPES 8
+
+static uint32_t swap32(uint32_t v)
+{
+    return v >> 24 | (v >> 8 & 0xFF00) | (v << 8 & 0xFF0000) | v << 24;
+}
+
+// Decrypts one broadcast data frame from a 3DS network's host with key.
+// 2: whole frame, CCMP tag right; 1: the start reads as 3DS data (the
+// recorder cut the rest, or the tag is wrong: *mic_bad); 0: not this key.
+// plain gets the decrypted body.
+static int open_data(const uint8_t *h, int len, bool whole, const uint8_t key[16], uint8_t *plain, int *plain_len,
+                     bool *mic_bad)
+{
+    *mic_bad = false;
+    if (len < 24 + 8 + 8 || !(h[1] & 0x40) || !(h[24 + 3] & 0x20))
+        return 0;
+    const uint8_t *ccmp = h + 24;
+    uint8_t nonce[13];
+    nonce[0] = 0;
+    memcpy(nonce + 1, h + 10, 6);
+    nonce[7] = ccmp[7];
+    nonce[8] = ccmp[6];
+    nonce[9] = ccmp[5];
+    nonce[10] = ccmp[4];
+    nonce[11] = ccmp[1];
+    nonce[12] = ccmp[0];
+    int n = len - 32 - (whole ? 8 : 0);
+    if (n < 8)
+        return 0;
+    memcpy(plain, h + 32, n);
+    *plain_len = n;
+    if (whole)
+    {
+        uint8_t aad[22];
+        aad[0] = h[0] & 0x8F;
+        aad[1] = (h[1] & 0xC7) | 0x40;
+        memcpy(aad + 2, h + 4, 18);
+        aad[20] = h[22] & 0x0F;
+        aad[21] = 0;
+        if (Aes128CcmDecrypt(key, nonce, aad, 22, plain, n, h + 32 + n) == 0)
+            return 2;
+        *mic_bad = true;
+        memcpy(plain, h + 32, n);
+    }
+    // Without the tag: CCM's counter mode alone, then the SNAP header
+    uint8_t ctr[16] = { 1 };
+    memcpy(ctr + 1, nonce, 13);
+    ctr[15] = 1;
+    Aes128Ctr(key, ctr, plain, n);
+    static const uint8_t snap[8] = { 0xAA, 0xAA, 0x03, 0, 0, 0, UDS_ETH_DATA >> 8, UDS_ETH_DATA & 0xFF };
+    return !memcmp(plain, snap, 8);
+}
+
+// Download Play checksum: the Sion's way (variant 0) and others, to find a
+// real host's if it differs: words summed big- or little-endian, mixed
+// with the Sion's shift-or or a true rotation right or left, the key read
+// big- or little-endian, the result stored big- or little-endian
+static const char *const sum_names[] = { "words big-endian", "words little-endian" };
+static const char *const mix_names[] = { "shift-or", "rotate right", "rotate left" };
+static const char *const order_names[] = { "big-endian", "little-endian" };
+#define SUM_VARIANTS 24
+
+static uint32_t dlp_sum_variant(int v, const uint8_t ks[4], const uint8_t *p, int len)
+{
+    int sum_le = v & 1, mix = (v >> 1) % 3, key_le = (v / 6) & 1, out_le = (v / 12) & 1;
+    uint32_t key = key_le ? (uint32_t)ks[3] << 24 | ks[2] << 16 | ks[1] << 8 | ks[0]
+                          : (uint32_t)ks[0] << 24 | ks[1] << 16 | ks[2] << 8 | ks[3];
+    uint32_t h = 0;
+    for (int i = 0; i < len; i += 4)
+    {
+        uint8_t w[4] = { 0 };
+        memcpy(w, p + i, len - i < 4 ? len - i : 4);
+        h += sum_le ? (uint32_t)w[3] << 24 | w[2] << 16 | w[1] << 8 | w[0]
+                    : (uint32_t)w[0] << 24 | w[1] << 16 | w[2] << 8 | w[3];
+    }
+    int rounds = (key & 7) + 2;
+    int shift = ((key >> 8) & 15) + 4;
+    for (int r = 0; r < rounds; r++)
+    {
+        if (mix == 0)
+            h = (h >> shift) | (h << shift);
+        else if (mix == 1)
+            h = (h >> shift) | (h << (32 - shift));
+        else
+            h = (h << shift) | (h >> (32 - shift));
+        h ^= key;
+    }
+    return out_le ? swap32(h) : h;
+}
+
+typedef struct {
+    uint8_t mac[6];
+    uint32_t comm_id, network_id;
+    uint8_t id8;
+    bool tagged;
+    int data, whole, opened[KEY_RECIPES], sealed, mic_bad, dlp_ok, dlp_bad, short_dlp, sums[SUM_VARIANTS];
+} pcap_host;
+
 // Reads a radiotap pcap (sionsniff's) and checks the node data of the
 // first beacon of each 3DS network in it with the beacon key: a 3DS drops a
-// beacon whose node data doesn't check out
+// beacon whose node data doesn't check out. Then decrypts each network's
+// broadcast data (title info) with the key a 3DS would make for it, and
+// checks the Download Play checksums. Prints only whether things check
+// out; no key material.
 static int check_beacons(const char *pcap, const char *keys_path)
 {
     uds_keys k;
@@ -1374,61 +1521,159 @@ static int check_beacons(const char *pcap, const char *keys_path)
         perror(pcap);
         return 1;
     }
-    uint8_t gh[24], ph[16];
-    static uint8_t b[65536];
+    uint8_t gh[24];
     uint32_t seen[64];
     int nseen = 0, checked = 0;
-    // Broadcast data frames (title info) from each host, by its address
-    uint8_t host_mac[64][6];
-    int host_data[64] = { 0 }, nhosts = 0;
+    static pcap_host hosts[64];
+    int nhosts = 0;
+    pcap_frame p;
     if (fread(gh, 1, 24, f) != 24)
         return 1;
-    while (fread(ph, 1, 16, f) == 16)
+    // First pass: beacons, and which hosts sent broadcast data
+    while (next_frame(f, &p))
     {
-        uint32_t cl = ph[8] | ph[9] << 8 | ph[10] << 16 | (uint32_t)ph[11] << 24;
-        if (cl > sizeof(b) || fread(b, 1, cl, f) != cl)
-            break;
-        if (cl < 8)
+        const uint8_t *h = p.b + p.rt;
+        int len = p.end - p.rt;
+        bool data = len >= 24 && ((h[0] >> 2) & 3) == 2 && h[4] == 0xFF;
+        bool beacon = len >= 36 && h[0] == 0x80;
+        if (!data && !beacon)
             continue;
-        int rt = b[2] | b[3] << 8;
-        uint32_t present = b[4] | b[5] << 8 | b[6] << 16 | (uint32_t)b[7] << 24;
-        // Flags come right after the header when there's no TSFT
-        bool fcs = (present & 2) && !(present & 1) && rt > 8 && (b[8] & 0x10);
-        int end = cl - (fcs ? 4 : 0);
-        if (rt + 24 <= end && ((b[rt] >> 2) & 3) == 2 && b[rt + 4] == 0xFF)
+        int i = 0;
+        while (i < nhosts && memcmp(hosts[i].mac, h + 10, 6))
+            i++;
+        if (i == nhosts)
         {
-            int h = 0;
-            while (h < nhosts && memcmp(host_mac[h], b + rt + 10, 6))
-                h++;
-            if (h == nhosts && nhosts < 64)
-                memcpy(host_mac[nhosts++], b + rt + 10, 6);
-            if (h < 64)
-                host_data[h]++;
+            if (nhosts == 64)
+                continue;
+            memset(&hosts[nhosts], 0, sizeof(hosts[0]));
+            memcpy(hosts[nhosts++].mac, h + 10, 6);
+        }
+        pcap_host *ho = &hosts[i];
+        if (data)
+        {
+            ho->data++;
             continue;
         }
-        if (rt + 36 > end || b[rt] != 0x80)
-            continue;
+        if (!ho->tagged)
+            ho->tagged = UdsNetworkTag(h + 36, len - 36, &ho->comm_id, &ho->network_id, &ho->id8);
         uint32_t id;
-        int r = UdsCheckBeacon(&k, b + rt + 10, b + rt + 36, end - rt - 36, &id);
+        int r = UdsCheckBeacon(&k, h + 10, h + 36, len - 36, &id);
         if (r < 0)
             continue;
         bool dup = false;
-        for (int i = 0; i < nseen; i++)
-            dup |= seen[i] == id;
+        for (int j = 0; j < nseen; j++)
+            dup |= seen[j] == id;
         if (dup || nseen == 64)
             continue;
         seen[nseen++] = id;
         checked++;
-        printf("beacon from %02x:%02x:%02x:%02x:%02x:%02x, network %08x: node data %s\n", b[rt + 10],
-               b[rt + 11], b[rt + 12], b[rt + 13], b[rt + 14], b[rt + 15], id,
-               r ? "checks out" : "DOESN'T check out (wrong beacon_key, or built wrong)");
+        printf("beacon from %02x:%02x:%02x:%02x:%02x:%02x, network %08x: node data %s\n", h[10], h[11], h[12],
+               h[13], h[14], h[15], id, r ? "checks out" : "DOESN'T check out (wrong beacon_key, or built wrong)");
     }
-    fclose(f);
     if (!checked)
         printf("no 3DS beacons in %s\n", pcap);
-    for (int h = 0; h < nhosts; h++)
-        printf("broadcast data frames from %02x:%02x:%02x:%02x:%02x:%02x: %d\n", host_mac[h][0], host_mac[h][1],
-               host_mac[h][2], host_mac[h][3], host_mac[h][4], host_mac[h][5], host_data[h]);
+
+    // Second pass: open the broadcast data
+    if (k.have_uds_data)
+    {
+        static uint8_t keys[64][KEY_RECIPES][16];
+        for (int i = 0; i < nhosts; i++)
+            for (int v = 0; v < KEY_RECIPES; v++)
+            {
+                pcap_host *ho = &hosts[i];
+                uint32_t net = v & 1 ? swap32(ho->network_id) : ho->network_id;
+                uint32_t comm = v & 2 ? swap32(ho->comm_id) : ho->comm_id;
+                UdsDataKey(&k, comm, net, ho->mac, ho->id8, DLP_PASSPHRASE, strlen(DLP_PASSPHRASE) + !(v & 4),
+                           keys[i][v]);
+            }
+        fseek(f, 24, SEEK_SET);
+        static uint8_t plain[65536];
+        while (next_frame(f, &p))
+        {
+            const uint8_t *h = p.b + p.rt;
+            int len = p.end - p.rt;
+            if (len < 24 || ((h[0] >> 2) & 3) != 2 || h[4] != 0xFF)
+                continue;
+            int i = 0;
+            while (i < nhosts && memcmp(hosts[i].mac, h + 10, 6))
+                i++;
+            if (i == nhosts || !hosts[i].tagged)
+                continue;
+            pcap_host *ho = &hosts[i];
+            ho->whole += p.whole;
+            for (int v = 0; v < KEY_RECIPES; v++)
+            {
+                int n;
+                bool mic_bad;
+                int r = open_data(h, len, p.whole, keys[i][v], plain, &n, &mic_bad);
+                if (!r)
+                    continue;
+                ho->opened[v]++;
+                if (v)
+                    continue;
+                ho->mic_bad += mic_bad;
+                if (r != 2)
+                    continue;
+                ho->sealed++;
+                // SNAP, the secure data header, then the Download Play packet
+                const uint8_t *d = plain + 8 + 14;
+                int dl = n - 8 - 14;
+                int size = (plain[8] << 8 | plain[9]) - 14;
+                if (dl < 16 || size != dl || !k.have_dlp)
+                {
+                    ho->short_dlp++;
+                    continue;
+                }
+                uint8_t tmp[2048];
+                if (dl > (int)sizeof(tmp))
+                    continue;
+                memcpy(tmp, d, dl);
+                uint32_t want = (uint32_t)tmp[8] << 24 | tmp[9] << 16 | tmp[10] << 8 | tmp[11];
+                memset(tmp + 8, 0, 4);
+                uint32_t key = DlpChecksumKey(&k, ho->mac);
+                if (DlpChecksum(key, tmp, dl) == want)
+                    ho->dlp_ok++;
+                else
+                    ho->dlp_bad++;
+                uint8_t ks[4] = { key >> 24, key >> 16, key >> 8, key };
+                for (int sv = 0; sv < SUM_VARIANTS; sv++)
+                    ho->sums[sv] += dlp_sum_variant(sv, ks, tmp, dl) == want;
+            }
+        }
+    }
+    fclose(f);
+    for (int i = 0; i < nhosts; i++)
+    {
+        pcap_host *ho = &hosts[i];
+        if (!ho->data)
+            continue;
+        printf("broadcast data frames from %02x:%02x:%02x:%02x:%02x:%02x: %d (%d recorded whole)\n", ho->mac[0],
+               ho->mac[1], ho->mac[2], ho->mac[3], ho->mac[4], ho->mac[5], ho->data, ho->whole);
+        if (!k.have_uds_data)
+        {
+            printf("  no uds_data_key: can't open them\n");
+            continue;
+        }
+        if (!ho->tagged)
+        {
+            printf("  no 3DS beacon from it: can't open them\n");
+            continue;
+        }
+        printf("  opened with %s key recipe: %d", key_recipes[0], ho->opened[0]);
+        if (ho->whole)
+            printf(", CCMP tag right on %d, wrong on %d", ho->sealed, ho->mic_bad);
+        if (ho->sealed && k.have_dlp)
+            printf(", Download Play checksum right on %d, wrong on %d", ho->dlp_ok, ho->dlp_bad);
+        printf("\n");
+        for (int sv = 1; sv < SUM_VARIANTS && ho->dlp_bad; sv++)
+            if (ho->sums[sv])
+                printf("  Download Play checksum right on %d the other way: %s, %s, key %s, stored %s\n",
+                       ho->sums[sv], sum_names[sv & 1], mix_names[(sv >> 1) % 3], order_names[(sv / 6) & 1],
+                       order_names[(sv / 12) & 1]);
+        for (int v = 1; v < KEY_RECIPES; v++)
+            if (ho->opened[v])
+                printf("  opened with the %s recipe instead: %d\n", key_recipes[v], ho->opened[v]);
+    }
     return 0;
 }
 
