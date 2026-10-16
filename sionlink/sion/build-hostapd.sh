@@ -1,6 +1,6 @@
 #!/bin/sh
 # Builds the static hostapd 2.11 the kit ships, with hostapd-2.11-sionlink.patch
-# (ignore_unacked_join). Needs libnl-genl-3-dev (static libs). Prints its path.
+# (ignore_unacked_join, force_privacy). Needs libnl-genl-3-dev (static libs). Prints its path.
 set -e
 here=$(cd "$(dirname "$0")" && pwd)
 W=${1:-/tmp/sionlink-hostapd}

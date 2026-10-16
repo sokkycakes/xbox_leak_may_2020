@@ -24,6 +24,10 @@
 // 3DSes (common/sluds.h) join a 3DS local wireless network the Sion hosts
 // beside the DS one, and take part as players like the DSes do:
 //
+//   --if3ds IFACE  Real hardware: hostapd (--hostapd PATH, default
+//                  /opt/sionlink/hostapd) runs the 3DS network on IFACE,
+//                  on --3ds-channel N (default 1); host/radio3ds.h.
+//                  --3ds-group-key N is the key index broadcasts use.
 //   --air3ds PORT  Emulator testing: frames go to and from Azahar through
 //                  ctr/azahar/azbridge (UDP on 127.0.0.1:PORT).
 //   --dlp CIA      First offer CIA to the 3DS Download Play app (host/dlp.h);
@@ -55,6 +59,7 @@
 #include <unistd.h>
 
 #include "dlp.h"
+#include "radio3ds.h"
 #include "slgame.h"
 #include "slproto.h"
 #include "sluds.h"
@@ -1109,6 +1114,8 @@ static uint8_t *dlp_cia;
 static uint64_t dlp_done_at;
 static uint8_t mac3[6] = { 0x02, 0x51, 0x0E, 0x4E, 0x00, 0x01 };
 static int air3_sock = -1;
+static radio3ds *radio3;      // --if3ds: the Sion's radio (host/radio3ds.h)
+static int ctr_channel = 1;
 static struct sockaddr_in air3_peer;
 static bool air3_have_peer;
 
@@ -1166,8 +1173,9 @@ static bool ctr_network(bool sion_link)
     memcpy(cfg.mac, mac3, 6);
     cfg.name = host_name;
     cfg.keys = &keys3;
-    cfg.channel = 1;
-    cfg.tx = air3_tx;
+    cfg.channel = ctr_channel;
+    cfg.tx = radio3 ? R3Tx : air3_tx;
+    cfg.ctx = radio3;
     cfg.node = ctr_node;
     cfg.data = ctr_data;
     if (sion_link)
@@ -1190,6 +1198,8 @@ static bool ctr_network(bool sion_link)
     uds3_is_sl = sion_link;
     logf_("3DS: hosting the %s network (ID %08x)", sion_link ? "Sion Link" : "Download Play",
           UdsNetworkId(uds3));
+    if (radio3)
+        R3Start(radio3, uds3);
     return true;
 }
 
@@ -1262,6 +1272,8 @@ static void ctr_poll(void)
 {
     if (air3_sock >= 0)
         air3_poll();
+    if (radio3)
+        R3Poll(radio3);
     if (!uds3)
         return;
     uint64_t now = now_ms();
@@ -1287,8 +1299,10 @@ static void ctr_poll(void)
 static void usage(void)
 {
     fprintf(stderr,
-            "usage: sionlinkd [--if IFACE | --melon PORT [--deaf]] [--air3ds PORT [--dlp CIA]\n"
-            "                 [--3ds-keys FILE]] [--name NAME] [--motd TEXT] [--game-sock PATH] [-v]\n"
+            "usage: sionlinkd [--if IFACE | --melon PORT [--deaf]]\n"
+            "                 [--if3ds IFACE [--hostapd PATH] [--3ds-channel N] [--3ds-group-key N]\n"
+            "                  | --air3ds PORT] [--dlp CIA] [--3ds-keys FILE]\n"
+            "                 [--name NAME] [--motd TEXT] [--game-sock PATH] [-v]\n"
             "       sionlinkd --vendor-element   print the hostapd vendor_elements hex\n");
     exit(2);
 }
@@ -1298,7 +1312,8 @@ int main(int argc, char **argv)
     const char *ifname = NULL;
     int melon_port = 0;
     const char *game_sock = SLGAME_SOCKET;
-    int air3_port = 0;
+    int air3_port = 0, group_key = 0;
+    const char *if3ds = NULL, *hostapd = "/opt/sionlink/hostapd";
     const char *dlp_path = NULL, *keys_path = "/data/sionlink/3ds-keys.txt";
 
     for (int i = 1; i < argc; i++)
@@ -1319,6 +1334,14 @@ int main(int argc, char **argv)
             dlp_path = argv[++i];
         else if (!strcmp(argv[i], "--3ds-keys") && i + 1 < argc)
             keys_path = argv[++i];
+        else if (!strcmp(argv[i], "--if3ds") && i + 1 < argc)
+            if3ds = argv[++i];
+        else if (!strcmp(argv[i], "--hostapd") && i + 1 < argc)
+            hostapd = argv[++i];
+        else if (!strcmp(argv[i], "--3ds-channel") && i + 1 < argc)
+            ctr_channel = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--3ds-group-key") && i + 1 < argc)
+            group_key = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--deaf"))
             deaf = true;
         else if (!strcmp(argv[i], "-v"))
@@ -1336,7 +1359,8 @@ int main(int argc, char **argv)
         else
             usage();
     }
-    if ((ifname && melon_port) || (!ifname && !melon_port && !air3_port) || (dlp_path && !air3_port))
+    bool ctr = air3_port || if3ds;
+    if ((ifname && melon_port) || (air3_port && if3ds) || (!ifname && !melon_port && !ctr) || (dlp_path && !ctr))
         usage();
 
     setvbuf(stdout, NULL, _IOLBF, 0);
@@ -1345,12 +1369,19 @@ int main(int argc, char **argv)
     int fd = ifname ? pkt_init(ifname) : melon_port ? melon_init(melon_port) : -1;
     if (fd < 0 && (ifname || melon_port))
         return 1;
-    if (air3_port)
+    if (ctr)
     {
         if (!UdsLoadKeys(keys_path, &keys3))
             logf_("3DS: no keys file %s; a real 3DS won't accept this network", keys_path);
-        if (air3_init(air3_port) < 0)
+        if (air3_port && air3_init(air3_port) < 0)
             return 1;
+        if (if3ds)
+        {
+            radio3 = R3Open(if3ds, hostapd, "/run/sionlink", ctr_channel, group_key, logf_);
+            if (!radio3)
+                return 1;
+            memcpy(mac3, R3Mac(radio3), 6);
+        }
         if (dlp_path ? !ctr_start_dlp(dlp_path) : !ctr_network(true))
             return 1;
     }
@@ -1361,12 +1392,19 @@ int main(int argc, char **argv)
     uint64_t next_beacon = 0;
     for (;;)
     {
-        struct pollfd pfd[5] = { { fd, POLLIN, 0 }, { 0, POLLIN, 0 },
+        struct pollfd pfd[7] = { { fd, POLLIN, 0 }, { 0, POLLIN, 0 },
                                  { game.listen_fd, POLLIN, 0 }, { game.fd, POLLIN, 0 },
-                                 { air3_sock, POLLIN, 0 } };
+                                 { air3_sock, POLLIN, 0 }, { -1, POLLIN, 0 }, { -1, POLLIN, 0 } };
         if (!stdin_open)
             pfd[1].fd = -1;
-        poll(pfd, 5, xfer.active || dlp3 ? 2 : 20);
+        if (radio3)
+        {
+            int r3[2];
+            R3Fds(radio3, r3);
+            pfd[5].fd = r3[0];
+            pfd[6].fd = r3[1];
+        }
+        poll(pfd, 7, xfer.active || dlp3 ? 2 : 20);
 
         if (melon_port)
         {
