@@ -327,9 +327,19 @@ do_ffcc() {
     [ -f "$RUN/sionlinkd.pid" ] && kill -0 "$(cat "$RUN/sionlinkd.pid")" 2>/dev/null ||
         do_start || return 1
     log "link a DS with the Sion Link app; it gets the FFCC client. Type help for commands, Ctrl+C ends it."
+    # The radio's own events (scans, channel changes, the home Wi-Fi
+    # dropping) are shown and logged too, to line up with silences from the DS
+    : > "$RUN/ffcc.log"
+    iw event -t 2>/dev/null | while read -r line; do
+        l="$(date +%H:%M:%S) wifi: $line"
+        echo "$l"; echo "$l" >> "$RUN/ffcc.log"
+    done &
+    wifi=$!
     trap 'true' INT TERM
-    "$DIR/bin/ffhost" --client "$DIR/ffcc-gba.nds" --data "$data" "$@" 2>&1 | tee -i "$RUN/ffcc.log"
+    "$DIR/bin/ffhost" --client "$DIR/ffcc-gba.nds" --data "$data" "$@" 2>&1 | tee -ai "$RUN/ffcc.log"
     trap - INT TERM
+    kill $wifi 2>/dev/null
+    for p in $(pidof iw); do grep -q event /proc/$p/cmdline 2>/dev/null && kill $p; done
 }
 
 case "$1" in
