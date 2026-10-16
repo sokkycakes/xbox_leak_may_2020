@@ -284,9 +284,10 @@ static void Status(void)
     else
         printf("Player %d on the Sion%-12s", player, "");
     printf("\x1b[4;0HGameCube link: %-12s\n", Link_IsConnected() ? "connected" : "waiting");
-    printf("\x1b[5;0HJoyBus: %lu batches, %lu cmds   \n", (unsigned long)joy_batches,
+    printf("\x1b[5;0H%-32s", "");
+    printf("\x1b[5;0HJoyBus: %lu batches, %lu cmds\n", (unsigned long)joy_batches,
            (unsigned long)joy_ops);
-    printf("resent answers: %lu   \n", (unsigned long)joy_resent);
+    printf("\x1b[6;0Hresent answers: %lu   \n", (unsigned long)joy_resent);
 }
 
 static void Pump(void)
