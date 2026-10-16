@@ -11,3 +11,6 @@ ffcc/ds/build/
 ffcc/ds/*.nds
 ffcc/ds/*.elf
 ffcc/sion/ffhost
+ffcc/ds/dslib/
+ffcc/ds/linktest/
+linktest/ds/dslib/
