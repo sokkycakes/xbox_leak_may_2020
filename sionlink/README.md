@@ -68,8 +68,12 @@ sends a program to every linked DS, which keeps it in RAM and boots it.
 Chunks go out as broadcasts in a sliding window; the DS acknowledges the
 first chunk it still lacks plus a bitmap of the 32 after it, and the Sion
 resends only what's missing (`SIONLINK_DROP=N` drops N% on purpose, for
-testing). Booting is in `ds/source/boot.c` and `ds/arm7/source/boot7.c`,
-handshaking over the IPC sync register (see `common/slboot.h`). Programs
-must load their ARM9 binary below 0x02380000 and their ARM7 binary at
-0x02380000 and up, which is what BlockSDS and devkitPro build by default,
-and fit in 2.5 MB. `demo/` builds `sion-hello.nds` to try it with.
+testing). The Sion sends only what's needed to boot, as a packed image: header, ARM9
+binary, ARM7 binary (see `common/slboot.h`). Booting is in
+`ds/source/boot.c` and `ds/arm7/source/boot7.c`, handshaking over the IPC sync
+register. The ARM9 binary may load anywhere in main RAM below the staging area;
+the ARM7 binary either in main RAM (BlockSDS/devkitPro default, 0x02380000) or
+in ARM7 RAM (0x037F8000, common in retail programs), in which case it travels
+through VRAM C+D and a small stub there copies it. Up to about 3.6 MB of code
+fits. Programs that read files from their own card (NitroFS, retail file
+systems) won't find them. `demo/` builds `sion-hello.nds` to try it with.

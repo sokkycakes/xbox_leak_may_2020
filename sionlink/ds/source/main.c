@@ -9,6 +9,7 @@
 #include <dswifi9.h>
 
 #include "boot.h"
+#include "slboot.h"
 #include "slproto.h"
 
 static PrintConsole top, bottom;
@@ -316,7 +317,7 @@ static bool Join(Wifi_AccessPoint *ap)
 // Download Play: receiving a .nds from the Sion
 // ==============================================
 
-static u8 *stage; // SL_FILE_MAX bytes, taken from the heap at start-up
+static u8 *stage; // SL_FILE_MAX bytes at SLBOOT_STAGE, kept out of the heap
 
 static struct {
     bool active;
@@ -650,8 +651,11 @@ int main(int argc, char *argv[])
 
     cpuStartTiming(0);
 
-    // Staging area for Download Play, taken now so it sits low in the heap
-    stage = malloc(SL_FILE_MAX);
+    // Staging area for Download Play: main RAM from SLBOOT_STAGE up, which
+    // the heap must never reach. Done before anything allocates.
+    if (getHeapEnd() <= (u8 *)SLBOOT_STAGE
+        && reduceHeapSize(getHeapLimit() - (u8 *)SLBOOT_STAGE) == 0)
+        stage = (u8 *)SLBOOT_STAGE;
 
     Title("Starting wireless...");
     if (!Wifi_InitDefault(INIT_ONLY | WIFI_LOCAL_ONLY))

@@ -39,11 +39,12 @@ enum sl_type {
     SL_FILE_ACK   = 9, // DS -> Sion: sl_file_ack
 };
 
-// Download Play: the Sion sends a whole .nds into the DS's RAM, which then
-// boots it. Chunks are SL_FILE_CHUNK bytes; the DS keeps chunks that arrive
+// Download Play: the Sion sends a program into the DS's RAM, which then
+// boots it. What goes over the air is a packed image (slboot.h): header,
+// ARM9 binary, ARM7 binary. Chunks are SL_FILE_CHUNK bytes; the DS keeps chunks that arrive
 // out of order and acknowledges the first one it is still missing.
 #define SL_FILE_CHUNK   (SL_MAX_BODY - 8)
-#define SL_FILE_MAX     (2560u * 1024u) // fits the DS's staging area
+#define SL_FILE_MAX     (0x023FE000u - 0x02060000u) // packed image; see slboot.h
 
 enum sl_file_status {
     SL_FILE_RECEIVING = 0,
@@ -78,7 +79,7 @@ typedef struct __attribute__((packed)) {
 
 typedef struct __attribute__((packed)) {
     uint32_t id;        // transfer number, echoed in data and acks
-    uint32_t size;      // bytes
+    uint32_t size;      // bytes in the packed image
     char     name[32];  // shown on the DS
 } sl_file_begin;
 

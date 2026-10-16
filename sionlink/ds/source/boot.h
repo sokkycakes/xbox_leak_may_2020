@@ -3,11 +3,11 @@
 
 #include <stdint.h>
 
-// Checks that a received .nds can be booted from where it sits in RAM.
+// Checks that a received packed image (common/slboot.h) can be booted.
 // Returns NULL if so, or a short reason for the screen.
 const char *BootCheck(const uint8_t *file, uint32_t size);
 
-// Boots it (see common/slboot.h). Wireless must already be off. Never returns.
+// Boots it. Wireless must already be off. Never returns.
 void BootNds(const uint8_t *file, uint32_t size) __attribute__((noreturn));
 
 #endif

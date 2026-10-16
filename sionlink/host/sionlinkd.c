@@ -232,6 +232,35 @@ static void file_finish(const char *why)
     memset(&xfer, 0, sizeof(xfer));
 }
 
+static uint32_t rd32(const uint8_t *p)
+{
+    return p[0] | (p[1] << 8) | (p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+// Builds the packed image the DS boots (common/slboot.h): the header, the
+// ARM9 binary padded to 4 bytes, the ARM7 binary. Returns NULL or a reason.
+static const char *pack_nds(const uint8_t *f, uint32_t size, uint8_t **out, long *out_size)
+{
+    uint32_t off9 = rd32(f + 0x20), size9 = rd32(f + 0x2C);
+    uint32_t off7 = rd32(f + 0x30), size7 = rd32(f + 0x3C);
+    if (off9 < 0x200 || off9 > size || size9 > size - off9
+        || off7 < 0x200 || off7 > size || size7 > size - off7 || !size9 || !size7)
+        return "doesn't look like a .nds (bad ARM9/ARM7 offsets)";
+    uint32_t pad9 = (size9 + 3) & ~3u;
+    uint64_t total = 0x200ull + pad9 + size7;
+    if (total > SL_FILE_MAX)
+        return "program too big for the DS's RAM";
+    uint8_t *p = calloc(1, total);
+    if (!p)
+        return "out of memory";
+    memcpy(p, f, 0x200);
+    memcpy(p + 0x200, f + off9, size9);
+    memcpy(p + 0x200 + pad9, f + off7, size7);
+    *out = p;
+    *out_size = (long)total;
+    return NULL;
+}
+
 static void file_start(const char *path)
 {
     if (xfer.active)
@@ -248,21 +277,29 @@ static void file_start(const char *path)
     fseek(f, 0, SEEK_END);
     long size = ftell(f);
     fseek(f, 0, SEEK_SET);
-    if (size < 0x200 || size > (long)SL_FILE_MAX)
+    if (size < 0x200 || size > 512L * 1024 * 1024)
     {
-        logf_("%s: %ld bytes; must be 512 to %u", path, size, SL_FILE_MAX);
+        logf_("%s: %ld bytes; not a .nds", path, size);
         fclose(f);
         return;
     }
-    uint8_t *data = malloc(size);
-    if (!data || fread(data, 1, size, f) != (size_t)size)
+    uint8_t *file = malloc(size);
+    if (!file || fread(file, 1, size, f) != (size_t)size)
     {
         logf_("%s: read failed", path);
-        free(data);
+        free(file);
         fclose(f);
         return;
     }
     fclose(f);
+    uint8_t *data;
+    const char *why = pack_nds(file, (uint32_t)size, &data, &size);
+    free(file);
+    if (why)
+    {
+        logf_("%s: %s", path, why);
+        return;
+    }
 
     int n = 0;
     for (int i = 0; i < MAX_CLIENTS; i++)
@@ -291,7 +328,7 @@ static void file_start(const char *path)
     const char *base = strrchr(path, '/');
     snprintf(xfer.name, sizeof(xfer.name), "%.31s", base ? base + 1 : path);
     xfer.started = xfer.last_progress = now_ms();
-    logf_("sending %s (%u bytes) to %d DS", xfer.name, xfer.size, n);
+    logf_("sending %s (%u bytes packed) to %d DS", xfer.name, xfer.size, n);
 }
 
 static void file_ack(client *c, const sl_file_ack *a)
