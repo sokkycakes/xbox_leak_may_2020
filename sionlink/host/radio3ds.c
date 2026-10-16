@@ -224,7 +224,9 @@ static void AddAnchor(radio3ds *r)
     NlRequest(r, msg, len, NULL, 0);
 
     static const uint8_t rates[] = { 0x16, 0x18, 0x24, 0x30, 0x48, 0x60, 0x6C };
-    uint16_t aid = 2007, listen = 1;
+    // AID 15, which hostapd never hands out (max_num_sta=14); the Intel
+    // firmware crashes on 2007
+    uint16_t aid = 15, listen = 1;
     struct nl80211_sta_flag_update fl = { 0 };
     fl.mask = fl.set = 1 << NL80211_STA_FLAG_AUTHENTICATED | 1 << NL80211_STA_FLAG_ASSOCIATED |
                        1 << NL80211_STA_FLAG_AUTHORIZED;
@@ -367,7 +369,7 @@ void R3Start(radio3ds *r, uds_host *u)
             "ssid=%s\nignore_broadcast_ssid=2\n"
             "hw_mode=g\nchannel=%d\nbeacon_int=100\ndtim_period=1\n"
             "supported_rates=110 120 180 240 360 480 540\nbasic_rates=110 120 180 240 360 480 540\n"
-            "preamble=1\nauth_algs=1\nwmm_enabled=0\nmax_num_sta=15\n"
+            "preamble=1\nauth_algs=1\nwmm_enabled=0\nmax_num_sta=14\n"
             "force_privacy=1\nap_max_inactivity=600\nskip_inactivity_poll=1\ndisassoc_low_ack=0\n"
             "vendor_elements=%s\n",
             r->ifname, ctrl, ssid, r->channel, ve);
