@@ -775,6 +775,7 @@ static void nintendo_element(uint8_t *e)
 // ==========================
 
 #define MELON_CH 6
+static int beacon_ch = MELON_CH; // --channel: what the beacons announce
 static int melon_sock = -1;
 static struct sockaddr_in melon_peer;
 static bool melon_have_peer;
@@ -818,7 +819,7 @@ static int beacon_body(uint8_t *p)
     p[n++] = 0x21; p[n++] = 0x00;                     // ESS | short preamble
     p[n++] = 0; p[n++] = 4; memcpy(p + n, "Sion", 4); n += 4;
     p[n++] = 1; p[n++] = 2; p[n++] = 0x82; p[n++] = 0x84;
-    p[n++] = 3; p[n++] = 1; p[n++] = MELON_CH;
+    p[n++] = 3; p[n++] = 1; p[n++] = beacon_ch;
     p[n++] = 5; p[n++] = 4; p[n++] = 0; p[n++] = 1; p[n++] = 0; p[n++] = 0; // TIM
     p[n++] = 221; p[n++] = 48; nintendo_element(p + n); n += 48;
     return n;
@@ -1038,6 +1039,42 @@ static int pkt_init(const char *ifname)
     return pkt_sock;
 }
 
+// Beacons sent by us through a monitor interface on the AP's radio, for
+// radios whose own beaconing doesn't work (the Nintendo Wi-Fi USB Connector
+// on rt2500usb answers probes but never beacons).
+static int bcn_sock = -1;
+static int bcn_ifindex;
+
+static int beacon_init(const char *ifname)
+{
+    bcn_sock = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
+    struct ifreq ifr = { 0 };
+    snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", ifname);
+    if (bcn_sock < 0 || ioctl(bcn_sock, SIOCGIFINDEX, &ifr) < 0)
+    {
+        logf_("beacons on %s: %s", ifname, strerror(errno));
+        return -1;
+    }
+    bcn_ifindex = ifr.ifr_ifindex;
+    logf_("sending beacons on %s, channel %d", ifname, beacon_ch);
+    return 0;
+}
+
+static void pkt_beacon(void)
+{
+    static const uint8_t bcast[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+    uint8_t f[300];
+    // radiotap: rate 1 Mbit/s, TX flags no-ack
+    static const uint8_t rt[12] = { 0, 0, 12, 0, 0x04, 0x80, 0, 0, 2, 0, 0x08, 0 };
+    memcpy(f, rt, sizeof(rt));
+    int n = sizeof(rt);
+    n += mgmt_header(f + n, 0x0080, bcast);
+    n += beacon_body(f + n);
+    struct sockaddr_ll sll = { .sll_family = AF_PACKET, .sll_ifindex = bcn_ifindex };
+    if (sendto(bcn_sock, f, n, 0, (struct sockaddr *)&sll, sizeof(sll)) < 0 && verbose > 1)
+        logf_("beacon: %s", strerror(errno));
+}
+
 static void pkt_poll(void)
 {
     uint8_t f[2048];
@@ -1069,7 +1106,8 @@ static void pkt_poll(void)
 static void usage(void)
 {
     fprintf(stderr,
-            "usage: sionlinkd (--if IFACE [--unicast] | --melon PORT [--deaf]) [--name NAME] [--motd TEXT]\n"
+            "usage: sionlinkd (--if IFACE [--unicast] [--beacon-if MONITOR --channel CH] | --melon PORT [--deaf])\n"
+            "                 [--name NAME] [--motd TEXT]\n"
             "                 [--game-sock PATH] [-v]\n"
             "       sionlinkd --vendor-element   print the hostapd vendor_elements hex\n");
     exit(2);
@@ -1080,6 +1118,7 @@ int main(int argc, char **argv)
     const char *ifname = NULL;
     int melon_port = 0;
     const char *game_sock = SLGAME_SOCKET;
+    const char *beacon_if = NULL;
 
     for (int i = 1; i < argc; i++)
     {
@@ -1097,6 +1136,10 @@ int main(int argc, char **argv)
             deaf = true;
         else if (!strcmp(argv[i], "--unicast"))
             unicast = true;
+        else if (!strcmp(argv[i], "--beacon-if") && i + 1 < argc)
+            beacon_if = argv[++i];
+        else if (!strcmp(argv[i], "--channel") && i + 1 < argc)
+            beacon_ch = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-v"))
             verbose++;
         else if (!strcmp(argv[i], "--vendor-element"))
@@ -1120,6 +1163,8 @@ int main(int argc, char **argv)
         file_drop_pct = atoi(getenv("SIONLINK_DROP"));
     int fd = ifname ? pkt_init(ifname) : melon_init(melon_port);
     if (fd < 0)
+        return 1;
+    if (beacon_if && (!ifname || beacon_init(beacon_if) < 0))
         return 1;
     if (*game_sock)
         game.listen_fd = game_listen(game_sock);
@@ -1147,6 +1192,12 @@ int main(int argc, char **argv)
         else
         {
             pkt_poll();
+            uint64_t now = now_ms();
+            if (bcn_sock >= 0 && now >= next_beacon)
+            {
+                pkt_beacon();
+                next_beacon = now + 100;
+            }
         }
 
         if (stdin_open && (pfd[1].revents & (POLLIN | POLLHUP)))

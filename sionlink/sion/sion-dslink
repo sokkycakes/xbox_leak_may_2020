@@ -39,6 +39,25 @@ if [ -z "$PHY_IF" ]; then
     done
 fi
 AP_IF=sionds
+MON_IF=sionmon
+
+# udev gives a new USB Wi-Fi interface its own name (wlp0s20f0u1u2); the
+# Intel card escapes that only because its name is taken. Waits for the
+# rename, then takes the name back: take_name PHY TYPE NAME, where TYPE is
+# as `iw dev` prints it (AP, monitor).
+take_name() {
+    command -v udevadm >/dev/null && udevadm settle -t 3 2>/dev/null
+    sleep 1
+    i=$(iw dev 2>/dev/null | awk -v p="phy#${1#phy}" -v t="$2" '
+        $0 ~ "^" p { on = 1; next } /^phy#/ { on = 0 }
+        on && $1 == "Interface" { n = $2 } on && $1 == "type" && $2 == t { print n; exit }')
+    if [ -n "$i" ] && [ "$i" != "$3" ]; then
+        [ -f "/var/run/sion/wpa.$i.pid" ] && kill "$(cat "/var/run/sion/wpa.$i.pid")" 2>/dev/null
+        ip link set "$i" down 2>/dev/null
+        ip link set "$i" name "$3" || { log "couldn't rename $i to $3"; return 1; }
+    fi
+    [ -e "/sys/class/net/$3" ] || { log "$3 vanished after it was added"; return 1; }
+}
 
 log() { echo "sion-dslink: $*"; }
 
@@ -187,15 +206,7 @@ do_start() {
     # Intel card escapes that only because its name is taken. Wait for the
     # rename, then take the name back.
     if [ -n "$unicast" ]; then
-        command -v udevadm >/dev/null && udevadm settle -t 3 2>/dev/null
-        sleep 1
-        i=$(iw dev 2>/dev/null | awk -v p="phy#${phy#phy}" '$0 ~ "^" p { on = 1; next } /^phy#/ { on = 0 } on && $1 == "Interface" { print $2; exit }')
-        if [ -n "$i" ] && [ "$i" != "$AP_IF" ]; then
-            [ -f "/var/run/sion/wpa.$i.pid" ] && kill "$(cat "/var/run/sion/wpa.$i.pid")" 2>/dev/null
-            ip link set "$i" down 2>/dev/null
-            ip link set "$i" name "$AP_IF" || { log "couldn't rename $i to $AP_IF"; return 1; }
-        fi
-        [ -e "/sys/class/net/$AP_IF" ] || { log "$AP_IF vanished after it was added"; return 1; }
+        take_name "$phy" AP "$AP_IF" || return 1
     fi
     # A different, locally administered MAC from the home interface
     if [ -z "$unicast" ]; then
@@ -211,10 +222,23 @@ do_start() {
     "$DIR/bin/hostapd" -B -P "$RUN/hostapd.pid" "$RUN/hostapd.conf" > "$RUN/hostapd.log" 2>&1 || {
         log "hostapd failed:"; tail -8 "$RUN/hostapd.log"; iw dev "$AP_IF" del; return 1; }
 
+    # The connector answers probes but never beacons on its own, so
+    # sionlinkd sends the beacons through a monitor interface beside the AP.
+    beacon=
+    if [ -n "$unicast" ]; then
+        iw dev "$MON_IF" del 2>/dev/null
+        if iw phy "$phy" interface add "$MON_IF" type monitor && take_name "$phy" monitor "$MON_IF" &&
+           ip link set "$MON_IF" up; then
+            beacon="--beacon-if $MON_IF --channel $ch"
+        else
+            log "couldn't add the beacon interface; the DS may not find the Sion"
+        fi
+    fi
+
     rm -f "$RUN/in"; mkfifo "$RUN/in"
     (
         exec 3<>"$RUN/in"
-        exec "$DIR/bin/sionlinkd" --if "$AP_IF" $unicast --name "${SIONLINK_NAME:-$(hostname)}" -v <&3 >>"$RUN/sionlinkd.log" 2>&1
+        exec "$DIR/bin/sionlinkd" --if "$AP_IF" $unicast $beacon --name "${SIONLINK_NAME:-$(hostname)}" -v <&3 >>"$RUN/sionlinkd.log" 2>&1
     ) &
     echo $! > "$RUN/sionlinkd.pid"
     sleep 1
@@ -236,6 +260,7 @@ do_stop() {
     done
     sleep 1
     iw dev "$AP_IF" del 2>/dev/null
+    iw dev "$MON_IF" del 2>/dev/null
     log "stopped"
 }
 
