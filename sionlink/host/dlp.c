@@ -10,7 +10,8 @@
 #define HDR 16
 #define FRAG 1440      // CIA bytes per fragment
 #define BLOCK_FRAGS 182 // fragments per block
-#define FRAGS_PER_TICK 8 // fragments sent per DlpTick to avoid overflowing radio TX queues
+#define FRAGS_PER_TICK 1 // fragments sent per FRAG_GAP_MS (8 per 2 ms may overrun a 3DS)
+#define FRAG_GAP_MS 4
 #define BROADCAST_MS 500
 #define REPEAT_MS 100  // how often an unanswered request is repeated
 #define START_AFTER_MS 4000 // distribution starts this long after the last join
@@ -436,8 +437,8 @@ void DlpData(dlp_host *d, int node, int channel, const uint8_t *p, int len)
         }
         else if (type != c->last_rx || c->rx_repeats >= 50)
         {
-            char hex[3 * 32 + 1] = "";
-            for (int i = 0; i < len && i < 32; i++)
+            char hex[3 * 64 + 1] = "";
+            for (int i = 0; i < len && i < 64; i++)
                 sprintf(hex + i * 3, "%02x ", p[i]);
             DlpLog("3DS node %d sent %s (%d bytes, %d like the last since) while %s: %s", node,
                    type < 7 ? packet_names[type] : "an unknown packet", len, c->rx_repeats,
@@ -475,23 +476,39 @@ void DlpData(dlp_host *d, int node, int channel, const uint8_t *p, int len)
     case PK_FINISH_DIST:
         if ((c->state == CL_ASKED || c->state == CL_NO_CONTENT) && len >= 0x1C)
         {
-            bool done_block = p[0x14], needs = p[0x15];
-            uint32_t seq = Get32(p + 0x16);
+            // 0x14: 1 if it has the whole block; 0x15: 1 if it needs
+            // more; 0x16: its ack count. A real 3DS sends 0x34 bytes, with
+            // a 16-bit length at 0x1A and then a bitmap of the block's
+            // fragments (0x18 bytes for 182 fragments).
+            int done_block = p[0x14], needs = p[0x15];
             c->seq++;
             c->last = 0;
+            if (DlpLog && len >= 0x1C)
+            {
+                int bm = Get16(p + 0x1A), set = 0;
+                for (int i = 0; i < bm && 0x1C + i < len; i++)
+                    for (int b = 0; b < 8; b++)
+                        set += (p[0x1C + i] >> b) & 1;
+                DlpLog("3DS node %d: block %s, %s; bitmap of %d bytes with %d bits set", node,
+                       done_block == 1 ? "complete" : "INCOMPLETE", needs ? "needs more" : "needs nothing more",
+                       bm, set);
+            }
             if (!needs)
                 c->state = CL_GOT_IT;
-            else if (seq == c->block)
+            else if (done_block == 1)
             {
+                // Next block (c->block already points past the one sent)
                 c->asked++;
                 c->frag = 0;
                 c->state = CL_SENDING;
             }
-            else if (seq + 1 == c->block && !done_block)
+            else
             {
-                // It's missing fragments of the last block: send it again
+                // It's missing fragments of the block just sent: send it all
+                // again
                 c->asked++;
-                c->block--;
+                if (c->block)
+                    c->block--;
                 c->frag = 0;
                 c->state = CL_SENDING;
             }
@@ -527,7 +544,7 @@ void DlpTick(dlp_host *d, uint64_t now)
         {
             if (DlpLog && c->frag == 0)
                 DlpLog("3DS node %d: sending block %u", n, c->block);
-            if (c->last && now - c->last < 2)
+            if (c->last && now - c->last < FRAG_GAP_MS)
                 continue;
             c->last = now;
             if (!SendBlock(d, n, c))
