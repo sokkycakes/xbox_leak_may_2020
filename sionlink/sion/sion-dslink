@@ -455,9 +455,24 @@ start_sniff() {
         [ -f "/var/run/sion/wpa.$i.pid" ] && kill "$(cat "/var/run/sion/wpa.$i.pid")" 2>/dev/null
         iw dev "$i" del 2>/dev/null
     done
-    iw phy "$sphy" interface add "$SNIFF_IF" type monitor && take_name "$sphy" monitor "$SNIFF_IF" &&
-        ip link set "$SNIFF_IF" up && iw dev "$SNIFF_IF" set channel "$1" ||
-        { log "couldn't set up the air recording"; iw dev "$SNIFF_IF" del 2>/dev/null; return 0; }
+    iw phy "$sphy" interface add "$SNIFF_IF" type monitor && take_name "$sphy" monitor "$SNIFF_IF" ||
+        { log "couldn't add the recording interface"; iw dev "$SNIFF_IF" del 2>/dev/null; return 0; }
+    # Some drivers only take a channel while the interface is down, others
+    # only while it's up
+    ip link set "$SNIFF_IF" down 2>/dev/null
+    tuned=0
+    iw dev "$SNIFF_IF" set channel "$1" 2>/dev/null && tuned=1
+    ip link set "$SNIFF_IF" up || { log "couldn't bring up $SNIFF_IF"; iw dev "$SNIFF_IF" del 2>/dev/null; return 0; }
+    [ $tuned -eq 1 ] || iw dev "$SNIFF_IF" set channel "$1" 2>/dev/null && tuned=1
+    [ $tuned -eq 1 ] || iw phy "$sphy" set channel "$1" 2>/dev/null && tuned=1
+    on=$(iw dev "$SNIFF_IF" info 2>/dev/null | sed -n 's/^.*channel \([0-9]*\).*/\1/p')
+    if [ -z "$on" ] && [ $tuned -eq 0 ]; then
+        log "couldn't tune the connector to channel $1; recording on whatever channel it's on"
+    elif [ -n "$on" ] && [ "$on" != "$1" ]; then
+        log "the connector wouldn't tune to channel $1 (it's on $on); not recording"
+        iw dev "$SNIFF_IF" del 2>/dev/null
+        return 0
+    fi
     "$DIR/bin/sionsniff" "$SNIFF_IF" "$RUN/sniff.pcap" 3600 > "$RUN/sniff.log" 2>&1 &
     echo $! > "$RUN/sniff.pid"
     log "recording the air on channel $1 with the Wi-Fi USB Connector"
