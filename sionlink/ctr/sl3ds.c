@@ -107,6 +107,7 @@ int SlKeepAlive(uint32_t app, uint32_t now)
 
 static bool b_quits = true;
 static volatile bool woke; // back from sleep: the system dropped the network
+static bool lid_closed;
 
 static void AptEvent(APT_HookType type, void *param)
 {
@@ -119,14 +120,50 @@ bool SlInit(void)
 {
     static aptHookCookie cookie;
     aptHook(&cookie, AptEvent, NULL);
+    // Sleep drops the network, so closing the lid only turns the screens
+    // off (SlRejoin), as on a DS
+    aptSetSleepAllowed(false);
+    ptmuInit();
+    gspLcdInit();
     return R_SUCCEEDED(udsInit(0x3000, NULL));
+}
+
+// The screens go dark while the lid is closed
+static void Lid(void)
+{
+    static u32 last;
+    u32 now = SlMillis();
+    if (now - last < 250)
+        return;
+    last = now;
+    u8 open = 1;
+    if (R_FAILED(PTMU_GetShellState(&open)))
+        return;
+    if (!open != lid_closed)
+    {
+        lid_closed = !open;
+        if (lid_closed)
+            GSPLCD_PowerOffBacklight(GSPLCD_SCREEN_BOTH);
+        else
+            GSPLCD_PowerOnBacklight(GSPLCD_SCREEN_BOTH);
+    }
 }
 
 bool SlRejoin(void (*status)(const char *text), uint32_t quiet_ms)
 {
+    Lid();
     if (!woke && SlQuietFor(SlMillis()) < quiet_ms)
         return false;
-    woke = false;
+    if (woke)
+    {
+        // After sleep the wireless service starts over
+        if (bound)
+            udsUnbind(&link_bind);
+        bound = false;
+        udsExit();
+        udsInit(0x3000, NULL);
+        woke = false;
+    }
     b_quits = false;
     bool ok = SlJoin(status);
     b_quits = true;
@@ -193,6 +230,10 @@ bool SlJoin(void (*status)(const char *text))
 
 void SlExit(void)
 {
+    if (lid_closed)
+        GSPLCD_PowerOnBacklight(GSPLCD_SCREEN_BOTH);
+    gspLcdExit();
+    ptmuExit();
     if (bound)
     {
         SlSend(SL_BYE, NULL, 0);

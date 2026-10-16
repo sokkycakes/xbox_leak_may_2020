@@ -78,7 +78,12 @@ static void logf_(const char *fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
-    fprintf(stderr, "sionlinkd: ");
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    struct tm tm;
+    localtime_r(&ts.tv_sec, &tm);
+    fprintf(stderr, "%02d:%02d:%02d.%03ld sionlinkd: ", tm.tm_hour, tm.tm_min, tm.tm_sec,
+            ts.tv_nsec / 1000000);
     vfprintf(stderr, fmt, ap);
     fputc('\n', stderr);
     va_end(ap);

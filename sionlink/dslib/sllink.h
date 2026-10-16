@@ -40,8 +40,9 @@ uint32_t SlQuietFor(uint32_t now_ms);
 void SlExit(void);
 
 // Joins again if the link dropped (the 3DS slept, or the Sion has been quiet
-// for quiet_ms), showing progress through status(); B doesn't stop it. Call
-// every frame. True if it rejoined.
+// for quiet_ms), showing progress through status(); B doesn't stop it. Also
+// turns the screens off while the lid is closed (SlInit stops the 3DS from
+// sleeping). Call every frame. True if it rejoined.
 bool SlRejoin(void (*status)(const char *text), uint32_t quiet_ms);
 #endif
 
