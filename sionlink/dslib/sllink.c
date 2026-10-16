@@ -1,3 +1,4 @@
+#include <stdio.h>
 // Sion Link for DS game clients (see sllink.h).
 
 #include <string.h>
@@ -149,6 +150,7 @@ bool SlJoin(void (*status)(const char *text))
     Say(status, "Looking for the Sion...\n\nB: quit");
 
     Wifi_AccessPoint ap;
+    int shown = -1, frames = 0;
     for (bool found = false; !found;)
     {
         swiWaitForVBlank();
@@ -156,6 +158,17 @@ bool SlJoin(void (*status)(const char *text))
         if (keysDown() & KEY_B)
             return false;
         int n = Wifi_GetNumAP();
+        // What the radio hears, for when the Sion doesn't turn up
+        if (++frames >= 60 && n != shown)
+        {
+            char text[96];
+            snprintf(text, sizeof(text),
+                     "Looking for the Sion...\n\nB: quit\n\n%d networks heard\n%s mode",
+                     n, isDSiMode() ? "DSi" : "DS");
+            Say(status, text);
+            shown = n;
+            frames = 0;
+        }
         for (int i = 0; i < n && !found; i++)
         {
             Wifi_GetAPData(i, &ap);
