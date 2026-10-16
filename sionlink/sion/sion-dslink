@@ -2,11 +2,16 @@
 # sion-dslink: DS local wireless for the Sion (Sion Link).
 #
 #   sion-dslink check        what the Wi-Fi card supports, nothing changes
-#   sion-dslink start [CH]   add a second, DS-only network next to the home
-#                            Wi-Fi and start sionlinkd
+#   sion-dslink start [CH] [--3ds] [--dlp FILE.cia|--no-dlp] [--force]
+#                            add a second DS or 3DS network next to the home
+#                            Wi-Fi and start sionlinkd (3ds defaults to
+#                            serving ffcc-gba.cia over Download Play)
+#   sion-dslink 3ds [CH] [--dlp FILE.cia|--no-dlp] [--force]
+#                            shorthand for: sion-dslink start --3ds ...
+#   sion-dslink dlp-start    start 3DS Download Play distribution immediately
 #   sion-dslink stop
 #   sion-dslink status
-#   sion-dslink say TEXT     show TEXT on every linked DS
+#   sion-dslink say TEXT     show TEXT on every linked DS/3DS
 #   sion-dslink send FILE    send a .nds to every linked DS, which boots it
 #                            (FILE - reads it from stdin)
 #   sion-dslink txtrace [N]  send N test broadcasts and show the rate each frame
@@ -16,11 +21,12 @@
 #                            DS that links joins (its client is sent to it);
 #                            shows and logs how steady the link is. Ctrl+C ends
 #                            it and brings the dashboard back.
-#   sion-dslink ffcc         FFCC demo: the Sion plays the GameCube's side of
-#                            Crystal Chronicles' GBA link for every DS that
-#                            links (the DS gets the GBA client). Needs the
-#                            disc's gba folder in /data/ffcc/gba. Type help
-#                            for the commands; Ctrl+C ends it.
+#   sion-dslink ffcc [--3ds] FFCC demo: the Sion plays the GameCube's side of
+#                            Crystal Chronicles' GBA link for every DS or 3DS
+#                            that links (a 3DS gets ffcc-gba.cia via Download
+#                            Play; a DS gets ffcc-gba.nds). Needs the disc's
+#                            gba folder in /data/ffcc/gba. Type help for the
+#                            commands; Ctrl+C ends it.
 #
 # The home Wi-Fi link (and SSH over it) is never touched: start refuses when
 # the card can't run an access point beside it, unless --force is given.
@@ -101,14 +107,24 @@ load_ratefix() {
 
 do_start() {
     force=0
+    mode3ds=0
+    dlp_cia=
+    no_dlp=0
     want_ch=
-    for a in "$@"; do
-        case "$a" in --force) force=1 ;; *) want_ch=$a ;; esac
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --force) force=1 ;;
+            --3ds|3ds) mode3ds=1 ;;
+            --dlp) shift; dlp_cia=$1 ;;
+            --no-dlp) no_dlp=1 ;;
+            *) want_ch=$1 ;;
+        esac
+        shift
     done
-    [ -f "$RUN/hostapd.pid" ] && kill -0 "$(cat "$RUN/hostapd.pid")" 2>/dev/null && { log "already running"; return 0; }
+    [ -f "$RUN/sionlinkd.pid" ] && kill -0 "$(cat "$RUN/sionlinkd.pid")" 2>/dev/null && { log "already running"; return 0; }
     # sion-netd would otherwise treat the DS network as a second home Wi-Fi
     # and move the Sion's address and default route onto it.
-    if ! grep -q 'ifc" = sionds' /usr/libexec/sion-netd; then
+    if [ -f /usr/libexec/sion-netd ] && ! grep -q 'ifc" = sionds' /usr/libexec/sion-netd; then
         log "sion-netd doesn't know about the DS network yet; run install-sionlink.sh first"
         return 1
     fi
@@ -126,14 +142,23 @@ do_start() {
         return 1
     fi
 
-    # The DS only does 2.4 GHz. With one channel at a time we must share the
-    # home network's channel, which then has to be 2.4 GHz.
+    # The DS/3DS only does 2.4 GHz. With one channel at a time we must share
+    # the home network's channel, which then has to be 2.4 GHz.
     if [ -n "$want_ch" ]; then ch=$want_ch
     elif [ "$home_ch" -gt 0 ]; then ch=$home_ch
+    elif [ $mode3ds -eq 1 ]; then ch=1
     else ch=6; fi
     if [ -n "$f" ] && [ "$maxch" -lt 2 ] && [ "$ch" != "$home_ch" ] && [ $force -eq 0 ]; then
-        log "home Wi-Fi is on ${f} MHz and the card can only use one channel at a time; the DS needs 2.4 GHz. Not starting."
+        log "home Wi-Fi is on ${f} MHz and the card can only use one channel at a time; the DS/3DS needs 2.4 GHz. Not starting."
         return 1
+    fi
+
+    if [ $mode3ds -eq 1 ]; then
+        KEYS=${SIONLINK_KEYS:-/data/sionlink/3ds-keys.txt}
+        [ -f "$KEYS" ] || { log "no 3DS keys at $KEYS"; return 1; }
+        if [ -z "$dlp_cia" ] && [ $no_dlp -eq 0 ] && [ -f "$DIR/ffcc-gba.cia" ]; then
+            dlp_cia="$DIR/ffcc-gba.cia"
+        fi
     fi
 
     mkdir -p "$RUN"
@@ -145,22 +170,37 @@ do_start() {
     mac=$(cat /sys/class/net/$PHY_IF/address)
     ip link set "$AP_IF" address "02:${mac#*:}" 2>/dev/null
 
-    ve=$("$DIR/bin/sionlinkd" --vendor-element)
-    sed -e "s/@IF@/$AP_IF/" -e "s/@CH@/$ch/" -e "s/@VE@/$ve/" \
-        "$DIR/hostapd-sionlink.conf.in" > "$RUN/hostapd.conf"
-    # hostapd prints its startup errors before going to the background
-    rm -f "$RUN/hostapd.pid"
-    "$DIR/bin/hostapd" -B -P "$RUN/hostapd.pid" "$RUN/hostapd.conf" > "$RUN/hostapd.log" 2>&1 || {
-        log "hostapd failed:"; tail -8 "$RUN/hostapd.log"; iw dev "$AP_IF" del; return 1; }
+    rm -f "$RUN/in" "$RUN/hostapd.pid"; mkfifo "$RUN/in"
+    if [ $mode3ds -eq 1 ]; then
+        # In 3DS UDS mode, sionlinkd spawns and manages hostapd itself
+        (
+            exec 3<>"$RUN/in"
+            exec "$DIR/bin/sionlinkd" --if3ds "$AP_IF" --3ds-channel "$ch" \
+                --hostapd "$DIR/bin/hostapd" --3ds-keys "$KEYS" \
+                ${dlp_cia:+--dlp "$dlp_cia"} \
+                --name "${SIONLINK_NAME:-$(hostname)}" -v <&3 >>"$RUN/sionlinkd.log" 2>&1
+        ) &
+        echo $! > "$RUN/sionlinkd.pid"
+        sleep 1
+        kill -0 "$(cat "$RUN/sionlinkd.pid")" 2>/dev/null || {
+            log "sionlinkd (3DS) failed:"; tail -12 "$RUN/sionlinkd.log"; iw dev "$AP_IF" del 2>/dev/null; return 1; }
+        log "3DS UDS network up on channel $ch ($AP_IF)${dlp_cia:+ with Download Play ($dlp_cia)}; logs in $RUN"
+    else
+        ve=$("$DIR/bin/sionlinkd" --vendor-element)
+        sed -e "s/@IF@/$AP_IF/" -e "s/@CH@/$ch/" -e "s/@VE@/$ve/" \
+            "$DIR/hostapd-sionlink.conf.in" > "$RUN/hostapd.conf"
+        # hostapd prints its startup errors before going to the background
+        "$DIR/bin/hostapd" -B -P "$RUN/hostapd.pid" "$RUN/hostapd.conf" > "$RUN/hostapd.log" 2>&1 || {
+            log "hostapd failed:"; tail -8 "$RUN/hostapd.log"; iw dev "$AP_IF" del; return 1; }
 
-    rm -f "$RUN/in"; mkfifo "$RUN/in"
-    (
-        exec 3<>"$RUN/in"
-        exec "$DIR/bin/sionlinkd" --if "$AP_IF" --name "${SIONLINK_NAME:-$(hostname)}" -v <&3 >>"$RUN/sionlinkd.log" 2>&1
-    ) &
-    echo $! > "$RUN/sionlinkd.pid"
-    sleep 1
-    log "DS network up on channel $ch ($AP_IF); logs in $RUN"
+        (
+            exec 3<>"$RUN/in"
+            exec "$DIR/bin/sionlinkd" --if "$AP_IF" --name "${SIONLINK_NAME:-$(hostname)}" -v <&3 >>"$RUN/sionlinkd.log" 2>&1
+        ) &
+        echo $! > "$RUN/sionlinkd.pid"
+        sleep 1
+        log "DS network up on channel $ch ($AP_IF); logs in $RUN"
+    fi
 }
 
 do_stop() {
@@ -182,7 +222,7 @@ do_stop() {
 }
 
 do_status() {
-    if [ -f "$RUN/hostapd.pid" ] && kill -0 "$(cat "$RUN/hostapd.pid")" 2>/dev/null; then
+    if [ -f "$RUN/sionlinkd.pid" ] && kill -0 "$(cat "$RUN/sionlinkd.pid")" 2>/dev/null; then
         log "running"
         [ -d /sys/module/iwl_ratefix ] && log "rate fix: $(cat /sys/module/iwl_ratefix/parameters/fixed) frames corrected"
         iw dev "$AP_IF" info 2>/dev/null | grep -E "channel|addr" | sed 's/^/    /'
@@ -324,9 +364,19 @@ do_ffcc() {
         { log "the FFCC demo isn't installed"; return 1; }
     data=${FFCC_DATA:-/data/ffcc/gba}
     [ -f "$data/objdat.spt" ] || { log "no FFCC disc data in $data (objdat.spt and the m*.mcd maps)"; return 1; }
-    [ -f "$RUN/sionlinkd.pid" ] && kill -0 "$(cat "$RUN/sionlinkd.pid")" 2>/dev/null ||
-        do_start || return 1
-    log "link a DS with the Sion Link app; it gets the FFCC client. Type help for commands, Ctrl+C ends it."
+    start_args=
+    if [ "$1" = --3ds ] || [ "$1" = 3ds ]; then
+        start_args=--3ds
+        shift
+    fi
+    if [ -n "$start_args" ]; then
+        do_stop
+        do_start "$start_args" || return 1
+    else
+        [ -f "$RUN/sionlinkd.pid" ] && kill -0 "$(cat "$RUN/sionlinkd.pid")" 2>/dev/null ||
+            do_start || return 1
+    fi
+    log "link a DS or 3DS (Download Play -> Nintendo 3DS); it gets the FFCC client. Type help for commands, Ctrl+C ends it."
     trap 'true' INT TERM
     "$DIR/bin/ffhost" --client "$DIR/ffcc-gba.nds" --data "$data" "$@" 2>&1 | tee -i "$RUN/ffcc.log"
     trap - INT TERM
@@ -335,6 +385,8 @@ do_ffcc() {
 case "$1" in
     check) do_check ;;
     start) shift; do_start "$@" ;;
+    3ds) shift; do_start --3ds "$@" ;;
+    dlp-start) [ -p "$RUN/in" ] && echo "!start" > "$RUN/in" || log "not running" ;;
     stop) do_stop ;;
     restart) do_stop; shift; do_start "$@" ;;
     status) do_status ;;
@@ -343,5 +395,5 @@ case "$1" in
     linktest) shift; do_linktest "$@" ;;
     ffcc) shift; do_ffcc "$@" ;;
     say) shift; [ -p "$RUN/in" ] && echo "$*" > "$RUN/in" || log "not running" ;;
-    *) echo "usage: sion-dslink check|start [CH] [--force]|stop|status|say TEXT|send FILE.nds|txtrace [N]|linktest [--headless]|ffcc"; exit 2 ;;
+    *) echo "usage: sion-dslink check|start [CH] [--3ds] [--dlp FILE.cia|--no-dlp] [--force]|3ds [CH]|dlp-start|stop|status|say TEXT|send FILE.nds|txtrace [N]|linktest [--headless]|ffcc [--3ds]"; exit 2 ;;
 esac
