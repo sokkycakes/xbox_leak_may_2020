@@ -21,6 +21,12 @@
 #                            links (the DS gets the GBA client). Needs the
 #                            disc's gba folder in /data/ffcc/gba. Type help
 #                            for the commands; Ctrl+C ends it.
+#   sion-dslink 3ds          FFCC demo for 3DSes: the Sion offers the FFCC
+#                            client (ffcc-gba.cia) to the 3DS Download Play
+#                            app, then plays the GameCube's side like ffcc.
+#                            Stops the DS network while it runs. Needs the
+#                            3DS keys file (sionlinkd --3ds-keys); without it
+#                            a real 3DS won't see the Sion. Ctrl+C ends it.
 #
 # The home Wi-Fi link (and SSH over it) is never touched: start refuses when
 # the card can't run an access point beside it, unless --force is given.
@@ -33,6 +39,7 @@ if [ -z "$PHY_IF" ]; then
     for p in /sys/class/net/*; do
         i=${p##*/}
         [ "$i" = sionds ] && continue
+        [ "$i" = sion3ds ] && continue
         # not the Nintendo Wi-Fi USB Connector, which is only ever the DS radio
         [ "$(basename "$(readlink "$p/device/driver" 2>/dev/null)")" = rt2500usb ] && continue
         [ -e "$p/phy80211" ] && { PHY_IF=$i; break; }
@@ -425,6 +432,63 @@ do_ffcc() {
     for p in $(pidof iw); do grep -q event /proc/$p/cmdline 2>/dev/null && kill $p; done
 }
 
+# The FFCC demo for 3DSes over the 3DS's own local wireless (host/radio3ds.h):
+# sionlinkd runs hostapd on its own interface on the Intel card, which shares
+# the home Wi-Fi's channel.
+AP3_IF=sion3ds
+do_3ds() {
+    [ -x "$DIR/bin/ffhost" ] && [ -f "$DIR/ffcc-gba.cia" ] ||
+        { log "the 3DS FFCC demo isn't installed"; return 1; }
+    data=${FFCC_DATA:-/data/ffcc/gba}
+    [ -f "$data/objdat.spt" ] || { log "no FFCC disc data in $data (objdat.spt and the m*.mcd maps)"; return 1; }
+    if ! grep -q 'ifc" = sion3ds' /usr/libexec/sion-netd; then
+        log "sion-netd doesn't know about the 3DS network yet; run the kit's installer first"
+        return 1
+    fi
+    keys=${SIONLINK_3DS_KEYS:-/data/sionlink/3ds-keys.txt}
+    if [ -f "$keys" ]; then
+        log "3DS keys: $keys"
+    else
+        log "no 3DS keys at $keys: the Sion starts, but a real 3DS won't see it in Download Play"
+    fi
+    phy=$(phy_of "$PHY_IF")
+    [ -n "$phy" ] || { log "no Wi-Fi interface $PHY_IF"; return 1; }
+    f=$(home_freq)
+    ch=6
+    [ -n "$f" ] && ch=$(freq_to_ch "$f")
+    [ "$ch" -gt 0 ] || { log "home Wi-Fi is on 5 GHz; the 3DS needs 2.4 GHz and the card can only use one channel"; return 1; }
+    case $ch in 1|6|11) ;; *) log "home Wi-Fi is on channel $ch; the 3DS only looks on 1, 6 and 11, so it may not find the Sion" ;; esac
+    do_stop >/dev/null
+    mkdir -p "$RUN"
+    iw dev "$AP3_IF" del 2>/dev/null
+    iw phy "$phy" interface add "$AP3_IF" type __ap || { log "couldn't add $AP3_IF"; return 1; }
+    mac=$(cat /sys/class/net/$PHY_IF/address)
+    ip link set "$AP3_IF" address "06:${mac#*:}" 2>/dev/null
+    rm -f "$RUN/in"; mkfifo "$RUN/in"
+    (
+        exec 3<>"$RUN/in"
+        exec "$DIR/bin/sionlinkd" --if3ds "$AP3_IF" --hostapd "$DIR/bin/hostapd" --3ds-channel "$ch" \
+            --dlp "$DIR/ffcc-gba.cia" --3ds-keys "$keys" --name "${SIONLINK_NAME:-$(hostname)}" -v \
+            <&3 >>"$RUN/sionlinkd.log" 2>&1
+    ) &
+    echo $! > "$RUN/sionlinkd.pid"
+    sleep 2
+    if ! kill -0 "$(cat "$RUN/sionlinkd.pid")" 2>/dev/null; then
+        log "sionlinkd stopped:"; tail -8 "$RUN/sionlinkd.log"; iw dev "$AP3_IF" del 2>/dev/null; return 1
+    fi
+    log "3DS network up on channel $ch ($AP3_IF); logs in $RUN"
+    log "on the 3DS open Download Play, pick Nintendo 3DS, then the Sion. Ctrl+C ends it."
+    # The 3DS side of sionlinkd's log alongside ffhost's
+    ( tail -n 0 -f "$RUN/sionlinkd.log" & echo $! > "$RUN/tail.pid"; wait ) |
+        awk '/3DS/ { print; fflush() }' &
+    trap 'true' INT TERM
+    "$DIR/bin/ffhost" --data "$data" "$@" 2>&1 | tee -i "$RUN/ffcc3ds.log"
+    trap - INT TERM
+    kill "$(cat "$RUN/tail.pid" 2>/dev/null)" 2>/dev/null
+    do_stop
+    iw dev "$AP3_IF" del 2>/dev/null
+}
+
 case "$1" in
     check) do_check ;;
     start) shift; do_start "$@" ;;
@@ -435,6 +499,7 @@ case "$1" in
     send) shift; do_send "$@" ;;
     linktest) shift; do_linktest "$@" ;;
     ffcc) shift; do_ffcc "$@" ;;
+    3ds) shift; do_3ds "$@" ;;
     say) shift; [ -p "$RUN/in" ] && echo "$*" > "$RUN/in" || log "not running" ;;
-    *) echo "usage: sion-dslink check|start [CH] [--force]|stop|status|say TEXT|send FILE.nds|txtrace [N]|linktest [--headless]|ffcc"; exit 2 ;;
+    *) echo "usage: sion-dslink check|start [CH] [--force]|stop|status|say TEXT|send FILE.nds|txtrace [N]|linktest [--headless]|ffcc|3ds"; exit 2 ;;
 esac
