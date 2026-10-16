@@ -6,7 +6,7 @@ client's game code into build/cli with the few edits the DS port needs, and
 puts its graphics there: extracted from your FFCC disc image with --disc, or
 blank stand-ins with --stub (the client then runs, but shows no text).
 
-usage: setup.py [--region usa|pal|jp] (--disc FFCC.iso | --stub)
+usage: setup.py [--region usa|pal|jp] (--disc FFCC.iso | --bin ffcc_cli.bin | --stub)
 """
 
 import argparse
@@ -128,7 +128,7 @@ def weak_storage():
     (CLI / "port_bss.c").write_text(text + "\n" + "\n".join(common) + "\n")
 
 
-def assets(region, disc, stub):
+def assets(region, disc, stub, cli_bin=None):
     version, config = REGIONS[region]
     cfg = DECOMP / "gba" / config
     if stub:
@@ -143,8 +143,11 @@ def assets(region, disc, stub):
     orig = BUILD / "orig" / version
     orig.mkdir(parents=True, exist_ok=True)
     tools = DECOMP / "gba/tools"
-    subprocess.run([sys.executable, str(tools / "extract.py"), str(disc), str(orig), "gba/ffcc_cli.bin"],
-                   check=True)
+    if cli_bin:
+        shutil.copy(cli_bin, orig / "ffcc_cli.bin")
+    else:
+        subprocess.run([sys.executable, str(tools / "extract.py"), str(disc), str(orig), "gba/ffcc_cli.bin"],
+                       check=True)
     subprocess.run([sys.executable, str(tools / "assets.py"), str(orig / "ffcc_cli.bin"), str(cfg), str(CLI)],
                    check=True)
 
@@ -154,12 +157,13 @@ def main():
     p.add_argument("--region", choices=REGIONS, default="usa")
     g = p.add_mutually_exclusive_group(required=True)
     g.add_argument("--disc", type=Path, help="your FFCC disc image (.iso or .gcm)")
+    g.add_argument("--bin", type=Path, help="gba/ffcc_cli.bin from your disc")
     g.add_argument("--stub", action="store_true", help="blank graphics, for build tests")
     a = p.parse_args()
     fetch()
     copy_sources(a.region)
     weak_storage()
-    assets(a.region, a.disc, a.stub)
+    assets(a.region, a.disc, a.stub, a.bin)
     (BUILD / "region").write_text(REGIONS[a.region][0] + "\n")
     print(f"build/cli ready ({a.region}{', blank graphics' if a.stub else ''})")
 
