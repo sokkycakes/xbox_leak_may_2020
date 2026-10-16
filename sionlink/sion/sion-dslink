@@ -183,6 +183,20 @@ do_start() {
     # died can still be beaconing, and a new hostapd then fails to start.
     iw dev "$AP_IF" del 2>/dev/null
     iw phy "$phy" interface add "$AP_IF" type __ap || { log "couldn't add $AP_IF"; return 1; }
+    # udev gives a new USB interface its own name (wlp0s20f0u1u2); the
+    # Intel card escapes that only because its name is taken. Wait for the
+    # rename, then take the name back.
+    if [ -n "$unicast" ]; then
+        command -v udevadm >/dev/null && udevadm settle -t 3 2>/dev/null
+        sleep 1
+        i=$(iw dev 2>/dev/null | awk -v p="phy#${phy#phy}" '$0 ~ "^" p { on = 1; next } /^phy#/ { on = 0 } on && $1 == "Interface" { print $2; exit }')
+        if [ -n "$i" ] && [ "$i" != "$AP_IF" ]; then
+            [ -f "/var/run/sion/wpa.$i.pid" ] && kill "$(cat "/var/run/sion/wpa.$i.pid")" 2>/dev/null
+            ip link set "$i" down 2>/dev/null
+            ip link set "$i" name "$AP_IF" || { log "couldn't rename $i to $AP_IF"; return 1; }
+        fi
+        [ -e "/sys/class/net/$AP_IF" ] || { log "$AP_IF vanished after it was added"; return 1; }
+    fi
     # A different, locally administered MAC from the home interface
     if [ -z "$unicast" ]; then
         mac=$(cat /sys/class/net/$PHY_IF/address)
