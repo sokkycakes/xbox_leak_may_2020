@@ -14,6 +14,8 @@
 #define BROADCAST_MS 500
 #define REPEAT_MS 100  // how often an unanswered request is repeated
 #define START_AFTER_MS 4000 // distribution starts this long after the last join
+#define NVER_US 0x000400DB00017302ull // the US system's version title
+#define SYSTEM_VERSION 0x2D10          // 11.17.0
 #define REBOOT_PASSPHRASE "Sion Link" // 9 bytes, no NUL
 
 enum {
@@ -54,6 +56,7 @@ struct dlp_host {
     uint32_t cia_size, meta_offset;
     uint64_t title_id;
     uint16_t title_short[64], title_long[128];
+    uint8_t ratings[16];      // the SMDH's age ratings
     uint16_t icon[0x900];
     char name[65];
     int max_clients;
@@ -149,6 +152,12 @@ static void Broadcast(dlp_host *d)
     p[27] = 1;
     Put32(p + 28, FRAG * BLOCK_FRAGS);
     p[32] = d->max_clients + 1;
+    // As a real 3DS host on 11.17 sends them; meaning unknown (0x2D10 is
+    // 11.17's NVer version, as in the update list below)
+    p[33] = 0x02;
+    Put16(p + 34, SYSTEM_VERSION);
+    p[36] = 0x01;
+    memcpy(p + 40, d->ratings, 16);
     Put32(p + 56, d->meta_offset);
     Put32(p + 60, d->cia_size);
     for (int i = 0; i < 64; i++)
@@ -167,9 +176,20 @@ static void Broadcast(dlp_host *d)
         Send(d, UDS_BROADCAST, DLP_BROADCAST_CHANNEL, p, 1448);
     }
 
-    // The fifth carries the system update list; none here
+    // The fifth carries the system update list. A real US 3DS on 11.17
+    // lists its NVer twice: 1, 2, 1, then (title ID, version) entries of
+    // 16 bytes; a child below that version is asked to update.
     memset(p, 0, 1464);
     Header(p, PK_BROADCAST, 1464, 4, resp);
+    Put16(p + 16, 1);
+    Put16(p + 18, 2);
+    Put32(p + 20, 1);
+    for (int e = 0; e < 2; e++)
+    {
+        Put32(p + 24 + e * 16, (uint32_t)(NVER_US >> 32));
+        Put32(p + 28 + e * 16, (uint32_t)NVER_US);
+        Put16(p + 32 + e * 16, SYSTEM_VERSION);
+    }
     Send(d, UDS_BROADCAST, DLP_BROADCAST_CHANNEL, p, 1464);
 }
 
@@ -298,6 +318,7 @@ static const char *ParseCia(dlp_host *d)
     for (int i = 0; i < 0x900; i++)
         d->icon[i] = smdh[0x24C0 + i * 2] | (smdh[0x24C0 + i * 2 + 1] << 8);
     int n;
+    memcpy(d->ratings, smdh + 0x2008, 16);
     for (n = 0; n < 64 && d->title_short[n]; n++)
         d->name[n] = d->title_short[n] < 0x80 ? d->title_short[n] : '?';
     d->name[n] = 0;

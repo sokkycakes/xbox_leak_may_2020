@@ -470,15 +470,16 @@ void UdsKick(uds_host *u, int node_id)
 // Data
 // ====
 
-// SNAP, then the secure data header: payload size + 14, 2 unknown bytes,
-// payload size + 10, management flag, channel, sequence, destination and
-// source nodes (all big-endian), then the payload
+// SNAP, then the secure data header: payload size + 14, a 16-bit 1 (what
+// a real 3DS sends; maybe an outer protocol's type), payload size + 10,
+// management flag, channel, sequence, destination and source nodes (all
+// big-endian), then the payload
 static int SecureData(uds_host *u, uint8_t *f, int dst, int src, int channel, const void *data, int len)
 {
     int n = Snap(f, UDS_ETH_DATA);
     uint8_t *h = f + n;
     Put16(h, len + 14);
-    h[2] = h[3] = 0;
+    Put16(h + 2, 1);
     Put16(h + 4, len + 10);
     h[6] = 0;
     h[7] = channel;
