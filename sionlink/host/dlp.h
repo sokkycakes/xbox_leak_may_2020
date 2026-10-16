@@ -26,6 +26,7 @@
 #include "uds.h"
 
 #define DLP_COMM_ID     0x00002810u
+#define DLP_ID8         0x55        // as a real 3DS hosting Download Play beacons it
 #define DLP_PASSPHRASE  "0km@tsa$uhmy1a0sa" // sent with its NUL
 #define DLP_BROADCAST_CHANNEL 1
 #define DLP_CLIENT_CHANNEL    2

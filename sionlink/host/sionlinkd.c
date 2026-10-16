@@ -1235,7 +1235,9 @@ static bool ctr_network(bool sion_link)
     else
     {
         cfg.comm_id = DLP_COMM_ID;
-        cfg.id8 = 0;
+        cfg.id8 = DLP_ID8;
+        cfg.tag_unk9 = 1;
+        cfg.tag_unk13 = 1;
         cfg.max_nodes = SL_UDS_MAX_NODES;
         cfg.passphrase = DLP_PASSPHRASE;
         cfg.passphrase_len = strlen(DLP_PASSPHRASE) + 1;

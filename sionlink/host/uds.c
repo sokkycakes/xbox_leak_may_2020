@@ -139,10 +139,12 @@ static int NetworkTag(uds_host *u, uint8_t *p)
     body[3] = TAG_NETWORK;
     Put32(body + 4, u->cfg.comm_id);
     body[8] = u->cfg.id8;
+    body[9] = u->cfg.tag_unk9;
     Put16(body + 10, u->attributes);
     Put32(body + 12, u->network_id);
     body[16] = TotalNodes(u);
     body[17] = u->cfg.max_nodes;
+    body[19] = u->cfg.tag_unk13;
     uint8_t hash[20];
     Sha1(body, 0x1F + 20 + 1, hash);
     memcpy(body + 0x1F, hash, 20);

@@ -62,6 +62,9 @@ typedef struct {
     uint32_t comm_id;         // local-WLAN communication ID
     uint8_t id8;
     uint8_t max_nodes;        // including the host
+    // Network tag bytes 0x09 and 0x13, meaning unknown: both 1 in a real
+    // 3DS's Download Play beacon, 0 otherwise
+    uint8_t tag_unk9, tag_unk13;
     uint8_t channel;          // Wi-Fi channel
     uint8_t mac[6];           // the host's MAC
     const char *name;         // the host's user name (ASCII)
