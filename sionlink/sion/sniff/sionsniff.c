@@ -84,6 +84,11 @@ int main(int argc, char **argv)
             perror("sionsniff: recv");
             break;
         }
+        if (time(NULL) >= next_report)
+        {
+            fprintf(stderr, "sionsniff: %ld frames seen, %ld kept so far\n", seen, kept);
+            next_report = time(NULL) + 5;
+        }
         if (n < 8)
             continue;
         seen++;
@@ -113,11 +118,6 @@ int main(int argc, char **argv)
                     keep = !memcmp(h + a, ouis[i], 3);
             if (type != 0)
                 cut = rt + 64 < n ? rt + 64 : n;
-        }
-        if (time(NULL) >= next_report)
-        {
-            fprintf(stderr, "sionsniff: %ld frames seen, %ld kept so far\n", seen, kept);
-            next_report = time(NULL) + 5;
         }
         if (!keep)
             continue;
