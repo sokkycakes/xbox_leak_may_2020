@@ -1499,6 +1499,9 @@ typedef struct {
     uint8_t id8;
     bool tagged;
     int data, whole, opened[KEY_RECIPES], sealed, mic_bad, dlp_ok, dlp_bad, short_dlp, sums[SUM_VARIANTS];
+    // The first whole title info packet of each index: headers and fields
+    uint8_t info[5][14 + 64];
+    int info_len[5];
 } pcap_host;
 
 // Reads a radiotap pcap (sionsniff's) and checks the node data of the
@@ -1627,6 +1630,14 @@ static int check_beacons(const char *pcap, const char *keys_path)
                 uint8_t tmp[2048];
                 if (dl > (int)sizeof(tmp))
                     continue;
+                if (d[12] < 5 && !ho->info_len[d[12]])
+                {
+                    // Secure data header, then the packet's first 64 bytes
+                    // (header, title ID, sizes; not the names or icon)
+                    int keep = dl < 64 ? dl : 64;
+                    memcpy(ho->info[d[12]], plain + 8, 14 + keep);
+                    ho->info_len[d[12]] = 14 + keep;
+                }
                 memcpy(tmp, d, dl);
                 uint32_t want = (uint32_t)tmp[8] << 24 | tmp[9] << 16 | tmp[10] << 8 | tmp[11];
                 memset(tmp + 8, 0, 4);
@@ -1670,6 +1681,14 @@ static int check_beacons(const char *pcap, const char *keys_path)
                 printf("  Download Play checksum right on %d the other way: %s, %s, key %s, stored %s\n",
                        ho->sums[sv], sum_names[sv & 1], mix_names[(sv >> 1) % 3], order_names[(sv / 6) & 1],
                        order_names[(sv / 12) & 1]);
+        for (int ix = 0; ix < 5; ix++)
+            if (ho->info_len[ix])
+            {
+                printf("  title info %d:", ix);
+                for (int j = 0; j < ho->info_len[ix]; j++)
+                    printf("%s%02x", j == 14 || (j > 14 && (j - 14) % 16 == 0) ? " " : "", ho->info[ix][j]);
+                printf("\n");
+            }
         for (int v = 1; v < KEY_RECIPES; v++)
             if (ho->opened[v])
                 printf("  opened with the %s recipe instead: %d\n", key_recipes[v], ho->opened[v]);
