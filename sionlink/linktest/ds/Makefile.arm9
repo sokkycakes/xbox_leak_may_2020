@@ -1,5 +1,5 @@
-SOURCEDIRS	:= source
-INCLUDEDIRS	:= .. ../../common
+SOURCEDIRS	:= source ../../dslib
+INCLUDEDIRS	:= .. ../../common ../../dslib
 LIBS		:= -ldswifi9_noip -lnds9
 LIBDIRS		:= $(CURDIR)/../../ds/build/dswifi
 

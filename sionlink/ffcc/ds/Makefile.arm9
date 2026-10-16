@@ -1,0 +1,10 @@
+SOURCEDIRS	:= source ../build/cli ../../dslib
+INCLUDEDIRS	:= source .. ../../common ../../dslib ../build/cli
+REGION		:= $(shell cat ../build/region 2>/dev/null || echo GCCE01)
+# The client is 2006 GBA code: quiet its warnings, and it reads one type
+# through another
+DEFINES		:= -DPORT_DS -DVERSION_$(REGION) -fno-strict-aliasing -w
+LIBS		:= -ldswifi9_noip -lnds9
+LIBDIRS		:= $(CURDIR)/../../ds/build/dswifi
+
+include $(BLOCKSDS)/sys/default_makefiles/rom_arm9arm7/Makefile.arm9

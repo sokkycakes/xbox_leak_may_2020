@@ -6,3 +6,8 @@ linktest/ds/build/
 linktest/ds/*.nds
 linktest/ds/*.elf
 linktest/sion/linktest
+ffcc/build/
+ffcc/ds/build/
+ffcc/ds/*.nds
+ffcc/ds/*.elf
+ffcc/sion/ffhost
