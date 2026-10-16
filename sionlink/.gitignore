@@ -14,3 +14,9 @@ ffcc/sion/ffhost
 ffcc/ds/dslib/
 ffcc/ds/linktest/
 linktest/ds/dslib/
+ffcc/ctr/build/
+ffcc/ctr/*.3dsx
+ffcc/ctr/*.elf
+ffcc/ctr/*.smdh
+ffcc/ctr/*.cia
+ctr/azahar/azbridge

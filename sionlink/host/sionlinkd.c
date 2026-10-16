@@ -20,6 +20,17 @@
 // A game on the Sion connects to the game socket (common/slgame.h,
 // --game-sock PATH) to have its DS client sent to every DS that links, and
 // to trade SL_GAME packets with the DSes running it.
+//
+// 3DSes (common/sluds.h) join a 3DS local wireless network the Sion hosts
+// beside the DS one, and take part as players like the DSes do:
+//
+//   --air3ds PORT  Emulator testing: frames go to and from Azahar through
+//                  ctr/azahar/azbridge (UDP on 127.0.0.1:PORT).
+//   --dlp CIA      First offer CIA to the 3DS Download Play app (host/dlp.h);
+//                  once every 3DS that took it was told to start it, host
+//                  the Sion Link network its program joins.
+//   --3ds-keys F   The 3DS system keys (host/uds.h); default
+//                  /data/sionlink/3ds-keys.txt.
 
 #define _GNU_SOURCE
 #include <arpa/inet.h>
@@ -43,8 +54,11 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "dlp.h"
 #include "slgame.h"
 #include "slproto.h"
+#include "sluds.h"
+#include "uds.h"
 
 #define MAX_CLIENTS 15
 #define CLIENT_TIMEOUT_MS 10000
@@ -100,6 +114,8 @@ typedef struct {
     // Game (see "Game socket" below)
     uint32_t app;       // what the DS runs: 0 = the Sion Link app
     uint64_t offered;   // when we last sent it the game's client
+    // A 3DS: its node number on the 3DS network (0 for a DS)
+    int node3ds;
 } client;
 
 static client clients[MAX_CLIENTS];
@@ -140,7 +156,16 @@ static void (*backend_send)(const uint8_t *dst, const uint8_t *payload, int len)
 
 static const uint8_t bcast_mac[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 
-// Everything goes out as a broadcast naming its DS (see slproto.h)
+static uds_host *uds3; // the 3DS network, when there is one
+static bool uds3_is_sl; // it's the Sion Link network (not Download Play)
+
+static const char *kind(const client *c)
+{
+    return c->node3ds ? "3DS" : "DS";
+}
+
+// Everything goes out as a broadcast naming its DS (see slproto.h); a 3DS
+// gets it one-to-one on the 3DS network (sluds.h)
 static void send_sl(client *c, int type, const void *body, int len)
 {
     uint8_t buf[6 + sizeof(sl_hdr) + SL_MAX_BODY];
@@ -154,7 +179,14 @@ static void send_sl(client *c, int type, const void *body, int len)
     h->len = len;
     if (len)
         memcpy(buf + 6 + sizeof(sl_hdr), body, len);
-    backend_send(bcast_mac, buf, 6 + sizeof(sl_hdr) + len);
+    if (c->node3ds)
+    {
+        if (uds3 && uds3_is_sl)
+            UdsSend(uds3, c->node3ds, SL_UDS_CHANNEL, buf + 6, sizeof(sl_hdr) + len);
+        return;
+    }
+    if (backend_send)
+        backend_send(bcast_mac, buf, 6 + sizeof(sl_hdr) + len);
 }
 
 static void send_welcome(client *c)
@@ -173,7 +205,7 @@ static void game_left(client *c);
 static void drop_client(client *c, const char *why)
 {
     if (c->used)
-        logf_("DS %s (%s) left: %s", mac_str(c->mac), c->name, why);
+        logf_("%s %s (%s) left: %s", kind(c), mac_str(c->mac), c->name, why);
     game_left(c);
     c->used = false;
 }
@@ -320,7 +352,7 @@ static bool file_start(const char *path, bool launchers_only)
     for (int i = 0; i < MAX_CLIENTS; i++)
     {
         client *c = &clients[i];
-        c->in_file = c->used && c->welcomed && (!launchers_only || c->app == 0);
+        c->in_file = c->used && c->welcomed && !c->node3ds && (!launchers_only || c->app == 0);
         c->file_begun = false;
         c->file_next = 0;
         c->file_ahead = 0;
@@ -481,7 +513,7 @@ static void handle_sl(const uint8_t *mac, const uint8_t *pkt, int len)
         if (h->len >= sizeof(sl_hello))
             memcpy(&app, &((const sl_hello *)body)->app, 4);
         if (!c->welcomed)
-            logf_("DS %s linked, owner \"%s\", #%d%s", mac_str(mac), c->name, c->aid,
+            logf_("%s %s linked, owner \"%s\", #%d%s", kind(c), mac_str(mac), c->name, c->aid,
                   app ? ", running a game client" : "");
         bool was = c->welcomed;
         c->welcomed = true;
@@ -586,7 +618,7 @@ static void game_joined(client *c)
 {
     if (!game_player(c))
         return;
-    logf_("DS %s (%s) is player %d", mac_str(c->mac), c->name, c->aid);
+    logf_("%s %s (%s) is player %d", kind(c), mac_str(c->mac), c->name, c->aid);
     game_send(SLGAME_JOIN, c->aid, c->name, 20);
 }
 
@@ -725,7 +757,8 @@ static void game_poll(void)
     for (int i = 0; i < MAX_CLIENTS; i++)
     {
         client *c = &clients[i];
-        if (c->used && c->welcomed && c->app == 0 && (!c->offered || now - c->offered > GAME_OFFER_MS))
+        if (c->used && c->welcomed && !c->node3ds && c->app == 0
+            && (!c->offered || now - c->offered > GAME_OFFER_MS))
             any = true;
     }
     if (!any)
@@ -736,7 +769,7 @@ static void game_poll(void)
         game_send(SLGAME_NOTE, 0, note, sizeof(note) - 1);
     }
     for (int i = 0; i < MAX_CLIENTS; i++)
-        if (clients[i].used && clients[i].welcomed && clients[i].app == 0)
+        if (clients[i].used && clients[i].welcomed && !clients[i].node3ds && clients[i].app == 0)
             clients[i].offered = now;
 }
 
@@ -1060,11 +1093,202 @@ static void pkt_poll(void)
 // Main
 // ====
 
+// 3DS back end
+// ============
+//
+// The 3DS network is a UDS network (host/uds.h) hosted by this program. With
+// --dlp it starts as Download Play's network (host/dlp.h); when that's done
+// it is replaced by the Sion Link network (common/sluds.h), where 3DSes
+// trade Sion Link packets on SL_UDS_CHANNEL and are clients like DSes.
+
+#define DLP_LINGER_MS 3000 // keep the Download Play network up this long after the start
+
+static uds_keys keys3;
+static dlp_host *dlp3;
+static uint8_t *dlp_cia;
+static uint64_t dlp_done_at;
+static uint8_t mac3[6] = { 0x02, 0x51, 0x0E, 0x4E, 0x00, 0x01 };
+static int air3_sock = -1;
+static struct sockaddr_in air3_peer;
+static bool air3_have_peer;
+
+static void air3_tx(void *ctx, int kind3, const uint8_t dst[6], const uint8_t *body, int len)
+{
+    uint8_t buf[14 + 2048];
+    if (!air3_have_peer || len > 2048)
+        return;
+    buf[0] = kind3;
+    buf[1] = 1; // channel
+    memcpy(buf + 2, mac3, 6);
+    memcpy(buf + 8, dst, 6);
+    memcpy(buf + 14, body, len);
+    sendto(air3_sock, buf, 14 + len, 0, (struct sockaddr *)&air3_peer, sizeof(air3_peer));
+}
+
+static void ctr_node(void *ctx, int node, bool joined, const uint8_t mac[6], const char *name)
+{
+    logf_("3DS %s (%s) %s the %s network as node %d", mac_str(mac), name,
+          joined ? "joined" : "left", uds3_is_sl ? "Sion Link" : "Download Play", node);
+    if (dlp3)
+    {
+        DlpNode(dlp3, node, joined);
+        return;
+    }
+    client *c = find_client(mac, false);
+    if (!joined && c && c->node3ds)
+        drop_client(c, "left the 3DS network");
+}
+
+static void ctr_data(void *ctx, int node, int channel, const uint8_t *data, int len)
+{
+    if (dlp3)
+    {
+        DlpData(dlp3, node, channel, data, len);
+        return;
+    }
+    const uint8_t *mac = UdsNodeMac(uds3, node);
+    if (channel != SL_UDS_CHANNEL || !mac || len < (int)sizeof(sl_hdr))
+        return;
+    if (((const sl_hdr *)data)->type == SL_HELLO)
+    {
+        client *c = find_client(mac, true);
+        if (c)
+            c->node3ds = node;
+    }
+    handle_sl(mac, data, len);
+}
+
+static bool ctr_network(bool sion_link)
+{
+    if (uds3)
+        UdsDestroy(uds3);
+    uds_config cfg = { 0 };
+    memcpy(cfg.mac, mac3, 6);
+    cfg.name = host_name;
+    cfg.keys = &keys3;
+    cfg.channel = 1;
+    cfg.tx = air3_tx;
+    cfg.node = ctr_node;
+    cfg.data = ctr_data;
+    if (sion_link)
+    {
+        cfg.comm_id = SL_UDS_COMM_ID;
+        cfg.id8 = SL_UDS_ID8;
+        cfg.max_nodes = SL_UDS_MAX_NODES;
+        cfg.passphrase = SL_UDS_PASSPHRASE;
+        cfg.passphrase_len = strlen(SL_UDS_PASSPHRASE);
+    }
+    else
+    {
+        cfg.comm_id = DLP_COMM_ID;
+        cfg.id8 = 0;
+        cfg.max_nodes = SL_UDS_MAX_NODES;
+        cfg.passphrase = DLP_PASSPHRASE;
+        cfg.passphrase_len = strlen(DLP_PASSPHRASE) + 1;
+    }
+    uds3 = UdsCreate(&cfg);
+    uds3_is_sl = sion_link;
+    logf_("3DS: hosting the %s network (ID %08x)", sion_link ? "Sion Link" : "Download Play",
+          UdsNetworkId(uds3));
+    return true;
+}
+
+static bool ctr_start_dlp(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+    {
+        logf_("%s: %s", path, strerror(errno));
+        return false;
+    }
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    dlp_cia = malloc(size > 0 ? size : 1);
+    if (size <= 0 || fread(dlp_cia, 1, size, f) != (size_t)size)
+    {
+        logf_("%s: read failed", path);
+        fclose(f);
+        return false;
+    }
+    fclose(f);
+    ctr_network(false);
+    const char *why = NULL;
+    dlp3 = DlpCreate(uds3, mac3, &keys3, dlp_cia, (uint32_t)size, SL_UDS_MAX_NODES - 1, &why);
+    if (!dlp3)
+    {
+        logf_("%s: %s", path, why);
+        return false;
+    }
+    logf_("3DS Download Play: offering \"%s\" (%016llx, %ld bytes)", DlpTitleName(dlp3),
+          (unsigned long long)DlpTitleId(dlp3), size);
+    return true;
+}
+
+static int air3_init(int port)
+{
+    air3_sock = socket(AF_INET, SOCK_DGRAM, 0);
+    struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons(port),
+                             .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+    if (bind(air3_sock, (struct sockaddr *)&a, sizeof(a)) < 0)
+    {
+        logf_("air3ds: bind %d: %s", port, strerror(errno));
+        return -1;
+    }
+    logf_("3DS: waiting for azbridge on UDP %d", port);
+    return air3_sock;
+}
+
+static void air3_poll(void)
+{
+    for (;;)
+    {
+        uint8_t buf[14 + 2048];
+        struct sockaddr_in from;
+        socklen_t fl = sizeof(from);
+        ssize_t n = recvfrom(air3_sock, buf, sizeof(buf), MSG_DONTWAIT, (struct sockaddr *)&from, &fl);
+        if (n < 0)
+            break;
+        if (!air3_have_peer || memcmp(&from, &air3_peer, sizeof(from)))
+            logf_("3DS: azbridge at port %d", ntohs(from.sin_port));
+        air3_peer = from;
+        air3_have_peer = true;
+        if (n >= 14 && uds3)
+            UdsReceive(uds3, buf[0], buf + 2, buf + 8, buf + 14, (int)n - 14);
+    }
+}
+
+static void ctr_poll(void)
+{
+    if (air3_sock >= 0)
+        air3_poll();
+    if (!uds3)
+        return;
+    uint64_t now = now_ms();
+    UdsTick(uds3, now);
+    if (!dlp3)
+        return;
+    DlpTick(dlp3, now);
+    if (!DlpDone(dlp3))
+        return;
+    if (!dlp_done_at)
+    {
+        dlp_done_at = now;
+        logf_("3DS Download Play: every 3DS has the program and was told to start it");
+    }
+    else if (now - dlp_done_at > DLP_LINGER_MS)
+    {
+        DlpDestroy(dlp3);
+        dlp3 = NULL;
+        ctr_network(true);
+    }
+}
+
 static void usage(void)
 {
     fprintf(stderr,
-            "usage: sionlinkd (--if IFACE | --melon PORT [--deaf]) [--name NAME] [--motd TEXT]\n"
-            "                 [--game-sock PATH] [-v]\n"
+            "usage: sionlinkd [--if IFACE | --melon PORT [--deaf]] [--air3ds PORT [--dlp CIA]\n"
+            "                 [--3ds-keys FILE]] [--name NAME] [--motd TEXT] [--game-sock PATH] [-v]\n"
             "       sionlinkd --vendor-element   print the hostapd vendor_elements hex\n");
     exit(2);
 }
@@ -1074,6 +1298,8 @@ int main(int argc, char **argv)
     const char *ifname = NULL;
     int melon_port = 0;
     const char *game_sock = SLGAME_SOCKET;
+    int air3_port = 0;
+    const char *dlp_path = NULL, *keys_path = "/data/sionlink/3ds-keys.txt";
 
     for (int i = 1; i < argc; i++)
     {
@@ -1087,6 +1313,12 @@ int main(int argc, char **argv)
             snprintf(motd, sizeof(motd), "%s", argv[++i]);
         else if (!strcmp(argv[i], "--game-sock") && i + 1 < argc)
             game_sock = argv[++i];
+        else if (!strcmp(argv[i], "--air3ds") && i + 1 < argc)
+            air3_port = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--dlp") && i + 1 < argc)
+            dlp_path = argv[++i];
+        else if (!strcmp(argv[i], "--3ds-keys") && i + 1 < argc)
+            keys_path = argv[++i];
         else if (!strcmp(argv[i], "--deaf"))
             deaf = true;
         else if (!strcmp(argv[i], "-v"))
@@ -1104,15 +1336,24 @@ int main(int argc, char **argv)
         else
             usage();
     }
-    if (!ifname == !melon_port)
+    if ((ifname && melon_port) || (!ifname && !melon_port && !air3_port) || (dlp_path && !air3_port))
         usage();
 
     setvbuf(stdout, NULL, _IOLBF, 0);
     if (getenv("SIONLINK_DROP"))
         file_drop_pct = atoi(getenv("SIONLINK_DROP"));
-    int fd = ifname ? pkt_init(ifname) : melon_init(melon_port);
-    if (fd < 0)
+    int fd = ifname ? pkt_init(ifname) : melon_port ? melon_init(melon_port) : -1;
+    if (fd < 0 && (ifname || melon_port))
         return 1;
+    if (air3_port)
+    {
+        if (!UdsLoadKeys(keys_path, &keys3))
+            logf_("3DS: no keys file %s; a real 3DS won't accept this network", keys_path);
+        if (air3_init(air3_port) < 0)
+            return 1;
+        if (dlp_path ? !ctr_start_dlp(dlp_path) : !ctr_network(true))
+            return 1;
+    }
     if (*game_sock)
         game.listen_fd = game_listen(game_sock);
 
@@ -1120,11 +1361,12 @@ int main(int argc, char **argv)
     uint64_t next_beacon = 0;
     for (;;)
     {
-        struct pollfd pfd[4] = { { fd, POLLIN, 0 }, { 0, POLLIN, 0 },
-                                 { game.listen_fd, POLLIN, 0 }, { game.fd, POLLIN, 0 } };
+        struct pollfd pfd[5] = { { fd, POLLIN, 0 }, { 0, POLLIN, 0 },
+                                 { game.listen_fd, POLLIN, 0 }, { game.fd, POLLIN, 0 },
+                                 { air3_sock, POLLIN, 0 } };
         if (!stdin_open)
             pfd[1].fd = -1;
-        poll(pfd, 4, xfer.active ? 2 : 20);
+        poll(pfd, 5, xfer.active || dlp3 ? 2 : 20);
 
         if (melon_port)
         {
@@ -1136,10 +1378,11 @@ int main(int argc, char **argv)
                 next_beacon = now + 100;
             }
         }
-        else
+        else if (ifname)
         {
             pkt_poll();
         }
+        ctr_poll();
 
         if (stdin_open && (pfd[1].revents & (POLLIN | POLLHUP)))
         {
@@ -1154,6 +1397,8 @@ int main(int argc, char **argv)
                     blast(n);
                 else if (!strncmp(line, "!send ", 6))
                     file_start(line + 6, false);
+                else if (!strcmp(line, "!start") && dlp3)
+                    DlpStart(dlp3);
                 else if (line[0])
                     broadcast_text(line);
             }

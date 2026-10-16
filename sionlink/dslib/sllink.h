@@ -1,6 +1,8 @@
 // Sion Link for DS game clients: finds the Sion, joins it and trades Sion
 // Link packets (common/slproto.h). Used by the programs the Sion sends over
-// Download Play; needs the Sion Link DSWifi build (ds/dswifi).
+// Download Play; needs the Sion Link DSWifi build (ds/dswifi). 3DS clients
+// get the same calls over the 3DS's local wireless from ctr/sl3ds.c, which
+// adds SlExit().
 
 #ifndef SLLINK_H
 #define SLLINK_H
@@ -32,5 +34,10 @@ uint32_t SlMillis(void);
 
 // Ms since the Sion was last heard.
 uint32_t SlQuietFor(uint32_t now_ms);
+
+#ifdef __3DS__
+// Leaves the Sion's network and stops wireless
+void SlExit(void);
+#endif
 
 #endif

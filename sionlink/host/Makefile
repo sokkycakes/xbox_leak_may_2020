@@ -2,8 +2,10 @@ CC      ?= cc
 CFLAGS  ?= -O2 -Wall -Wextra -Wno-unused-parameter
 LDFLAGS ?= -static
 
-sionlinkd: sionlinkd.c ../common/slproto.h
-	$(CC) $(CFLAGS) -I../common -o $@ sionlinkd.c $(LDFLAGS)
+SRC := sionlinkd.c uds.c dlp.c ctrcrypto.c
+
+sionlinkd: $(SRC) uds.h dlp.h ctrcrypto.h ../common/slproto.h ../common/sluds.h
+	$(CC) $(CFLAGS) -I../common -o $@ $(SRC) $(LDFLAGS)
 
 clean:
 	rm -f sionlinkd

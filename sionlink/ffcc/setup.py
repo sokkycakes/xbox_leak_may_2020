@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Prepares the FFCC GBA client source for the DS build (ds/).
+"""Prepares the FFCC GBA client source for the DS (ds/) and 3DS (ctr/) builds.
 
 Fetches the FFCC decompilation (CC0) at a pinned commit, copies the GBA
-client's game code into build/cli with the few edits the DS port needs, and
+client's game code into build/cli with the few edits the ports need, and
 puts its graphics there: extracted from your FFCC disc image with --disc, or
 blank stand-ins with --stub (the client then runs, but shows no text).
 
@@ -63,16 +63,20 @@ def copy_sources(region):
         shutil.copy(src / name, CLI / name)
     shutil.copy(DECOMP / "gba/include/gba_types.h", CLI / "gba_types.h")
 
-    # global.h: the DS port's hardware (ds/source/ds_port.h) instead of the GBA's
+    # global.h: the DS or 3DS port's hardware (ds/source/ds_port.h,
+    # ctr/source/ctr_port.h) instead of the GBA's
     g = CLI / "global.h"
     edit(g, '#define ABS(x) ((x) < 0 ? -(x) : (x))\n',
-         '#define ABS(x) ((x) < 0 ? -(x) : (x))\n\n#ifdef PORT_DS\n#include "ds_port.h"\n#else\n')
+         '#define ABS(x) ((x) < 0 ? -(x) : (x))\n\n#if defined(PORT_DS)\n#include "ds_port.h"\n'
+         '#elif defined(PORT_CTR)\n#include "ctr_port.h"\n#else\n')
     edit(g, '#define INTR_VECTOR (*(void **)0x03007FFC)\n',
          '#define INTR_VECTOR (*(void **)0x03007FFC)\n'
          '#define BG_SCROLL_REGS ((vu16 *)0x04000010)\n'
          '#define OBJ_VRAM      0x06010000\n'
          '#define MB_HEADER     ((u8 *)0x02000000)\n'
-         '#define CART_HEADER   ((u8 *)0x08000000)\n#endif\n')
+         '#define CART_HEADER   ((u8 *)0x08000000)\n#endif\n'
+         '#ifndef GBA_PLTT_ADDR\n#define GBA_PLTT_ADDR(o) (0x05000000 + (o))\n'
+         '#define GBA_VRAM_ADDR(o) (0x06000000 + (o))\n#define GBA_OAM_ADDR(o)  (0x07000000 + (o))\n#endif\n')
     edit(g, '/* DMA helpers in the style of the AGB SDK; dmaNo is 0 or 3 */\n#define DmaSet',
          '/* DMA helpers in the style of the AGB SDK; dmaNo is 0 or 3 */\n#ifndef DmaSet\n#define DmaSet')
     edit(g, '        dmaRegs[2];                                       \\\n    }\n',
@@ -103,6 +107,25 @@ def copy_sources(region):
          '#define DETAIL_START   (PORT_DOWNLOAD + 0x7800)\n#elif defined(VERSION_GCCJGC)\n#define DOWNLOAD_START')
     edit(CLI / "xfer.h", '#define DOWNLOAD_END  0x02040000\n',
          '#ifdef PORT_DS\n#define DOWNLOAD_END  (PORT_DOWNLOAD + 0xC000)\n#else\n#define DOWNLOAD_END  0x02040000\n#endif\n')
+
+    hardware_addresses()
+
+
+def hardware_addresses():
+    """The client writes palettes, VRAM and OAM at literal addresses. The 3DS
+    port keeps them in arrays, so every literal 0x05/0x06/0x07 address becomes
+    GBA_PLTT_ADDR(), GBA_VRAM_ADDR() or GBA_OAM_ADDR() of its offset (global.h
+    gives the GBA's own addresses unless the port says otherwise)."""
+    import re
+    lit = re.compile(r"\b0x0([567])([0-9A-Fa-f]{6})\b")
+    name = {"5": "GBA_PLTT_ADDR", "6": "GBA_VRAM_ADDR", "7": "GBA_OAM_ADDR"}
+    for f in sorted(CLI.glob("*.[ch]")):
+        if f.name == "global.h":
+            continue
+        text = f.read_text(errors="replace")
+        new = lit.sub(lambda m: f"{name[m.group(1)]}(0x{m.group(2)})", text)
+        if new != text:
+            f.write_text(new)
 
 
 def weak_storage():
