@@ -1,12 +1,12 @@
 #!/bin/sh
-# Cross build for the RG DS. The mkspec reaches the Buildroot toolchain and
-# staging dir through fixed links (see qtopia-rgds/setup-sdk.sh):
-#   /opt/rgds-sdk/host    -> <buildroot output>/host
-#   /opt/rgds-sdk/sysroot -> <buildroot output>/staging
-QTMOKO_SYSROOT=/opt/rgds-sdk/sysroot
-echo "Running environment script for device rgds with sysroot $QTMOKO_SYSROOT"
+# Cross build for the RG DS. qtopia-rgds/setup-sdk.sh links the Buildroot
+# toolchain and staging dir to /opt/rgds-sdk/{host,sysroot} and writes
+# sysroot-relative .pc files to /opt/rgds-sdk/pkgconfig.
+echo "Running environment script for device rgds with sysroot /opt/rgds-sdk/sysroot"
 
-PKG_CONFIG_PATH=$QTMOKO_SYSROOT/usr/lib/pkgconfig:$QTMOKO_SYSROOT/usr/share/pkgconfig
-PKG_CONFIG_SYSROOT_DIR=$QTMOKO_SYSROOT
+# Only PKG_CONFIG_PATH: QtMoko swaps it back to the host value when it builds
+# the host Qt, which a PKG_CONFIG_SYSROOT_DIR would leak into.
+PKG_CONFIG_PATH=/opt/rgds-sdk/pkgconfig
 QTMOKO_PKG_CONFIG_PATH=$PKG_CONFIG_PATH
-export PKG_CONFIG_PATH PKG_CONFIG_SYSROOT_DIR QTMOKO_PKG_CONFIG_PATH
+unset PKG_CONFIG_SYSROOT_DIR
+export PKG_CONFIG_PATH QTMOKO_PKG_CONFIG_PATH

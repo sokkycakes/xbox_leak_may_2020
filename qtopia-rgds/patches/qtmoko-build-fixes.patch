@@ -1,3 +1,27 @@
+diff --git a/src/3rdparty/libraries/tar/encode.c b/src/3rdparty/libraries/tar/encode.c
+index 99ef6be9..9aae9e2e 100644
+--- a/src/3rdparty/libraries/tar/encode.c
++++ b/src/3rdparty/libraries/tar/encode.c
+@@ -12,6 +12,7 @@
+ 
+ #include <libtar.h>
+ 
++#include <sys/sysmacros.h>
+ #include <stdio.h>
+ #include <pwd.h>
+ #include <grp.h>
+diff --git a/src/3rdparty/libraries/tar/extract.c b/src/3rdparty/libraries/tar/extract.c
+index 6e6cfafb..a282378c 100644
+--- a/src/3rdparty/libraries/tar/extract.c
++++ b/src/3rdparty/libraries/tar/extract.c
+@@ -12,6 +12,7 @@
+ 
+ #include <libtar.h>
+ 
++#include <sys/sysmacros.h>
+ #include <stdio.h>
+ #include <sys/param.h>
+ #include <sys/types.h>
 diff --git a/src/build/bin/configure b/src/build/bin/configure
 index 9743ba1f..679236ef 100755
 --- a/src/build/bin/configure

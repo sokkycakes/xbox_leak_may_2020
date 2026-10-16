@@ -22,6 +22,31 @@ index c3ce7775..528b3559 100644
  QMAKE_CXXFLAGS_DEPS       += $$QMAKE_CFLAGS_DEPS
  QMAKE_CXXFLAGS_WARN_ON    += $$QMAKE_CFLAGS_WARN_ON
  QMAKE_CXXFLAGS_WARN_OFF   += $$QMAKE_CFLAGS_WARN_OFF
+diff --git a/src/3rdparty/javascriptcore/JavaScriptCore/wtf/Platform.h b/src/3rdparty/javascriptcore/JavaScriptCore/wtf/Platform.h
+index d930ed77..0bbceb66 100644
+--- a/src/3rdparty/javascriptcore/JavaScriptCore/wtf/Platform.h
++++ b/src/3rdparty/javascriptcore/JavaScriptCore/wtf/Platform.h
+@@ -204,6 +204,11 @@
+ #define WTF_CPU_X86_64 1
+ #endif
+ 
++/* CPU(AARCH64) - 64-bit ARM; interpreter only, no JIT */
++#if defined(__aarch64__)
++#define WTF_CPU_AARCH64 1
++#endif
++
+ /* 64-bit mode on AIX */
+ #ifdef __64BIT__
+ #define WTF_CPU_AIX64 1
+@@ -884,7 +889,7 @@
+ #endif
+ 
+ #if !defined(WTF_USE_JSVALUE64) && !defined(WTF_USE_JSVALUE32) && !defined(WTF_USE_JSVALUE32_64)
+-#if (CPU(X86_64) && (OS(UNIX) || OS(WINDOWS) || OS(SOLARIS) || OS(HPUX))) || (CPU(IA64) && !CPU(IA64_32)) || CPU(ALPHA) || CPU(AIX64) || CPU(SPARC64)
++#if (CPU(X86_64) && (OS(UNIX) || OS(WINDOWS) || OS(SOLARIS) || OS(HPUX))) || (CPU(IA64) && !CPU(IA64_32)) || CPU(ALPHA) || CPU(AIX64) || CPU(SPARC64) || CPU(AARCH64)
+ #define WTF_USE_JSVALUE64 1
+ #elif CPU(ARM) || CPU(PPC64)
+ #define WTF_USE_JSVALUE32 1
 diff --git a/src/corelib/arch/aarch64/arch.pri b/src/corelib/arch/aarch64/arch.pri
 new file mode 100644
 index 00000000..ab8ae2dd

@@ -2,6 +2,6 @@
 -arch aarch64
 -prefix /opt/qtmoko
 
--extra-qt-embedded-config "-qt-mouse-tslib" 
+-extra-qt-embedded-config "-qt-mouse-tslib -qt-mouse-linuxinput -qt-kbd-linuxinput -no-mmx -no-3dnow -no-sse -no-sse2 -no-sse3 -no-ssse3 -no-sse4.1 -no-sse4.2 -no-avx -no-neon -no-openssl"
 
 -sound-system alsa

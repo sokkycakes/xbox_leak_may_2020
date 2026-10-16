@@ -2,7 +2,7 @@
 -ui-type mobile
 
 -dynamic-rotation
--ssl
+-no-ssl
 -dbus
 -pictureflow
 
