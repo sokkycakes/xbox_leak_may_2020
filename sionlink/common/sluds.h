@@ -18,4 +18,10 @@
 #define SL_UDS_CHANNEL    1           // UDS data channel
 #define SL_UDS_MAX_NODES  8           // the host plus up to 7 3DSes
 
+// A Sion serving 3DS Download Play hosts Download Play's network instead
+// (host/dlp.h), and 3DS programs join that one, with its passphrase
+#define SL_DLP_COMM_ID    0x00002810u
+#define SL_DLP_ID8        0x55
+#define SL_DLP_PASSPHRASE "0km@tsa$uhmy1a0sa" // sent with its NUL
+
 #endif

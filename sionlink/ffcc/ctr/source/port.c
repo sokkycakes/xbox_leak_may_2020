@@ -364,11 +364,17 @@ static void Status(void)
     printf("\x1b[28;1HHOME: quit");
 }
 
+static void Say(const char *s);
+
 static void Pump(void)
 {
     u32 now = SlMillis();
     if (!joined)
         return;
+    // Closing the lid sleeps the 3DS, which leaves the network: link again
+    // on waking (or after 8 s without the Sion, which says welcome every 3 s)
+    if (SlRejoin(Say, 8000))
+        consoleClear();
     player = SlKeepAlive(FF_APP_ID, now);
     const sl_hdr *h;
     const u8 *body;

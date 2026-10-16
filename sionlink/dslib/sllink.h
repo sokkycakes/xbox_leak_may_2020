@@ -38,6 +38,11 @@ uint32_t SlQuietFor(uint32_t now_ms);
 #ifdef __3DS__
 // Leaves the Sion's network and stops wireless
 void SlExit(void);
+
+// Joins again if the link dropped (the 3DS slept, or the Sion has been quiet
+// for quiet_ms), showing progress through status(); B doesn't stop it. Call
+// every frame. True if it rejoined.
+bool SlRejoin(void (*status)(const char *text), uint32_t quiet_ms);
 #endif
 
 #endif

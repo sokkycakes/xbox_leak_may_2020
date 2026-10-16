@@ -194,7 +194,7 @@ static void send_sl(client *c, int type, const void *body, int len)
         memcpy(buf + 6 + sizeof(sl_hdr), body, len);
     if (c->node3ds)
     {
-        if (uds3 && uds3_is_sl)
+        if (uds3)
             UdsSend(uds3, c->node3ds, SL_UDS_CHANNEL, buf + 6, sizeof(sl_hdr) + len);
         return;
     }
@@ -1148,12 +1148,14 @@ static void pkt_poll(void)
 // 3DS back end
 // ============
 //
-// The 3DS network is a UDS network (host/uds.h) hosted by this program. With
-// --dlp it starts as Download Play's network (host/dlp.h); when that's done
-// it is replaced by the Sion Link network (common/sluds.h), where 3DSes
-// trade Sion Link packets on SL_UDS_CHANNEL and are clients like DSes.
+// The 3DS network is a UDS network (host/uds.h) hosted by this program. 3DSes
+// trade Sion Link packets on SL_UDS_CHANNEL and are clients like DSes. With
+// --dlp it is Download Play's network (host/dlp.h) and stays so: 3DS programs
+// join it too (ctr/sl3ds.c looks for both), so one 3DS can download while
+// another plays. A node is Download Play's until it says hello on
+// SL_UDS_CHANNEL. Without --dlp it is the Sion Link network (common/sluds.h).
 
-#define DLP_LINGER_MS 3000 // keep the Download Play network up this long after the start
+#define DLP_LINGER_MS 3000 // keep a finished Download Play session this long before a new one
 
 static uds_keys keys3;
 static dlp_host *dlp3;
@@ -1165,6 +1167,8 @@ static radio3ds *radio3;      // --if3ds: the Sion's radio (host/radio3ds.h)
 static int ctr_channel = 1;
 static struct sockaddr_in air3_peer;
 static bool air3_have_peer;
+static bool sl_node[UDS_MAX_NODES + 1]; // the node said hello: a Sion Link client
+static uint32_t dlp_cia_size;
 
 static void air3_tx(void *ctx, int kind3, const uint8_t dst[6], const uint8_t *body, int len)
 {
@@ -1183,11 +1187,11 @@ static void ctr_node(void *ctx, int node, bool joined, const uint8_t mac[6], con
 {
     logf_("3DS %s (%s) %s the %s network as node %d", mac_str(mac), name,
           joined ? "joined" : "left", uds3_is_sl ? "Sion Link" : "Download Play", node);
-    if (dlp3)
-    {
+    bool was_sl = node >= 0 && node <= UDS_MAX_NODES && sl_node[node];
+    if (node >= 0 && node <= UDS_MAX_NODES)
+        sl_node[node] = false;
+    if (dlp3 && !was_sl)
         DlpNode(dlp3, node, joined);
-        return;
-    }
     client *c = find_client(mac, false);
     if (!joined && c && c->node3ds)
         drop_client(c, "left the 3DS network");
@@ -1195,16 +1199,26 @@ static void ctr_node(void *ctx, int node, bool joined, const uint8_t mac[6], con
 
 static void ctr_data(void *ctx, int node, int channel, const uint8_t *data, int len)
 {
-    if (dlp3)
+    const sl_hdr *h = (const sl_hdr *)data;
+    bool sl = channel == SL_UDS_CHANNEL && len >= (int)sizeof(sl_hdr) && h->magic[0] == SL_MAGIC0
+              && h->magic[1] == SL_MAGIC1;
+    bool known = node >= 0 && node <= UDS_MAX_NODES && sl_node[node];
+    if (dlp3 && !known && !(sl && h->type == SL_HELLO))
     {
         DlpData(dlp3, node, channel, data, len);
         return;
     }
     const uint8_t *mac = UdsNodeMac(uds3, node);
-    if (channel != SL_UDS_CHANNEL || !mac || len < (int)sizeof(sl_hdr))
+    if (!sl || !mac)
         return;
-    if (((const sl_hdr *)data)->type == SL_HELLO)
+    if (h->type == SL_HELLO)
     {
+        if (!known && node >= 0 && node <= UDS_MAX_NODES)
+        {
+            sl_node[node] = true;
+            if (dlp3)
+                DlpNode(dlp3, node, false); // not a Download Play child
+        }
         client *c = find_client(mac, true);
         if (c)
             c->node3ds = node;
@@ -1245,6 +1259,7 @@ static bool ctr_network(bool sion_link)
     }
     uds3 = UdsCreate(&cfg);
     uds3_is_sl = sion_link;
+    memset(sl_node, 0, sizeof(sl_node));
     logf_("3DS: hosting the %s network (ID %08x)", sion_link ? "Sion Link" : "Download Play",
           UdsNetworkId(uds3));
     if (radio3)
@@ -1274,7 +1289,8 @@ static bool ctr_start_dlp(const char *path)
     ctr_network(false);
     const char *why = NULL;
     DlpLog = logf_;
-    dlp3 = DlpCreate(uds3, mac3, &keys3, dlp_cia, (uint32_t)size, SL_UDS_MAX_NODES - 1, &why);
+    dlp_cia_size = (uint32_t)size;
+    dlp3 = DlpCreate(uds3, mac3, &keys3, dlp_cia, dlp_cia_size, SL_UDS_MAX_NODES - 1, &why);
     if (!dlp3)
     {
         logf_("%s: %s", path, why);
@@ -1340,9 +1356,16 @@ static void ctr_poll(void)
     }
     else if (now - dlp_done_at > DLP_LINGER_MS)
     {
+        // A new session on the same network, for the next 3DS; Sion Link
+        // clients on it stay
+        const char *why = NULL;
         DlpDestroy(dlp3);
-        dlp3 = NULL;
-        ctr_network(true);
+        dlp3 = DlpCreate(uds3, mac3, &keys3, dlp_cia, dlp_cia_size, SL_UDS_MAX_NODES - 1, &why);
+        dlp_done_at = 0;
+        if (!dlp3)
+            logf_("3DS Download Play: %s", why);
+        else
+            logf_("3DS Download Play: offering \"%s\" again", DlpTitleName(dlp3));
     }
 }
 

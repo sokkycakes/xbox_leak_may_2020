@@ -22,7 +22,10 @@ static udsBindContext link_bind;
 static bool bound;
 static u32 last_heard;
 static int player;
-static u8 current[sizeof(sl_hdr) + SL_MAX_BODY];
+// Room for any UDS frame: on Download Play's network the Sion also
+// broadcasts title info on this channel, bigger than any Sion Link packet,
+// and a frame that doesn't fit stays stuck at the head of the queue
+static u8 current[UDS_DATAFRAME_MAXSIZE] __attribute__((aligned(4)));
 
 bool SlNext(const sl_hdr **hdr, const uint8_t **body)
 {
@@ -102,9 +105,32 @@ int SlKeepAlive(uint32_t app, uint32_t now)
 // Joining
 // =======
 
+static bool b_quits = true;
+static volatile bool woke; // back from sleep: the system dropped the network
+
+static void AptEvent(APT_HookType type, void *param)
+{
+    if (type == APTHOOK_ONWAKEUP)
+        woke = true;
+}
+
+
 bool SlInit(void)
 {
+    static aptHookCookie cookie;
+    aptHook(&cookie, AptEvent, NULL);
     return R_SUCCEEDED(udsInit(0x3000, NULL));
+}
+
+bool SlRejoin(void (*status)(const char *text), uint32_t quiet_ms)
+{
+    if (!woke && SlQuietFor(SlMillis()) < quiet_ms)
+        return false;
+    woke = false;
+    b_quits = false;
+    bool ok = SlJoin(status);
+    b_quits = true;
+    return ok;
 }
 
 static void Say(void (*status)(const char *), const char *s)
@@ -116,7 +142,7 @@ static void Say(void (*status)(const char *), const char *s)
 static bool Quit(void)
 {
     hidScanInput();
-    return !aptMainLoop() || (hidKeysDown() & KEY_B);
+    return !aptMainLoop() || (b_quits && (hidKeysDown() & KEY_B));
 }
 
 bool SlJoin(void (*status)(const char *text))
@@ -128,21 +154,27 @@ bool SlJoin(void (*status)(const char *text))
         udsUnbind(&link_bind);
         bound = false;
     }
-    Say(status, "Looking for the Sion...\n\nB: quit");
+    Say(status, b_quits ? "Looking for the Sion...\n\nB: quit" : "Looking for the Sion...");
     for (;;)
     {
         if (Quit())
             return false;
+        // The Sion Link network, or Download Play's when the Sion serves
+        // that too, by turns
+        static bool dlp;
+        dlp = !dlp;
         udsNetworkScanInfo *nets = NULL;
         size_t total = 0;
-        if (R_SUCCEEDED(udsScanBeacons(scan, sizeof(scan), &nets, &total, SL_UDS_COMM_ID,
-                                       SL_UDS_ID8, NULL, false)) && total)
+        if (R_SUCCEEDED(udsScanBeacons(scan, sizeof(scan), &nets, &total,
+                                       dlp ? SL_DLP_COMM_ID : SL_UDS_COMM_ID,
+                                       dlp ? SL_DLP_ID8 : SL_UDS_ID8, NULL, false)) && total)
         {
-            Say(status, "Linking...\n\nB: quit");
+            Say(status, b_quits ? "Linking...\n\nB: quit" : "Linking...");
             udsNetworkStruct net = nets[0].network;
             free(nets);
             nets = NULL;
-            Result r = udsConnectNetwork(&net, SL_UDS_PASSPHRASE, strlen(SL_UDS_PASSPHRASE),
+            const char *pass = dlp ? SL_DLP_PASSPHRASE : SL_UDS_PASSPHRASE;
+            Result r = udsConnectNetwork(&net, pass, strlen(pass) + dlp,
                                          &link_bind, UDS_BROADCAST_NETWORKNODEID, UDSCONTYPE_Client,
                                          SL_UDS_CHANNEL, UDS_DEFAULT_RECVBUFSIZE);
             if (R_SUCCEEDED(r))
@@ -152,7 +184,7 @@ bool SlJoin(void (*status)(const char *text))
                 last_heard = SlMillis();
                 return true;
             }
-            Say(status, "Couldn't link, trying again...\n\nB: quit");
+            Say(status, "Couldn't link, trying again...");
         }
         free(nets);
         gspWaitForVBlank();
