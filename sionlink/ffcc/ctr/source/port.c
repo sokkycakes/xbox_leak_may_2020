@@ -422,6 +422,7 @@ static void Say(const char *s)
 
 int main(int argc, char *argv[])
 {
+    osSetSpeedupEnable(true); // 804 MHz and the L2 cache on a New 3DS
     gfxInit(GSP_RGB565_OES, GSP_BGR8_OES, false);
     consoleInit(GFX_BOTTOM, &bottom);
     ClearTop();

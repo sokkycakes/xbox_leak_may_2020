@@ -35,7 +35,7 @@ CLI_ASM		:= $(wildcard $(CLI)/*.s)
 OBJS		:= $(addprefix $(BUILD)/,$(notdir $(PORT_SRC:.c=.o))) \
 		   $(addprefix $(BUILD)/cli_,$(notdir $(CLI_SRC:.c=.o) $(CLI_ASM:.s=.o)))
 
-.PHONY: all elf clean
+.PHONY: cia all elf clean
 all: $(NAME).3dsx
 elf: $(NAME).elf
 
@@ -66,5 +66,14 @@ $(BUILD)/$(NAME).smdh: | $(BUILD)
 $(NAME).3dsx: $(NAME).elf $(BUILD)/$(NAME).smdh
 	$(TOOLS)/3dsxtool $< $@ --smdh=$(BUILD)/$(NAME).smdh
 
+# The Download Play child (cia/ffcc-gba.rsf). makerom comes from
+# github.com/3DSGuy/Project_CTR; it isn't part of devkitPro.
+MAKEROM	?= makerom
+
+cia: $(NAME).cia
+
+$(NAME).cia: $(NAME).elf $(BUILD)/$(NAME).smdh cia/$(NAME).rsf
+	$(MAKEROM) -f cia -o $@ -elf $< -rsf cia/$(NAME).rsf -icon $(BUILD)/$(NAME).smdh -exefslogo -target t
+
 clean:
-	rm -rf $(BUILD) $(NAME).elf $(NAME).3dsx
+	rm -rf $(BUILD) $(NAME).elf $(NAME).3dsx $(NAME).cia

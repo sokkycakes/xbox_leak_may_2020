@@ -273,8 +273,12 @@ static const char *ParseCia(dlp_host *d)
 
     // The title ID, from the TMD (after its signature)
     const uint8_t *t = c + tmd_at;
-    uint32_t sig = Get32(t);
-    int sig_len = sig == 0x10000 ? 0x200 + 0x3C : sig == 0x10001 ? 0x100 + 0x3C : 0x3C + 0x40;
+    // Signature types 0x10000-0x10005: RSA-4096, RSA-2048, ECDSA, with SHA-1
+    // then SHA-256; each padded to 64 bytes
+    uint32_t sig = Get32(t) - 0x10000;
+    if (sig > 5)
+        return "the CIA's TMD has an unknown signature type";
+    int sig_len = sig % 3 == 0 ? 0x200 + 0x3C : sig % 3 == 1 ? 0x100 + 0x3C : 0x3C + 0x40;
     const uint8_t *tid = t + 4 + sig_len + 0x4C;
     d->title_id = ((uint64_t)Get32(tid) << 32) | Get32(tid + 4);
     if ((d->title_id >> 32) != 0x00040001)
