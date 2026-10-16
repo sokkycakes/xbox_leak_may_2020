@@ -77,3 +77,11 @@ in ARM7 RAM (0x037F8000, common in retail programs), in which case it travels
 through VRAM C+D and a small stub there copies it. Up to about 3.6 MB of code
 fits. Programs that read files from their own card (NitroFS, retail file
 systems) won't find them. `demo/` builds `sion-hello.nds` to try it with.
+
+## Download Station demos
+
+A DS Download Station card keeps its kiosk demos in `/ds_demo/` as LZO1X
+files ("LZOn" header). `tools/dlstation.py CARD.nds OUTDIR` unpacks them into
+plain .nds images, and each one boots with `sion-dslink send`. The card's own
+multiboot, `/mb/ds_demo_client.srl`, is only the kiosk's download client: it
+expects the kiosk server to hand it a demo, so on its own it just waits.
