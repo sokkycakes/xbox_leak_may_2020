@@ -450,7 +450,9 @@ do_linktest() {
 # With the Nintendo Wi-Fi USB Connector plugged in, a 3DS run also records
 # the air on its channel through the connector (sionsniff), to
 # $RUN/sniff.pcap, so what the Sion and the 3DS sent can be looked at after.
-SNIFF_IF=sionsniff
+# sion-netd leaves sionmon alone (any other new interface on the connector
+# it turns into a home Wi-Fi client); the DS network isn't up while recording
+SNIFF_IF=$MON_IF
 start_sniff() {
     [ -x "$DIR/bin/sionsniff" ] || return 0
     sphy=$(ds_radio_phy)
@@ -506,11 +508,21 @@ stop_sniff() {
 find_nintendo_channel() {
     sta=$(iw dev 2>/dev/null | awk '$1 == "Interface" { i = $2 } $1 == "type" && $2 == "managed" { print i; exit }')
     [ -n "$sta" ] || return 0
-    iw dev "$sta" scan 2>/dev/null | awk '
-        /^BSS / { bss = $2; sub(/\(.*/, "", bss); ch = "" }
+    # A 3DS host hides its name, and the scan may not keep its Nintendo
+    # elements, but its address is a Nintendo one
+    iw dev "$sta" scan 2>/dev/null | awk -v ouis="00:09:bf 00:16:56 40:d2:8a 2c:10:c1 98:b6:e9 9c:e6:35 e8:4e:ce a4:5c:27 78:a2:a0 34:af:2c 8c:56:c5 cc:fb:65 e0:0c:7f 58:bd:a3 00:22:4c 00:24:44 00:25:a0 00:26:59 00:1b:ea 00:1e:35 00:21:47 00:21:bd 00:23:31 00:23:cc 00:24:1e 00:24:f3 00:27:09 04:03:d6 18:2a:7b 40:f4:07 7c:bb:8a 8c:cd:e8 a4:c0:e1 b8:ae:6e d8:6b:f7 e0:e7:51 e8:da:20" '
+        BEGIN { n = split(ouis, o, " "); for (i = 1; i <= n; i++) nin[o[i]] = 1 }
+        function out() {
+            if (bss != "" && ch != "" && (tag || (hidden && (substr(bss, 1, 8) in nin))) && !seen[bss]++)
+                print ch, bss
+        }
+        /^BSS / { out(); bss = $2; sub(/\(.*/, "", bss); ch = ""; tag = 0; hidden = 0 }
         /DS Parameter set: channel/ { ch = $NF }
         /primary channel:/ { if (ch == "") ch = $NF }
-        /Vendor specific: OUI 00:1f:32/ && ch != "" && !seen[bss]++ { print ch, bss }'
+        /^[[:space:]]*SSID: *$/ { hidden = 1 }
+        /SSID: \\x00/ { hidden = 1 }
+        /Vendor specific: OUI 00:1f:32/ { tag = 1 }
+        END { out() }'
 }
 do_record() {
     mkdir -p "$RUN"
