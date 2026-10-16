@@ -360,16 +360,15 @@ void R3Start(radio3ds *r, uds_host *u)
     }
     // A 3DS network: the SSID (sent as zeros in beacons) is the network ID
     // in hex, open authentication, and the Privacy bit set (our hostapd
-    // patch) though there is no WPA. Rates and short preamble as a real
-    // 3DS's Download Play beacon: 11 Mbit/s and up, all basic, so beacons go
-    // out at 11 Mbit/s like a 3DS's
+    // patch) though there is no WPA, short preamble as a 3DS. The basic
+    // rates stay 1 and 2 Mbit/s: the Intel firmware beacons at 1 Mbit/s and
+    // sent no beacons at all with a 3DS's 11-54 Mbit/s basic set
     fprintf(f,
             "# Written by sionlinkd for the 3DS network (host/radio3ds.c)\n"
             "interface=%s\ndriver=nl80211\nctrl_interface=%s\n"
             "ssid=%s\nignore_broadcast_ssid=2\n"
             "hw_mode=g\nchannel=%d\nbeacon_int=100\ndtim_period=1\n"
-            "supported_rates=110 120 180 240 360 480 540\nbasic_rates=110 120 180 240 360 480 540\n"
-            "preamble=1\nauth_algs=1\nwmm_enabled=0\nmax_num_sta=14\n"
+            "basic_rates=10 20\npreamble=1\nauth_algs=1\nwmm_enabled=0\nmax_num_sta=14\n"
             "force_privacy=1\nap_max_inactivity=600\nskip_inactivity_poll=1\ndisassoc_low_ack=0\n"
             "vendor_elements=%s\n",
             r->ifname, ctrl, ssid, r->channel, ve);
