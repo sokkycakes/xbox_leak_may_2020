@@ -20,8 +20,32 @@ playing the GameCube's side.
   commands a GameCube would put on the wire (reset, status, read, write); the
   DS applies each to its emulated JOY registers and runs the client's serial
   interrupt, as a GBA would.
-- `sion/ffhost.c`: the GameCube's side. For now it runs the client's
-  handshake and reads what the client sends (its buttons and screen); it
-  doesn't play the game.
+- `sion/ffhost.c`: the GameCube's side of the wire: the client's handshake,
+  then a queue of words for each DS with the game's ACK/NAK and resend rules.
+- `sion/demo.c`: a stand-in for the game, so every screen of the client can
+  be tried without a GameCube. Each DS gets a caravan member with a full
+  bag, the disc's radar maps with the party, monsters and treasure moving on
+  them, letters from home, a shop, a blacksmith, character creation and the
+  "look at the TV" screen. It needs the disc's `gba` folder (`objdat.spt`
+  and the `m*.mcd` maps), given with `--data`; none of it is in the repo.
+
+## The demo on the Sion
+
+`sion-dslink ffcc` starts the DS network if needed and runs ffhost with the
+data in `/data/ffcc/gba`. Link a DS with the Sion Link app and it gets the
+client. On the DS, SELECT switches between steering the menus (L/R pages
+through them, as on a real GBA) and being a controller:
+
+| DS button | as a controller |
+|-----------|-----------------|
+| D-pad     | walk the caravan around the map |
+| A         | next map |
+| B         | take a hit |
+| L / R     | radar role: map, monsters, scouter, monsters and treasure |
+| START     | next scene: field, creation, shop, blacksmith, TV, field |
+
+Finishing or leaving a scene on the DS moves on too. Lines typed at ffhost
+do the same for every DS (`help` lists them): `field`, `cmake`, `shop`,
+`smith`, `tv`, `map`, `radar`, `hit`, `letter`, `menu`, `pad`, `screen N`.
 
 Sound (the client's m4a music driver) isn't ported yet.

@@ -31,6 +31,7 @@ vu16 gPortDispcnt, gPortIE, gPortIME, gPortDummy16;
 void *gPortDummyPtr;
 vu16 gPortScroll[8];
 u8 gPortMbHeader[0x100], gPortCartHeader[0x100];
+u8 gPortDownload[0xC000] __attribute__((aligned(32)));
 
 static PrintConsole bottom;
 static jmp_buf restart;
@@ -191,7 +192,7 @@ static void JoyIrq(u16 cause)
     joy_cnt &= ~7;
 }
 
-static u32 joy_ops, joy_batches, joy_resent;
+static u32 joy_batches, joy_resent;
 
 static void JoyBatch(const u8 *body, int len)
 {
@@ -246,7 +247,6 @@ static void JoyBatch(const u8 *body, int len)
         }
         memcpy(&res[i], &out, sizeof(out));
     }
-    joy_ops += j.count;
     joy_batches++;
     reply_len = sizeof(ff_joy) + j.count * sizeof(ff_result);
     last_seq = j.seq;
@@ -285,8 +285,7 @@ static void Status(void)
         printf("Player %d on the Sion%-12s", player, "");
     printf("\x1b[4;0HGameCube link: %-12s\n", Link_IsConnected() ? "connected" : "waiting");
     printf("\x1b[5;0H%-32s", "");
-    printf("\x1b[5;0HJoyBus: %lu batches, %lu cmds\n", (unsigned long)joy_batches,
-           (unsigned long)joy_ops);
+    printf("\x1b[5;0HJoyBus: %lu batches\n", (unsigned long)joy_batches);
     printf("\x1b[6;0Hresent answers: %lu   \n", (unsigned long)joy_resent);
 }
 

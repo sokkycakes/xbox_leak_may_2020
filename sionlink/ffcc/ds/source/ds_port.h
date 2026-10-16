@@ -16,6 +16,7 @@ extern vu16 gPortDispcnt, gPortIE, gPortIME, gPortDummy16;
 extern void *gPortDummyPtr;
 extern vu16 gPortScroll[8];
 extern u8 gPortMbHeader[0x100], gPortCartHeader[0x100];
+extern u8 gPortDownload[0xC000];
 
 vu32 *PortJoyRecv(void);
 vu32 *PortJoyTrans(void);
@@ -50,6 +51,7 @@ void PortDma(u32 src, u32 dst, u32 control);
 #define OBJ_VRAM      0x06400000
 #define MB_HEADER     gPortMbHeader
 #define CART_HEADER   gPortCartHeader
+#define PORT_DOWNLOAD ((u32)gPortDownload) // the GameCube's download area (xfer.h)
 
 #define DmaSet(dmaNo, src, dst, control) PortDma((u32)(src), (u32)(dst), (u32)(control))
 

@@ -97,6 +97,13 @@ def copy_sources(region):
         edit(l, f'0x020000{off}', f'(MB_HEADER + 0x{off})', count=2 if off == "C4" else 1)
     edit(l, '0x080000AC', '(CART_HEADER + 0xAC)')
 
+    # The GameCube's bulk downloads land in EWRAM the DS program occupies
+    edit(CLI / "xfer.h", '#if defined(VERSION_GCCJGC)\n#define DOWNLOAD_START',
+         '#if defined(PORT_DS)\n#define DOWNLOAD_START PORT_DOWNLOAD\n#define LIST_START     (PORT_DOWNLOAD + 0x4800)\n'
+         '#define DETAIL_START   (PORT_DOWNLOAD + 0x7800)\n#elif defined(VERSION_GCCJGC)\n#define DOWNLOAD_START')
+    edit(CLI / "xfer.h", '#define DOWNLOAD_END  0x02040000\n',
+         '#ifdef PORT_DS\n#define DOWNLOAD_END  (PORT_DOWNLOAD + 0xC000)\n#else\n#define DOWNLOAD_END  0x02040000\n#endif\n')
+
 
 def weak_storage():
     """Globals the retail image keeps in a common BSS block have no defining

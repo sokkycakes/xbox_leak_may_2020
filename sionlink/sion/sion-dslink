@@ -16,6 +16,11 @@
 #                            DS that links joins (its client is sent to it);
 #                            shows and logs how steady the link is. Ctrl+C ends
 #                            it and brings the dashboard back.
+#   sion-dslink ffcc         FFCC demo: the Sion plays the GameCube's side of
+#                            Crystal Chronicles' GBA link for every DS that
+#                            links (the DS gets the GBA client). Needs the
+#                            disc's gba folder in /data/ffcc/gba. Type help
+#                            for the commands; Ctrl+C ends it.
 #
 # The home Wi-Fi link (and SSH over it) is never touched: start refuses when
 # the card can't run an access point beside it, unless --force is given.
@@ -312,6 +317,21 @@ do_linktest() {
     fi
 }
 
+# The FFCC demo host (ffcc/sion in the source). It has no picture, so the
+# dashboard keeps running.
+do_ffcc() {
+    [ -x "$DIR/bin/ffhost" ] && [ -f "$DIR/ffcc-gba.nds" ] ||
+        { log "the FFCC demo isn't installed"; return 1; }
+    data=${FFCC_DATA:-/data/ffcc/gba}
+    [ -f "$data/objdat.spt" ] || { log "no FFCC disc data in $data (objdat.spt and the m*.mcd maps)"; return 1; }
+    [ -f "$RUN/sionlinkd.pid" ] && kill -0 "$(cat "$RUN/sionlinkd.pid")" 2>/dev/null ||
+        do_start || return 1
+    log "link a DS with the Sion Link app; it gets the FFCC client. Type help for commands, Ctrl+C ends it."
+    trap 'true' INT TERM
+    "$DIR/bin/ffhost" --client "$DIR/ffcc-gba.nds" --data "$data" "$@" 2>&1 | tee -i "$RUN/ffcc.log"
+    trap - INT TERM
+}
+
 case "$1" in
     check) do_check ;;
     start) shift; do_start "$@" ;;
@@ -321,6 +341,7 @@ case "$1" in
     txtrace) shift; do_txtrace "$@" ;;
     send) shift; do_send "$@" ;;
     linktest) shift; do_linktest "$@" ;;
+    ffcc) shift; do_ffcc "$@" ;;
     say) shift; [ -p "$RUN/in" ] && echo "$*" > "$RUN/in" || log "not running" ;;
-    *) echo "usage: sion-dslink check|start [CH] [--force]|stop|status|say TEXT|send FILE.nds|txtrace [N]|linktest [--headless]"; exit 2 ;;
+    *) echo "usage: sion-dslink check|start [CH] [--force]|stop|status|say TEXT|send FILE.nds|txtrace [N]|linktest [--headless]|ffcc"; exit 2 ;;
 esac
