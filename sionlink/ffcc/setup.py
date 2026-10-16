@@ -76,7 +76,9 @@ def copy_sources(region):
          '#define MB_HEADER     ((u8 *)0x02000000)\n'
          '#define CART_HEADER   ((u8 *)0x08000000)\n#endif\n'
          '#ifndef GBA_PLTT_ADDR\n#define GBA_PLTT_ADDR(o) (0x05000000 + (o))\n'
-         '#define GBA_VRAM_ADDR(o) (0x06000000 + (o))\n#define GBA_OAM_ADDR(o)  (0x07000000 + (o))\n#endif\n')
+         '#define GBA_VRAM_ADDR(o) (0x06000000 + (o))\n#define GBA_OAM_ADDR(o)  (0x07000000 + (o))\n#endif\n'
+         '/* Where the host\'s sprite cells say their tiles are (GBA OBJ VRAM) */\n'
+         '#define GBA_OBJ_TILES 0x06010000u\n')
     edit(g, '/* DMA helpers in the style of the AGB SDK; dmaNo is 0 or 3 */\n#define DmaSet',
          '/* DMA helpers in the style of the AGB SDK; dmaNo is 0 or 3 */\n#ifndef DmaSet\n#define DmaSet')
     edit(g, '        dmaRegs[2];                                       \\\n    }\n',
@@ -90,8 +92,14 @@ def copy_sources(region):
          '#if !defined(PORT_DS) && !defined(PORT_CTR)\n    DmaCopy32(3, intr_main, gIntrMainRam, sizeof(gIntrMainRam));\n    INTR_VECTOR = gIntrMainRam;\n#endif\n')
     edit(m, '(vu16 *)0x04000010', 'BG_SCROLL_REGS', count=3)
 
-    # Sprite tiles live elsewhere on the DS
-    edit(CLI / "obj.c", '0x06010000', 'OBJ_VRAM', count=2)
+    # Sprite tiles live elsewhere on the DS and 3DS. The cells the host
+    # sends hold GBA addresses of their tiles (0x0601xxxx): keep those for
+    # tile numbers, and move them into OBJ_VRAM before reading through them
+    # (on the 3DS, 0x0601xxxx isn't mapped and the read crashes).
+    edit(CLI / "obj.c", 'LZ77UnCompVram(src, (void *)0x06010000)', 'LZ77UnCompVram(src, (void *)OBJ_VRAM)')
+    edit(CLI / "obj.c", '((u32)cell->tiles - 0x06010000)', '((u32)cell->tiles - GBA_OBJ_TILES)')
+    edit(CLI / "obj.c", 'DmaSet(3, e->tiles, dest,',
+         'DmaSet(3, OBJ_VRAM + ((u32)e->tiles - GBA_OBJ_TILES), dest,')
     edit(CLI / "text.c", '0x06017880', '(OBJ_VRAM + 0x7880)', count=2)
     edit(CLI / "text.c", '0x06017380', '(OBJ_VRAM + 0x7380)', count=2)
 

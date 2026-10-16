@@ -489,9 +489,9 @@ void DlpData(dlp_host *d, int node, int channel, const uint8_t *p, int len)
                 for (int i = 0; i < bm && 0x1C + i < len; i++)
                     for (int b = 0; b < 8; b++)
                         set += (p[0x1C + i] >> b) & 1;
-                DlpLog("3DS node %d: block %s, %s; bitmap of %d bytes with %d bits set", node,
+                DlpLog("3DS node %d: block %s, %s; on block %u; bitmap of %d bytes with %d bits set", node,
                        done_block == 1 ? "complete" : "INCOMPLETE", needs ? "needs more" : "needs nothing more",
-                       bm, set);
+                       Get32(p + 0x16), bm, set);
             }
             if (!needs)
                 c->state = CL_GOT_IT;
@@ -571,7 +571,10 @@ void DlpTick(dlp_host *d, uint64_t now)
             SendStartDist(d, n, c);
             break;
         case CL_ASKED:
-            SendFinishDist(d, n, c, c->asked);
+            // The number of the block just sent (c->block points past it),
+            // not a count of asks: after a resend a real 3DS still acks with
+            // 0x16 = the block it's on and ignores asks with a later number
+            SendFinishDist(d, n, c, c->block ? c->block - 1 : 0);
             break;
         case CL_NO_CONTENT:
             SendFinishDist(d, n, c, 0);
