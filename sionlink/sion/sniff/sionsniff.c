@@ -17,6 +17,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <time.h>
@@ -50,6 +52,12 @@ int main(int argc, char **argv)
         perror(argv[1]);
         return 1;
     }
+    struct packet_mreq mr = { .mr_ifindex = sll.sll_ifindex, .mr_type = PACKET_MR_PROMISC };
+    setsockopt(s, SOL_PACKET, PACKET_ADD_MEMBERSHIP, &mr, sizeof(mr));
+    struct ifreq ifr = { 0 };
+    snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", argv[1]);
+    if (ioctl(s, SIOCGIFFLAGS, &ifr) == 0 && !(ifr.ifr_flags & IFF_UP))
+        fprintf(stderr, "sionsniff: %s is down\n", argv[1]);
     FILE *f = fopen(argv[2], "wb");
     if (!f)
     {
@@ -63,6 +71,7 @@ int main(int argc, char **argv)
     struct timeval tv = { 0, 200000 };
     setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     long kept = 0, seen = 0, beacons = 0, probes = 0;
+    time_t next_report = time(NULL) + 5;
     uint8_t buf[4096];
     struct sigaction sa = { .sa_handler = Stop };
     sigaction(SIGTERM, &sa, NULL);
@@ -70,6 +79,11 @@ int main(int argc, char **argv)
     while (time(NULL) < end && !stop)
     {
         int n = recv(s, buf, sizeof(buf), 0);
+        if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)
+        {
+            perror("sionsniff: recv");
+            break;
+        }
         if (n < 8)
             continue;
         seen++;
@@ -99,6 +113,11 @@ int main(int argc, char **argv)
                     keep = !memcmp(h + a, ouis[i], 3);
             if (type != 0)
                 cut = rt + 64 < n ? rt + 64 : n;
+        }
+        if (time(NULL) >= next_report)
+        {
+            fprintf(stderr, "sionsniff: %ld frames seen, %ld kept so far\n", seen, kept);
+            next_report = time(NULL) + 5;
         }
         if (!keep)
             continue;

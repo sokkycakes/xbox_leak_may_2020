@@ -29,6 +29,10 @@
 #                            Play; a DS gets ffcc-gba.nds). Needs the disc's
 #                            gba folder in /data/ffcc/gba. Type help for the
 #                            commands; Ctrl+C ends it.
+#   sion-dslink record [CH] [SECONDS]
+#                            Records a real 3DS Download Play host through the
+#                            Wi-Fi USB Connector to /run/sionlink/sniff.pcap
+#                            (finds its channel when CH isn't given).
 #
 # The home Wi-Fi link (and SSH over it) is never touched: start refuses when
 # the card can't run an access point beside it, unless --force is given.
@@ -485,6 +489,60 @@ stop_sniff() {
     iw dev "$SNIFF_IF" del 2>/dev/null
 }
 
+# Records a real 3DS Download Play host (or any Nintendo local wireless
+# host) for comparing with the Sion's: finds its channel with a scan on the
+# home Wi-Fi card, records that channel through the Wi-Fi USB Connector for
+# a while to $RUN/sniff.pcap, then brings the DS network back.
+# sion-dslink record [channel] [seconds]
+find_nintendo_channel() {
+    sta=$(iw dev 2>/dev/null | awk '$1 == "Interface" { i = $2 } $1 == "type" && $2 == "managed" { print i; exit }')
+    [ -n "$sta" ] || return 0
+    iw dev "$sta" scan 2>/dev/null | awk '
+        /^BSS / { bss = $2; sub(/\(.*/, "", bss); ch = "" }
+        /DS Parameter set: channel/ { ch = $NF }
+        /primary channel:/ { if (ch == "") ch = $NF }
+        /Vendor specific: OUI 00:1f:32/ && ch != "" && !seen[bss]++ { print ch, bss }'
+}
+do_record() {
+    want=$1
+    secs=${2:-60}
+    [ -x "$DIR/bin/sionsniff" ] || { log "the recorder isn't installed"; return 1; }
+    [ -n "$(ds_radio_phy)" ] || { log "plug in the Wi-Fi USB Connector first; it does the recording"; return 1; }
+    do_stop >/dev/null
+    rm -f "$RUN/sniff.pcap"
+    mkdir -p "$RUN"
+    if [ -z "$want" ]; then
+        log "start hosting Download Play on the other 3DS now; looking for it for up to a minute"
+        i=0
+        while [ $i -lt 20 ]; do
+            found=$(find_nintendo_channel)
+            [ -n "$found" ] && break
+            i=$((i + 1))
+            sleep 3
+        done
+        if [ -z "$found" ]; then
+            log "no Nintendo host showed up in the scans; recording channel 1 anyway"
+            want=1
+        else
+            echo "$found" | while read -r c b; do log "found a Nintendo host $b on channel $c"; done
+            want=$(echo "$found" | head -n 1 | cut -d' ' -f1)
+        fi
+    fi
+    start_sniff "$want"
+    [ -f "$RUN/sniff.pid" ] || { log "the recording didn't start"; do_start >/dev/null; return 1; }
+    log "recording channel $want for $secs seconds; search from the other 3DS's Download Play now"
+    t=0
+    while [ $t -lt "$secs" ] && kill -0 "$(cat "$RUN/sniff.pid")" 2>/dev/null; do
+        sleep 5
+        t=$((t + 5))
+        tail -n 1 "$RUN/sniff.log" 2>/dev/null
+    done
+    stop_sniff
+    cat "$RUN/sniff.log" 2>/dev/null | tail -n 3
+    log "bringing the DS network back"
+    do_start >/dev/null
+}
+
 # The FFCC demo host (ffcc/sion in the source). It has no picture, so the
 # dashboard keeps running.
 do_ffcc() {
@@ -560,6 +618,7 @@ case "$1" in
     send) shift; do_send "$@" ;;
     linktest) shift; do_linktest "$@" ;;
     ffcc) shift; do_ffcc "$@" ;;
+    record) shift; do_record "$@" ;;
     say) shift; [ -p "$RUN/in" ] && echo "$*" > "$RUN/in" || log "not running" ;;
-    *) echo "usage: sion-dslink check|start [CH] [--3ds] [--dlp FILE.cia|--no-dlp] [--force]|3ds [CH]|dlp-start|stop|status|say TEXT|send FILE.nds|txtrace [N]|linktest [--headless]|ffcc [--3ds]"; exit 2 ;;
+    *) echo "usage: sion-dslink check|start [CH] [--3ds] [--dlp FILE.cia|--no-dlp] [--force]|3ds [CH]|dlp-start|stop|status|say TEXT|send FILE.nds|txtrace [N]|linktest [--headless]|ffcc [--3ds]|record [CH] [SECONDS]"; exit 2 ;;
 esac
