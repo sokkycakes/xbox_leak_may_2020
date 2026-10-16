@@ -111,3 +111,24 @@ index ddac61f..c90acae 100644
      // First, check if we have received anything and handle it
      Wifi_RxQueueFlush();
  
+diff --git a/source/arm9/wifi_arm9.c b/source/arm9/wifi_arm9.c
+index c9176de..37c0504 100644
+--- a/source/arm9/wifi_arm9.c
++++ b/source/arm9/wifi_arm9.c
+@@ -50,6 +50,16 @@ static void Wifi_NTR_Update(void)
+         }
+         read_idx += sizeof(uint32_t);
+ 
++        // Sion Link: a size that runs past the end of the ring means the ring
++        // is out of step (seen on hardware under heavy traffic). This runs in
++        // an IRQ, where a failed assert can't even be reported, so drop what
++        // is queued instead.
++        if (read_idx + round_up_32(size) > (WIFI_RXBUFFER_SIZE - sizeof(u32)))
++        {
++            WifiData->rxbufRead = WifiData->rxbufWrite;
++            return;
++        }
++
+ #ifdef DSWIFI_ENABLE_LWIP
+         if (wifi_lwip_enabled)
+         {
