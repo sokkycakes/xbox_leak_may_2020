@@ -16,6 +16,10 @@
 //
 // Lines typed on stdin are sent to every linked DS as SL_TEXT; "!send PATH"
 // sends a .nds for the DSes to boot (Download Play).
+//
+// A game on the Sion connects to the game socket (common/slgame.h,
+// --game-sock PATH) to have its DS client sent to every DS that links, and
+// to trade SL_GAME packets with the DSes running it.
 
 #define _GNU_SOURCE
 #include <arpa/inet.h>
@@ -34,9 +38,12 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
 
+#include "slgame.h"
 #include "slproto.h"
 
 #define MAX_CLIENTS 15
@@ -90,6 +97,9 @@ typedef struct {
     uint32_t file_next; // first byte it still needs
     uint32_t file_ahead; // chunks past file_next it already has (sl_file_ack)
     uint8_t file_status;
+    // Game (see "Game socket" below)
+    uint32_t app;       // what the DS runs: 0 = the Sion Link app
+    uint64_t offered;   // when we last sent it the game's client
 } client;
 
 static client clients[MAX_CLIENTS];
@@ -158,10 +168,13 @@ static void send_welcome(client *c)
     send_sl(c, SL_WELCOME, &w, sizeof(w));
 }
 
+static void game_left(client *c);
+
 static void drop_client(client *c, const char *why)
 {
     if (c->used)
         logf_("DS %s (%s) left: %s", mac_str(c->mac), c->name, why);
+    game_left(c);
     c->used = false;
 }
 
@@ -261,18 +274,20 @@ static const char *pack_nds(const uint8_t *f, uint32_t size, uint8_t **out, long
     return NULL;
 }
 
-static void file_start(const char *path)
+// Sends PATH to every linked DS, or with launchers_only to those running the
+// Sion Link app. Returns false if nothing was sent.
+static bool file_start(const char *path, bool launchers_only)
 {
     if (xfer.active)
     {
         logf_("a transfer is already running");
-        return;
+        return false;
     }
     FILE *f = fopen(path, "rb");
     if (!f)
     {
         logf_("%s: %s", path, strerror(errno));
-        return;
+        return false;
     }
     fseek(f, 0, SEEK_END);
     long size = ftell(f);
@@ -281,7 +296,7 @@ static void file_start(const char *path)
     {
         logf_("%s: %ld bytes; not a .nds", path, size);
         fclose(f);
-        return;
+        return false;
     }
     uint8_t *file = malloc(size);
     if (!file || fread(file, 1, size, f) != (size_t)size)
@@ -289,7 +304,7 @@ static void file_start(const char *path)
         logf_("%s: read failed", path);
         free(file);
         fclose(f);
-        return;
+        return false;
     }
     fclose(f);
     uint8_t *data;
@@ -298,14 +313,14 @@ static void file_start(const char *path)
     if (why)
     {
         logf_("%s: %s", path, why);
-        return;
+        return false;
     }
 
     int n = 0;
     for (int i = 0; i < MAX_CLIENTS; i++)
     {
         client *c = &clients[i];
-        c->in_file = c->used && c->welcomed;
+        c->in_file = c->used && c->welcomed && (!launchers_only || c->app == 0);
         c->file_begun = false;
         c->file_next = 0;
         c->file_ahead = 0;
@@ -316,7 +331,7 @@ static void file_start(const char *path)
     {
         logf_("no DS linked; nothing sent");
         free(data);
-        return;
+        return false;
     }
 
     static uint32_t next_id = 1;
@@ -329,6 +344,7 @@ static void file_start(const char *path)
     snprintf(xfer.name, sizeof(xfer.name), "%.31s", base ? base + 1 : path);
     xfer.started = xfer.last_progress = now_ms();
     logf_("sending %s (%u bytes packed) to %d DS", xfer.name, xfer.size, n);
+    return true;
 }
 
 static void file_ack(client *c, const sl_file_ack *a)
@@ -432,6 +448,9 @@ static void file_pump(void)
     }
 }
 
+static void game_app_changed(client *c, uint32_t app);
+static void game_packet(client *c, const uint8_t *body, int len);
+
 // Handles one Sion Link packet from a DS (payload after the client AID byte).
 static void handle_sl(const uint8_t *mac, const uint8_t *pkt, int len)
 {
@@ -452,16 +471,25 @@ static void handle_sl(const uint8_t *mac, const uint8_t *pkt, int len)
     switch (h->type)
     {
     case SL_HELLO:
-        if (h->len >= sizeof(sl_hello))
+    {
+        uint32_t app = 0;
+        if (h->len >= 20)
         {
             memcpy(c->name, ((const sl_hello *)body)->name, 20);
             c->name[20] = 0;
         }
+        if (h->len >= sizeof(sl_hello))
+            memcpy(&app, &((const sl_hello *)body)->app, 4);
         if (!c->welcomed)
-            logf_("DS %s linked, owner \"%s\", #%d", mac_str(mac), c->name, c->aid);
+            logf_("DS %s linked, owner \"%s\", #%d%s", mac_str(mac), c->name, c->aid,
+                  app ? ", running a game client" : "");
+        bool was = c->welcomed;
         c->welcomed = true;
+        if (!was || app != c->app)
+            game_app_changed(c, app);
         send_welcome(c);
         break;
+    }
     case SL_PING:
         if (verbose)
             logf_("ping from %s", mac_str(mac));
@@ -473,6 +501,9 @@ static void handle_sl(const uint8_t *mac, const uint8_t *pkt, int len)
     case SL_FILE_ACK:
         if (h->len >= sizeof(sl_file_ack))
             file_ack(c, (const sl_file_ack *)body);
+        break;
+    case SL_GAME:
+        game_packet(c, body, h->len);
         break;
     }
 }
@@ -516,6 +547,197 @@ static void housekeeping(void)
         else if (c->welcomed)
             send_welcome(c); // keepalive, and refreshes the linked count
     }
+}
+
+// Game socket
+// ===========
+//
+// See common/slgame.h. One game at a time.
+
+#define GAME_OFFER_MS 20000 // a DS that didn't take the client is offered it again after this
+
+static struct {
+    int listen_fd, fd;      // -1 when closed
+    bool registered;
+    uint32_t app;
+    char client_path[256];
+} game = { -1, -1, false, 0, "" };
+
+static void game_send(uint8_t op, uint8_t id, const void *body, int len)
+{
+    if (game.fd < 0)
+        return;
+    uint8_t buf[SLGAME_MAX + 1];
+    if (len > SLGAME_MAX - 2)
+        len = SLGAME_MAX - 2;
+    buf[0] = op;
+    buf[1] = id;
+    if (len)
+        memcpy(buf + 2, body, len);
+    send(game.fd, buf, 2 + len, MSG_DONTWAIT | MSG_NOSIGNAL);
+}
+
+static bool game_player(const client *c)
+{
+    return game.registered && c->used && c->welcomed && c->app == game.app;
+}
+
+static void game_joined(client *c)
+{
+    if (!game_player(c))
+        return;
+    logf_("DS %s (%s) is player %d", mac_str(c->mac), c->name, c->aid);
+    game_send(SLGAME_JOIN, c->aid, c->name, 20);
+}
+
+static void game_left(client *c)
+{
+    if (game_player(c))
+        game_send(SLGAME_LEAVE, c->aid, NULL, 0);
+}
+
+static void game_app_changed(client *c, uint32_t app)
+{
+    game_left(c);
+    c->app = app;
+    game_joined(c);
+}
+
+static void game_packet(client *c, const uint8_t *body, int len)
+{
+    if (game_player(c))
+        game_send(SLGAME_PACKET, c->aid, body, len);
+}
+
+static void game_close(const char *why)
+{
+    if (game.fd >= 0)
+    {
+        logf_("game %s", why);
+        close(game.fd);
+    }
+    game.fd = -1;
+    game.registered = false;
+}
+
+static int game_listen(const char *path)
+{
+    char dir[sizeof(((struct sockaddr_un *)0)->sun_path)];
+    snprintf(dir, sizeof(dir), "%s", path);
+    char *slash = strrchr(dir, '/');
+    if (slash && slash != dir)
+    {
+        *slash = 0;
+        mkdir(dir, 0755);
+    }
+    struct sockaddr_un a = { .sun_family = AF_UNIX };
+    snprintf(a.sun_path, sizeof(a.sun_path), "%s", path);
+    unlink(path);
+    int fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    if (fd < 0 || bind(fd, (struct sockaddr *)&a, sizeof(a)) < 0 || listen(fd, 2) < 0)
+    {
+        logf_("game socket %s: %s", path, strerror(errno));
+        if (fd >= 0)
+            close(fd);
+        return -1;
+    }
+    chmod(path, 0666);
+    return fd;
+}
+
+static client all_clients = { .mac = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF } };
+
+static void game_message(const uint8_t *m, int n)
+{
+    if (n < 1)
+        return;
+    switch (m[0])
+    {
+    case SLGAME_REGISTER:
+    {
+        if (n < 6)
+            return;
+        memcpy(&game.app, m + 1, 4);
+        int plen = n - 5;
+        if (plen >= (int)sizeof(game.client_path))
+            plen = sizeof(game.client_path) - 1;
+        memcpy(game.client_path, m + 5, plen);
+        game.client_path[plen] = 0;
+        game.registered = true;
+        logf_("game %08x registered, client %s", game.app, game.client_path);
+        for (int i = 0; i < MAX_CLIENTS; i++)
+        {
+            clients[i].offered = 0;
+            game_joined(&clients[i]);
+        }
+        break;
+    }
+    case SLGAME_SEND:
+    {
+        if (n < 2 || !game.registered)
+            return;
+        int len = n - 2;
+        if (len > SL_MAX_BODY)
+            len = SL_MAX_BODY;
+        if (m[1] == SLGAME_ALL)
+        {
+            send_sl(&all_clients, SL_GAME, m + 2, len);
+            return;
+        }
+        for (int i = 0; i < MAX_CLIENTS; i++)
+            if (clients[i].aid == m[1] && game_player(&clients[i]))
+                send_sl(&clients[i], SL_GAME, m + 2, len);
+        break;
+    }
+    }
+}
+
+static void game_poll(void)
+{
+    if (game.listen_fd < 0)
+        return;
+    int fd = accept4(game.listen_fd, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
+    if (fd >= 0)
+    {
+        game_close("replaced by a new one");
+        game.fd = fd;
+        logf_("game connected");
+    }
+    while (game.fd >= 0)
+    {
+        uint8_t buf[SLGAME_MAX + 256];
+        ssize_t n = recv(game.fd, buf, sizeof(buf), MSG_DONTWAIT);
+        if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK))
+        {
+            game_close("disconnected");
+            break;
+        }
+        if (n < 0)
+            break;
+        game_message(buf, (int)n);
+    }
+
+    // Every DS still on the Sion Link app gets the game's client
+    if (!game.registered || xfer.active)
+        return;
+    uint64_t now = now_ms();
+    bool any = false;
+    for (int i = 0; i < MAX_CLIENTS; i++)
+    {
+        client *c = &clients[i];
+        if (c->used && c->welcomed && c->app == 0 && (!c->offered || now - c->offered > GAME_OFFER_MS))
+            any = true;
+    }
+    if (!any)
+        return;
+    if (!file_start(game.client_path, true))
+    {
+        char note[] = "couldn't send the game's DS client; see the sionlinkd log";
+        game_send(SLGAME_NOTE, 0, note, sizeof(note) - 1);
+    }
+    for (int i = 0; i < MAX_CLIENTS; i++)
+        if (clients[i].used && clients[i].welcomed && clients[i].app == 0)
+            clients[i].offered = now;
 }
 
 // Nintendo vendor element, shared by both back ends
@@ -841,7 +1063,8 @@ static void pkt_poll(void)
 static void usage(void)
 {
     fprintf(stderr,
-            "usage: sionlinkd (--if IFACE | --melon PORT [--deaf]) [--name NAME] [--motd TEXT] [-v]\n"
+            "usage: sionlinkd (--if IFACE | --melon PORT [--deaf]) [--name NAME] [--motd TEXT]\n"
+            "                 [--game-sock PATH] [-v]\n"
             "       sionlinkd --vendor-element   print the hostapd vendor_elements hex\n");
     exit(2);
 }
@@ -850,6 +1073,7 @@ int main(int argc, char **argv)
 {
     const char *ifname = NULL;
     int melon_port = 0;
+    const char *game_sock = SLGAME_SOCKET;
 
     for (int i = 1; i < argc; i++)
     {
@@ -861,6 +1085,8 @@ int main(int argc, char **argv)
             snprintf(host_name, sizeof(host_name), "%s", argv[++i]);
         else if (!strcmp(argv[i], "--motd") && i + 1 < argc)
             snprintf(motd, sizeof(motd), "%s", argv[++i]);
+        else if (!strcmp(argv[i], "--game-sock") && i + 1 < argc)
+            game_sock = argv[++i];
         else if (!strcmp(argv[i], "--deaf"))
             deaf = true;
         else if (!strcmp(argv[i], "-v"))
@@ -887,13 +1113,18 @@ int main(int argc, char **argv)
     int fd = ifname ? pkt_init(ifname) : melon_init(melon_port);
     if (fd < 0)
         return 1;
+    if (*game_sock)
+        game.listen_fd = game_listen(game_sock);
 
     bool stdin_open = true;
     uint64_t next_beacon = 0;
     for (;;)
     {
-        struct pollfd pfd[2] = { { fd, POLLIN, 0 }, { 0, POLLIN, 0 } };
-        poll(pfd, stdin_open ? 2 : 1, xfer.active ? 2 : 20);
+        struct pollfd pfd[4] = { { fd, POLLIN, 0 }, { 0, POLLIN, 0 },
+                                 { game.listen_fd, POLLIN, 0 }, { game.fd, POLLIN, 0 } };
+        if (!stdin_open)
+            pfd[1].fd = -1;
+        poll(pfd, 4, xfer.active ? 2 : 20);
 
         if (melon_port)
         {
@@ -922,12 +1153,13 @@ int main(int argc, char **argv)
                 if (sscanf(line, "!blast %d", &n) == 1)
                     blast(n);
                 else if (!strncmp(line, "!send ", 6))
-                    file_start(line + 6);
+                    file_start(line + 6, false);
                 else if (line[0])
                     broadcast_text(line);
             }
         }
 
+        game_poll();
         file_pump();
         housekeeping();
     }

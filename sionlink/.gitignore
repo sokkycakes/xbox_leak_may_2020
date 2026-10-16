@@ -2,3 +2,7 @@ ds/build/
 ds/*.nds
 ds/*.elf
 host/sionlinkd
+linktest/ds/build/
+linktest/ds/*.nds
+linktest/ds/*.elf
+linktest/sion/linktest

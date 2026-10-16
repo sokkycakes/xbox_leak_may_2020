@@ -11,6 +11,11 @@
 #                            (FILE - reads it from stdin)
 #   sion-dslink txtrace [N]  send N test broadcasts and show the rate each frame
 #                            goes out at (needs kprobe tracing)
+#   sion-dslink linktest [--headless]
+#                            Link Test: a game on the Sion's screen that every
+#                            DS that links joins (its client is sent to it);
+#                            shows and logs how steady the link is. Ctrl+C ends
+#                            it and brings the dashboard back.
 #
 # The home Wi-Fi link (and SSH over it) is never touched: start refuses when
 # the card can't run an access point beside it, unless --force is given.
@@ -281,6 +286,32 @@ do_send() {
     log "still going after 60 s"
 }
 
+# Link Test (linktest/ in the source). It draws on the screen itself, so the
+# dashboard steps aside while it runs.
+do_linktest() {
+    [ -x "$DIR/bin/linktest" ] && [ -f "$DIR/linktest.nds" ] ||
+        { log "Link Test isn't installed (kit 13 or later)"; return 1; }
+    [ -f "$RUN/sionlinkd.pid" ] && kill -0 "$(cat "$RUN/sionlinkd.pid")" 2>/dev/null ||
+        do_start || return 1
+    headless=
+    [ "$1" = --headless ] && headless=--headless
+    dash=0
+    if [ -z "$headless" ] && { pidof xbcompat xbox-av theseus >/dev/null; }; then
+        log "the dashboard steps aside while Link Test runs"
+        [ -x /etc/init.d/S98xbox ] && /etc/init.d/S98xbox stop >/dev/null 2>&1
+        [ -x /etc/init.d/S99theseus ] && /etc/init.d/S99theseus stop >/dev/null 2>&1
+        dash=1
+    fi
+    log "link a DS with the Sion Link app; it gets the game. Ctrl+C ends Link Test."
+    trap 'true' INT TERM
+    "$DIR/bin/linktest" $headless --client "$DIR/linktest.nds" | tee -i "$RUN/linktest.log"
+    trap - INT TERM
+    if [ $dash -eq 1 ]; then
+        log "bringing the dashboard back"
+        sion restart dashboard >/dev/null 2>&1
+    fi
+}
+
 case "$1" in
     check) do_check ;;
     start) shift; do_start "$@" ;;
@@ -289,6 +320,7 @@ case "$1" in
     status) do_status ;;
     txtrace) shift; do_txtrace "$@" ;;
     send) shift; do_send "$@" ;;
+    linktest) shift; do_linktest "$@" ;;
     say) shift; [ -p "$RUN/in" ] && echo "$*" > "$RUN/in" || log "not running" ;;
-    *) echo "usage: sion-dslink check|start [CH] [--force]|stop|status|say TEXT|send FILE.nds|txtrace [N]"; exit 2 ;;
+    *) echo "usage: sion-dslink check|start [CH] [--force]|stop|status|say TEXT|send FILE.nds|txtrace [N]|linktest [--headless]"; exit 2 ;;
 esac

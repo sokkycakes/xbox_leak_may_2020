@@ -37,6 +37,8 @@ enum sl_type {
     SL_FILE_BEGIN = 7, // Sion -> DS: sl_file_begin, a program is coming
     SL_FILE_DATA  = 8, // Sion -> DS: sl_file_data + bytes
     SL_FILE_ACK   = 9, // DS -> Sion: sl_file_ack
+    SL_GAME    = 10, // either way: a game's own packet (sionlinkd passes it
+                     // between the DS and the game on the Sion, see slgame.h)
 };
 
 // Download Play: the Sion sends a program into the DS's RAM, which then
@@ -62,6 +64,8 @@ typedef struct __attribute__((packed)) {
 
 typedef struct __attribute__((packed)) {
     char     name[20];  // DS owner name, UTF-8, NUL padded
+    uint32_t app;       // 0: the Sion Link app; else the game client running
+                        // (an older DS app sends only the name)
 } sl_hello;
 
 typedef struct __attribute__((packed)) {

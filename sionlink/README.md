@@ -78,6 +78,24 @@ through VRAM C+D and a small stub there copies it. Up to about 3.6 MB of code
 fits. Programs that read files from their own card (NitroFS, retail file
 systems) won't find them. `demo/` builds `sion-hello.nds` to try it with.
 
+## Games on the Sion with DS players
+
+A game on the Sion reaches its DS players through `sionlinkd`'s game socket
+(`common/slgame.h`, `/run/sionlink/game.sock`). It registers with an app ID
+and a DS client .nds; every DS that links with the Sion Link app is sent that
+client, boots it, links again saying hello with the game's app ID, and from
+then on `SL_GAME` packets pass between it and the game.
+
+`linktest/` is the first such game. `sion-dslink linktest` puts it on the
+Sion's screen (the dashboard steps aside until Ctrl+C); each DS moves a square
+with the D-pad or touch screen. Every frame the DS sends its input and the
+Sion sends one snapshot of the field to all DSes, and both ends count what
+arrives: frames per second, lost frames, the longest gap between two, and
+the round trip (`linktest/ltproto.h`). The Sion's screen and log show both
+directions for every player; the DS's top screen shows the same from its
+side. The Sion draws with KMS dumb buffers at 720x480, so it needs no SDL or
+display server; `--headless` runs it without a screen.
+
 ## Download Station demos
 
 A DS Download Station card keeps its kiosk demos in `/ds_demo/` as LZO1X

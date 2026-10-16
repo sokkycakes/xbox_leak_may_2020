@@ -4,12 +4,13 @@
 set -e
 mkdir -p /opt/sionlink/bin
 cd /tmp/sionlink
-cp hostapd sionlinkd /opt/sionlink/bin/
+cp hostapd sionlinkd linktest /opt/sionlink/bin/
 cp hostapd-sionlink.conf.in /opt/sionlink/
-cp iwl_ratefix.ko /opt/sionlink/
+cp iwl_ratefix.ko linktest.nds /opt/sionlink/
 cp sion-dslink /usr/bin/sion-dslink
 chmod 755 /opt/sionlink/bin/* /usr/bin/sion-dslink
 sion persist /opt/sionlink/bin/hostapd /opt/sionlink/bin/sionlinkd \
+    /opt/sionlink/bin/linktest /opt/sionlink/linktest.nds \
     /opt/sionlink/hostapd-sionlink.conf.in /opt/sionlink/iwl_ratefix.ko \
     /usr/bin/sion-dslink >/dev/null
 # Teach sion-netd to leave the DS network alone, then restart only its

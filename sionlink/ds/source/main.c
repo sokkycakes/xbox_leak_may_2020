@@ -63,9 +63,15 @@ static void Send(int type, const void *body, int len)
     Wifi_MultiplayerClientToHostDataTxFrame(buf, sizeof(sl_hdr) + len);
 }
 
+// cpuGetTiming() wraps every 128 s; this keeps counting.
 static u32 Millis(void)
 {
-    return timerTicks2msec(cpuGetTiming());
+    static u32 last;
+    static u64 ticks;
+    u32 t = cpuGetTiming();
+    ticks += (u32)(t - last);
+    last = t;
+    return (u32)(ticks * 1000 / BUS_CLOCK);
 }
 
 // Screens
