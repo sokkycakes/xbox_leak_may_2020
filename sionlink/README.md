@@ -49,3 +49,14 @@ never answers auth or assoc.
 
 `start` refuses (unless `--force`) when the card can't run an access point
 beside the home Wi-Fi, so SSH over Wi-Fi isn't dropped.
+
+## The Intel 7265 rate bug
+
+Linux 6.18's iwlmvm sends every frame that uses a host-chosen rate (management
+frames, broadcasts) at the wrong legacy rate on firmware with TX_CMD version 8
+or older, such as the Sion's 7265D-29: 1 Mbit/s goes out at 5.5 Mbit/s. Beacons
+use another path and are fine. Phones cope; a DS only does 1 and 2 Mbit/s, so
+it heard the Sion's beacons and nothing else. `sion/ratefix/iwl_ratefix.ko`
+kprobes `iwl_trans_tx()` and puts the intended rate back; `sion-dslink start`
+loads it. Build it against a linux-6.18.7 tree configured like the Sion
+(`KDIR=... make -C sion/ratefix KBUILD_MODPOST_WARN=1`).

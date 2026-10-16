@@ -6,10 +6,12 @@ mkdir -p /opt/sionlink/bin
 cd /tmp/sionlink
 cp hostapd sionlinkd /opt/sionlink/bin/
 cp hostapd-sionlink.conf.in /opt/sionlink/
+cp iwl_ratefix.ko /opt/sionlink/
 cp sion-dslink /usr/bin/sion-dslink
 chmod 755 /opt/sionlink/bin/* /usr/bin/sion-dslink
 sion persist /opt/sionlink/bin/hostapd /opt/sionlink/bin/sionlinkd \
-    /opt/sionlink/hostapd-sionlink.conf.in /usr/bin/sion-dslink >/dev/null
+    /opt/sionlink/hostapd-sionlink.conf.in /opt/sionlink/iwl_ratefix.ko \
+    /usr/bin/sion-dslink >/dev/null
 # Teach sion-netd to leave the DS network alone, then restart only its
 # loop: wpa_supplicant and the home Wi-Fi link keep running.
 if ! grep -q 'ifc" = sionds' /usr/libexec/sion-netd; then

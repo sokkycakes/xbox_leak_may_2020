@@ -77,6 +77,16 @@ do_check() {
     [ -x "$DIR/bin/hostapd" ] && [ -x "$DIR/bin/sionlinkd" ] && log "programs installed in $DIR" || log "programs missing from $DIR"
 }
 
+# The Intel 7265 under Linux 6.18 sends 1 Mbit/s frames at 5.5 Mbit/s,
+# which a DS can't receive; iwl_ratefix.ko corrects the rate (see ratefix/).
+load_ratefix() {
+    [ -d /sys/module/iwl_ratefix ] && return 0
+    [ -f "$DIR/iwl_ratefix.ko" ] || { log "no $DIR/iwl_ratefix.ko"; return 1; }
+    insmod "$DIR/iwl_ratefix.ko" 2>/dev/null ||
+        { log "rate fix didn't load (kernel $(uname -r)); the DS won't hear the Sion"; return 1; }
+    log "rate fix loaded"
+}
+
 do_start() {
     force=0
     want_ch=
@@ -93,6 +103,7 @@ do_start() {
 
     phy=$(phy_of "$PHY_IF")
     [ -n "$phy" ] || { log "no Wi-Fi interface $PHY_IF"; return 1; }
+    load_ratefix
     maxch=$(ap_combo_channels "$phy")
     f=$(home_freq)
     home_ch=0
@@ -161,6 +172,7 @@ do_stop() {
 do_status() {
     if [ -f "$RUN/hostapd.pid" ] && kill -0 "$(cat "$RUN/hostapd.pid")" 2>/dev/null; then
         log "running"
+        [ -d /sys/module/iwl_ratefix ] && log "rate fix: $(cat /sys/module/iwl_ratefix/parameters/fixed) frames corrected"
         iw dev "$AP_IF" info 2>/dev/null | grep -E "channel|addr" | sed 's/^/    /'
         iw dev "$AP_IF" station dump 2>/dev/null | grep -E "^Station|tx bitrate|rx bitrate" | sed 's/^/    /'
         tail -5 "$RUN/sionlinkd.log" 2>/dev/null
