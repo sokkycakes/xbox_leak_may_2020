@@ -10,6 +10,18 @@ index 0e906663..47b69394 100644
  QMAKE_CXXFLAGS_DEPS       += $$QMAKE_CFLAGS_DEPS
  QMAKE_CXXFLAGS_WARN_ON    += $$QMAKE_CFLAGS_WARN_ON
  QMAKE_CXXFLAGS_WARN_OFF   += $$QMAKE_CFLAGS_WARN_OFF
+diff --git a/mkspecs/linux-g++/qmake.conf b/mkspecs/linux-g++/qmake.conf
+index c3ce7775..528b3559 100644
+--- a/mkspecs/linux-g++/qmake.conf
++++ b/mkspecs/linux-g++/qmake.conf
+@@ -123,6 +123,7 @@ QMAKE_CFLAGS_YACC           += -Wno-unused -Wno-parentheses
+ QMAKE_CFLAGS_HIDESYMS       += -fvisibility=hidden
+ 
+ QMAKE_CXXFLAGS            += $$QMAKE_CFLAGS
++QMAKE_CXXFLAGS            += -std=gnu++98 -fno-lifetime-dse -fno-delete-null-pointer-checks -Wno-deprecated-copy -Wno-class-memaccess
+ QMAKE_CXXFLAGS_DEPS       += $$QMAKE_CFLAGS_DEPS
+ QMAKE_CXXFLAGS_WARN_ON    += $$QMAKE_CFLAGS_WARN_ON
+ QMAKE_CXXFLAGS_WARN_OFF   += $$QMAKE_CFLAGS_WARN_OFF
 diff --git a/src/corelib/arch/aarch64/arch.pri b/src/corelib/arch/aarch64/arch.pri
 new file mode 100644
 index 00000000..ab8ae2dd
@@ -245,6 +257,38 @@ index 0e41a308..8d022554 100644
  #elif defined(QT_ARCH_ALPHA)
  #  include "QtCore/qatomic_alpha.h"
  #elif defined(QT_ARCH_ARM)
+diff --git a/src/corelib/global/qglobal.h b/src/corelib/global/qglobal.h
+index b3d4852f..f8a69651 100644
+--- a/src/corelib/global/qglobal.h
++++ b/src/corelib/global/qglobal.h
+@@ -2359,20 +2359,22 @@ typedef uint Flags;
+ 
+ #if defined(Q_CC_GNU) && !defined(Q_CC_INTEL) && !defined(Q_CC_RVCT)
+ /* make use of typeof-extension */
++// GCC 9+ no longer lets a break inside a statement expression end the inner
++// loop, so use the Qt 4.8.7 form, which needs no statement expressions.
+ template <typename T>
+ class QForeachContainer {
+ public:
+-    inline QForeachContainer(const T& t) : c(t), brk(0), i(c.begin()), e(c.end()) { }
++    inline QForeachContainer(const T& t) : c(t), i(c.begin()), e(c.end()), control(1) { }
+     const T c;
+-    int brk;
+     typename T::const_iterator i, e;
++    int control;
+ };
+ 
+ #define Q_FOREACH(variable, container)                                \
+ for (QForeachContainer<__typeof__(container)> _container_(container); \
+-     !_container_.brk && _container_.i != _container_.e;              \
+-     __extension__  ({ ++_container_.brk; ++_container_.i; }))                       \
+-    for (variable = *_container_.i;; __extension__ ({--_container_.brk; break;}))
++     _container_.control && _container_.i != _container_.e;           \
++     ++_container_.i, _container_.control ^= 1)                       \
++    for (variable = *_container_.i; _container_.control; _container_.control = 0)
+ 
+ #else
+ 
 diff --git a/src/dbus/qdbusconnection.cpp b/src/dbus/qdbusconnection.cpp
 index 6f1c7735..a1160295 100644
 --- a/src/dbus/qdbusconnection.cpp
