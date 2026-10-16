@@ -3,7 +3,8 @@
 # so the three modules are built out of tree from the kernel's own sources:
 #   make KDIR=/path/to/linux-6.18.7 (configured like the Sion, modules_prepare done)
 # rt2500usb-hwbeacon.patch keeps the chip from beaconing (it wedges the
-# connector's USB sends); sionlinkd --beacon-if sends the beacons instead.
+# connector's USB sends; sionlinkd --beacon-if sends the beacons instead)
+# and sets the receiver gain to 0x60, which stops false channel-busy alarms.
 # Prebuilt copies for the Sion's 6.18.7 kernel are in prebuilt/.
 KDIR ?= /lib/modules/$(shell uname -r)/build
 SRC = $(KDIR)/drivers/net/wireless/ralink/rt2x00
