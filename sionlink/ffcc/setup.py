@@ -84,10 +84,10 @@ def copy_sources(region):
 
     # main.c: no IWRAM to clear and no interrupt vector to install on the DS
     m = CLI / "main.c"
-    edit(m, '    REG_WAITCNT = 0x4014;\n', '#ifndef PORT_DS\n    REG_WAITCNT = 0x4014;\n')
+    edit(m, '    REG_WAITCNT = 0x4014;\n', '#if !defined(PORT_DS) && !defined(PORT_CTR)\n    REG_WAITCNT = 0x4014;\n')
     edit(m, '    DmaClear32(3, 0, 0x03007E00, value);\n', '    DmaClear32(3, 0, 0x03007E00, value);\n#endif\n')
     edit(m, '    DmaCopy32(3, intr_main, gIntrMainRam, sizeof(gIntrMainRam));\n    INTR_VECTOR = gIntrMainRam;\n',
-         '#ifndef PORT_DS\n    DmaCopy32(3, intr_main, gIntrMainRam, sizeof(gIntrMainRam));\n    INTR_VECTOR = gIntrMainRam;\n#endif\n')
+         '#if !defined(PORT_DS) && !defined(PORT_CTR)\n    DmaCopy32(3, intr_main, gIntrMainRam, sizeof(gIntrMainRam));\n    INTR_VECTOR = gIntrMainRam;\n#endif\n')
     edit(m, '(vu16 *)0x04000010', 'BG_SCROLL_REGS', count=3)
 
     # Sprite tiles live elsewhere on the DS
@@ -101,12 +101,13 @@ def copy_sources(region):
         edit(l, f'0x020000{off}', f'(MB_HEADER + 0x{off})', count=2 if off == "C4" else 1)
     edit(l, '0x080000AC', '(CART_HEADER + 0xAC)')
 
-    # The GameCube's bulk downloads land in EWRAM the DS program occupies
+    # The GameCube's bulk downloads land in EWRAM the DS program occupies (and
+    # that the 3DS doesn't have)
     edit(CLI / "xfer.h", '#if defined(VERSION_GCCJGC)\n#define DOWNLOAD_START',
-         '#if defined(PORT_DS)\n#define DOWNLOAD_START PORT_DOWNLOAD\n#define LIST_START     (PORT_DOWNLOAD + 0x4800)\n'
+         '#if defined(PORT_DS) || defined(PORT_CTR)\n#define DOWNLOAD_START PORT_DOWNLOAD\n#define LIST_START     (PORT_DOWNLOAD + 0x4800)\n'
          '#define DETAIL_START   (PORT_DOWNLOAD + 0x7800)\n#elif defined(VERSION_GCCJGC)\n#define DOWNLOAD_START')
     edit(CLI / "xfer.h", '#define DOWNLOAD_END  0x02040000\n',
-         '#ifdef PORT_DS\n#define DOWNLOAD_END  (PORT_DOWNLOAD + 0xC000)\n#else\n#define DOWNLOAD_END  0x02040000\n#endif\n')
+         '#if defined(PORT_DS) || defined(PORT_CTR)\n#define DOWNLOAD_END  (PORT_DOWNLOAD + 0xC000)\n#else\n#define DOWNLOAD_END  0x02040000\n#endif\n')
 
     hardware_addresses()
 
@@ -119,7 +120,13 @@ def hardware_addresses():
     import re
     lit = re.compile(r"\b0x0([567])([0-9A-Fa-f]{6})\b")
     name = {"5": "GBA_PLTT_ADDR", "6": "GBA_VRAM_ADDR", "7": "GBA_OAM_ADDR"}
-    for f in sorted(CLI.glob("*.[ch]")):
+    # C files, and the .inc files C files include (the others are assembly
+    # data, where such numbers aren't addresses)
+    files = sorted(CLI.glob("*.[ch]"))
+    inc = re.compile(r'#include\s+"([^"]+\.inc)"')
+    c_incs = {n for f in files for n in inc.findall(f.read_text(errors="replace"))}
+    files += [CLI / n for n in sorted(c_incs) if (CLI / n).exists()]
+    for f in files:
         if f.name == "global.h":
             continue
         text = f.read_text(errors="replace")

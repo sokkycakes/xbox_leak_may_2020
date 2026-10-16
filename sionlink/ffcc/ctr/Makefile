@@ -26,7 +26,7 @@ INCLUDES	:= -Isource -I.. -I../../common -I../../dslib -I$(CLI) -I$(CTRULIB)/inc
 # The client is 2006 GBA code: quiet its warnings, and it reads one type
 # through another
 CLIENT_FLAGS	:= -DPORT_CTR -DVERSION_$(REGION) -fno-strict-aliasing -w
-CFLAGS		:= -O2 -g -mword-relocations -ffunction-sections $(ARCH) -D__3DS__ $(INCLUDES)
+CFLAGS		:= -O2 -g -mword-relocations -ffunction-sections $(ARCH) -D__3DS__ $(INCLUDES) $(EXTRA_CFLAGS)
 LDFLAGS		:= -specs=3dsx.specs -g $(ARCH) -L$(CTRULIB)/lib -Wl,-Map,$(BUILD)/$(NAME).map
 
 PORT_SRC	:= source/port.c source/gbappu.c ../../ctr/sl3ds.c

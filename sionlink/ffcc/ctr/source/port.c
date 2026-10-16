@@ -48,12 +48,23 @@ static jmp_buf restart;
 // =======
 
 static u16 frame[GBA_W * GBA_H];
-static u16 to565[0x8000];
+
+// GBA BGR555 to the top screen's RGB565 (green's low bit from its top bit)
+static inline u16 To565(u16 c)
+{
+    return ((c & 31) << 11) | ((c & 0x3E0) << 1) | ((c >> 4) & 0x20) | ((c >> 10) & 31);
+}
+
+// Time spent drawing the picture and running the game, per frame (in
+// ARM11 ticks, averaged on the bottom screen)
+static u64 ticks_ppu, ticks_draw, ticks_game, ticks_left;
 
 static void Present(void)
 {
+    u64 t0 = svcGetSystemTick();
     gba_ppu ppu = { gPortIo, gPortPltt, gPortVram, gPortOam };
     GbaPpuDraw(&ppu, frame);
+    ticks_draw += svcGetSystemTick() - t0;
 
     // The top framebuffer is stored a column at a time, bottom to top
     u16 *fb = (u16 *)gfxGetFramebuffer(GFX_TOP, GFX_LEFT, NULL, NULL);
@@ -62,10 +73,29 @@ static void Present(void)
         u16 *col = fb + (x + OFS_X) * 240 + (239 - OFS_Y);
         const u16 *src = frame + x;
         for (int y = 0; y < GBA_H; y++, src += GBA_W)
-            *col-- = to565[*src];
+            *col-- = To565(*src);
     }
     gfxFlushBuffers();
     gfxSwapBuffers();
+    ticks_ppu += svcGetSystemTick() - t0;
+#ifdef PPU_DUMP
+    // The display state every 10 s, for checking the picture on a PC
+    static int frames;
+    if (++frames % 600 == 0)
+    {
+        char path[32];
+        snprintf(path, sizeof(path), "sdmc:/ffppu%d.bin", frames / 600);
+        FILE *f = fopen(path, "wb");
+        if (f)
+        {
+            fwrite(gPortIo, 1, 0x400, f);
+            fwrite(gPortPltt, 1, 0x400, f);
+            fwrite(gPortVram, 1, 0x18000, f);
+            fwrite(gPortOam, 1, 0x400, f);
+            fclose(f);
+        }
+    }
+#endif
 }
 
 static void ClearTop(void)
@@ -327,6 +357,10 @@ static void Status(void)
     printf("\x1b[5;1HGameCube link: %-12s\n", Link_IsConnected() ? "connected" : "waiting");
     printf("\x1b[6;1HJoyBus: %lu batches   \n", (unsigned long)joy_batches);
     printf("\x1b[7;1Hresent answers: %lu   \n", (unsigned long)joy_resent);
+    double ms = 1000.0 / SYSCLOCK_ARM11 / 30;
+    printf("\x1b[9;1Hpicture %4.1f ms (drawing %4.1f)   \n", ticks_ppu * ms, ticks_draw * ms);
+    printf("\x1b[10;1Hgame %4.1f ms   \n", ticks_game * ms);
+    ticks_ppu = ticks_draw = ticks_game = 0;
     printf("\x1b[28;1HHOME: quit");
 }
 
@@ -358,6 +392,8 @@ static void Quit(void)
 
 void VBlankIntrWait(void)
 {
+    if (ticks_left)
+        ticks_game += svcGetSystemTick() - ticks_left;
     if (!aptMainLoop())
         Quit();
     Present();
@@ -370,6 +406,7 @@ void VBlankIntrWait(void)
     static int n;
     if (++n % 30 == 0)
         Status();
+    ticks_left = svcGetSystemTick();
 }
 
 // Start
@@ -388,11 +425,6 @@ int main(int argc, char *argv[])
     gfxInit(GSP_RGB565_OES, GSP_BGR8_OES, false);
     consoleInit(GFX_BOTTOM, &bottom);
     ClearTop();
-    for (int c = 0; c < 0x8000; c++)
-    {
-        int r = c & 31, g = (c >> 5) & 31, b = (c >> 10) & 31;
-        to565[c] = (r << 11) | (g << 6) | ((g >> 4) << 5) | b;
-    }
     GBA_IO16(0x130) = 0x3FF;
     memcpy(gPortCartHeader + 0xAC, "RELS", 4);
 
