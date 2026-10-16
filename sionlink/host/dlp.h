@@ -57,6 +57,9 @@ uint64_t DlpTitleId(dlp_host *d);
 const char *DlpTitleName(dlp_host *d);
 
 // The checksum every DLP packet carries (exposed for the tests)
+// Where the host logs each client's progress (NULL: nowhere)
+extern void (*DlpLog)(const char *fmt, ...);
+
 uint32_t DlpChecksum(uint32_t key, const uint8_t *packet, int len);
 uint32_t DlpChecksumKey(const uds_keys *keys, const uint8_t host_mac[6]);
 

@@ -1273,6 +1273,7 @@ static bool ctr_start_dlp(const char *path)
     fclose(f);
     ctr_network(false);
     const char *why = NULL;
+    DlpLog = logf_;
     dlp3 = DlpCreate(uds3, mac3, &keys3, dlp_cia, (uint32_t)size, SL_UDS_MAX_NODES - 1, &why);
     if (!dlp3)
     {
@@ -1364,6 +1365,7 @@ typedef struct {
     uint8_t *b;
     int rt, end;
     bool whole; // not cut short by the recorder
+    double sec; // when it was recorded
 } pcap_frame;
 
 static bool next_frame(FILE *f, pcap_frame *p)
@@ -1384,6 +1386,8 @@ static bool next_frame(FILE *f, pcap_frame *p)
         bool fcs = (present & 2) && !(present & 1) && rt > 8 && (b[8] & 0x10);
         p->b = b;
         p->rt = rt;
+        p->sec = (ph[0] | ph[1] << 8 | ph[2] << 16 | (uint32_t)ph[3] << 24) +
+                 (ph[4] | ph[5] << 8 | ph[6] << 16 | (uint32_t)ph[7] << 24) / 1e6;
         p->whole = cl == ol;
         p->end = cl - (fcs && p->whole ? 4 : 0);
         return true;
@@ -1412,16 +1416,20 @@ static uint32_t swap32(uint32_t v)
 // Decrypts one broadcast data frame from a 3DS network's host with key.
 // 2: whole frame, CCMP tag right; 1: the start reads as 3DS data (the
 // recorder cut the rest, or the tag is wrong: *mic_bad); 0: not this key.
-// plain gets the decrypted body.
+// Decrypts one data frame of a 3DS network with key. 2: whole frame, CCMP
+// tag right; 1: the start reads as SNAP (the recorder cut the rest, or the
+// tag is wrong: *mic_bad); 0: not this key. plain gets the decrypted body.
 static int open_data(const uint8_t *h, int len, bool whole, const uint8_t key[16], uint8_t *plain, int *plain_len,
                      bool *mic_bad)
 {
     *mic_bad = false;
-    if (len < 24 + 8 + 8 || !(h[1] & 0x40) || !(h[24 + 3] & 0x20))
+    bool qos = (h[0] & 0x80) != 0;
+    int hl = 24 + (qos ? 2 : 0);
+    if (len < hl + 8 + 8 || !(h[1] & 0x40) || !(h[hl + 3] & 0x20))
         return 0;
-    const uint8_t *ccmp = h + 24;
+    const uint8_t *ccmp = h + hl;
     uint8_t nonce[13];
-    nonce[0] = 0;
+    nonce[0] = qos ? h[24] & 0x0F : 0;
     memcpy(nonce + 1, h + 10, 6);
     nonce[7] = ccmp[7];
     nonce[8] = ccmp[6];
@@ -1429,31 +1437,36 @@ static int open_data(const uint8_t *h, int len, bool whole, const uint8_t key[16
     nonce[10] = ccmp[4];
     nonce[11] = ccmp[1];
     nonce[12] = ccmp[0];
-    int n = len - 32 - (whole ? 8 : 0);
+    int n = len - hl - 8 - (whole ? 8 : 0);
     if (n < 8)
         return 0;
-    memcpy(plain, h + 32, n);
+    memcpy(plain, h + hl + 8, n);
     *plain_len = n;
     if (whole)
     {
-        uint8_t aad[22];
+        uint8_t aad[24];
         aad[0] = h[0] & 0x8F;
         aad[1] = (h[1] & 0xC7) | 0x40;
         memcpy(aad + 2, h + 4, 18);
         aad[20] = h[22] & 0x0F;
         aad[21] = 0;
-        if (Aes128CcmDecrypt(key, nonce, aad, 22, plain, n, h + 32 + n) == 0)
+        if (qos)
+        {
+            aad[22] = h[24] & 0x0F;
+            aad[23] = 0;
+        }
+        if (Aes128CcmDecrypt(key, nonce, aad, qos ? 24 : 22, plain, n, h + hl + 8 + n) == 0)
             return 2;
         *mic_bad = true;
-        memcpy(plain, h + 32, n);
+        memcpy(plain, h + hl + 8, n);
     }
     // Without the tag: CCM's counter mode alone, then the SNAP header
     uint8_t ctr[16] = { 1 };
     memcpy(ctr + 1, nonce, 13);
     ctr[15] = 1;
     Aes128Ctr(key, ctr, plain, n);
-    static const uint8_t snap[8] = { 0xAA, 0xAA, 0x03, 0, 0, 0, UDS_ETH_DATA >> 8, UDS_ETH_DATA & 0xFF };
-    return !memcmp(plain, snap, 8);
+    static const uint8_t snap[6] = { 0xAA, 0xAA, 0x03, 0, 0, 0 };
+    return !memcmp(plain, snap, 6);
 }
 
 // Download Play checksum: the Sion's way (variant 0) and others, to find a
@@ -1503,6 +1516,87 @@ typedef struct {
     uint8_t info[5][14 + 64];
     int info_len[5];
 } pcap_host;
+
+static uint8_t recipe_keys[64][KEY_RECIPES][16];
+
+// Prints one line per unicast data frame in a 3DS network (to or from its
+// host): direction, what it carries (Download Play packet type, length,
+// index; join messages), squeezing runs of the same kind into one line
+static void trace_unicast(pcap_host *hosts, int nhosts, uint8_t (*keys)[KEY_RECIPES][16], const uint8_t *h, int len,
+                          bool whole, double sec)
+{
+    static char last[160];
+    static int repeats, lines;
+    static double t0;
+    if (!h)
+    {
+        // flush
+        if (repeats)
+            printf("      ... %d more like that\n", repeats);
+        repeats = 0;
+        last[0] = 0;
+        return;
+    }
+    bool to_ds = h[1] & 1, from_ds = h[1] & 2;
+    const uint8_t *bss = to_ds ? h + 4 : from_ds ? h + 10 : h + 16;
+    int i = 0;
+    while (i < nhosts && memcmp(hosts[i].mac, bss, 6))
+        i++;
+    if (i == nhosts || !hosts[i].tagged)
+        return;
+    if (!t0)
+        t0 = sec;
+    static uint8_t plain[65536];
+    int n;
+    bool mic_bad;
+    char line[160];
+    const uint8_t *other = to_ds ? h + 10 : h + 4;
+    int r = open_data(h, len, whole, keys[i][0], plain, &n, &mic_bad);
+    const char *dir = to_ds ? "from" : "to";
+    if (!r)
+        snprintf(line, sizeof(line), "%s %02x:%02x:%02x: doesn't open (%d bytes)", dir, other[3], other[4], other[5],
+                 len);
+    else
+    {
+        uint16_t type = plain[6] << 8 | plain[7];
+        if (type == UDS_ETH_EAPOL)
+            snprintf(line, sizeof(line), "%s %02x:%02x:%02x: join message (%d bytes)%s", dir, other[3], other[4],
+                     other[5], n - 8, mic_bad ? ", tag WRONG" : "");
+        else if (type == UDS_ETH_DATA && n >= 8 + 14)
+        {
+            const uint8_t *sh = plain + 8;
+            const uint8_t *d = sh + 14;
+            int dl = n - 8 - 14;
+            if (dl >= 16)
+                snprintf(line, sizeof(line), "%s %02x:%02x:%02x: ch %d node %d->%d, Download Play type %d len %d index %d%s",
+                         dir, other[3], other[4], other[5], sh[7], sh[12] << 8 | sh[13], sh[10] << 8 | sh[11], d[0],
+                         d[4] << 8 | d[5], d[12], mic_bad ? ", tag WRONG" : "");
+            else
+                snprintf(line, sizeof(line), "%s %02x:%02x:%02x: ch %d node %d->%d, %d bytes%s%s", dir, other[3],
+                         other[4], other[5], sh[7], sh[12] << 8 | sh[13], sh[10] << 8 | sh[11], dl,
+                         sh[6] ? " (management)" : "", mic_bad ? ", tag WRONG" : "");
+        }
+        else
+            snprintf(line, sizeof(line), "%s %02x:%02x:%02x: ethertype %04x, %d bytes", dir, other[3], other[4],
+                     other[5], type, n - 8);
+    }
+    if (!strcmp(line, last))
+    {
+        repeats++;
+        return;
+    }
+    if (repeats)
+        printf("      ... %d more like that\n", repeats);
+    repeats = 0;
+    if (lines++ == 400)
+        printf("      (trace cut short)\n");
+    if (lines > 400)
+        return;
+    if (lines == 1)
+        printf("  unicast data:\n");
+    printf("    %7.3f s %s\n", sec - t0, line);
+    snprintf(last, sizeof(last), "%s", line);
+}
 
 // Reads a radiotap pcap (sionsniff's) and checks the node data of the
 // first beacon of each 3DS network in it with the beacon key: a 3DS drops a
@@ -1579,7 +1673,7 @@ static int check_beacons(const char *pcap, const char *keys_path)
     // Second pass: open the broadcast data
     if (k.have_uds_data)
     {
-        static uint8_t keys[64][KEY_RECIPES][16];
+        static uint8_t (*keys)[KEY_RECIPES][16] = recipe_keys;
         for (int i = 0; i < nhosts; i++)
             for (int v = 0; v < KEY_RECIPES; v++)
             {
@@ -1595,8 +1689,13 @@ static int check_beacons(const char *pcap, const char *keys_path)
         {
             const uint8_t *h = p.b + p.rt;
             int len = p.end - p.rt;
-            if (len < 24 || ((h[0] >> 2) & 3) != 2 || h[4] != 0xFF)
+            if (len < 24 || ((h[0] >> 2) & 3) != 2)
                 continue;
+            if (h[4] != 0xFF)
+            {
+                trace_unicast(hosts, nhosts, keys, h, len, p.whole, p.sec);
+                continue;
+            }
             int i = 0;
             while (i < nhosts && memcmp(hosts[i].mac, h + 10, 6))
                 i++;
@@ -1652,6 +1751,7 @@ static int check_beacons(const char *pcap, const char *keys_path)
             }
         }
     }
+    trace_unicast(hosts, nhosts, NULL, NULL, 0, false, 0);
     fclose(f);
     for (int i = 0; i < nhosts; i++)
     {

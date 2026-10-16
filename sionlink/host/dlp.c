@@ -47,7 +47,18 @@ typedef struct {
     uint32_t frag;    // next fragment in block to send
     uint32_t asked;   // how many times we asked about blocks
     uint64_t last;    // when we last sent it something
+    int logged_state; // last state logged, for DlpLog
+    int last_rx;      // last packet type logged from it
+    int rx_repeats;   // how many of those since
 } client;
+
+void (*DlpLog)(const char *fmt, ...);
+
+static const char *const state_names[] = { "none", "accepting it (auth sent)", "accepted", "asking if it needs the CIA",
+                                           "sending a block", "asking about the block", "confirming it has the CIA",
+                                           "telling it to get ready", "told it to start" };
+static const char *const packet_names[] = { "?", "title info", "auth", "start distribution", "fragment",
+                                            "finish distribution", "start game" };
 
 struct dlp_host {
     uds_host *uds;
@@ -373,6 +384,11 @@ void DlpNode(dlp_host *d, int node, bool joined)
         return;
     client *c = &d->cl[node];
     memset(c, 0, sizeof(*c));
+    c->logged_state = -1;
+    c->last_rx = -1;
+    if (DlpLog)
+        DlpLog("3DS node %d %s%s", node, joined ? "joined" : "left",
+               joined && d->distributing ? " after distribution started: not taken" : "");
     if (joined && !d->distributing)
     {
         c->state = CL_AUTH; // everyone is accepted
@@ -405,10 +421,35 @@ bool DlpDone(dlp_host *d)
 
 void DlpData(dlp_host *d, int node, int channel, const uint8_t *p, int len)
 {
-    if (node < 2 || node > UDS_MAX_NODES || channel != DLP_CLIENT_CHANNEL || len < HDR
-        || Get16(p + 4) != len)
+    if (node < 2 || node > UDS_MAX_NODES)
         return;
     client *c = &d->cl[node];
+    if (DlpLog)
+    {
+        int type = len >= 1 ? p[0] : -1;
+        if (channel != DLP_CLIENT_CHANNEL || len < HDR || Get16(p + 4) != len)
+        {
+            char hex[3 * 24 + 1] = "";
+            for (int i = 0; i < len && i < 24; i++)
+                sprintf(hex + i * 3, "%02x ", p[i]);
+            DlpLog("3DS node %d: ignored %d bytes on channel %d: %s", node, len, channel, hex);
+        }
+        else if (type != c->last_rx || c->rx_repeats >= 50)
+        {
+            char hex[3 * 32 + 1] = "";
+            for (int i = 0; i < len && i < 32; i++)
+                sprintf(hex + i * 3, "%02x ", p[i]);
+            DlpLog("3DS node %d sent %s (%d bytes, %d like the last since) while %s: %s", node,
+                   type < 7 ? packet_names[type] : "an unknown packet", len, c->rx_repeats,
+                   state_names[c->state], hex);
+            c->last_rx = type;
+            c->rx_repeats = 0;
+        }
+        else
+            c->rx_repeats++;
+    }
+    if (channel != DLP_CLIENT_CHANNEL || len < HDR || Get16(p + 4) != len)
+        return;
     switch (p[0])
     {
     case PK_AUTH:
@@ -484,6 +525,8 @@ void DlpTick(dlp_host *d, uint64_t now)
             all_have_it = false;
         if (c->state == CL_SENDING)
         {
+            if (DlpLog && c->frag == 0)
+                DlpLog("3DS node %d: sending block %u", n, c->block);
             if (c->last && now - c->last < 2)
                 continue;
             c->last = now;
@@ -497,6 +540,11 @@ void DlpTick(dlp_host *d, uint64_t now)
         if (c->last && now - c->last < REPEAT_MS)
             continue;
         c->last = now;
+        if (DlpLog && (int)c->state != c->logged_state)
+        {
+            DlpLog("3DS node %d: %s", n, state_names[c->state]);
+            c->logged_state = c->state;
+        }
         switch (c->state)
         {
         case CL_AUTH:
