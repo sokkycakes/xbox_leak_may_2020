@@ -169,6 +169,12 @@ static void InstallKey(radio3ds *r, const uint8_t *sta)
     uint32_t ifindex = r->ifindex;
     uint8_t idx = sta ? 0 : r->group_key_idx;
     uint32_t type = sta ? NL80211_KEYTYPE_PAIRWISE : NL80211_KEYTYPE_GROUP;
+    int dlen = GenlHeader(msg, r->nl80211, NL80211_CMD_DEL_KEY);
+    Attr(msg, &dlen, NL80211_ATTR_IFINDEX, &ifindex, 4);
+    if (sta)
+        Attr(msg, &dlen, NL80211_ATTR_MAC, sta, 6);
+    Attr(msg, &dlen, NL80211_ATTR_KEY_IDX, &idx, 1);
+    NlRequest(r, msg, dlen, NULL, 0);
     int len = GenlHeader(msg, r->nl80211, NL80211_CMD_NEW_KEY);
     Attr(msg, &len, NL80211_ATTR_IFINDEX, &ifindex, 4);
     if (sta)
@@ -288,7 +294,10 @@ static void Attach(radio3ds *r)
         r->ev = CtrlSocket(r, r->ev_path, "ev");
     if (r->cmd < 0 || r->ev < 0)
         return;
-    if (send(r->ev, "ATTACH", 6, 0) < 0)
+    struct timeval tv = { 1, 0 };
+    setsockopt(r->ev, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    char ok[16];
+    if (send(r->ev, "ATTACH", 6, 0) < 0 || recv(r->ev, ok, sizeof(ok), 0) < 2 || strncmp(ok, "OK", 2))
     {
         CloseCtrl(r);
         return;
@@ -429,7 +438,7 @@ void R3Tx(void *ctx, int kind, const uint8_t dst[6], const uint8_t *body, int le
     case UDS_DATA:
     {
         // [SNAP: AA AA 03 00 00 00, EtherType] payload -> Ethernet
-        if (len < 8 || len > 2000)
+        if (!r->enabled || len < 8 || len > 2000)
             return;
         uint8_t f[14 + 2000];
         memcpy(f, dst, 6);
@@ -438,8 +447,18 @@ void R3Tx(void *ctx, int kind, const uint8_t dst[6], const uint8_t *body, int le
         memcpy(f + 14, body + 8, len - 8);
         struct sockaddr_ll a = { .sll_family = AF_PACKET, .sll_ifindex = r->ifindex, .sll_halen = 6 };
         memcpy(a.sll_addr, dst, 6);
-        if (sendto(r->pkt, f, 14 + len - 8, 0, (struct sockaddr *)&a, sizeof(a)) < 0)
+        for (int tries = 0;; tries++)
+        {
+            if (sendto(r->pkt, f, 14 + len - 8, 0, (struct sockaddr *)&a, sizeof(a)) >= 0)
+                break;
+            if ((errno == ENOBUFS || errno == EAGAIN) && tries < 20)
+            {
+                usleep(1000);
+                continue;
+            }
             r->log("3DS radio: send to %s: %s", Mac(dst), strerror(errno));
+            break;
+        }
         break;
     }
     default:
@@ -505,6 +524,9 @@ radio3ds *R3Open(const char *ifname, const char *hostapd, const char *run_dir,
         R3Close(r);
         return NULL;
     }
+    int buf_sz = 1024 * 1024;
+    setsockopt(r->pkt, SOL_SOCKET, SO_SNDBUF, &buf_sz, sizeof(buf_sz));
+    setsockopt(r->pkt, SOL_SOCKET, SO_RCVBUF, &buf_sz, sizeof(buf_sz));
     if (!NlOpen(r))
     {
         log("3DS radio: nl80211 isn't available: %s", strerror(errno));
