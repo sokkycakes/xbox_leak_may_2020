@@ -365,7 +365,13 @@ static void next_batch(int id)
 static void send_batch(int id, bool resend)
 {
     player *p = &players[id];
+    // Every batch goes out twice, the copy a frame later: the Sion reaches
+    // the DS by broadcast, which the radio never retries, and the client
+    // waits on every batch in turn, so one lost frame would stall the link
+    // until a resend. The DS runs a batch once and answers the copy again,
+    // which doubles the answer too.
     link_send(id, p->batch, p->batch_len);
+    p->copy_due = true;
     p->waiting = true;
     p->sent_at = now_ms();
     if (resend)
@@ -648,6 +654,11 @@ int main(int argc, char **argv)
                 demo_frame(p, now);
             if (p->waiting)
             {
+                if (p->copy_due && now - p->sent_at >= 10)
+                {
+                    p->copy_due = false;
+                    link_send(id, p->batch, p->batch_len);
+                }
                 // A real DS answers more slowly than melonDS (broadcasts
                 // wait for the radio), so resend only well after the usual
                 // round trip
