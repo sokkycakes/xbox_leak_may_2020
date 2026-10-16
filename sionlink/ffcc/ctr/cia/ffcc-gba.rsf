@@ -18,7 +18,7 @@ Option:
   UseOnSD                 : true
   FreeProductCode         : true
   MediaFootPadding        : false
-  EnableCrypt             : false
+  EnableCrypt             : true
   EnableCompress          : true
 
 AccessControlInfo:

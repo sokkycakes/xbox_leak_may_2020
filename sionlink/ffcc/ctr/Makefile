@@ -67,13 +67,17 @@ $(NAME).3dsx: $(NAME).elf $(BUILD)/$(NAME).smdh
 	$(TOOLS)/3dsxtool $< $@ --smdh=$(BUILD)/$(NAME).smdh
 
 # The Download Play child (cia/ffcc-gba.rsf). makerom comes from
-# github.com/3DSGuy/Project_CTR; it isn't part of devkitPro.
+# github.com/3DSGuy/Project_CTR (built at d52c2b0e); it isn't part of
+# devkitPro. Apply cia/makerom-fixedkey.patch first: it adds -ncchfixedkey,
+# which encrypts the NCCH with the fixed zero key. A NoCrypto child crashes
+# the 3DS loader under Luma (FS error E0C046F8 reading its ExeFS), and stock
+# makerom wants console keys for any other choice.
 MAKEROM	?= makerom
 
 cia: $(NAME).cia
 
 $(NAME).cia: $(NAME).elf $(BUILD)/$(NAME).smdh cia/$(NAME).rsf
-	$(MAKEROM) -f cia -o $@ -elf $< -rsf cia/$(NAME).rsf -icon $(BUILD)/$(NAME).smdh -exefslogo -target t
+	$(MAKEROM) -f cia -o $@ -elf $< -rsf cia/$(NAME).rsf -icon $(BUILD)/$(NAME).smdh -exefslogo -target t -ncchfixedkey
 
 clean:
 	rm -rf $(BUILD) $(NAME).elf $(NAME).3dsx $(NAME).cia
