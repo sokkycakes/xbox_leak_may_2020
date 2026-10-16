@@ -465,6 +465,14 @@ start_sniff() {
     # Some drivers only take a channel while the interface is down, others
     # only while it's up
     ip link set "$SNIFF_IF" down 2>/dev/null
+    # It has come up as a managed interface on the connector, which hears
+    # nothing but its own traffic; make sure it's a monitor
+    if ! iw dev "$SNIFF_IF" info 2>/dev/null | grep -q "type monitor"; then
+        iw dev "$SNIFF_IF" set type monitor 2>/dev/null
+        iw dev "$SNIFF_IF" set monitor control otherbss 2>/dev/null
+    fi
+    iw dev "$SNIFF_IF" info 2>/dev/null | grep -q "type monitor" ||
+        { log "the connector won't go into monitor mode ($(iw dev "$SNIFF_IF" info 2>/dev/null | sed -n 's/^.*type //p'))"; iw dev "$SNIFF_IF" del 2>/dev/null; return 0; }
     tuned=0
     iw dev "$SNIFF_IF" set channel "$1" 2>/dev/null && tuned=1
     ip link set "$SNIFF_IF" up || { log "couldn't bring up $SNIFF_IF"; iw dev "$SNIFF_IF" del 2>/dev/null; return 0; }
@@ -528,7 +536,16 @@ do_record_() {
             sleep 3
         done
         sta=$(iw dev 2>/dev/null | awk '$1 == "Interface" { i = $2 } $1 == "type" && $2 == "managed" { print i; exit }')
-        log "last scan on $sta saw $(iw dev "$sta" scan dump 2>/dev/null | grep -c '^BSS ') networks"
+        log "last scan on $sta saw $(iw dev "$sta" scan dump 2>/dev/null | grep -c '^BSS ') networks:"
+        iw dev "$sta" scan dump 2>/dev/null | awk '
+            function out() { if (bss != "") printf "    %s ch %s%s%s\n", bss, ch, hidden ? " hidden" : "", ouis }
+            /^BSS / { out(); bss = $2; sub(/\(.*/, "", bss); ch = "?"; hidden = 0; ouis = "" }
+            /DS Parameter set: channel/ { ch = $NF }
+            /^[[:space:]]*SSID: *$/ { hidden = 1 }
+            /SSID: \\x00/ { hidden = 1 }
+            /Vendor specific: OUI/ { o = $4; sub(/,$/, "", o); ouis = ouis " " o }
+            END { out() }'
+
         if [ -z "$found" ]; then
             log "no Nintendo host showed up in the scans; recording channel 1 anyway"
             want=1
