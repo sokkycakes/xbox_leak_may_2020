@@ -32,7 +32,7 @@
 
 #define RESEND_MS   60
 #define READS       8   // words read from each GBA per frame
-#define WRITES      24  // words written to each GBA per frame (its queue holds 64)
+#define WRITES      48  // words written to each GBA per batch (its queue holds 64)
 #define ACK_MS      3000
 #define TRIES       5
 #define IDLE_WORD   0x43434646u // the multiboot image's idle word, "FFCC"
@@ -371,7 +371,10 @@ static void send_batch(int id, bool resend)
     if (resend)
         p->resends++;
     else
+    {
         p->batches++;
+        p->first_sent_at = p->sent_at;
+    }
 }
 
 static void word_from_gba(int id, uint32_t w)
@@ -400,6 +403,10 @@ static void reply(int id, const uint8_t *b, int len)
     if (!p->waiting || j.seq != p->seq || len < (int)(sizeof(ff_joy) + j.count * sizeof(ff_result)))
         return;
     p->waiting = false;
+    uint32_t rtt = now_ms() - p->first_sent_at;
+    p->srtt = p->srtt ? (7 * p->srtt + rtt) / 8 : rtt;
+    if (rtt > p->rtt_max)
+        p->rtt_max = rtt;
     const ff_result *r = (const ff_result *)(b + sizeof(ff_joy));
     for (int i = 0; i < j.count; i++)
     {
@@ -637,7 +644,12 @@ int main(int argc, char **argv)
                 demo_frame(p, now);
             if (p->waiting)
             {
-                if (now - p->sent_at > RESEND_MS)
+                // A real DS answers more slowly than melonDS (broadcasts
+                // wait for the radio), so resend only well after the usual
+                // round trip
+                uint32_t wait = 2 * p->srtt + 20;
+                wait = wait < RESEND_MS ? RESEND_MS : wait > 600 ? 600 : wait;
+                if (now - p->sent_at > wait)
                     send_batch(id, true);
                 continue;
             }
@@ -649,9 +661,12 @@ int main(int argc, char **argv)
             last_log = now;
             for (int id = 1; id <= MAX_PLAYERS; id++)
                 if (players[id].here && players[id].step == CONNECTED)
-                    logf_("player %d: %u batches, %u resent, %u words in, %u out", id,
-                          players[id].batches, players[id].resends, players[id].words,
-                          players[id].written);
+                {
+                    logf_("player %d: %u batches, %u resent, %u words in, %u out, round trip %u ms (worst %u)",
+                          id, players[id].batches, players[id].resends, players[id].words,
+                          players[id].written, players[id].srtt, players[id].rtt_max);
+                    players[id].rtt_max = 0;
+                }
         }
 
         next.tv_nsec += 16666667;
