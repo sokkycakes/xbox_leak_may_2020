@@ -50,6 +50,18 @@ if ! grep -q 'ifc" = sionmon' /usr/libexec/sion-netd; then
     start-stop-daemon -S -q -b -m -p /var/run/sion-netd.pid -x /usr/libexec/sion-netd
     echo "updated sion-netd for the beacon interface"
 fi
+# Teach sion-netd to leave the 3DS network's interface alone too, then
+# restart only its loop: wpa_supplicant and the home Wi-Fi link keep running.
+if [ -f /usr/libexec/sion-netd ] && ! grep -q 'ifc" = sion3ds' /usr/libexec/sion-netd; then
+    awk '{ print } index($0, "-e \"$p/device\" ] || continue") { print "\t\t[ \"$ifc\" = sion3ds ] && continue  # Sion Link 3DS network" }' \
+        /usr/libexec/sion-netd > /tmp/sion-netd.new
+    cat /tmp/sion-netd.new > /usr/libexec/sion-netd && rm -f /tmp/sion-netd.new
+    grep -q 'ifc" = sion3ds' /usr/libexec/sion-netd || { echo "couldn't update sion-netd; stopping"; exit 1; }
+    sion persist /usr/libexec/sion-netd >/dev/null
+    start-stop-daemon -K -q -p /var/run/sion-netd.pid
+    start-stop-daemon -S -q -b -m -p /var/run/sion-netd.pid -x /usr/libexec/sion-netd
+    echo "updated sion-netd for the 3DS network"
+fi
 cd / && rm -rf /tmp/sionlink
 echo
 sion-dslink check

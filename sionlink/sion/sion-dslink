@@ -44,13 +44,14 @@ PHY_IF=$SIONLINK_WIFI
 if [ -z "$PHY_IF" ]; then
     for p in /sys/class/net/*; do
         i=${p##*/}
-        [ "$i" = sionds ] && continue
+        [ "$i" = sionds ] || [ "$i" = sion3ds ] && continue
         # not the Nintendo Wi-Fi USB Connector, which is only ever the DS radio
         [ "$(basename "$(readlink "$p/device/driver" 2>/dev/null)")" = rt2500usb ] && continue
         [ -e "$p/phy80211" ] && { PHY_IF=$i; break; }
     done
 fi
 AP_IF=sionds
+AP3_IF=sion3ds
 MON_IF=sionmon
 
 # udev gives a new USB Wi-Fi interface its own name (wlp0s20f0u1u2); the
@@ -150,6 +151,7 @@ ds_radio_phy() {
 }
 
 do_start() {
+    sniff_free=0
     force=0
     mode3ds=0
     dlp_cia=
@@ -173,30 +175,39 @@ do_start() {
         return 1
     fi
 
-    # Each mode the DS radio is driven in: the connector on its own channel
-    # with direct sends, or the Intel card beside the home Wi-Fi, by broadcast
+    # The DS network runs on the Nintendo Wi-Fi USB Connector when it's
+    # plugged in (its own channel, direct sends), else on the Intel card
+    # beside the home Wi-Fi (by broadcast). The 3DS network always runs on
+    # the Intel card. With --3ds and the connector, both run at once: DSes
+    # on the connector, 3DSes on the Intel card, one sionlinkd for both.
     unicast=
-    phy=
-    # The 3DS network always runs on the Intel card
-    [ $mode3ds -eq 0 ] && phy=$(ds_radio_phy)
-    if [ -n "$phy" ]; then
+    ds=1
+    ds_ch=
+    ds_phy=$(ds_radio_phy)
+    if [ $mode3ds -eq 1 ]; then
+        [ -n "$ds_phy" ] && [ "$SIONLINK_DS" != 0 ] || ds=0
+    fi
+    [ $ds -eq 1 ] || ds_phy=
+    ch=
+    if [ -n "$ds_phy" ]; then
         f=$(home_freq)
         home_ch=0
         [ -n "$f" ] && home_ch=$(freq_to_ch "$f")
         # Clear of the home Wi-Fi: channels 1, 6 and 11 don't overlap
-        if [ -n "$want_ch" ]; then ch=$want_ch
-        elif [ "$home_ch" -ge 1 ] && [ "$home_ch" -le 3 ]; then ch=11
-        else ch=1; fi
+        if [ -n "$want_ch" ] && [ $mode3ds -eq 0 ]; then ds_ch=$want_ch
+        elif [ "$home_ch" -ge 1 ] && [ "$home_ch" -le 3 ]; then ds_ch=11
+        else ds_ch=1; fi
         # The connector does nothing else: drop the interface it came up
         # with (sion-netd would try to join the home Wi-Fi on it)
-        for i in $(iw dev 2>/dev/null | awk -v p="phy#${phy#phy}" '$0 ~ "^" p { on = 1; next } /^phy#/ { on = 0 } on && $1 == "Interface" { print $2 }'); do
+        for i in $(iw dev 2>/dev/null | awk -v p="phy#${ds_phy#phy}" '$0 ~ "^" p { on = 1; next } /^phy#/ { on = 0 } on && $1 == "Interface" { print $2 }'); do
             [ "$i" = "$AP_IF" ] && continue
             [ -f "/var/run/sion/wpa.$i.pid" ] && kill "$(cat "/var/run/sion/wpa.$i.pid")" 2>/dev/null
             iw dev "$i" del 2>/dev/null
         done
         unicast=--unicast
-        log "DS radio: Nintendo Wi-Fi USB Connector ($phy), direct sends"
-    else
+        log "DS radio: Nintendo Wi-Fi USB Connector ($ds_phy), direct sends"
+    fi
+    if [ $mode3ds -eq 1 ] || [ -z "$ds_phy" ]; then
         phy=$(phy_of "$PHY_IF")
         [ -n "$phy" ] || { log "no Wi-Fi interface $PHY_IF"; return 1; }
         load_ratefix
@@ -221,6 +232,10 @@ do_start() {
             return 1
         fi
     fi
+    if [ $mode3ds -eq 0 ] && [ -n "$ds_phy" ]; then
+        phy=$ds_phy
+        ch=$ds_ch
+    fi
 
     if [ $mode3ds -eq 1 ]; then
         KEYS=${SIONLINK_KEYS:-/data/sionlink/3ds-keys.txt}
@@ -228,68 +243,77 @@ do_start() {
         if [ -z "$dlp_cia" ] && [ $no_dlp -eq 0 ] && [ -f "$DIR/ffcc-gba.cia" ]; then
             dlp_cia="$DIR/ffcc-gba.cia"
         fi
+        if ! grep -q 'ifc" = sion3ds' /usr/libexec/sion-netd 2>/dev/null && [ -f /usr/libexec/sion-netd ]; then
+            log "sion-netd doesn't know about the 3DS network yet; run the installer first"
+            return 1
+        fi
     fi
 
     mkdir -p "$RUN"
-    # Always start from a fresh interface: one left behind by a hostapd that
-    # died can still be beaconing, and a new hostapd then fails to start.
-    iw dev "$AP_IF" del 2>/dev/null
-    iw phy "$phy" interface add "$AP_IF" type __ap || { log "couldn't add $AP_IF"; return 1; }
-    # udev gives a new USB interface its own name (wlp0s20f0u1u2); the
-    # Intel card escapes that only because its name is taken. Wait for the
-    # rename, then take the name back.
-    if [ -n "$unicast" ]; then
-        take_name "$phy" AP "$AP_IF" || return 1
-    fi
-    # A different, locally administered MAC from the home interface
-    if [ -z "$unicast" ]; then
-        mac=$(cat /sys/class/net/$PHY_IF/address)
-        ip link set "$AP_IF" address "02:${mac#*:}" 2>/dev/null
-    fi
-
     rm -f "$RUN/in" "$RUN/hostapd.pid"; mkfifo "$RUN/in"
+    args=
     if [ $mode3ds -eq 1 ]; then
-        # In 3DS UDS mode, sionlinkd spawns and manages hostapd itself
-        (
-            exec 3<>"$RUN/in"
-            exec "$DIR/bin/sionlinkd" --if3ds "$AP_IF" --3ds-channel "$ch" \
-                --hostapd "$DIR/bin/hostapd" --3ds-keys "$KEYS" \
-                ${dlp_cia:+--dlp "$dlp_cia"} \
-                --name "${SIONLINK_NAME:-$(hostname)}" -v <&3 >>"$RUN/sionlinkd.log" 2>&1
-        ) &
-        echo $! > "$RUN/sionlinkd.pid"
-        sleep 1
-        kill -0 "$(cat "$RUN/sionlinkd.pid")" 2>/dev/null || {
-            log "sionlinkd (3DS) failed:"; tail -12 "$RUN/sionlinkd.log"; iw dev "$AP_IF" del 2>/dev/null; return 1; }
-        log "3DS UDS network up on channel $ch ($AP_IF)${dlp_cia:+ with Download Play ($dlp_cia)}; logs in $RUN"
-    else
+        # Always start from a fresh interface: one left behind by a hostapd
+        # that died can still be beaconing, and a new hostapd then fails.
+        iw dev "$AP3_IF" del 2>/dev/null
+        iw phy "$phy" interface add "$AP3_IF" type __ap || { log "couldn't add $AP3_IF"; return 1; }
+        # A different, locally administered MAC from the home interface
+        mac=$(cat /sys/class/net/$PHY_IF/address)
+        ip link set "$AP3_IF" address "02:${mac#*:}" 2>/dev/null
+        # sionlinkd spawns and manages the 3DS network's hostapd itself
+        args="--if3ds $AP3_IF --3ds-channel $ch --hostapd $DIR/bin/hostapd --3ds-keys $KEYS"
+    fi
+    if [ $ds -eq 1 ]; then
+        dphy=${ds_phy:-$phy}
+        dch=${ds_ch:-$ch}
+        iw dev "$AP_IF" del 2>/dev/null
+        iw phy "$dphy" interface add "$AP_IF" type __ap || { log "couldn't add $AP_IF"; return 1; }
+        # udev gives a new USB interface its own name (wlp0s20f0u1u2); the
+        # Intel card escapes that only because its name is taken. Wait for
+        # the rename, then take the name back.
+        if [ -n "$unicast" ]; then
+            take_name "$dphy" AP "$AP_IF" || return 1
+        else
+            # A different, locally administered MAC from the home interface
+            mac=$(cat /sys/class/net/$PHY_IF/address)
+            ip link set "$AP_IF" address "02:${mac#*:}" 2>/dev/null
+        fi
         ve=$("$DIR/bin/sionlinkd" --vendor-element)
-        sed -e "s/@IF@/$AP_IF/" -e "s/@CH@/$ch/" -e "s/@VE@/$ve/" \
+        sed -e "s/@IF@/$AP_IF/" -e "s/@CH@/$dch/" -e "s/@VE@/$ve/" \
             "$DIR/hostapd-sionlink.conf.in" > "$RUN/hostapd.conf"
         # hostapd prints its startup errors before going to the background
         "$DIR/bin/hostapd" -B -P "$RUN/hostapd.pid" "$RUN/hostapd.conf" > "$RUN/hostapd.log" 2>&1 || {
-            log "hostapd failed:"; tail -8 "$RUN/hostapd.log"; iw dev "$AP_IF" del; return 1; }
+            log "hostapd failed:"; tail -8 "$RUN/hostapd.log"; iw dev "$AP_IF" del; iw dev "$AP3_IF" del 2>/dev/null; return 1; }
 
         # The connector answers probes but never beacons on its own, so
         # sionlinkd sends the beacons through a monitor interface beside the AP.
         beacon=
         if [ -n "$unicast" ]; then
             iw dev "$MON_IF" del 2>/dev/null
-            if iw phy "$phy" interface add "$MON_IF" type monitor && take_name "$phy" monitor "$MON_IF" &&
+            if iw phy "$dphy" interface add "$MON_IF" type monitor && take_name "$dphy" monitor "$MON_IF" &&
                ip link set "$MON_IF" up; then
-                beacon="--beacon-if $MON_IF --channel $ch"
+                beacon="--beacon-if $MON_IF --channel $dch"
             else
                 log "couldn't add the beacon interface; the DS may not find the Sion"
             fi
         fi
-        (
-            exec 3<>"$RUN/in"
-            exec "$DIR/bin/sionlinkd" --if "$AP_IF" $unicast $beacon --name "${SIONLINK_NAME:-$(hostname)}" -v <&3 >>"$RUN/sionlinkd.log" 2>&1
-        ) &
-        echo $! > "$RUN/sionlinkd.pid"
-        sleep 1
-        log "DS network up on channel $ch ($AP_IF); logs in $RUN"
+        args="--if $AP_IF $unicast $beacon $args"
     fi
+    (
+        exec 3<>"$RUN/in"
+        exec "$DIR/bin/sionlinkd" $args ${dlp_cia:+--dlp "$dlp_cia"} \
+            --name "${SIONLINK_NAME:-$(hostname)}" -v <&3 >>"$RUN/sionlinkd.log" 2>&1
+    ) &
+    echo $! > "$RUN/sionlinkd.pid"
+    sleep 1
+    kill -0 "$(cat "$RUN/sionlinkd.pid")" 2>/dev/null || {
+        log "sionlinkd failed:"; tail -12 "$RUN/sionlinkd.log"; do_stop >/dev/null; return 1; }
+    [ $ds -eq 1 ] && log "DS network up on channel $dch ($AP_IF); logs in $RUN"
+    [ $mode3ds -eq 1 ] && log "3DS network up on channel $ch ($AP3_IF)${dlp_cia:+ with Download Play ($dlp_cia)}; logs in $RUN"
+    # The connector records the air only when it isn't the DS radio
+    sniff_free=1
+    [ -n "$ds_phy" ] && sniff_free=0
+    return 0
 }
 
 do_stop() {
@@ -307,6 +331,7 @@ do_stop() {
     done
     sleep 1
     iw dev "$AP_IF" del 2>/dev/null
+    iw dev "$AP3_IF" del 2>/dev/null
     iw dev "$MON_IF" del 2>/dev/null
     log "stopped"
 }
@@ -315,8 +340,10 @@ do_status() {
     if [ -f "$RUN/sionlinkd.pid" ] && kill -0 "$(cat "$RUN/sionlinkd.pid")" 2>/dev/null; then
         log "running"
         [ -d /sys/module/iwl_ratefix ] && log "rate fix: $(cat /sys/module/iwl_ratefix/parameters/fixed) frames corrected"
-        iw dev "$AP_IF" info 2>/dev/null | grep -E "channel|addr" | sed 's/^/    /'
-        iw dev "$AP_IF" station dump 2>/dev/null | grep -E "^Station|tx bitrate|rx bitrate" | sed 's/^/    /'
+        for i in "$AP_IF" "$AP3_IF"; do
+            iw dev "$i" info 2>/dev/null | grep -E "Interface|channel|addr" | sed 's/^/    /'
+            iw dev "$i" station dump 2>/dev/null | grep -E "^Station|tx bitrate|rx bitrate" | sed 's/^/    /'
+        done
         tail -5 "$RUN/sionlinkd.log" 2>/dev/null
     else
         log "not running"
@@ -607,7 +634,7 @@ do_ffcc() {
     if [ -n "$start_args" ]; then
         do_stop
         do_start "$start_args" || return 1
-        start_sniff "$ch"
+        [ $sniff_free -eq 1 ] && start_sniff "$ch"
     else
         [ -f "$RUN/sionlinkd.pid" ] && kill -0 "$(cat "$RUN/sionlinkd.pid")" 2>/dev/null ||
             do_start || return 1
@@ -639,8 +666,10 @@ do_diag() {
     echo "== sion-dslink diag, $(date)"
     echo "== interfaces"; iw dev 2>&1
     echo "== home Wi-Fi ($PHY_IF)"; iw dev "$PHY_IF" link 2>&1
-    echo "== $AP_IF"; iw dev "$AP_IF" info 2>&1; ip -br link show "$AP_IF" 2>&1
-    iw dev "$AP_IF" station dump 2>&1
+    for i in "$AP_IF" "$AP3_IF"; do
+        echo "== $i"; iw dev "$i" info 2>&1; ip -br link show "$i" 2>&1
+        iw dev "$i" station dump 2>&1
+    done
     echo "== processes"
     for d in /proc/[0-9]*; do
         case "$(cat "$d/comm" 2>/dev/null)" in
