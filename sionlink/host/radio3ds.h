@@ -43,7 +43,7 @@ void R3Tx(void *ctx, int kind, const uint8_t dst[6], const uint8_t *body, int le
 
 // File descriptors to poll (-1 where there is none yet), and the work
 // when one is ready (or every few milliseconds)
-int R3Fds(radio3ds *r, int fds[2]);
+int R3Fds(radio3ds *r, int fds[3]);
 void R3Poll(radio3ds *r);
 
 #endif

@@ -36,6 +36,9 @@ struct radio3ds {
     uint8_t mac[6];
     int pkt;            // packet socket
     int nl, nl80211;    // generic netlink socket, nl80211's family ID
+    int nl_mlme;        // nl80211's "mlme" events (new stations), or -1
+    uint32_t mlme_group;
+    uint8_t keyed[16][6]; // stations given the key already (on NEW_STATION)
     pid_t hostapd_pid;
     int ev, cmd;        // hostapd control sockets: events (attached), commands
     char ev_path[256], cmd_path[256];
@@ -149,20 +152,63 @@ static bool NlOpen(radio3ds *r)
             break;
         if (a->nla_type == CTRL_ATTR_FAMILY_ID)
             r->nl80211 = *(uint16_t *)((uint8_t *)a + NLA_HDRLEN);
+        if ((a->nla_type & NLA_TYPE_MASK) == CTRL_ATTR_MCAST_GROUPS)
+        {
+            // [group [name] [id]]...
+            int g = at + NLA_HDRLEN;
+            while (g + NLA_HDRLEN <= at + a->nla_len)
+            {
+                struct nlattr *ga = (struct nlattr *)(reply + g);
+                if (ga->nla_len < NLA_HDRLEN)
+                    break;
+                const char *name = NULL;
+                uint32_t id = 0;
+                for (int f = g + NLA_HDRLEN; f + NLA_HDRLEN <= g + ga->nla_len;)
+                {
+                    struct nlattr *fa = (struct nlattr *)(reply + f);
+                    if (fa->nla_len < NLA_HDRLEN)
+                        break;
+                    if (fa->nla_type == CTRL_ATTR_MCAST_GRP_NAME)
+                        name = (const char *)fa + NLA_HDRLEN;
+                    if (fa->nla_type == CTRL_ATTR_MCAST_GRP_ID)
+                        id = *(uint32_t *)((uint8_t *)fa + NLA_HDRLEN);
+                    f += NLA_ALIGN(fa->nla_len);
+                }
+                if (name && !strcmp(name, "mlme"))
+                    r->mlme_group = id;
+                g += NLA_ALIGN(ga->nla_len);
+            }
+        }
         at += NLA_ALIGN(a->nla_len);
+    }
+    if (r->mlme_group)
+    {
+        // Station events. A 3DS's first frame (its join request) comes a
+        // few ms after association, encrypted: the key must be in by then,
+        // and hostapd's AP-STA-CONNECTED often comes too late, so the 3DS
+        // waits ~100 ms to send it again and sometimes gives up
+        r->nl_mlme = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC | SOCK_NONBLOCK, NETLINK_GENERIC);
+        struct sockaddr_nl sa = { .nl_family = AF_NETLINK };
+        if (r->nl_mlme >= 0 && (bind(r->nl_mlme, (struct sockaddr *)&sa, sizeof(sa)) < 0
+                                || setsockopt(r->nl_mlme, SOL_NETLINK, NETLINK_ADD_MEMBERSHIP,
+                                              &r->mlme_group, sizeof(r->mlme_group)) < 0))
+        {
+            close(r->nl_mlme);
+            r->nl_mlme = -1;
+        }
     }
     return r->nl80211 != 0;
 }
 
 // Installs the network's CCMP key: for one station (pairwise, index 0), or
 // for broadcasts (sta NULL: group, made the default multicast key)
-static void InstallKey(radio3ds *r, const uint8_t *sta)
+static bool InstallKey(radio3ds *r, const uint8_t *sta)
 {
     uint8_t key[16];
     if (!r->u || !UdsCcmpKey(r->u, key))
     {
         r->log("3DS radio: no CCMP key (uds_data_key missing from the keys file)");
-        return;
+        return false;
     }
     uint8_t msg[256];
     uint32_t cipher = CCMP_CIPHER;
@@ -190,10 +236,10 @@ static void InstallKey(radio3ds *r, const uint8_t *sta)
     {
         r->log("3DS radio: installing the %s key%s%s: %s", sta ? "pairwise" : "group", sta ? " for " : "",
                sta ? Mac(sta) : "", strerror(-err));
-        return;
+        return false;
     }
     if (sta)
-        return;
+        return true;
     len = GenlHeader(msg, r->nl80211, NL80211_CMD_SET_KEY);
     Attr(msg, &len, NL80211_ATTR_IFINDEX, &ifindex, 4);
     nest = NestStart(msg, &len, NL80211_ATTR_KEY);
@@ -206,6 +252,7 @@ static void InstallKey(radio3ds *r, const uint8_t *sta)
     err = NlRequest(r, msg, len, NULL, 0);
     if (err < 0)
         r->log("3DS radio: making key %d the broadcast key: %s", idx, strerror(-err));
+    return err >= 0;
 }
 
 // mac80211 drops an access point's broadcasts while no station is
@@ -428,6 +475,71 @@ static bool ParseMac(const char *s, uint8_t m[6])
     return true;
 }
 
+// Whether sta got the key on NEW_STATION (and forgets it if forget)
+static bool Keyed(radio3ds *r, const uint8_t *sta, bool forget)
+{
+    for (int i = 0; i < 16; i++)
+        if (!memcmp(r->keyed[i], sta, 6))
+        {
+            if (forget)
+                memset(r->keyed[i], 0, 6);
+            return true;
+        }
+    return false;
+}
+
+// nl80211 station events: a new station on our interface gets the key at
+// once (reinstalling it later would restart its packet numbers, which a
+// 3DS would take for replays)
+static void MlmeEvents(radio3ds *r)
+{
+    uint8_t buf[8192];
+    int n;
+    while (r->nl_mlme >= 0 && (n = recv(r->nl_mlme, buf, sizeof(buf), MSG_DONTWAIT)) > 0)
+        for (struct nlmsghdr *m = (struct nlmsghdr *)buf; NLMSG_OK(m, (unsigned)n); m = NLMSG_NEXT(m, n))
+        {
+            if (m->nlmsg_type != r->nl80211)
+                continue;
+            struct genlmsghdr *g = NLMSG_DATA(m);
+            if (g->cmd != NL80211_CMD_NEW_STATION && g->cmd != NL80211_CMD_DEL_STATION)
+                continue;
+            uint32_t ifindex = 0;
+            const uint8_t *mac = NULL;
+            int at = NLMSG_HDRLEN + GENL_HDRLEN;
+            while (at + NLA_HDRLEN <= (int)m->nlmsg_len)
+            {
+                struct nlattr *a = (struct nlattr *)((uint8_t *)m + at);
+                if (a->nla_len < NLA_HDRLEN)
+                    break;
+                if (a->nla_type == NL80211_ATTR_IFINDEX)
+                    ifindex = *(uint32_t *)((uint8_t *)a + NLA_HDRLEN);
+                if (a->nla_type == NL80211_ATTR_MAC)
+                    mac = (uint8_t *)a + NLA_HDRLEN;
+                at += NLA_ALIGN(a->nla_len);
+            }
+            if (ifindex != (uint32_t)r->ifindex || !mac || !r->enabled)
+                continue;
+            if (g->cmd == NL80211_CMD_DEL_STATION)
+            {
+                Keyed(r, mac, true);
+                continue;
+            }
+            if (Keyed(r, mac, false))
+                continue;
+            static const uint8_t none[6];
+            for (int i = 0; i < 16; i++)
+                if (!memcmp(r->keyed[i], none, 6))
+                {
+                    if (InstallKey(r, mac))
+                    {
+                        memcpy(r->keyed[i], mac, 6);
+                        r->log("3DS radio: %s has the key as it joins", Mac(mac));
+                    }
+                    break;
+                }
+        }
+}
+
 static void Event(radio3ds *r, const char *e)
 {
     if (*e == '<') // the level
@@ -449,12 +561,14 @@ static void Event(radio3ds *r, const char *e)
         r->enabled = false;
     else if (!strncmp(e, "AP-STA-CONNECTED ", 17) && ParseMac(e + 17, m))
     {
-        InstallKey(r, m);
+        if (!Keyed(r, m, false))
+            InstallKey(r, m);
         if (r->u)
             UdsAssociated(r->u, m);
     }
     else if (!strncmp(e, "AP-STA-DISCONNECTED ", 20) && ParseMac(e + 20, m))
     {
+        Keyed(r, m, true);
         if (r->u)
             UdsLeft(r->u, m);
     }
@@ -540,7 +654,7 @@ radio3ds *R3Open(const char *ifname, const char *hostapd, const char *run_dir,
     r->channel = channel;
     r->group_key_idx = group_key_idx & 3;
     r->log = log;
-    r->ev = r->cmd = r->nl = -1;
+    r->ev = r->cmd = r->nl = r->nl_mlme = -1;
     mkdir(run_dir, 0755);
 
     r->pkt = socket(AF_PACKET, SOCK_RAW | SOCK_CLOEXEC, htons(ETH_P_ALL));
@@ -585,6 +699,8 @@ void R3Close(radio3ds *r)
         close(r->pkt);
     if (r->nl >= 0)
         close(r->nl);
+    if (r->nl_mlme >= 0)
+        close(r->nl_mlme);
     free(r);
 }
 
@@ -593,11 +709,12 @@ const uint8_t *R3Mac(radio3ds *r)
     return r->mac;
 }
 
-int R3Fds(radio3ds *r, int fds[2])
+int R3Fds(radio3ds *r, int fds[3])
 {
     fds[0] = r->pkt;
     fds[1] = r->ev;
-    return 2;
+    fds[2] = r->nl_mlme;
+    return 3;
 }
 
 void R3Poll(radio3ds *r)
@@ -638,5 +755,6 @@ void R3Poll(radio3ds *r)
             Event(r, e);
         }
     }
+    MlmeEvents(r);
     Receive(r);
 }

@@ -1924,19 +1924,21 @@ int main(int argc, char **argv)
     uint64_t next_beacon = 0;
     for (;;)
     {
-        struct pollfd pfd[7] = { { fd, POLLIN, 0 }, { 0, POLLIN, 0 },
+        struct pollfd pfd[8] = { { fd, POLLIN, 0 }, { 0, POLLIN, 0 },
                                  { game.listen_fd, POLLIN, 0 }, { game.fd, POLLIN, 0 },
-                                 { air3_sock, POLLIN, 0 }, { -1, POLLIN, 0 }, { -1, POLLIN, 0 } };
+                                 { air3_sock, POLLIN, 0 }, { -1, POLLIN, 0 }, { -1, POLLIN, 0 },
+                                 { -1, POLLIN, 0 } };
         if (!stdin_open)
             pfd[1].fd = -1;
         if (radio3)
         {
-            int r3[2];
+            int r3[3];
             R3Fds(radio3, r3);
             pfd[5].fd = r3[0];
             pfd[6].fd = r3[1];
+            pfd[7].fd = r3[2];
         }
-        poll(pfd, 7, xfer.active || dlp3 ? 2 : 20);
+        poll(pfd, 8, xfer.active || dlp3 ? 2 : 20);
 
         if (melon_port)
         {

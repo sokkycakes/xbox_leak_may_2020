@@ -12,7 +12,7 @@
 #define BLOCK_FRAGS 182 // fragments per block
 #define FRAGS_PER_TICK 1 // fragments sent per FRAG_GAP_MS (8 per 2 ms may overrun a 3DS)
 #define FRAG_GAP_MS 4
-#define BROADCAST_MS 500
+#define BROADCAST_MS 390 // a real host sends its 5 title info packets about this often (769 in 60 s)
 #define REPEAT_MS 100  // how often an unanswered request is repeated
 #define START_AFTER_MS 4000 // distribution starts this long after the last join
 #define NVER_US 0x000400DB00017302ull // the US system's version title
