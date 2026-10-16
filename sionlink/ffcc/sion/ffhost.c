@@ -403,7 +403,11 @@ static void reply(int id, const uint8_t *b, int len)
     if (!p->waiting || j.seq != p->seq || len < (int)(sizeof(ff_joy) + j.count * sizeof(ff_result)))
         return;
     p->waiting = false;
-    uint32_t rtt = now_ms() - p->first_sent_at;
+    uint32_t now = now_ms();
+    if (p->last_reply && now - p->last_reply > 1500)
+        logf_("player %d: the DS was silent for %.1f s", id, (now - p->last_reply) / 1000.0);
+    p->last_reply = now;
+    uint32_t rtt = now - p->first_sent_at;
     p->srtt = p->srtt ? (7 * p->srtt + rtt) / 8 : rtt;
     if (rtt > p->rtt_max)
         p->rtt_max = rtt;

@@ -193,6 +193,12 @@ static void JoyIrq(u16 cause)
 }
 
 static u32 joy_batches, joy_resent;
+static u32 joy_last_ms;     // when the last batch came
+
+int PortHostSilent(void)
+{
+    return SlMillis() - joy_last_ms > 15000;
+}
 
 static void JoyBatch(const u8 *body, int len)
 {
@@ -302,7 +308,10 @@ static void Pump(void)
         if (h->type != SL_GAME || h->len < 1)
             continue;
         if (body[0] == FF_JOY && h->len >= sizeof(ff_joy))
+        {
+            joy_last_ms = now;
             JoyBatch(body, h->len);
+        }
         else if (body[0] == FF_BOOT)
             BootParams(body, h->len);
     }
@@ -379,6 +388,7 @@ int main(int argc, char *argv[])
         Pump();
     }
     consoleClear();
+    joy_last_ms = SlMillis();
     setjmp(restart);
     AgbMain();
     return 0;

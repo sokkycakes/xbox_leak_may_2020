@@ -17,6 +17,7 @@ extern void *gPortDummyPtr;
 extern vu16 gPortScroll[8];
 extern u8 gPortMbHeader[0x100], gPortCartHeader[0x100];
 extern u8 gPortDownload[0xC000];
+int PortHostSilent(void); // the Sion has sent no JoyBus batch for 15 s
 
 vu32 *PortJoyRecv(void);
 vu32 *PortJoyTrans(void);

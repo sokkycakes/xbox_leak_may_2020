@@ -97,10 +97,11 @@ def copy_sources(region):
         edit(l, f'0x020000{off}', f'(MB_HEADER + 0x{off})', count=2 if off == "C4" else 1)
     edit(l, '0x080000AC', '(CART_HEADER + 0xAC)')
     # The client drops the link after 10 frames without a JoyBus command. Over
-    # Sion Link the commands come in radio batches that can be late or
-    # resent, so allow two seconds
+    # Sion Link the commands come in radio batches, and the Sion's radio can
+    # go quiet for seconds (it shares its channel time with the home Wi-Fi),
+    # so the DS drops the link only once the Sion has been silent for a while
     edit(l, '    if (sLinkWork.watchdog > 10) {',
-         '#ifdef PORT_DS\n    if (sLinkWork.watchdog > 120) {\n#else\n    if (sLinkWork.watchdog > 10) {\n#endif')
+         '#ifdef PORT_DS\n    if (PortHostSilent()) {\n#else\n    if (sLinkWork.watchdog > 10) {\n#endif')
 
     # The GameCube's bulk downloads land in EWRAM the DS program occupies
     edit(CLI / "xfer.h", '#if defined(VERSION_GCCJGC)\n#define DOWNLOAD_START',
