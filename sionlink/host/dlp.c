@@ -178,9 +178,12 @@ static void Broadcast(dlp_host *d)
 
     // The fifth carries the system update list. A real US 3DS on 11.17
     // lists its NVer twice: 1, 2, 1, then (title ID, version) entries of
-    // 16 bytes; a child below that version is asked to update.
+    // 16 bytes. A child without that title at that version is told to
+    // update (a Japanese 3DS asked for "0.0.0-50J"), and the Sion has no
+    // update to give, so the list stays empty unless SEND_UPDATE_LIST.
     memset(p, 0, 1464);
     Header(p, PK_BROADCAST, 1464, 4, resp);
+#ifdef SEND_UPDATE_LIST
     Put16(p + 16, 1);
     Put16(p + 18, 2);
     Put32(p + 20, 1);
@@ -190,6 +193,7 @@ static void Broadcast(dlp_host *d)
         Put32(p + 28 + e * 16, (uint32_t)NVER_US);
         Put16(p + 32 + e * 16, SYSTEM_VERSION);
     }
+#endif
     Send(d, UDS_BROADCAST, DLP_BROADCAST_CHANNEL, p, 1464);
 }
 
