@@ -20,7 +20,7 @@ the Sion playing the GameCube's side.
   `ffcc-gba.cia` (`make cia`, needs `devkitARM`, `libctru`, `3ds-tools`, and
   `makerom`). `common/gbappu.c` renders the GBA's backgrounds, windows, sprites
   and blending in software at 60 fps in menus (~28 fps on the radar map) and
-  centers the 240x160 picture on the 3DS top screen.
+  shows the 240x160 picture at 1.5x (360x240) on the 3DS top screen.
 - `ffproto.h`: the JoyBus traffic over Sion Link. The host sends the
   commands a GameCube would put on the wire (reset, status, read, write); the
   DS/3DS applies each to its emulated JOY registers and runs the client's serial

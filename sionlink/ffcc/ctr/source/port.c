@@ -4,7 +4,7 @@
 // Same shape as the DS port (ds/source/port.c): the client's main loop calls
 // VBlankIntrWait() once a frame, and that is where the port does what a GBA
 // would have done behind its back: the vertical blank interrupt, the picture
-// (drawn by gbappu.c and shown 1:1 in the middle of the top screen), the
+// (drawn by gbappu.c and shown 1.5x, filling the top screen's height), the
 // buttons, and the JoyBus traffic from the Sion, applied one GameCube
 // command at a time with the client's serial interrupt run after each.
 
@@ -19,9 +19,10 @@
 #include "gbappu.h"
 #include "sllink.h"
 
-// The GBA screen, centered on the 400x240 top screen
-#define OFS_X ((400 - GBA_W) / 2)
-#define OFS_Y ((240 - GBA_H) / 2)
+// The GBA screen at 1.5x, 360x240 in the middle of the 400x240 top screen
+// (the full width would stretch it)
+#define TOP_W (GBA_W * 3 / 2)
+#define OFS_X ((400 - TOP_W) / 2)
 
 // The client (built from the decompilation)
 void AgbMain(void);
@@ -55,6 +56,12 @@ static inline u16 To565(u16 c)
     return ((c & 31) << 11) | ((c & 0x3E0) << 1) | ((c >> 4) & 0x20) | ((c >> 10) & 31);
 }
 
+// The average of two RGB565 colors
+static inline u16 Mix(u16 a, u16 b)
+{
+    return (((a ^ b) & 0xF7DE) >> 1) + (a & b);
+}
+
 // Time spent drawing the picture and running the game, per frame (in
 // ARM11 ticks, averaged on the bottom screen)
 static u64 ticks_ppu, ticks_draw, ticks_game, ticks_left;
@@ -66,14 +73,30 @@ static void Present(void)
     GbaPpuDraw(&ppu, frame);
     ticks_draw += svcGetSystemTick() - t0;
 
-    // The top framebuffer is stored a column at a time, bottom to top
+    // Each 2x2 block of GBA pixels becomes 3x3, the middle row and column
+    // the average of their neighbors. The top framebuffer is stored a
+    // column at a time, bottom to top
     u16 *fb = (u16 *)gfxGetFramebuffer(GFX_TOP, GFX_LEFT, NULL, NULL);
-    for (int x = 0; x < GBA_W; x++)
+    for (int x = 0; x < GBA_W; x += 2)
     {
-        u16 *col = fb + (x + OFS_X) * 240 + (239 - OFS_Y);
-        const u16 *src = frame + x;
-        for (int y = 0; y < GBA_H; y++, src += GBA_W)
-            *col-- = To565(*src);
+        u16 cols[3][GBA_H];
+        for (int y = 0; y < GBA_H; y++)
+        {
+            cols[0][y] = To565(frame[y * GBA_W + x]);
+            cols[2][y] = To565(frame[y * GBA_W + x + 1]);
+            cols[1][y] = Mix(cols[0][y], cols[2][y]);
+        }
+        for (int i = 0; i < 3; i++)
+        {
+            u16 *out = fb + (OFS_X + x / 2 * 3 + i) * 240 + 239;
+            const u16 *c = cols[i];
+            for (int y = 0; y < GBA_H; y += 2)
+            {
+                *out-- = c[y];
+                *out-- = Mix(c[y], c[y + 1]);
+                *out-- = c[y + 1];
+            }
+        }
     }
     gfxFlushBuffers();
     gfxSwapBuffers();
