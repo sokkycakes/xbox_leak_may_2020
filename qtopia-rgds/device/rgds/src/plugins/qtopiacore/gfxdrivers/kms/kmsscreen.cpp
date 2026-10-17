@@ -11,6 +11,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/ipc.h>
 #include <sys/mman.h>
@@ -36,7 +37,13 @@ struct KmsShared
 // Every screen of one device shares a single fd, so the server stays DRM master
 // for all of them.
 static QMap<QString, int> drmFds;
-static QSet<uint32_t> claimedCrtcs;
+// CRTC ids are only unique per device, so key them by fd as well.
+static QSet<quint64> claimedCrtcs;
+
+static quint64 crtcKey(int fd, uint32_t crtc)
+{
+    return (quint64(fd) << 32) | crtc;
+}
 
 static int openDevice(const QString &device)
 {
@@ -107,7 +114,7 @@ bool KmsScreen::openDrm(const QString &device, int connectorIndex)
     if (conn->encoder_id) {
         drmModeEncoder *enc = drmModeGetEncoder(drmFd, conn->encoder_id);
         if (enc) {
-            if (enc->crtc_id && !claimedCrtcs.contains(enc->crtc_id))
+            if (enc->crtc_id && !claimedCrtcs.contains(crtcKey(drmFd, enc->crtc_id)))
                 crtcId = enc->crtc_id;
             drmModeFreeEncoder(enc);
         }
@@ -117,7 +124,7 @@ bool KmsScreen::openDrm(const QString &device, int connectorIndex)
         if (!enc)
             continue;
         for (int c = 0; c < res->count_crtcs; ++c) {
-            if ((enc->possible_crtcs & (1 << c)) && !claimedCrtcs.contains(res->crtcs[c])) {
+            if ((enc->possible_crtcs & (1 << c)) && !claimedCrtcs.contains(crtcKey(drmFd, res->crtcs[c]))) {
                 crtcId = res->crtcs[c];
                 break;
             }
@@ -130,7 +137,7 @@ bool KmsScreen::openDrm(const QString &device, int connectorIndex)
         drmModeFreeResources(res);
         return false;
     }
-    claimedCrtcs.insert(crtcId);
+    claimedCrtcs.insert(crtcKey(drmFd, crtcId));
 
     physWidth = conn->mmWidth;
     physHeight = conn->mmHeight;
@@ -307,7 +314,7 @@ void KmsScreen::shutdownDevice()
         drmIoctl(drmFd, DRM_IOCTL_MODE_DESTROY_DUMB, &destroy);
         dumbHandle = 0;
     }
-    claimedCrtcs.remove(crtcId);
+    claimedCrtcs.remove(crtcKey(drmFd, crtcId));
 }
 
 void KmsScreen::setMode(int, int, int)
@@ -379,5 +386,10 @@ void KmsScreen::flush(const QRegion &region)
         clips.append(clip);
     }
     // Needed by virtual GPUs; scanout hardware like the RK3568 VOP2 ignores it.
-    drmModeDirtyFB(drmFd, fbId, clips.data(), clips.size());
+    int ret = drmModeDirtyFB(drmFd, fbId, clips.data(), clips.size());
+    static const bool debug = qgetenv("KMS_DEBUG").toInt();
+    if (debug)
+        fprintf(stderr, "KmsScreen %d: flush %d rects, bounds %d,%d %dx%d, dirtyfb %d\n", displayId, rects.size(),
+               region.boundingRect().x(), region.boundingRect().y(),
+               region.boundingRect().width(), region.boundingRect().height(), ret);
 }

@@ -6,7 +6,8 @@ PROJECTS-=\
     settings/serverwidgets \
     server/phone/ui/components/simapp \
     ../examples/whereabouts/mappingdemo \
-    plugins/network/dialing
+    plugins/network/dialing \
+    3rdparty/applications/qx
 
 SERVER_PROJECTS-=\
     server/media/genericvolumeservice \

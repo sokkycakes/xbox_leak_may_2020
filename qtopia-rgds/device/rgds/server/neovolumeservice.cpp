@@ -94,7 +94,8 @@ void NeoVolumeService::initVolumes()
 {
     qLog(AudioState) << __PRETTY_FUNCTION__;
 
-    initMixer();
+    if (initMixer() < 0)
+        return; // no sound card (or no mixer on it)
     snd_mixer_elem_t *elem;
     long minPVolume;
     long maxPVolume;
@@ -159,7 +160,8 @@ void NeoVolumeService::adjustVolume(int leftChannel, int rightChannel, AdjustTyp
 
 void NeoVolumeService::adjustSpeakerVolume(int left, int right)
 {
-    initMixer();
+    if (initMixer() < 0)
+        return; // no sound card (or no mixer on it)
 
     for (elem = snd_mixer_first_elem(mixerFd); elem; elem = snd_mixer_elem_next(elem)) {
         if (snd_mixer_elem_get_type(elem) == SND_MIXER_ELEM_SIMPLE &&
@@ -183,7 +185,8 @@ void NeoVolumeService::adjustSpeakerVolume(int left, int right)
 
 void NeoVolumeService::adjustMicrophoneVolume(int volume)
 {
-    initMixer();
+    if (initMixer() < 0)
+        return; // no sound card (or no mixer on it)
 
     for (elem = snd_mixer_first_elem(mixerFd); elem; elem = snd_mixer_elem_next(elem)) {
         if (snd_mixer_elem_get_type(elem) == SND_MIXER_ELEM_SIMPLE &&
@@ -287,7 +290,8 @@ void NeoVolumeService::changeAmpModeVS()
 {
     char itemname[40];
     unsigned int item = 0;
-    initMixer();
+    if (initMixer() < 0)
+        return; // no sound card (or no mixer on it)
 
     for (elem = snd_mixer_first_elem(mixerFd); elem; elem = snd_mixer_elem_next(elem)) {
         if (snd_mixer_elem_get_type(elem) == SND_MIXER_ELEM_SIMPLE &&
@@ -322,7 +326,8 @@ void NeoVolumeService::setAmp(bool mode)
     QValueSpaceItem ampVS("/Hardware/Audio/Amp");
     QString ok = ampVS.value().toString();
 
-    initMixer();
+    if (initMixer() < 0)
+        return; // no sound card (or no mixer on it)
     unsigned int item = 0;
 
     for (elem = snd_mixer_first_elem(mixerFd); elem; elem = snd_mixer_elem_next(elem)) {
@@ -365,7 +370,8 @@ void NeoVolumeService::set1973Amp(bool mode)
     m_vsoVolumeObject->setAttribute("Amp", mode);
     ampMode = mode ? "Stereo Speakers" : "Headphones";
 
-    initMixer();
+    if (initMixer() < 0)
+        return; // no sound card (or no mixer on it)
 
     for (elem = snd_mixer_first_elem(mixerFd); elem; elem = snd_mixer_elem_next(elem)) {
         if (snd_mixer_elem_get_type(elem) == SND_MIXER_ELEM_SIMPLE &&
