@@ -4,9 +4,10 @@
 // Same shape as the DS port (ds/source/port.c): the client's main loop calls
 // VBlankIntrWait() once a frame, and that is where the port does what a GBA
 // would have done behind its back: the vertical blank interrupt, the picture
-// (drawn by gbappu.c and shown 1.5x, filling the top screen's height), the
-// buttons, and the JoyBus traffic from the Sion, applied one GameCube
-// command at a time with the client's serial interrupt run after each.
+// (drawn by gbappu.c a little wider than the GBA's, then shown 1.5x across
+// the top screen), the buttons, and the JoyBus traffic from the Sion,
+// applied one GameCube command at a time with the client's serial
+// interrupt run after each.
 
 #include <setjmp.h>
 #include <stdio.h>
@@ -19,10 +20,15 @@
 #include "gbappu.h"
 #include "sllink.h"
 
-// The GBA screen at 1.5x, 360x240 in the middle of the 400x240 top screen
-// (the full width would stretch it)
-#define TOP_W (GBA_W * 3 / 2)
+// The picture: 264x160, its windows and sprites spread out to the edges
+// (gbappu.c), at 1.5x: 396x240 in the middle of the 400x240 top screen
+#define WIDE_W 264
+#define TOP_W (WIDE_W * 3 / 2)
 #define OFS_X ((400 - TOP_W) / 2)
+
+// The backdrop pattern's tiles in VRAM, which fill what opens up: where
+// Bg_LoadBackdrop() puts them, and Bg_CopyBackdropToRadar()'s copy
+static const u32 backdrop_tiles[] = { 0xD7E0, 0xDFE0, 0x7060, 0x7860 };
 
 // The client (built from the decompilation)
 void AgbMain(void);
@@ -48,7 +54,7 @@ static jmp_buf restart;
 // Display
 // =======
 
-static u16 frame[GBA_W * GBA_H];
+static u16 frame[WIDE_W * GBA_H];
 
 // GBA BGR555 to the top screen's RGB565 (green's low bit from its top bit)
 static inline u16 To565(u16 c)
@@ -69,7 +75,7 @@ static u64 ticks_ppu, ticks_draw, ticks_game, ticks_left;
 static void Present(void)
 {
     u64 t0 = svcGetSystemTick();
-    gba_ppu ppu = { gPortIo, gPortPltt, gPortVram, gPortOam };
+    gba_ppu ppu = { gPortIo, gPortPltt, gPortVram, gPortOam, WIDE_W - GBA_W, backdrop_tiles, 2 };
     GbaPpuDraw(&ppu, frame);
     ticks_draw += svcGetSystemTick() - t0;
 
@@ -77,13 +83,13 @@ static void Present(void)
     // the average of their neighbors. The top framebuffer is stored a
     // column at a time, bottom to top
     u16 *fb = (u16 *)gfxGetFramebuffer(GFX_TOP, GFX_LEFT, NULL, NULL);
-    for (int x = 0; x < GBA_W; x += 2)
+    for (int x = 0; x < WIDE_W; x += 2)
     {
         u16 cols[3][GBA_H];
         for (int y = 0; y < GBA_H; y++)
         {
-            cols[0][y] = To565(frame[y * GBA_W + x]);
-            cols[2][y] = To565(frame[y * GBA_W + x + 1]);
+            cols[0][y] = To565(frame[y * WIDE_W + x]);
+            cols[2][y] = To565(frame[y * WIDE_W + x + 1]);
             cols[1][y] = Mix(cols[0][y], cols[2][y]);
         }
         for (int i = 0; i < 3; i++)
@@ -102,12 +108,13 @@ static void Present(void)
     gfxSwapBuffers();
     ticks_ppu += svcGetSystemTick() - t0;
 #ifdef PPU_DUMP
-    // The display state every 10 s, for checking the picture on a PC
+    // The display state every PPU_DUMP frames, for checking the picture on
+    // a PC, then the client's mode and screen
     static int frames;
-    if (++frames % 600 == 0)
+    if (++frames % PPU_DUMP == 0)
     {
         char path[32];
-        snprintf(path, sizeof(path), "sdmc:/ffppu%d.bin", frames / 600);
+        snprintf(path, sizeof(path), "sdmc:/ffppu%d.bin", frames / PPU_DUMP);
         FILE *f = fopen(path, "wb");
         if (f)
         {
@@ -115,6 +122,10 @@ static void Present(void)
             fwrite(gPortPltt, 1, 0x400, f);
             fwrite(gPortVram, 1, 0x18000, f);
             fwrite(gPortOam, 1, 0x400, f);
+            extern u32 gMode;
+            extern s32 gScreen;
+            fwrite(&gMode, 4, 1, f);
+            fwrite(&gScreen, 4, 1, f);
             fclose(f);
         }
     }
