@@ -36,6 +36,12 @@ for f in xboxdash.xbe xboxdash.map default.xip mainmenu5.xip; do
 	files="$files $D/$f"
 	keep="$keep $D/$f.pre-live"
 done
+# The Games screen's scenes, for a dashboard from before they were added.
+for f in NewGames.xip Games_Title.xip; do
+	[ -f $D/$f ] && continue
+	cp $K/dash/$f $D/$f && chmod 644 $D/$f
+	files="$files $D/$f"
+done
 ln -sfn $L/xodash $D/xodash
 
 touch /etc/default/xbox

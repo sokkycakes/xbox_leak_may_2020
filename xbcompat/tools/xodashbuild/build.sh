@@ -35,7 +35,7 @@ MAININC=$(inc private\\online\\xodash\\xodashlib private\\inc private\\inc\\cryp
 # Microsoft only built this title checked, and a few of its ASSERTs do the
 # work (seek to a glyph, a XIP block, make a directory).  A retail build
 # drops them, so those are kept as plain statements.  fixups.py makes
-# account creation wait for the server.  Patched
+# account creation wait for the server and D: the xodash folder.  Patched
 # copies are rewritten only when they change so their objects stay cached.
 mkdir -p "$WORK/patch"
 patch_src() { # dir file
@@ -62,7 +62,7 @@ cc_dir() { # dir include-path file...
 }
 X="$WORK/xb/private/online/xodash"
 for f in font.cpp xip.cpp fileutil.cpp translator.cpp; do patch_src "$X/XODashLib" $f; done
-for f in act_online.cpp accountdata.cpp; do patch_src "$X/XODashMain" $f; done
+for f in act_online.cpp accountdata.cpp xodash.cpp; do patch_src "$X/XODashMain" $f; done
 cc_dir "$X/XODashLib" "$LIBINC" utilities.cpp xbinput.cpp xbutil.cpp xbstopwatch.cpp primitivescene.cpp msgdialog.cpp \
     camera.cpp falloff.cpp tgl.cpp smartobject.cpp button.cpp listbox.cpp spinner.cpp texture.cpp texturecache.cpp \
     material.cpp materiallibrary.cpp xip.cpp fileutil.cpp file.cpp inifile.cpp text.cpp locale.cpp translator.cpp \
@@ -92,15 +92,15 @@ timeout 300 wine "$WORK/xb/public/idw/imagebld.exe" /TESTID:0xFFFE0000 /TESTRATI
   /TESTREGION:0x7FFFFFFF "/TESTNAME:Xbox Live" /INITFLAGS:0x00000004 /LIMITMEM /VERSION:0001 \
   $ins /TESTMEDIATYPES:1 /NOLIBWARN /NOSETUPHD /IN:xodash.exe /OUT:xodash.xbe | tr -d '\r'
 
-# The title maps D: to the dashboard partition (its Y: drive), laid out as
-# copymedia.bat copies it to the kit.
+# D: is C:\xodash (fixups.py), laid out as copymedia.bat copies it to the
+# kit, with the title where the retail dashboards launched it.
 S="$WORK/xb/private/online/xodash"
 R="$WORK/run"
-Y="$R/hdd/partition2"
+Y="$R/hdd/partition2/xodash"
 mkdir -p "$R/disc" "$Y/media" "$Y/audio" "$R"/hdd/partition{1,3,4,5}
 cp "$S"/*.xtf "$Y/"
 cp -ru "$S/audio/mainaudio" "$Y/audio/"
 for d in Xbg Xbx Content; do cp -ru "$S/Media/$d" "$Y/media/"; done
 cp "$S"/Media/*.csv "$Y/media/"
-cp xodash.xbe "$Y/xodash.xbe"
+cp xodash.xbe "$Y/xonlinedash.xbe"
 echo "built $WORK/xodash.xbe; run it with $HERE/run.sh $WORK"

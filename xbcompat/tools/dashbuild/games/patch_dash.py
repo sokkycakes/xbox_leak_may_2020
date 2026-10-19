@@ -111,6 +111,11 @@ d = d.replace(old, '''function UpdateMainMenu()
     c.game_select_pod_inner03.visible = (nCurMainMenuItem == 2);
     c.game_select_pod_inner02_l.visible = (nCurMainMenuItem == 3);
 
+    // Five pods don't fit round the ring: the end four places from the
+    // selection would sit on its neighbour, so it is left out.
+    c.Main_memory_ringpin_2_g.visible = (nCurMainMenuItem != 3);
+    c.Main_memory_ringpin_2_l.visible = (nCurMainMenuItem != -1);
+
     c.theMenuItems.SetRotation(0, 0, 1, a);
 
     c.theMusicItem_g.SetRotation(0, 1, 0, a);

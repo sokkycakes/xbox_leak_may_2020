@@ -5,4 +5,4 @@
 HERE=$(cd "$(dirname "$0")" && pwd)
 WORK=${1:-/tmp/xodash}; shift
 R="$WORK/run"
-exec python3 "$HERE/../xbrun.py" "$R/hdd/partition2/xodash.xbe" --dvd "$R/disc" --d-path '\\Device\\Harddisk0\\Partition2' --xbe-path xodash.xbe --hdd "$R/hdd" --net "${XBCOMPAT_NET:-nat}" "$@"
+exec python3 "$HERE/../xbrun.py" "$R/hdd/partition2/xodash/xonlinedash.xbe" --dvd "$R/disc" --d-path '\\Device\\Harddisk0\\Partition2\\xodash' --xbe-path xonlinedash.xbe --hdd "$R/hdd" --net "${XBCOMPAT_NET:-nat}" "$@"

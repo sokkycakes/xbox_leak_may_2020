@@ -5,10 +5,18 @@ build.sh:  fixups.py FILE < source > patched
 The account sign-up in this snapshot starts _XOnlineCreateAccount and shows
 "Congrats!" straight away: nothing pumps the task, so the request never goes
 out until some later scene happens to, and its result is thrown away.  These
-run the wait cursor until the task ends and report a failure instead."""
+run the wait cursor until the task ends and report a failure instead.
+
+The title maps D: to Partition2 itself, where a kit's copymedia.bat put its
+media; the retail dashboards launched C:\\xodash\\xonlinedash.xbe, so here D:
+is that folder."""
 import sys
 
 FIXES = {
+    'xodash.cpp': [(
+        '\tif(FAILED(hr = MapDrive(DASH_DRIVE_LETTER, DASH_PARTITION)) )\r\n',
+        '\tif(FAILED(hr = MapDrive(DASH_DRIVE_LETTER, DASH_PARTITION "\\\\xodash")) )\r\n',
+    )],
     'act_online.cpp': [(
         '                        hr = Accounts::Instance()->Validate( eACT_Cost_Confirm_Yes, L"" );\r\n'
         '                        hDialogReturn = RunOKDlg( L"SIGNUP_CONGRATS_MESSAGE" );\r\n',
