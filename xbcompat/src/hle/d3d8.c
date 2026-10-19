@@ -7943,8 +7943,14 @@ static void NTAPI D3DDevice_GetBackMaterial(float *m)
     m[16] = d3d.back_material_power;
 }
 
-/* Visibility tests are GL occlusion queries, one per index the title uses. */
-#define VIS_SLOTS 256
+/* Visibility tests are GL occlusion queries, one per index the title uses.
+   Indices run to D3DVISIBILITY_TEST_MAX (4096) and each keeps its own
+   report, as the library's do.  With 256 slots, index i and i + 256 shared
+   one: the later EndVisibilityTest dropped the earlier query, whose result
+   then read as "nothing drawn" (D3DERR_INVALIDCALL, 0 pixels), so whatever
+   the title culls on that result vanished depending on which tests the
+   view happened to issue. */
+#define VIS_SLOTS 4096
 static struct { ULONG index; GLuint query; bool used; } vis[VIS_SLOTS];
 static GLuint vis_active;
 
