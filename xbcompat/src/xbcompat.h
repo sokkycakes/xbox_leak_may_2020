@@ -115,6 +115,19 @@ NTSTATUS wait_objects(ULONG count, PVOID objects[], int wait_any, KPROCESSOR_MOD
 void apc_queue(xthread *t, PVOID routine, PVOID ctx, PVOID arg1, PVOID arg2, KAPC *kapc);
 ULONG NTAPI RtlNtStatusToDosError(NTSTATUS st);
 void timers_init(void);
+/* Uniprocessor IRQL semantics once networking is up (ke.c). */
+void ke_dispatch_exclusive(void);
+void ke_dispatch_enter(KIRQL irql);
+void ke_dispatch_leave(void);
+bool ke_dispatch_release_for_wait(void);
+void ke_dispatch_reacquire(bool was_held);
+/* The console identity in the hard disk directory (misc.c). */
+void identity_init(const char *hdd);
+const UCHAR *identity_mac(void);
+/* The emulated Ethernet controller (nic.c). */
+extern bool g_nic_enabled;
+void nic_interrupt_init(PVOID Interrupt, PVOID ServiceRoutine, PVOID ServiceContext, ULONG Vector);
+bool nic_interrupt_connect(PVOID Interrupt, bool connect);
 extern void (*g_vblank_hook)(void);   /* run 60 times a second on the DPC thread */
 extern void (*g_render_drain)(void);  /* before freeing guest memory queued drawing may still read */
 void ke_frame_presented(void);   /* XBCOMPAT_FIXED_FPS clock step */

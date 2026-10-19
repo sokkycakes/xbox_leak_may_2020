@@ -14,6 +14,7 @@
 
 #include "xbcompat.h"
 #include "cpu.h"
+#include "kernel/net.h"
 
 void misc_init(void);
 
@@ -78,6 +79,8 @@ static void crash_handler(int sig, siginfo_t *si, void *uc_)
     ucontext_t *uc = uc_;
     greg_t *r = uc->uc_mcontext.gregs;
     if (sig == SIGSEGV && (read_tsc(r) || debug_service(r) || privileged_insn(r))) { g_guest_traps++; return; }
+    if (sig == SIGSEGV && nic_trap_fault(si->si_addr, uc)) return;
+    if (sig == SIGTRAP && nic_trap_step(uc)) return;
     if (sig == SIGTRAP) {
         /* int 3 (DbgBreakPoint and friends): nobody is listening, carry on. */
         xlog("breakpoint at eip=%08x ignored", r[REG_EIP]);
@@ -191,6 +194,10 @@ static void usage(void)
             "               or an Xbox disc image (XISO), or an optical drive (/dev/sr0)\n"
             "  --dvd-drive DEV  an optical drive whose disc is the tray while the drive is\n"
             "               plugged in (discs can go in and out while titles run)\n"
+            "  --net nat|tunnel:HOST:PORT[:LOCALPORT]|none\n"
+            "               emulate the Ethernet controller: NAT to the host's network, or\n"
+            "               frames in UDP to another xbcompat (System Link); default none\n"
+            "               (or XBCOMPAT_NET)\n"
             "  --card DIR   the game card (Kazeta cart media); default: the first card\n"
             "               with a .kzi or .kzp under /media or /run/media\n"
             "  --d-path P, --xbe-path P, --launch-data FILE\n"
@@ -210,9 +217,10 @@ int main(int argc, char **argv)
         { "frames", required_argument, 0, 'f' }, { "dvd", required_argument, 0, 'v' },
         { "d-path", required_argument, 0, 'D' }, { "launch-data", required_argument, 0, 'L' },
         { "xbe-path", required_argument, 0, 'X' }, { "card", required_argument, 0, 'c' },
-        { "dvd-drive", required_argument, 0, 'R' },
+        { "dvd-drive", required_argument, 0, 'R' }, { "net", required_argument, 0, 'N' },
         { 0, 0, 0, 0 },
     };
+    const char *net = getenv("XBCOMPAT_NET");
     const char *hle = NULL, *hdd = NULL, *d_path = NULL, *launch_data = NULL, *xbe_rel = NULL;
     int c;
     while ((c = getopt_long(argc, argv, "", opts, NULL)) != -1) {
@@ -230,6 +238,7 @@ int main(int argc, char **argv)
         case 'X': xbe_rel = optarg; break;
         case 'c': fs_set_card(optarg); break;
         case 'R': g_dvd_drive = optarg; break;
+        case 'N': net = optarg; break;
         default: usage();
         }
     }
@@ -257,6 +266,8 @@ int main(int argc, char **argv)
     xbe_image img;
     xbe_load(xbe, &img);
     fs_init(xbe, hdd, g_dvd_root, g_dvd_drive);
+    identity_init(hdd);
+    nic_init(net, identity_mac());
     launch_init(argc, argv, d_path, launch_data, xbe_rel);
     kernel_resolve_imports(&img);
     reset_init(((XBE_CERTIFICATE *)img.header->Certificate)->TitleID);

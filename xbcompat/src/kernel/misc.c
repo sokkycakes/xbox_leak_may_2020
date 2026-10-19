@@ -34,6 +34,61 @@ ULONG KiBugCheckData[5];
 ULONG ExEventObjectTypeDummy;
 UCHAR AvpCurrentSettings[64];
 
+/* This install's console identity: the factory EEPROM values Xbox Live
+   reads (serial number, Ethernet address, online key) and the hard disk key.
+   Real consoles each have their own, so they are made up once per hard disk
+   directory and kept in console-id there.  Nothing here comes from a real
+   console's keys, and every value is nonzero. */
+static UCHAR id_serial[12], id_mac[6], id_online_key[16];
+
+void identity_init(const char *hdd)
+{
+    char path[4096];
+    snprintf(path, sizeof path, "%s/console-id", hdd);
+    FILE *f = fopen(path, "r");
+    bool ok = false;
+    if (f) {
+        char ser[16], m[16], ok16[40], hk[40];
+        if (fscanf(f, "serial %12s\nmac %12s\nonline-key %32s\nhdd-key %32s", ser, m, ok16, hk) == 4 &&
+            strlen(ser) == 12 && strlen(m) == 12 && strlen(ok16) == 32 && strlen(hk) == 32) {
+            memcpy(id_serial, ser, 12);
+            for (int i = 0; i < 6; i++) sscanf(m + 2 * i, "%2hhx", &id_mac[i]);
+            for (int i = 0; i < 16; i++) sscanf(ok16 + 2 * i, "%2hhx", &id_online_key[i]);
+            for (int i = 0; i < 16; i++) sscanf(hk + 2 * i, "%2hhx", &XboxHDKey[i]);
+            ok = true;
+        }
+        fclose(f);
+    }
+    if (!ok) {
+        UCHAR rnd[64];
+        FILE *r = fopen("/dev/urandom", "rb");
+        if (!r || fread(rnd, 1, sizeof rnd, r) != sizeof rnd) fatal("cannot read /dev/urandom");
+        fclose(r);
+        for (int i = 0; i < 12; i++) id_serial[i] = '0' + rnd[i] % 10;
+        id_serial[0] = '1' + rnd[0] % 9;
+        id_mac[0] = 0x00; id_mac[1] = 0x50; id_mac[2] = 0xF2;   /* Microsoft's prefix, as consoles use */
+        memcpy(id_mac + 3, rnd + 12, 3);
+        memcpy(id_online_key, rnd + 16, 16);
+        memcpy(XboxHDKey, rnd + 32, 16);
+        id_online_key[0] |= 1;
+        XboxHDKey[0] |= 1;
+        f = fopen(path, "w");
+        if (f) {
+            fprintf(f, "serial %.12s\nmac ", (char *)id_serial);
+            for (int i = 0; i < 6; i++) fprintf(f, "%02x", id_mac[i]);
+            fprintf(f, "\nonline-key ");
+            for (int i = 0; i < 16; i++) fprintf(f, "%02x", id_online_key[i]);
+            fprintf(f, "\nhdd-key ");
+            for (int i = 0; i < 16; i++) fprintf(f, "%02x", XboxHDKey[i]);
+            fprintf(f, "\n");
+            fclose(f);
+            xlog("identity: made a new console identity in %s", path);
+        }
+    }
+}
+
+const UCHAR *identity_mac(void) { return id_mac; }
+
 void misc_init(void)
 {
     XeImageFileName.Buffer = image_file_name;
@@ -330,7 +385,6 @@ NTSTATUS NTAPI ExQueryNonVolatileSetting(ULONG ValueIndex, ULONG *Type, PVOID Va
         { 48, 4 }, { 52, 4 }, { 56, 4 }, { 60, 4 }, { 64, 4 }, { 68, 4 },           /* language .. movies */
         { 72, 4 }, { 76, 4 }, { 80, 4 }, { 84, 4 }, { 88, 4 }, { 92, 4 },           /* online, misc, DVD */
     };
-    static const UCHAR serial[12] = "000000000000", mac[6] = { 0x00, 0x50, 0xf2, 0x00, 0x00, 0x01 };
     static const ULONG av_region = 0x00400100;    /* NTSC-M */
     static const ULONG game_region = 1;           /* North America */
     static UCHAR all[256];
@@ -343,13 +397,17 @@ NTSTATUS NTAPI ExQueryNonVolatileSetting(ULONG ValueIndex, ULONG *Type, PVOID Va
         if (ValueIndex == 1 || ValueIndex == 2 || ValueIndex == 4 || ValueIndex == 5) type = 3;
     } else switch (ValueIndex) {
     case 0xFF: src = &user_settings; len = sizeof(user_settings); type = 3; break;   /* XC_MAX_OS */
-    case 0x100: src = serial; len = sizeof(serial); type = 3; break;               /* XC_FACTORY_SERIAL_NUMBER */
-    case 0x101: src = mac; len = sizeof(mac); type = 3; break;                     /* XC_FACTORY_ETHERNET_ADDR */
+    case 0x100: src = id_serial; len = sizeof(id_serial); type = 3; break;         /* XC_FACTORY_SERIAL_NUMBER */
+    case 0x101: src = id_mac; len = sizeof(id_mac); type = 3; break;               /* XC_FACTORY_ETHERNET_ADDR */
+    case 0x102: src = id_online_key; len = sizeof(id_online_key); type = 3; break; /* XC_FACTORY_ONLINE_KEY */
     case 0x103: src = &av_region; len = 4; break;                                  /* XC_FACTORY_AV_REGION */
     case 0x104: src = &game_region; len = 4; break;                                /* XC_FACTORY_GAME_REGION */
     case 0xFFFF:                                                                   /* XC_MAX_ALL */
         /* The factory section starts at 0x30 of the 256-byte image (AV region
            at +40), the user section at 0x60. */
+        memcpy(all + 0x30 + 4, id_serial, 12);
+        memcpy(all + 0x30 + 16, id_mac, 6);
+        memcpy(all + 0x30 + 24, id_online_key, 16);
         memcpy(all + 0x30 + 40, &av_region, 4);
         memcpy(all + 0x60, &user_settings, sizeof(user_settings));
         src = all; len = sizeof(all); type = 3;
@@ -653,7 +711,8 @@ ULONG NTAPI XcModExp(ULONG *A, const ULONG *B, const ULONG *C, const ULONG *D, U
 
 /* ---- network PHY: there is no Ethernet link ------------------------------ */
 
-ULONG NTAPI PhyGetLinkState(BOOLEAN Update) { (void)Update; return 0; }
+/* With the NIC emulated the cable is always in: 100 Mbps, full duplex. */
+ULONG NTAPI PhyGetLinkState(BOOLEAN Update) { (void)Update; return g_nic_enabled ? 0x01 | 0x02 | 0x08 : 0; }
 NTSTATUS NTAPI PhyInitialize(BOOLEAN ForceReset, PVOID Param) { (void)ForceReset; (void)Param; return STATUS_SUCCESS; }
 
 /* ---- misc -------------------------------------------------------------- */
