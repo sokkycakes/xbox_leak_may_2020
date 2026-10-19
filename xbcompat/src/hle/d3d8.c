@@ -3531,13 +3531,43 @@ static void upload_ps_uniforms(program_entry *e)
         }
         program_uniform2fv(e, e->loc_bump_lum, 4, &lum[0][0]);
     }
-    /* Fog parameters reach the program through gl_Fog. */
-    color4(c[0], RS(D3DRS_FOGCOLOR));
-    glFogfv(GL_FOG_COLOR, c[0]);
-    glFogf(GL_FOG_START, rs_float(D3DRS_FOGSTART));
-    glFogf(GL_FOG_END, rs_float(D3DRS_FOGEND));
-    glFogf(GL_FOG_DENSITY, rs_float(D3DRS_FOGDENSITY));
     DETAIL_TIMED(t_textures, apply_shader_textures(e));
+}
+
+/* Fog parameters, read through gl_Fog by translated shaders and by GL's
+   own fog stage.  LazySetSpecFogCombiner programs linear fog as
+   (end - z) * scale with scale = 1 / (end - start), and with
+   MAX_FOG_SCALE (8192) when the endpoints are equal: a hard step at end.
+   GL derives gl_Fog.scale from start and end itself, so move start just
+   below end to get that steep scale instead of an infinite one. */
+static void apply_fog_params(void)
+{
+    float c[4];
+    color4(c, RS(D3DRS_FOGCOLOR));
+    glFogfv(GL_FOG_COLOR, c);
+    float start = rs_float(D3DRS_FOGSTART), end = rs_float(D3DRS_FOGEND);
+    if (start == end) start = end - fmaxf(1.0f / 8192.0f, fabsf(end) * (1.0f / 1048576.0f));
+    glFogf(GL_FOG_START, start);
+    glFogf(GL_FOG_END, end);
+    glFogf(GL_FOG_DENSITY, rs_float(D3DRS_FOGDENSITY));
+}
+
+/* Fog for draws GL's fixed fragment stage colors (no fragment program):
+   the fog table mode applies to the eye distance, or to oFog of a vertex
+   program.  D3DFOG_NONE takes the factor itself from oFog, which linear
+   fog from 1 to 0 passes through; without a vertex program it would be
+   the specular alpha, which the GL stage cannot read, so that stays off. */
+static void apply_fixed_fog(bool programmable_vertex)
+{
+    ULONG mode = RS(D3DRS_FOGTABLEMODE);
+    bool on = RS(D3DRS_FOGENABLE) && mode <= 3 && (mode || programmable_vertex);
+    gc_enable(GL_FOG, on);
+    if (!on) return;
+    static GLint last_mode;
+    GLint gl_mode = mode == 1 ? GL_EXP : mode == 2 ? GL_EXP2 : GL_LINEAR;
+    if (gl_mode != last_mode) { glFogi(GL_FOG_MODE, gl_mode); last_mode = gl_mode; }
+    apply_fog_params();
+    if (!mode) { glFogf(GL_FOG_START, 1.0f); glFogf(GL_FOG_END, 0.0f); }
 }
 
 /* Fixed-function GL work (draws without shaders, glDrawPixels) needs
@@ -3698,6 +3728,8 @@ static bool use_program(GLuint vs, program_entry **out)
     if (vs && RS(D3DRS_POINTSCALEENABLE)) glEnable(GL_VERTEX_PROGRAM_POINT_SIZE);
     else glDisable(GL_VERTEX_PROGRAM_POINT_SIZE);
     bool programmable_vertex = vs != 0;
+    if (fs) apply_fog_params();
+    else apply_fixed_fog(programmable_vertex);
     if (fs && (whatif == WHATIF_FLAT_FS || whatif == WHATIF_BOTH)) {
         static GLuint flat;
         if (!flat)
@@ -3719,10 +3751,9 @@ static bool use_program(GLuint vs, program_entry **out)
         ULONG mode = RS(D3DRS_FOGTABLEMODE);
         /* Only paired programmable stages share the factor convention.
            Legacy vertex/fragment stages retain their coordinate convention.
-           Equal linear endpoints still require a parameter-generation oracle. */
+           Equal linear endpoints get a finite scale from apply_fog_params. */
         bool factor = programmable_vertex && fs && RS(D3DRS_FOGENABLE)
-            && mode >= 1 && mode <= 3
-            && (mode != 3 || rs_float(D3DRS_FOGSTART) != rs_float(D3DRS_FOGEND));
+            && mode >= 1 && mode <= 3;
         program_uniform1f(e, e->loc_fog_vertex_mode, factor ? mode : 0);
     }
     upload_fixed_lighting(e);
