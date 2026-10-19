@@ -73,6 +73,7 @@ public:
     int GetSavedGameCount(int nGame);
     int SelectGameImage(int nGame);
     void LaunchGame(int nGame);
+    void LaunchXOnlineDash();
 
     int IsInstalled(int nGame);
     int StartInstall(int nGame);
@@ -108,6 +109,7 @@ START_NODE_FUN(CGameCollection, CNode)
     NODE_FUN_II(GetSavedGameCount)
     NODE_FUN_II(SelectGameImage)
     NODE_FUN_VI(LaunchGame)
+    NODE_FUN_VV(LaunchXOnlineDash)
     NODE_FUN_II(IsInstalled)
     NODE_FUN_II(StartInstall)
     NODE_FUN_SV(GetInstallStatus)
@@ -782,6 +784,18 @@ void CGameCollection::LaunchGame(int nGame)
     sprintf(szImage, "D:\\%s", pGame->m_szXbe);
     XAppGetD3DDev()->PersistDisplay();
     XLaunchNewImage(szImage, NULL);
+}
+
+// The Live dashboard, where the retail dashboards keep it: C:\xodash, run
+// with D: there.
+void CGameCollection::LaunchXOnlineDash()
+{
+    OBJECT_STRING dDrive = CONSTANT_OBJECT_STRING("\\??\\D:");
+    OBJECT_STRING target = CONSTANT_OBJECT_STRING("\\Device\\Harddisk0\\Partition2\\xodash");
+    IoDeleteSymbolicLink(&dDrive);
+    IoCreateSymbolicLink(&dDrive, &target);
+    XAppGetD3DDev()->PersistDisplay();
+    XLaunchNewImage("D:\\xonlinedash.xbe", NULL);
 }
 
 ////////////////////////////////////////////////////////////////////////////

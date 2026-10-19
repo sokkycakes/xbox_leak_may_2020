@@ -1,17 +1,20 @@
 #!/bin/sh
 #
 # XBCOMPAT_LAUNCHER on a Sion with the Live dashboard installed (see
-# install.sh, which sets it in /etc/default/xbox). Picking "Xbox Live" in the
-# normal dashboard's Games list launches E:\Games\Xbox Live\default.xbe; that
-# one runs as the Live dashboard, with its own xbcompat, hard disk and the
-# Live server. Every other title goes on to the usual launcher. Leaving the
-# Live dashboard (L + R + Back + Start) brings the normal dashboard back.
+# sion-install.sh, which sets it in /etc/default/xbox). The dashboard's
+# XBOX LIVE item launches C:\xodash\xonlinedash.xbe, as the retail
+# dashboards did; that one runs under the Live dashboard's own xbcompat
+# (with the network card), next to the Live server. Every other title goes
+# on to the usual launcher. Leaving the Live dashboard (L + R + Back + Start)
+# brings the normal dashboard back.
+#
+# xbcompat runs this as: launch-title IMAGE [options...]
 #
 L=/data/xbox-live
 X=/opt/xbcompat
 
 case $1 in
-*"/Games/Xbox Live/default.xbe")
+*/xodash/xonlinedash.xbe)
 	PID=/var/run/xbox-live-server.pid
 	if ! { [ -s $PID ] && kill -0 "$(cat $PID)" 2> /dev/null; }; then
 		PYTHONHOME=$X PYTHONDONTWRITEBYTECODE=1 setsid "$X/bin/python3" "$L/liveserver/liveserver.py" \
@@ -19,12 +22,13 @@ case $1 in
 		echo $! > $PID
 		sleep 1
 	fi
-	for p in 1 3 4 5; do mkdir -p "$L/hdd/partition$p"; done
-	mkdir -p "$L/disc"
+	image=$1
+	shift
 	export XBCOMPAT_DNS=127.0.0.1:5353 XBCOMPAT_RESET=1
-	exec "$L/bin/xbcompat" --hle "$L/xodash.hlemap" --hdd "$L/hdd" --dvd "$L/disc" \
-		--d-path '\Device\Harddisk0\Partition2' --xbe-path xodash.xbe --net nat "$L/hdd/partition2/xodash.xbe"
+	exec "$L/bin/xbcompat" --hle "$L/xodash.hlemap" --net nat "$@" "$image"
 	;;
 esac
+next=${XBOX_LIVE_NEXT_LAUNCHER:-$X/bin/python3 $X/tools/xbrun.py}
+[ "$next" = "$0" ] && next="$X/bin/python3 $X/tools/xbrun.py"
 # shellcheck disable=SC2086
-exec ${XBOX_LIVE_NEXT_LAUNCHER:-$X/bin/python3 $X/tools/xbrun.py} "$@"
+exec $next "$@"
