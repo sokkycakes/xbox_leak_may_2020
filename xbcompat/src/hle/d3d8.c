@@ -6569,6 +6569,7 @@ static void front_buffer_memory(void)
    frees the persisted frame at the first Present, after which
    GetPersistedSurface returns NULL. */
 static struct { D3DSurface *s; bool loaded, presented; } persisted;
+void NTAPI AvSetSavedDataAddress(PVOID p);
 
 static D3DSurface *new_linear_surface(ULONG fmt, ULONG w, ULONG h);
 static void persisted_path(char *path, size_t n) { snprintf(path, n, "%s/.persisted", fs_hdd_root()); }
@@ -6624,6 +6625,7 @@ static void persisted_first_present(void)
 {
     if (persisted.presented) return;
     persisted.presented = true;
+    if (persisted.s) AvSetSavedDataAddress(NULL);   /* the library frees it here */
     if (!persisted.loaded) {
         persisted.loaded = true;
         char path[600];
@@ -6920,6 +6922,16 @@ static void create_device_surfaces(ULONG format, ULONG depth_format)
     d3d.backbuffer = new_linear_surface(format, d3d.width, d3d.height);
     d3d.depth = new_linear_surface(depth_format ? depth_format : 0x2A, d3d.width, d3d.height);
     if (!front.s) front.s = new_linear_surface(format, d3d.width, d3d.height);
+#ifndef XBC_TRANSLATED
+    /* Copy every presented frame from the start, so the first ask for it
+       finds the frame on screen rather than whatever is drawn by then.  Not
+       on the Pi, where each copy is a GPU job of its own. */
+    front.used = true;
+#endif
+    if (!persisted.loaded && !persisted.presented) {
+        persisted_load();
+        if (persisted.s) AvSetSavedDataAddress(persisted.s);
+    }
     d3d.zscale = depth_format == 0x2C || depth_format == 0x2D || depth_format == 0x30 || depth_format == 0x31
                      ? 65535.0f : 16777215.0f;
     zsync.hash = depth_memory_hash();

@@ -273,7 +273,14 @@ void NTAPI HalDisableSystemInterrupt(ULONG v) { (void)v; }
 
 static PVOID av_saved_data;
 
-PVOID NTAPI AvGetSavedDataAddress(void) { return av_saved_data; }
+/* The persisted frame (see D3D's persisted_load): D3D's GetPersistedSurface
+   is this call, so titles built with it inlined ask the kernel directly. */
+PVOID NTAPI AvGetSavedDataAddress(void)
+{
+    static unsigned logged;
+    if (logged < 20) { logged++; xlog("AvGetSavedDataAddress: %p", av_saved_data); }
+    return av_saved_data;
+}
 void NTAPI AvSetSavedDataAddress(PVOID p) { av_saved_data = p; }
 
 void NTAPI AvSendTVEncoderOption(PVOID RegisterBase, ULONG Option, ULONG Param, ULONG *Result)
