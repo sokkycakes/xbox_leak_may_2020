@@ -76,6 +76,7 @@ static const struct { unsigned short off, size, group; } async_fields[] = {
     AF(constant_mode, G_OTHER), AF(vs_const, G_VSC), AF(ps_const, G_PSC), AF(eye_vector, G_OTHER),
     AF(pixel_shader, G_RS), AF(zscale, G_OTHER), AF(cpu_time, G_OTHER), AF(callbacks, G_OTHER),
     AF(ncallbacks, G_OTHER), AF(palettes, G_TEX), AF(stipple_on, G_RS), AF(stipple, G_RS),
+    AF(direct_mv, G_XFORM),
 };
 #undef AF
 

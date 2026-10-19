@@ -140,7 +140,7 @@ static void hud_batch_flush(void)
     p_glClientActiveTexture(GL_TEXTURE0);
     shader_diagnostics_mark(d3d.frame, ++shader_diag_draw, hud_batch.key.state.fvf, 0, hud_batch.key.program,
                             "fvf-batch");
-    TIMED(t_gl, glDrawArrays(GL_TRIANGLES, 0, hud_batch.count));
+    for (unsigned pass = 0; scissor_pass(pass); pass++) TIMED(t_gl, glDrawArrays(GL_TRIANGLES, 0, hud_batch.count));
     hud_submitted_draws++;
 
     hud_batch.bytes = 0; hud_batch.count = 0;
