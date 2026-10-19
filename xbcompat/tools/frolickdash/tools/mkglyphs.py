@@ -7,7 +7,8 @@ With art360dir (the A/B/X/Y-Button.png of the Xbox 360 Blades dashboard's
 shared resources, xam.xex's shrdres package, 32x32 orbs), writes
 glyph_a.png, glyph_a_button.png, glyph_b.png, glyph_x.png and glyph_y.png
 (100x100, like Frolick's) from those orbs with the button's letter over
-them, as the Blades legend draws them.  Without it, stand-ins: a coloured
+them, as the Blades legend draws them, and glyph_start.png from the grey
+orb with the Start triangle.  Without it, stand-ins: a coloured
 disc with the letter.
 """
 import os, sys
@@ -54,17 +55,40 @@ def glyph360(l, src, path, rim=False):
     im.save(path)
 
 
+def start(path):
+    im = Image.new("RGBA", (100, 100), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    d.ellipse((4, 4, 95, 95), fill=(0, 0, 0, 160))
+    d.ellipse((6, 6, 93, 93), fill=(0x60, 0x60, 0x60, 255))
+    d.polygon([(38, 30), (38, 70), (70, 50)], fill=(255, 255, 255, 255))
+    im.save(path)
+
+
+def start360(src, path):
+    """The Start button: the Blades legend draws it as the grey orb with a
+    white triangle (the packages carry no Start image, only the orb)."""
+    orb = Image.open(src).convert("RGBA")
+    im = Image.new("RGBA", (100, 100), (0, 0, 0, 0))
+    im.paste(orb.resize((100, 100), Image.LANCZOS), (0, 0))
+    ImageDraw.Draw(im).polygon([(38, 30), (38, 70), (70, 50)], fill=(255, 255, 255, 255))
+    im.save(path)
+
+
 out = sys.argv[1]
 os.makedirs(out, exist_ok=True)
 art = sys.argv[2] if len(sys.argv) > 2 else None
-for l in "abxy":
+# Frolick's names: glyph_a.png is the Start button (its file is Xelu's
+# 360_Start.png), glyph_a_button.png the A button.
+for l in "bxy":
     if art:
         glyph360(l, os.path.join(art, "%s-Button.png" % l.upper()), os.path.join(out, "glyph_%s.png" % l))
     else:
         glyph(l, os.path.join(out, "glyph_%s.png" % l))
 if art:
-    glyph360("a", os.path.join(art, "A-Button.png"), os.path.join(out, "glyph_a_button.png"), rim=True)
+    glyph360("a", os.path.join(art, "A-Button.png"), os.path.join(out, "glyph_a_button.png"))
+    start360(os.path.join(art, "disabled-Button.png"), os.path.join(out, "glyph_a.png"))
     print("wrote Xbox 360 glyphs to", out)
 else:
-    glyph("a", os.path.join(out, "glyph_a_button.png"), rim=True)
+    glyph("a", os.path.join(out, "glyph_a_button.png"))
+    start(os.path.join(out, "glyph_a.png"))
     print("wrote stand-in glyphs to", out)

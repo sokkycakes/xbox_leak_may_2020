@@ -265,7 +265,7 @@ def overlay_scene():
                    " <PointSize>%d</PointSize>" % round(111 * UI), " <TextStyle>16</TextStyle>", "</Properties>", "</XuiText>"]),
         # A + chevron under the panel
         "\n".join(["<XuiImage>", "<Properties>", " <Id>promptA</Id>", " <Width>26</Width>", " <Height>26</Height>",
-                   " <Position>347,336,0</Position>", " <ImagePath>glyph_a.png</ImagePath>", " <SizeMode>4</SizeMode>",
+                   " <Position>347,336,0</Position>", " <ImagePath>glyph_a_button.png</ImagePath>", " <SizeMode>4</SizeMode>",
                    "</Properties>", "</XuiImage>"]),
         "\n".join(["<XuiFigure>", "<Properties>", " <Id>chevron</Id>", " <Width>22</Width>", " <Height>12</Height>",
                    " <Position>349,366,0</Position>",
