@@ -1364,7 +1364,8 @@ int main(int argc, char **argv)
                 {0x03,0x1c,2,0x5543,{173,82,25,255}},
                 {0x04,0x1d,2,0xd159,{17,85,153,221}},
                 {0x38,0x3d,2,0xaa87,{173,82,25,255}},
-                {0x39,0x3e,2,0x159d,{17,85,153,221}}
+                {0x39,0x3e,2,0x159d,{17,85,153,221}},
+                {0x29,0x16,2,0x9955,{153,0,85,255}}   /* R8B8: red high, blue low, no green */
             };
             uint32_t saved_rs[256],saved_tss[128];
             memcpy(saved_rs,render_states,sizeof saved_rs);
@@ -1964,6 +1965,125 @@ int main(int argc, char **argv)
             memcpy(texture_states,saved_tss,sizeof saved_tss);
             puts("renderer passes: target switch resets viewport/scissors, viewport-clipped clear, "
                  "4096 visibility reports, adjusted shadow-buffer compare passed");
+
+            /* Window clip rectangles: a draw reaches the union of several
+             * inclusive ones once (additive blending would show an overlap
+             * drawn twice), exclusive ones keep it outside all of them, and
+             * GetScissors reports the viewport when none are set. */
+            {
+                void (NTAPI *get_scissors)(ULONG *,ULONG *,LONG *) = find("_D3DDevice_GetScissors@12");
+                ULONG n = 0, exclusive = 1;
+                LONG got[4] = {0};
+                set_viewport(&full_vp);
+                get_scissors(&n,&exclusive,got);
+                assert(n == 1 && exclusive == 0 && got[0] == 0 && got[1] == 0 && got[2] == 64 && got[3] == 64);
+                set_tex(0,NULL); set_ps(0); set_vs(0x44);
+                texture_states[14] = texture_states[18] = 0;
+                render_states[124] = 0;
+                render_states[59] = 1; render_states[62] = render_states[63] = 1;   /* ONE + ONE */
+                struct vertex half[3] = {
+                    {-64,-64,0.5f,1,0xff800000}, {192,-64,0.5f,1,0xff800000}, {32,192,0.5f,1,0xff800000}
+                };
+                const LONG two[8] = {0,0,40,40, 24,24,64,64};
+                set_scissors(2,0,two);
+                clear(0,NULL,0xf0,0xff000000,1.0f,0);
+                draw(5,3,half,sizeof half[0]);
+                /* D3D (x, y) is GL (x, 63 - y) on the back buffer. */
+                static const struct { int x, y, red; } inclusive[] = {
+                    {8,8,0x80}, {32,32,0x80}, {56,56,0x80}, {56,8,0}, {8,56,0}
+                };
+                for (unsigned i = 0; i < 5; i++) {
+                    glReadPixels(inclusive[i].x,63 - inclusive[i].y,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                    assert(abs((int)pixel[0] - inclusive[i].red) <= 2 && pixel[1] < 8 && pixel[2] < 8);
+                }
+                const LONG middle[4] = {16,16,48,48};
+                set_scissors(1,1,middle);
+                get_scissors(&n,&exclusive,got);
+                assert(n == 1 && exclusive == 1 && got[0] == 16 && got[3] == 48);
+                clear(0,NULL,0xf0,0xff000000,1.0f,0);
+                draw(5,3,half,sizeof half[0]);
+                glReadPixels(32,31,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                assert(pixel[0] < 8);
+                glReadPixels(8,55,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                assert(abs((int)pixel[0] - 0x80) <= 2);
+                render_states[59] = 0;
+                set_viewport(&full_vp);
+            }
+            puts("renderer scissors: inclusive union drawn once, exclusive rectangles, viewport report passed");
+
+            /* Recorded push buffers: a Nop becomes a jump over a draw and
+             * back, and a recorded EndVisibilityTest takes a new index. */
+            {
+                LONG (NTAPI *create_pb)(ULONG,ULONG,void **) = find("_D3DDevice_CreatePushBuffer@12");
+                void (NTAPI *begin_pb)(void *) = find("_D3DDevice_BeginPushBuffer@4");
+                LONG (NTAPI *end_pb)(void) = find("_D3DDevice_EndPushBuffer@0");
+                void (NTAPI *run_pb)(void *,void *) = find("_D3DDevice_RunPushBuffer@8");
+                void (NTAPI *pb_offset)(ULONG *) = find("_D3DDevice_GetPushBufferOffset@4");
+                void (NTAPI *nop)(void) = find("_D3DDevice_Nop@0");
+                void (NTAPI *jump)(void *,ULONG,ULONG) = find("_D3DPushBuffer_Jump@12");
+                LONG (NTAPI *fix_vis)(void *,ULONG,ULONG) = find("_D3DPushBuffer_EndVisibilityTest@12");
+                void *pb = NULL;
+                ULONG nop_at = 0, past_draw = 0, vis_at = 0, drawn = 1;
+                assert(create_pb(4096,0,&pb) == 0 && pb);
+                set_tex(0,NULL); set_ps(0); set_vs(0x44);
+                texture_states[14] = texture_states[18] = 0;
+                begin_pb(pb);
+                pb_offset(&nop_at); nop();
+                draw(5,3,cover,sizeof cover[0]);
+                pb_offset(&past_draw);
+                vis_begin(); pb_offset(&vis_at); assert(vis_end(40) == 0);
+                assert(end_pb() == 0);
+                for (unsigned pass = 0; pass < 3; pass++) {
+                    if (pass == 1) jump(pb,nop_at,past_draw);
+                    if (pass == 2) jump(pb,nop_at,nop_at);
+                    clear(0,NULL,0xf0,0xff000000,1.0f,0);
+                    run_pb(pb,NULL);
+                    glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                    assert(pass == 1 ? pixel[0] < 8 : pixel[0] > 240);
+                }
+                assert(fix_vis(pb,vis_at,41) == 0);
+                run_pb(pb,NULL);
+                while ((r = vis_result(41,&drawn,NULL)) == (LONG)0x88760828) {}
+                assert(r == 0 && drawn == 0);
+            }
+            puts("renderer push buffers: Nop/Jump fixups and EndVisibilityTest index fixup passed");
+
+            /* SetModelView: its composite matrix places fixed-function
+             * vertices (here moved half the target right) until it is
+             * turned off again; GetModelView reports it. */
+            {
+                void (NTAPI *set_transform)(ULONG,const float *) = find("_D3DDevice_SetTransform@8");
+                void (NTAPI *get_pv)(float *) = find("_D3DDevice_GetProjectionViewportMatrix@4");
+                void (NTAPI *set_mv)(const float *,const float *,const float *) = find("_D3DDevice_SetModelView@12");
+                LONG (NTAPI *get_mv)(float *) = find("_D3DDevice_GetModelView@4");
+                static const float ident[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+                for (ULONG t = 0; t < 10; t++) set_transform(t,ident);
+                uint32_t saved_cull = render_states[128];
+                render_states[92] = render_states[124] = render_states[128] = 0;
+                set_tex(0,NULL); set_ps(0); set_vs(0x42);   /* XYZ + diffuse */
+                struct { float x,y,z; uint32_t color; } left[3] = {
+                    {-0.9f,0.9f,0.5f,0xffff0000}, {-0.1f,0.9f,0.5f,0xffff0000}, {-0.5f,-0.9f,0.5f,0xffff0000}
+                };
+                float pv[16], composite[16], got[16];
+                get_pv(pv);
+                assert(pv[0] == 32 && pv[5] == -32 && pv[12] == 32 && pv[13] == 32);
+                for (int i = 0; i < 16; i++) composite[i] = pv[i];
+                for (int j = 0; j < 4; j++) composite[12 + j] += pv[j];   /* x + 1 before the viewport */
+                for (unsigned pass = 0; pass < 3; pass++) {
+                    if (pass == 1) set_mv(ident,NULL,composite);
+                    if (pass == 2) set_mv(NULL,NULL,NULL);
+                    assert(get_mv(got) == (pass == 1 ? 0 : 1));
+                    clear(0,NULL,0xf0,0xff000000,1.0f,0);
+                    draw(5,3,left,sizeof left[0]);
+                    unsigned char at_left[4], at_right[4];
+                    glReadPixels(16,31,1,1,GL_RGBA,GL_UNSIGNED_BYTE,at_left);
+                    glReadPixels(48,31,1,1,GL_RGBA,GL_UNSIGNED_BYTE,at_right);
+                    assert(pass == 1 ? at_left[0] < 8 && at_right[0] > 240 : at_left[0] > 240 && at_right[0] < 8);
+                }
+                render_states[128] = saved_cull;
+                set_vs(0x144);
+            }
+            puts("renderer model view: SetModelView composite placement and GetModelView status passed");
 
             /* Rewritten geometry is drawn on the next draw, not up to 16
              * frames later.  Both edits miss every position the cache

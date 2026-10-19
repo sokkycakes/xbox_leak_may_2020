@@ -196,6 +196,11 @@ typedef struct d3d_state {
     bool stipple_on;             /* NV097_SET_STIPPLE_CONTROL: polygon stipple */
     bool stipple_dirty;          /* the pattern changed since GL last got it */
     ULONG stipple[32];           /* NV097_SET_STIPPLE_PATTERN: one row of 32 pixels each */
+    /* Set[VertexBlend]ModelView: matrices given to the hardware directly in
+       place of the ones derived from the transforms (the library's
+       D3DDIRTYFLAG_DIRECT_MODELVIEW, m_ModelViewTransform and
+       m_ProjectionViewport).  `composite` maps to the viewport's pixels. */
+    struct { bool on, blend, has_inv; ULONG count; D3DMATRIX mv[4], inv[4], composite, proj_vp; } direct_mv;
 } d3d_state;
 
 /* The device state.  With XBCOMPAT_ASYNC_DRAWS the title's threads set
@@ -253,7 +258,7 @@ enum {
     OP_RS = 1, OP_TSS, OP_VS_CONST, OP_VERTEX_SHADER, OP_TEXTURE, OP_STREAM, OP_INDICES, OP_TRANSFORM,
     OP_VIEWPORT, OP_DRAW, OP_DRAW_INDEXED, OP_DRAW_UP, OP_DRAW_INDEXED_UP, OP_BEGIN_END, OP_PIXEL_SHADER,
     OP_PS_CONST, OP_VS_INPUT, OP_RENDER_TARGET, OP_PALETTE, OP_RUN, OP_CLEAR, OP_LIGHT, OP_LIGHT_ENABLE,
-    OP_MATERIAL, OP_RAW,
+    OP_MATERIAL, OP_RAW, OP_NOP, OP_VIS_BEGIN, OP_VIS_END, OP_MODELVIEW, OP_BLEND_MODELVIEW, OP_SCISSORS,
 };
 
 /* An Xbox surface: a pixel container plus the texture it belongs to. */
@@ -1167,6 +1172,95 @@ static ULONG NTAPI D3DDevice_Swap(ULONG Flags)
     return d3d.frame;
 }
 
+/* The window clip (SetScissors) as GL scissor boxes: none (n < 0) with no
+   rectangles set, which leaves the viewport; else disjoint boxes covering
+   the union of the rectangles (inclusive) or the target outside all of them
+   (exclusive).  GL has one scissor box, so a draw runs once per box
+   (scissor_pass); the boxes don't overlap, so blending sees each pixel once. */
+#define SCISSOR_BOXES (17 * 17)
+static struct { int n; GLint box[SCISSOR_BOXES][4]; } scissor_boxes = { -1, { { 0 } } };
+
+static int long_cmp(const void *a, const void *b)
+{
+    LONG x = *(const LONG *)a, y = *(const LONG *)b;
+    return x < y ? -1 : x > y;
+}
+
+static void scissor_box_add(LONG x1, LONG y1, LONG x2, LONG y2)
+{
+    /* Grow a box from the band above when it spans the same columns. */
+    for (int i = 0; i < scissor_boxes.n; i++) {
+        GLint *b = scissor_boxes.box[i];
+        if (b[0] == x1 && b[2] == x2 - x1 && b[1] + b[3] == y1) { b[3] = y2 - b[1]; return; }
+    }
+    if (scissor_boxes.n == SCISSOR_BOXES) return;
+    GLint *b = scissor_boxes.box[scissor_boxes.n++];
+    b[0] = x1; b[1] = y1; b[2] = x2 - x1; b[3] = y2 - y1;
+}
+
+static void scissor_build(void)
+{
+    ULONG count = d3d.scissors.count > 8 ? 8 : d3d.scissors.count;
+    const D3DRECT *r = d3d.scissors.rects;
+    scissor_boxes.n = -1;
+    if (!count) return;
+    scissor_boxes.n = 0;
+    if (count == 1 && !d3d.scissors.exclusive) {
+        scissor_boxes.n = 1;
+        GLint *b = scissor_boxes.box[0];
+        b[0] = r->x1; b[1] = r->y1; b[2] = r->x2 - r->x1; b[3] = r->y2 - r->y1;
+    } else {
+        /* Cut the target along every rectangle edge; each cell is wholly
+           inside or outside each rectangle.  Rows of wanted cells become
+           spans, and spans repeating down the bands one box. */
+        LONG w = d3d.rt_width, h = d3d.rt_height, xs[18], ys[18];
+        unsigned nx = 0, ny = 0;
+        xs[nx++] = 0; xs[nx++] = w; ys[ny++] = 0; ys[ny++] = h;
+        for (ULONG i = 0; i < count; i++) {
+            xs[nx++] = r[i].x1 < 0 ? 0 : r[i].x1 > w ? w : r[i].x1;
+            xs[nx++] = r[i].x2 < 0 ? 0 : r[i].x2 > w ? w : r[i].x2;
+            ys[ny++] = r[i].y1 < 0 ? 0 : r[i].y1 > h ? h : r[i].y1;
+            ys[ny++] = r[i].y2 < 0 ? 0 : r[i].y2 > h ? h : r[i].y2;
+        }
+        qsort(xs, nx, sizeof xs[0], long_cmp);
+        qsort(ys, ny, sizeof ys[0], long_cmp);
+        for (unsigned j = 0; j + 1 < ny; j++) {
+            if (ys[j] == ys[j + 1]) continue;
+            LONG start = -1;
+            for (unsigned i = 0; i + 1 < nx; i++) {
+                if (xs[i] == xs[i + 1]) continue;
+                bool inside = false;
+                for (ULONG k = 0; k < count && !inside; k++)
+                    inside = xs[i] >= r[k].x1 && xs[i + 1] <= r[k].x2 && ys[j] >= r[k].y1 && ys[j + 1] <= r[k].y2;
+                bool want = inside != (d3d.scissors.exclusive != 0);
+                if (want && start < 0) start = xs[i];
+                if (!want && start >= 0) {
+                    scissor_box_add(start, ys[j], xs[i], ys[j + 1]);
+                    start = -1;
+                }
+            }
+            if (start >= 0) scissor_box_add(start, ys[j], xs[nx - 1], ys[j + 1]);
+        }
+    }
+    /* To GL's window coordinates (rows bottom-up) unless drawing into a
+       texture, which is stored flipped. */
+    if (!d3d.rt_texture)
+        for (int i = 0; i < scissor_boxes.n; i++) {
+            GLint *b = scissor_boxes.box[i];
+            b[1] = d3d.rt_height - (b[1] + b[3]);
+        }
+}
+
+/* Before each GL draw call: false once the draw has gone to every box. */
+static bool scissor_pass(unsigned pass)
+{
+    if (scissor_boxes.n < 0) return pass == 0;
+    if ((int)pass >= scissor_boxes.n) return false;
+    const GLint *b = scissor_boxes.box[pass];
+    glScissor(b[0], b[1], b[2], b[3]);
+    return true;
+}
+
 static void apply_viewport(void)
 {
     hud_batch_flush();
@@ -1176,11 +1270,10 @@ static void apply_viewport(void)
     if (d3d.rt_texture) glViewport(v->X, v->Y, v->Width, v->Height);
     else glViewport(v->X, d3d.rt_height - (v->Y + v->Height), v->Width, v->Height);
     glDepthRange(v->MinZ, v->MaxZ);
-    if (d3d.scissors.count && !d3d.scissors.exclusive) {
-        const D3DRECT *r = &d3d.scissors.rects[0];
+    scissor_build();
+    if (scissor_boxes.n >= 0) {
         glEnable(GL_SCISSOR_TEST);
-        if (d3d.rt_texture) glScissor(r->x1, r->y1, r->x2 - r->x1, r->y2 - r->y1);
-        else glScissor(r->x1, d3d.rt_height - r->y2, r->x2 - r->x1, r->y2 - r->y1);
+        scissor_pass(0);
     } else {
         glDisable(GL_SCISSOR_TEST);
     }
@@ -1402,12 +1495,33 @@ static void NTAPI D3D_FreeContiguousMemory(PVOID p)
     MmFreeContiguousMemory(p);
 }
 
+/* Texture data registered again, for the next texture lookup (on the GL
+   thread: titles load bundles on threads of their own) to drop the GL
+   copies of. */
+#define TEX_STALE 4096
+static ULONG tex_stale[TEX_STALE];
+static unsigned tex_stale_put, tex_stale_got;
+
+static void tex_stale_note(ULONG data)
+{
+    unsigned n = __atomic_load_n(&tex_stale_put, __ATOMIC_RELAXED);
+    tex_stale[n % TEX_STALE] = data;
+    __atomic_store_n(&tex_stale_put, n + 1, __ATOMIC_RELEASE);
+}
+
+static void tex_stale_drop(void);
+
 static void NTAPI D3DResource_Register(D3DResource *r, PVOID base)
 {
     ULONG mem = (ULONG)base + r->Data, type = r->Common & D3DCOMMON_TYPE_MASK;
     /* Push and index buffers keep a virtual address (the CPU reads them);
        everything else a GPU (physical) one. */
     r->Data = type == D3DCOMMON_TYPE_PUSHBUFFER || type == D3DCOMMON_TYPE_INDEXBUFFER ? mem : (mem & 0x7FFFFFFF);
+    /* A bundle (XPR) loaded again into the same memory registers the same
+       addresses over new contents: the GL copies made from the old ones go. */
+    if (type == D3DCOMMON_TYPE_TEXTURE || type == D3DCOMMON_TYPE_SURFACE) tex_stale_note(r->Data);
+    else if (type == D3DCOMMON_TYPE_VERTEXBUFFER || type == D3DCOMMON_TYPE_INDEXBUFFER)
+        note_vb_lock((const UCHAR *)resource_data(r), 0);
 }
 
 /* ---- textures ---------------------------------------------------------- */
@@ -1617,7 +1731,10 @@ static void upload_image3(GLenum target, GLint level, ULONG fmt, ULONG w, ULONG 
        5 = A8, which the NV2A samples as white with that alpha;
        6 = AL8, one byte that is both luminance and alpha;
        7 = P8, an index into the stage's palette of A8R8G8B8 colors;
-       8 = V16U16, kept to its high bytes and stored like V8U8. */
+       8 = V16U16, kept to its high bytes and stored like V8U8;
+       9 = R8B8, red in the high byte and blue in the low one (the XDK's
+       pixel descriptions, e.g. xfont's g_Formats and the D3D test
+       framework's masks 0xFF00 / 0x00FF): no green, and opaque. */
     struct { ULONG fmt; int bpp; bool swizzled; GLenum gl_fmt, gl_type; bool force_alpha; int conv; } table[] = {
         { 0x3A, 4, true,  GL_RGBA, GL_UNSIGNED_BYTE, false, 0 },               /* A8B8G8R8 / Q8W8V8U8 */
         { 0x3F, 4, false, GL_RGBA, GL_UNSIGNED_BYTE, false, 0 },               /* LIN_A8B8G8R8 */
@@ -1658,6 +1775,8 @@ static void upload_image3(GLenum target, GLint level, ULONG fmt, ULONG w, ULONG 
         { 0x1B, 1, false, GL_RGBA, GL_UNSIGNED_BYTE, false, 6 },              /* LIN_AL8 */
         { 0x1A, 2, true,  GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE, false, 0 },   /* A8L8 */
         { 0x20, 2, false, GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE, false, 0 },   /* LIN_A8L8 */
+        { 0x29, 2, true,  GL_RGBA, GL_UNSIGNED_BYTE, false, 9 },            /* R8B8 */
+        { 0x16, 2, false, GL_RGBA, GL_UNSIGNED_BYTE, false, 9 },            /* LIN_R8B8 */
         { 0x24, 2, false, GL_RGBA, GL_UNSIGNED_BYTE, false, 3 },            /* YUY2 */
         { 0x25, 2, false, GL_RGBA, GL_UNSIGNED_BYTE, false, 4 },            /* UYVY */
     };
@@ -1718,6 +1837,15 @@ static void upload_image3(GLenum target, GLint level, ULONG fmt, ULONG w, ULONG 
             uint8_t *o = px + k * 4;
             o[0] = o[1] ^ 0x80; o[1] = o[3] ^ 0x80; o[2] = o[3] = 0xFF;
         }
+    } else if (table[i].conv == 9) {
+        uint8_t *rgba = malloc(w * h * d * 4);
+        for (ULONG k = 0; k < w * h * d; k++) {
+            uint8_t *o = rgba + k * 4;
+            o[0] = px[k * 2 + 1]; o[1] = 0; o[2] = px[k * 2]; o[3] = 0xFF;
+        }
+        free(px);
+        px = rgba;
+        bpp = 4;
     } else if (table[i].conv == 7) {
         uint8_t *bgra = malloc(w * h * d * 4);
         for (ULONG k = 0; k < w * h * d; k++) {
@@ -1832,8 +1960,22 @@ static uint64_t depth_memory_hash(void)
     return x;
 }
 
+static void tex_stale_drop(void)
+{
+    unsigned put = __atomic_load_n(&tex_stale_put, __ATOMIC_ACQUIRE);
+    if (put == tex_stale_got) return;
+    if (put - tex_stale_got > TEX_STALE) {
+        xlog("D3D: %u textures registered again at once; the oldest %u keep their GL copies",
+             put - tex_stale_got, put - tex_stale_got - TEX_STALE);
+        tex_stale_got = put - TEX_STALE;
+    }
+    for (unsigned i = tex_stale_got; i != put; i++) tex_invalidate(tex_stale[i % TEX_STALE]);
+    tex_stale_got = put;
+}
+
 static GLuint texture_for(D3DPixelContainer *t)
 {
+    tex_stale_drop();
     if (hud_packet_active)   /* a captured HUD packet bound its textures already */
         for (int s = 0; s < 4; s++)
             if (d3d.textures[s] == (D3DResource *)t) return hud_packet_texture_id[s];
@@ -2582,6 +2724,77 @@ static void mat_mul(D3DMATRIX *out, const D3DMATRIX *a, const D3DMATRIX *b)
     *out = r;
 }
 
+/* UpdateProjectionViewportTransform's viewport matrix: clip space to the
+   viewport's pixels and the depth buffer's range, all of it scaled by
+   zscale / wfar with D3DZB_USEW (the library then w-buffers). */
+static void viewport_transform(D3DMATRIX *vp)
+{
+    const D3DVIEWPORT8 *v = &d3d.viewport;
+    const D3DMATRIX *p = &d3d.transforms[1];
+    float s = 1;
+    if (RS(D3DRS_ZENABLE) == 2 /* D3DZB_USEW */) {
+        float wfar = p->m[2][2] == p->m[2][3] || p->m[2][2] == 0 ? 1
+                     : (p->m[3][3] - p->m[3][2]) / (p->m[2][2] - p->m[2][3]) * p->m[2][3] + p->m[3][3];
+        if (wfar != 0) s = d3d.zscale / wfar;
+    }
+    memset(vp, 0, sizeof(*vp));
+    vp->m[0][0] = vp->m[3][0] = 0.5f * v->Width * s;
+    vp->m[1][1] = -0.5f * v->Height * s;
+    vp->m[3][1] = 0.5f * v->Height * s;
+    vp->m[2][2] = d3d.zscale * (v->MaxZ - v->MinZ) * s;
+    vp->m[3][2] = d3d.zscale * v->MinZ * s;
+    vp->m[3][3] = s;
+}
+
+/* The inverse of a general 4x4 matrix; false when it is singular. */
+static bool mat_inverse(D3DMATRIX *out, const D3DMATRIX *m)
+{
+    const float *a = &m->m[0][0];
+    float inv[16];
+    inv[0] = a[5]*a[10]*a[15] - a[5]*a[11]*a[14] - a[9]*a[6]*a[15] + a[9]*a[7]*a[14] + a[13]*a[6]*a[11] - a[13]*a[7]*a[10];
+    inv[4] = -a[4]*a[10]*a[15] + a[4]*a[11]*a[14] + a[8]*a[6]*a[15] - a[8]*a[7]*a[14] - a[12]*a[6]*a[11] + a[12]*a[7]*a[10];
+    inv[8] = a[4]*a[9]*a[15] - a[4]*a[11]*a[13] - a[8]*a[5]*a[15] + a[8]*a[7]*a[13] + a[12]*a[5]*a[11] - a[12]*a[7]*a[9];
+    inv[12] = -a[4]*a[9]*a[14] + a[4]*a[10]*a[13] + a[8]*a[5]*a[14] - a[8]*a[6]*a[13] - a[12]*a[5]*a[10] + a[12]*a[6]*a[9];
+    inv[1] = -a[1]*a[10]*a[15] + a[1]*a[11]*a[14] + a[9]*a[2]*a[15] - a[9]*a[3]*a[14] - a[13]*a[2]*a[11] + a[13]*a[3]*a[10];
+    inv[5] = a[0]*a[10]*a[15] - a[0]*a[11]*a[14] - a[8]*a[2]*a[15] + a[8]*a[3]*a[14] + a[12]*a[2]*a[11] - a[12]*a[3]*a[10];
+    inv[9] = -a[0]*a[9]*a[15] + a[0]*a[11]*a[13] + a[8]*a[1]*a[15] - a[8]*a[3]*a[13] - a[12]*a[1]*a[11] + a[12]*a[3]*a[9];
+    inv[13] = a[0]*a[9]*a[14] - a[0]*a[10]*a[13] - a[8]*a[1]*a[14] + a[8]*a[2]*a[13] + a[12]*a[1]*a[10] - a[12]*a[2]*a[9];
+    inv[2] = a[1]*a[6]*a[15] - a[1]*a[7]*a[14] - a[5]*a[2]*a[15] + a[5]*a[3]*a[14] + a[13]*a[2]*a[7] - a[13]*a[3]*a[6];
+    inv[6] = -a[0]*a[6]*a[15] + a[0]*a[7]*a[14] + a[4]*a[2]*a[15] - a[4]*a[3]*a[14] - a[12]*a[2]*a[7] + a[12]*a[3]*a[6];
+    inv[10] = a[0]*a[5]*a[15] - a[0]*a[7]*a[13] - a[4]*a[1]*a[15] + a[4]*a[3]*a[13] + a[12]*a[1]*a[7] - a[12]*a[3]*a[5];
+    inv[14] = -a[0]*a[5]*a[14] + a[0]*a[6]*a[13] + a[4]*a[1]*a[14] - a[4]*a[2]*a[13] - a[12]*a[1]*a[6] + a[12]*a[2]*a[5];
+    inv[3] = -a[1]*a[6]*a[11] + a[1]*a[7]*a[10] + a[5]*a[2]*a[11] - a[5]*a[3]*a[10] - a[9]*a[2]*a[7] + a[9]*a[3]*a[6];
+    inv[7] = a[0]*a[6]*a[11] - a[0]*a[7]*a[10] - a[4]*a[2]*a[11] + a[4]*a[3]*a[10] + a[8]*a[2]*a[7] - a[8]*a[3]*a[6];
+    inv[11] = -a[0]*a[5]*a[11] + a[0]*a[7]*a[9] + a[4]*a[1]*a[11] - a[4]*a[3]*a[9] - a[8]*a[1]*a[7] + a[8]*a[3]*a[5];
+    inv[15] = a[0]*a[5]*a[10] - a[0]*a[6]*a[9] - a[4]*a[1]*a[10] + a[4]*a[2]*a[9] + a[8]*a[1]*a[6] - a[8]*a[2]*a[5];
+    float det = a[0] * inv[0] + a[1] * inv[4] + a[2] * inv[8] + a[3] * inv[12];
+    if (det == 0 || !isfinite(det)) return false;
+    for (int i = 0; i < 16; i++) (&out->m[0][0])[i] = inv[i] / det;
+    return true;
+}
+
+/* With Set[VertexBlend]ModelView in effect: the modelview and the D3D clip
+   space projection that reproduce its matrices.  The hardware takes
+   positions straight to the viewport's pixels with the composite matrix
+   (with skinning, the blended eye position times it); undoing the viewport
+   transform gives the projection, and undoing the modelview too what GL
+   applies after its modelview. */
+static bool direct_modelview(D3DMATRIX *modelview, D3DMATRIX *proj)
+{
+    if (!d3d.direct_mv.on) return false;
+    D3DMATRIX vp, unview;
+    viewport_transform(&vp);
+    if (!mat_inverse(&unview, &vp)) return false;
+    *modelview = d3d.direct_mv.mv[0];
+    mat_mul(proj, &d3d.direct_mv.composite, &unview);
+    if (!d3d.direct_mv.blend) {
+        D3DMATRIX unmodel;
+        if (!mat_inverse(&unmodel, modelview)) return false;
+        mat_mul(proj, &unmodel, proj);
+    }
+    return true;
+}
+
 static GLenum gl_primitive(ULONG type)
 {
     static const GLenum map[] = { 0, GL_POINTS, GL_LINES, GL_LINE_LOOP, GL_LINE_STRIP, GL_TRIANGLES,
@@ -2813,10 +3026,14 @@ static void apply_render_states(bool pretransformed, bool has_normal)
         /* D3D row-vector matrices loaded as-is are the GL column-vector
            transforms.  D3D clip space has z in [0,w]; GL wants [-w,w]. */
         static const D3DMATRIX zfix = { { { 1, 0, 0, 0 }, { 0, 1, 0, 0 }, { 0, 0, 2, 0 }, { 0, 0, -1, 1 } } };
-        D3DMATRIX proj, modelview;
-        mat_mul(&proj, &d3d.transforms[1], &zfix);
+        D3DMATRIX proj, modelview, clip;
+        if (direct_modelview(&modelview, &clip)) {
+            mat_mul(&proj, &clip, &zfix);
+        } else {
+            mat_mul(&proj, &d3d.transforms[1], &zfix);
+            mat_mul(&modelview, &d3d.transforms[6], &d3d.transforms[0]);
+        }
         if (d3d.rt_texture) for (int i = 0; i < 4; i++) proj.m[i][1] = -proj.m[i][1];
-        mat_mul(&modelview, &d3d.transforms[6], &d3d.transforms[0]);
         glMatrixMode(GL_PROJECTION);
         glLoadMatrixf(&proj.m[0][0]);
         glMatrixMode(GL_MODELVIEW);
@@ -4045,10 +4262,20 @@ static void upload_fixed_lighting(program_entry *e)
     for (int i = 0; i < 4; i++) state[8][i] = TSS(i, D3DTSS_TEXCOORDINDEX) >> 16;
     if (blend && e->loc_ff_transform >= 0) {
         float transform[28][4] = {{0}};
+        /* SetVertexBlendModelView's matrices, else world i * view. */
+        bool direct = d3d.direct_mv.on && d3d.direct_mv.blend;
         for (unsigned i = 0; i < 4; i++) {
             D3DMATRIX mv;
-            mat_mul(&mv, &d3d.transforms[6+i], &d3d.transforms[0]);
+            if (direct) mv = d3d.direct_mv.mv[i];
+            else mat_mul(&mv, &d3d.transforms[6+i], &d3d.transforms[0]);
             memcpy(transform + 7*i, &mv, sizeof mv);
+            if (direct && d3d.direct_mv.has_inv && i < d3d.direct_mv.count) {
+                /* The title's inverse: normals go through its transpose. */
+                for (int row = 0; row < 3; row++)
+                    for (int col = 0; col < 3; col++)
+                        transform[7*i+4+row][col] = d3d.direct_mv.inv[i].m[col][row];
+                continue;
+            }
             /* Cofactor(M)/det(M) is the inverse transpose for row-vector
                normal transforms. Translation never participates. */
             float cofactor[3][3];
@@ -4707,9 +4934,10 @@ static void draw_programmable_(vshader *sh, ULONG PrimitiveType, const UCHAR *up
                             "programmable");
     if (whatif_skip_draw || whatif == WHATIF_NO_DRAWS) return;
     if (detail_on) t_gl0 = now_ns();
-    TIMED(t_gl, if (ix) glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, NULL);
-                else if (indices) glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, indices + first);
-                else glDrawArrays(gl_primitive(PrimitiveType), first, count));
+    for (unsigned pass = 0; scissor_pass(pass); pass++)
+        TIMED(t_gl, if (ix) glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, NULL);
+                    else if (indices) glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, indices + first);
+                    else glDrawArrays(gl_primitive(PrimitiveType), first, count));
     frame_draws++;
     if (flush_every && last_frame_draws >= FLUSH_MIN_DRAWS && !d3d.rt_texture && ++flush_count >= flush_every) {
         flush_count = 0;
@@ -4870,8 +5098,9 @@ static void draw_declared_(const vshader *sh, ULONG PrimitiveType, const UCHAR *
           indices ? indices + first : NULL, d3d.vertex_shader);
     shader_diagnostics_mark(d3d.frame, ++shader_diag_draw, d3d.vertex_shader, d3d.pixel_shader, cur_program,
                             "declared");
-    TIMED(t_gl, if (indices) glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, indices + first);
-                else glDrawArrays(gl_primitive(PrimitiveType), first, count));
+    for (unsigned pass = 0; scissor_pass(pass); pass++)
+        TIMED(t_gl, if (indices) glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, indices + first);
+                    else glDrawArrays(gl_primitive(PrimitiveType), first, count));
     end_program(e);
 }
 
@@ -5076,8 +5305,9 @@ static void draw_fvf(ULONG PrimitiveType, const UCHAR *base, ULONG stride, ULONG
         hud_batch_flush();
         shader_diagnostics_mark(d3d.frame, ++shader_diag_draw, d3d.vertex_shader, d3d.pixel_shader, cur_program,
                                 "fvf");
-        TIMED(t_gl, if (indices) glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, indices + first);
-                    else glDrawArrays(gl_primitive(PrimitiveType), first, count));
+        for (unsigned pass = 0; scissor_pass(pass); pass++)
+            TIMED(t_gl, if (indices) glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, indices + first);
+                        else glDrawArrays(gl_primitive(PrimitiveType), first, count));
     }
     if (eligible && !e) {
         memcpy(&fvf_plan.key, &key, sizeof(key)); fvf_plan.epoch = gc_epoch;
@@ -7187,17 +7417,13 @@ static void NTAPI D3DDevice_SetShaderConstantMode(ULONG mode)
 }
 static void NTAPI D3DDevice_GetShaderConstantMode(ULONG *mode) { *mode = d3d.constant_mode; }
 
+/* The library's m_ProjectionViewportTransform: the projection times the
+   viewport's scale to its pixels (relative to its corner: the hardware adds
+   X and Y itself) and z to the depth buffer's range. */
 static void NTAPI D3DDevice_GetProjectionViewportMatrix(D3DMATRIX *out)
 {
-    D3DVIEWPORT8 *v = &d3d.viewport;
     D3DMATRIX vp;
-    identity(&vp);
-    vp.m[0][0] = v->Width / 2.0f;
-    vp.m[1][1] = -(float)v->Height / 2.0f;
-    vp.m[2][2] = v->MaxZ - v->MinZ;
-    vp.m[3][0] = v->X + v->Width / 2.0f;
-    vp.m[3][1] = v->Y + v->Height / 2.0f;
-    vp.m[3][2] = v->MinZ;
+    viewport_transform(&vp);
     mat_mul(out, &d3d.transforms[1], &vp);
 }
 
@@ -7257,9 +7483,15 @@ static LONG NTAPI Direct3D_GetAdapterIdentifier(UINT_ a, ULONG flags, char *id)
     return D3D_OK;
 }
 
+/* The library keeps no rectangles as one inclusive rectangle over the
+   viewport (and SetViewport sets that); here a count of 0 stands for it,
+   so draws need no scissor, and GetScissors reports it as the library does. */
 static void NTAPI D3DDevice_SetScissors(ULONG Count, BOOLEAN Exclusive, const D3DRECT *rects)
 {
     if (Count > 8) Count = 8;
+    if (!rects) Count = 0;
+    if (!Count) Exclusive = 0;
+    if (d3d.recording) { ULONG h[2] = { Count, Exclusive }; pb_record2(OP_SCISSORS, h, 8, rects, Count * sizeof(D3DRECT)); }
     d3d.scissors.count = Count;
     d3d.scissors.exclusive = Exclusive;
     if (Count) memcpy(d3d.scissors.rects, rects, Count * sizeof(D3DRECT));
@@ -7267,9 +7499,15 @@ static void NTAPI D3DDevice_SetScissors(ULONG Count, BOOLEAN Exclusive, const D3
 
 static void NTAPI D3DDevice_GetScissors(ULONG *Count, ULONG *Exclusive, D3DRECT *rects)
 {
-    *Count = d3d.scissors.count;
-    *Exclusive = d3d.scissors.exclusive;
-    if (rects) memcpy(rects, d3d.scissors.rects, d3d.scissors.count * sizeof(D3DRECT));
+    const D3DVIEWPORT8 *v = &d3d.viewport;
+    D3DRECT whole = { (LONG)v->X, (LONG)v->Y, (LONG)(v->X + v->Width), (LONG)(v->Y + v->Height) };
+    ULONG n = d3d.scissors.count;
+    if (Count) *Count = n ? n : 1;
+    if (Exclusive) *Exclusive = n ? d3d.scissors.exclusive : 0;
+    if (rects) {
+        if (n) memcpy(rects, d3d.scissors.rects, n * sizeof(D3DRECT));
+        else rects[0] = whole;
+    }
 }
 
 /* Callbacks run "when the GPU gets there": we run them at the next sync point. */
@@ -7811,6 +8049,8 @@ static struct {
     float vs_const[192][4], ps_const[16][4], eye_vector[4];
     D3DPalette *palettes[4];
     D3DSurface *target, *target_depth;
+    typeof(d3d.scissors) scissors;
+    typeof(d3d.direct_mv) direct_mv;
 } pb_saved;
 static ULONG pb_rs[D3DRS_MAX], pb_tss[4 * 32];   /* the state last written to the stream */
 
@@ -7911,6 +8151,8 @@ static void NTAPI D3DDevice_BeginPushBuffer(D3DPushBuffer *pb)
     memcpy(pb_saved.palettes, d3d.palettes, sizeof(pb_saved.palettes));
     pb_saved.target = d3d.target;
     pb_saved.target_depth = d3d.target_depth;
+    pb_saved.scissors = d3d.scissors;
+    pb_saved.direct_mv = d3d.direct_mv;
 }
 
 static LONG NTAPI D3DDevice_EndPushBuffer(void)
@@ -7939,6 +8181,8 @@ static LONG NTAPI D3DDevice_EndPushBuffer(void)
     memcpy(d3d.palettes, pb_saved.palettes, sizeof(pb_saved.palettes));
     if (d3d.target != pb_saved.target || d3d.target_depth != pb_saved.target_depth)
         D3DDevice_SetRenderTarget(pb_saved.target, pb_saved.target_depth);
+    d3d.scissors = pb_saved.scissors;   /* after SetRenderTarget, which resets them */
+    d3d.direct_mv = pb_saved.direct_mv;
     TRACE_ALL("D3D: recorded push buffer %p: %u dwords", (void *)pb, pb_stream_of(pb, true)->n);
     return D3D_OK;
 }
@@ -7991,11 +8235,25 @@ static LONG NTAPI D3DPushBuffer_EndFixup(D3DPushBuffer *pb)
     return D3D_OK;
 }
 
+/* Render and texture stage states the title set between GetPushBufferOffset
+   and the call it means to fix up are recorded ahead of that call: the
+   offset of the op of kind `op` at or just past those, as recorded. */
+static ULONG pb_op_offset(D3DPushBuffer *b, ULONG offset, unsigned op)
+{
+    pb_stream *pb = pb_stream_of(b, false);
+    unsigned i = offset / 4;
+    while (pb && pb->ops && i < pb->n && (pb->ops[i] & 0xFF) != op
+           && ((pb->ops[i] & 0xFF) == OP_RS || (pb->ops[i] & 0xFF) == OP_TSS))
+        i += pb->ops[i] >> 8;
+    return i * 4;
+}
+
 /* The op recorded at `offset`, or NULL (with one complaint) when there is
    no op of that kind there. */
 static ULONG *pb_op_at(D3DPushBuffer *b, ULONG offset, unsigned op)
 {
     pb_stream *pb = pb_stream_of(b, false);
+    offset = pb_op_offset(b, offset, op);
     if (pb && pb->ops && offset / 4 < pb->n && (pb->ops[offset / 4] & 0xFF) == op) return pb->ops + offset / 4 + 1;
     static bool warned;
     if (!warned) {
@@ -8018,7 +8276,7 @@ static ULONG *fixup_payload(D3DPushBuffer *pb, ULONG offset, unsigned op, unsign
         if (fx->Next > fx->Size) return NULL;
         ULONG *e = (ULONG *)(fx->Data + at);
         e[0] = size;
-        e[1] = offset;
+        e[1] = pb_op_offset(pb, offset, op);
         e[2] = op;
         return e + 3;
     }
@@ -8087,6 +8345,47 @@ static void NTAPI D3DPushBuffer_RunPushBuffer(D3DPushBuffer *pb, ULONG Offset, D
     if (p) { p[0] = (ULONG)dest; p[1] = (ULONG)fx; }
 }
 
+/* Offset holds a recorded Nop (or an earlier jump): running the buffer then
+   goes on at DestinationOffset of the same buffer, or past the Nop when the
+   two offsets are equal. */
+static void NTAPI D3DPushBuffer_Jump(D3DPushBuffer *pb, ULONG Offset, ULONG DestinationOffset)
+{
+    ULONG *p = fixup_payload(pb, Offset, OP_NOP, 8);
+    if (p) { p[0] = Offset != DestinationOffset; p[1] = DestinationOffset; }
+}
+
+static void NTAPI D3DPushBuffer_SetModelView(D3DPushBuffer *pb, ULONG Offset, const D3DMATRIX *mv,
+                                             const D3DMATRIX *inv, const D3DMATRIX *composite)
+{
+    ULONG *p = fixup_payload(pb, Offset, OP_MODELVIEW, 4 + 3 * sizeof(D3DMATRIX));
+    if (!p) return;
+    p[0] = (mv && composite) | (inv != NULL) << 1;
+    if (mv) memcpy(p + 1, mv, sizeof(D3DMATRIX));
+    if (inv) memcpy(p + 17, inv, sizeof(D3DMATRIX));
+    if (composite) memcpy(p + 33, composite, sizeof(D3DMATRIX));
+}
+
+static void NTAPI D3DPushBuffer_SetVertexBlendModelView(D3DPushBuffer *pb, ULONG Offset, UINT_ count,
+                                                        const D3DMATRIX *mv, const D3DMATRIX *inv,
+                                                        const D3DMATRIX *proj_vp)
+{
+    ULONG *p = fixup_payload(pb, Offset, OP_BLEND_MODELVIEW, 8 + 9 * sizeof(D3DMATRIX));
+    if (!p) return;
+    if (count > 4) count = 4;
+    p[0] = mv ? count : 0;
+    p[1] = (mv != NULL) | (inv != NULL) << 1 | (proj_vp != NULL) << 2;
+    if (mv) memcpy(p + 2, mv, count * sizeof(D3DMATRIX));
+    if (inv) memcpy(p + 2 + 64, inv, count * sizeof(D3DMATRIX));
+    if (proj_vp) memcpy(p + 2 + 128, proj_vp, sizeof(D3DMATRIX));
+}
+
+static LONG NTAPI D3DPushBuffer_EndVisibilityTest(D3DPushBuffer *pb, ULONG Offset, ULONG Index)
+{
+    ULONG *p = fixup_payload(pb, Offset, OP_VIS_END, 4);
+    if (p) p[0] = Index;
+    return D3D_OK;
+}
+
 static void NTAPI D3DPushBuffer_Verify(D3DPushBuffer *pb, ULONG StampResources) { (void)pb; (void)StampResources; }
 
 /* ---- running ---- */
@@ -8094,10 +8393,26 @@ static void NTAPI D3DPushBuffer_Verify(D3DPushBuffer *pb, ULONG StampResources) 
 static void pb_interpret(const ULONG *p, unsigned n);
 static void pb_run(D3DPushBuffer *b, D3DFixup *fx, int depth);
 
+static void NTAPI D3DDevice_BeginVisibilityTest(void);
+static LONG NTAPI D3DDevice_EndVisibilityTest(ULONG index);
+static void NTAPI D3DDevice_SetModelView(const D3DMATRIX *mv, const D3DMATRIX *inv, const D3DMATRIX *composite);
+static void NTAPI D3DDevice_SetVertexBlendModelView(UINT_ count, const D3DMATRIX *mv, const D3DMATRIX *inv,
+                                                    const D3DMATRIX *proj_vp);
+static void NTAPI D3DDevice_SetScissors(ULONG Count, BOOLEAN Exclusive, const D3DRECT *rects);
+
+/* Whether `i` (in dwords) starts a recorded op: a jump may only go there. */
+static bool pb_op_boundary(const pb_stream *pb, unsigned i)
+{
+    unsigned k = 0;
+    while (k < i && k < pb->n) k += pb->ops[k] >> 8;
+    return k == i;
+}
+
 static void pb_run_body(D3DPushBuffer *b, D3DFixup *fx, int depth)
 {
     pb_stream *pb = pb_stream_of(b, false);
     if (!pb || !pb->ops || depth > 8) return;
+    unsigned jumps = 0;
     for (unsigned i = 0; i < pb->n;) {
         const ULONG *p = pb->ops + i;
         unsigned op = p[0] & 0xFF, len = p[0] >> 8;
@@ -8150,6 +8465,29 @@ static void pb_run_body(D3DPushBuffer *b, D3DFixup *fx, int depth)
         case OP_LIGHT_ENABLE: D3DDevice_LightEnable(a[0], a[1]); break;
         case OP_MATERIAL: D3DDevice_SetMaterial((const float *)a); break;
         case OP_RAW: pb_interpret(a + 1, a[0]); break;
+        case OP_NOP:
+            if (!a[0]) break;
+            /* A jump: a title loops only as long as some other agent (a DPC,
+               a fixup between runs) changes it; give up on one that won't end. */
+            if (a[1] / 4 > pb->n || !pb_op_boundary(pb, a[1] / 4) || ++jumps > 1u << 16) {
+                xlog("D3D: push buffer jump from %u to %u abandoned", i * 4, a[1]);
+                return;
+            }
+            i = a[1] / 4;
+            continue;
+        case OP_VIS_BEGIN: D3DDevice_BeginVisibilityTest(); break;
+        case OP_VIS_END: D3DDevice_EndVisibilityTest(a[0]); break;
+        case OP_MODELVIEW:
+            D3DDevice_SetModelView(a[0] & 1 ? (const D3DMATRIX *)(a + 1) : NULL,
+                                   a[0] & 2 ? (const D3DMATRIX *)(a + 17) : NULL,
+                                   a[0] & 1 ? (const D3DMATRIX *)(a + 33) : NULL);
+            break;
+        case OP_BLEND_MODELVIEW:
+            D3DDevice_SetVertexBlendModelView(a[0], a[1] & 1 ? (const D3DMATRIX *)(a + 2) : NULL,
+                                              a[1] & 2 ? (const D3DMATRIX *)(a + 2 + 64) : NULL,
+                                              a[1] & 4 ? (const D3DMATRIX *)(a + 2 + 128) : NULL);
+            break;
+        case OP_SCISSORS: D3DDevice_SetScissors(a[0], (BOOLEAN)a[1], a[0] ? (const D3DRECT *)(a + 2) : NULL); break;
         default: xlog("D3D: bad push buffer op %u", op); return;
         }
         i += len;
@@ -8468,7 +8806,11 @@ static void NTAPI CDevice_SetStateVB(PVOID self, ULONG x) { (void)self; (void)x;
 static void NTAPI CDevice_SetStateUP(PVOID self) { (void)self; pusher_drain(); }
 static void NTAPI CDevice_KickOff(PVOID self) { (void)self; pusher_drain(); }
 
-static void NTAPI D3DDevice_Nop(void) {}
+/* Recorded, a Nop holds the place of a later D3DPushBuffer_Jump. */
+static void NTAPI D3DDevice_Nop(void)
+{
+    if (d3d.recording) { ULONG a[2] = { 0, 0 }; pb_record(OP_NOP, a, sizeof(a)); }
+}
 
 /* ---- odds and ends ----------------------------------------------------- */
 
@@ -8540,6 +8882,7 @@ static GLuint vis_active;
 static void NTAPI D3DDevice_BeginVisibilityTest(void)
 {
     pusher_drain();
+    if (d3d.recording) { ULONG a = 0; pb_record(OP_VIS_BEGIN, &a, 4); return; }
     if (async_front()) { async_vis_begin(); return; }
     hud_batch_flush();
     if (!p_glGenQueries || vis_active) return;
@@ -8551,6 +8894,7 @@ static void NTAPI D3DDevice_BeginVisibilityTest(void)
 static LONG NTAPI D3DDevice_EndVisibilityTest(ULONG index)
 {
     pusher_drain();
+    if (d3d.recording) { pb_record(OP_VIS_END, &index, 4); return D3D_OK; }
     if (async_front()) { async_vis_end(index); return D3D_OK; }
     hud_batch_flush();
     if (!vis_active) return D3DERR_INVALIDCALL;
@@ -8882,27 +9226,38 @@ static void NTAPI D3DDevice_GetScreenSpaceOffset(float *x, float *y)
     *y = d3d.screen_offset[1];
 }
 
-/* SetVertexBlendModelView overrides the skinning matrices the fixed-function
-   pipeline derives from the world and view transforms.  They are kept for
-   GetVertexBlendModelView; drawing still uses the transforms (noted once). */
-static struct { bool on; UINT_ count; D3DMATRIX mv[4], proj_vp; } blend_mv;
+/* SetVertexBlendModelView gives the skinning matrices and the projection
+   (with the viewport) directly, in place of the ones the fixed-function
+   pipeline derives from the world, view and projection transforms, until
+   it is called with NULL (apply_direct_modelview draws with them). */
 static void NTAPI D3DDevice_SetVertexBlendModelView(UINT_ count, const D3DMATRIX *mv, const D3DMATRIX *inv,
                                                     const D3DMATRIX *proj_vp)
 {
-    (void)inv;
-    blend_mv.on = mv != NULL;
+    if (d3d.recording) {
+        static ULONG rec[2 + 9 * 16];
+        memset(rec, 0, sizeof(rec));
+        ULONG n = count > 4 ? 4 : count;
+        rec[0] = mv ? n : 0;
+        rec[1] = (mv != NULL) | (inv != NULL) << 1 | (proj_vp != NULL) << 2;
+        if (mv) memcpy(rec + 2, mv, n * sizeof(D3DMATRIX));
+        if (inv) memcpy(rec + 2 + 64, inv, n * sizeof(D3DMATRIX));
+        if (proj_vp) memcpy(rec + 2 + 128, proj_vp, sizeof(D3DMATRIX));
+        pb_record(OP_BLEND_MODELVIEW, rec, sizeof(rec));
+    }
+    d3d.direct_mv.on = mv != NULL;
     if (!mv) return;
-    blend_mv.count = count > 4 ? 4 : count;
-    memcpy(blend_mv.mv, mv, blend_mv.count * sizeof(D3DMATRIX));
-    if (proj_vp) blend_mv.proj_vp = *proj_vp;
-    static bool noted;
-    if (!noted) { noted = true; xlog("D3D: SetVertexBlendModelView overrides are kept but not drawn with"); }
+    d3d.direct_mv.blend = true;
+    d3d.direct_mv.count = count > 4 ? 4 : count;
+    d3d.direct_mv.has_inv = inv != NULL;
+    memcpy(d3d.direct_mv.mv, mv, d3d.direct_mv.count * sizeof(D3DMATRIX));
+    if (inv) memcpy(d3d.direct_mv.inv, inv, d3d.direct_mv.count * sizeof(D3DMATRIX));
+    if (proj_vp) d3d.direct_mv.composite = d3d.direct_mv.proj_vp = *proj_vp;
 }
 static LONG NTAPI D3DDevice_GetVertexBlendModelView(UINT_ count, D3DMATRIX *mv, D3DMATRIX *proj_vp)
 {
-    if (mv) memcpy(mv, blend_mv.mv, (count > 4 ? 4 : count) * sizeof(D3DMATRIX));
-    if (proj_vp) *proj_vp = blend_mv.proj_vp;
-    return blend_mv.on ? D3D_OK : 1 /* S_FALSE */;
+    if (mv) memcpy(mv, d3d.direct_mv.mv, (count > 4 ? 4 : count) * sizeof(D3DMATRIX));
+    if (proj_vp) *proj_vp = d3d.direct_mv.proj_vp;
+    return d3d.direct_mv.on ? D3D_OK : 1 /* S_FALSE */;
 }
 
 /* The inline Release in 5xxx headers drops the count itself and calls this
@@ -8920,16 +9275,37 @@ static void NTAPI D3DDevice_MultiplyTransform(ULONG State, const D3DMATRIX *m)
     D3DDevice_SetTransform(State, &r);
 }
 
-static void NTAPI D3DDevice_GetModelView(D3DMATRIX *m)
+/* The modelview SetModelView or SetVertexBlendModelView last gave, and
+   whether one is in effect (S_OK) or not (S_FALSE), as the library has it. */
+static LONG NTAPI D3DDevice_GetModelView(D3DMATRIX *m)
 {
-    mat_mul(m, &d3d.transforms[6], &d3d.transforms[0]);
+    if (m) *m = d3d.direct_mv.mv[0];
+    return d3d.direct_mv.on ? D3D_OK : 1 /* S_FALSE */;
 }
 
+/* SetModelView gives the modelview, its inverse (optional) and the
+   composite matrix (modelview * projection * viewport) directly, in place
+   of world * view and the projection transform, until it is called with
+   NULL (apply_direct_modelview draws with them). */
 static void NTAPI D3DDevice_SetModelView(const D3DMATRIX *mv, const D3DMATRIX *inv, const D3DMATRIX *composite)
 {
-    (void)inv; (void)composite;
-    static bool warned;
-    if (mv && !warned) { xlog("D3D: SetModelView overrides are ignored"); warned = true; }
+    if (d3d.recording) {
+        static ULONG rec[1 + 3 * 16];
+        memset(rec, 0, sizeof(rec));
+        rec[0] = (mv && composite) | (inv != NULL) << 1;
+        if (mv) memcpy(rec + 1, mv, sizeof(D3DMATRIX));
+        if (inv) memcpy(rec + 17, inv, sizeof(D3DMATRIX));
+        if (composite) memcpy(rec + 33, composite, sizeof(D3DMATRIX));
+        pb_record(OP_MODELVIEW, rec, sizeof(rec));
+    }
+    d3d.direct_mv.on = mv && composite;
+    if (!d3d.direct_mv.on) return;
+    d3d.direct_mv.blend = false;
+    d3d.direct_mv.count = 1;
+    d3d.direct_mv.has_inv = inv != NULL;
+    d3d.direct_mv.mv[0] = *mv;
+    if (inv) d3d.direct_mv.inv[0] = *inv;
+    d3d.direct_mv.composite = *composite;
 }
 
 static void NTAPI D3DDevice_GetViewportOffsetAndScale(float *offset, float *scale)
@@ -8937,7 +9313,7 @@ static void NTAPI D3DDevice_GetViewportOffsetAndScale(float *offset, float *scal
     /* The screen-space transform the hardware applies after projection
        (CDevice::GetViewportOffsetAndScale): pixel centres at +0.53125 and
        z scaled to the depth buffer's range. */
-    float zscale = d3d.depth ? (((d3d.depth->Format >> 8) & 0xFF) == 0x2C ? 65535.0f : 16777215.0f) : 1.0f;
+    float zscale = d3d.zscale;   /* the library's m_ZScale, from the last depth buffer set */
     const D3DVIEWPORT8 *v = &d3d.viewport;
     scale[0] = v->Width * 0.5f;
     scale[1] = -(v->Height * 0.5f);
@@ -9328,6 +9704,10 @@ const struct hle_func d3d8_funcs[] = {
     F("_D3DDevice_GetVertexShaderInput@12", D3DDevice_GetVertexShaderInput),
     F("_D3DDevice_SelectVertexShaderDirect@8", D3DDevice_SelectVertexShaderDirect),
     F("_D3DPushBuffer_SetVertexShaderInputDirect@20", D3DPushBuffer_SetVertexShaderInputDirect),
+    F("_D3DPushBuffer_Jump@12", D3DPushBuffer_Jump),
+    F("_D3DPushBuffer_SetModelView@20", D3DPushBuffer_SetModelView),
+    F("_D3DPushBuffer_SetVertexBlendModelView@24", D3DPushBuffer_SetVertexBlendModelView),
+    F("_D3DPushBuffer_EndVisibilityTest@12", D3DPushBuffer_EndVisibilityTest),
     F("_D3DDevice_GetDebugMarker@0", D3DDevice_GetDebugMarker),
     F("_D3DDevice_SetTileCompressionTagBits@16", D3DDevice_SetTileCompressionTagBits),
     F("_D3DDevice_GetTileCompressionTagBits@16", D3DDevice_GetTileCompressionTagBits),
