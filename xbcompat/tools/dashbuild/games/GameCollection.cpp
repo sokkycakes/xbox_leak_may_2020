@@ -790,12 +790,15 @@ void CGameCollection::LaunchGame(int nGame)
 // with D: there.
 void CGameCollection::LaunchXOnlineDash()
 {
-    OBJECT_STRING dDrive = CONSTANT_OBJECT_STRING("\\??\\D:");
-    OBJECT_STRING target = CONSTANT_OBJECT_STRING("\\Device\\Harddisk0\\Partition2\\xodash");
-    IoDeleteSymbolicLink(&dDrive);
-    IoCreateSymbolicLink(&dDrive, &target);
+    // The retail online dashboard returns straight to the dashboard unless
+    // it is launched from the dashboard: LDT_FROM_DASHBOARD with the
+    // dashboard's title ID, as config.cpp's BackToLauncher2 launches.
+    LD_FROM_DASHBOARD fd;
+    ZeroMemory(&fd, sizeof(fd));
+    fd.dwContext = 0;   // the controller port
     XAppGetD3DDev()->PersistDisplay();
-    XLaunchNewImage("D:\\xonlinedash.xbe", NULL);
+    XWriteTitleInfoAndReboot("xonlinedash.xbe", "\\Device\\Harddisk0\\Partition2\\xodash",
+        LDT_FROM_DASHBOARD, 0xfffe0000, (PLAUNCH_DATA)&fd);
 }
 
 ////////////////////////////////////////////////////////////////////////////

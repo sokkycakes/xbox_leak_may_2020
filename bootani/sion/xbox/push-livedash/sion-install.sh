@@ -3,7 +3,9 @@
 # Runs on the Sion (install.sh sends it with the kit, unpacked in /tmp/xbox-live-kit):
 #
 #   /data/xbox-live          the Live dashboard's xbcompat, its map, the Live
-#                            server, and xodash/ (xonlinedash.xbe and media)
+#                            server, and xodash/ (xonlinedash.xbe and media:
+#                            the leak's beta, or a retail one already there,
+#                            which is kept; the beta is also in xodash-beta)
 #   /opt/xbcompat/dash       the dashboard with the XBOX LIVE item (the old
 #                            files kept as *.pre-live) and xodash -> the above,
 #                            so C:\xodash\xonlinedash.xbe is there
@@ -15,15 +17,29 @@ K=/tmp/xbox-live-kit
 L=/data/xbox-live
 D=/opt/xbcompat/dash
 
+# The leak's beta Live dashboard goes in xodash-beta; it is xodash too
+# unless a retail one (a different xonlinedash.xbe) is already there.
+beta=$(md5sum < $K/xbox-live/xodash/xonlinedash.xbe)
+retail=
+[ -f $L/xodash/xonlinedash.xbe ] && [ "$(md5sum < $L/xodash/xonlinedash.xbe)" != "$beta" ] &&
+	[ ! -L $L/xodash ] && retail=1
 mkdir -p $L
-rm -rf $L/xodash.new
-cp -r $K/xbox-live/xodash $L/xodash.new
-rm -rf $L/xodash
-mv $L/xodash.new $L/xodash
+rm -rf $L/xodash-beta.new
+cp -r $K/xbox-live/xodash $L/xodash-beta.new
+rm -rf $L/xodash-beta
+mv $L/xodash-beta.new $L/xodash-beta
+cp $K/xbox-live/xodash.hlemap $L/xodash.hlemap.beta
+if [ -z "$retail" ]; then
+	rm -rf $L/xodash
+	cp -r $L/xodash-beta $L/xodash
+	cp $K/xbox-live/xodash.hlemap $L/xodash.hlemap
+else
+	echo "kept the retail Live dashboard in $L/xodash (the beta is in $L/xodash-beta)"
+fi
 mkdir -p $L/bin $L/liveserver
 cp $K/xbox-live/bin/xbcompat $L/bin/xbcompat.new && mv $L/bin/xbcompat.new $L/bin/xbcompat
 cp $K/xbox-live/liveserver/*.py $L/liveserver/
-cp $K/xbox-live/xodash.hlemap $K/xbox-live/launch-title $L/
+cp $K/xbox-live/launch-title $L/
 chmod 755 $L/bin/xbcompat $L/launch-title
 # The earlier side-by-side install's files.
 rm -rf $L/hdd/partition2 $L/live-dash
