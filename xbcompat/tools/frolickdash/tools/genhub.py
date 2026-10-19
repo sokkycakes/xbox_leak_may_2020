@@ -56,7 +56,12 @@ LABEL_OVERSAMPLE = 2                           # mkart.py renders the labels at 
 CAMERAS = {  # eye, view direction (-Z column), up (Y column), vertical fov in degrees
     "library": ((0.0, 0.106559, 0.917581), (0.0, 0.286932, -0.708153), (0.0, 1.46646, 0.594187), 80.0),
     "catalog": ((-0.848216, 0.1074, 0.464691), (0.628121, 0.375529, -0.6815), (-0.254505, 0.926811, 0.276133), 80.1803),
+    # cam_angle_padfocus: the close, near top-down shot of the catalog pad
+    # (pitched 70 degrees down); A on the catalog or settings panel flies
+    # there, B flies back.  Its up vector is its own, not +Y.
+    "catalogfocus": ((-0.639461, 0.133682, 0.0213613), (0.0, -0.942063, -0.335435), (0.0, 0.335435, -0.942063), 80.1803),
 }
+ZOOM_DURATION = 0.75                           # the library carousel's zoom
 FOOTER_H, FOOTER_COLOR, FOOTER_ALPHA = 50, (0.68, 0.665493, 0.5712), 0.592157
 FOOTER_STOPS = [(0.0, 0.0), (0.387409, 0.647059), (0.939467, 1.0)]
 WORDMARK_COLOR = (0.79, 0.773147, 0.6636)      # LabelSettings_1bvp3, 37 px
@@ -95,8 +100,8 @@ def pad_world(name):
 
 def camera(name):
     """eye, direction, up, fov for a pad's view."""
-    if name == "settings":
-        eye, d, up, fov = CAMERAS["catalog"]
+    if name.startswith("settings"):
+        eye, d, up, fov = CAMERAS["catalog" + name[len("settings"):]]
         return mirrorx(eye), norm(mirrorx(d)), norm(mirrorx(up)), fov
     eye, d, up, fov = CAMERAS[name]
     return eye, norm(d), norm(up), fov
@@ -345,6 +350,17 @@ DEF vpSettings Viewpoint
     %(vp_settings)s
 }
 
+// main.tscn's cam_angle_padfocus, and its mirror for the settings pad.
+DEF vpCatalogFocus Viewpoint
+{
+    %(vp_catalogfocus)s
+}
+
+DEF vpSettingsFocus Viewpoint
+{
+    %(vp_settingsfocus)s
+}
+
 DEF theMover CameraMover
 {
     duration 0.55
@@ -354,8 +370,19 @@ DEF theMover CameraMover
     }
 }
 
+// The zoom onto a pad takes longer than a pad switch, as Frolick's carousel does.
+DEF theZoomer CameraMover
+{
+    duration %(zoom_duration)s
+    function OnArrive()
+    {
+        bMoving = false;
+    }
+}
+
 var nPad;       // 0 catalog, 1 library, 2 settings
 var bMoving;
+var bZoomed;    // the camera is on the pad's focus view (catalog, settings)
 
 DEF theHub Level
 {
@@ -447,6 +474,7 @@ DEF theHub Level
         function OnMoveUp() { PadMove("up", 0); }
         function OnMoveDown() { PadMove("down", 0); }
         function OnADown() { PadPress(); }
+        function OnBDown() { PadBack(); }
     }
 }
 
@@ -455,6 +483,8 @@ DEF theHub Level
 function PadMove(dir, step)
 {
     if (bMoving)
+        return;
+    if (bZoomed)
         return;
 
     var moved = 0;
@@ -483,6 +513,8 @@ function PadPress()
 {
     if (bMoving)
         return;
+    if (bZoomed)
+        return;
 
     if (nPad == 0)
         padCatalog.Press();
@@ -494,7 +526,39 @@ function PadPress()
 
 function OnPadPress(pad, id)
 {
-    // Frolick: A on the library pad opens the game carousel.
+    // Frolick: A on the library pad opens the game carousel.  On the
+    // catalog and settings pads it flies down to the pad's focus view.
+    if (pad == 1)
+        return;
+    ZoomIn();
+}
+
+// A on the catalog or settings panel: the panel fades out and the camera
+// flies to cam_angle_padfocus.  B flies back up to the pad's view.
+function ZoomIn()
+{
+    bMoving = true;
+    bZoomed = true;
+    SetPadAlpha(nPad, 0);
+    if (nPad == 0)
+        theZoomer.GoTo(vpCatalogFocus);
+    else
+        theZoomer.GoTo(vpSettingsFocus);
+}
+
+function PadBack()
+{
+    if (bMoving)
+        return;
+    if (bZoomed == false)
+        return;
+    bMoving = true;
+    bZoomed = false;
+    SetPadAlpha(nPad, 1);
+    if (nPad == 0)
+        theZoomer.GoTo(vpCatalog);
+    else
+        theZoomer.GoTo(vpSettings);
 }
 
 function SetPadAlpha(pad, a)
@@ -538,6 +602,7 @@ function initialize()
 {
     nPad = 1;
     bMoving = false;
+    bZoomed = false;
     EnableInput(true);
     theHub.GoTo();
     padLibrary.Play("", "Intro");
@@ -559,6 +624,9 @@ def main():
         vals["panel_" + name] = panel(name)
         vals["pad_" + name] = pad_nodes(name)
         vals["word_" + name] = WORDS[name]
+    for name in ("catalogfocus", "settingsfocus"):
+        vals["vp_" + name] = viewpoint(name)
+    vals["zoom_duration"] = ZOOM_DURATION
     open(os.path.join(out, "default.xap"), "w").write(HUB % vals)
     open(os.path.join(pads, "overlay.xui"), "w").write(overlay_scene())
     catalog = open(os.path.join(pads, "catalog.xui")).read()

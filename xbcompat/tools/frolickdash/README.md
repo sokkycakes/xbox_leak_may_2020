@@ -52,7 +52,7 @@ dashboard (`tools/dashbuild`), as its own `xboxdash.xbe` with its own
   files Frolick's `glyph_*.png` are), or `GLYPHS=dir` for a set of your own;
   `tools/mkart.py` renders the pad labels as `main.tscn`'s Label3D nodes
   describe them and a ring for the emblems, until Frolick's `Circle.png`
-  and pad textures arrive (`ART=dir`).
+  and pad textures arrive (`ART=dir`).  A on a catalog or settings tile flies the camera (750 ms, like Frolick's carousel zoom) down to `main.tscn`'s `cam_angle_padfocus`, mirrored for settings, with the panel faded out; B flies back.  The expanded menu that belongs there is not built yet.
 
 ## Build and run
 
