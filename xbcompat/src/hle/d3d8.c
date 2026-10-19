@@ -5994,7 +5994,10 @@ static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
             return;
         }
         bool d24 = depth_format_max((z->Format >> 8) & 0xFF) > 65535.0f;
-        d3d.host_zmax = d24 ? 16777215.0f : 65535.0f;
+        /* upload_image3 stores D16 images as GL_DEPTH_COMPONENT24 too, so
+           GL's polygon offset unit is 2^-24 for both: with 65535 here a D16
+           shadow buffer got 1/256 of its D3DRS_POLYGONOFFSETZOFFSET. */
+        d3d.host_zmax = 16777215.0f;
         p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, 0);
         p_glFramebufferTexture2D(GL_FRAMEBUFFER, d24 ? GL_DEPTH_STENCIL_ATTACHMENT : GL_DEPTH_ATTACHMENT,
                                  depth_face, dt, depth_level);
