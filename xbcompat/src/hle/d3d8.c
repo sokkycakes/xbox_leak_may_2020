@@ -2081,6 +2081,9 @@ static GLuint texture_for(D3DPixelContainer *t)
            drawn into it since the last sync and the CPU has not changed the
            memory since then. */
         uint64_t h = depth_memory_hash();
+        TRACE_ALL("D3D: depth view %#x: memory %s, gpu writes %lu (synced at %lu)%s", (unsigned)t->res.Data,
+                  h != zsync.hash ? "changed by the CPU" : "unchanged", depth_gpu_writes, zsync.writes,
+                  h == zsync.hash && zsync.writes != depth_gpu_writes ? ", reading the GPU's depth back" : "");
         if (h != zsync.hash) {
             upload_depth_memory();
             zsync.hash = h;
@@ -6869,6 +6872,12 @@ static bool readback_rt_surface(D3DSurface *s)
 {
     hud_batch_flush();
     if (s == d3d.backbuffer) return false;
+    /* A colour header over the depth buffer's memory (Splinter Cell locks
+       one to decode its loading pictures there): the GL texture under that
+       address is only a copy made from memory when it was last sampled, not
+       a render target, and reading it back put the previous picture (black
+       at first) over what the CPU had written since through its pointer. */
+    if (d3d.depth && (s->Data | CONTIG_BASE) == (d3d.depth->Data | CONTIG_BASE)) return false;
     ULONG fmt = (s->Format >> 8) & 0xFF, level;
     GLenum transfer_format, transfer_type;
     unsigned bytes;
@@ -6892,6 +6901,7 @@ static bool readback_rt_surface(D3DSurface *s)
     }
     free(tmp);
     stats.readbacks++;
+    TRACE_ALL("D3D: surface %p at %#x read back from GL texture %u", (void *)s, (unsigned)s->Data, e->id);
     return true;
 }
 
