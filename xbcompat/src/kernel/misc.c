@@ -813,18 +813,6 @@ NTSTATUS NTAPI NtSetSystemTime(LARGE_INTEGER *New, LARGE_INTEGER *Old)
     return STATUS_SUCCESS;
 }
 
-typedef struct { ULONG Length, ReturnValue; } IO_DUMMY;
-
-NTSTATUS NTAPI IoSynchronousDeviceIoControlRequest(ULONG Code, PVOID Dev, PVOID In, ULONG InLen,
-                                                   PVOID Out, ULONG OutLen, ULONG *Returned, BOOLEAN Internal)
-{
-    (void)Dev; (void)In; (void)InLen; (void)Internal;
-    TRACE("IoSynchronousDeviceIoControlRequest(%#x)", Code);
-    if (Out) memset(Out, 0, OutLen);
-    if (Returned) *Returned = 0;
-    return STATUS_SUCCESS;
-}
-
 /* ---- small exports later XDKs import ------------------------------------ */
 
 ULONG KeTimeIncrement = 10000;   /* 100 ns units per clock tick (1 ms) */
@@ -857,3 +845,138 @@ void NTAPI MmDeleteKernelStack(PVOID StackBase, PVOID StackLimit)
     (void)StackBase;
     free(StackLimit);
 }
+
+/* The file system cache is the host's: nothing to drop. */
+void NTAPI FscInvalidateIdleBlocks(void) {}
+
+/* ---- port I/O (HAL READ_/WRITE_PORT_BUFFER_*) -------------------------
+   There are no I/O ports behind these: reads see a floating bus (all ones),
+   writes go nowhere. */
+
+static void port_note(const char *what, ULONG port)
+{
+    static int once;
+    if (!once++) xlog("%s(port %#x): no I/O ports here; reads give all ones, writes are dropped", what,
+                      (unsigned)port);
+}
+
+void NTAPI READ_PORT_BUFFER_UCHAR(UCHAR *Port, UCHAR *Buffer, ULONG Count)
+{
+    port_note("READ_PORT_BUFFER_UCHAR", (ULONG)(uintptr_t)Port);
+    memset(Buffer, 0xFF, Count);
+}
+
+void NTAPI READ_PORT_BUFFER_USHORT(USHORT *Port, USHORT *Buffer, ULONG Count)
+{
+    port_note("READ_PORT_BUFFER_USHORT", (ULONG)(uintptr_t)Port);
+    memset(Buffer, 0xFF, Count * sizeof(USHORT));
+}
+
+void NTAPI READ_PORT_BUFFER_ULONG(ULONG *Port, ULONG *Buffer, ULONG Count)
+{
+    port_note("READ_PORT_BUFFER_ULONG", (ULONG)(uintptr_t)Port);
+    memset(Buffer, 0xFF, Count * sizeof(ULONG));
+}
+
+void NTAPI WRITE_PORT_BUFFER_UCHAR(UCHAR *Port, UCHAR *Buffer, ULONG Count)
+{
+    (void)Buffer; (void)Count;
+    port_note("WRITE_PORT_BUFFER_UCHAR", (ULONG)(uintptr_t)Port);
+}
+
+void NTAPI WRITE_PORT_BUFFER_USHORT(USHORT *Port, USHORT *Buffer, ULONG Count)
+{
+    (void)Buffer; (void)Count;
+    port_note("WRITE_PORT_BUFFER_USHORT", (ULONG)(uintptr_t)Port);
+}
+
+void NTAPI WRITE_PORT_BUFFER_ULONG(ULONG *Port, ULONG *Buffer, ULONG Count)
+{
+    (void)Buffer; (void)Count;
+    port_note("WRITE_PORT_BUFFER_ULONG", (ULONG)(uintptr_t)Port);
+}
+
+/* ---- profiling (xprof/xprofile.c, xbbt.cpp) ----------------------------
+   No sampling profiler and no BBT sweeps: control calls succeed and the
+   profile stays empty. */
+
+/* XProfpGlobals: the sample buffer (empty) and the session's parameters. */
+static struct {
+    ULONG *bufstart, *bufend, *bufnext, *bufnext_stopped;
+    ULONG start_type, start_param;
+    ULONG reserved[16];
+} xprof_data;
+
+NTSTATUS NTAPI XProfpControl(ULONG Action, ULONG Param)
+{
+    static int once;
+    if (!once++) xlog("XProfpControl(%u, %#x): the kernel profiler is not available", (unsigned)Action,
+                      (unsigned)Param);
+    return STATUS_SUCCESS;
+}
+
+PVOID NTAPI XProfpGetData(void) { return &xprof_data; }
+
+void NTAPI IrtClientInitFast(PVOID irtp, ULONG *Counts, UCHAR *TobCounts, PVOID frtp, ULONG *SeqNums,
+                             PVOID fid, PVOID unused)
+{
+    (void)irtp; (void)Counts; (void)TobCounts; (void)frtp; (void)SeqNums; (void)fid; (void)unused;
+    xlog("IrtClientInitFast: BBT instrumentation data is not collected");
+}
+
+NTSTATUS NTAPI IrtSweep(HANDLE File)
+{
+    (void)File;
+    return STATUS_INVALID_PARAMETER;   /* as when no instrumented client initialized */
+}
+
+/* ---- debugger memory (mmx/debugsup.c) ----------------------------------
+   The development kit's extra memory for the debug monitor, from the
+   arena; addresses are writable as they are. */
+
+static ULONG mm_dbg_pages;
+
+PVOID NTAPI MmDbgAllocateMemory(SIZE_T NumberOfBytes, ULONG Protect)
+{
+    (void)Protect;
+    SIZE_T size = (NumberOfBytes + 0xFFF) & ~0xFFFu;
+    PVOID p = size ? arena_alloc(size, 0) : NULL;
+    if (p) __sync_add_and_fetch(&mm_dbg_pages, size >> 12);
+    return p;
+}
+
+ULONG NTAPI MmDbgFreeMemory(PVOID BaseAddress, SIZE_T NumberOfBytes)
+{
+    ULONG pages = (NumberOfBytes + 0xFFF) >> 12;
+    if (!BaseAddress) return 0;
+    arena_free(BaseAddress);
+    __sync_sub_and_fetch(&mm_dbg_pages, pages);
+    return pages;
+}
+
+/* What is left of the 64 MB a development kit has above a retail console's. */
+ULONG NTAPI MmDbgQueryAvailablePages(void)
+{
+    return mm_dbg_pages < 0x4000 ? 0x4000 - mm_dbg_pages : 0;
+}
+
+PVOID NTAPI MmDbgWriteCheck(PVOID VirtualAddress, PVOID Opaque)
+{
+    (void)Opaque;
+    return VirtualAddress;
+}
+
+void NTAPI MmDbgReleaseAddress(PVOID VirtualAddress, PVOID Opaque) { (void)VirtualAddress; (void)Opaque; }
+
+/* MmGlobalData (data export): pointers to the memory manager's state for
+   the debug monitor.  Only the counters are filled. */
+static ULONG mm_pfn_region[2], mm_pte_range[4], mm_available_pages = 0x2000, mm_pages_by_usage[16];
+static ULONG mm_address_space_lock[8];
+static PVOID mm_vad_root, mm_vad_hint, mm_vad_free_hint;
+struct {
+    PVOID RetailPfnRegion, SystemPteRange, AvailablePages, AllocatedPagesByUsage, AddressSpaceLock;
+    PVOID VadRoot, VadHint, VadFreeHint;
+} MmGlobalData = {
+    mm_pfn_region, mm_pte_range, &mm_available_pages, mm_pages_by_usage, mm_address_space_lock,
+    &mm_vad_root, &mm_vad_hint, &mm_vad_free_hint,
+};
