@@ -1821,6 +1821,12 @@ static HRESULT NTAPI DS_DownloadEffectsImage(void *self, const void *pv, DWORD s
     return hr;
 }
 
+static void fx_note_unknown(DWORD index)
+{
+    static unsigned noted;
+    if (noted++ < 4) xlog("DSound: effect %u: no effects image describes it; its data is ignored", index);
+}
+
 static HRESULT NTAPI DS_GetEffectData(void *self, DWORD index, DWORD offset, void *pv, DWORD size)
 {
     LOCK();
@@ -1829,6 +1835,13 @@ static HRESULT NTAPI DS_GetEffectData(void *self, DWORD index, DWORD offset, voi
     if (d && pv && index < d->fx_count && offset <= d->fx_state_size[index] &&
         size <= d->fx_state_size[index] - offset) {
         memcpy(pv, d->fx_state[index] + offset, size);
+        hr = DS_OK;
+    } else if (d && pv && !d->fx_count) {
+        /* No image, or one whose descriptor was not found, so the effects
+           are unknown: the DSP is not emulated, and their state reads as
+           zeros rather than failing the title. */
+        fx_note_unknown(index);
+        memset(pv, 0, size);
         hr = DS_OK;
     }
     UNLOCK();
@@ -1844,6 +1857,9 @@ static HRESULT NTAPI DS_SetEffectData(void *self, DWORD index, DWORD offset, con
     if (d && pv && index < d->fx_count && offset <= d->fx_state_size[index] &&
         size <= d->fx_state_size[index] - offset) {
         memcpy(d->fx_state[index] + offset, pv, size);
+        hr = DS_OK;
+    } else if (d && pv && !d->fx_count) {
+        fx_note_unknown(index);   /* dropped: nothing runs the effect */
         hr = DS_OK;
     }
     UNLOCK();

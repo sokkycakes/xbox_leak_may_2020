@@ -5,11 +5,16 @@ without emulating the console. Xbox code is 32-bit x86, so the XBE is mapped at
 its native address (0x10000) inside a 32-bit Linux process and executed directly.
 What differs from a PC is replaced underneath it:
 
-- **Kernel**: all 375 `xboxkrnl.exe` exports, generated from the leak's
-  `private/ntos/init/ntoskrnl.src`. Threads, events, waits, timers/DPCs, virtual
-  and contiguous memory, the object manager, file I/O and Rtl are implemented on
+- **Kernel**: the 375 `xboxkrnl.exe` exports are listed from the leak's
+  `private/ntos/init/ntoskrnl.src`, and 312 of them are implemented. Threads,
+  events, waits, queues and I/O completion ports, timers/DPCs, virtual and
+  contiguous memory, the object manager, file I/O and Rtl are implemented on
   pthreads and the host filesystem (`src/kernel/`). Each guest thread gets a
-  KPCR at `fs:0` through an LDT entry.
+  KPCR at `fs:0` through an LDT entry. The other 63 are the driver model
+  (IRPs, device objects and queues, `IoCreateFile`), object directories, port
+  I/O, the `Xc*` public-key and block crypto that only networking uses, and
+  debug/profiling exports. A title that imports one still loads; calling it
+  stops with a message that names it.
 - **Direct3D 8**: the XDK statically links D3D8 into every title. `tools/mksigs.py`
   builds signatures from the leak's own `d3d8.lib`/`d3d8d.lib`, and
   `tools/findsigs.py` finds those functions in the XBE. `src/hle/` patches

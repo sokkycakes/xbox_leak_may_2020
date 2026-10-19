@@ -212,6 +212,171 @@ NTSTATUS NTAPI RtlIntegerToChar(ULONG value, ULONG base, LONG len, char *out)
     return STATUS_SUCCESS;
 }
 
+/* Counted string helpers with the NT semantics: appends fail whole when the
+   destination is too small, and a terminating NUL is added when it fits. */
+
+NTSTATUS NTAPI RtlAppendStringToString(ANSI_STRING *d, const ANSI_STRING *s)
+{
+    if (!s || !s->Length) return STATUS_SUCCESS;
+    if ((ULONG)d->Length + s->Length > d->MaximumLength) return STATUS_BUFFER_TOO_SMALL;
+    memmove(d->Buffer + d->Length, s->Buffer, s->Length);
+    d->Length += s->Length;
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS append_wide(UNICODE_STRING *d, const WCHAR *src, ULONG bytes)
+{
+    if (!bytes) return STATUS_SUCCESS;
+    if ((ULONG)d->Length + bytes > d->MaximumLength) return STATUS_BUFFER_TOO_SMALL;
+    memmove((char *)d->Buffer + d->Length, src, bytes);
+    d->Length += bytes;
+    if (d->Length + 2 <= d->MaximumLength) d->Buffer[d->Length / 2] = 0;
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS NTAPI RtlAppendUnicodeStringToString(UNICODE_STRING *d, const UNICODE_STRING *s)
+{
+    return s ? append_wide(d, s->Buffer, s->Length) : STATUS_SUCCESS;
+}
+
+NTSTATUS NTAPI RtlAppendUnicodeToString(UNICODE_STRING *d, const WCHAR *s)
+{
+    ULONG n = 0;
+    if (s) while (s[n]) n++;
+    return append_wide(d, s, n * 2);
+}
+
+static WCHAR wupper(WCHAR c) { return c < 128 ? (WCHAR)toupper(c) : c; }
+static WCHAR wlower(WCHAR c) { return c < 128 ? (WCHAR)tolower(c) : c; }
+
+LONG NTAPI RtlCompareUnicodeString(const UNICODE_STRING *a, const UNICODE_STRING *b, BOOLEAN ci)
+{
+    USHORT n = (a->Length < b->Length ? a->Length : b->Length) / 2;
+    for (USHORT i = 0; i < n; i++) {
+        WCHAR x = a->Buffer[i], y = b->Buffer[i];
+        if (ci) { x = wupper(x); y = wupper(y); }
+        if (x != y) return (LONG)x - (LONG)y;
+    }
+    return (LONG)a->Length - (LONG)b->Length;
+}
+
+void NTAPI RtlCopyUnicodeString(UNICODE_STRING *d, const UNICODE_STRING *s)
+{
+    if (!s) { d->Length = 0; return; }
+    USHORT n = s->Length < d->MaximumLength ? s->Length : d->MaximumLength;
+    memmove(d->Buffer, s->Buffer, n);
+    d->Length = n;
+    if (n + 2 <= d->MaximumLength) d->Buffer[n / 2] = 0;
+}
+
+BOOLEAN NTAPI RtlCreateUnicodeString(UNICODE_STRING *d, const WCHAR *s)
+{
+    ULONG n = 0;
+    while (s[n]) n++;
+    if ((n + 1) * 2 > 0xFFFF) return 0;
+    d->Buffer = pool_alloc((n + 1) * 2);
+    if (!d->Buffer) return 0;
+    memcpy(d->Buffer, s, (n + 1) * 2);
+    d->Length = n * 2;
+    d->MaximumLength = (n + 1) * 2;
+    return 1;
+}
+
+static NTSTATUS map_case(UNICODE_STRING *d, const UNICODE_STRING *s, BOOLEAN Allocate, WCHAR (*f)(WCHAR))
+{
+    if (Allocate) {
+        d->Buffer = pool_alloc(s->Length ? s->Length : 2);
+        if (!d->Buffer) return STATUS_NO_MEMORY;
+        d->MaximumLength = s->Length;
+    } else if (s->Length > d->MaximumLength) {
+        return STATUS_BUFFER_OVERFLOW;
+    }
+    for (USHORT i = 0; i < s->Length / 2; i++) d->Buffer[i] = f(s->Buffer[i]);
+    d->Length = s->Length;
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS NTAPI RtlUpcaseUnicodeString(UNICODE_STRING *d, const UNICODE_STRING *s, BOOLEAN Allocate)
+{
+    return map_case(d, s, Allocate, wupper);
+}
+
+NTSTATUS NTAPI RtlDowncaseUnicodeString(UNICODE_STRING *d, const UNICODE_STRING *s, BOOLEAN Allocate)
+{
+    return map_case(d, s, Allocate, wlower);
+}
+
+NTSTATUS NTAPI RtlUpcaseUnicodeToMultiByteN(char *d, ULONG dmax, ULONG *written, const WCHAR *s, ULONG slen)
+{
+    ULONG n = slen / 2 < dmax ? slen / 2 : dmax;
+    for (ULONG i = 0; i < n; i++) { WCHAR c = wupper(s[i]); d[i] = c < 256 ? (char)c : '?'; }
+    if (written) *written = n;
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS NTAPI RtlIntegerToUnicodeString(ULONG value, ULONG base, UNICODE_STRING *s)
+{
+    char buf[40];
+    NTSTATUS st = RtlIntegerToChar(value, base, sizeof(buf), buf);
+    if (!NT_SUCCESS(st)) return st;
+    ULONG n = strlen(buf);
+    if (n * 2 > s->MaximumLength) return STATUS_BUFFER_OVERFLOW;
+    for (ULONG i = 0; i < n; i++) s->Buffer[i] = (UCHAR)buf[i];
+    s->Length = n * 2;
+    if (s->Length + 2 <= s->MaximumLength) s->Buffer[n] = 0;
+    return STATUS_SUCCESS;
+}
+
+/* Leading blanks, a sign, and with base 0 a 0x/0o/0b prefix (10 otherwise);
+   stops at the first character that is not a digit of the base. */
+NTSTATUS NTAPI RtlUnicodeStringToInteger(const UNICODE_STRING *s, ULONG base, ULONG *value)
+{
+    const WCHAR *p = s->Buffer, *end = s->Buffer + s->Length / 2;
+    while (p < end && *p <= ' ') p++;
+    bool neg = false;
+    if (p < end && (*p == '-' || *p == '+')) neg = *p++ == '-';
+    if (!base) {
+        base = 10;
+        if (end - p >= 2 && p[0] == '0') {
+            WCHAR c = wlower(p[1]);
+            if (c == 'x') { base = 16; p += 2; }
+            else if (c == 'o') { base = 8; p += 2; }
+            else if (c == 'b') { base = 2; p += 2; }
+        }
+    } else if (base != 2 && base != 8 && base != 10 && base != 16) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    ULONG v = 0;
+    for (; p < end; p++) {
+        WCHAR c = wlower(*p);
+        ULONG d = c >= '0' && c <= '9' ? (ULONG)(c - '0') : c >= 'a' && c <= 'f' ? (ULONG)(c - 'a' + 10) : 99;
+        if (d >= base) break;
+        v = v * base + d;
+    }
+    *value = neg ? (ULONG)-(LONG)v : v;
+    return STATUS_SUCCESS;
+}
+
+typedef struct { ULONG GenericRead, GenericWrite, GenericExecute, GenericAll; } GENERIC_MAPPING;
+
+void NTAPI RtlMapGenericMask(ULONG *mask, const GENERIC_MAPPING *map)
+{
+    ULONG m = *mask;
+    if (m & 0x80000000) m |= map->GenericRead;
+    if (m & 0x40000000) m |= map->GenericWrite;
+    if (m & 0x20000000) m |= map->GenericExecute;
+    if (m & 0x10000000) m |= map->GenericAll;
+    *mask = m & 0x0FFFFFFF;
+}
+
+/* No stack walking: report no frames. */
+USHORT NTAPI RtlCaptureStackBackTrace(ULONG skip, ULONG count, PVOID *trace, ULONG *hash)
+{
+    (void)skip; (void)count; (void)trace;
+    if (hash) *hash = 0;
+    return 0;
+}
+
 /* ---- critical sections ----------------------------------------------- */
 
 typedef struct {
@@ -258,6 +423,11 @@ void NTAPI RtlLeaveCriticalSection(RTL_CRITICAL_SECTION *cs)
     if (__sync_sub_and_fetch(&cs->LockCount, 1) >= 0)
         KeSetEvent((KEVENT *)&cs->Event, 0, 0);
 }
+
+/* The ...AndRegion forms also disable kernel APCs while held; guest APCs
+   here are only delivered in alertable waits, so they are the plain ones. */
+void NTAPI RtlEnterCriticalSectionAndRegion(RTL_CRITICAL_SECTION *cs) { RtlEnterCriticalSection(cs); }
+void NTAPI RtlLeaveCriticalSectionAndRegion(RTL_CRITICAL_SECTION *cs) { RtlLeaveCriticalSection(cs); }
 
 BOOLEAN NTAPI RtlTryEnterCriticalSection(RTL_CRITICAL_SECTION *cs)
 {

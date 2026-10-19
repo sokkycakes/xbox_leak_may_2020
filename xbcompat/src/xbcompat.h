@@ -127,7 +127,7 @@ void thread_untrap_tsc(void);      /* back to the host's counter, before exec */
 /* ---- handles ---------------------------------------------------------- */
 
 enum obj_kind { OBJ_NONE, OBJ_EVENT, OBJ_SEMAPHORE, OBJ_MUTANT, OBJ_TIMER, OBJ_THREAD,
-                OBJ_FILE, OBJ_SYMLINK, OBJ_DEVICE };
+                OBJ_FILE, OBJ_SYMLINK, OBJ_DEVICE, OBJ_IOCOMPLETION };
 
 typedef struct xobject {
     enum obj_kind kind;
@@ -138,7 +138,8 @@ typedef struct xobject {
         KSEMAPHORE semaphore;
         KMUTANT mutant;
         KTIMER timer;
-    } u;                        /* dispatcher body lives here for NtCreate* objects */
+        KQUEUE queue;           /* an I/O completion port */
+    } u;                       /* dispatcher body lives here for NtCreate* objects */
     xthread *thread;
     struct xfile *file;
     char *link_target;
@@ -149,6 +150,8 @@ xobject *handle_lookup(HANDLE h);
 NTSTATUS handle_close(HANDLE h);
 xobject *object_new(enum obj_kind kind);
 void object_release(xobject *obj);
+/* Queue a completion packet on an I/O completion port (ob.c). */
+NTSTATUS iocp_post(xobject *port, PVOID key, PVOID apc_context, NTSTATUS status, ULONG_PTR info);
 
 /* ---- files ------------------------------------------------------------ */
 

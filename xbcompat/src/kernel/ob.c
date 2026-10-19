@@ -141,6 +141,7 @@ NTSTATUS NTAPI ObReferenceObjectByHandle(HANDLE Handle, OBJECT_TYPE *ObjectType,
         { &ExEventObjectType, OBJ_EVENT }, { &ExSemaphoreObjectType, OBJ_SEMAPHORE },
         { &ExMutantObjectType, OBJ_MUTANT }, { &ExTimerObjectType, OBJ_TIMER },
         { &PsThreadObjectType, OBJ_THREAD }, { &IoFileObjectType, OBJ_FILE },
+        { &IoCompletionObjectType, OBJ_IOCOMPLETION },
     };
     if (ObjectType) {
         for (unsigned i = 0; i < sizeof(map) / sizeof(map[0]); i++)
@@ -172,6 +173,13 @@ NTSTATUS NTAPI ObOpenObjectByPointer(PVOID Object, OBJECT_TYPE *ObjectType, HAND
 
 /* ---- waits by handle -------------------------------------------------- */
 
+/* What a wait on a file handle waits for: a notification event that stays
+   signaled (see handle_to_waitable). */
+static KEVENT file_done;
+static pthread_once_t file_done_once = PTHREAD_ONCE_INIT;
+void NTAPI KeInitializeEvent(KEVENT *Event, ULONG Type, BOOLEAN State);
+static void file_done_init(void) { KeInitializeEvent(&file_done, 0 /* NotificationEvent */, 1); }
+
 static NTSTATUS handle_to_waitable(HANDLE h, PVOID *out)
 {
     if (h == NtCurrentThread) {
@@ -181,10 +189,19 @@ static NTSTATUS handle_to_waitable(HANDLE h, PVOID *out)
     xobject *o = handle_lookup(h);
     if (!o) return STATUS_INVALID_HANDLE;
     switch (o->kind) {
-    case OBJ_EVENT: case OBJ_SEMAPHORE: case OBJ_MUTANT: case OBJ_TIMER:
+    case OBJ_EVENT: case OBJ_SEMAPHORE: case OBJ_MUTANT: case OBJ_TIMER: case OBJ_IOCOMPLETION:
         *out = &o->u; return STATUS_SUCCESS;
     case OBJ_THREAD:
         *out = &o->thread->ethread.Tcb.Header; return STATUS_SUCCESS;
+    case OBJ_FILE: {
+        /* A file object is signaled when its I/O completes, and I/O here
+           completes before the call that started it returns: XAPI's
+           ReadFile on a handle opened for overlapped I/O, and
+           GetOverlappedResult without an event, wait on the handle. */
+        pthread_once(&file_done_once, file_done_init);
+        *out = &file_done;
+        return STATUS_SUCCESS;
+    }
     default:
         return STATUS_OBJECT_TYPE_MISMATCH;
     }
@@ -385,6 +402,137 @@ NTSTATUS NTAPI NtCancelTimer(HANDLE h, BOOLEAN *CurrentState)
     if (!o || o->kind != OBJ_TIMER) return STATUS_INVALID_HANDLE;
     if (CurrentState) *CurrentState = (BOOLEAN)o->u.timer.Header.SignalState;
     KeCancelTimer(&o->u.timer);
+    return STATUS_SUCCESS;
+}
+
+/* ---- queries (ex/mutant.c, ex/semphore.c, ex/timer.c) ---------------- */
+
+typedef struct { LONG CurrentCount; BOOLEAN OwnedByCaller; BOOLEAN AbandonedState; } MUTANT_BASIC_INFORMATION;
+typedef struct { LONG CurrentCount; LONG MaximumCount; } SEMAPHORE_BASIC_INFORMATION;
+typedef struct { LARGE_INTEGER RemainingTime; BOOLEAN TimerState; } TIMER_BASIC_INFORMATION;
+
+extern LONGLONG ke_timer_remaining(KTIMER *t);
+
+NTSTATUS NTAPI NtQueryMutant(HANDLE h, MUTANT_BASIC_INFORMATION *info)
+{
+    xobject *o = handle_lookup(h);
+    if (!o) return STATUS_INVALID_HANDLE;
+    if (o->kind != OBJ_MUTANT) return STATUS_OBJECT_TYPE_MISMATCH;
+    xthread *t = thread_current();
+    info->CurrentCount = o->u.mutant.Header.SignalState;
+    info->OwnedByCaller = t && o->u.mutant.OwnerThread == &t->ethread.Tcb;
+    info->AbandonedState = o->u.mutant.Abandoned;
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS NTAPI NtQuerySemaphore(HANDLE h, SEMAPHORE_BASIC_INFORMATION *info)
+{
+    xobject *o = handle_lookup(h);
+    if (!o) return STATUS_INVALID_HANDLE;
+    if (o->kind != OBJ_SEMAPHORE) return STATUS_OBJECT_TYPE_MISMATCH;
+    info->CurrentCount = o->u.semaphore.Header.SignalState;
+    info->MaximumCount = o->u.semaphore.Limit;
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS NTAPI NtQueryTimer(HANDLE h, TIMER_BASIC_INFORMATION *info)
+{
+    xobject *o = handle_lookup(h);
+    if (!o) return STATUS_INVALID_HANDLE;
+    if (o->kind != OBJ_TIMER) return STATUS_OBJECT_TYPE_MISMATCH;
+    info->TimerState = o->u.timer.Header.SignalState != 0;
+    info->RemainingTime.QuadPart = ke_timer_remaining(&o->u.timer);
+    return STATUS_SUCCESS;
+}
+
+/* ---- I/O completion ports (io/complete.c) ----------------------------
+   A port is a KQUEUE of packets.  The packets are host allocations; only
+   NtRemoveIoCompletion takes them apart. */
+
+extern void NTAPI KeInitializeQueue(KQUEUE *, ULONG);
+extern LONG NTAPI KeInsertQueue(KQUEUE *, LIST_ENTRY *);
+extern LIST_ENTRY *NTAPI KeRemoveQueue(KQUEUE *, KPROCESSOR_MODE, LARGE_INTEGER *);
+
+typedef struct {
+    LIST_ENTRY ListEntry;
+    PVOID KeyContext;
+    PVOID ApcContext;
+    NTSTATUS IoStatus;
+    ULONG_PTR IoStatusInformation;
+} iocp_packet;
+
+NTSTATUS iocp_post(xobject *port, PVOID key, PVOID apc_context, NTSTATUS status, ULONG_PTR info)
+{
+    iocp_packet *p = malloc(sizeof(*p));
+    if (!p) return STATUS_INSUFFICIENT_RESOURCES;
+    p->KeyContext = key;
+    p->ApcContext = apc_context;
+    p->IoStatus = status;
+    p->IoStatusInformation = info;
+    KeInsertQueue(&port->u.queue, &p->ListEntry);
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS NTAPI NtCreateIoCompletion(HANDLE *h, ULONG DesiredAccess, OBJECT_ATTRIBUTES *oa, ULONG Count)
+{
+    (void)DesiredAccess;
+    xobject *o;
+    NTSTATUS st = create_named(h, oa, OBJ_IOCOMPLETION, &o);
+    if (o) KeInitializeQueue(&o->u.queue, Count);
+    TRACE("NtCreateIoCompletion(count %u) = %p", (unsigned)Count, *h);
+    return st;
+}
+
+static xobject *port_of(HANDLE h, NTSTATUS *st)
+{
+    xobject *o = handle_lookup(h);
+    *st = !o ? STATUS_INVALID_HANDLE : o->kind != OBJ_IOCOMPLETION ? STATUS_OBJECT_TYPE_MISMATCH : STATUS_SUCCESS;
+    return *st == STATUS_SUCCESS ? o : NULL;
+}
+
+NTSTATUS NTAPI IoSetIoCompletion(PVOID IoCompletion, PVOID KeyContext, PVOID ApcContext,
+                                 NTSTATUS IoStatus, ULONG_PTR IoStatusInformation)
+{
+    /* IoCompletion is the port's body, as ObReferenceObjectByHandle gave it. */
+    xobject *o = (xobject *)((char *)IoCompletion - offsetof(xobject, u));
+    return iocp_post(o, KeyContext, ApcContext, IoStatus, IoStatusInformation);
+}
+
+NTSTATUS NTAPI NtSetIoCompletion(HANDLE h, PVOID KeyContext, PVOID ApcContext, NTSTATUS IoStatus,
+                                 ULONG_PTR IoStatusInformation)
+{
+    NTSTATUS st;
+    xobject *o = port_of(h, &st);
+    if (!o) return st;
+    return iocp_post(o, KeyContext, ApcContext, IoStatus, IoStatusInformation);
+}
+
+NTSTATUS NTAPI NtRemoveIoCompletion(HANDLE h, PVOID *KeyContext, PVOID *ApcContext,
+                                    IO_STATUS_BLOCK *iosb, LARGE_INTEGER *Timeout)
+{
+    NTSTATUS st;
+    xobject *o = port_of(h, &st);
+    if (!o) return st;
+    LIST_ENTRY *e = KeRemoveQueue(&o->u.queue, 0 /* KernelMode */, Timeout);
+    if ((ULONG_PTR)e == STATUS_TIMEOUT || (ULONG_PTR)e == STATUS_USER_APC)
+        return (NTSTATUS)(ULONG_PTR)e;
+    iocp_packet *p = (iocp_packet *)e;
+    *KeyContext = p->KeyContext;
+    *ApcContext = p->ApcContext;
+    iosb->Information = p->IoStatusInformation;
+    iosb->Status = p->IoStatus;
+    free(p);
+    return STATUS_SUCCESS;
+}
+
+typedef struct { LONG Depth; } IO_COMPLETION_BASIC_INFORMATION;
+
+NTSTATUS NTAPI NtQueryIoCompletion(HANDLE h, IO_COMPLETION_BASIC_INFORMATION *info)
+{
+    NTSTATUS st;
+    xobject *o = port_of(h, &st);
+    if (!o) return st;
+    info->Depth = o->u.queue.Header.SignalState;
     return STATUS_SUCCESS;
 }
 
