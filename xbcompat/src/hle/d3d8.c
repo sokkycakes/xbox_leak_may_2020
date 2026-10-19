@@ -711,6 +711,31 @@ static Uint64 prof_draw_begin(void)
 static unsigned long depth_gpu_writes;
 /* The depth memory's hash and depth_gpu_writes when they last agreed. */
 static struct { uint64_t hash; unsigned long writes; } zsync;
+/* The back buffer's memory as it was when it last matched GL (an upload of
+   CPU writes, or a read back): sampled, since views of the back buffer are
+   made several times a frame. */
+static void container_size(const D3DPixelContainer *t, ULONG *w, ULONG *h, ULONG *pitch);
+static struct { ULONG data; uint64_t hash; } bbsync;
+static uint64_t backbuffer_memory_hash(void)
+{
+    ULONG w, h, pitch;
+    container_size((D3DPixelContainer *)d3d.backbuffer, &w, &h, &pitch);
+    if (w > (ULONG)d3d.width) w = d3d.width;
+    if (h > (ULONG)d3d.height) h = d3d.height;
+    const uint8_t *px = (const uint8_t *)(d3d.backbuffer->Data | CONTIG_BASE);
+    uint64_t x = 0xcbf29ce484222325ull;
+    for (ULONG y = 0; y < h; y += 2) {
+        const uint64_t *row = (const uint64_t *)(px + y * pitch);
+        for (ULONG i = y & 6; i < w * 4 / 8; i += 8) x = (x ^ row[i]) * 0x100000001b3ull;
+    }
+    return x;
+}
+static void backbuffer_synced(void)
+{
+    if (!d3d.backbuffer) return;
+    bbsync.data = d3d.backbuffer->Data;
+    bbsync.hash = backbuffer_memory_hash();
+}
 
 static void debug_dump_draw(void)
 {
@@ -777,6 +802,7 @@ static void flush_cpu_backbuffer(void)
     for (ULONG y = 0; y < h; y++) memcpy(tmp + (h - 1 - y) * w * bytes, px + y * pitch, w * bytes);
     draw_window_pixels_format(tmp, format, type);
     free(tmp);
+    backbuffer_synced();
 }
 
 /* Replace the window's color buffer with BGRA pixels, bottom row first. */
@@ -2020,6 +2046,19 @@ static GLuint texture_for(D3DPixelContainer *t)
     bool on_depth = d3d.depth && va == (d3d.depth->Data | CONTIG_BASE) && t != (D3DPixelContainer *)d3d.depth;
     if (on_color || on_depth) hud_batch_flush();   /* queued draws land in the frame first */
     if (on_color && (whatif == WHATIF_NO_BBVIEW || whatif == WHATIF_BOTH)) { whatif_skip_draw = true; return 0; }
+    if (on_color && d3d.backbuffer->Data == bbsync.data && (d3d.bb_cpu_dirty || backbuffer_memory_hash() != bbsync.hash)) {
+        /* The CPU wrote the back buffer's memory, locked or through a
+           pointer kept from an earlier lock: Splinter Cell copies each
+           loading and menu picture in that way and cross-fades from a view
+           of it, which sampled GL's stale frame (all white after the boot
+           quad).  Load the memory into the frame first. */
+        GLuint program = cur_program;
+        d3d.bb_cpu_dirty = true;
+        flush_cpu_backbuffer();
+        gc_reset();
+        if (program) { p_glUseProgram(program); cur_program = program; }
+        TRACE_ALL("D3D: back buffer memory written by the CPU loaded before a view of it");
+    }
     if (on_color) {
         /* A 32-bit view of the back buffer (Phantom Dust filters the frame
            through three every frame): copy it on the GPU, no readback. */
@@ -2030,6 +2069,7 @@ static GLuint texture_for(D3DPixelContainer *t)
     }
     if (on_color) {
         readback_surface(d3d.backbuffer, false);
+        backbuffer_synced();
         tex_invalidate(t->res.Data);
     }
     if (on_depth) {
@@ -3175,6 +3215,17 @@ static void apply_render_states(bool pretransformed, bool has_normal)
         } else {
             mat_mul(&proj, &d3d.transforms[1], &zfix);
             mat_mul(&modelview, &d3d.transforms[6], &d3d.transforms[0]);
+        }
+        /* The half pixel of the pretransformed path, in clip space: the
+           library's fixed-function viewport offset carries KELVIN_BORDER
+           too.  Splinter Cell's glow pass draws its full-target quad
+           through the transforms. */
+        if (d3d.viewport.Width && d3d.viewport.Height) {
+            float kx = 1.0f / d3d.viewport.Width, ky = -1.0f / d3d.viewport.Height;
+            for (int i = 0; i < 4; i++) {
+                proj.m[i][0] += kx * proj.m[i][3];
+                proj.m[i][1] += ky * proj.m[i][3];
+            }
         }
         if (d3d.rt_texture) for (int i = 0; i < 4; i++) proj.m[i][1] = -proj.m[i][1];
         glMatrixMode(GL_PROJECTION);
@@ -6675,6 +6726,7 @@ static void create_device_surfaces(ULONG format, ULONG depth_format)
                      ? 65535.0f : 16777215.0f;
     zsync.hash = depth_memory_hash();
     zsync.writes = depth_gpu_writes;
+    backbuffer_synced();
     d3d.target = d3d.backbuffer;
     d3d.target_depth = d3d.depth;
     internal_addref_surface(d3d.target);
@@ -7066,6 +7118,7 @@ static void NTAPI D3DSurface_LockRect(D3DSurface *s, ULONG *locked, const LONG *
         backbuffer_read_end();
         for (ULONG y = 0; y < h; y++) memcpy(px + y * pitch, tmp + (h - 1 - y) * w * bytes, w * bytes);
         free(tmp);
+        backbuffer_synced();
     }
     if (s != d3d.backbuffer) readback_rt_surface(s);
     if (s == d3d.backbuffer && !(flags & 0x80 /* D3DLOCK_READONLY */)) d3d.bb_cpu_dirty = true;
