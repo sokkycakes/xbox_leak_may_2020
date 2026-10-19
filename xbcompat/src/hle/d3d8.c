@@ -2490,6 +2490,65 @@ static void apply_texture_transforms(unsigned units, const int tsize[4])
 
 /* --trace detail for a draw: what each stage samples and how, and the
    vertices of a small pre-transformed draw (full-screen passes). */
+/* On a traced frame with the dump flag set: each stage's texture as GL holds
+   it for this draw (.ppm, GL row 0 first) and the guest memory behind it
+   (.raw, pitch x height bytes), at most 32 a frame and each image once. */
+static void trace_dump_sampled(void)
+{
+    static unsigned long frame;
+    static unsigned n;
+    static ULONG seen[32];
+    if (access("/data/xbox/xbcompat-dump-targets", F_OK) && access("/tmp/xbcompat-dump-targets", F_OK)) return;
+    if (frame != d3d.frame) { frame = d3d.frame; n = 0; }
+    GLint active;
+    glGetIntegerv(GL_ACTIVE_TEXTURE, &active);
+    for (int s = 0; s < 4 && n < 32; s++) {
+        D3DPixelContainer *t = (D3DPixelContainer *)d3d.textures[s];
+        if (!t) continue;
+        unsigned i = 0;
+        while (i < n && seen[i] != t->res.Data) i++;
+        if (i < n) continue;
+        seen[n++] = t->res.Data;
+        p_glActiveTexture(GL_TEXTURE0 + s);
+        GLint id = 0, gw = 0, gh = 0;
+        glGetIntegerv(GL_TEXTURE_BINDING_2D, &id);
+        if (id) {
+            glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &gw);
+            glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &gh);
+        }
+        ULONG w = 0, h = 0, pitch = 0;
+        container_size(t, &w, &h, &pitch);
+        mkdir("/tmp/xbc-dump", 0755);
+        char path[128];
+        if (id && gw > 0 && gh > 0 && gw <= 2048 && gh <= 2048) {
+            uint8_t *px = malloc((size_t)gw * gh * 4);
+            if (px) {
+                glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
+                snprintf(path, sizeof path, "/tmp/xbc-dump/%lu-s%d-%08x-%dx%d-gl.ppm", frame, s,
+                         (unsigned)t->res.Data, gw, gh);
+                FILE *f = fopen(path, "wb");
+                if (f) {
+                    fprintf(f, "P6 %d %d 255\n", gw, gh);
+                    for (long k = 0; k < (long)gw * gh; k++) fwrite(px + k * 4, 1, 3, f);
+                    fclose(f);
+                }
+                free(px);
+            }
+        }
+        ULONG bytes = pitch * h;
+        if (bytes && bytes <= (4u << 20)) {
+            snprintf(path, sizeof path, "/tmp/xbc-dump/%lu-s%d-%08x-%ux%u-p%u-f%02x.raw", frame, s,
+                     (unsigned)t->res.Data, (unsigned)w, (unsigned)h, (unsigned)pitch,
+                     (unsigned)((t->Format >> 8) & 0xFF));
+            FILE *f = fopen(path, "wb");
+            if (f) { fwrite((const void *)(uintptr_t)(t->res.Data | CONTIG_BASE), 1, bytes, f); fclose(f); }
+        }
+        xlog("D3D:   dumped stage %d data %#x (gl texture %d, %dx%d)", s, (unsigned)t->res.Data, id, gw, gh);
+    }
+    p_glActiveTexture(active);
+}
+
 static void trace_draw_detail(const uint8_t *base, ULONG stride, ULONG count, bool rhw)
 {
     if (g_trace != 1) return;
@@ -2505,6 +2564,7 @@ static void trace_draw_detail(const uint8_t *base, ULONG stride, ULONG count, bo
              d3d.backbuffer && (t->res.Data | CONTIG_BASE) == (d3d.backbuffer->Data | CONTIG_BASE) ? " backbuffer" : "",
              d3d.depth && (t->res.Data | CONTIG_BASE) == (d3d.depth->Data | CONTIG_BASE) ? " depth" : "");
     }
+    trace_dump_sampled();
     if (d3d.target) {
         ULONG w = 0, h = 0, pitch = 0;
         container_size((D3DPixelContainer *)d3d.target, &w, &h, &pitch);
