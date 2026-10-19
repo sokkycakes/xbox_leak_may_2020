@@ -7425,13 +7425,21 @@ static void NTAPI D3DDevice_SetShaderConstantMode(ULONG mode)
 }
 static void NTAPI D3DDevice_GetShaderConstantMode(ULONG *mode) { *mode = d3d.constant_mode; }
 
-/* The library's m_ProjectionViewportTransform: the projection times the
-   viewport's scale to its pixels (relative to its corner: the hardware adds
-   X and Y itself) and z to the depth buffer's range. */
 static void NTAPI D3DDevice_GetProjectionViewportMatrix(D3DMATRIX *out)
 {
+    /* Not viewport_transform(): with D3DZB_USEW its zscale / wfar scaling
+       made Splinter Cell (4928) build model matrices that put every model
+       out of view.  Titles combine this with their own vertex programs, and
+       xbcompat's program epilogue expects the plain viewport matrix. */
+    D3DVIEWPORT8 *v = &d3d.viewport;
     D3DMATRIX vp;
-    viewport_transform(&vp);
+    identity(&vp);
+    vp.m[0][0] = v->Width / 2.0f;
+    vp.m[1][1] = -(float)v->Height / 2.0f;
+    vp.m[2][2] = v->MaxZ - v->MinZ;
+    vp.m[3][0] = v->X + v->Width / 2.0f;
+    vp.m[3][1] = v->Y + v->Height / 2.0f;
+    vp.m[3][2] = v->MinZ;
     mat_mul(out, &d3d.transforms[1], &vp);
 }
 
