@@ -19,6 +19,7 @@
 #include <errno.h>
 #include <math.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -2104,6 +2105,7 @@ static GLuint texture_for(D3DPixelContainer *t)
 static void NTAPI D3DDevice_SetTexture(ULONG Stage, D3DResource *t)
 {
     if (d3d.recording) { ULONG a[2] = { Stage, (ULONG)t }; pb_record(OP_TEXTURE, a, sizeof(a)); }
+    TRACE_ALL("D3D: SetTexture(%u, %p) data %#x", Stage, (void *)t, t ? (unsigned)t->Data : 0);
     if (Stage < 4) d3d.textures[Stage] = t;
 }
 
@@ -6768,8 +6770,52 @@ static bool readback_rt_surface(D3DSurface *s)
     return true;
 }
 
+/* --trace aid: while /data/xbox/xbcompat-dump-targets exists, a traced
+   frame writes each texture render target it leaves to
+   /tmp/xbc-dump/F-N-DATA-WxH.ppm (top row first) for looking at offline. */
+static void trace_dump_target(D3DSurface *s)
+{
+    static unsigned seq;
+    static unsigned long seq_frame;
+    if (g_trace != 1 || !s || s == d3d.backbuffer || !d3d.rt_texture) return;
+    if (access("/data/xbox/xbcompat-dump-targets", F_OK) && access("/tmp/xbcompat-dump-targets", F_OK)) return;
+    GLenum face;
+    ULONG level;
+    tex_entry *e = s->Parent ? surface_image(s, &face, &level) : NULL;
+    if (!s->Parent) {
+        for (e = *tex_bucket(s->Data); e; e = e->next)
+            if (e->data == s->Data && e->format == s->Format && e->size == s->Size) break;
+        face = GL_TEXTURE_2D; level = 0;
+    }
+    if (!e) return;
+    hud_batch_flush();
+    ULONG w, h, pitch;
+    container_size((D3DPixelContainer *)s, &w, &h, &pitch);
+    if (!w || !h || w > 2048 || h > 2048) return;
+    uint8_t *px = malloc(w * h * 4);
+    if (!px) return;
+    glBindTexture(e->target, e->id);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glGetTexImage(face, level, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    mkdir("/tmp/xbc-dump", 0755);
+    if (seq_frame != d3d.frame) { seq_frame = d3d.frame; seq = 0; }
+    char path[128];
+    snprintf(path, sizeof path, "/tmp/xbc-dump/%lu-%02u-%08x-%ux%u.ppm", (unsigned long)d3d.frame, seq++,
+             (unsigned)s->Data, (unsigned)w, (unsigned)h);
+    FILE *f = fopen(path, "wb");
+    if (f) {
+        fprintf(f, "P6 %u %u 255\n", (unsigned)w, (unsigned)h);
+        for (ULONG i = 0; i < w * h; i++) fwrite(px + i * 4, 1, 3, f);
+        fclose(f);
+        xlog("D3D:   dumped %s", path);
+    }
+    free(px);
+    gc_reset();   /* the texture binding changed behind the cache */
+}
+
 static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
 {
+    trace_dump_target(d3d.target);
     pusher_drain();
     if (async_front()) { async_target(target, z); return; }
     if (async_replaying) {
@@ -6926,6 +6972,8 @@ static void NTAPI D3DSurface_LockRect(D3DSurface *s, ULONG *locked, const LONG *
 {
     ULONG w, h, pitch;
     container_size((D3DPixelContainer *)s, &w, &h, &pitch);
+    TRACE_ALL("D3D: LockRect surface %p data %#x %ux%u flags %#x%s%s", (void *)s, (unsigned)s->Data, (unsigned)w,
+              (unsigned)h, (unsigned)flags, s == d3d.backbuffer ? " backbuffer" : "", s == d3d.depth ? " depth" : "");
     if (s == d3d.backbuffer && !d3d.bb_cpu_dirty) {
         /* Hand out the real pixels: read the frame back.  Not while memory
            holds writes from an earlier lock: GL hasn't seen them yet (a draw
@@ -7043,6 +7091,8 @@ static void NTAPI D3DDevice_CopyRects(D3DSurface *src, const LONG *rects, UINT_ 
     ULONG sw, sh, sp, dw, dh, dp;
     container_size((D3DPixelContainer *)src, &sw, &sh, &sp);
     container_size((D3DPixelContainer *)dst, &dw, &dh, &dp);
+    TRACE_ALL("D3D: CopyRects %p data %#x %ux%u -> %p data %#x %ux%u, %u rects", (void *)src, (unsigned)src->Data,
+              (unsigned)sw, (unsigned)sh, (void *)dst, (unsigned)dst->Data, (unsigned)dw, (unsigned)dh, (unsigned)n);
     bool lin;
     ULONG src_fmt = (src->Format >> 8) & 0xFF, dst_fmt = (dst->Format >> 8) & 0xFF;
     if (src_fmt == 0x0C || src_fmt == 0x0E || src_fmt == 0x0F ||
@@ -7286,6 +7336,8 @@ static void lock_level(D3DPixelContainer *t, ULONG face, ULONG level, ULONG *loc
 
 static void NTAPI D3DTexture_LockRect(D3DPixelContainer *t, UINT_ level, ULONG *locked, const LONG *rect, ULONG flags)
 {
+    TRACE_ALL("D3D: LockRect texture %p data %#x level %u flags %#x", (void *)t, (unsigned)t->res.Data, (unsigned)level,
+              (unsigned)flags);
     lock_level(t, 0, level, locked, rect, flags);
 }
 
@@ -7635,6 +7687,8 @@ static void NTAPI D3DDevice_SetScissors(ULONG Count, BOOLEAN Exclusive, const D3
     d3d.scissors.count = Count;
     d3d.scissors.exclusive = Exclusive;
     if (Count) memcpy(d3d.scissors.rects, rects, Count * sizeof(D3DRECT));
+    TRACE_ALL("D3D: SetScissors(%u, %u) first %d,%d-%d,%d", Count, Exclusive, Count ? (int)rects[0].x1 : 0,
+              Count ? (int)rects[0].y1 : 0, Count ? (int)rects[0].x2 : 0, Count ? (int)rects[0].y2 : 0);
 }
 
 static void NTAPI D3DDevice_GetScissors(ULONG *Count, ULONG *Exclusive, D3DRECT *rects)
