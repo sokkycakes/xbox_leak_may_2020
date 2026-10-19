@@ -1,0 +1,165 @@
+<XuiCanvas version="000c">
+<Properties>
+ <Id>canvas</Id>
+ <Width>1024</Width>
+ <Height>768</Height>
+</Properties>
+<XuiScene>
+<Properties>
+ <Id>CarouselFocus</Id>
+ <Width>1024</Width>
+ <Height>768</Height>
+ <Position>0,0,0</Position>
+ <Pivot>512,384,0</Pivot>
+</Properties>
+<XuiFigure>
+<Properties>
+ <Id>card</Id>
+ <Width>640</Width>
+ <Height>440</Height>
+ <Position>192,40,0</Position>
+ <Stroke>
+  <StrokeWidth>10</StrokeWidth>
+  <StrokeColor>0xff8e8e8e</StrokeColor>
+ </Stroke>
+ <Fill>
+  <FillType>2</FillType>
+  <Gradient>
+   <NumStops>3</NumStops>
+   <StopColor>0xff5c5a55</StopColor>
+   <StopColor>0xff53514c</StopColor>
+   <StopColor>0xff4b4945</StopColor>
+   <StopPos>0</StopPos>
+   <StopPos>0.6</StopPos>
+   <StopPos>1</StopPos>
+  </Gradient>
+  <Rotation>90</Rotation>
+ </Fill>
+ <Closed>true</Closed>
+ <Points>640,440;64,0;576,0,611.347,0,640,28.6528;640,64;640,376,640,411.347,611.347,440;576,440;64,440,28.6528,440,0,411.347;0,376;0,64,0,28.6528,28.6528,0</Points>
+</Properties>
+</XuiFigure>
+<XuiFigure>
+<Properties>
+ <Id>arrowL</Id>
+ <Width>34</Width>
+ <Height>60</Height>
+ <Position>220,230.0,0</Position>
+ <Fill>
+  <FillType>1</FillType>
+  <FillColor>0xffd8d8d8</FillColor>
+ </Fill>
+ <Closed>true</Closed>
+ <Points>34,60;34,0;34,60;0,30</Points>
+</Properties>
+</XuiFigure>
+<XuiFigure>
+<Properties>
+ <Id>arrowR</Id>
+ <Width>34</Width>
+ <Height>60</Height>
+ <Position>770,230.0,0</Position>
+ <Fill>
+  <FillType>1</FillType>
+  <FillColor>0xffd8d8d8</FillColor>
+ </Fill>
+ <Closed>true</Closed>
+ <Points>34,60;0,0;34,30;0,60</Points>
+</Properties>
+</XuiFigure>
+<XuiFigure>
+<Properties>
+ <Id>aPill</Id>
+ <Width>120</Width>
+ <Height>110</Height>
+ <Position>682,360,0</Position>
+ <Fill>
+  <FillType>1</FillType>
+  <FillColor>0xffc6f23a</FillColor>
+ </Fill>
+ <Closed>true</Closed>
+ <Points>120,110;50,0;65,0,95.3765,0,120,24.6235;120,55;120,55,120,85.3765,95.3765,110;65,110;50,110,22.385,110,0,87.615;0,60;0,50,0,22.385,22.385,0</Points>
+</Properties>
+</XuiFigure>
+<XuiImage>
+<Properties>
+ <Id>aGlyph</Id>
+ <Width>90</Width>
+ <Height>90</Height>
+ <Position>676,350,0</Position>
+ <ImagePath>glyph_a_button.png</ImagePath>
+ <SizeMode>4</SizeMode>
+</Properties>
+</XuiImage>
+<XuiText>
+<Properties>
+ <Id>title</Id>
+ <Width>1024</Width>
+ <Height>60</Height>
+ <Position>0,510,0</Position>
+ <Text>Game Title</Text>
+ <TextColor>0xffffffff</TextColor>
+ <DropShadowColor>0</DropShadowColor>
+ <PointSize>44</PointSize>
+ <Font>Convection</Font>
+ <TextStyle>1040</TextStyle>
+</Properties>
+</XuiText>
+<XuiImage>
+<Properties>
+ <Id>bGlyph</Id>
+ <Width>48</Width>
+ <Height>48</Height>
+ <Position>488.0,584,0</Position>
+ <ImagePath>glyph_b.png</ImagePath>
+ <SizeMode>4</SizeMode>
+</Properties>
+</XuiImage>
+<XuiFigure>
+<Properties>
+ <Id>backStem</Id>
+ <Width>100</Width>
+ <Height>40</Height>
+ <Position>462.0,630,0</Position>
+ <Stroke>
+  <StrokeWidth>9</StrokeWidth>
+  <StrokeColor>0xffdedede</StrokeColor>
+ </Stroke>
+ <Closed>false</Closed>
+ <Points>100,40;90,0;90,32;16,32</Points>
+</Properties>
+</XuiFigure>
+<XuiFigure>
+<Properties>
+ <Id>backHead</Id>
+ <Width>34</Width>
+ <Height>36</Height>
+ <Position>446.0,644,0</Position>
+ <Fill>
+  <FillType>1</FillType>
+  <FillColor>0xffdedede</FillColor>
+ </Fill>
+ <Closed>true</Closed>
+ <Points>34,36;34,0;34,36;0,18</Points>
+</Properties>
+</XuiFigure>
+<Timelines>
+<NamedFrames>
+<NamedFrame><Name>Intro</Name><Time>0</Time><Command>play</Command><CommandParams></CommandParams></NamedFrame>
+<NamedFrame><Name>Pulse</Name><Time>10</Time><Command>play</Command><CommandParams></CommandParams></NamedFrame>
+<NamedFrame><Name>EndPulse</Name><Time>40</Time><Command>gotoandplay</Command><CommandParams>Pulse</CommandParams></NamedFrame>
+</NamedFrames>
+<Timeline>
+<Id>aPill</Id>
+<TimelineProp>Opacity</TimelineProp>
+<KeyFrame><Time>0</Time><Interpolation>0</Interpolation><Prop>0</Prop></KeyFrame>
+<KeyFrame><Time>10</Time><Interpolation>2</Interpolation><Prop>1</Prop></KeyFrame>
+<KeyFrame><Time>25</Time><Interpolation>2</Interpolation><Prop>0.7</Prop></KeyFrame>
+<KeyFrame><Time>40</Time><Interpolation>0</Interpolation><Prop>1</Prop></KeyFrame>
+</Timeline>
+</Timelines>
+
+</XuiScene>
+</XuiCanvas>
+</cross-session-message>
+</system-reminder>

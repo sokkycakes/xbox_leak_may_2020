@@ -1,0 +1,505 @@
+<XuiCanvas version="000c">
+<Properties>
+ <Id>canvas</Id>
+ <Width>1024</Width>
+ <Height>512</Height>
+</Properties>
+<XuiScene>
+<Properties>
+ <Id>CatalogPanel</Id>
+ <Width>586</Width>
+ <Height>402</Height>
+ <Position>219,55,0</Position>
+ <Pivot>293,201,0</Pivot>
+</Properties>
+<XuiFigure>
+<Properties>
+ <Id>card</Id>
+ <Width>586</Width>
+ <Height>402</Height>
+ <Position>0,0,0</Position>
+ <Stroke>
+  <StrokeWidth>6</StrokeWidth>
+  <StrokeColor>0xff898989</StrokeColor>
+ </Stroke>
+ <Fill>
+  <FillType>1</FillType>
+  <FillColor>0xff55534e</FillColor>
+ </Fill>
+ <Closed>true</Closed>
+ <Points>586,402;36,0;550,0,569.883,0,586,16.1172;586,36;586,366,586,385.883,569.883,402;550,402;36,402,16.1172,402,0,385.883;0,366;0,36,0,16.1172,16.1172,0</Points>
+</Properties>
+</XuiFigure>
+<XuiFigure>
+<Properties>
+ <Id>cardSheen</Id>
+ <Width>580</Width>
+ <Height>396</Height>
+ <Position>3,3,0</Position>
+ <Fill>
+  <FillType>2</FillType>
+  <Gradient>
+   <NumStops>3</NumStops>
+   <StopColor>0x4dd9d9d9</StopColor>
+   <StopColor>0x4d000000</StopColor>
+   <StopColor>0x00000000</StopColor>
+   <StopPos>0</StopPos>
+   <StopPos>0.97</StopPos>
+   <StopPos>1</StopPos>
+  </Gradient>
+  <Rotation>90</Rotation>
+ </Fill>
+ <Closed>true</Closed>
+ <Points>580,396;33,0;547,0,565.226,0,580,14.7741;580,33;580,363,580,381.226,565.226,396;547,396;33,396,14.7741,396,0,381.226;0,363;0,33,0,14.7741,14.7741,0</Points>
+</Properties>
+</XuiFigure>
+<XuiFigure>
+<Properties>
+ <Id>heroBg</Id>
+ <Width>563</Width>
+ <Height>194</Height>
+ <Position>12,11,0</Position>
+ <Fill>
+  <FillType>2</FillType>
+  <Gradient>
+   <NumStops>3</NumStops>
+   <StopColor>0xfff7f7f7</StopColor>
+   <StopColor>0xffe9e9e9</StopColor>
+   <StopColor>0xffcfcfcf</StopColor>
+   <StopPos>0</StopPos>
+   <StopPos>0.55</StopPos>
+   <StopPos>1</StopPos>
+  </Gradient>
+  <Rotation>90</Rotation>
+ </Fill>
+ <Closed>true</Closed>
+ <Points>563,194;30,0;533,0,549.569,0,563,13.431;563,30;563,194;0,194;0,30,0,13.431,13.431,0</Points>
+</Properties>
+</XuiFigure>
+<XuiImage>
+<Properties>
+ <Id>heroArt</Id>
+ <Width>313</Width>
+ <Height>194</Height>
+ <Position>262,11,0</Position>
+ <ImagePath>hero.png</ImagePath>
+ <SizeMode>4</SizeMode>
+</Properties>
+</XuiImage>
+<XuiText>
+<Properties>
+ <Id>heroLogo1</Id>
+ <Width>260</Width>
+ <Height>52</Height>
+ <Position>38,45,0</Position>
+ <Text>STILETTO</Text>
+ <TextColor>0xffe3121b</TextColor>
+ <DropShadowColor>0</DropShadowColor>
+ <PointSize>44</PointSize>
+ <Font>Convection</Font>
+ <TextStyle>16</TextStyle>
+</Properties>
+</XuiText>
+<XuiText>
+<Properties>
+ <Id>heroLogo2</Id>
+ <Width>260</Width>
+ <Height>52</Height>
+ <Position>38,91,0</Position>
+ <Text>SWIFT</Text>
+ <TextColor>0xffe3121b</TextColor>
+ <DropShadowColor>0</DropShadowColor>
+ <PointSize>44</PointSize>
+ <Font>Convection</Font>
+ <TextStyle>16</TextStyle>
+</Properties>
+</XuiText>
+<XuiFigure>
+<Properties>
+ <Id>heroStroke</Id>
+ <Width>563</Width>
+ <Height>194</Height>
+ <Position>12,11,0</Position>
+ <Stroke>
+  <StrokeWidth>2</StrokeWidth>
+  <StrokeColor>0xff404040</StrokeColor>
+ </Stroke>
+ <Fill>
+  <FillType>0</FillType>
+ </Fill>
+ <Closed>true</Closed>
+ <Points>563,194;30,0;533,0,549.569,0,563,13.431;563,30;563,194;0,194;0,30,0,13.431,13.431,0</Points>
+</Properties>
+</XuiFigure>
+<XuiFigure>
+<Properties>
+ <Id>exploreStrip</Id>
+ <Width>250</Width>
+ <Height>32</Height>
+ <Position>175,166,0</Position>
+ <Fill>
+  <FillType>2</FillType>
+  <Gradient>
+   <NumStops>4</NumStops>
+   <StopColor>0x00383838</StopColor>
+   <StopColor>0xb0383838</StopColor>
+   <StopColor>0xb0383838</StopColor>
+   <StopColor>0x00383838</StopColor>
+   <StopPos>0</StopPos>
+   <StopPos>0.25</StopPos>
+   <StopPos>0.75</StopPos>
+   <StopPos>1</StopPos>
+  </Gradient>
+  <Rotation>0</Rotation>
+ </Fill>
+ <Closed>true</Closed>
+ <Points>250,32;0,0;250,0;250,32;0,32</Points>
+</Properties>
+</XuiFigure>
+<XuiFigure>
+<Properties>
+ <Id>spotBg</Id>
+ <Width>284</Width>
+ <Height>186</Height>
+ <Position>12,205,0</Position>
+ <Fill>
+  <FillType>2</FillType>
+  <Gradient>
+   <NumStops>4</NumStops>
+   <StopColor>0xffd6d8f0</StopColor>
+   <StopColor>0xff9da3d8</StopColor>
+   <StopColor>0xff7c82ba</StopColor>
+   <StopColor>0xff5a5e8e</StopColor>
+   <StopPos>0</StopPos>
+   <StopPos>0.32</StopPos>
+   <StopPos>0.7</StopPos>
+   <StopPos>1</StopPos>
+  </Gradient>
+  <Rotation>90</Rotation>
+ </Fill>
+ <Closed>true</Closed>
+ <Points>284,186;0,0;284,0;284,186;30,186,13.431,186,0,172.569;0,156</Points>
+</Properties>
+</XuiFigure>
+<XuiFigure>
+<Properties>
+ <Id>spotGlow</Id>
+ <Width>284</Width>
+ <Height>186</Height>
+ <Position>12,205,0</Position>
+ <Fill>
+  <FillType>3</FillType>
+  <Gradient>
+   <Radial>true</Radial>
+   <NumStops>2</NumStops>
+   <StopColor>0x90eef0ff</StopColor>
+   <StopColor>0x00eef0ff</StopColor>
+   <StopPos>0</StopPos>
+   <StopPos>1</StopPos>
+  </Gradient>
+  <Translation>102,-83,0</Translation>
+  <Scale>1.4,1.4,1</Scale>
+ </Fill>
+ <Closed>true</Closed>
+ <Points>284,186;0,0;284,0;284,186;30,186,13.431,186,0,172.569;0,156</Points>
+</Properties>
+</XuiFigure>
+<XuiFigure>
+<Properties>
+ <Id>spotStroke</Id>
+ <Width>284</Width>
+ <Height>186</Height>
+ <Position>12,205,0</Position>
+ <Stroke>
+  <StrokeWidth>2</StrokeWidth>
+  <StrokeColor>0xff404040</StrokeColor>
+ </Stroke>
+ <Fill>
+  <FillType>0</FillType>
+ </Fill>
+ <Closed>true</Closed>
+ <Points>284,186;0,0;284,0;284,186;30,186,13.431,186,0,172.569;0,156</Points>
+</Properties>
+</XuiFigure>
+<XuiFigure>
+<Properties>
+ <Id>dlBg</Id>
+ <Width>279</Width>
+ <Height>186</Height>
+ <Position>296,205,0</Position>
+ <Fill>
+  <FillType>2</FillType>
+  <Gradient>
+   <NumStops>4</NumStops>
+   <StopColor>0xffdedeb0</StopColor>
+   <StopColor>0xffbcbc5e</StopColor>
+   <StopColor>0xff9c9c62</StopColor>
+   <StopColor>0xff6a6d8a</StopColor>
+   <StopPos>0</StopPos>
+   <StopPos>0.32</StopPos>
+   <StopPos>0.68</StopPos>
+   <StopPos>1</StopPos>
+  </Gradient>
+  <Rotation>90</Rotation>
+ </Fill>
+ <Closed>true</Closed>
+ <Points>279,186;0,0;279,0;279,156,279,172.569,265.569,186;249,186;0,186</Points>
+</Properties>
+</XuiFigure>
+<XuiFigure>
+<Properties>
+ <Id>dlGlow</Id>
+ <Width>279</Width>
+ <Height>186</Height>
+ <Position>296,205,0</Position>
+ <Fill>
+  <FillType>3</FillType>
+  <Gradient>
+   <Radial>true</Radial>
+   <NumStops>2</NumStops>
+   <StopColor>0x80f6f6c8</StopColor>
+   <StopColor>0x00f6f6c8</StopColor>
+   <StopPos>0</StopPos>
+   <StopPos>1</StopPos>
+  </Gradient>
+  <Translation>-79.5,-83,0</Translation>
+  <Scale>1.4,1.4,1</Scale>
+ </Fill>
+ <Closed>true</Closed>
+ <Points>279,186;0,0;279,0;279,156,279,172.569,265.569,186;249,186;0,186</Points>
+</Properties>
+</XuiFigure>
+<XuiFigure>
+<Properties>
+ <Id>dlStroke</Id>
+ <Width>279</Width>
+ <Height>186</Height>
+ <Position>296,205,0</Position>
+ <Stroke>
+  <StrokeWidth>2</StrokeWidth>
+  <StrokeColor>0xff404040</StrokeColor>
+ </Stroke>
+ <Fill>
+  <FillType>0</FillType>
+ </Fill>
+ <Closed>true</Closed>
+ <Points>279,186;0,0;279,0;279,156,279,172.569,265.569,186;249,186;0,186</Points>
+</Properties>
+</XuiFigure>
+<XuiButton>
+<Properties>
+ <Id>tileHero</Id>
+ <Width>563</Width>
+ <Height>194</Height>
+ <Position>12,11,0</Position>
+ <Visual>FrolickTile</Visual>
+ <NavDown>tileSpotlight</NavDown>
+</Properties>
+<XuiImage>
+<Properties>
+ <Id>glyphStart</Id>
+ <Width>32</Width>
+ <Height>26</Height>
+ <Position>233,155,0</Position>
+ <ImagePath>glyph_a.png</ImagePath>
+ <SizeMode>4</SizeMode>
+</Properties>
+</XuiImage>
+<XuiText>
+<Properties>
+ <Id>startLabel</Id>
+ <Width>48</Width>
+ <Height>12</Height>
+ <Position>225,177,0</Position>
+ <Text>START</Text>
+ <TextColor>0xffffffff</TextColor>
+ <DropShadowColor>0</DropShadowColor>
+ <PointSize>8</PointSize>
+ <Font>Convection</Font>
+ <TextStyle>1040</TextStyle>
+</Properties>
+</XuiText>
+<XuiText>
+<Properties>
+ <Id>exploreLabel</Id>
+ <Width>120</Width>
+ <Height>28</Height>
+ <Position>271,157,0</Position>
+ <Text>explore</Text>
+ <TextColor>0xffeeeeee</TextColor>
+ <DropShadowColor>0</DropShadowColor>
+ <PointSize>20</PointSize>
+ <Font>Convection</Font>
+ <TextStyle>16</TextStyle>
+</Properties>
+</XuiText>
+</XuiButton>
+<XuiButton>
+<Properties>
+ <Id>tileSpotlight</Id>
+ <Width>284</Width>
+ <Height>186</Height>
+ <Position>12,205,0</Position>
+ <Visual>FrolickTile</Visual>
+ <NavUp>tileHero</NavUp>
+ <NavRight>tileDownloads</NavRight>
+</Properties>
+<XuiImage>
+<Properties>
+ <Id>glyphX</Id>
+ <Width>30</Width>
+ <Height>30</Height>
+ <Position>6,8,0</Position>
+ <ImagePath>glyph_x.png</ImagePath>
+ <SizeMode>4</SizeMode>
+</Properties>
+</XuiImage>
+<XuiText>
+<Properties>
+ <Id>spotLabel</Id>
+ <Width>250</Width>
+ <Height>48</Height>
+ <Position>26,34,0</Position>
+ <Text>spotlight +</Text>
+ <TextColor>0xffffffff</TextColor>
+ <DropShadowColor>0</DropShadowColor>
+ <PointSize>38</PointSize>
+ <Font>Convection</Font>
+ <TextStyle>16</TextStyle>
+</Properties>
+</XuiText>
+<XuiText>
+<Properties>
+ <Id>spotSub</Id>
+ <Width>250</Width>
+ <Height>32</Height>
+ <Position>26,80,0</Position>
+ <Text>featured</Text>
+ <TextColor>0xffffffff</TextColor>
+ <DropShadowColor>0</DropShadowColor>
+ <PointSize>24</PointSize>
+ <Font>Convection</Font>
+ <TextStyle>16</TextStyle>
+</Properties>
+</XuiText>
+</XuiButton>
+<XuiButton>
+<Properties>
+ <Id>tileDownloads</Id>
+ <Width>279</Width>
+ <Height>186</Height>
+ <Position>296,205,0</Position>
+ <Visual>FrolickTile</Visual>
+ <NavUp>tileHero</NavUp>
+ <NavLeft>tileSpotlight</NavLeft>
+</Properties>
+<XuiImage>
+<Properties>
+ <Id>glyphY</Id>
+ <Width>30</Width>
+ <Height>30</Height>
+ <Position>6,8,0</Position>
+ <ImagePath>glyph_y.png</ImagePath>
+ <SizeMode>4</SizeMode>
+</Properties>
+</XuiImage>
+<XuiText>
+<Properties>
+ <Id>dlLabel</Id>
+ <Width>240</Width>
+ <Height>48</Height>
+ <Position>24,34,0</Position>
+ <Text>downloads</Text>
+ <TextColor>0xffffffff</TextColor>
+ <DropShadowColor>0</DropShadowColor>
+ <PointSize>38</PointSize>
+ <Font>Convection</Font>
+ <TextStyle>16</TextStyle>
+</Properties>
+</XuiText>
+<XuiText>
+<Properties>
+ <Id>dlTitle</Id>
+ <Width>150</Width>
+ <Height>20</Height>
+ <Position>28,95,0</Position>
+ <Text>Stiletto Swift</Text>
+ <TextColor>0xffffffff</TextColor>
+ <DropShadowColor>0</DropShadowColor>
+ <PointSize>14</PointSize>
+ <Font>Convection</Font>
+ <TextStyle>16</TextStyle>
+</Properties>
+</XuiText>
+<XuiText>
+<Properties>
+ <Id>dlPct</Id>
+ <Width>58</Width>
+ <Height>20</Height>
+ <Position>180,95,0</Position>
+ <Text>70%</Text>
+ <TextColor>0xffffffff</TextColor>
+ <DropShadowColor>0</DropShadowColor>
+ <PointSize>14</PointSize>
+ <Font>Convection</Font>
+ <TextStyle>528</TextStyle>
+</Properties>
+</XuiText>
+<XuiFigure>
+<Properties>
+ <Id>dlTrack</Id>
+ <Width>219</Width>
+ <Height>14</Height>
+ <Position>24,118,0</Position>
+ <Stroke>
+  <StrokeWidth>2</StrokeWidth>
+  <StrokeColor>0xff5c5c5c</StrokeColor>
+ </Stroke>
+ <Fill>
+  <FillType>1</FillType>
+  <FillColor>0xff6e6e6e</FillColor>
+ </Fill>
+ <Closed>true</Closed>
+ <Points>219,14;7,0;212,0,215.866,0,219,3.1339;219,7;219,7,219,10.8661,215.866,14;212,14;7,14,3.1339,14,0,10.8661;0,7;0,7,0,3.1339,3.1339,0</Points>
+</Properties>
+</XuiFigure>
+<XuiFigure>
+<Properties>
+ <Id>dlFill</Id>
+ <Width>153</Width>
+ <Height>14</Height>
+ <Position>24,118,0</Position>
+ <Fill>
+  <FillType>2</FillType>
+  <Gradient>
+   <NumStops>3</NumStops>
+   <StopColor>0xff7dfa9c</StopColor>
+   <StopColor>0xff2ed65a</StopColor>
+   <StopColor>0xff22b84a</StopColor>
+   <StopPos>0</StopPos>
+   <StopPos>0.45</StopPos>
+   <StopPos>1</StopPos>
+  </Gradient>
+  <Rotation>90</Rotation>
+ </Fill>
+ <Closed>true</Closed>
+ <Points>153,14;7,0;146,0,149.866,0,153,3.1339;153,7;153,7,153,10.8661,149.866,14;146,14;7,14,3.1339,14,0,10.8661;0,7;0,7,0,3.1339,3.1339,0</Points>
+</Properties>
+</XuiFigure>
+</XuiButton>
+</XuiScene>
+<Timelines>
+<NamedFrames>
+<NamedFrame><Name>Intro</Name><Time>0</Time><Command>play</Command><CommandParams></CommandParams></NamedFrame>
+<NamedFrame><Name>EndIntro</Name><Time>12</Time><Command>stop</Command><CommandParams></CommandParams></NamedFrame>
+</NamedFrames>
+<Timeline>
+<Id>CatalogPanel</Id>
+<TimelineProp>Opacity</TimelineProp>
+<TimelineProp>Scale</TimelineProp>
+<KeyFrame><Time>0</Time><Interpolation>2</Interpolation><Prop>0</Prop><Prop>0.94,0.94,1</Prop></KeyFrame>
+<KeyFrame><Time>12</Time><Interpolation>0</Interpolation><Prop>1</Prop><Prop>1,1,1</Prop></KeyFrame>
+</Timeline>
+</Timelines>
+</XuiCanvas>
+
