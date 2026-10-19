@@ -7,7 +7,7 @@ Writes, for the Sprite nodes genhub.py places:
   label_catalog.png, label_library.png, label_settings.png: the pad names
     as Godot's Label3D draws them: Trebuchet MS (art/fonts/trebuc.ttf, the
     one Frolick ships) at 32 px, natural width, +6 px glyph spacing and a
-    12 px outline, in the text and outline colours of each label (rendered
+    3 px outline (0.75 x Label3D's outline_size 12, as Frolick's label bake has it), in the text and outline colours of each label (rendered
     at 2x: pixelSize is 0.002 * 0.552553 / 2).  main.tscn's font_stretch 50
     and font_weight 999 only pick a face; Trebuchet has neither, so the
     text is drawn as the Regular face is.
@@ -35,7 +35,12 @@ def rgb(c, a=255):
 
 
 def label(text, colour, outline, path, fontfile=FONT):
-    size, spacing, stroke = 32 * S, 6 * S, 12 * S
+    # As Frolick's own label bake (frolick_assets/label_mesh.py) draws them:
+    # the outline is an outward stroke of 0.75 x Label3D's default
+    # outline_size 12, i.e. 0.094 em (3 px at 32 px), round joins, and the
+    # glyph spacing of 6 is at its 37 px logical size, 0.162 em.
+    size = 32 * S
+    spacing, stroke = int(round(0.162 * size)), int(round(0.09375 * size))
     font = ImageFont.truetype(fontfile, size)
     widths = [font.getlength(ch) for ch in text]
     w = int(sum(widths) + spacing * (len(text) - 1) + stroke * 2 + 8)
