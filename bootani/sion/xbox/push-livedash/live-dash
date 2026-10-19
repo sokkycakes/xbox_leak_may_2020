@@ -8,6 +8,9 @@
 #
 #   /data/xbox-live/live-dash        start it (returns at once)
 #
+# The normal dashboard starts it too: "Xbox Live" in its Games list (see
+# launch-title).
+#
 # Everything lives in /data/xbox-live: its own xbcompat (with the network
 # card), its own Xbox hard disk (hdd/) and the server's accounts (live.json).
 # Nothing in /opt/xbcompat or /data/xbox is touched.
@@ -28,10 +31,14 @@ echo "$(date '+%F %T') Live dashboard: stopping the normal dashboard"
 for p in 1 3 4 5; do mkdir -p "$L/hdd/partition$p"; done
 mkdir -p "$L/disc"
 
-PYTHONHOME=$X PYTHONDONTWRITEBYTECODE=1 "$X/bin/python3" "$L/liveserver/liveserver.py" \
-	--db "$L/live.json" > /var/log/xbox-live-server.log 2>&1 &
-srv=$!
-sleep 1
+# The Live server keeps running afterwards (launch-title shares it).
+PID=/var/run/xbox-live-server.pid
+if ! { [ -s $PID ] && kill -0 "$(cat $PID)" 2> /dev/null; }; then
+	PYTHONHOME=$X PYTHONDONTWRITEBYTECODE=1 setsid "$X/bin/python3" "$L/liveserver/liveserver.py" \
+		--db "$L/live.json" > /var/log/xbox-live-server.log 2>&1 < /dev/null &
+	echo $! > $PID
+	sleep 1
+fi
 
 xbox_av_start
 echo "$(date '+%F %T') Live dashboard: running"
@@ -40,5 +47,4 @@ XBCOMPAT_DNS=127.0.0.1:5353 XBCOMPAT_RESET=1 "$L/bin/xbcompat" --hle "$L/xodash.
 	--net nat "$L/hdd/partition2/xodash.xbe" > "$LOG" 2>&1
 echo "$(date '+%F %T') Live dashboard: exited with $?"
 
-kill "$srv" 2>/dev/null
 /etc/init.d/S98xbox start

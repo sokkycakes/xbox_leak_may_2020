@@ -89,7 +89,7 @@ for l in english:English japanese:Japanese german:German french:French spanish:S
 done
 echo "imagebld xodash.xbe"
 timeout 300 wine "$WORK/xb/public/idw/imagebld.exe" /TESTID:0xFFFE0000 /TESTRATINGS:0xFFFFFFFF \
-  /TESTREGION:0x7FFFFFFF "/TESTNAME:Xbox OnlineDash" /INITFLAGS:0x00000004 /LIMITMEM /VERSION:0001 \
+  /TESTREGION:0x7FFFFFFF "/TESTNAME:Xbox Live" /INITFLAGS:0x00000004 /LIMITMEM /VERSION:0001 \
   $ins /TESTMEDIATYPES:1 /NOLIBWARN /NOSETUPHD /IN:xodash.exe /OUT:xodash.xbe | tr -d '\r'
 
 # The title maps D: to the dashboard partition (its Y: drive), laid out as
