@@ -69,9 +69,9 @@ BACKDROP_STOPS = [(0.0, (0.42, 0.41104, 0.3528)), (0.32809, (0.29, 0.283813, 0.2
                   (0.665169, (0.201875, 0.198955, 0.179975)), (1.0, (0.13, 0.13, 0.13))]
 # ---- the pad panels (Frolick's 0.9 x 0.45 canvas, 1024 x 512) ------------
 # Centred on each camera's view axis, a little above it, tilted back a
-# few degrees, at the distance that gives the mockup's card size.
+# few degrees, close enough to fill the view as Frolick's own panels do.
 PANEL_W, PANEL_H = 0.9, 0.45
-PANEL_DIST, PANEL_RAISE, PANEL_TILT = 0.49, 0.066, 8.0
+PANEL_DIST, PANEL_RAISE, PANEL_TILT = 0.37, 0.06, 10.6
 # The screen overlay canvas (the engine's HUD is 720 x 480).
 HUD_W, HUD_H = 720, 480
 UI = HUD_H / 720.0                             # Godot's 720-high UI to the HUD

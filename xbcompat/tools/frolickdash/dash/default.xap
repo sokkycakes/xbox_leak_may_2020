@@ -184,9 +184,9 @@ DEF theHub Level
                 {
                     url "pads/catalog.xui"
                     skin "pads/frolick_skin.xui"
-                    origin -0.92516 0.57084 -0.11581
+                    origin -0.99226 0.52247 -0.04301
                     axisX 0.66179 0.00000 0.60995
-                    axisY 0.07407 -0.43652 -0.08037
+                    axisY 0.06058 -0.44103 -0.06573
                     function OnPress(id) { OnPadPress(0, id); }
                 }
             ]
@@ -201,9 +201,9 @@ DEF theHub Level
                 {
                     url "pads/library.xui"
                     skin "pads/frolick_skin.xui"
-                    origin -0.45000 0.57000 0.54288
+                    origin -0.45000 0.52163 0.64189
                     axisX 0.90000 -0.00000 0.00000
-                    axisY -0.00000 -0.43652 -0.10930
+                    axisY -0.00000 -0.44103 -0.08938
                     function OnPress(id) { OnPadPress(1, id); }
                 }
             ]
@@ -218,9 +218,9 @@ DEF theHub Level
                 {
                     url "pads/settings.xui"
                     skin "pads/frolick_skin.xui"
-                    origin 0.26338 0.57084 0.49414
+                    origin 0.33048 0.52247 0.56694
                     axisX 0.66179 -0.00000 -0.60995
-                    axisY -0.07407 -0.43652 -0.08037
+                    axisY -0.06058 -0.44103 -0.06573
                     function OnPress(id) { OnPadPress(2, id); }
                 }
             ]
