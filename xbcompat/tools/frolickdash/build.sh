@@ -11,7 +11,8 @@
 # (about ten minutes under Wine); this script then adds its own objects and
 # writes WORK/frolick.  Environment:
 #   FONT    the TTF the panels use (default: DejaVu Sans from the system)
-#   GLYPHS  a directory with Frolick's glyph_*.png (default: stand-ins)
+#   GLYPHS  a directory with Frolick's glyph_*.png (default: the Xbox 360
+#           Blades A/B/X/Y buttons in art360/, lettered)
 #   ART     a directory with Frolick's Circle.png / label_*.png and pad
 #           textures (default: tools/mkart.py's renderings)
 set -eo pipefail
@@ -59,7 +60,7 @@ cp "$HERE"/dash/pads/*.xui "$OUT/dash/pads/"
 python3 "$HERE/tools/genhub.py" "$OUT/dash"
 python3 "$HERE/tools/mkart.py" "$OUT/dash"
 [ -n "$ART" ] && cp "$ART"/*.png "$OUT/dash/"
-if [ -n "$GLYPHS" ]; then cp "$GLYPHS"/glyph_*.png "$OUT/dash/pads/"; else python3 "$HERE/tools/mkglyphs.py" "$OUT/dash/pads"; fi
+if [ -n "$GLYPHS" ]; then cp "$GLYPHS"/glyph_*.png "$OUT/dash/pads/"; else python3 "$HERE/tools/mkglyphs.py" "$OUT/dash/pads" "$HERE/art360"; fi
 cp "${FONT:-/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf}" "$OUT/dash/font.ttf"
 (
     cd "$OUT/dash"
