@@ -551,12 +551,14 @@ static LONG NTAPI Direct3D_CreateDevice(UINT_ Adapter, ULONG DeviceType, PVOID p
          pp->BackBufferFormat, pp->EnableAutoDepthStencil ? "yes" : "no", pp->MultiSampleType);
 
     av_title_starting();
-    FILE *boot = fopen("/tmp/xbcompat-trace-boot", "r");
+    const char *boot_path = "/tmp/xbcompat-trace-boot";
+    FILE *boot = fopen(boot_path, "r");
+    if (!boot) boot = fopen(boot_path = "/data/xbox/xbcompat-trace-boot", "r");
     if (boot) {
         unsigned long n = 0;
         if (fscanf(boot, "%lu", &n) != 1 || !n) n = 30;
         fclose(boot);
-        if (!unlink("/tmp/xbcompat-trace-boot")) {
+        if (!unlink(boot_path)) {
             trace_boot_frames = d3d.frame + n;
             g_trace = 1;
             xlog("D3D: tracing from device creation to frame %lu", trace_boot_frames);
@@ -1050,6 +1052,7 @@ static void swap_begin_frame(void)
 {
     d3d.frame++;
     __atomic_store_n(&published_frame_count, d3d.frame, __ATOMIC_RELEASE);
+    if (d3d.frame == 1) xlog("D3D: first Present");
     {
         /* Debug aid: XBCOMPAT_TRACE_FRAME=n turns --trace on for frame n only. */
         static long trace_frame = -2;
@@ -2503,9 +2506,12 @@ static void trace_draw_detail(const uint8_t *base, ULONG stride, ULONG count, bo
     if (d3d.target) {
         ULONG w = 0, h = 0, pitch = 0;
         container_size((D3DPixelContainer *)d3d.target, &w, &h, &pitch);
-        xlog("D3D:   target data %#x fmt %#x %ux%u blend %u %u/%u op %u alpha %u/%u", (unsigned)d3d.target->Data,
+        xlog("D3D:   target data %#x fmt %#x %ux%u blend %u %u/%u op %u alpha %u/%u viewport %u,%u %ux%u rt %dx%d"
+             " scissors %d vs %#x", (unsigned)d3d.target->Data,
              (unsigned)((d3d.target->Format >> 8) & 0xFF), (unsigned)w, (unsigned)h, RS(D3DRS_ALPHABLENDENABLE),
-             RS(D3DRS_SRCBLEND), RS(D3DRS_DESTBLEND), RS(D3DRS_BLENDOP), RS(D3DRS_ALPHATESTENABLE), RS(D3DRS_ALPHAREF));
+             RS(D3DRS_SRCBLEND), RS(D3DRS_DESTBLEND), RS(D3DRS_BLENDOP), RS(D3DRS_ALPHATESTENABLE), RS(D3DRS_ALPHAREF),
+             (unsigned)d3d.viewport.X, (unsigned)d3d.viewport.Y, (unsigned)d3d.viewport.Width,
+             (unsigned)d3d.viewport.Height, d3d.rt_width, d3d.rt_height, d3d.scissors.count, (unsigned)d3d.vertex_shader);
     }
     if (rhw && base && count <= 6 && stride >= 16 && stride <= 64) {
         for (ULONG v = 0; v < count; v++) {
@@ -5175,7 +5181,7 @@ static void draw_declared_(const vshader *sh, ULONG PrimitiveType, const UCHAR *
     if (!use_program(0, &e)) return;
     TRACE_ALL("D3D: draw(declared) prim %u count %u stride %u indices %p shader %#x", PrimitiveType, count, stride,
           indices ? indices + first : NULL, d3d.vertex_shader);
-    trace_draw_detail(NULL, stride, count, false);
+    trace_draw_detail(indices ? NULL : base + first * stride, stride, count, !indices);
     shader_diagnostics_mark(d3d.frame, ++shader_diag_draw, d3d.vertex_shader, d3d.pixel_shader, cur_program,
                             "declared");
     for (unsigned pass = 0; scissor_pass(pass); pass++)
@@ -8976,9 +8982,14 @@ static LONG NTAPI D3DDevice_PersistDisplay(void)
     else backbuffer_read_end();
     for (int y = 0; y < h; y++) memcpy(flipped + (size_t)y * w * 4, px + (size_t)(h - 1 - y) * w * 4, (size_t)w * 4);
     av_persist(flipped, w, h);
+    unsigned long long sum[3] = { 0, 0, 0 };
+    for (size_t i = 0; i < (size_t)w * h; i++)
+        for (int c = 0; c < 3; c++) sum[c] += flipped[i * 4 + c];
+    unsigned long long n = (unsigned long long)w * h ? (unsigned long long)w * h : 1;
     free(px);
     free(flipped);
-    xlog("D3D: PersistDisplay kept a %dx%d frame", w, h);
+    xlog("D3D: PersistDisplay kept a %dx%d frame, average colour %02llx%02llx%02llx", w, h,
+         sum[2] / n, sum[1] / n, sum[0] / n);
     return D3D_OK;
 }
 
