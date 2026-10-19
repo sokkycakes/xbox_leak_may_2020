@@ -1204,18 +1204,31 @@ static void NTAPI D3DDevice_Clear(ULONG Count, const D3DRECT *pRects, ULONG Flag
     }
     if (Flags & 1) { glClearDepth(Z); glDepthMask(GL_TRUE); mask |= GL_DEPTH_BUFFER_BIT; }
     if (Flags & 2) { glClearStencil(Stencil); glStencilMask(0xFF); mask |= GL_STENCIL_BUFFER_BIT; }
-    if (Count && pRects) {
-        glEnable(GL_SCISSOR_TEST);
-        for (ULONG i = 0; i < Count; i++) {
-            const D3DRECT *r = &pRects[i];
-            if (d3d.rt_texture) glScissor(r->x1, r->y1, r->x2 - r->x1, r->y2 - r->y1);
-            else glScissor(r->x1, d3d.rt_height - r->y2, r->x2 - r->x1, r->y2 - r->y1);
-            glClear(mask);
+    /* The library clips each rectangle, and the whole-target clear without
+       any, to the viewport; the scissors play no part.  GL's clear ignores
+       the viewport, so without this a clear of one viewport (a shadow
+       buffer tile, a split screen) wiped the whole target, and a clear
+       after a draw kept that draw's scissor. */
+    const D3DVIEWPORT8 *v = &d3d.viewport;
+    D3DRECT whole = { (LONG)v->X, (LONG)v->Y, (LONG)(v->X + v->Width), (LONG)(v->Y + v->Height) };
+    if (!Count || !pRects) { Count = 1; pRects = &whole; }
+    for (ULONG i = 0; i < Count; i++) {
+        D3DRECT r = pRects[i];
+        if (r.x1 < whole.x1) r.x1 = whole.x1;
+        if (r.y1 < whole.y1) r.y1 = whole.y1;
+        if (r.x2 > whole.x2) r.x2 = whole.x2;
+        if (r.y2 > whole.y2) r.y2 = whole.y2;
+        if (r.x1 >= r.x2 || r.y1 >= r.y2) continue;
+        if (r.x1 <= 0 && r.y1 <= 0 && r.x2 >= (LONG)d3d.rt_width && r.y2 >= (LONG)d3d.rt_height) {
+            glDisable(GL_SCISSOR_TEST);   /* the whole target: a plain (fast) clear */
+        } else {
+            glEnable(GL_SCISSOR_TEST);
+            if (d3d.rt_texture) glScissor(r.x1, r.y1, r.x2 - r.x1, r.y2 - r.y1);
+            else glScissor(r.x1, d3d.rt_height - r.y2, r.x2 - r.x1, r.y2 - r.y1);
         }
-        glDisable(GL_SCISSOR_TEST);
-    } else {
         glClear(mask);
     }
+    glDisable(GL_SCISSOR_TEST);
     glColorMask(1, 1, 1, 1);
 }
 
