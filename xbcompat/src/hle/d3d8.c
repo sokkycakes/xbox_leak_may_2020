@@ -169,6 +169,8 @@ typedef struct d3d_state {
     float target_zmax;           /* largest value of the current depth buffer's format */
     float host_zmax;             /* the same for the GL depth buffer actually backing it */
     ULONG fbo;                   /* framebuffer object for texture targets */
+    ULONG bb_proxy_tex;          /* the back buffer's stand-in while it pairs with a depth texture */
+    bool bb_proxy;               /* d3d.fbo draws into bb_proxy_tex for the back buffer */
     struct { ULONG count; ULONG exclusive; D3DRECT rects[8]; } scissors;
     float screen_offset[2];
     float backbuffer_scale[2];
@@ -3068,7 +3070,8 @@ typedef struct program_entry {
     GLuint vs, fs, prog;
     GLint attr[16];          /* the location of each v<n> input, -1 if unused */
     unsigned attr_mask;      /* the locations in attr */
-    GLint loc_ff_lighting, loc_fog_vertex_mode, loc_ff_transform, loc_ff_texcount;
+    GLint loc_ff_lighting, loc_fog_vertex_mode, loc_ff_transform, loc_ff_texcount, loc_zw_scale;
+    GLint loc_shadow_func, loc_shadow_dim;
     GLint loc_c, loc_flip_y, loc_vp_scale, loc_vp_offset, loc_wdepth;
     GLint loc_tex[4], loc_cube[4], loc_vol[4], loc_tex_scale, loc_c0, loc_c1, loc_fc0, loc_fc1,
           loc_bump_env, loc_bump_lum, loc_eye_vector, loc_key_color;
@@ -3644,6 +3647,9 @@ static program_entry *program_for(GLuint vs, GLuint fs)
         e->loc_ff_transform = U("ff_transform");
         e->loc_ff_texcount = U("ff_texcount");
         e->loc_fog_vertex_mode = U("fog_vertex_mode");
+        e->loc_zw_scale = U("zw_scale");
+        e->loc_shadow_func = U("shadow_func");
+        e->loc_shadow_dim = U("shadow_dim");
         e->loc_eye_vector = U("eye_vector");
         e->loc_key_color = U("key_color");
 #undef U
@@ -3817,7 +3823,7 @@ static GLuint fragment_shader_object(void)
    and point its samplers at them. */
 static void apply_shader_textures(program_entry *e)
 {
-    float scale[4][4];
+    float scale[4][4], shadow_func[4][4] = { { 0 } }, shadow_dim[4][4] = { { 0 } };
     for (int s = 0; s < 4; s++) {
         scale[s][0] = scale[s][1] = scale[s][2] = scale[s][3] = 1;
         p_glActiveTexture(GL_TEXTURE0 + s);
@@ -3847,6 +3853,20 @@ static void apply_shader_textures(program_entry *e)
         }
         if (is_depth_format((t->Format >> 8) & 0xFF))   /* r/q is in depth buffer steps */
             scale[s][2] = 1.0f / depth_format_max((t->Format >> 8) & 0xFF);
+        if (e->loc_shadow_func >= 0 && target == GL_TEXTURE_2D && is_depth_format((t->Format >> 8) & 0xFF)) {
+            /* The program compares whole depth steps itself (psh.c
+               shadow_lookup): it reads the raw texels, and filters the
+               compares rather than the depths. */
+            ULONG w, h, pitch, func = RS(D3DRS_SHADOWFUNC) & 7;
+            container_size(t, &w, &h, &pitch);
+            sampler_i(target, s, GL_TEXTURE_COMPARE_MODE, GL_NONE);
+            sampler_i(target, s, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            sampler_i(target, s, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            shadow_func[s][0] = func & 1; shadow_func[s][1] = (func >> 1) & 1; shadow_func[s][2] = (func >> 2) & 1;
+            shadow_func[s][3] = depth_format_max((t->Format >> 8) & 0xFF);
+            shadow_dim[s][0] = w; shadow_dim[s][1] = h;
+            shadow_dim[s][2] = TSS(s, D3DTSS_MAGFILTER) != 1 /* D3DTEXF_POINT */;
+        }
         /* The program declares at most one sampler per stage, of the type its
            texture mode wants; point it at unit s whatever is bound there. */
         if (e->loc_tex[s] >= 0) program_uniform1i(e, e->loc_tex[s], s);
@@ -3855,6 +3875,13 @@ static void apply_shader_textures(program_entry *e)
     }
     p_glActiveTexture(GL_TEXTURE0);
     program_uniform4fv(e, e->loc_tex_scale, 4, &scale[0][0]);
+    /* DOT_ZW writes depth in steps of the target's depth format. */
+    if (e->loc_zw_scale >= 0) program_uniform1f(e, e->loc_zw_scale, d3d.target_zmax);
+    if (e->loc_shadow_func >= 0) program_uniform4fv(e, e->loc_shadow_func, 4, &shadow_func[0][0]);
+    if (e->loc_shadow_dim >= 0) program_uniform4fv(e, e->loc_shadow_dim, 4, &shadow_dim[0][0]);
+    /* shadow_centre reads flip_y too, also under fixed-function vertices. */
+    if (e->loc_shadow_func >= 0 && e->loc_flip_y >= 0)
+        program_uniform1f(e, e->loc_flip_y, d3d.rt_texture ? -1.0f : 1.0f);
 }
 
 
@@ -5783,10 +5810,79 @@ static void resolve_window_framebuffer(GLbitfield mask)
     if (scissor) glEnable(GL_SCISSOR_TEST);
 }
 
+/* The back buffer paired with a depth texture (SetRenderTarget(NULL, z) for
+   a depth peel or shadow pass): GL can't attach the window framebuffer's
+   color to the FBO holding the texture, and the texture's rows run top-down
+   while the window's run bottom-up, so the pass draws into a texture
+   standing in for the back buffer, filled from the window when the pair is
+   set and copied back, flipped, when it is left or the frame is shown.
+   Rendering into the window's own depth instead put every pass of the
+   ATG NoSortAlphaBlend sample into the main depth buffer and left its
+   peel textures empty. */
+static void backbuffer_proxy_blit(bool to_window)
+{
+    GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
+    glDisable(GL_SCISSOR_TEST);
+    int w = (int)d3d.width, h = (int)d3d.height;
+    if (to_window) {
+        window_fb.bind(GL_READ_FRAMEBUFFER, d3d.fbo);
+        window_fb.bind(GL_DRAW_FRAMEBUFFER, window_fb.fbo);
+    } else {
+        resolve_window_framebuffer(GL_COLOR_BUFFER_BIT);
+        window_fb.bind(GL_READ_FRAMEBUFFER, window_fb.resolve ? window_fb.resolve : window_fb.fbo);
+        window_fb.bind(GL_DRAW_FRAMEBUFFER, d3d.fbo);
+    }
+    window_fb.blit(0, 0, w, h, 0, h, w, 0, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    window_fb.bind(GL_FRAMEBUFFER, d3d.rt_texture ? d3d.fbo : window_fb.fbo);
+    if (scissor) glEnable(GL_SCISSOR_TEST);
+}
+
+/* Bring the window up to date with what the pass drew.  A multisampled
+   window can't be the target of a flipping blit: its color from such a pass
+   is lost (depth-only passes, the usual case, don't mind). */
+static void backbuffer_proxy_sync(void)
+{
+    if (!d3d.bb_proxy) return;
+    if (window_fb.resolve) {
+        static bool warned;
+        if (!warned) xlog("D3D: color drawn with a depth texture over a multisampled back buffer is dropped");
+        warned = true;
+        return;
+    }
+    backbuffer_proxy_blit(true);
+}
+
+static void backbuffer_proxy_end(void)
+{
+    if (!d3d.bb_proxy) return;
+    backbuffer_proxy_sync();
+    d3d.bb_proxy = false;
+}
+
+/* The stand-in texture, in the window's color format, attached by the
+   caller to d3d.fbo before backbuffer_proxy_blit(false) fills it. */
+static GLuint backbuffer_proxy_texture(void)
+{
+    if (!d3d.bb_proxy_tex) {
+        GLuint id;
+        glGenTextures(1, &id);
+        glBindTexture(GL_TEXTURE_2D, id);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+        glTexImage2D(GL_TEXTURE_2D, 0, window_fb.color_storage, d3d.width, d3d.height, 0,
+                     window_fb.color_storage == GL_RGB565 ? GL_RGB : GL_BGRA,
+                     window_fb.color_storage == GL_RGB565 ? GL_UNSIGNED_SHORT_5_6_5 : GL_UNSIGNED_BYTE, NULL);
+        d3d.bb_proxy_tex = id;
+    }
+    return d3d.bb_proxy_tex;
+}
+
 /* Point GL_READ_FRAMEBUFFER at the back buffer's pixels for glReadPixels
    (GL can't read a multisampled buffer directly). */
 static void backbuffer_read_begin(GLbitfield mask)
 {
+    backbuffer_proxy_sync();
     if (!window_fb.fbo) {
         if (p_glBindFramebuffer) p_glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
         return;
@@ -5901,6 +5997,7 @@ ready:
 static void present_window_framebuffer(void)
 {
     if (!window_fb.fbo) return;
+    backbuffer_proxy_sync();
     DETAIL_TIMED(t_resolve, resolve_window_framebuffer(GL_COLOR_BUFFER_BIT));
     uint64_t filter_start = detail_on ? now_ns() : 0;
     static int flicker_override = -2;
@@ -6332,7 +6429,15 @@ static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
     sync_device_surfaces();
     }
     TRACE_ALL("D3D: render target %p (parent %p) depth %p", (void *)target, (void *)target->Parent, (void *)z);
-    if (target == d3d.backbuffer || (!target->Parent && !p_glGenFramebuffers)) {
+    backbuffer_proxy_end();
+    /* Depth surfaces with an image of their own: a depth texture's level, or
+       a standalone integer depth surface (kept like one). */
+    bool z_image = z && ((z->Parent && tex_target(z->Parent) == GL_TEXTURE_2D)
+                         || (!z->Parent && (((z->Format >> 8) & 0xFF) == 0x2E
+                                          || ((z->Format >> 8) & 0xFF) == 0x30)));
+    bool bb_proxy = target == d3d.backbuffer && z_image && z != d3d.depth && window_fb.fbo && window_fb.blit
+                    && p_glGenFramebuffers;
+    if (!bb_proxy && (target == d3d.backbuffer || (!target->Parent && !p_glGenFramebuffers))) {
         if (target != d3d.backbuffer)
             xlog("D3D: no framebuffer objects, rendering a standalone surface into the back buffer");
         if (p_glBindFramebuffer) p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -6369,20 +6474,19 @@ static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
     p_glBindFramebuffer(GL_FRAMEBUFFER, d3d.fbo);
     /* A standalone surface (CreateRenderTarget) renders into a GL texture of
        its own; CopyRects reads it back. */
-    GLuint tex = target->Parent ? texture_for(target->Parent) : surface_rt_texture(target, w, h);
+    GLuint tex = bb_proxy ? backbuffer_proxy_texture()
+                 : target->Parent ? texture_for(target->Parent) : surface_rt_texture(target, w, h);
     GLenum face_target = GL_TEXTURE_2D;
     ULONG target_level = 0;
     /* Surface dimensions and offsets identify the actual mip, including a
        mip within a cube face. The parent's level zero is not this view. */
-    if (target->Parent && !surface_image(target, &face_target, &target_level)) {
+    if (!bb_proxy && target->Parent && !surface_image(target, &face_target, &target_level)) {
         xlog("D3D: cannot resolve render target subresource");
         return;
     }
     p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, face_target, tex, target_level);
     d3d.target_zmax = z ? depth_format_max((z->Format >> 8) & 0xFF) : d3d.zscale;
-    if (z && ((z->Parent && tex_target(z->Parent) == GL_TEXTURE_2D)
-              || (!z->Parent && (((z->Format >> 8) & 0xFF) == 0x2E
-                               || ((z->Format >> 8) & 0xFF) == 0x30)))) {
+    if (z_image) {
         /* Give standalone integer depth surfaces their own persistent image,
            just like texture views. A shared scratch renderbuffer loses data
            when targets alternate and cannot be copied or locked back. */
@@ -6408,6 +6512,10 @@ static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
         d3d.rt_width = w;
         d3d.rt_height = h;
         d3d.rt_texture = true;
+        if (bb_proxy && st == GL_FRAMEBUFFER_COMPLETE) {
+            backbuffer_proxy_blit(false);
+            d3d.bb_proxy = true;
+        }
         target_viewport_reset(z, w, h);
         return;
     }

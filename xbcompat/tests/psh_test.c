@@ -266,7 +266,7 @@ static void test_texture_modes(void)
     rs_from_def(rs, def, 0, 0);
     src = check("tm_dot_zw", rs, 0);
     expect("tm_dot_zw", src, "dotmap_hilo_1(t1)", 1);
-    expect("tm_dot_zw", src, "gl_FragDepth = zw3 / 16777215.0;", 1);
+    expect("tm_dot_zw", src, "gl_FragDepth = floor(zw3 + 0.5) / zw_scale;", 1);
     expect("tm_dot_zw", src, "float zw3 = dot2 / dot3;", 1);
     free(src);
 
