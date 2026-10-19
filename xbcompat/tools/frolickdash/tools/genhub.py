@@ -67,21 +67,12 @@ ZOOM_DURATION = 0.75                           # the library carousel's zoom
 # are from the pad disc.
 CAROUSEL_EYE_OFFSET = (0.0, 0.033, 0.596)
 CAROUSEL_LOOK = (0.0, 0.430, -1.0)
-# The belt (GameTap's, see art/gametap) lines the inside of the rail ring:
-# its ring shares the rail's axis and height, the regular covers sit this
-# far in from the ribbon, and the focused cover is straight ahead of the
-# carousel camera.
+# The game belt (GameTap's, see art/gametap) lines the inside of the rail
+# ring as it lines GameTap's vault wall: its ring shares the rail's axis and
+# height, the regular covers sit this far in from the ribbon, and the
+# focused cover is on the far wall straight ahead of the carousel camera.
 BELT_INSET = 0.95
-# GameTap views the belt from the ring's axis, 50 units below the covers'
-# centre line (mkbelt.py prints the ring: radius 460.5, the covers facing
-# (-398, 69, 8) at y 119); the carousel camera goes there, looking level
-# at the focused cover (BELT_CAMERA_ON_AXIS); off, the carousel camera is
-# Frolick's own low one behind the library pad, and the belt is far away on
-# the ring's far wall.
-GAMETAP_RING_R, GAMETAP_CAMERA_DROP = 460.5, 69.0 - 119.0
-BELT_CAMERA_ON_AXIS = True
-CAROUSEL_GAMES = ["Game Title", "Stiletto Swift", "Game Title 3", "Game Title 4", "Game Title 5",
-                  "Game Title 6", "Game Title 7", "Game Title 8", "Game Title 9"]  # carouselGames
+BELT_GAMES = 9                                 # placeholder count: carousel.go's carouselGames
 FOOTER_H, FOOTER_COLOR, FOOTER_ALPHA = 50, (0.68, 0.665493, 0.5712), 0.592157
 FOOTER_STOPS = [(0.0, 0.0), (0.387409, 0.647059), (0.939467, 1.0)]
 WORDMARK_COLOR = (0.79, 0.773147, 0.6636)      # LabelSettings_1bvp3, 37 px
@@ -121,10 +112,6 @@ def pad_world(name):
 def camera(name):
     """eye, direction, up, fov for a pad's view."""
     if name == "carousel":
-        if BELT_CAMERA_ON_AXIS:
-            s = 0.5 * RAIL_SCALE[0] * BELT_INSET / GAMETAP_RING_R
-            eye = add(RAIL_ORIGIN, (0.0, GAMETAP_CAMERA_DROP * s, 0.0))
-            return eye, (0.0, 0.0, -1.0), (0.0, 1.0, 0.0), CAMERAS["library"][3]
         eye = add(pad_world("library"), CAROUSEL_EYE_OFFSET)
         return eye, norm(CAROUSEL_LOOK), (0.0, 1.0, 0.0), CAMERAS["library"][3]
     if name.startswith("settings"):
@@ -471,20 +458,17 @@ DEF theHub Level
                 }
             ]
         }
-        // The library carousel: GameTap's game belt (art/gametap), entered
-        // from the library pad with A, left and right step it, B leaves.
+        // The library view: GameTap's game belt (art/gametap) on the rail
+        // ring, entered from the library pad with A, left and right step
+        // it, B leaves.
         DEF theBelt Belt
         {
             url "belt.bin"
-            card "pads/carousel_card.xui"
-            focus "pads/carousel_focus.xui"
-            skin "pads/frolick_skin.xui"
-            eye %(belt_eye)s
             centre %(belt_centre)s
             radius %(belt_radius).5f
-            zoomDuration %(zoom_duration)s
+            fadeDuration %(zoom_duration)s
             count %(belt_count)d
-            function OnStep() { theBelt.SetTitle(GameName(theBelt.GetSelected())); }
+            function OnStep() { }
         }
 
         DEF xfSettings Transform
@@ -598,14 +582,13 @@ function OnPadPress(pad, id)
 }
 
 // A on the library panel: the panel fades out and the camera flies in
-// 750 ms to the belt, whose covers fade in and settle from further out.
+// 750 ms (Frolick's carousel zoom) while the belt's covers fade in.
 function OpenLibrary()
 {
     bMoving = true;
     bLibraryOpen = true;
     SetPadAlpha(1, 0);
     theZoomer.GoTo(vpCarousel);
-    theBelt.SetTitle(GameName(theBelt.GetSelected()));
     theBelt.Open();
 }
 
@@ -618,7 +601,6 @@ function CloseLibrary()
     theBelt.Close();
 }
 
-%(game_names)s
 
 // A on the catalog or settings panel: the panel fades out and the camera
 // flies to cam_angle_padfocus.  B flies back up to the pad's view.
@@ -721,18 +703,9 @@ def main():
     for name in ("catalogfocus", "settingsfocus", "carousel"):
         vals["vp_" + name] = viewpoint(name)
     vals["zoom_duration"] = ZOOM_DURATION
-    eye, d, up, fov = camera("carousel")
-    vals["belt_eye"] = v3(eye)
     vals["belt_centre"] = v3(RAIL_ORIGIN)
     vals["belt_radius"] = 0.5 * RAIL_SCALE[0] * BELT_INSET
-    vals["belt_count"] = len(CAROUSEL_GAMES)
-    names = ["// carousel.go carouselGames, until a real game list exists", "function GameName(i)", "{"]
-    for i, g in enumerate(CAROUSEL_GAMES):
-        names.append("    if (i == %d)" % i)
-        names.append("        return \"%s\";" % g.replace('"', ''))
-    names.append("    return \"\";")
-    names.append("}")
-    vals["game_names"] = "\n".join(names)
+    vals["belt_count"] = BELT_GAMES
     open(os.path.join(out, "default.xap"), "w").write(HUB % vals)
     open(os.path.join(pads, "overlay.xui"), "w").write(overlay_scene())
     catalog = open(os.path.join(pads, "catalog.xui")).read()

@@ -54,23 +54,25 @@ dashboard (`tools/dashbuild`), as its own `xboxdash.xbe` with its own
   describe them and a ring for the emblems, until Frolick's `Circle.png`
   and pad textures arrive (`ART=dir`).  A on a catalog or settings tile flies the camera (750 ms, like Frolick's carousel zoom) down to `main.tscn`'s `cam_angle_padfocus`, mirrored for settings, with the panel faded out; B flies back.  The expanded menu that belongs there is not built yet.
 
-The library carousel is GameTap's game belt (`art/gametap/`: the decoded
+The library view is GameTap's game belt (`art/gametap/`: the decoded
 `beta2scene-belt.json` and the spec `game-belt-render.md`).  `tools/mkbelt.py`
-packs the 13 cover nodes' frame 1000..1020 poses and the cover mesh into
-`belt.bin`; the `Belt` node in `nodes/XuiPanel.cpp` drapes Frolick's
-`carousel_card.xui` over each cover's 7x6 grid and the `carousel_focus.xui`
-overlay over the focused one.  The belt lines the inside of the rail ring
+packs the 13 cover nodes gsb_0shape..gsb_12shape, each with its own cover
+mesh and its frame 1000..1020 poses, into `belt.bin`; the `Belt` node in
+`nodes/XuiPanel.cpp` draws each cover mesh at its sampled world matrix, in
+shape-list order, depth tested.  The belt lines the inside of the rail ring
 as it lines GameTap's vault wall: its ring shares the rail's axis and
 height, the regular covers sit at 0.95 of the ribbon's radius facing the
-axis, and the focused cover is on the far wall straight ahead of the
-carousel camera, which sits on the ring's axis like GameTap's (50 of
-GameTap's units below the covers, looking level); the hub pads are behind it.
-A on the library panel flies in (750 ms, the
-panel fades, the covers fade in from further out); left and right play
-Belt_Right / Belt_Left (20 frames at speed 2.5, 0.267 s, input dropped while
-a step plays, as the client's lock does); B flies back.  The game list is
-carousel.go's placeholder titles; ends do not wrap; GameTap's per-step sounds
-are not played (no audio in the port yet).
+axis, and the focused cover is on the far wall straight ahead of Frolick's
+own carousel camera (carousel.go's carouselEyeTarget, unchanged).  Motion is
+the sampled clip only: left and right play Belt_Right / Belt_Left (20 frames
+at speed 2.5, 0.267 s, input dropped while a step plays, as the client's lock
+does); when a step ends the covers are back on their frame-1000 slots and
+each slot takes the next game.  A on the library panel flies the camera in
+(750 ms, the panel fades, the covers fade in); B flies back.  Not from the
+GameTap data, so not there yet: cover art and the cover materials (the
+meshes draw flat grey), the screen-space focus frame, arrows, counter and
+title, the step sounds, and what the list ends do (nine placeholder games,
+no wrap).
 
 ## Build and run
 
@@ -85,7 +87,7 @@ pad; `XBCOMPAT_INPUT_SCRIPT="100:right 200:a"` presses buttons at frames.
 
 ## Not there yet
 
-The library carousel (A on the library pad), Frolick's pad textures
+The belt's cover art and extras (above), Frolick's pad textures
 (`_albedo003..005`, tiled 2x2 on the discs) and its `Circle.png`, and the
 woosh sound.  Frolick's `hero.png` and `cover.png` are
 missing on the PC too.
