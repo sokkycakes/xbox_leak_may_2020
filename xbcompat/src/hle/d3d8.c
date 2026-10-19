@@ -321,6 +321,7 @@ static bool ff_lighting_candidate, ff_primary_present, ff_secondary_present;
 static unsigned ff_texture_units, ff_weight_components;
 static bool ff_pretransformed;
 static void program_off(void);
+static const float *vertex_diffuse(void);
 static GLuint backbuffer_copy_texture(ULONG data, ULONG w, ULONG h);
 static void run_callbacks(void);
 static void pusher_drain(void);
@@ -5266,7 +5267,7 @@ static void draw_declared_(const vshader *sh, ULONG PrimitiveType, const UCHAR *
     } else {
         glDisableClientState(GL_COLOR_ARRAY);
         glDisable(GL_COLOR_MATERIAL);
-        glColor4f(1, 1, 1, 1);
+        glColor4fv(vertex_diffuse());
     }
     if (sh->attr[4].stream >= 0) {
         const UCHAR *b; ULONG s;
@@ -5478,7 +5479,7 @@ static void draw_fvf(ULONG PrimitiveType, const UCHAR *base, ULONG stride, ULONG
     } else {
         glDisableClientState(GL_COLOR_ARRAY);
         glDisable(GL_COLOR_MATERIAL);
-        glColor4f(1, 1, 1, 1);
+        glColor4fv(vertex_diffuse());
     }
     if (rgba_vertex_colors && l.specular_off >= 0)
         secondary_color(lit, rgba_colors(base + l.specular_off, stride, vertex_range(first, count, indices), NULL), 3,
@@ -8206,6 +8207,21 @@ static struct {
 
 /* The vertex registers persist across Begin/End; they start out as the
    hardware defaults. */
+/* SetVertexData outside Begin/End sets the diffuse register for draws
+   whose vertices carry none (the library's SetVertexShader resets it to
+   white for such a shader, so it holds until the shader changes).
+   Splinter Cell fades its loading and menu pictures with it: a
+   BLENDDIFFUSEALPHA stage between the new picture and the old one, the
+   alpha going from 1 to 0.  Always white, every fade stayed on the old
+   picture (black for the first load, the menu over a level's briefing). */
+static struct { bool on; ULONG vs; } persistent_diffuse;
+static const float *vertex_diffuse(void)
+{
+    static const float white[4] = { 1, 1, 1, 1 };
+    if (persistent_diffuse.on && d3d.vertex_shader != persistent_diffuse.vs) persistent_diffuse.on = false;
+    return persistent_diffuse.on ? imm.reg[3] : white;
+}
+
 static void imm_init(void)
 {
     static bool done;
@@ -8231,6 +8247,11 @@ static void imm_set(LONG reg, float a, float b, float c, float d)
     if (reg < 0 || reg > 15) return;
     imm.reg[reg][0] = a; imm.reg[reg][1] = b; imm.reg[reg][2] = c; imm.reg[reg][3] = d;
     imm.used[reg] = true;
+    if (reg == 3 && !imm.active) {
+        persistent_diffuse.on = true;
+        persistent_diffuse.vs = d3d.vertex_shader;
+        TRACE_ALL("D3D: persistent diffuse %g %g %g %g", a, b, c, d);
+    }
     if (reg == 0 && imm.active) {
         if (imm.n == imm.cap) {
             imm.cap = imm.cap ? imm.cap * 2 : 256;
