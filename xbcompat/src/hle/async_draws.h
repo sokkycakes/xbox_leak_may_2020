@@ -305,7 +305,7 @@ static void async_target_state(D3DSurface *target, D3DSurface *z)
         d3d.rt_height = d3d.height;
         d3d.rt_texture = false;
         d3d.target_zmax = z ? depth_format_max((z->Format >> 8) & 0xFF) : d3d.zscale;
-        d3d.viewport = (D3DVIEWPORT8){ 0, 0, d3d.rt_width, d3d.rt_height, 0, 1 };
+        target_viewport_reset(z, d3d.rt_width, d3d.rt_height);
         return;
     }
     if (!p_glGenFramebuffers) return;
@@ -315,7 +315,7 @@ static void async_target_state(D3DSurface *target, D3DSurface *z)
     d3d.rt_width = w;
     d3d.rt_height = h;
     d3d.rt_texture = true;
-    d3d.viewport = (D3DVIEWPORT8){ 0, 0, w, h, 0, 1 };
+    target_viewport_reset(z, w, h);
 }
 
 static void async_target(D3DSurface *target, D3DSurface *z)

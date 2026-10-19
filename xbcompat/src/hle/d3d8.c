@@ -2331,6 +2331,26 @@ static void NTAPI D3DDevice_SetViewport(const D3DVIEWPORT8 *v)
     }
 }
 
+/* The end of the library's SetRenderTarget: the depth scale (m_ZScale)
+   follows the new depth buffer, kept when there is none, and SetViewport
+   over the whole w x h target resets the scissors and rewrites the reserved
+   viewport constants.  Without this a scissor set for a pass on the back
+   buffer stayed on into the next target: a shadow buffer rendered (and
+   cleared) after a per-light scissor kept only that rectangle, which moves
+   with the camera. */
+static void target_viewport_reset(D3DSurface *z, ULONG w, ULONG h)
+{
+    if (z) d3d.zscale = depth_format_max((z->Format >> 8) & 0xFF);
+    d3d.viewport = (D3DVIEWPORT8){ 0, 0, w, h, 0, 1 };
+    d3d.scissors.count = 0;
+    if (!(d3d.constant_mode & 0x10)) {   /* D3DSCM_NORESERVEDCONSTANTS */
+        float vp[2][4];
+        viewport_constants(vp);
+        memcpy(d3d.vs_const[58], vp, sizeof(vp));
+        if (async_front()) { async_vs_touch(58); async_vs_touch(59); }
+    }
+}
+
 /* The NV097 method each simple state (D3DRS_PSALPHAINPUTS0 to
    D3DRS_SOLIDOFFSETENABLE) writes, the library's D3DSIMPLERENDERSTATEENCODE
    (public/xdk/inc/d3d8.h); their values go to the GPU unchanged. */
@@ -5921,7 +5941,7 @@ static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
         d3d.rt_texture = false;
         d3d.target_zmax = z ? depth_format_max((z->Format >> 8) & 0xFF) : d3d.zscale;
         d3d.host_zmax = window_fb.depth_storage == 0x81A5 /* GL_DEPTH_COMPONENT16 */ ? 65535.0f : 16777215.0f;
-        d3d.viewport = (D3DVIEWPORT8){ 0, 0, d3d.rt_width, d3d.rt_height, 0, 1 };
+        target_viewport_reset(z, d3d.rt_width, d3d.rt_height);
         return;
     }
     if (!p_glGenFramebuffers) {
@@ -5970,7 +5990,7 @@ static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
         d3d.rt_width = w;
         d3d.rt_height = h;
         d3d.rt_texture = true;
-        d3d.viewport = (D3DVIEWPORT8){ 0, 0, w, h, 0, 1 };
+        target_viewport_reset(z, w, h);
         return;
     }
     /* Any other depth surface gets a scratch renderbuffer in its own format;
@@ -5996,7 +6016,7 @@ static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
     d3d.rt_width = w;
     d3d.rt_height = h;
     d3d.rt_texture = true;
-    d3d.viewport = (D3DVIEWPORT8){ 0, 0, w, h, 0, 1 };
+    target_viewport_reset(z, w, h);
 }
 
 static void NTAPI D3DSurface_GetDesc(D3DSurface *s, ULONG *desc)
