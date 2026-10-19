@@ -1,0 +1,44 @@
+#!/bin/sh
+#
+# The 2002 Xbox Live dashboard (XOnlineDash) on the Sion, signed in to the
+# Sion's own Live server (liveserver/). It runs beside the normal dashboard:
+# this stops the normal one, runs the Live one, and brings the normal one
+# back when it exits. Leave with L + R + Back + Start or a tap on the power
+# button.
+#
+#   /data/xbox-live/live-dash        start it (returns at once)
+#
+# Everything lives in /data/xbox-live: its own xbcompat (with the network
+# card), its own Xbox hard disk (hdd/) and the server's accounts (live.json).
+# Nothing in /opt/xbcompat or /data/xbox is touched.
+#
+L=/data/xbox-live
+LOG=/var/log/xbox-live.log
+
+if [ "$1" != --fg ]; then
+	setsid "$0" --fg < /dev/null >> /var/log/xbox-live-session.log 2>&1 &
+	echo "Starting the Live dashboard (logs: $LOG, /var/log/xbox-live-server.log)"
+	exit 0
+fi
+
+. /usr/lib/xbox/xbox-env
+echo "$(date '+%F %T') Live dashboard: stopping the normal dashboard"
+/etc/init.d/S98xbox stop
+
+for p in 1 3 4 5; do mkdir -p "$L/hdd/partition$p"; done
+mkdir -p "$L/disc"
+
+PYTHONHOME=$X PYTHONDONTWRITEBYTECODE=1 "$X/bin/python3" "$L/liveserver/liveserver.py" \
+	--db "$L/live.json" > /var/log/xbox-live-server.log 2>&1 &
+srv=$!
+sleep 1
+
+xbox_av_start
+echo "$(date '+%F %T') Live dashboard: running"
+XBCOMPAT_DNS=127.0.0.1:5353 XBCOMPAT_RESET=1 "$L/bin/xbcompat" --hle "$L/xodash.hlemap" \
+	--hdd "$L/hdd" --dvd "$L/disc" --d-path '\Device\Harddisk0\Partition2' --xbe-path xodash.xbe \
+	--net nat "$L/hdd/partition2/xodash.xbe" > "$LOG" 2>&1
+echo "$(date '+%F %T') Live dashboard: exited with $?"
+
+kill "$srv" 2>/dev/null
+/etc/init.d/S98xbox start
