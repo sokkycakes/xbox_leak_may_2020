@@ -11,8 +11,8 @@
 # (about ten minutes under Wine); this script then adds its own objects and
 # writes WORK/frolick.  Environment:
 #   FONT    the TTF the panels use (default: DejaVu Sans from the system)
-#   GLYPHS  a directory with Frolick's glyph_*.png (default: the Xbox 360
-#           Blades A/B/X/Y buttons in art360/, lettered)
+#   GLYPHS  a directory with Frolick's glyph_*.png (default: Xelu's Xbox 360
+#           prompts in art/xelu360/, under Frolick's names)
 #   ART     a directory with Frolick's Circle.png / label_*.png and pad
 #           textures (default: tools/mkart.py's renderings)
 set -eo pipefail
@@ -60,7 +60,15 @@ cp "$HERE"/dash/pads/*.xui "$OUT/dash/pads/"
 python3 "$HERE/tools/genhub.py" "$OUT/dash"
 python3 "$HERE/tools/mkart.py" "$OUT/dash"
 [ -n "$ART" ] && cp "$ART"/*.png "$OUT/dash/"
-if [ -n "$GLYPHS" ]; then cp "$GLYPHS"/glyph_*.png "$OUT/dash/pads/"; else python3 "$HERE/tools/mkglyphs.py" "$OUT/dash/pads" "$HERE/art360"; fi
+if [ -n "$GLYPHS" ]; then cp "$GLYPHS"/glyph_*.png "$OUT/dash/pads/"; else
+    # Frolick's glyph files are Xelu's "Others/Xbox 360" prompts: glyph_a.png
+    # is 360_Start (the game tile and the START strip), glyph_a_button.png
+    # is 360_A (the carousel pill and the hub prompt), glyph_b/x/y are B/X/Y.
+    X="$HERE/art/xelu360"
+    cp "$X/360_Start.png" "$OUT/dash/pads/glyph_a.png"
+    cp "$X/360_A.png" "$OUT/dash/pads/glyph_a_button.png"
+    for b in b x y; do cp "$X/360_${b^^}.png" "$OUT/dash/pads/glyph_$b.png"; done
+fi
 cp "${FONT:-/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf}" "$OUT/dash/font.ttf"
 (
     cd "$OUT/dash"

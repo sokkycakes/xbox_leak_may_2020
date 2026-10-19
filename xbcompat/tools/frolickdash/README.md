@@ -47,8 +47,9 @@ dashboard (`tools/dashbuild`), as its own `xboxdash.xbe` with its own
   footer with the wordmark) and `pads/settings.xui` (the catalog layout
   relabelled, like Frolick's RML settings panel).
 - `tools/mkassets.py` – packs the data into `default.xip`, converting PNGs
-  to the raw `.xtx` textures the panel reads.  `tools/mkglyphs.py` makes
-  stand-in button glyphs when Frolick's are not at hand (`GLYPHS=dir`);
+  to the raw `.xtx` textures the panel reads.  The button glyphs are
+  Xelu's Xbox 360 prompts in `art/xelu360/` (Start, A, B, X, Y: the same
+  files Frolick's `glyph_*.png` are), or `GLYPHS=dir` for a set of your own;
   `tools/mkart.py` renders the pad labels as `main.tscn`'s Label3D nodes
   describe them and a ring for the emblems, until Frolick's `Circle.png`
   and pad textures arrive (`ART=dir`).
