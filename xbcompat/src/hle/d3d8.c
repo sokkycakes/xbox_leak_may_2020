@@ -2276,10 +2276,21 @@ static void apply_texture_transforms(unsigned units, const int tsize[4])
 
 /* ---- state setters ----------------------------------------------------- */
 
+/* SetVertexShaderInput's state (with the vertex shader objects below). */
+static bool vs_direct_input(void);
+static void vs_set_aside_stream(UINT_ Stream, D3DResource *vb, ULONG Stride);
+static void vs_set_program_ext(ULONG Handle);
+static void vs_note_slot0(ULONG Handle);
+
 static void NTAPI D3DDevice_SetStreamSource(UINT_ Stream, D3DResource *vb, UINT_ Stride)
 {
     if (d3d.recording) { ULONG a[3] = { Stream, (ULONG)vb, Stride }; pb_record(OP_STREAM, a, sizeof(a)); }
     if (Stream >= 16) return;
+    if (vs_direct_input()) {
+        /* SetVertexShaderInput's streams stand until it is turned off. */
+        vs_set_aside_stream(Stream, vb, Stride);
+        return;
+    }
     d3d.streams[Stream].vb = vb;
     d3d.streams[Stream].stride = Stride;
 }
@@ -2287,7 +2298,10 @@ static void NTAPI D3DDevice_SetStreamSource(UINT_ Stream, D3DResource *vb, UINT_
 static void NTAPI D3DDevice_SetVertexShader(ULONG Handle)
 {
     if (d3d.recording) pb_record(OP_VERTEX_SHADER, &Handle, 4);
+    if (vs_direct_input()) { vs_set_program_ext(Handle); return; }
     d3d.vertex_shader = Handle;
+    /* A program goes to slot 0 of program memory (see vp_flush_pending). */
+    if (Handle & 1) vs_note_slot0(Handle);
 }
 
 static void NTAPI D3DDevice_SetTransform(ULONG State, const D3DMATRIX *m)
@@ -2892,7 +2906,11 @@ typedef struct {
     bool vs_z_attempted;     /* the variant was tried (it may not compile) */
     ULONG stream_mask;
     int tess_normal_in, tess_normal_out, tess_uv_out;   /* tessellator outputs, -1 if unused */
+    ULONG user_handle;       /* vs_compose: the handle GetVertexShader reports (0: this one) */
 } vshader;
+
+static vshader *vp_slot0_pending;
+static void vp_flush_pending(void);
 
 /* D3DVSDT: high nibble = component count (7 = FLOAT2H), low nibble = NV2A type. */
 static bool decode_vsdt(ULONG t, vattr *a)
@@ -3061,6 +3079,7 @@ static void NTAPI D3DDevice_DeleteVertexShader(ULONG handle)
 {
     if (!(handle & 1)) return;
     vshader *sh = (vshader *)(handle & ~1u);
+    if (vp_slot0_pending == sh) vp_flush_pending();   /* program memory keeps its copy */
     if (sh->vs || sh->vs_z) {
         /* GL reuses the names, so programs linked with them must go too. */
         for (program_entry **pp = &programs; *pp;) {
@@ -3128,12 +3147,94 @@ static LONG NTAPI D3DDevice_GetVertexShaderFunction(ULONG h, void *data, ULONG *
    for SelectVertexShader(NULL, address); ordinary programs are compiled from
    their own copy of the microcode. */
 static uint32_t vp_mem[136][4];
+/* SetVertexShader loads its program at slot 0, as the library does; the
+   copy is made only when program memory is next read or written. */
+static void vp_flush_pending(void)
+{
+    vshader *sh = vp_slot0_pending;
+    vp_slot0_pending = NULL;
+    if (sh && sh->code) memcpy(vp_mem[0], sh->code, (sh->ninstr < 136 ? sh->ninstr : 136) * 16);
+}
 
 static void vp_load(const uint32_t *code, unsigned n, ULONG address)
 {
+    vp_flush_pending();
     if (address >= 136) return;
     if (n > 136 - address) n = 136 - address;
     memcpy(vp_mem[address], code, n * 16);
+}
+
+/* Instructions from `address` through the one marked final (NV2A word 3 bit 0). */
+static unsigned vp_program_length(ULONG address)
+{
+    vp_flush_pending();
+    unsigned n = 0;
+    while (address + n < 136) if (vp_mem[address + n++][3] & 1) break;
+    return n;
+}
+
+/* Vertex shader objects made by combining one shader's attribute layout
+   with another's (or program memory's) microcode: SelectVertexShader runs
+   the program at an address with the handle's declaration, and
+   SetVertexShaderInput reads the vertex arrays with its handle's layout
+   while the current program runs.  Kept for the life of the title (a title
+   has a handful), found again by content. */
+static vshader **vs_composed;
+static unsigned vs_ncomposed;
+
+static bool vs_same_layout(const vshader *a, const vshader *b)
+{
+    return !memcmp(a->attr, b->attr, sizeof a->attr) && a->tess_normal_in == b->tess_normal_in &&
+           a->tess_normal_out == b->tess_normal_out && a->tess_uv_out == b->tess_uv_out;
+}
+
+/* A handle drawing with `layout`'s attributes and `code` (ninstr
+   instructions, NULL for none), with `program`'s declared constants;
+   GetVertexShader reports `user`. */
+static ULONG vs_compose(const vshader *layout, const uint32_t *code, unsigned ninstr, const vshader *program, ULONG user)
+{
+    if (layout == program && program && program->code == code) return (ULONG)program | 1;
+    if (program && program->code == code && program->ninstr == ninstr && vs_same_layout(layout, program))
+        return (ULONG)program | 1;
+    unsigned nconsts = program ? program->nconsts : 0;
+    for (unsigned i = 0; i < vs_ncomposed; i++) {
+        vshader *c = vs_composed[i];
+        if (c->user_handle == user && c->ninstr == ninstr && vs_same_layout(c, layout) &&
+            (!ninstr || !memcmp(c->code, code, ninstr * 16)) && c->nconsts == nconsts &&
+            (!nconsts || (!memcmp(c->consts, program->consts, nconsts * 16) &&
+                          !memcmp(c->const_slots, program->const_slots, nconsts * sizeof(int)))))
+            return (ULONG)c | 1;
+    }
+    vshader *c = calloc(1, sizeof(*c));
+    if (!c) return user;
+    memcpy(c->attr, layout->attr, sizeof c->attr);
+    c->stream_mask = layout->stream_mask;
+    c->tess_normal_in = layout->tess_normal_in;
+    c->tess_normal_out = layout->tess_normal_out;
+    c->tess_uv_out = layout->tess_uv_out;
+    if (ninstr) {
+        c->code = malloc(ninstr * 16);
+        memcpy(c->code, code, ninstr * 16);
+        c->ninstr = ninstr;
+        c->header = ninstr << 16;
+    }
+    if (nconsts) {   /* the declaration's constants, which the program's draws apply */
+        c->consts = malloc(nconsts * 16);
+        c->const_slots = malloc(nconsts * sizeof(int));
+        if (c->consts && c->const_slots) {
+            memcpy(c->consts, program->consts, nconsts * 16);
+            memcpy(c->const_slots, program->const_slots, nconsts * sizeof(int));
+            c->nconsts = nconsts;
+        }
+    }
+    c->user_handle = user;
+    vshader **n = realloc(vs_composed, (vs_ncomposed + 1) * sizeof(*n));
+    if (!n) { free(c->code); free(c); return user; }
+    vs_composed = n;
+    vs_composed[vs_ncomposed++] = c;
+    if (vs_ncomposed == 256 || vs_ncomposed == 4096)
+        xlog("D3D: %u combined vertex shader layouts/programs", vs_ncomposed);
+    return (ULONG)c | 1;
 }
 
 static void NTAPI D3DDevice_LoadVertexShader(ULONG handle, ULONG address)
@@ -3147,27 +3248,202 @@ static void NTAPI D3DDevice_LoadVertexShaderProgram(const ULONG *func, ULONG add
 {
     if (func) vp_load(func + 1, func[0] >> 16, address);
 }
+
+/* SetVertexShaderInput state: the layout the vertex arrays follow (0: the
+   current shader's, from SetStreamSource), the streams it set, and the
+   SetStreamSource bindings it set aside. */
+static ULONG vs_input_handle;
+static UINT_ vs_input_count;
+static ULONG vs_input_streams[16][3];
+static struct { D3DResource *vb; ULONG stride; } vs_saved_streams[16];
+static ULONG vs_program;   /* while vs_input_handle is set: the shader draws would use without it */
+
+/* The handle draws use for `prog` with the direct input layout, if any. */
+static ULONG vs_with_input(ULONG prog)
+{
+    if (!vs_input_handle || !(prog & 1)) return prog;
+    vshader *p = (vshader *)(prog & ~1u), *in = (vshader *)(vs_input_handle & ~1u);
+    return vs_compose(in, p->code, p->ninstr, p, p->user_handle ? p->user_handle : prog);
+}
+
+/* Make `h` the current shader, under the direct input layout if one is set. */
+static void vs_set_program(ULONG h)
+{
+    if (vs_input_handle) {
+        vs_program = h;
+        d3d.vertex_shader = (h & 1) ? vs_with_input(h) : vs_input_handle;
+    } else {
+        d3d.vertex_shader = h;
+    }
+}
+
 static void NTAPI D3DDevice_SelectVertexShader(ULONG handle, ULONG address)
 {
-    if (d3d.recording && handle) pb_record(OP_VERTEX_SHADER, &handle, 4);
-    /* The shader was loaded into program memory earlier; just use it. */
-    if (handle) d3d.vertex_shader = handle;
+    /* The program at `address` in program memory runs with the handle's
+       declaration; with no handle, with the current shader's. */
+    ULONG layout_h = handle ? handle : vs_input_handle ? vs_program : d3d.vertex_shader;
+    if (layout_h & 1) {
+        vshader *layout = (vshader *)(layout_h & ~1u);
+        ULONG user = layout->user_handle ? layout->user_handle : layout_h;
+        const vshader *program = layout->user_handle ? (const vshader *)(layout->user_handle & ~1u) : layout;
+        unsigned n = address < 136 ? vp_program_length(address) : 0;
+        ULONG h;
+        if (program->code && program->ninstr == n && !memcmp(vp_mem[address], program->code, n * 16))
+            h = (ULONG)program | 1;   /* its own program: the usual case */
+        else if (n)
+            h = vs_compose(program, vp_mem[address], n, program, user);
+        else
+            h = layout_h;
+        vs_set_program(h);
+    }
+    if (d3d.recording && d3d.vertex_shader) pb_record(OP_VERTEX_SHADER, &d3d.vertex_shader, 4);
 }
 static void NTAPI D3DDevice_RunVertexStateShader(ULONG address, const float *data)
 {
+    vp_flush_pending();
     if (address >= 136) return;
     vsh_run_state(vp_mem[address], 136 - address, data, d3d.vs_const);
+}
+
+/* A shim vertex buffer per (buffer, offset) pair: SetVertexShaderInput's
+   offset moves where the stream starts, and draws read stream data through
+   the resource's Data.  Kept (not reused) so queued drawing never sees one
+   change under it. */
+static D3DResource *vs_input_shim(D3DResource *vb, ULONG offset)
+{
+    static struct shim { D3DResource *vb; ULONG data, offset; D3DResource r; } *shims;
+    static unsigned nshims;
+    if (!vb || !offset) return vb;
+    for (unsigned i = 0; i < nshims; i++)
+        if (shims[i].vb == vb && shims[i].data == vb->Data && shims[i].offset == offset) return &shims[i].r;
+    if (nshims % 64 == 0) {
+        /* Grow by a fresh block: pointers into older blocks stay valid. */
+        struct shim *blk = calloc(64, sizeof(*blk));
+        if (!blk) return vb;
+        static struct shim **blocks;
+        static unsigned nblocks;
+        struct shim **nb = realloc(blocks, (nblocks + 1) * sizeof(*nb));
+        if (!nb) { free(blk); return vb; }
+        blocks = nb;
+        blocks[nblocks++] = blk;
+        shims = blk;
+        nshims = 0;
+    }
+    struct shim *s = &shims[nshims++];
+    s->vb = vb;
+    s->data = vb->Data;
+    s->offset = offset;
+    s->r = *vb;
+    s->r.Data = vb->Data + offset;
+    return &s->r;
 }
 
 static void NTAPI D3DDevice_SetVertexShaderInput(ULONG handle, UINT_ count, const ULONG *inputs)
 {
     if (d3d.recording) { ULONG h[2] = { handle, count }; pb_record2(OP_VS_INPUT, h, 8, inputs, count * 12); }
+    if (!handle) {
+        /* Back to the streams SetStreamSource set and the shader's own layout. */
+        if (vs_input_handle) {
+            for (int i = 0; i < 16; i++) {
+                d3d.streams[i].vb = vs_saved_streams[i].vb;
+                d3d.streams[i].stride = vs_saved_streams[i].stride;
+            }
+            d3d.vertex_shader = vs_program;
+        }
+        vs_input_handle = 0;
+        vs_input_count = 0;
+        return;
+    }
+    if (!vs_input_handle) {
+        for (int i = 0; i < 16; i++) {
+            vs_saved_streams[i].vb = d3d.streams[i].vb;
+            vs_saved_streams[i].stride = d3d.streams[i].stride;
+        }
+        vs_program = d3d.vertex_shader;
+    }
+    vs_input_handle = handle;
+    vs_input_count = count > 15 ? 15 : count;
+    memcpy(vs_input_streams, inputs, vs_input_count * 12);
     /* D3DSTREAM_INPUT: VertexBuffer, Stride, Offset */
     for (UINT_ i = 0; i < count && i < 16; i++) {
-        d3d.streams[i].vb = (D3DResource *)inputs[i * 3];
+        d3d.streams[i].vb = vs_input_shim((D3DResource *)inputs[i * 3], inputs[i * 3 + 2]);
         d3d.streams[i].stride = inputs[i * 3 + 1];
     }
-    if (handle) d3d.vertex_shader = handle;
+    /* The current program reads the arrays with the handle's layout (with
+       a fixed-function shader current, the handle is drawn as before). */
+    d3d.vertex_shader = (vs_program & 1) ? vs_with_input(vs_program) : handle;
+}
+
+static bool vs_direct_input(void) { return vs_input_handle != 0; }
+
+static void vs_set_aside_stream(UINT_ Stream, D3DResource *vb, ULONG Stride)
+{
+    vs_saved_streams[Stream].vb = vb;
+    vs_saved_streams[Stream].stride = Stride;
+}
+
+static void vs_note_slot0(ULONG Handle)
+{
+    vshader *sh = (vshader *)(Handle & ~1u);
+    if (sh->code) vp_slot0_pending = sh;
+}
+
+static void vs_set_program_ext(ULONG Handle)
+{
+    if (Handle & 1) vs_note_slot0(Handle);
+    vs_set_program(Handle);
+}
+
+static LONG NTAPI D3DDevice_GetVertexShaderInput(ULONG *pHandle, UINT_ *pCount, ULONG *pInputs)
+{
+    if (pCount) *pCount = vs_input_count;
+    if (pHandle) *pHandle = vs_input_handle;
+    if (pInputs) memcpy(pInputs, vs_input_streams, vs_input_count * 12);
+    return vs_input_handle ? D3D_OK : 1 /* S_FALSE */;
+}
+
+/* The ...Direct forms take a D3DVERTEXATTRIBUTEFORMAT (16 D3DVERTEXSHADERINPUTs:
+   StreamIndex, Offset, Format, TessType, TessSource) in place of a handle. */
+static ULONG direct_layout_handle(const ULONG *vaf)
+{
+    static vshader **cache;
+    static unsigned n;
+    vshader tmp;
+    memset(&tmp, 0, sizeof(tmp));
+    tmp.tess_normal_in = tmp.tess_normal_out = tmp.tess_uv_out = -1;
+    for (int r = 0; r < 16; r++) {
+        const ULONG *in = vaf + r * 4;
+        tmp.attr[r].stream = -1;
+        UCHAR tess_type = in[3] & 0xFF, tess_src = (in[3] >> 8) & 0xFF;
+        if (tess_type == 1) { tmp.tess_normal_in = tess_src; tmp.tess_normal_out = r; }
+        else if (tess_type == 2) tmp.tess_uv_out = r;
+        vattr a;
+        memset(&a, 0, sizeof(a));
+        if (in[2] == 0x02 || !decode_vsdt(in[2] & 0xFF, &a)) continue;   /* D3DVSDT_NONE */
+        a.stream = in[0] & 0xF;
+        a.offset = in[1];
+        tmp.attr[r] = a;
+        tmp.stream_mask |= 1u << a.stream;
+    }
+    for (unsigned i = 0; i < n; i++)
+        if (vs_same_layout(cache[i], &tmp)) return (ULONG)cache[i] | 1;
+    vshader *sh = malloc(sizeof(*sh));
+    vshader **nc = sh ? realloc(cache, (n + 1) * sizeof(*nc)) : NULL;
+    if (!nc) { free(sh); return 0; }
+    *sh = tmp;
+    cache = nc;
+    cache[n++] = sh;
+    return (ULONG)sh | 1;
+}
+
+static void NTAPI D3DDevice_SetVertexShaderInputDirect(const ULONG *vaf, UINT_ count, const ULONG *inputs)
+{
+    D3DDevice_SetVertexShaderInput(vaf ? direct_layout_handle(vaf) : 0, count, inputs);
+}
+
+static void NTAPI D3DDevice_SelectVertexShaderDirect(const ULONG *vaf, ULONG address)
+{
+    D3DDevice_SelectVertexShader(vaf ? direct_layout_handle(vaf) : 0, address);
 }
 
 
@@ -6593,7 +6869,13 @@ static void NTAPI D3DDevice_GetLight(ULONG Index, D3DLIGHT8 *l)
 
 static void NTAPI D3DDevice_GetLightEnable(ULONG Index, ULONG *on) { *on = Index < 8 && d3d.lights[Index].enabled; }
 
-static void NTAPI D3DDevice_GetVertexShader(ULONG *h) { *h = d3d.vertex_shader; }
+static void NTAPI D3DDevice_GetVertexShader(ULONG *h)
+{
+    /* A layout or program combined for SelectVertexShader/SetVertexShaderInput
+       answers with the handle the title set. */
+    ULONG v = d3d.vertex_shader;
+    *h = (v & 1) && ((vshader *)(v & ~1u))->user_handle ? ((vshader *)(v & ~1u))->user_handle : v;
+}
 
 /* Constants are numbered -96..95 by the title (D3DSCM_96CONSTANTS puts 0..95
    at hardware slots 96..191; D3DSCM_192CONSTANTS exposes all of them). */
@@ -6746,9 +7028,70 @@ static void NTAPI D3DDevice_GetDisplayFieldStatus(ULONG *st) { st[0] = 3; st[1] 
 static void NTAPI D3DDevice_SetScreenSpaceOffset(float x, float y) { d3d.screen_offset[0] = x; d3d.screen_offset[1] = y; }
 static void NTAPI D3DDevice_SetBackBufferScale(float x, float y) { d3d.backbuffer_scale[0] = x; d3d.backbuffer_scale[1] = y; }
 static void NTAPI D3DDevice_GetBackBufferScale(float *x, float *y) { *x = d3d.backbuffer_scale[0]; *y = d3d.backbuffer_scale[1]; }
-static void NTAPI D3DDevice_SetDebugMarker(ULONG v) { (void)v; }
-static void NTAPI D3DDevice_SetTile(ULONG i, const void *t) { (void)i; (void)t; }
-static void NTAPI D3DDevice_GetTile(ULONG i, ULONG *t) { (void)i; memset(t, 0, 24); }
+/* The marker is only recorded (the library keeps it for its debug dumps):
+   SetDebugMarker returns the previous one. */
+static ULONG debug_marker;
+static ULONG NTAPI D3DDevice_SetDebugMarker(ULONG v) { ULONG old = debug_marker; debug_marker = v; return old; }
+static ULONG NTAPI D3DDevice_GetDebugMarker(void) { return debug_marker; }
+/* Tiles (D3DTILE: Flags, pMemory, Size, Pitch, ZStartTag, ZOffset) only set
+   how the NV2A lays out and compresses memory; GetTile returns what SetTile
+   set, as the library does. */
+static ULONG d3d_tiles[8][6];
+static void NTAPI D3DDevice_SetTile(ULONG i, const void *t)
+{
+    if (i >= 8) return;
+    if (t) memcpy(d3d_tiles[i], t, sizeof d3d_tiles[i]);
+    else memset(d3d_tiles[i], 0, sizeof d3d_tiles[i]);
+}
+static void NTAPI D3DDevice_GetTile(ULONG i, ULONG *t) { if (i < 8) memcpy(t, d3d_tiles[i], sizeof d3d_tiles[i]); else memset(t, 0, 24); }
+/* No Z compression: no tag is ever set. */
+static void NTAPI D3DDevice_SetTileCompressionTagBits(ULONG part, ULONG addr, const ULONG *data, ULONG n)
+{
+    (void)part; (void)addr; (void)data; (void)n;
+}
+static void NTAPI D3DDevice_GetTileCompressionTagBits(ULONG part, ULONG addr, ULONG *data, ULONG n)
+{
+    (void)part; (void)addr;
+    if (data) memset(data, 0, n * 4);
+}
+static ULONG NTAPI D3DDevice_GetTileCompressionTags(ULONG start, ULONG end) { (void)start; (void)end; return 0; }
+
+/* CopyRects' blit engine state (D3DCOPYRECTSTATE, 8 dwords, and
+   D3DCOPYRECTROPSTATE, 8).  CopyRects copies as D3DCOPYRECT_SRCCOPY with
+   the default color format; anything else is kept for GetCopyRectsState
+   and noted once. */
+static ULONG copyrect_state[8] = { 0, 3 /* D3DCOPYRECT_SRCCOPY */ }, copyrect_rop[8];
+static void NTAPI D3DDevice_SetCopyRectsState(const ULONG *state, const ULONG *rop)
+{
+    if (state) memcpy(copyrect_state, state, sizeof copyrect_state);
+    if (rop) memcpy(copyrect_rop, rop, sizeof copyrect_rop);
+    static bool noted;
+    if (state && (state[1] != 3 || state[0] || state[2] || state[7]) && !noted) {
+        noted = true;
+        xlog("D3D: SetCopyRectsState(format %u, operation %u, color key %u, clip %#x) is not emulated; "
+             "CopyRects copies", state[0], state[1], state[2], state[7]);
+    }
+}
+static void NTAPI D3DDevice_GetCopyRectsState(ULONG *state, ULONG *rop)
+{
+    if (state) memcpy(state, copyrect_state, sizeof copyrect_state);
+    if (rop) { memcpy(rop, copyrect_rop, sizeof copyrect_rop); rop[7] = 0; /* ColorPattern: not kept */ }
+}
+
+/* The video encoder's border color (no border is drawn here). */
+static ULONG overscan_color;
+static void NTAPI D3DDevice_SetOverscanColor(ULONG c) { overscan_color = c; }
+static ULONG NTAPI D3DDevice_GetOverscanColor(void) { return overscan_color; }
+
+/* Closed captions go to the TV encoder; there is none.  GetCCStatus
+   reports both fields free for more data. */
+static void NTAPI D3DDevice_EnableCC(ULONG on) { (void)on; }
+static void NTAPI D3DDevice_SendCC(ULONG field, ULONG cc1, ULONG cc2) { (void)field; (void)cc1; (void)cc2; }
+static void NTAPI D3DDevice_GetCCStatus(ULONG *f1, ULONG *f2) { if (f1) *f1 = 1; if (f2) *f2 = 1; }
+
+/* Resume(Reset) re-sends all device state after the title drove the push
+   buffer itself; the state here never left the device. */
+static void NTAPI D3DDevice_Resume(ULONG reset) { (void)reset; pusher_drain(); }
 static void NTAPI D3DDevice_KickPushBuffer(void) { pusher_drain(); }
 /* A fence: drawing that waits has passed it at once, queued drawing when
    the worker gets there (calls that wait for one drain the queue first). */
@@ -7456,6 +7799,12 @@ static void NTAPI D3DPushBuffer_SetVertexShaderInput(D3DPushBuffer *pb, ULONG Of
 {
     ULONG *p = fixup_payload(pb, Offset, OP_VS_INPUT, 8 + count * 12);
     if (p) { p[0] = Handle; p[1] = count; memcpy(p + 2, inputs, count * 12); }
+}
+
+static void NTAPI D3DPushBuffer_SetVertexShaderInputDirect(D3DPushBuffer *pb, ULONG Offset, const ULONG *vaf,
+                                                           UINT_ count, const ULONG *inputs)
+{
+    D3DPushBuffer_SetVertexShaderInput(pb, Offset, vaf ? direct_layout_handle(vaf) : 0, count, inputs);
 }
 
 static void NTAPI D3DPushBuffer_RunPushBuffer(D3DPushBuffer *pb, ULONG Offset, D3DPushBuffer *dest, D3DFixup *fx)
@@ -8213,6 +8562,69 @@ static void NTAPI D3DVertexBuffer_GetDesc(D3DResource *vb, ULONG *desc)
     desc[5] = 0;
 }
 
+/* D3DINDEXBUFFER_DESC: Format, Type (the library fills only these). */
+static void NTAPI D3DIndexBuffer_GetDesc(D3DResource *ib, ULONG *desc)
+{
+    (void)ib;
+    desc[0] = 101;   /* D3DFMT_INDEX16 */
+    desc[1] = 7;     /* D3DRTYPE_INDEXBUFFER */
+}
+
+/* D3DPALETTESIZE, as CreatePalette put it in Common's top bits. */
+static ULONG NTAPI D3DPalette_GetSize(D3DPalette *p) { return p->Common >> 30; }
+
+static void NTAPI D3DDevice_GetPalette(ULONG Stage, D3DPalette **pp)
+{
+    D3DPalette *p = Stage < 4 ? d3d.palettes[Stage] : NULL;
+    if (p) D3DResource_AddRef((D3DResource *)p);
+    *pp = p;
+}
+
+/* The texture a surface level belongs to, with a reference. */
+static LONG NTAPI D3DSurface_GetContainer(D3DSurface *s, D3DPixelContainer **pp)
+{
+    *pp = s->Parent;
+    if (!s->Parent) return (LONG)0x80004005;   /* E_FAIL */
+    D3DResource_AddRef(&s->Parent->res);
+    return D3D_OK;
+}
+
+static void NTAPI D3DCubeTexture_GetLevelDesc(D3DPixelContainer *t, UINT_ level, ULONG *desc)
+{
+    D3DTexture_GetLevelDesc(t, level, desc);
+}
+
+static void NTAPI D3DSurface_UnlockRect(D3DSurface *s) { (void)s; }
+
+static void NTAPI D3DDevice_GetScreenSpaceOffset(float *x, float *y)
+{
+    *x = d3d.screen_offset[0];
+    *y = d3d.screen_offset[1];
+}
+
+/* SetVertexBlendModelView overrides the skinning matrices the fixed-function
+   pipeline derives from the world and view transforms.  They are kept for
+   GetVertexBlendModelView; drawing still uses the transforms (noted once). */
+static struct { bool on; UINT_ count; D3DMATRIX mv[4], proj_vp; } blend_mv;
+static void NTAPI D3DDevice_SetVertexBlendModelView(UINT_ count, const D3DMATRIX *mv, const D3DMATRIX *inv,
+                                                    const D3DMATRIX *proj_vp)
+{
+    (void)inv;
+    blend_mv.on = mv != NULL;
+    if (!mv) return;
+    blend_mv.count = count > 4 ? 4 : count;
+    memcpy(blend_mv.mv, mv, blend_mv.count * sizeof(D3DMATRIX));
+    if (proj_vp) blend_mv.proj_vp = *proj_vp;
+    static bool noted;
+    if (!noted) { noted = true; xlog("D3D: SetVertexBlendModelView overrides are kept but not drawn with"); }
+}
+static LONG NTAPI D3DDevice_GetVertexBlendModelView(UINT_ count, D3DMATRIX *mv, D3DMATRIX *proj_vp)
+{
+    if (mv) memcpy(mv, blend_mv.mv, (count > 4 ? 4 : count) * sizeof(D3DMATRIX));
+    if (proj_vp) *proj_vp = blend_mv.proj_vp;
+    return blend_mv.on ? D3D_OK : 1 /* S_FALSE */;
+}
+
 /* The inline Release in 5xxx headers drops the count itself and calls this
    on the last reference, after releasing a surface's parent itself. */
 static void NTAPI D3D_DestroyResource(D3DResource *r)
@@ -8632,6 +9044,33 @@ const struct hle_func d3d8_funcs[] = {
     F("_D3DDevice_SelectVertexShader@8", D3DDevice_SelectVertexShader),
     F("_D3DDevice_RunVertexStateShader@8", D3DDevice_RunVertexStateShader),
     F("_D3DDevice_SetVertexShaderInput@12", D3DDevice_SetVertexShaderInput),
+    F("_D3DDevice_SetVertexShaderInputDirect@12", D3DDevice_SetVertexShaderInputDirect),
+    F("_D3DDevice_GetVertexShaderInput@12", D3DDevice_GetVertexShaderInput),
+    F("_D3DDevice_SelectVertexShaderDirect@8", D3DDevice_SelectVertexShaderDirect),
+    F("_D3DPushBuffer_SetVertexShaderInputDirect@20", D3DPushBuffer_SetVertexShaderInputDirect),
+    F("_D3DDevice_GetDebugMarker@0", D3DDevice_GetDebugMarker),
+    F("_D3DDevice_SetTileCompressionTagBits@16", D3DDevice_SetTileCompressionTagBits),
+    F("_D3DDevice_GetTileCompressionTagBits@16", D3DDevice_GetTileCompressionTagBits),
+    F("_D3DDevice_GetTileCompressionTags@8", D3DDevice_GetTileCompressionTags),
+    F("_D3DDevice_SetCopyRectsState@8", D3DDevice_SetCopyRectsState),
+    F("_D3DDevice_GetCopyRectsState@8", D3DDevice_GetCopyRectsState),
+    F("_D3DDevice_SetOverscanColor@4", D3DDevice_SetOverscanColor),
+    F("_D3DDevice_GetOverscanColor@0", D3DDevice_GetOverscanColor),
+    F("_D3DDevice_EnableCC@4", D3DDevice_EnableCC),
+    F("_D3DDevice_SendCC@12", D3DDevice_SendCC),
+    F("_D3DDevice_GetCCStatus@8", D3DDevice_GetCCStatus),
+    F("_D3DDevice_Resume@4", D3DDevice_Resume),
+    F("_D3DIndexBuffer_GetDesc@8", D3DIndexBuffer_GetDesc),
+    F("_D3DPalette_GetSize@4", D3DPalette_GetSize),
+    F("_D3DDevice_GetPalette@8", D3DDevice_GetPalette),
+    F("_D3DSurface_GetContainer@8", D3DSurface_GetContainer),
+    F("_D3DCubeTexture_GetLevelDesc@12", D3DCubeTexture_GetLevelDesc),
+    F("_D3DSurface_UnlockRect@4", D3DSurface_UnlockRect),
+    F("_D3DDevice_GetScreenSpaceOffset@8", D3DDevice_GetScreenSpaceOffset),
+    F("_D3DDevice_SetVertexBlendModelView@16", D3DDevice_SetVertexBlendModelView),
+    F("_D3DDevice_GetVertexBlendModelView@12", D3DDevice_GetVertexBlendModelView),
+    F("_D3DDevice_SetTextureStageState@12", D3DDevice_SetTextureStageStateNotInline),
+    F("@D3DDevice_SwitchTexture_Fast@12", D3DDevice_SwitchTexture),
     F("_D3DDevice_Begin@4", D3DDevice_Begin),
     F("_D3DDevice_End@0", D3DDevice_End),
     F("_D3DDevice_SetVertexData2f@12", D3DDevice_SetVertexData2f),
