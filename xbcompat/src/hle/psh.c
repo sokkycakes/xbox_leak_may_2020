@@ -336,8 +336,15 @@ static const char *dot_ref(psh_ctx *c, char *buf, size_t n, int stage)
 
 static void emit_dot(psh_ctx *c, int i)
 {
+    const char *f = dotmap_func(c, i);
+    int m = c->dotmap[i] & 7;
+    if (m >= 1 && m <= 3 && ((c->options.bump_biased >> c->inputtex[i]) & 1)) {
+        /* A biased signed upload already holds the signed value + 128. */
+        c->use_dotmap[1] = c->use_snorm8[0] = 1;
+        f = "dotmap_snorm_d3d";
+    }
     sb_fmt(&c->tex, "    float dot%d = dot(gl_TexCoord[%d].xyz, %s(t%d));\n",
-           i, i, dotmap_func(c, i), c->inputtex[i]);
+           i, i, f, c->inputtex[i]);
     c->dot_defined[i] = 1;
 }
 
@@ -432,9 +439,16 @@ static int emit_texture_stage(psh_ctx *c, int i)
         /* s' = s + m00*du + m10*dv, t' = t + m01*du + m11*dv (the DX8
            convention); du/dv are the signed bytes in the input's r/g. */
         c->sampler[i] = 2;
-        c->use_texscale = c->use_bumpenv = c->use_snorm8[2] = 1;
-        sb_fmt(o, "    vec2 dsdt%d = vec2(snorm8(t%d.%c), snorm8(t%d.g));\n",
-               i, in, (c->options.bump_bgra & (1u << in)) ? 'b' : 'r', in);
+        c->use_texscale = c->use_bumpenv = 1;
+        {
+            /* A biased upload decodes as (x - 128) / 127 after filtering;
+               raw two's complement bytes as snorm8. */
+            int biased = (c->options.bump_biased >> in) & 1;
+            const char *dec = biased ? "snorm8_d3d" : "snorm8";
+            c->use_snorm8[biased ? 0 : 2] = 1;
+            sb_fmt(o, "    vec2 dsdt%d = vec2(%s(t%d.%c), %s(t%d.g));\n",
+                   i, dec, in, (c->options.bump_bgra & (1u << in)) ? 'b' : 'r', dec, in);
+        }
         sb_fmt(o, "    vec4 t%d = texture2D(tex%d, (gl_TexCoord[%d].xy + vec2(dot(bump_env[%d].xz, dsdt%d), dot(bump_env[%d].yw, dsdt%d))) * tex_scale[%d].xy);\n",
                i, i, i, i, i, i, i, i);
         if (mode == TM_BUMPENVMAP_LUM) {

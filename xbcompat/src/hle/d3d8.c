@@ -28,6 +28,7 @@
 #include "nv2a_shaders.h"
 #include "dxt_decode.h"
 #include "ff_vsh.h"
+#include "ff_combiner.h"
 #include "shader_diagnostics.h"
 #include "cpu_compare_audit.h"
 static unsigned shader_diag_draw;   /* draws seen, for XBCOMPAT_SHADER_DIAGNOSTICS */
@@ -273,6 +274,12 @@ static unsigned char rs_xlat[D3DRS_MAX];
 #define TSS(stage, i) (d3d.texture_state[(stage) * 32 + (i)])
 static float rs_float(ULONG i) { float f; memcpy(&f, &RS(i), 4); return f; }
 static float tss_float(int s, ULONG i) { float f; memcpy(&f, &d3d.texture_state[s * 32 + i], 4); return f; }
+/* Fixed-function stages that need a fragment program: bump env mapping
+   (ff_combiner.h).  Everything else stays on GL's texture environment. */
+static bool ff_fragment_program(void)
+{
+    return !d3d.pixel_shader && ff_combiner_needs_program(d3d.texture_state, RS(D3DRS_POINTSPRITEENABLE) != 0);
+}
 
 enum {
     D3DTSS_ADDRESSU = 0, D3DTSS_ADDRESSV = 1, D3DTSS_ADDRESSW = 2, D3DTSS_MAGFILTER = 3, D3DTSS_MINFILTER = 4,
@@ -1583,7 +1590,10 @@ static void upload_image3(GLenum target, GLint level, ULONG fmt, ULONG w, ULONG 
         return;
     }
     /* conv: 1 = V8U8 (bump), 2 = L6V5U5 (bump), both expanded to RGBA8 with
-       du/dv as the signed bytes' bit patterns in r/g and luminance in b;
+       du/dv in r/g as signed bytes + 128 and luminance in b: the hardware
+       filters these channels as signed values (the bump stage forces
+       D3DTSIGN_GSIGNED | BSIGNED), and with the bias GL's unsigned
+       filtering interpolates them the same way (psh bump_biased);
        3 = YUY2 and 4 = UYVY (video frames), converted to RGB with BT.601;
        5 = A8, which the NV2A samples as white with that alpha;
        6 = AL8, one byte that is both luminance and alpha;
@@ -1721,11 +1731,11 @@ static void upload_image3(GLenum target, GLint level, ULONG fmt, ULONG w, ULONG 
             uint16_t v = px[k * 2] | px[k * 2 + 1] << 8;
             uint8_t *o = rgba + k * 4;
             if (table[i].conv == 1) {
-                o[0] = v & 0xFF; o[1] = v >> 8; o[2] = 0xFF;
+                o[0] = (v & 0xFF) ^ 0x80; o[1] = (v >> 8) ^ 0x80; o[2] = 0xFF;
             } else {
                 int du = (int)(v << 27) >> 27, dv = (int)((v >> 5) << 27) >> 27;   /* signed 5-bit */
-                o[0] = (uint8_t)(int8_t)(du * 127 / 15 < -128 ? -128 : du * 127 / 15);
-                o[1] = (uint8_t)(int8_t)(dv * 127 / 15 < -128 ? -128 : dv * 127 / 15);
+                o[0] = (uint8_t)(128 + (du * 127 / 15 < -128 ? -128 : du * 127 / 15));
+                o[1] = (uint8_t)(128 + (dv * 127 / 15 < -128 ? -128 : dv * 127 / 15));
                 o[2] = (uint8_t)(((v >> 10) & 0x3F) * 255 / 63);
             }
             o[3] = 0xFF;
@@ -2259,7 +2269,7 @@ static void apply_texture_transforms(unsigned units, const int tsize[4])
             }
         }
         D3DPixelContainer *t = (D3DPixelContainer *)d3d.textures[u];
-        if (on && t && t->Size && !d3d.pixel_shader) {
+        if (on && t && t->Size && !d3d.pixel_shader && !ff_fragment_program()) {
             /* Only legacy fragment sampling needs vertex-side normalization.
                Pixel shaders normalize at the texture instruction instead. */
             ULONG w, h, pitch;
@@ -3396,31 +3406,59 @@ static psh_options fragment_shader_options(void)
         /* X8L8V8U8 aliases X8R8G8B8: preserve ordinary RGB sampling, but
            tell bump stages where U, V and luminance landed in that upload. */
         if (fmt == 0x07 || fmt == 0x1E) o.bump_bgra |= 1u << i;
+        if (fmt == 0x28 || fmt == 0x17 || fmt == 0x27 || fmt == 0x37) o.bump_biased |= 1u << i;
     }
     return o;
 }
 
-static void fshader_key(uint32_t *key, const psh_options *o)
+/* Fixed-function stages as the combiner state the library would load
+   (ff_combiner.h): ps[] gets the D3DRS_PS* words, the texture modes are
+   returned. */
+static ULONG ff_fragment_state(uint32_t *ps)
+{
+    int kind[4];
+    for (int s = 0; s < 4; s++) {
+        const D3DPixelContainer *t = (const D3DPixelContainer *)d3d.textures[s];
+        GLenum target = t ? tex_target(t) : 0;
+        kind[s] = !t ? FFC_TEX_NONE : target == GL_TEXTURE_CUBE_MAP ? FFC_TEX_CUBE
+                : target == GL_TEXTURE_3D ? FFC_TEX_3D : FFC_TEX_2D;
+    }
+    uint32_t rs[D3DRS_MAX];
+    ff_combiner_state(rs, d3d.texture_state, kind, RS(D3DRS_POINTSPRITEENABLE) != 0);
+    memcpy(ps, rs, D3DRS_PS_MAX * 4);
+    return rs[D3DRS_PSTEXTUREMODES];
+}
+
+static void fshader_key(uint32_t *key, const psh_options *o, const uint32_t *ps, ULONG modes)
 {
     memset(key, 0, 64 * 4);
-    memcpy(key, d3d.render_state, D3DRS_PS_MAX * 4);
+    memcpy(key, ps, D3DRS_PS_MAX * 4);
     for (int i = D3DRS_PSCONSTANT0_0; i <= D3DRS_PSCONSTANT1_7; i++) key[i] = 0;
     key[D3DRS_PSFINALCOMBINERCONSTANT0] = key[D3DRS_PSFINALCOMBINERCONSTANT1] = 0;
-    key[57] = adjusted_texture_modes();
+    key[57] = modes;
     key[58] = RS(D3DRS_FOGENABLE);
     key[59] = RS(D3DRS_FOGTABLEMODE);
     key[60] = shadow_stages();
     key[61] = RS(D3DRS_SPECULARENABLE) != 0;
     key[62] = o->alpha_kill;
-    key[63] = (o->color_key_ignore_alpha << 8) | (o->bump_bgra << 12);
+    key[63] = (o->color_key_ignore_alpha << 8) | (o->bump_bgra << 12) | (o->bump_biased << 16);
     for (int i = 0; i < 4; i++) key[63] |= o->color_key[i] << (i * 2);
 }
 
 static GLuint fragment_shader_object(void)
 {
-    uint32_t key[64];
+    uint32_t key[64], ps[D3DRS_PS_MAX];
+    ULONG modes;
+    /* A fixed-function draw gets here only for stages GL's texture
+       environment cannot express (ff_fragment_program). */
+    if (d3d.pixel_shader) {
+        memcpy(ps, d3d.render_state, sizeof(ps));
+        modes = adjusted_texture_modes();
+    } else {
+        modes = ff_fragment_state(ps);
+    }
     psh_options options = fragment_shader_options();
-    fshader_key(key, &options);
+    fshader_key(key, &options, ps, modes);
     uint32_t hash = fshader_hash(key);
     fshader_entry **slot = &fshader_lookup[(hash ^ hash >> 16) & 255];
     if (*slot && (*slot)->hash == hash && gc_same((*slot)->key, key, 64)) return (*slot)->fs;
@@ -3430,13 +3468,12 @@ static GLuint fragment_shader_object(void)
     memcpy(e->key, key, sizeof(key));
     e->hash = hash;
     *slot = e;
-    ULONG modes = RS(D3DRS_PSTEXTUREMODES);
-    RS(D3DRS_PSTEXTUREMODES) = key[57];
     ULONG rs[D3DRS_MAX];   /* psh.c reads 4400 numbering */
     for (int i = 0; i < D3DRS_MAX; i++) rs[i] = RS(i);
+    memcpy(rs, ps, sizeof(ps));
+    rs[D3DRS_PSTEXTUREMODES] = modes;
     psh_shadow_stages = key[60];
     char *src = psh_translate_ex(rs, &options);
-    RS(D3DRS_PSTEXTUREMODES) = modes;
     if (!src) {
         xlog("D3D: pixel shader %#x could not be translated", d3d.pixel_shader);
     } else {
@@ -3508,26 +3545,31 @@ static void upload_ps_uniforms(program_entry *e)
         for (int i = 0; i < 8; i++) color4(c[i], RS(D3DRS_PSCONSTANT0_0 + i));
         program_uniform4fv(e, e->loc_c0, 8, &c[0][0]);
     }
+    /* A fixed-function program (ff_combiner.h) reads TFACTOR as C1, and
+       a bump lookup in unit s uses the BUMPENV states of D3D stage s - 1. */
+    bool ff = !d3d.pixel_shader;
     if (e->loc_c1 >= 0) {
-        for (int i = 0; i < 8; i++) color4(c[i], RS(D3DRS_PSCONSTANT1_0 + i));
+        for (int i = 0; i < 8; i++) color4(c[i], RS(ff ? D3DRS_TEXTUREFACTOR : D3DRS_PSCONSTANT1_0 + i));
         program_uniform4fv(e, e->loc_c1, 8, &c[0][0]);
     }
     if (e->loc_fc0 >= 0) { color4(c[0], RS(D3DRS_PSFINALCOMBINERCONSTANT0)); program_uniform4fv(e, e->loc_fc0, 1, c[0]); }
     if (e->loc_fc1 >= 0) { color4(c[0], RS(D3DRS_PSFINALCOMBINERCONSTANT1)); program_uniform4fv(e, e->loc_fc1, 1, c[0]); }
     if (e->loc_bump_env >= 0) {
         for (int s = 0; s < 4; s++) {
-            c[s][0] = tss_float(s, D3DTSS_BUMPENVMAT00);
-            c[s][1] = tss_float(s, D3DTSS_BUMPENVMAT01);
-            c[s][2] = tss_float(s, D3DTSS_BUMPENVMAT10);
-            c[s][3] = tss_float(s, D3DTSS_BUMPENVMAT11);
+            int from = ff ? (s ? s - 1 : 0) : s;
+            c[s][0] = tss_float(from, D3DTSS_BUMPENVMAT00);
+            c[s][1] = tss_float(from, D3DTSS_BUMPENVMAT01);
+            c[s][2] = tss_float(from, D3DTSS_BUMPENVMAT10);
+            c[s][3] = tss_float(from, D3DTSS_BUMPENVMAT11);
         }
         program_uniform4fv(e, e->loc_bump_env, 4, &c[0][0]);
     }
     if (e->loc_bump_lum >= 0) {
         float lum[4][2];
         for (int s = 0; s < 4; s++) {
-            lum[s][0] = tss_float(s, D3DTSS_BUMPENVLSCALE);
-            lum[s][1] = tss_float(s, D3DTSS_BUMPENVLOFFSET);
+            int from = ff ? (s ? s - 1 : 0) : s;
+            lum[s][0] = tss_float(from, D3DTSS_BUMPENVLSCALE);
+            lum[s][1] = tss_float(from, D3DTSS_BUMPENVLOFFSET);
         }
         program_uniform2fv(e, e->loc_bump_lum, 4, &lum[0][0]);
     }
@@ -3716,7 +3758,7 @@ static bool use_program(GLuint vs, program_entry **out)
 {
     *out = NULL;
     GLuint fs = 0;
-    if (d3d.pixel_shader) {
+    if (d3d.pixel_shader || ff_fragment_program()) {
         DETAIL_TIMED(t_fshader, fs = fragment_shader_object());
         if (!fs) return false;
     }
