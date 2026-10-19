@@ -337,7 +337,11 @@ ULONG NTAPI RtlNtStatusToDosError(NTSTATUS st)
     case 0xC0000013: return 21;                     /* STATUS_NO_MEDIA_IN_DEVICE: ERROR_NOT_READY */
     case 0xC0000014: return 1785;                   /* STATUS_UNRECOGNIZED_MEDIA: ERROR_UNRECOGNIZED_MEDIA */
     case 0xC00000A2: return 19;                     /* STATUS_MEDIA_WRITE_PROTECTED: ERROR_WRITE_PROTECT */
-    default: return 317;                            /* ERROR_MR_MID_NOT_FOUND */
+    default:
+        /* A Win32 error carried as an HRESULT, as XNet reports socket errors
+           (NETERR, e.g. WSA_IO_PENDING for an overlapped receive). */
+        if (((ULONG)st & 0xFFFF0000) == 0x80070000) return (ULONG)st & 0xFFFF;
+        return 317;                                 /* ERROR_MR_MID_NOT_FOUND */
     }
 }
 

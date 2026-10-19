@@ -81,6 +81,7 @@ static void crash_handler(int sig, siginfo_t *si, void *uc_)
     if (sig == SIGSEGV && (read_tsc(r) || debug_service(r) || privileged_insn(r))) { g_guest_traps++; return; }
     if (sig == SIGSEGV && nic_trap_fault(si->si_addr, uc)) return;
     if (sig == SIGTRAP && nic_trap_step(uc)) return;
+    if (sig == SIGTRAP && probe_trap(uc)) return;
     if (sig == SIGTRAP) {
         /* int 3 (DbgBreakPoint and friends): nobody is listening, carry on. */
         xlog("breakpoint at eip=%08x ignored", r[REG_EIP]);
@@ -272,6 +273,7 @@ int main(int argc, char **argv)
     kernel_resolve_imports(&img);
     reset_init(((XBE_CERTIFICATE *)img.header->Certificate)->TitleID);
     hle_patch(&img, hle);
+    probe_init();
 
     thread_create(img.header->SizeOfStackCommit, 0, NULL, (PVOID)run_entry_point,
                   (PVOID)img.entry, false);

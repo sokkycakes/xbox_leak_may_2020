@@ -401,7 +401,7 @@ static void *net_thread(void *arg)
                 uint32_t src = ntohl(from.sin_addr.s_addr);
                 uint16_t sport = ntohs(from.sin_port);
                 if (from.sin_addr.s_addr == dns_server.sin_addr.s_addr && from.sin_port == dns_server.sin_port)
-                    src = NET_DNS;
+                    src = NET_DNS, sport = 53;
                 else if (src == INADDR_LOOPBACK)
                     src = NET_GW;
                 to_guest_udp(src, sport, NET_GUEST, ports[i], buf, (unsigned)got, guest_mac);
@@ -418,8 +418,16 @@ static void find_dns(void)
     dns_server.sin_family = AF_INET;
     dns_server.sin_port = htons(53);
     inet_pton(AF_INET, "8.8.8.8", &dns_server.sin_addr);
+    /* XBCOMPAT_DNS=IP[:PORT], e.g. tools/liveserver's DNS on 127.0.0.1:5353. */
     const char *env = getenv("XBCOMPAT_DNS");
-    if (env && inet_pton(AF_INET, env, &dns_server.sin_addr) == 1) return;
+    if (env) {
+        char addr[64];
+        unsigned port = 53;
+        if (sscanf(env, "%63[^:]:%u", addr, &port) >= 1 && inet_pton(AF_INET, addr, &dns_server.sin_addr) == 1) {
+            dns_server.sin_port = htons((uint16_t)port);
+            return;
+        }
+    }
     FILE *f = fopen("/etc/resolv.conf", "r");
     if (!f) return;
     char line[256], addr[64];
@@ -436,7 +444,7 @@ bool net_init(const char *spec, const uint8_t mac[6])
     if (!strcmp(spec, "nat")) {
         backend = BACKEND_NAT;
         find_dns();
-        xlog("net: NAT on 10.0.2.0/24, DNS forwarded to %s", inet_ntoa(dns_server.sin_addr));
+        xlog("net: NAT on 10.0.2.0/24, DNS forwarded to %s:%u", inet_ntoa(dns_server.sin_addr), ntohs(dns_server.sin_port));
     } else if (!strncmp(spec, "tunnel:", 7)) {
         char host[256];
         unsigned port = 0, lport = 0;

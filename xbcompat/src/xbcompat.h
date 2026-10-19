@@ -122,6 +122,9 @@ void ke_dispatch_leave(void);
 bool ke_dispatch_release_for_wait(void);
 void ke_dispatch_reacquire(bool was_held);
 /* The console identity in the hard disk directory (misc.c). */
+/* probe.c: XBCOMPAT_PROBE address tracing */
+void probe_init(void);
+bool probe_trap(void *ucontext);
 void identity_init(const char *hdd);
 const UCHAR *identity_mac(void);
 /* The emulated Ethernet controller (nic.c). */

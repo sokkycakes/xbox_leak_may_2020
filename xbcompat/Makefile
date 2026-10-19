@@ -86,7 +86,7 @@ override CFLAGS += -Isrc
 LDLIBS += -ldl
 endif
 endif
-SRC      = src/main.c src/log.c src/prof.c src/loader.c src/memory.c src/thread.c $(KERNSRC) $(HLESRC)
+SRC      = src/main.c src/probe.c src/log.c src/prof.c src/loader.c src/memory.c src/thread.c $(KERNSRC) $(HLESRC)
 OBJ      = $(SRC:%.c=$(BUILD)/%.o)
 ifeq ($(RENDERER),native)
 ifeq ($(TARGET)$(CPU),armhfxlat)

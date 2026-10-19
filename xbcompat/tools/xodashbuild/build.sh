@@ -34,13 +34,14 @@ MAININC=$(inc private\\online\\xodash\\xodashlib private\\inc private\\inc\\cryp
          public\\ddk\\inc)
 # Microsoft only built this title checked, and a few of its ASSERTs do the
 # work (seek to a glyph, a XIP block, make a directory).  A retail build
-# drops them, so those are kept as plain statements.  Patched
+# drops them, so those are kept as plain statements.  fixups.py makes
+# account creation wait for the server.  Patched
 # copies are rewritten only when they change so their objects stay cached.
 mkdir -p "$WORK/patch"
 patch_src() { # dir file
     local real=$(ls "$1" | grep -ix "$2")
     sed -E 's/\bASSERT\((SetFilePointer|CreateDirectory|XFreeSectionByHandle|VirtualFree|pThis->Load)\b/(void)(\1/' \
-        "$1/$real" > "$WORK/patch/$real.new"
+        "$1/$real" | python3 "$HERE/fixups.py" "$real" > "$WORK/patch/$real.new"
     cmp -s "$WORK/patch/$real.new" "$WORK/patch/$real" && rm -f "$WORK/patch/$real.new" ||
         mv "$WORK/patch/$real.new" "$WORK/patch/$real"
 }
@@ -49,16 +50,19 @@ cc_dir() { # dir include-path file...
     for f in "$@"; do
         real=$(ls "$src" | grep -ix "$f")
         o="$WORK/obj/${real%.*}.obj"
-        file=$real dep=$src/$real
-        [ -f "$WORK/patch/$real" ] && file="$W\\patch\\$real" dep=$WORK/patch/$real
+        file=$real dep=$src/$real inc=$INC
+        # A patched copy still finds its "quoted" headers in the source folder.
+        [ -f "$WORK/patch/$real" ] && file="$W\\patch\\$real" dep=$WORK/patch/$real \
+            inc="$(echo "Z:$src" | tr / '\\');$INC"
         [ -s "$o" ] && [ "$o" -nt "$dep" ] && continue
         echo "cc $real"
-        WORK="$WORK" XB="$XB" CC_DIR="$src" CC_INC="$INC" \
+        WORK="$WORK" XB="$XB" CC_DIR="$src" CC_INC="$inc" \
             python3 "$HERE/../dashbuild/cc.py" "$file" -DXONLINE_BUILD_LIBX
     done
 }
 X="$WORK/xb/private/online/xodash"
 for f in font.cpp xip.cpp fileutil.cpp translator.cpp; do patch_src "$X/XODashLib" $f; done
+for f in act_online.cpp accountdata.cpp; do patch_src "$X/XODashMain" $f; done
 cc_dir "$X/XODashLib" "$LIBINC" utilities.cpp xbinput.cpp xbutil.cpp xbstopwatch.cpp primitivescene.cpp msgdialog.cpp \
     camera.cpp falloff.cpp tgl.cpp smartobject.cpp button.cpp listbox.cpp spinner.cpp texture.cpp texturecache.cpp \
     material.cpp materiallibrary.cpp xip.cpp fileutil.cpp file.cpp inifile.cpp text.cpp locale.cpp translator.cpp \
