@@ -380,7 +380,7 @@ NTSTATUS NTAPI NtCreateFile(HANDLE *FileHandle, ACCESS_MASK DesiredAccess, OBJEC
     (void)AllocationSize; (void)FileAttributes; (void)ShareAccess;
     char *xpath = full_xbox_path(oa);
     char host[PATH_MAX];
-    int is_device;
+    int is_device = 0;
     NTSTATUS st = translate_path(xpath, host, sizeof(host), &is_device);
     ULONG info = FILE_OPENED;
     xfile *f = NULL;
@@ -487,6 +487,14 @@ out:
     iosb->Information = NT_SUCCESS(st) ? info : 0;
     TRACE("NtCreateFile(%s -> %s, disp %u, opt %#x) = %#x", xpath, host, CreateDisposition,
           CreateOptions, st);
+    /* Missing files on the hard disk, for finding what a title looked for
+       and didn't get (Splinter Cell's downloaded level); the DVD logs its own. */
+    static int missing_logged;
+    if (!g_trace && is_device != 3 && (st == STATUS_OBJECT_NAME_NOT_FOUND || st == STATUS_OBJECT_PATH_NOT_FOUND)
+        && missing_logged < 300) {
+        missing_logged++;
+        xlog("NtCreateFile: %s not found (%s)", xpath, host);
+    }
     free(xpath);
     return st;
 }

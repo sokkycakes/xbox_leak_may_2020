@@ -696,7 +696,13 @@ static struct { uint64_t hash; unsigned long writes; } zsync;
 static void debug_dump_draw(void)
 {
     stats.draws++;
-    if (d3d.target_depth && d3d.target_depth == d3d.depth) depth_gpu_writes++;
+    /* Only draws that can write depth or stencil count: Splinter Cell draws
+       its loading picture (decoded into this memory) and progress bar with
+       z writes off, and counting those read the GPU's depth back over the
+       picture, so no level's loading screen showed. */
+    if (d3d.target_depth && d3d.target_depth == d3d.depth &&
+        ((RS(D3DRS_ZENABLE) && RS(D3DRS_ZWRITEENABLE)) || RS(D3DRS_STENCILENABLE)))
+        depth_gpu_writes++;
     static const char *dir; static int checked, n; static ULONG frame;
     if (!checked) {
         dir = getenv("XBCOMPAT_DUMP_DRAWS");
