@@ -66,6 +66,32 @@ static uint16_t csum_fold(uint32_t sum)
 }
 
 /* Send one IPv4 datagram to the console, fragmenting it to the 1500-byte MTU. */
+static bool frame_log;   /* XBCOMPAT_NET_LOG=1: one line per frame */
+
+static void log_frame(const char *dir, const uint8_t *f, unsigned len)
+{
+    if (!frame_log || len < 14) return;
+    unsigned type = rd16(f + 12);
+    if (type == 0x0800 && len >= 34) {
+        const uint8_t *ip = f + 14;
+        unsigned hl = (ip[0] & 15) * 4;
+        unsigned sp = 0, dp = 0;
+        if ((ip[9] == 17 || ip[9] == 6) && len >= 14 + hl + 4) { sp = rd16(ip + hl); dp = rd16(ip + hl + 2); }
+        xlog("net %s: IP proto %u %u.%u.%u.%u:%u -> %u.%u.%u.%u:%u, %u bytes", dir, ip[9], ip[12], ip[13], ip[14],
+             ip[15], sp, ip[16], ip[17], ip[18], ip[19], dp, len);
+    } else {
+        xlog("net %s: type %04x %02x:%02x:%02x:%02x:%02x:%02x -> %02x:%02x:%02x:%02x:%02x:%02x, %u bytes", dir, type,
+             f[6], f[7], f[8], f[9], f[10], f[11], f[0], f[1], f[2], f[3], f[4], f[5], len);
+    }
+}
+
+/* A frame for the title, logged like the ones it sends. */
+static void deliver(const uint8_t *f, unsigned len)
+{
+    log_frame("in", f, len);
+    nic_receive(f, len);
+}
+
 static void to_guest_ip(uint8_t proto, uint32_t src, uint32_t dst, const uint8_t *payload, unsigned len,
                         const uint8_t *dst_mac)
 {
@@ -91,7 +117,7 @@ static void to_guest_ip(uint8_t proto, uint32_t src, uint32_t dst, const uint8_t
         wr32(ip + 16, dst);
         wr16(ip + 10, csum_fold(csum_add(0, ip, 20)));
         memcpy(ip + 20, payload + off, chunk);
-        nic_receive(f, 14 + 20 + chunk);
+        deliver(f, 14 + 20 + chunk);
         off += chunk;
     } while (off < len);
 }
@@ -321,32 +347,13 @@ static void nat_arp(const uint8_t *a, unsigned len)
     wr32(r + 14, want);
     memcpy(r + 18, a + 8, 6);
     memcpy(r + 24, a + 14, 4);
-    nic_receive(f, sizeof f);
+    deliver(f, sizeof f);
 }
 
 /* ---- tunnel ------------------------------------------------------------ */
 
 static int tunnel_fd = -1;
 static struct sockaddr_in tunnel_peer;
-static bool frame_log;   /* XBCOMPAT_NET_LOG=1: one line per frame */
-
-static void log_frame(const char *dir, const uint8_t *f, unsigned len)
-{
-    if (!frame_log || len < 14) return;
-    unsigned type = rd16(f + 12);
-    if (type == 0x0800 && len >= 34) {
-        const uint8_t *ip = f + 14;
-        unsigned hl = (ip[0] & 15) * 4;
-        unsigned sp = 0, dp = 0;
-        if ((ip[9] == 17 || ip[9] == 6) && len >= 14 + hl + 4) { sp = rd16(ip + hl); dp = rd16(ip + hl + 2); }
-        xlog("net %s: IP proto %u %u.%u.%u.%u:%u -> %u.%u.%u.%u:%u, %u bytes", dir, ip[9], ip[12], ip[13], ip[14],
-             ip[15], sp, ip[16], ip[17], ip[18], ip[19], dp, len);
-    } else {
-        xlog("net %s: type %04x %02x:%02x:%02x:%02x:%02x:%02x -> %02x:%02x:%02x:%02x:%02x:%02x, %u bytes", dir, type,
-             f[6], f[7], f[8], f[9], f[10], f[11], f[0], f[1], f[2], f[3], f[4], f[5], len);
-    }
-}
-
 void net_send(const uint8_t *frame, unsigned len)
 {
     log_frame("out", frame, len);
@@ -388,8 +395,7 @@ static void *net_thread(void *arg)
                 ssize_t got = recvfrom(pfd[i].fd, buf, sizeof buf, MSG_DONTWAIT, (struct sockaddr *)&from, &fl);
                 if (got < 0) break;
                 if (backend == BACKEND_TUNNEL) {
-                    log_frame("in", buf, (unsigned)got);
-                    nic_receive(buf, (unsigned)got);
+                    deliver(buf, (unsigned)got);
                     continue;
                 }
                 uint32_t src = ntohl(from.sin_addr.s_addr);
