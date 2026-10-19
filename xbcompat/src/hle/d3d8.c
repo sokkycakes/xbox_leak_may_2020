@@ -2579,8 +2579,12 @@ static void viewport_constants(float vp[2][4])
     const D3DVIEWPORT8 *v = &d3d.viewport;
     float sx = 0.5f * v->Width, sy = -0.5f * v->Height;
     vp[0][0] = sx; vp[0][1] = sy; vp[0][2] = d3d.zscale * (v->MaxZ - v->MinZ); vp[0][3] = 0;
-    vp[1][0] = v->X + sx + d3d.screen_offset[0];
-    vp[1][1] = v->Y - sy + d3d.screen_offset[1];
+    /* The library's m_ScreenSpaceOffset carries KELVIN_BORDER (0.53125):
+       CommonSetViewport writes it into the reserved constants, and a
+       program that builds oPos from them lands half a pixel further right
+       and down than one that doesn't add it. */
+    vp[1][0] = v->X + sx + d3d.screen_offset[0] + 0.53125f;
+    vp[1][1] = v->Y - sy + d3d.screen_offset[1] + 0.53125f;
     vp[1][2] = d3d.zscale * v->MinZ; vp[1][3] = 0;
 }
 
@@ -4923,7 +4927,16 @@ static void upload_constants(const vshader *sh, program_entry *e)
 uploaded:
     if (e->loc_flip_y >= 0) program_uniform1f(e, e->loc_flip_y, d3d.rt_texture ? -1.0f : 1.0f);
     if (e->loc_vp_scale >= 0) program_uniform4fv(e, e->loc_vp_scale, 1, vp[0]);
-    if (e->loc_vp_offset >= 0) program_uniform4fv(e, e->loc_vp_offset, 1, vp[1]);
+    if (e->loc_vp_offset >= 0) {
+        /* Hardware screen position h is D3D position h - 0.53125, which we
+           draw at the GL pixel centre (+0.5), as the pretransformed path
+           does: without it Splinter Cell's glow quad (from the reserved
+           constants) missed its target's last column and row, which kept
+           the clear colour and bled green up the screen's right and bottom
+           edges. */
+        float off[4] = { vp[1][0] - 0.5f, vp[1][1] - 0.5f, vp[1][2], vp[1][3] };
+        program_uniform4fv(e, e->loc_vp_offset, 1, off);
+    }
     if (e->loc_wdepth >= 0) {
         /* D3DZB_USEW: the NV2A depth-tests w and ignores oPos.z, which
            W-buffered titles leave unscaled (Splinter Cell's z/w is 0..1, not
