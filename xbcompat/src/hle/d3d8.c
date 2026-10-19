@@ -9412,13 +9412,6 @@ static LONG NTAPI D3D_CreateTexture(UINT_ w, UINT_ h, UINT_ depth, UINT_ levels,
     return *pp ? D3D_OK : 0x8007000E;
 }
 
-/* SetRenderTarget's body, with a flag word the host has no use for. */
-static void NTAPI D3D_CommonSetRenderTarget(D3DSurface *target, D3DSurface *z, ULONG unknown)
-{
-    (void)unknown;
-    D3DDevice_SetRenderTargetFast(target, z, 0);
-}
-
 static D3DSurface *NTAPI D3DDevice_GetPersistedSurface2(void)
 {
     D3DSurface *s = NULL;
@@ -9606,8 +9599,10 @@ const struct hle_func d3d8_funcs[] = {
     F("@D3D_CommonSetMultiSampleModeAndScale@8", D3D_FastNop),
     F("@D3D_BlockOnResource@4", D3D_BlockOnResourceFast),
     F("_D3D_CreateTexture@36", D3D_CreateTexture),
-    F("_D3D_CreateStandAloneSurface@16", D3DDevice_CreateImageSurface),
-    F("_D3D_CommonSetRenderTarget@12", D3D_CommonSetRenderTarget),
+    /* _D3D_CreateStandAloneSurface@16 and _D3D_CommonSetRenderTarget@12 stay
+       guest code: the library's own internal callers (Splinter Cell, 4928)
+       pass surfaces the host can't resolve, and every model vanished; their
+       push buffer output is interpreted fine. */
     F("_D3DDevice_GetPersistedSurface2@0", D3DDevice_GetPersistedSurface2),
     F("_D3DDevice_Present@16", D3DDevice_Present),
     F("_D3DDevice_BeginStateBig@4", D3DDevice_BeginPushLTCG),
