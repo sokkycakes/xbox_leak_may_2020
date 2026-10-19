@@ -464,10 +464,14 @@ void d3d_async_run(const uint32_t *buf, unsigned n)
         case AS_VIS_END: D3DDevice_EndVisibilityTest(a[0]); break;
         case AS_SWAP:
             hud_batch_flush();
+            swap_cpu_backbuffer();
             flush_cpu_backbuffer();
+            front_buffer_overlay();
+            front_buffer_update();
             swap_gpu_frame_end();
             swap_screenshot();
             swap_present();
+            persisted_first_present();
             if (swap_window_events()) async_quit = true;
             /* The title's thread sees it when this batch is done. */
             __atomic_store_n(&async_frames_done, back->frame, __ATOMIC_RELEASE);

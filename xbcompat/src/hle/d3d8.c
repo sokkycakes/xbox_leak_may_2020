@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "../xbcompat.h"
@@ -323,6 +324,14 @@ static bool ff_pretransformed;
 static void program_off(void);
 static const float *vertex_diffuse(void);
 static GLuint backbuffer_copy_texture(ULONG data, ULONG w, ULONG h);
+static void swap_cpu_backbuffer(void);
+static void front_buffer_update(void);
+static void front_buffer_memory(void);
+static void front_buffer_overlay(void);
+/* GetBackBuffer(-1): see front_buffer_update.  snap holds the memory as a
+   frame's first CPU write found it (see front_buffer_overlay). */
+static struct { struct D3DSurface *s; GLuint tex; volatile bool used; bool memory_stale, written; uint8_t *snap; } front;
+static void persisted_first_present(void);
 static void run_callbacks(void);
 static void pusher_drain(void);
 static void pusher_init(ULONG *dev);
@@ -738,9 +747,11 @@ static void backbuffer_synced(void)
     bbsync.hash = backbuffer_memory_hash();
 }
 
+static unsigned long draw_serial;   /* every draw: see swap_cpu_backbuffer */
 static void debug_dump_draw(void)
 {
     stats.draws++;
+    draw_serial++;
     /* Only draws that can write depth or stencil count: Splinter Cell draws
        its loading picture (decoded into this memory) and progress bar with
        z writes off, and counting those read the GPU's depth back over the
@@ -810,7 +821,12 @@ static void flush_cpu_backbuffer(void)
 static void draw_window_pixels(const uint8_t *tmp)
 { draw_window_pixels_format(tmp, GL_BGRA, GL_UNSIGNED_BYTE); }
 
+static void draw_window_pixels_masked(const uint8_t *tmp, GLenum format, GLenum type, bool masked);
 static void draw_window_pixels_format(const uint8_t *tmp, GLenum format, GLenum type)
+{ draw_window_pixels_masked(tmp, format, type, false); }
+
+/* masked: only pixels with alpha above 0 are drawn. */
+static void draw_window_pixels_masked(const uint8_t *tmp, GLenum format, GLenum type, bool masked)
 {
     shader_diagnostics_mark(d3d.frame, ++shader_diag_draw, 0, 0, 0, "cpu-pixels");
     if (!p_glWindowPos2i) p_glWindowPos2i = SDL_GL_GetProcAddress("glWindowPos2i");
@@ -826,6 +842,7 @@ static void draw_window_pixels_format(const uint8_t *tmp, GLenum format, GLenum 
     glDisable(GL_STENCIL_TEST); glDisable(GL_SCISSOR_TEST); glDisable(GL_LIGHTING);
     glDisable(GL_DITHER); glDisable(GL_POLYGON_STIPPLE);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    if (masked) { glEnable(GL_ALPHA_TEST); glAlphaFunc(GL_GREATER, 0.0f); }
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     if (p_glBindFramebuffer) p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
     p_glWindowPos2i(0, 0);
@@ -1217,13 +1234,17 @@ static ULONG NTAPI D3DDevice_Swap(ULONG Flags)
     if (async_front()) return async_swap();
     pusher_drain();
     hud_batch_flush();
+    swap_cpu_backbuffer();
     flush_cpu_backbuffer();
+    front_buffer_overlay();
+    front_buffer_update();
     swap_begin_frame();
     swap_gpu_frame_end();
     ke_frame_presented();
     run_callbacks();
     swap_screenshot();
     swap_present();
+    persisted_first_present();
     swap_finish();
     swap_checks(swap_window_events());
     swap_exit_check();
@@ -1338,6 +1359,23 @@ static void apply_viewport(void)
 }
 
 static unsigned clear_serial;   /* bumped per Clear: see backbuffer_copy_texture */
+
+/* A frame with no draws or clears whose back buffer memory changed since it
+   last matched GL: the CPU wrote it through a pointer kept from an earlier
+   lock, and the hardware would show that.  Splinter Cell presents for
+   seconds without drawing while a level loads. */
+static void swap_cpu_backbuffer(void)
+{
+    static unsigned long draws;
+    static unsigned clears;
+    bool idle = draws == draw_serial && clears == clear_serial;
+    draws = draw_serial;
+    clears = clear_serial;
+    if (!idle || d3d.bb_cpu_dirty || !d3d.backbuffer || d3d.backbuffer->Data != bbsync.data) return;
+    bool changed = backbuffer_memory_hash() != bbsync.hash;
+    TRACE_ALL("D3D: frame with no draws, back buffer memory %s", changed ? "written by the CPU, shown" : "unchanged");
+    if (changed) d3d.bb_cpu_dirty = true;
+}
 static void NTAPI D3DDevice_Clear(ULONG Count, const D3DRECT *pRects, ULONG Flags, ULONG Color, float Z,
                                   ULONG Stencil)
 {
@@ -2046,6 +2084,15 @@ static GLuint texture_for(D3DPixelContainer *t)
     bool on_color = d3d.backbuffer && va == (d3d.backbuffer->Data | CONTIG_BASE) && t != (D3DPixelContainer *)d3d.backbuffer;
     bool on_depth = d3d.depth && va == (d3d.depth->Data | CONTIG_BASE) && t != (D3DPixelContainer *)d3d.depth;
     if (on_color || on_depth) hud_batch_flush();   /* queued draws land in the frame first */
+    if (front.s && va == (front.s->Data | CONTIG_BASE) && t != (D3DPixelContainer *)front.s) {
+        ULONG fmt = (t->Format >> 8) & 0xFF;
+        if (!front.tex) front_buffer_update();   /* asked for before a Swap: the frame so far */
+        if (front.tex && (fmt == 0x12 || fmt == 0x1E)) {
+            TRACE_ALL("D3D: view of the front buffer at %#x", (unsigned)t->res.Data);
+            return front.tex;
+        }
+        front_buffer_memory();
+    }
     if (on_color && (whatif == WHATIF_NO_BBVIEW || whatif == WHATIF_BOTH)) { whatif_skip_draw = true; return 0; }
     if (on_color && d3d.backbuffer->Data == bbsync.data && (d3d.bb_cpu_dirty || backbuffer_memory_hash() != bbsync.hash)) {
         /* The CPU wrote the back buffer's memory, locked or through a
@@ -6391,10 +6438,28 @@ static void backbuffer_read_end(void)
 /* A GL texture holding the back buffer's current pixels, top row first like
    an upload of its memory would, for a linear 32-bit texture header over
    it.  0 when the window has no framebuffer object to blit from. */
+/* Copy the back buffer's top-left w x h into a 2D texture, top row first. */
+static void backbuffer_blit_to_texture(GLuint tex, ULONG w, ULONG h)
+{
+    static GLuint fb;
+    if (!fb) p_glGenFramebuffers(1, &fb);
+    GLint draw = 0;
+    glGetIntegerv(0x8CA6 /* GL_DRAW_FRAMEBUFFER_BINDING */, &draw);
+    backbuffer_read_begin(GL_COLOR_BUFFER_BIT);
+    window_fb.bind(0x8CA9 /* GL_DRAW_FRAMEBUFFER */, fb);
+    p_glFramebufferTexture2D(0x8CA9, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+    GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
+    glDisable(GL_SCISSOR_TEST);
+    window_fb.blit(0, 0, w, h, 0, h, w, 0, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    if (scissor) glEnable(GL_SCISSOR_TEST);
+    window_fb.bind(0x8CA9, draw);
+    backbuffer_read_end();
+    stats.readbacks++;
+}
+
 static GLuint backbuffer_copy_texture(ULONG data, ULONG w, ULONG h)
 {
     static struct { ULONG data, w, h; GLuint tex; } slot[8];
-    static GLuint fb;
     if (!window_fb.fbo || !window_fb.blit || w > (ULONG)d3d.width || h > (ULONG)d3d.height) return 0;
     unsigned i = 0;
     while (i < 8 && slot[i].tex && !(slot[i].data == data && slot[i].w == w && slot[i].h == h)) i++;
@@ -6422,21 +6487,149 @@ static GLuint backbuffer_copy_texture(ULONG data, ULONG w, ULONG h)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
         slot[i].data = data; slot[i].w = w; slot[i].h = h;
     }
-    if (!fb) p_glGenFramebuffers(1, &fb);
-    GLint draw = 0;
-    glGetIntegerv(0x8CA6 /* GL_DRAW_FRAMEBUFFER_BINDING */, &draw);
-    backbuffer_read_begin(GL_COLOR_BUFFER_BIT);
-    window_fb.bind(0x8CA9 /* GL_DRAW_FRAMEBUFFER */, fb);
-    p_glFramebufferTexture2D(0x8CA9, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, slot[i].tex, 0);
-    GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
-    glDisable(GL_SCISSOR_TEST);
-    window_fb.blit(0, 0, w, h, 0, h, w, 0, GL_COLOR_BUFFER_BIT, GL_NEAREST);
-    if (scissor) glEnable(GL_SCISSOR_TEST);
-    window_fb.bind(0x8CA9, draw);
-    backbuffer_read_end();
-    stats.readbacks++;
+    backbuffer_blit_to_texture(slot[i].tex, w, h);
     TRACE_ALL("D3D: back buffer copied for a view at %#x, %ux%u (slot %u)", data, w, h, i);
     return slot[i].tex;
+}
+
+/* ---- the front buffer and the persisted frame ----
+
+   GetBackBuffer(-1) is the frame on screen.  The host draws into one
+   frame, so the front buffer gets memory of its own, and once a title has
+   asked for it each Swap copies the frame it shows into a texture: a view
+   of it samples that, a lock or a copy reads it into the memory.  Splinter
+   Cell cross-fades from it; handing out the back buffer instead faded from
+   whatever was drawn since (white at boot, the new frame into gameplay). */
+
+static void front_buffer_update(void)
+{
+    if (!front.used || !front.s || !window_fb.fbo || !window_fb.blit) return;
+    ULONG w = d3d.width, h = d3d.height;
+    if (!front.tex) {
+        glGenTextures(1, &front.tex);
+        glBindTexture(GL_TEXTURE_2D, front.tex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_BGRA, GL_UNSIGNED_BYTE, NULL);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+    }
+    backbuffer_blit_to_texture(front.tex, w, h);
+    front.memory_stale = true;
+}
+
+/* The CPU wrote the front buffer (TrueTypeFont's XFONT text): the hardware
+   shows that on the frame on screen.  Here the frame on screen is already
+   out, so put the pixels the CPU changed over the one being presented. */
+static void front_buffer_overlay(void)
+{
+    if (!front.written) return;
+    front.written = false;
+    ULONG fmt = (front.s->Format >> 8) & 0xFF, w, h, pitch;
+    if (fmt != 0x12 && fmt != 0x1E) return;
+    container_size((D3DPixelContainer *)front.s, &w, &h, &pitch);
+    if (w > (ULONG)d3d.width) w = d3d.width;
+    if (h > (ULONG)d3d.height) h = d3d.height;
+    const uint32_t *now = (const uint32_t *)(front.s->Data | CONTIG_BASE), *was = (const uint32_t *)front.snap;
+    uint32_t *px = calloc((size_t)d3d.width * d3d.height, 4);
+    if (!px) return;
+    unsigned changed = 0;
+    for (ULONG y = 0; y < h; y++)
+        for (ULONG x = 0; x < w; x++) {
+            uint32_t v = now[y * pitch / 4 + x];
+            if (v != was[y * pitch / 4 + x]) px[(h - 1 - y) * d3d.width + x] = v | 0xFF000000u, changed++;
+        }
+    if (changed) draw_window_pixels_masked((const uint8_t *)px, GL_BGRA, GL_UNSIGNED_BYTE, true);
+    TRACE_ALL("D3D: %u front buffer pixels written by the CPU put over the frame", changed);
+    free(px);
+}
+
+/* Bring the front buffer's memory up to date for the CPU or a copy. */
+static void front_buffer_memory(void)
+{
+    if (!front.memory_stale || !front.tex) return;
+    front.memory_stale = false;
+    ULONG w, h, pitch;
+    container_size((D3DPixelContainer *)front.s, &w, &h, &pitch);
+    if (w > (ULONG)d3d.width) w = d3d.width;
+    if (h > (ULONG)d3d.height) h = d3d.height;
+    GLenum format, type;
+    unsigned bytes;
+    if (!surface_color_transfer((front.s->Format >> 8) & 0xFF, &format, &type, &bytes)) return;
+    uint8_t *tmp = malloc((size_t)d3d.width * d3d.height * bytes);
+    if (!tmp) return;
+    glBindTexture(GL_TEXTURE_2D, front.tex);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glGetTexImage(GL_TEXTURE_2D, 0, format, type, tmp);
+    uint8_t *px = (uint8_t *)(front.s->Data | CONTIG_BASE);
+    for (ULONG y = 0; y < h; y++) memcpy(px + y * pitch, tmp + (size_t)y * d3d.width * bytes, w * bytes);
+    free(tmp);
+    tex_invalidate(front.s->Data);
+}
+
+/* PersistDisplay's frame for the next title, which is its own process:
+   <hdd>/.persisted holds its size and BGRA rows, top first.  The library
+   frees the persisted frame at the first Present, after which
+   GetPersistedSurface returns NULL. */
+static struct { D3DSurface *s; bool loaded, presented; } persisted;
+
+static D3DSurface *new_linear_surface(ULONG fmt, ULONG w, ULONG h);
+static void persisted_path(char *path, size_t n) { snprintf(path, n, "%s/.persisted", fs_hdd_root()); }
+
+static void persisted_save(void)
+{
+    ULONG w = d3d.width, h = d3d.height;
+    uint8_t *px = malloc((size_t)w * h * 4);
+    if (!px) return;
+    backbuffer_read_begin(GL_COLOR_BUFFER_BIT);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(0, 0, w, h, GL_BGRA, GL_UNSIGNED_BYTE, px);
+    backbuffer_read_end();
+    char path[600];
+    persisted_path(path, sizeof path);
+    FILE *f = fopen(path, "wb");
+    if (f) {
+        uint32_t hdr[2] = { w, h };
+        fwrite(hdr, sizeof hdr, 1, f);
+        for (ULONG y = h; y-- > 0;) fwrite(px + (size_t)y * w * 4, w * 4, 1, f);
+        fclose(f);
+    }
+    free(px);
+}
+
+static void persisted_load(void)
+{
+    persisted.loaded = true;
+    char path[600];
+    persisted_path(path, sizeof path);
+    struct stat st;
+    /* Left by a title that ran a while ago (a crash, a hand-run title): not ours. */
+    if (stat(path, &st) || time(NULL) - st.st_mtime > 120) return;
+    FILE *f = fopen(path, "rb");
+    uint32_t hdr[2];
+    if (!f || fread(hdr, sizeof hdr, 1, f) != 1 || !hdr[0] || !hdr[1] || hdr[0] > 4096 || hdr[1] > 4096) {
+        if (f) fclose(f);
+        return;
+    }
+    persisted.s = new_linear_surface(0x1E /* LIN_X8R8G8B8 */, hdr[0], hdr[1]);
+    if (persisted.s) {
+        ULONG w, h, pitch;
+        container_size((D3DPixelContainer *)persisted.s, &w, &h, &pitch);
+        uint8_t *px = (uint8_t *)(persisted.s->Data | CONTIG_BASE);
+        for (ULONG y = 0; y < hdr[1]; y++)
+            if (fread(px + y * pitch, hdr[0] * 4, 1, f) != 1) break;
+        xlog("D3D: the last title's persisted %ux%u frame is the persisted surface", hdr[0], hdr[1]);
+    }
+    fclose(f);
+}
+
+static void persisted_first_present(void)
+{
+    if (persisted.presented) return;
+    persisted.presented = true;
+    if (!persisted.loaded) {
+        persisted.loaded = true;
+        char path[600];
+        persisted_path(path, sizeof path);
+        unlink(path);
+    }
 }
 
 static const char present_vs[] =
@@ -6726,6 +6919,7 @@ static void create_device_surfaces(ULONG format, ULONG depth_format)
 {
     d3d.backbuffer = new_linear_surface(format, d3d.width, d3d.height);
     d3d.depth = new_linear_surface(depth_format ? depth_format : 0x2A, d3d.width, d3d.height);
+    if (!front.s) front.s = new_linear_surface(format, d3d.width, d3d.height);
     d3d.zscale = depth_format == 0x2C || depth_format == 0x2D || depth_format == 0x30 || depth_format == 0x31
                      ? 65535.0f : 16777215.0f;
     zsync.hash = depth_memory_hash();
@@ -6744,9 +6938,13 @@ static void create_device_surfaces(ULONG format, ULONG depth_format)
 
 static void NTAPI D3DDevice_GetBackBuffer(LONG BackBuffer, ULONG Type, D3DSurface **pp)
 {
-    (void)BackBuffer; (void)Type;
-    d3d.backbuffer->Common++;
-    *pp = d3d.backbuffer;
+    (void)Type;
+    TRACE_ALL("D3D: GetBackBuffer(%d)", (int)BackBuffer);
+    /* -1 is the frame on screen (see front_buffer_update). */
+    D3DSurface *s = BackBuffer == -1 && front.s && window_fb.fbo ? front.s : d3d.backbuffer;
+    if (s == front.s) front.used = true;
+    s->Common++;
+    *pp = s;
 }
 
 static LONG NTAPI D3DDevice_GetDepthStencilSurface(D3DSurface **pp)
@@ -7131,7 +7329,14 @@ static void NTAPI D3DSurface_LockRect(D3DSurface *s, ULONG *locked, const LONG *
         free(tmp);
         backbuffer_synced();
     }
-    if (s != d3d.backbuffer) readback_rt_surface(s);
+    if (s == front.s) {
+        front_buffer_memory();
+        if (!(flags & 0x80) && !front.written) {
+            ULONG bytes = pitch * h;
+            uint8_t *snap = realloc(front.snap, bytes);
+            if (snap) { memcpy(snap, (const void *)(s->Data | CONTIG_BASE), bytes); front.snap = snap; front.written = true; }
+        }
+    } else if (s != d3d.backbuffer) readback_rt_surface(s);
     if (s == d3d.backbuffer && !(flags & 0x80 /* D3DLOCK_READONLY */)) d3d.bb_cpu_dirty = true;
     if (s->Parent && !(flags & 0x80)) tex_invalidate(s->Parent->res.Data);
     ULONG fmt = (s->Format >> 8) & 0xFF;
@@ -7247,6 +7452,8 @@ static void NTAPI D3DDevice_CopyRects(D3DSurface *src, const LONG *rects, UINT_ 
     if (src == d3d.backbuffer) {
         ULONG locked[2];
         D3DSurface_LockRect(src, locked, NULL, 0x80);   /* refresh its pixels */
+    } else if (src == front.s) {
+        front_buffer_memory();
     } else {
         readback_rt_surface(src);
     }
@@ -9178,6 +9385,7 @@ static LONG NTAPI D3DDevice_PersistDisplay(void)
     pusher_drain();
     if (!d3d.window) return D3DERR_INVALIDCALL;
     flush_cpu_backbuffer();
+    persisted_save();
     int w = window_fb.fbo ? window_fb.w : (int)d3d.width, h = window_fb.fbo ? window_fb.h : (int)d3d.height;
     uint8_t *px = malloc((size_t)w * h * 4), *flipped = malloc((size_t)w * h * 4);
     if (!px || !flipped) { free(px); free(flipped); return D3DERR_INVALIDCALL; }
@@ -9204,12 +9412,14 @@ static LONG NTAPI D3DDevice_PersistDisplay(void)
     return D3D_OK;
 }
 
-/* Nothing survives a reboot here; hand out the back buffer so the title has a surface to read. */
+/* The last title's PersistDisplay frame until the first Present, else NULL
+   (the library's own answer; it doesn't count references either). */
 static LONG NTAPI D3DDevice_GetPersistedSurface(D3DSurface **pp)
 {
-    *pp = d3d.backbuffer;
-    if (d3d.backbuffer) d3d.backbuffer->Common++;
-    return d3d.backbuffer ? D3D_OK : D3DERR_INVALIDCALL;
+    if (!persisted.loaded && !persisted.presented) persisted_load();
+    *pp = persisted.presented ? NULL : persisted.s;
+    TRACE_ALL("D3D: GetPersistedSurface: %s", *pp ? "the last title's frame" : "none");
+    return *pp ? D3D_OK : D3DERR_INVALIDCALL;
 }
 
 static void NTAPI D3DDevice_SetBackMaterial(const float *m)
