@@ -1964,6 +1964,76 @@ int main(int argc, char **argv)
             memcpy(texture_states,saved_tss,sizeof saved_tss);
             puts("renderer passes: target switch resets viewport/scissors, viewport-clipped clear, "
                  "4096 visibility reports, adjusted shadow-buffer compare passed");
+
+            /* Rewritten geometry is drawn on the next draw, not up to 16
+             * frames later.  Both edits miss every position the cache
+             * samples: an index list of 3000 (rebuilt in place with the
+             * same count, as a per-view batch is) and a locked vertex
+             * buffer whose only visible triangle changes color. */
+            void (NTAPI *set_stream)(ULONG,void *,ULONG) = find("_D3DDevice_SetStreamSource@12");
+            void (NTAPI *draw_indexed)(ULONG,ULONG,const uint16_t *) =
+                find("_D3DDevice_DrawIndexedVertices@12");
+            void (NTAPI *draw_vb)(ULONG,ULONG,ULONG) = find("_D3DDevice_DrawVertices@12");
+            void (NTAPI *set_indices)(void *,ULONG) = find("_D3DDevice_SetIndices@8");
+            LONG (NTAPI *create_vshader)(const ULONG *,const ULONG *,ULONG *,ULONG) =
+                find("_D3DDevice_CreateVertexShader@16");
+            void (NTAPI *delete_vshader)(ULONG) = find("_D3DDevice_DeleteVertexShader@4");
+            /* The caches sit on the vertex program path: MOV oPos, v0;
+               MOV oD0, v3 over (float4 position, D3DCOLOR) from stream 0. */
+            const ULONG copy_decl[] = {0x20000000,0x40420000,0x40400003,0xffffffff};
+            const ULONG copy_code[] = {0x00022078,
+                0,0x0020001b,0x08000000,0x0000f800,
+                0,0x0020061b,0x08000000,0x0000f819};
+            ULONG copy_vs = 0;
+            assert(create_vshader(copy_decl,copy_code,&copy_vs,0) == 0 && copy_vs);
+            set_tex(0,NULL); set_ps(0); set_vs(copy_vs);
+            texture_states[14] = texture_states[18] = 0;
+            render_states[124] = 0;
+            void *halves_vb = create_vb(6 * sizeof(struct vertex));
+            struct vertex *halves = NULL;
+            lock_vb(halves_vb,0,0,(void **)&halves,0);
+            const struct vertex left_tri[3] = {{0,0,0.5f,1,0xffff0000},{32,0,0.5f,1,0xffff0000},{0,64,0.5f,1,0xffff0000}};
+            const struct vertex right_tri[3] = {{64,0,0.5f,1,0xff00ff00},{64,64,0.5f,1,0xff00ff00},{32,64,0.5f,1,0xff00ff00}};
+            memcpy(halves,left_tri,sizeof left_tri);
+            memcpy(halves + 3,right_tri,sizeof right_tri);
+            set_stream(0,halves_vb,sizeof(struct vertex));
+            set_indices(NULL,0);
+            static uint16_t batch[3000];   /* degenerate triangles but one */
+            unsigned char lpix[4], rpix[4];
+            for (unsigned frame = 0; frame < 2; frame++) {
+                memset(batch,0,sizeof batch);
+                for (unsigned k = 0; k < 3; k++) batch[51 + k] = frame ? 3 + k : k;
+                clear(0,NULL,0xf0,0xff000000,1.0f,0);
+                draw_indexed(5,3000,batch);
+                glReadPixels(4,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,lpix);
+                glReadPixels(60,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,rpix);
+                if (frame) assert(lpix[0] < 8 && rpix[1] > 240);
+                else assert(lpix[0] > 240 && rpix[1] < 8);
+            }
+            void *long_vb = create_vb(249 * sizeof(struct vertex));
+            struct vertex *verts = NULL;
+            lock_vb(long_vb,0,0,(void **)&verts,0);
+            memset(verts,0,249 * sizeof(struct vertex));
+            memcpy(verts + 3,left_tri,sizeof left_tri);
+            set_stream(0,long_vb,sizeof(struct vertex));
+            for (unsigned frame = 0; frame < 2; frame++) {
+                if (frame) {
+                    lock_vb(long_vb,0,0,(void **)&verts,0);
+                    for (unsigned k = 3; k < 6; k++) verts[k].color = 0xff0000ff;
+                }
+                clear(0,NULL,0xf0,0xff000000,1.0f,0);
+                draw_vb(5,0,249);
+                glReadPixels(4,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,lpix);
+                if (frame) assert(lpix[0] < 8 && lpix[2] > 240);
+                else assert(lpix[0] > 240 && lpix[2] < 8);
+            }
+            set_stream(0,NULL,0);
+            render_states[124] = saved_zenable;
+            set_tex(0,tex);
+            set_vs(0x144);
+            delete_vshader(copy_vs);
+            memcpy(texture_states,saved_tss,sizeof saved_tss);
+            puts("renderer caches: in-place index rebuild and locked vertex rewrite drawn at once passed");
         }
         /* The outstanding 65th callback executes inside Swap; device creation
          * resets scale, so restore the values its reentrant check expects. */
