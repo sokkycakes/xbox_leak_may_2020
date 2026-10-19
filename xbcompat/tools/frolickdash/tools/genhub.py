@@ -73,7 +73,8 @@ CAROUSEL_EYE = (0.0, 0.1072, 0.6407)
 CAROUSEL_LOOK = (0.0, 0.4043, -1.0)
 BELT_CENTRE = (-0.084, 1.581, 0.894)           # the belt ring's axis, at the regular covers' height
 BELT_INSET = 0.97
-BELT_GAMES = 9                                 # placeholder count: carousel.go's carouselGames
+CAROUSEL_GAMES = ["Game Title", "Stiletto Swift", "Game Title 3", "Game Title 4", "Game Title 5",
+                  "Game Title 6", "Game Title 7", "Game Title 8", "Game Title 9"]  # carousel.go carouselGames
 FOOTER_H, FOOTER_COLOR, FOOTER_ALPHA = 50, (0.68, 0.665493, 0.5712), 0.592157
 FOOTER_STOPS = [(0.0, 0.0), (0.387409, 0.647059), (0.939467, 1.0)]
 WORDMARK_COLOR = (0.79, 0.773147, 0.6636)      # LabelSettings_1bvp3, 37 px
@@ -464,11 +465,14 @@ DEF theHub Level
         DEF theBelt Belt
         {
             url "belt.bin"
+            card "pads/carousel_card.xui"
+            focus "pads/carousel_focus.xui"
+            skin "pads/frolick_skin.xui"
             centre %(belt_centre)s
             radius %(belt_radius).5f
             fadeDuration %(zoom_duration)s
             count %(belt_count)d
-            function OnStep() { }
+            function OnStep() { theBelt.SetTitle(GameName(theBelt.GetSelected())); }
         }
 
         DEF xfSettings Transform
@@ -589,6 +593,7 @@ function OpenLibrary()
     bLibraryOpen = true;
     SetPadAlpha(1, 0);
     theZoomer.GoTo(vpCarousel);
+    theBelt.SetTitle(GameName(theBelt.GetSelected()));
     theBelt.Open();
 }
 
@@ -600,6 +605,8 @@ function CloseLibrary()
     theZoomer.GoTo(vpLibrary);
     theBelt.Close();
 }
+
+%(game_names)s
 
 
 // A on the catalog or settings panel: the panel fades out and the camera
@@ -705,7 +712,14 @@ def main():
     vals["zoom_duration"] = ZOOM_DURATION
     vals["belt_centre"] = v3(BELT_CENTRE)
     vals["belt_radius"] = 0.5 * RAIL_SCALE[0] * BELT_INSET
-    vals["belt_count"] = BELT_GAMES
+    vals["belt_count"] = len(CAROUSEL_GAMES)
+    names = ["// carousel.go carouselGames, until a real game list exists", "function GameName(i)", "{"]
+    for i, g in enumerate(CAROUSEL_GAMES):
+        names.append("    if (i == %d)" % i)
+        names.append("        return \"%s\";" % g.replace('"', ''))
+    names.append("    return \"\";")
+    names.append("}")
+    vals["game_names"] = "\n".join(names)
     open(os.path.join(out, "default.xap"), "w").write(HUB % vals)
     open(os.path.join(pads, "overlay.xui"), "w").write(overlay_scene())
     catalog = open(os.path.join(pads, "catalog.xui")).read()

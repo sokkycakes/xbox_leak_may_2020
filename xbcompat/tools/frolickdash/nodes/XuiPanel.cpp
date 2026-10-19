@@ -20,6 +20,7 @@
 #include "xapp.h"
 #include "node.h"
 #include "runner.h"
+#include "Camera.h"
 #include "../xui/xui.h"
 
 extern float g_nEffectAlpha;
@@ -128,13 +129,34 @@ public:
     bool m_basis, m_flip;
     D3DXVECTOR3 m_o, m_ax, m_ay;
     float m_cw, m_ch;
+    // or, with m_gridMode, the canvas rectangle (m_gx0, m_gy0, scaled by
+    // m_gxs across and m_gys down to 0..1) draped over a 7x6 grid of world
+    // points, row 0 at the top (the Belt's cover meshes); points outside
+    // the rectangle extrapolate from the edge cells
+    bool m_gridMode;
+    D3DXVECTOR3 m_grid[6][7];
+    float m_gx0, m_gy0, m_gxs, m_gys;
     float m_alpha;
     bool m_clipping; float m_clip[4];
     xui::Vec<XUIVERTEX> m_verts;
     xui::Vec<unsigned short> m_idx;
 
     CXuiBackend() : m_sx(1), m_sy(1), m_ox(0), m_oy(0), m_basis(false), m_flip(false), m_cw(1), m_ch(1),
-        m_alpha(1), m_clipping(false) {}
+        m_gridMode(false), m_gx0(0), m_gy0(0), m_gxs(1), m_gys(1), m_alpha(1), m_clipping(false) {}
+
+    D3DXVECTOR3 GridPoint(float gx, float gy) const
+    {
+        float fx = gx * 6.0f, fy = gy * 5.0f;
+        int cx = (int)floor(fx), cy = (int)floor(fy);
+        if (cx < 0) cx = 0; if (cx > 5) cx = 5;
+        if (cy < 0) cy = 0; if (cy > 4) cy = 4;
+        float tx = fx - cx, ty = fy - cy;
+        const D3DXVECTOR3& a = m_grid[cy][cx];
+        const D3DXVECTOR3& b = m_grid[cy][cx + 1];
+        const D3DXVECTOR3& c = m_grid[cy + 1][cx];
+        const D3DXVECTOR3& d = m_grid[cy + 1][cx + 1];
+        return a + (b - a) * tx + (c - a) * ty + (a - b - c + d) * (tx * ty);
+    }
 
     ~CXuiBackend()
     {
@@ -207,7 +229,12 @@ public:
     void emit(const xui::Vertex& v)
     {
         XUIVERTEX o;
-        if (m_basis)
+        if (m_gridMode)
+        {
+            D3DXVECTOR3 w = GridPoint((v.x - m_gx0) * m_gxs, (v.y - m_gy0) * m_gys);
+            o.x = w.x; o.y = w.y; o.z = w.z;
+        }
+        else if (m_basis)
         {
             float fx = v.x / m_cw, fy = v.y / m_ch;
             if (m_flip) fx = 1.0f - fx;
@@ -692,20 +719,24 @@ void CXuiPanel::Reload()
 // slots, so the selection moves and each slot takes the next game.  Covers
 // draw in shape-list order (all gsb* share drawOrder 280), depth tested.
 //
-// Covers carry no art yet: the meshes draw flat until GameTap's cover
-// materials arrive.  The screen-space extras of the real belt (focus frame,
-// arrows, counter, title) are not part of the scene data and are not drawn.
+// Each cover wears Frolick's tile art: the carousel_card.xui scene draped
+// over the cover mesh (a 7x6 vertex grid; the card keeps its own aspect,
+// matched to the cover's width and centred on it), and the focused cover
+// the carousel_focus.xui overlay (its card rectangle on the cover, the
+// arrows, A pill, title and back hint riding with it).  GameTap's cover
+// materials are not used.
 //
 //   DEF theBelt Belt
 //   {
-//       url "belt.bin"
+//       url "belt.bin"  card "pads/carousel_card.xui"  focus "pads/carousel_focus.xui"
+//       skin "pads/frolick_skin.xui"  font "font.ttf"
 //       centre x y z  radius r      the ring the belt lines: its axis at
 //                                   the regular covers' height, and their
 //                                   radius; the focused cover faces +z
 //       count 9                     games on the belt
 //       function OnStep() { ... }   a step finished; GetSelected() tells which
 //   }
-//   theBelt.Open();  theBelt.Close();  theBelt.Step(1);
+//   theBelt.Open();  theBelt.Close();  theBelt.Step(1);  theBelt.SetTitle("...");
 
 struct BELTHDR { char magic[4]; int nNodes, nFrames, nVerts, nIdx; };
 struct BELTVERTEX { float x, y, z, nx, ny, nz, u, v; };
@@ -718,6 +749,10 @@ public:
     ~CBelt();
 
     TCHAR* m_url;
+    TCHAR* m_card;
+    TCHAR* m_focus;
+    TCHAR* m_skin;
+    TCHAR* m_font;
     D3DXVECTOR3 m_centre;   // the belt ring's axis, at the regular covers' height
     float m_radius;         // the regular covers' ring radius in the world
     float m_stepDuration;   // 20 frames at 30 fps, speed 2.5
@@ -733,13 +768,17 @@ public:
     void Step(int nDir);
     int GetSelected();
     int IsBusy();
+    void SetTitle(const TCHAR* szText);
 
     DECLARE_NODE_PROPS()
     DECLARE_NODE_FUNCTIONS()
 
 protected:
+    void Load();
     bool LoadData();
     void Pose(int node, float frame, D3DXMATRIX* pm);
+    void CoverGrid(int node, float frame, D3DXVECTOR3 grid[6][7]);
+    void DrawScene(xui::Scene* pScene, float alpha, float rx, float ry, float rw, float rh);
 
     BELTHDR m_hdr;
     float m_circleX, m_circleZ, m_circleR, m_coverY;
@@ -747,6 +786,16 @@ protected:
     unsigned short* m_indices;  // nNodes * nIdx
     float* m_poses;             // nNodes * nFrames * 16
     bool m_bDirty;
+
+    CXuiResources m_res;
+    CXuiBackend m_be;
+    xui::Renderer* m_pRenderer;
+    xui::Element* m_pCardRoot;
+    xui::Element* m_pFocusRoot;
+    xui::Element* m_pSkinRoot;
+    xui::Scene* m_pCard;
+    xui::Scene* m_pFocus;
+    bool m_bFontLoaded;
 
     int m_selected;
     bool m_open;
@@ -761,6 +810,10 @@ IMPLEMENT_NODE("Belt", CBelt, CNode)
 
 START_NODE_PROPS(CBelt, CNode)
     NODE_PROP(pt_string, CBelt, url)
+    NODE_PROP(pt_string, CBelt, card)
+    NODE_PROP(pt_string, CBelt, focus)
+    NODE_PROP(pt_string, CBelt, skin)
+    NODE_PROP(pt_string, CBelt, font)
     NODE_PROP(pt_vec3, CBelt, centre)
     NODE_PROP(pt_number, CBelt, radius)
     NODE_PROP(pt_number, CBelt, stepDuration)
@@ -774,13 +827,17 @@ START_NODE_FUN(CBelt, CNode)
     NODE_FUN_VI(Step)
     NODE_FUN_IV(GetSelected)
     NODE_FUN_IV(IsBusy)
+    NODE_FUN_VS(SetTitle)
 END_NODE_FUN()
 
 CBelt::CBelt() :
-    m_url(NULL), m_centre(0.0f, 0.0f, 0.0f), m_radius(1.0f),
+    m_url(NULL), m_card(NULL), m_focus(NULL), m_skin(NULL), m_font(NULL),
+    m_centre(0.0f, 0.0f, 0.0f), m_radius(1.0f),
     m_stepDuration(20.0f / 30.0f / 2.5f), m_fadeDuration(0.75f), m_count(0),
     m_circleX(0.0f), m_circleZ(0.0f), m_circleR(1.0f), m_coverY(0.0f),
     m_verts(NULL), m_indices(NULL), m_poses(NULL), m_bDirty(true),
+    m_pRenderer(NULL), m_pCardRoot(NULL), m_pFocusRoot(NULL), m_pSkinRoot(NULL), m_pCard(NULL), m_pFocus(NULL),
+    m_bFontLoaded(false),
     m_selected(0), m_open(false), m_fadeDir(0), m_fade(0.0f), m_stepDir(0), m_stepStart(0.0), m_bStepDone(false)
 {
     ZeroMemory(&m_hdr, sizeof m_hdr);
@@ -788,10 +845,20 @@ CBelt::CBelt() :
 
 CBelt::~CBelt()
 {
+    delete m_pCard;
+    delete m_pFocus;
+    delete m_pCardRoot;
+    delete m_pFocusRoot;
+    delete m_pSkinRoot;
+    delete m_pRenderer;
     delete [] m_verts;
     delete [] m_indices;
     delete [] m_poses;
     delete [] m_url;
+    delete [] m_card;
+    delete [] m_focus;
+    delete [] m_skin;
+    delete [] m_font;
 }
 
 bool CBelt::OnSetProperty(const PRD* pprd, const void* pvValue)
@@ -803,7 +870,6 @@ bool CBelt::OnSetProperty(const PRD* pprd, const void* pvValue)
 
 bool CBelt::LoadData()
 {
-    m_bDirty = false;
     delete [] m_verts; m_verts = NULL;
     delete [] m_indices; m_indices = NULL;
     delete [] m_poses; m_poses = NULL;
@@ -848,6 +914,52 @@ bool CBelt::LoadData()
     return true;
 }
 
+void CBelt::Load()
+{
+    m_bDirty = false;
+    delete m_pCard; m_pCard = NULL;
+    delete m_pFocus; m_pFocus = NULL;
+    delete m_pCardRoot; m_pCardRoot = NULL;
+    delete m_pFocusRoot; m_pFocusRoot = NULL;
+    delete m_pSkinRoot; m_pSkinRoot = NULL;
+    if (m_pRenderer == NULL)
+        m_pRenderer = new xui::Renderer(&m_be, &m_res);
+    if (!LoadData())
+        return;
+
+    char sz[MAX_PATH], err[256];
+    if (m_card != NULL)
+    {
+        ToAnsi(sz, m_card, MAX_PATH);
+        m_res.SetBaseFrom(sz);
+        m_pCardRoot = m_res.scene(sz, err, sizeof err);
+        if (m_pCardRoot == NULL)
+            TRACE(_T("Belt: %s: %S\n"), m_card, err);
+    }
+    if (m_focus != NULL)
+    {
+        ToAnsi(sz, m_focus, MAX_PATH);
+        m_pFocusRoot = m_res.scene(sz, err, sizeof err);
+        if (m_pFocusRoot == NULL)
+            TRACE(_T("Belt: %s: %S\n"), m_focus, err);
+    }
+    if (m_skin != NULL && m_skin[0])
+    {
+        ToAnsi(sz, m_skin, MAX_PATH);
+        m_pSkinRoot = m_res.scene(sz, err, sizeof err);
+    }
+    if (!m_bFontLoaded)
+    {
+        ToAnsi(sz, m_font != NULL && m_font[0] ? m_font : _T("font.ttf"), MAX_PATH);
+        m_pRenderer->setFont(sz);
+        m_bFontLoaded = true;
+    }
+    if (m_pCardRoot != NULL)
+        m_pCard = new xui::Scene(m_pCardRoot, m_pSkinRoot);
+    if (m_pFocusRoot != NULL)
+        m_pFocus = new xui::Scene(m_pFocusRoot, m_pSkinRoot);
+}
+
 // scroll_belt_right / scroll_belt_left for one step: nothing while the lock
 // holds.  nDir +1 selects the next game (Belt_Left: covers slide toward the
 // focus from the right), -1 the previous one (Belt_Right).  GameTap's
@@ -866,7 +978,7 @@ void CBelt::Step(int nDir)
 void CBelt::Open()
 {
     if (m_bDirty)
-        LoadData();
+        Load();
     m_open = true;
     m_fadeDir = 1;
 }
@@ -882,10 +994,21 @@ void CBelt::Close()
 int CBelt::GetSelected() { return m_selected; }
 int CBelt::IsBusy() { return m_fadeDir != 0 || m_stepDir != 0; }
 
+void CBelt::SetTitle(const TCHAR* szText)
+{
+    if (m_bDirty)
+        Load();
+    if (m_pFocus == NULL)
+        return;
+    xui::Node* n = m_pFocus->find("title");
+    if (n != NULL)
+        SetString(n, "Text", szText);
+}
+
 void CBelt::Advance(float nSeconds)
 {
     if (m_bDirty)
-        LoadData();
+        Load();
     if (m_fadeDir != 0)
     {
         m_fade += m_fadeDir * nSeconds / (m_fadeDuration > 0.0f ? m_fadeDuration : 0.001f);
@@ -898,6 +1021,8 @@ void CBelt::Advance(float nSeconds)
         m_stepDir = 0;
         m_bStepDone = true;
     }
+    if (m_pFocus != NULL && m_open)
+        m_pFocus->update(nSeconds);
     if (m_bStepDone)
     {
         m_bStepDone = false;
@@ -922,11 +1047,50 @@ void CBelt::Pose(int node, float frame, D3DXMATRIX* pm)
         o[k] = a[k] + (b[k] - a[k]) * t;
 }
 
+// The cover's 7x6 vertex grid in Frolick's world, row 0 at the top (the
+// mesh lists vertex col*6+row with row 0 at the bottom).  GameTap's world
+// into Frolick's: the regular covers' circle onto the ring, -x to -z, y up,
+// -z to +x.
+void CBelt::CoverGrid(int node, float frame, D3DXVECTOR3 grid[6][7])
+{
+    D3DXMATRIX m;
+    Pose(node, frame, &m);
+    float scale = m_radius / m_circleR;
+    const BELTVERTEX* v = m_verts + node * m_hdr.nVerts;
+    for (int col = 0; col < 7; col++)
+        for (int row = 0; row < 6; row++)
+        {
+            const BELTVERTEX& l = v[col * 6 + row];
+            D3DXVECTOR3 p(l.x, l.y, l.z), q;
+            D3DXVec3TransformCoord(&q, &p, &m);
+            grid[5 - row][col] = D3DXVECTOR3(
+                m_centre.x - (q.z - m_circleZ) * scale,
+                m_centre.y + (q.y - m_coverY) * scale,
+                m_centre.z + (q.x - m_circleX) * scale);
+        }
+}
+
+// The scene's rectangle (rx, ry, rw by rh) lands on the cover in m_be.m_grid:
+// as wide as the cover, keeping its own aspect, centred on the cover's
+// height.  The rest of the canvas rides along (the title under the focus).
+void CBelt::DrawScene(xui::Scene* pScene, float alpha, float rx, float ry, float rw, float rh)
+{
+    D3DXVECTOR3 w = m_be.m_grid[3][6] - m_be.m_grid[3][0], h = m_be.m_grid[5][3] - m_be.m_grid[0][3];
+    float coverH = rw * D3DXVec3Length(&h) / D3DXVec3Length(&w);   // the cover's height in canvas units
+    m_be.m_gridMode = true;
+    m_be.m_gx0 = rx; m_be.m_gy0 = ry - 0.5f * (coverH - rh);
+    m_be.m_gxs = 1.0f / rw;
+    m_be.m_gys = 1.0f / coverH;
+    m_be.m_alpha = alpha;
+    m_pRenderer->draw(pScene, 0, 0, 1);
+    m_be.m_gridMode = false;
+}
+
 void CBelt::Render()
 {
     if (m_bDirty)
-        LoadData();
-    if (!m_open || m_verts == NULL || !m_visible)
+        Load();
+    if (!m_open || m_verts == NULL || m_pCard == NULL || !m_visible)
         return;
     float alpha = m_fade * g_nEffectAlpha;
     if (alpha <= 0.01f)
@@ -943,60 +1107,78 @@ void CBelt::Render()
     int last = m_hdr.nFrames - 1;
     float frame = m_stepDir < 0 ? u * last : m_stepDir > 0 ? (1.0f - u) * last : 0.0f;
     int base = m_selected + (m_stepDir > 0 ? 1 : 0) - 6;  // game on cover 0
+    int leaving = m_stepDir < 0 ? 6 : 5, arriving = m_stepDir < 0 ? 5 : 6;
+
+    // back to front: the art is blended, so the farthest cover first
+    D3DXVECTOR3 eye = theCamera.m_position;
+    eye.z = -eye.z;
+    int order[32];
+    float depth[32];
+    int n = m_hdr.nNodes < 32 ? m_hdr.nNodes : 32;
+    int i, j;
+    D3DXVECTOR3 grid[6][7];
+    for (i = 0; i < n; i++)
+    {
+        CoverGrid(i, frame, grid);
+        D3DXVECTOR3 c = grid[3][3] - eye;
+        depth[i] = D3DXVec3Length(&c);
+        order[i] = i;
+    }
+    for (i = 1; i < n; i++)
+        for (j = i; j > 0 && depth[order[j]] > depth[order[j - 1]]; j--)
+        {
+            int t = order[j]; order[j] = order[j - 1]; order[j - 1] = t;
+        }
 
     DWORD dwLighting;
     XAppGetRenderState(D3DRS_LIGHTING, &dwLighting);
     XAppSetRenderState(D3DRS_LIGHTING, FALSE);
     XAppSetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
     XAppSetRenderState(D3DRS_ZENABLE, D3DZB_TRUE);
-    XAppSetRenderState(D3DRS_ZWRITEENABLE, alpha >= 0.99f);
+    XAppSetRenderState(D3DRS_ZWRITEENABLE, FALSE);
     XAppSetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
     XAppSetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
-    XAppSetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA);
-    XAppSetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
-    XAppSetTexture(0, NULL);
-    XAppSetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG2);
-    XAppSetTextureStageState(0, D3DTSS_COLORARG2, D3DTA_DIFFUSE);
-    XAppSetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG2);
-    XAppSetTextureStageState(0, D3DTSS_ALPHAARG2, D3DTA_DIFFUSE);
+    XAppSetRenderState(D3DRS_EDGEANTIALIAS, FALSE);
+    XAppSetTextureStageState(0, D3DTSS_TEXCOORDINDEX, 0);
+    XAppSetTextureStageState(0, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_DISABLE);
+    XAppSetTextureStageState(0, D3DTSS_ADDRESSU, D3DTADDRESS_CLAMP);
+    XAppSetTextureStageState(0, D3DTSS_ADDRESSV, D3DTADDRESS_CLAMP);
+    XAppSetTextureStageState(0, D3DTSS_MINFILTER, D3DTEXF_LINEAR);
+    XAppSetTextureStageState(0, D3DTSS_MAGFILTER, D3DTEXF_LINEAR);
     XAppSetTextureStageState(1, D3DTSS_COLOROP, D3DTOP_DISABLE);
     XAppSetTextureStageState(1, D3DTSS_ALPHAOP, D3DTOP_DISABLE);
     XAppSetTexture(1, NULL);
     D3DXMATRIX identity;
     D3DXMatrixIdentity(&identity);
     XAppSetTransform(D3DTS_WORLD, &identity);
-    XAppSetVertexShader(XUIVERTEX_FVF);
 
-    // GameTap's world into Frolick's: the regular covers' circle onto the
-    // ring, -x to -z, y up, -z to +x
-    float scale = m_radius / m_circleR;
-    D3DCOLOR color = D3DCOLOR_COLORVALUE(0.7f, 0.7f, 0.7f, alpha);   // flat, until the cover materials arrive
-    XUIVERTEX out[64];
-    int nv = m_hdr.nVerts < 64 ? m_hdr.nVerts : 64;
-    for (int node = 0; node < m_hdr.nNodes; node++)
+    float cw = m_pCard->root->width(), ch = m_pCard->root->height();
+    for (i = 0; i < n; i++)
     {
+        int node = order[i];
         int game = base + node;
         if (game < 0 || game >= m_count)
             continue;
-        D3DXMATRIX m;
-        Pose(node, frame, &m);
-        const BELTVERTEX* v = m_verts + node * m_hdr.nVerts;
-        for (int i = 0; i < nv; i++)
-        {
-            D3DXVECTOR3 p(v[i].x, v[i].y, v[i].z), q;
-            D3DXVec3TransformCoord(&q, &p, &m);
-            out[i].x = m_centre.x - (q.z - m_circleZ) * scale;
-            out[i].y = m_centre.y + (q.y - m_coverY) * scale;
-            out[i].z = m_centre.z + (q.x - m_circleX) * scale;
-            out[i].color = color;
-            out[i].u = v[i].u;
-            out[i].v = v[i].v;
-        }
-        XAppGetD3DDev()->DrawIndexedVerticesUP(D3DPT_TRIANGLELIST, m_hdr.nIdx, m_indices + node * m_hdr.nIdx, out, sizeof (XUIVERTEX));
+        CoverGrid(node, frame, m_be.m_grid);
+        DrawScene(m_pCard, alpha, 0.0f, 0.0f, cw > 0 ? cw : 1.0f, ch > 0 ? ch : 1.0f);
+
+        // the focus overlay rides the cover in the focus slot: its card
+        // rectangle (192,40 640x440 of 1024x768) is the cover
+        float fa = 0.0f;
+        if (m_stepDir == 0) fa = node == 6 ? 1.0f : 0.0f;
+        else if (node == leaving) fa = 1.0f - 2.0f * u;
+        else if (node == arriving) fa = 2.0f * u - 1.0f;
+        if (m_pFocus != NULL && fa > 0.01f)
+            DrawScene(m_pFocus, alpha * fa, 192.0f, 40.0f, 640.0f, 440.0f);
     }
 
+    XAppSetTexture(0, NULL);
+    XAppSetTextureStageState(0, D3DTSS_ADDRESSU, D3DTADDRESS_WRAP);
+    XAppSetTextureStageState(0, D3DTSS_ADDRESSV, D3DTADDRESS_WRAP);
     XAppSetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_DISABLE);
     XAppSetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_DISABLE);
+    XAppSetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA);
+    XAppSetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
     XAppSetRenderState(D3DRS_CULLMODE, D3DCULL_CCW);
     XAppSetRenderState(D3DRS_ZWRITEENABLE, TRUE);
     XAppSetRenderState(D3DRS_LIGHTING, dwLighting);

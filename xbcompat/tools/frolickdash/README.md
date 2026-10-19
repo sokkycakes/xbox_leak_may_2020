@@ -68,11 +68,11 @@ the sampled clip only: left and right play Belt_Right / Belt_Left (20 frames
 at speed 2.5, 0.267 s, input dropped while a step plays, as the client's lock
 does); when a step ends the covers are back on their frame-1000 slots and
 each slot takes the next game.  A on the library panel flies the camera in
-(750 ms, the panel fades, the covers fade in); B flies back.  Not from the
-GameTap data, so not there yet: cover art and the cover materials (the
-meshes draw flat grey), the screen-space focus frame, arrows, counter and
-title, the step sounds, and what the list ends do (nine placeholder games,
-no wrap).
+(750 ms, the panel fades, the covers fade in); B flies back.  Each cover wears
+Frolick's tile art, `carousel_card.xui` draped over the cover mesh at the
+card's own aspect, and the focused cover the `carousel_focus.xui` overlay
+(arrows, A pill, title and back hint).  Not there yet: real cover art, the
+step sounds, and what the list ends do (nine placeholder games, no wrap).
 
 ## Build and run
 
@@ -87,7 +87,7 @@ pad; `XBCOMPAT_INPUT_SCRIPT="100:right 200:a"` presses buttons at frames.
 
 ## Not there yet
 
-The belt's cover art and extras (above), Frolick's pad textures
+The belt's game cover art, Frolick's pad textures
 (`_albedo003..005`, tiled 2x2 on the discs) and its `Circle.png`, and the
 woosh sound.  Frolick's `hero.png` and `cover.png` are
 missing on the PC too.
