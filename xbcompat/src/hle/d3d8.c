@@ -328,9 +328,10 @@ static void swap_cpu_backbuffer(void);
 static void front_buffer_update(void);
 static void front_buffer_memory(void);
 static void front_buffer_overlay(void);
-/* GetBackBuffer(-1): see front_buffer_update.  snap holds the memory as a
-   frame's first CPU write found it (see front_buffer_overlay). */
-static struct { struct D3DSurface *s; GLuint tex; volatile bool used; bool memory_stale, written; uint8_t *snap; } front;
+static void front_snap_take(void);
+/* GetBackBuffer(-1): see front_buffer_update.  snap holds its memory as
+   xbcompat last left it (see front_buffer_overlay). */
+static struct { struct D3DSurface *s; GLuint tex; volatile bool used; bool memory_stale; uint8_t *snap; } front;
 static void persisted_first_present(void);
 static void run_callbacks(void);
 static void pusher_drain(void);
@@ -6501,8 +6502,30 @@ static GLuint backbuffer_copy_texture(ULONG data, ULONG w, ULONG h)
    Cell cross-fades from it; handing out the back buffer instead faded from
    whatever was drawn since (white at boot, the new frame into gameplay). */
 
+/* Traced frames: the average colour of the frame going out, so a trace shows
+   which frame first turned a colour. */
+static void trace_presented_colour(void)
+{
+    if (g_trace != 1 || !d3d.backbuffer) return;
+    ULONG w = d3d.width, h = d3d.height;
+    uint8_t *px = malloc((size_t)w * h * 4);
+    if (!px) return;
+    backbuffer_read_begin(GL_COLOR_BUFFER_BIT);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(0, 0, w, h, GL_BGRA, GL_UNSIGNED_BYTE, px);
+    backbuffer_read_end();
+    unsigned long long sum[3] = { 0, 0, 0 };
+    for (size_t i = 0; i < (size_t)w * h; i++)
+        for (int c = 0; c < 3; c++) sum[c] += px[i * 4 + c];
+    size_t n = (size_t)w * h;
+    xlog("D3D: frame %lu goes out with average colour %02llx%02llx%02llx", (unsigned long)d3d.frame,
+         sum[2] / n, sum[1] / n, sum[0] / n);
+    free(px);
+}
+
 static void front_buffer_update(void)
 {
+    trace_presented_colour();
     if (!front.used || !front.s || !window_fb.fbo || !window_fb.blit) return;
     ULONG w = d3d.width, h = d3d.height;
     if (!front.tex) {
@@ -6515,16 +6538,28 @@ static void front_buffer_update(void)
     front.memory_stale = true;
 }
 
-/* The CPU wrote the front buffer (TrueTypeFont's XFONT text): the hardware
-   shows that on the frame on screen.  Here the frame on screen is already
-   out, so put the pixels the CPU changed over the one being presented. */
+/* front.snap: the front buffer's memory as xbcompat last left it. */
+static void front_snap_take(void)
+{
+    ULONG w, h, pitch;
+    container_size((D3DPixelContainer *)front.s, &w, &h, &pitch);
+    uint8_t *snap = realloc(front.snap, (size_t)pitch * h);
+    if (!snap) return;
+    memcpy(snap, (const void *)(front.s->Data | CONTIG_BASE), (size_t)pitch * h);
+    front.snap = snap;
+}
+
+/* The CPU wrote the front buffer, through a lock (TrueTypeFont's XFONT
+   text) or a texture header over its memory: the hardware shows that on the
+   frame on screen.  Here the frame on screen is already out, so put the
+   pixels the CPU changed over the one being presented. */
 static void front_buffer_overlay(void)
 {
-    if (!front.written) return;
-    front.written = false;
+    if (!front.s || !front.snap) return;
     ULONG fmt = (front.s->Format >> 8) & 0xFF, w, h, pitch;
-    if (fmt != 0x12 && fmt != 0x1E) return;
     container_size((D3DPixelContainer *)front.s, &w, &h, &pitch);
+    if (!memcmp(front.snap, (const void *)(front.s->Data | CONTIG_BASE), (size_t)pitch * h)) return;
+    if (fmt != 0x12 && fmt != 0x1E) { front_snap_take(); return; }
     if (w > (ULONG)d3d.width) w = d3d.width;
     if (h > (ULONG)d3d.height) h = d3d.height;
     const uint32_t *now = (const uint32_t *)(front.s->Data | CONTIG_BASE), *was = (const uint32_t *)front.snap;
@@ -6539,6 +6574,7 @@ static void front_buffer_overlay(void)
     if (changed) draw_window_pixels_masked((const uint8_t *)px, GL_BGRA, GL_UNSIGNED_BYTE, true);
     TRACE_ALL("D3D: %u front buffer pixels written by the CPU put over the frame", changed);
     free(px);
+    front_snap_take();
 }
 
 /* Bring the front buffer's memory up to date for the CPU or a copy. */
@@ -6562,6 +6598,7 @@ static void front_buffer_memory(void)
     for (ULONG y = 0; y < h; y++) memcpy(px + y * pitch, tmp + (size_t)y * d3d.width * bytes, w * bytes);
     free(tmp);
     tex_invalidate(front.s->Data);
+    front_snap_take();
 }
 
 /* PersistDisplay's frame for the next title, which is its own process:
@@ -6921,7 +6958,7 @@ static void create_device_surfaces(ULONG format, ULONG depth_format)
 {
     d3d.backbuffer = new_linear_surface(format, d3d.width, d3d.height);
     d3d.depth = new_linear_surface(depth_format ? depth_format : 0x2A, d3d.width, d3d.height);
-    if (!front.s) front.s = new_linear_surface(format, d3d.width, d3d.height);
+    if (!front.s && (front.s = new_linear_surface(format, d3d.width, d3d.height))) front_snap_take();
 #ifndef XBC_TRANSLATED
     /* Copy every presented frame from the start, so the first ask for it
        finds the frame on screen rather than whatever is drawn by then.  Not
@@ -7164,6 +7201,7 @@ static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
     trace_dump_target(d3d.target);
     pusher_drain();
     if (async_front()) { async_target(target, z); return; }
+    TRACE_ALL("D3D: SetRenderTarget %#x, depth %#x", target ? (unsigned)target->Data : 0, z ? (unsigned)z->Data : 0);
     if (async_replaying) {
         /* The front took the references and told the title's device. */
         d3d.target = target;
@@ -7341,14 +7379,8 @@ static void NTAPI D3DSurface_LockRect(D3DSurface *s, ULONG *locked, const LONG *
         free(tmp);
         backbuffer_synced();
     }
-    if (s == front.s) {
-        front_buffer_memory();
-        if (!(flags & 0x80) && !front.written) {
-            ULONG bytes = pitch * h;
-            uint8_t *snap = realloc(front.snap, bytes);
-            if (snap) { memcpy(snap, (const void *)(s->Data | CONTIG_BASE), bytes); front.snap = snap; front.written = true; }
-        }
-    } else if (s != d3d.backbuffer) readback_rt_surface(s);
+    if (s == front.s) front_buffer_memory();
+    else if (s != d3d.backbuffer) readback_rt_surface(s);
     if (s == d3d.backbuffer && !(flags & 0x80 /* D3DLOCK_READONLY */)) d3d.bb_cpu_dirty = true;
     if (s->Parent && !(flags & 0x80)) tex_invalidate(s->Parent->res.Data);
     ULONG fmt = (s->Format >> 8) & 0xFF;
