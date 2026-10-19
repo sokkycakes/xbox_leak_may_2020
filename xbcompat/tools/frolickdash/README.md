@@ -54,6 +54,20 @@ dashboard (`tools/dashbuild`), as its own `xboxdash.xbe` with its own
   describe them and a ring for the emblems, until Frolick's `Circle.png`
   and pad textures arrive (`ART=dir`).  A on a catalog or settings tile flies the camera (750 ms, like Frolick's carousel zoom) down to `main.tscn`'s `cam_angle_padfocus`, mirrored for settings, with the panel faded out; B flies back.  The expanded menu that belongs there is not built yet.
 
+The library carousel is GameTap's game belt (`art/gametap/`: the decoded
+`beta2scene-belt.json` and the spec `game-belt-render.md`).  `tools/mkbelt.py`
+packs the 13 cover nodes' frame 1000..1020 poses and the cover mesh into
+`belt.bin`; the `Belt` node in `nodes/XuiPanel.cpp` drapes Frolick's
+`carousel_card.xui` over each cover's 7x6 grid and the `carousel_focus.xui`
+overlay over the focused one, laid out in the carousel camera's frame
+(carousel.go's carouselEyeTarget) with GameTap's ring centre on the eye and
+the focused cover 0.58 wide.  A on the library panel flies in (750 ms, the
+panel fades, the covers fade in from further out); left and right play
+Belt_Right / Belt_Left (20 frames at speed 2.5, 0.267 s, input dropped while
+a step plays, as the client's lock does); B flies back.  The game list is
+carousel.go's placeholder titles; ends do not wrap; GameTap's per-step sounds
+are not played (no audio in the port yet).
+
 ## Build and run
 
     tools/frolickdash/build.sh [WORK]      # WORK defaults to /tmp/xbdash

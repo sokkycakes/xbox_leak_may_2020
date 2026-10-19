@@ -59,6 +59,7 @@ rm -rf "$OUT/dash"; mkdir -p "$OUT/dash/pads" "$OUT/dash/obj"
 cp "$HERE"/dash/pads/*.xui "$OUT/dash/pads/"
 python3 "$HERE/tools/genhub.py" "$OUT/dash"
 python3 "$HERE/tools/mkart.py" "$OUT/dash"
+python3 "$HERE/tools/mkbelt.py" "$HERE/art/gametap/beta2scene-belt.json" "$OUT/dash/belt.bin"
 [ -n "$ART" ] && cp "$ART"/*.png "$OUT/dash/"
 if [ -n "$GLYPHS" ]; then cp "$GLYPHS"/glyph_*.png "$OUT/dash/pads/"; else
     # Frolick's glyph files are Xelu's "Others/Xbox 360" prompts: glyph_a.png

@@ -62,6 +62,15 @@ CAMERAS = {  # eye, view direction (-Z column), up (Y column), vertical fov in d
     "catalogfocus": ((-0.639461, 0.133682, 0.0213613), (0.0, -0.942063, -0.335435), (0.0, 0.335435, -0.942063), 80.1803),
 }
 ZOOM_DURATION = 0.75                           # the library carousel's zoom
+# The carousel camera (carousel.go carouselEyeTarget): low behind the library
+# pad, pitched up 23.3 degrees; Frolick's pad sits at y 0, so the offsets
+# are from the pad disc.  The belt (GameTap's, see art/gametap) is laid out
+# in this camera's frame with its ring centre on the eye.
+CAROUSEL_EYE_OFFSET = (0.0, 0.033, 0.596)
+CAROUSEL_LOOK = (0.0, 0.430, -1.0)
+CAROUSEL_CARD_W = 0.58                         # carouselCardW
+CAROUSEL_GAMES = ["Game Title", "Stiletto Swift", "Game Title 3", "Game Title 4", "Game Title 5",
+                  "Game Title 6", "Game Title 7", "Game Title 8", "Game Title 9"]  # carouselGames
 FOOTER_H, FOOTER_COLOR, FOOTER_ALPHA = 50, (0.68, 0.665493, 0.5712), 0.592157
 FOOTER_STOPS = [(0.0, 0.0), (0.387409, 0.647059), (0.939467, 1.0)]
 WORDMARK_COLOR = (0.79, 0.773147, 0.6636)      # LabelSettings_1bvp3, 37 px
@@ -100,6 +109,9 @@ def pad_world(name):
 
 def camera(name):
     """eye, direction, up, fov for a pad's view."""
+    if name == "carousel":
+        eye = add(pad_world("library"), CAROUSEL_EYE_OFFSET)
+        return eye, norm(CAROUSEL_LOOK), (0.0, 1.0, 0.0), CAMERAS["library"][3]
     if name.startswith("settings"):
         eye, d, up, fov = CAMERAS["catalog" + name[len("settings"):]]
         return mirrorx(eye), norm(mirrorx(d)), norm(mirrorx(up)), fov
@@ -361,6 +373,12 @@ DEF vpSettingsFocus Viewpoint
     %(vp_settingsfocus)s
 }
 
+// The library carousel's camera (carousel.go carouselEyeTarget).
+DEF vpCarousel Viewpoint
+{
+    %(vp_carousel)s
+}
+
 DEF theMover CameraMover
 {
     duration 0.55
@@ -383,6 +401,7 @@ DEF theZoomer CameraMover
 var nPad;       // 0 catalog, 1 library, 2 settings
 var bMoving;
 var bZoomed;    // the camera is on the pad's focus view (catalog, settings)
+var bLibraryOpen;   // the camera is in the game belt
 
 DEF theHub Level
 {
@@ -437,6 +456,22 @@ DEF theHub Level
                 }
             ]
         }
+        // The library carousel: GameTap's game belt (art/gametap), entered
+        // from the library pad with A, left and right step it, B leaves.
+        DEF theBelt Belt
+        {
+            url "belt.bin"
+            card "pads/carousel_card.xui"
+            focus "pads/carousel_focus.xui"
+            skin "pads/frolick_skin.xui"
+            eye %(belt_eye)s
+            target %(belt_target)s
+            cardWidth %(belt_card_w).3f
+            zoomDuration %(zoom_duration)s
+            count %(belt_count)d
+            function OnStep() { theBelt.SetTitle(GameName(theBelt.GetSelected())); }
+        }
+
         DEF xfSettings Transform
         {
             fade 0.55
@@ -486,6 +521,15 @@ function PadMove(dir, step)
         return;
     if (bZoomed)
         return;
+    if (bLibraryOpen)
+    {
+        // the belt: left scrolls it right (Belt_Right), right scrolls it left
+        if (step < 0)
+            theBelt.Step(0 - 1);
+        else if (step > 0)
+            theBelt.Step(1);
+        return;
+    }
 
     var moved = 0;
     if (nPad == 0)
@@ -515,6 +559,8 @@ function PadPress()
         return;
     if (bZoomed)
         return;
+    if (bLibraryOpen)
+        return;     // launching a game: nothing to launch yet
 
     if (nPad == 0)
         padCatalog.Press();
@@ -529,9 +575,35 @@ function OnPadPress(pad, id)
     // Frolick: A on the library pad opens the game carousel.  On the
     // catalog and settings pads it flies down to the pad's focus view.
     if (pad == 1)
+    {
+        OpenLibrary();
         return;
+    }
     ZoomIn();
 }
+
+// A on the library panel: the panel fades out and the camera flies in
+// 750 ms to the belt, whose covers fade in and settle from further out.
+function OpenLibrary()
+{
+    bMoving = true;
+    bLibraryOpen = true;
+    SetPadAlpha(1, 0);
+    theZoomer.GoTo(vpCarousel);
+    theBelt.SetTitle(GameName(theBelt.GetSelected()));
+    theBelt.Open();
+}
+
+function CloseLibrary()
+{
+    bMoving = true;
+    bLibraryOpen = false;
+    SetPadAlpha(1, 1);
+    theZoomer.GoTo(vpLibrary);
+    theBelt.Close();
+}
+
+%(game_names)s
 
 // A on the catalog or settings panel: the panel fades out and the camera
 // flies to cam_angle_padfocus.  B flies back up to the pad's view.
@@ -550,6 +622,12 @@ function PadBack()
 {
     if (bMoving)
         return;
+    if (bLibraryOpen)
+    {
+        if (theBelt.IsBusy() == 0)
+            CloseLibrary();
+        return;
+    }
     if (bZoomed == false)
         return;
     bMoving = true;
@@ -603,6 +681,7 @@ function initialize()
     nPad = 1;
     bMoving = false;
     bZoomed = false;
+    bLibraryOpen = false;
     EnableInput(true);
     theHub.GoTo();
     padLibrary.Play("", "Intro");
@@ -624,9 +703,21 @@ def main():
         vals["panel_" + name] = panel(name)
         vals["pad_" + name] = pad_nodes(name)
         vals["word_" + name] = WORDS[name]
-    for name in ("catalogfocus", "settingsfocus"):
+    for name in ("catalogfocus", "settingsfocus", "carousel"):
         vals["vp_" + name] = viewpoint(name)
     vals["zoom_duration"] = ZOOM_DURATION
+    eye, d, up, fov = camera("carousel")
+    vals["belt_eye"] = v3(eye)
+    vals["belt_target"] = v3(add(eye, d))
+    vals["belt_card_w"] = CAROUSEL_CARD_W
+    vals["belt_count"] = len(CAROUSEL_GAMES)
+    names = ["// carousel.go carouselGames, until a real game list exists", "function GameName(i)", "{"]
+    for i, g in enumerate(CAROUSEL_GAMES):
+        names.append("    if (i == %d)" % i)
+        names.append("        return \"%s\";" % g.replace('"', ''))
+    names.append("    return \"\";")
+    names.append("}")
+    vals["game_names"] = "\n".join(names)
     open(os.path.join(out, "default.xap"), "w").write(HUB % vals)
     open(os.path.join(pads, "overlay.xui"), "w").write(overlay_scene())
     catalog = open(os.path.join(pads, "catalog.xui")).read()
