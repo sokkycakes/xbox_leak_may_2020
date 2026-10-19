@@ -2459,6 +2459,42 @@ static void apply_texture_transforms(unsigned units, const int tsize[4])
     p_glActiveTexture(GL_TEXTURE0);
 }
 
+/* --trace detail for a draw: what each stage samples and how, and the
+   vertices of a small pre-transformed draw (full-screen passes). */
+static void trace_draw_detail(const uint8_t *base, ULONG stride, ULONG count, bool rhw)
+{
+    if (g_trace != 1) return;
+    for (int s = 0; s < 4; s++) {
+        D3DPixelContainer *t = (D3DPixelContainer *)d3d.textures[s];
+        if (!t) continue;
+        ULONG w = 0, h = 0, pitch = 0;
+        container_size(t, &w, &h, &pitch);
+        xlog("D3D:   stage %d tex %p data %#x fmt %#x %ux%u pitch %u size %#x addr %u/%u filt %u/%u/%u border %#x%s%s",
+             s, (void *)t, (unsigned)t->res.Data, (unsigned)((t->Format >> 8) & 0xFF), (unsigned)w, (unsigned)h,
+             (unsigned)pitch, (unsigned)t->Size, TSS(s, D3DTSS_ADDRESSU), TSS(s, D3DTSS_ADDRESSV),
+             TSS(s, D3DTSS_MAGFILTER), TSS(s, D3DTSS_MINFILTER), TSS(s, D3DTSS_MIPFILTER), TSS(s, D3DTSS_BORDERCOLOR),
+             d3d.backbuffer && (t->res.Data | CONTIG_BASE) == (d3d.backbuffer->Data | CONTIG_BASE) ? " backbuffer" : "",
+             d3d.depth && (t->res.Data | CONTIG_BASE) == (d3d.depth->Data | CONTIG_BASE) ? " depth" : "");
+    }
+    if (d3d.target) {
+        ULONG w = 0, h = 0, pitch = 0;
+        container_size((D3DPixelContainer *)d3d.target, &w, &h, &pitch);
+        xlog("D3D:   target data %#x fmt %#x %ux%u blend %u %u/%u op %u alpha %u/%u", (unsigned)d3d.target->Data,
+             (unsigned)((d3d.target->Format >> 8) & 0xFF), (unsigned)w, (unsigned)h, RS(D3DRS_ALPHABLENDENABLE),
+             RS(D3DRS_SRCBLEND), RS(D3DRS_DESTBLEND), RS(D3DRS_BLENDOP), RS(D3DRS_ALPHATESTENABLE), RS(D3DRS_ALPHAREF));
+    }
+    if (rhw && base && count <= 6 && stride >= 16 && stride <= 64) {
+        for (ULONG v = 0; v < count; v++) {
+            const float *f = (const float *)(base + v * stride);
+            char line[256];
+            int n = 0;
+            for (ULONG i = 0; i < stride / 4 && n < (int)sizeof(line) - 16; i++)
+                n += snprintf(line + n, sizeof(line) - n, " %g", f[i]);
+            xlog("D3D:   v%u%s", (unsigned)v, line);
+        }
+    }
+}
+
 /* ---- state setters ----------------------------------------------------- */
 
 /* SetVertexShaderInput's state (with the vertex shader objects below). */
@@ -5110,6 +5146,7 @@ static void draw_declared_(const vshader *sh, ULONG PrimitiveType, const UCHAR *
     if (!use_program(0, &e)) return;
     TRACE_ALL("D3D: draw(declared) prim %u count %u stride %u indices %p shader %#x", PrimitiveType, count, stride,
           indices ? indices + first : NULL, d3d.vertex_shader);
+    trace_draw_detail(NULL, stride, count, false);
     shader_diagnostics_mark(d3d.frame, ++shader_diag_draw, d3d.vertex_shader, d3d.pixel_shader, cur_program,
                             "declared");
     for (unsigned pass = 0; scissor_pass(pass); pass++)
@@ -5312,6 +5349,7 @@ static void draw_fvf(ULONG PrimitiveType, const UCHAR *base, ULONG stride, ULONG
     if ((PrimitiveType == 8 || PrimitiveType == 5) && hud_shader_supported()) hud_shader_bind();
     TRACE_ALL("D3D: draw prim %u count %u base %p stride %u indices %p fvf %#x", PrimitiveType, count, base, stride,
           indices ? indices + first : NULL, d3d.vertex_shader);
+    trace_draw_detail(base + (indices ? 0 : first * stride), stride, count, !indices && (d3d.vertex_shader & 0x0E) == 0x04);
     batch_key.units = units;
     batch_key.program = cur_program;
     bool batched = batchable && !e && hud_batch_append(&batch_key, base, first, count);

@@ -226,6 +226,32 @@ static NTSTATUS translate_path(const char *xpath, char *host, size_t hostlen, in
     if (!strncasecmp(path, "\\Device\\CdRom0", 14)) {
         rest = path + 14;
         const char *dir = dvd_is_media() ? dvd_host_dir() : cdrom_dir;
+        /* Downloaded content under D:\$c\ that the disc doesn't have comes
+           from the title's own content folder (T:\$c\).  Splinter Cell
+           looks for a downloaded level's loading picture and progress bar
+           only through D:. */
+        static __thread int redirecting;
+        if (!strncasecmp(rest, "\\$c\\", 4) && !redirecting) {
+            dvd_node *node;
+            struct stat sb;
+            char disc[PATH_MAX];
+            snprintf(disc, sizeof(disc), "%s%s", dir ? dir : "", rest);
+            for (char *c = disc; dir && *c; c++) if (*c == '\\') *c = '/';
+            bool on_disc = dir ? stat(disc, &sb) == 0 : NT_SUCCESS(dvd_lookup(rest, &node));
+            char *tdata = on_disc ? NULL : symlink_lookup("\\??\\T:");
+            if (tdata) {
+                char alt[1024];
+                snprintf(alt, sizeof(alt), "\\??\\T:%s", rest);
+                free(tdata);
+                redirecting = 1;
+                NTSTATUS st = translate_path(alt, host, hostlen, is_device);
+                redirecting = 0;
+                struct stat hs;
+                if (NT_SUCCESS(st) && stat(host, &hs) == 0) return st;
+                *is_device = 0;
+                host[0] = 0;
+            }
+        }
         if (!dir) {
             /* An Xbox disc (or none): its files are named, not mapped. */
             *is_device = 3;
