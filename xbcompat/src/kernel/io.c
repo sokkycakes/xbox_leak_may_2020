@@ -543,6 +543,42 @@ static int remove_entry(const char *path, const struct stat *sb, int type, struc
     return 0;
 }
 
+/* The hard disk partition a host path is in (0: none). */
+static int partition_of(const char *host)
+{
+    size_t n = strlen(hdd_dir);
+    if (!n || strncmp(host, hdd_dir, n) || strncmp(host + n, "/partition", 10)) return 0;
+    return atoi(host + n + 10);
+}
+
+/* The cluster size a partition was formatted with: XapiFormatFATVolumeEx
+   writes it into the FATX volume header, and XMountUtilityDrive checks that
+   FileFsSizeInformation reports the size the XBE asks for (16 KB to 128 KB
+   for the utility drive, XINIT_UTILITY_DRIVE_*_CLUSTER_SIZE).  Kept in
+   <hdd>/.partitionN.cluster; 16 KB when never formatted here. */
+static ULONG partition_cluster_bytes(int part)
+{
+    char p[PATH_MAX];
+    snprintf(p, sizeof(p), "%s/.partition%d.cluster", hdd_dir, part);
+    FILE *f = part > 0 ? fopen(p, "r") : NULL;
+    unsigned v = 0;
+    if (f) {
+        if (fscanf(f, "%u", &v) != 1) v = 0;
+        fclose(f);
+    }
+    return v >= 512 && v <= (1u << 20) && !(v & (v - 1)) ? v : 16384;
+}
+
+static void partition_set_cluster_bytes(int part, ULONG bytes)
+{
+    char p[PATH_MAX];
+    snprintf(p, sizeof(p), "%s/.partition%d.cluster", hdd_dir, part);
+    FILE *f = fopen(p, "w");
+    if (!f) return;
+    fprintf(f, "%u\n", (unsigned)bytes);
+    fclose(f);
+}
+
 /* A partition opened as a volume has no backing file: sector reads return
    zeros and sector writes are dropped, except that rewriting the volume
    header of a cache partition (3 and up) is a format, which empties it. */
@@ -555,8 +591,13 @@ static NTSTATUS volume_io(xfile *f, HANDLE Event, PVOID ApcRoutine, PVOID ApcCon
     if (!write) {
         memset(Buffer, 0, Length);
     } else if (off == 0 && part >= 3) {
-        xlog("formatting cache partition %d (%s)", part, f->host);
+        /* FAT_VOLUME_METADATA: Signature "FATX", SerialNumber, SectorsPerCluster. */
+        const UCHAR *h = Buffer;
+        ULONG spc = Length >= 12 && !memcmp(h, "FATX", 4) ? *(const ULONG *)(h + 8) : 0;
+        ULONG bytes = spc && spc <= 2048 ? spc * 512 : 16384;
+        xlog("formatting cache partition %d (%s), %u byte clusters", part, f->host, (unsigned)bytes);
         nftw(f->host, remove_entry, 16, FTW_DEPTH | FTW_PHYS);
+        partition_set_cluster_bytes(part, bytes);
     }
     f->pos = off + Length;
     return complete(Event, ApcRoutine, ApcContext, iosb, STATUS_SUCCESS, Length);
@@ -615,6 +656,53 @@ NTSTATUS NTAPI NtWriteFile(HANDLE FileHandle, HANDLE Event, PVOID ApcRoutine, PV
     f->pos = off + n;
     complete(Event, ApcRoutine, ApcContext, iosb, STATUS_SUCCESS, (ULONG)n);
     return f->async ? STATUS_PENDING : STATUS_SUCCESS;
+}
+
+/* NtReadFileScatter/NtWriteFileGather (ntos/io/read.c, write.c): the
+   buffer is an array of FILE_SEGMENT_ELEMENTs, 64-bit slots whose low half
+   points at one page each; Length is a multiple of the page size. Each page
+   goes through the plain read or write in turn. */
+static NTSTATUS scatter_gather(HANDLE FileHandle, HANDLE Event, PVOID ApcRoutine, PVOID ApcContext,
+                               IO_STATUS_BLOCK *iosb, const ULONGLONG *segs, ULONG Length,
+                               LARGE_INTEGER *ByteOffset, bool write)
+{
+    xfile *f = file_of(FileHandle);
+    if (!f) return STATUS_INVALID_HANDLE;
+    LONGLONG off = ByteOffset && ByteOffset->QuadPart >= 0 ? ByteOffset->QuadPart : f->pos;
+    ULONG done = 0;
+    NTSTATUS st = STATUS_SUCCESS;
+    for (ULONG i = 0; done < Length; i++) {
+        ULONG chunk = Length - done < 4096 ? Length - done : 4096;
+        IO_STATUS_BLOCK one = {0};
+        LARGE_INTEGER at;
+        at.QuadPart = off + done;
+        void *buf = (void *)(uintptr_t)(ULONG)segs[i];
+        st = write ? NtWriteFile(FileHandle, NULL, NULL, NULL, &one, buf, chunk, &at)
+                   : NtReadFile(FileHandle, NULL, NULL, NULL, &one, buf, chunk, &at);
+        if (st == STATUS_PENDING) st = one.Status;
+        if (NT_ERROR(st) || st == STATUS_END_OF_FILE) break;
+        done += (ULONG)one.Information;
+        if (one.Information < chunk) break;
+    }
+    if (done == 0 && (NT_ERROR(st) || st == STATUS_END_OF_FILE))
+        return complete(Event, ApcRoutine, ApcContext, iosb, st, 0);
+    f->pos = off + done;
+    complete(Event, ApcRoutine, ApcContext, iosb, STATUS_SUCCESS, done);
+    return f->async ? STATUS_PENDING : STATUS_SUCCESS;
+}
+
+NTSTATUS NTAPI NtReadFileScatter(HANDLE FileHandle, HANDLE Event, PVOID ApcRoutine, PVOID ApcContext,
+                                 IO_STATUS_BLOCK *iosb, const ULONGLONG *SegmentArray, ULONG Length,
+                                 LARGE_INTEGER *ByteOffset)
+{
+    return scatter_gather(FileHandle, Event, ApcRoutine, ApcContext, iosb, SegmentArray, Length, ByteOffset, false);
+}
+
+NTSTATUS NTAPI NtWriteFileGather(HANDLE FileHandle, HANDLE Event, PVOID ApcRoutine, PVOID ApcContext,
+                                 IO_STATUS_BLOCK *iosb, const ULONGLONG *SegmentArray, ULONG Length,
+                                 LARGE_INTEGER *ByteOffset)
+{
+    return scatter_gather(FileHandle, Event, ApcRoutine, ApcContext, iosb, SegmentArray, Length, ByteOffset, true);
 }
 
 NTSTATUS NTAPI NtFlushBuffersFile(HANDLE FileHandle, IO_STATUS_BLOCK *iosb)
@@ -795,15 +883,17 @@ NTSTATUS NTAPI NtQueryVolumeInformationFile(HANDLE FileHandle, IO_STATUS_BLOCK *
     case 7: {   /* FileFsFullSizeInformation */
         LARGE_INTEGER *li = Info;
         ULONG *u;
-        /* Report a 16 KB cluster FATX-like volume, capped to what a console has. */
+        /* Report a FATX-like volume with the partition's cluster size (16 KB
+           unless formatted otherwise), capped to what a console has. */
+        ULONG cluster = f->is_dvd ? 16384 : partition_cluster_bytes(partition_of(f->host));
         ULONGLONG total = (ULONGLONG)vs.f_blocks * vs.f_frsize, avail = (ULONGLONG)vs.f_bavail * vs.f_frsize;
         if (total > 8ULL << 30) total = 8ULL << 30;
         if (avail > total) avail = total;
-        li[0].QuadPart = total / 16384;
-        li[1].QuadPart = avail / 16384;
+        li[0].QuadPart = total / cluster;
+        li[1].QuadPart = avail / cluster;
         if (Class == 7) { li[2].QuadPart = li[1].QuadPart; u = (ULONG *)&li[3]; size = 32; }
         else { u = (ULONG *)&li[2]; size = 24; }
-        u[0] = 32;
+        u[0] = cluster / 512;
         u[1] = 512;
         break;
     }

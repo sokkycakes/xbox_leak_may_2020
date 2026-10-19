@@ -172,6 +172,13 @@ NTSTATUS NTAPI ObOpenObjectByPointer(PVOID Object, OBJECT_TYPE *ObjectType, HAND
 
 /* ---- waits by handle -------------------------------------------------- */
 
+/* What a wait on a file handle waits for: a notification event that stays
+   signaled (see handle_to_waitable). */
+static KEVENT file_done;
+static pthread_once_t file_done_once = PTHREAD_ONCE_INIT;
+void NTAPI KeInitializeEvent(KEVENT *Event, ULONG Type, BOOLEAN State);
+static void file_done_init(void) { KeInitializeEvent(&file_done, 0 /* NotificationEvent */, 1); }
+
 static NTSTATUS handle_to_waitable(HANDLE h, PVOID *out)
 {
     if (h == NtCurrentThread) {
@@ -185,6 +192,15 @@ static NTSTATUS handle_to_waitable(HANDLE h, PVOID *out)
         *out = &o->u; return STATUS_SUCCESS;
     case OBJ_THREAD:
         *out = &o->thread->ethread.Tcb.Header; return STATUS_SUCCESS;
+    case OBJ_FILE: {
+        /* A file object is signaled when its I/O completes, and I/O here
+           completes before the call that started it returns: XAPI's
+           ReadFile on a handle opened for overlapped I/O, and
+           GetOverlappedResult without an event, wait on the handle. */
+        pthread_once(&file_done_once, file_done_init);
+        *out = &file_done;
+        return STATUS_SUCCESS;
+    }
     default:
         return STATUS_OBJECT_TYPE_MISMATCH;
     }
