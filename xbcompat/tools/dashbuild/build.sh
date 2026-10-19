@@ -51,7 +51,17 @@ patch_srcs() { # patch-file file...
     rm -rf "$WORK/patch/new"
 }
 # GuidDef.h defines `one`, which main.cpp uses as a variable name.
-patch_src main.cpp 's/\bone\b/fOne/g'
+# The 3D view is built for a 720-wide screen (aspect 720/480) even though the
+# back buffer is 640x480, so it shows 1/8 more scene sideways than a 4:3 view.
+# xbcompat's XBCOMPAT_DASH_VIEW=4:3 sets bit 31 of the raw video flags (no
+# Xbox flag uses it; XGetVideoFlags masks it off for games), and the dash then
+# builds its view for 640x480 instead (Layer.cpp builds the same view).
+patch_src main.cpp 's/\bone\b/fOne/g
+s|^D3DXMATRIX g_matProjection;|&\nfloat g_fViewAspect = 720.0f / 480.0f;|
+s|float aspect = 720.0f / 480.0f;|float aspect = g_fViewAspect;|
+s|^\(\s*\)m_bStretchWidescreen = (XGetVideoFlags() \& XC_VIDEO_FLAGS_WIDESCREEN) != 0;|&\n\1{\n\1    DWORD dwType, dwRaw;\n\1    if (XQueryValue(XC_VIDEO_FLAGS, \&dwType, \&dwRaw, 4, NULL) == ERROR_SUCCESS \&\& (dwRaw \& 0x80000000))\n\1        g_fViewAspect = 640.0f / 480.0f;\n\1}|'
+patch_src Layer.cpp 's|^extern D3DXMATRIX g_matIdentity;|&\nextern float g_fViewAspect;|
+s|float aspect = 720.0f/480.0f;|float aspect = g_fViewAspect;|'
 # A game disc in the tray at startup waits in the Games screen's top slot
 # instead of rebooting into the game (Microsoft's dashboard only ran with a
 # game disc in when a game had sent it there).
