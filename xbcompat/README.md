@@ -23,7 +23,7 @@ or crash. The other seven are a Windows tool, three debug-monitor samples,
 and three whose media or DSP image is missing from the leak. What works:
 
 - **Direct3D 8**: fixed function with lighting, specular, fog and texture
-  stages (all texture ops but bump env mapping); texture coordinate generation and texture matrices; NV2A vertex
+  stages (all texture ops, bump env mapping through the combiner translator); texture coordinate generation and texture matrices; NV2A vertex
   programs and register combiners translated to GLSL; vertex state shaders run
   on the CPU; push buffers (recorded and BeginPush); point sprites; swizzled,
   linear, DXT, cube, volume and bump-map textures; render targets, including

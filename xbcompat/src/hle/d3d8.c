@@ -1597,7 +1597,8 @@ static void upload_image3(GLenum target, GLint level, ULONG fmt, ULONG w, ULONG 
        3 = YUY2 and 4 = UYVY (video frames), converted to RGB with BT.601;
        5 = A8, which the NV2A samples as white with that alpha;
        6 = AL8, one byte that is both luminance and alpha;
-       7 = P8, an index into the stage's palette of A8R8G8B8 colors. */
+       7 = P8, an index into the stage's palette of A8R8G8B8 colors;
+       8 = V16U16, kept to its high bytes and stored like V8U8. */
     struct { ULONG fmt; int bpp; bool swizzled; GLenum gl_fmt, gl_type; bool force_alpha; int conv; } table[] = {
         { 0x3A, 4, true,  GL_RGBA, GL_UNSIGNED_BYTE, false, 0 },               /* A8B8G8R8 / Q8W8V8U8 */
         { 0x3F, 4, false, GL_RGBA, GL_UNSIGNED_BYTE, false, 0 },               /* LIN_A8B8G8R8 */
@@ -1615,6 +1616,8 @@ static void upload_image3(GLenum target, GLint level, ULONG fmt, ULONG w, ULONG 
         { 0x17, 2, false, GL_RGBA, GL_UNSIGNED_BYTE, false, 1 },            /* LIN_V8U8 / LIN_G8B8 */
         { 0x27, 2, true,  GL_RGBA, GL_UNSIGNED_BYTE, false, 2 },            /* L6V5U5 / R6G5B5 */
         { 0x37, 2, false, GL_RGBA, GL_UNSIGNED_BYTE, false, 2 },            /* LIN_L6V5U5 */
+        { 0x33, 4, true,  GL_RGBA, GL_UNSIGNED_BYTE, false, 8 },            /* V16U16 */
+        { 0x36, 4, false, GL_RGBA, GL_UNSIGNED_BYTE, false, 8 },            /* LIN_V16U16 */
         { 0x06, 4, true,  GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, false, 0 },   /* A8R8G8B8 */
         { 0x07, 4, true,  GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, true, 0 },    /* X8R8G8B8 */
         { 0x12, 4, false, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, false, 0 },   /* LIN_A8R8G8B8 */
@@ -1691,7 +1694,12 @@ static void upload_image3(GLenum target, GLint level, ULONG fmt, ULONG w, ULONG 
     }
     if (table[i].force_alpha && bpp == 4)
         for (ULONG k = 0; k < w * h * d; k++) px[k * 4 + 3] = 0xFF;
-    if (table[i].conv == 7) {
+    if (table[i].conv == 8) {
+        for (ULONG k = 0; k < w * h * d; k++) {
+            uint8_t *o = px + k * 4;
+            o[0] = o[1] ^ 0x80; o[1] = o[3] ^ 0x80; o[2] = o[3] = 0xFF;
+        }
+    } else if (table[i].conv == 7) {
         uint8_t *bgra = malloc(w * h * d * 4);
         for (ULONG k = 0; k < w * h * d; k++) {
             uint32_t c = tex_palette && px[k] < tex_palette_count ? tex_palette[px[k]] : 0xFFFF00FF;
@@ -3406,7 +3414,8 @@ static psh_options fragment_shader_options(void)
         /* X8L8V8U8 aliases X8R8G8B8: preserve ordinary RGB sampling, but
            tell bump stages where U, V and luminance landed in that upload. */
         if (fmt == 0x07 || fmt == 0x1E) o.bump_bgra |= 1u << i;
-        if (fmt == 0x28 || fmt == 0x17 || fmt == 0x27 || fmt == 0x37) o.bump_biased |= 1u << i;
+        if (fmt == 0x28 || fmt == 0x17 || fmt == 0x27 || fmt == 0x37 || fmt == 0x33 || fmt == 0x36)
+            o.bump_biased |= 1u << i;
     }
     return o;
 }
