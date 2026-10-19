@@ -6,14 +6,13 @@ its native address (0x10000) inside a 32-bit Linux process and executed directly
 What differs from a PC is replaced underneath it:
 
 - **Kernel**: the 375 `xboxkrnl.exe` exports are listed from the leak's
-  `private/ntos/init/ntoskrnl.src`, and 312 of them are implemented. Threads,
+  `private/ntos/init/ntoskrnl.src`, and 321 of them are implemented. Threads,
   events, waits, queues and I/O completion ports, timers/DPCs, virtual and
   contiguous memory, the object manager, file I/O and Rtl are implemented on
   pthreads and the host filesystem (`src/kernel/`). Each guest thread gets a
-  KPCR at `fs:0` through an LDT entry. The other 63 are the driver model
+  KPCR at `fs:0` through an LDT entry. The other 54 are the driver model
   (IRPs, device objects and queues, `IoCreateFile`), object directories, port
-  I/O, the `Xc*` public-key and block crypto that only networking uses, and
-  debug/profiling exports. A title that imports one still loads; calling it
+  I/O, and debug/profiling exports. A title that imports one still loads; calling it
   stops with a message that names it.
 - **Direct3D 8**: the XDK statically links D3D8 into every title. `tools/mksigs.py`
   builds signatures from the leak's own `d3d8.lib`/`d3d8d.lib`, and
@@ -39,7 +38,9 @@ and three whose media or DSP image is missing from the leak. What works:
   and multi-function envelopes and the DLS2 low-pass filter.
 - **Input**: XInput on SDL2 game controllers, with rumble, plus a keyboard pad
   when no controller is attached (see below).
-- **Kernel**: SHA-1, HMAC, RC4 and big-number crypto are real, so save
+- **Kernel**: all of the `Xc*` crypto is real (`src/kernel/xcrypt.c`): SHA-1,
+  HMAC, RC4, RSA on the Xbox's BSAFE key blobs with PKCS #1 signature
+  checks, DES/3DES in ECB and CBC, and the `XcUpdateCrypto` vector, so save
   signatures work. There is no Ethernet: the Xbox Live samples start and
   report that the console is offline.
 
