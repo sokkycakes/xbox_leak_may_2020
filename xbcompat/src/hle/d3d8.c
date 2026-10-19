@@ -1257,10 +1257,14 @@ static LONG NTAPI D3DDevice_CreateVertexBuffer(UINT_ Length, ULONG Usage, ULONG 
     return D3D_OK;
 }
 
+static void note_vb_lock(const UCHAR *p, size_t len);
+
 static void NTAPI D3DVertexBuffer_Lock(D3DResource *vb, UINT_ Offset, UINT_ Size, PVOID *ppbData, ULONG Flags)
 {
-    (void)Size; (void)Flags;
     *ppbData = (UCHAR *)resource_data(vb) + Offset;
+    /* Size 0 locks to the end of the buffer.  The cached GL copies of what
+       a write lock covers are compared in full at their next draw. */
+    if (!(Flags & 0x80 /* D3DLOCK_READONLY */)) note_vb_lock(*ppbData, Size);
 }
 
 static ULONG NTAPI D3DResource_AddRef(D3DResource *r)
@@ -3786,7 +3790,12 @@ typedef struct { ULONG lo, hi; } vrange;
    dashboard reads about 3 MB a frame), so a draw compares 33 samples spread
    over the data and the whole copy is compared every CONV_FULL_EVERY frames:
    a rewritten buffer is caught at once, a small edit to one within that
-   many frames. */
+   many frames.  That delay is too long for data the title is known to
+   rewrite, so two cases are compared in full on every use: index lists
+   (small next to the vertices, and rebuilt in place per view: a batch of
+   the same length with a few triangles swapped kept drawing the old ones),
+   and vertex data in a range locked for writing since the entry last
+   looked (see conv_locked). */
 #define CONV_FULL_EVERY 16
 enum { CONV_RANGE, CONV_NORMPACKED3, CONV_RGBA, CONV_VBO };
 typedef struct {
@@ -3802,7 +3811,39 @@ typedef struct {
     size_t span;                 /* CONV_VBO: bytes from vertex 0 in buf and raw */
     unsigned verified;           /* draw serial of the last check against the source */
     size_t verified_to;          /* CONV_VBO: bytes from vertex 0 that check covered */
+    unsigned lock_seen;          /* vb_lock_serial when the entry last looked at the locks */
 } conv_entry;
+
+/* Vertex buffer ranges locked for writing, the last VB_LOCKS of them.  A
+   lock is the title saying it rewrites those bytes (a dynamic buffer
+   refilled each frame, lighting colors or projector coordinates computed on
+   the CPU), which the sampled compare can miss for CONV_FULL_EVERY frames.
+   The title's thread adds them and the draws (maybe on the worker) read
+   them; a lost race only falls back to sampling. */
+#define VB_LOCKS 64
+static struct { uintptr_t lo, hi; } vb_locks[VB_LOCKS];
+static unsigned vb_lock_serial;
+
+static void note_vb_lock(const UCHAR *p, size_t len)
+{
+    unsigned n = __atomic_load_n(&vb_lock_serial, __ATOMIC_RELAXED);
+    vb_locks[n % VB_LOCKS].lo = (uintptr_t)p;
+    vb_locks[n % VB_LOCKS].hi = len ? (uintptr_t)p + len : UINTPTR_MAX;
+    __atomic_store_n(&vb_lock_serial, n + 1, __ATOMIC_RELEASE);
+}
+
+/* Whether bytes lo to hi - 1, which `e` copied, were locked for writing
+   since the entry last asked (the caller then compares the whole entry). */
+static bool conv_locked(conv_entry *e, uintptr_t lo, uintptr_t hi)
+{
+    unsigned now = __atomic_load_n(&vb_lock_serial, __ATOMIC_ACQUIRE), seen = e->lock_seen;
+    if (now == seen) return false;
+    e->lock_seen = now;
+    if (now - seen > VB_LOCKS) return true;   /* some fell out of the ring: assume so */
+    for (unsigned i = seen; i != now; i++)
+        if (vb_locks[i % VB_LOCKS].lo < hi && vb_locks[i % VB_LOCKS].hi > lo) return true;
+    return false;
+}
 
 #define CONV_SLOTS 1024
 static conv_entry conv_cache[CONV_SLOTS];
@@ -3833,7 +3874,8 @@ static conv_entry *conv_find(const UCHAR *src, ULONG stride, ULONG kind, ULONG c
     free(victim->raw);
     free(victim->out);
     if (victim->buf) { p_glDeleteBuffers(1, &victim->buf); gc_forget_buffer(victim->buf); }
-    *victim = (conv_entry){ src, stride, kind, count, 0, 0, NULL, 0, NULL, 0, d3d.frame, 0, 0, 0, 0 };
+    *victim = (conv_entry){ src, stride, kind, count, 0, 0, NULL, 0, NULL, 0, d3d.frame, 0, 0, 0, 0,
+                            __atomic_load_n(&vb_lock_serial, __ATOMIC_ACQUIRE) };
     return victim;
 }
 
@@ -3891,10 +3933,7 @@ static conv_entry *index_entry(const USHORT *ix, ULONG count, bool upload)
     /* A draw looks its indices up twice (the range, the buffer); the source
        cannot change in between. */
     if (e->raw && e->verified == conv_serial) same = true;
-    else if (e->raw) {
-        if (conv_full_due(e)) same = !memcmp(e->raw, ix, count * 2);
-        else same = conv_sampled_same(e->raw, (const UCHAR *)ix, count * 2, 2, 2) || !memcmp(e->raw, ix, count * 2);
-    }
+    else if (e->raw) same = !memcmp(e->raw, ix, count * 2);   /* in full: see CONV_FULL_EVERY */
     if (upload && (!same || !e->buf)) {
         if (!e->buf) p_glGenBuffers(1, &e->buf);
         gc_bind_buffer(GL_ELEMENT_ARRAY_BUFFER, e->buf);
@@ -3949,7 +3988,7 @@ static GLuint stream_buffer(const UCHAR *base, ULONG stride, vrange r, size_t ne
     e->verified = conv_serial;
     if (e->buf && need <= e->span) {
         size_t from = (size_t)r.lo * stride, to = need;
-        if (conv_full_due(e)) from = 0, to = e->span;
+        if (conv_locked(e, (uintptr_t)base, (uintptr_t)base + e->span) | conv_full_due(e)) from = 0, to = e->span;
         e->verified_to = to;
         if (to == need && conv_sampled_same(e->raw + from, base + from, to - from, stride, 4)) return e->buf;
         if (!conv_refresh(e->raw + from, base + from, to - from)) return e->buf;
@@ -3993,7 +4032,8 @@ static const void *convert_cached(const UCHAR *src, ULONG stride, vrange r, ULON
     e->used = conv_serial;
     if (e->out && r.lo >= e->lo && r.hi <= e->hi) {
         ULONG lo = r.lo, hi = r.hi;
-        if (conv_full_due(e)) {
+        if (conv_locked(e, (uintptr_t)(src + (size_t)e->lo * stride), (uintptr_t)(src + (size_t)e->hi * stride))
+            | conv_full_due(e)) {
             lo = e->lo, hi = e->hi;
         } else {
             size_t len = (size_t)(hi - lo - 1) * stride + 4;   /* each vertex reads 4 bytes */
