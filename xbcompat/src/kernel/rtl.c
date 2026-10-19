@@ -104,15 +104,6 @@ void NTAPI RtlCopyString(ANSI_STRING *d, const ANSI_STRING *s)
     d->Length = n;
 }
 
-void NTAPI RtlCopyUnicodeString(UNICODE_STRING *d, const UNICODE_STRING *s)
-{
-    if (!s) { d->Length = 0; return; }
-    USHORT n = s->Length < d->MaximumLength ? s->Length : d->MaximumLength;
-    memmove(d->Buffer, s->Buffer, n);
-    d->Length = n;
-    if (n + 2 <= d->MaximumLength) d->Buffer[n / 2] = 0;
-}
-
 NTSTATUS NTAPI RtlUnicodeStringToAnsiString(ANSI_STRING *d, const UNICODE_STRING *s, BOOLEAN Allocate)
 {
     USHORT n = s->Length / 2;
@@ -141,34 +132,6 @@ NTSTATUS NTAPI RtlAnsiStringToUnicodeString(UNICODE_STRING *d, const ANSI_STRING
     d->Buffer[n] = 0;
     d->Length = n * 2;
     return STATUS_SUCCESS;
-}
-
-/* The Append functions fail without touching the destination when the
-   result would not fit; a Unicode result is terminated when room is left. */
-NTSTATUS NTAPI RtlAppendStringToString(ANSI_STRING *d, const ANSI_STRING *s)
-{
-    if (!s || !s->Length) return STATUS_SUCCESS;
-    if (d->Length + s->Length > d->MaximumLength) return STATUS_BUFFER_TOO_SMALL;
-    memmove(d->Buffer + d->Length, s->Buffer, s->Length);
-    d->Length += s->Length;
-    return STATUS_SUCCESS;
-}
-
-NTSTATUS NTAPI RtlAppendUnicodeStringToString(UNICODE_STRING *d, const UNICODE_STRING *s)
-{
-    if (!s || !s->Length) return STATUS_SUCCESS;
-    if (d->Length + s->Length > d->MaximumLength) return STATUS_BUFFER_TOO_SMALL;
-    memmove((char *)d->Buffer + d->Length, s->Buffer, s->Length);
-    d->Length += s->Length;
-    if (d->Length + 2 <= d->MaximumLength) d->Buffer[d->Length / 2] = 0;
-    return STATUS_SUCCESS;
-}
-
-NTSTATUS NTAPI RtlAppendUnicodeToString(UNICODE_STRING *d, const WCHAR *s)
-{
-    UNICODE_STRING u;
-    RtlInitUnicodeString(&u, s);
-    return RtlAppendUnicodeStringToString(d, &u);
 }
 
 void NTAPI RtlFreeAnsiString(ANSI_STRING *s) { pool_free(s->Buffer); s->Buffer = NULL; }
