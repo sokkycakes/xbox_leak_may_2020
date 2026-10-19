@@ -141,6 +141,20 @@ typedef struct {
     LONG Period;
 } KTIMER;
 
+typedef struct {
+    DISPATCHER_HEADER Header;   /* SignalState: entries queued */
+    LIST_ENTRY EntryListHead;
+    ULONG CurrentCount;
+    ULONG MaximumCount;
+    LIST_ENTRY ThreadListHead;
+} KQUEUE;
+
+typedef struct {
+    ULONG LowPart;
+    LONG High1Time;
+    LONG High2Time;
+} KSYSTEM_TIME;
+
 typedef struct KWAIT_BLOCK {
     LIST_ENTRY WaitListEntry;
     KTHREAD *Thread;

@@ -147,6 +147,25 @@ static ULONGLONG mono_100ns(void)
 volatile ULONG KeTickCount;
 static ULONGLONG boot_mono;
 
+/* KeSystemTime and KeInterruptTime: KSYSTEM_TIMEs titles may read directly,
+   kept current by the DPC thread every millisecond.  The writer stores
+   High2Time, then LowPart, then High1Time; a reader takes High1Time,
+   LowPart and High2Time and retries until the two high parts agree. */
+volatile KSYSTEM_TIME KeSystemTime, KeInterruptTime;
+
+static void ksystem_time_store(volatile KSYSTEM_TIME *t, ULONGLONG v)
+{
+    __atomic_store_n(&t->High2Time, (LONG)(v >> 32), __ATOMIC_RELEASE);
+    __atomic_store_n(&t->LowPart, (ULONG)v, __ATOMIC_RELEASE);
+    __atomic_store_n(&t->High1Time, (LONG)(v >> 32), __ATOMIC_RELEASE);
+}
+
+static void ke_update_clocks(ULONGLONG mono)
+{
+    ksystem_time_store(&KeSystemTime, system_time_now());
+    ksystem_time_store(&KeInterruptTime, mono - boot_mono);
+}
+
 void NTAPI KeQuerySystemTime(LARGE_INTEGER *t)
 {
     t->QuadPart = system_time_now();
@@ -692,6 +711,89 @@ LONG NTAPI KeReleaseMutant(KMUTANT *Mutant, LONG Increment, BOOLEAN Abandoned, B
     return old;
 }
 
+/* ---- queues (ke/queueobj.c) ------------------------------------------
+   SignalState counts the queued entries.  A remover takes the head entry
+   under the dispatcher lock, so a wake that loses the race to another
+   remover just waits again.  The concurrency limit (MaximumCount) is kept
+   but not enforced: threads here are not scheduled by the kernel. */
+
+void NTAPI KeInitializeQueue(KQUEUE *Queue, ULONG Count)
+{
+    init_header(&Queue->Header, QueueObject, sizeof(KQUEUE) / 4, 0);
+    Queue->EntryListHead.Flink = Queue->EntryListHead.Blink = &Queue->EntryListHead;
+    Queue->ThreadListHead.Flink = Queue->ThreadListHead.Blink = &Queue->ThreadListHead;
+    Queue->CurrentCount = 0;
+    Queue->MaximumCount = Count ? Count : 1;
+}
+
+static LONG queue_insert(KQUEUE *q, LIST_ENTRY *e, bool head)
+{
+    pthread_mutex_lock(&g_disp_lock);
+    LONG old = q->Header.SignalState;
+    LIST_ENTRY *h = &q->EntryListHead;
+    if (head) {
+        e->Flink = h->Flink; e->Blink = h;
+        h->Flink->Blink = e; h->Flink = e;
+    } else {
+        e->Flink = h; e->Blink = h->Blink;
+        h->Blink->Flink = e; h->Blink = e;
+    }
+    q->Header.SignalState++;
+    disp_signal(q);
+    pthread_mutex_unlock(&g_disp_lock);
+    return old;
+}
+
+LONG NTAPI KeInsertQueue(KQUEUE *Queue, LIST_ENTRY *Entry) { return queue_insert(Queue, Entry, false); }
+LONG NTAPI KeInsertHeadQueue(KQUEUE *Queue, LIST_ENTRY *Entry) { return queue_insert(Queue, Entry, true); }
+
+/* The head entry, or STATUS_TIMEOUT / STATUS_USER_APC cast to a pointer. */
+LIST_ENTRY *NTAPI KeRemoveQueue(KQUEUE *Queue, KPROCESSOR_MODE WaitMode, LARGE_INTEGER *Timeout)
+{
+    /* A relative timeout counts from the first call, not from each retry. */
+    LARGE_INTEGER abs, *to = Timeout;
+    if (Timeout && Timeout->QuadPart < 0) {
+        abs.QuadPart = (LONGLONG)(system_time_now() - (ULONGLONG)Timeout->QuadPart);
+        to = &abs;
+    }
+    xthread *xt = thread_current();
+    if (xt) xt->ethread.Tcb.Queue = Queue;
+    for (;;) {
+        pthread_mutex_lock(&g_disp_lock);
+        LIST_ENTRY *h = &Queue->EntryListHead, *e = h->Flink;
+        if (Queue->Header.SignalState > 0 && e != h) {
+            h->Flink = e->Flink;
+            e->Flink->Blink = h;
+            Queue->Header.SignalState--;
+            pthread_mutex_unlock(&g_disp_lock);
+            return e;
+        }
+        pthread_mutex_unlock(&g_disp_lock);
+        PVOID obj = Queue;
+        NTSTATUS st = wait_objects(1, &obj, 1, WaitMode, WaitMode == 1, to);
+        if (st == STATUS_TIMEOUT || st == STATUS_USER_APC)
+            return (LIST_ENTRY *)(ULONG_PTR)st;
+    }
+}
+
+/* Empties the queue: its first entry, the rest still linked to it as a
+   ring, or NULL when it was empty. */
+LIST_ENTRY *NTAPI KeRundownQueue(KQUEUE *Queue)
+{
+    pthread_mutex_lock(&g_disp_lock);
+    LIST_ENTRY *h = &Queue->EntryListHead, *first = h->Flink;
+    if (first == h) first = NULL;
+    else {
+        /* Unlink the head, leaving the entries as a ring. */
+        first->Blink = h->Blink;
+        h->Blink->Flink = first;
+        h->Flink = h->Blink = h;
+    }
+    Queue->Header.SignalState = 0;
+    pthread_mutex_unlock(&g_disp_lock);
+    return first;
+}
+
 /* ---- IRQL ------------------------------------------------------------- */
 
 #ifdef XBC_NATIVE
@@ -995,6 +1097,7 @@ static void *dpc_thread(void *arg)
     for (;;) {
         ULONGLONG now = mono_100ns();
         KeTickCount = (ULONG)((now - boot_mono) / 10000);
+        ke_update_clocks(now);
         if (g_apu_sample_counter) *g_apu_sample_counter = (ULONG)((now - boot_mono) * 48 / 10000);
 
         /* Expire timers. */
@@ -1108,6 +1211,7 @@ void timers_init(void)
     pthread_cond_init(&dpc_cond, &ca);
     pthread_condattr_destroy(&ca);
     boot_mono = mono_100ns();
+    ke_update_clocks(boot_mono);
     tsc_init();
     pthread_t t;
     pthread_create(&t, NULL, dpc_thread, NULL);
@@ -1219,4 +1323,65 @@ void NTAPI KeStallExecutionProcessor(ULONG MicroSeconds)
     struct timespec ts = { MicroSeconds / 1000000, (MicroSeconds % 1000000) * 1000 };
     cpu_block();
     nanosleep(&ts, NULL);
+}
+
+/* Time left on a timer, for NtQueryTimer: negative once it is due. */
+LONGLONG ke_timer_remaining(KTIMER *t)
+{
+    return (LONGLONG)(t->DueTime.QuadPart - mono_100ns());
+}
+
+/* ---- more thread and process controls ------------------------------- */
+
+extern void thread_resume(xthread *t);
+
+static xthread *xthread_of(KTHREAD *t)
+{
+    return (xthread *)((char *)t - offsetof(xthread, ethread.Tcb));
+}
+
+ULONG NTAPI KeSuspendThread(KTHREAD *Thread)
+{
+    return thread_suspend(xthread_of(Thread));
+}
+
+ULONG NTAPI KeResumeThread(KTHREAD *Thread)
+{
+    ULONG prev = (UCHAR)Thread->SuspendCount;
+    thread_resume(xthread_of(Thread));
+    return prev;
+}
+
+/* Alerts and resumes; there is no alerted state to set here, so a resume. */
+ULONG NTAPI KeAlertResumeThread(KTHREAD *Thread)
+{
+    return KeResumeThread(Thread);
+}
+
+/* Priority boosts don't exist on the host's scheduler. */
+void NTAPI KeBoostPriorityThread(KTHREAD *Thread, LONG Increment)
+{
+    (void)Thread; (void)Increment;
+}
+
+/* Sets a synchronization event (fast mutex release).  The waiter it wakes
+   isn't known here, so *Thread is left as it is when no one waits. */
+void NTAPI KeSetEventBoostPriority(KEVENT *Event, KTHREAD **Thread)
+{
+    (void)Thread;
+    KeSetEvent(Event, 0, 0);
+}
+
+/* The process's base priority (8 for a title); threads keep their own. */
+static LONG process_base_priority = 8;
+
+LONG NTAPI KeSetPriorityProcess(PVOID Process, LONG BasePriority)
+{
+    (void)Process;
+    return __atomic_exchange_n(&process_base_priority, BasePriority, __ATOMIC_SEQ_CST);
+}
+
+ULONG NTAPI KeIsExecutingDpc(void)
+{
+    return in_dpc_thread;
 }

@@ -485,6 +485,143 @@ LONGLONG FASTCALL ExInterlockedCompareExchange64(LONGLONG *Dest, LONGLONG *Excha
     return __sync_val_compare_and_swap(Dest, *Comperand, *Exchange);
 }
 
+/* ExInterlockedAddLargeInteger(Addend, Increment, Lock) (ex/i386/intrlock.asm):
+   adds and returns the old value; the spin lock argument is unused on the
+   Xbox. The increment is taken as two stack slots, as KeSetTimerEx does. */
+LONGLONG NTAPI ExInterlockedAddLargeInteger(LARGE_INTEGER *Addend, ULONG IncLow, LONG IncHigh, PVOID Lock)
+{
+    (void)Lock;
+    LONGLONG inc = (LONGLONG)(((ULONGLONG)(ULONG)IncHigh << 32) | IncLow);
+    return __sync_fetch_and_add(&Addend->QuadPart, inc);
+}
+
+/* ExfInterlocked{Insert,Remove}*List (ex/i386/intrlfst.asm): list edits
+   under a lock; inserts return the old first (last) entry, NULL when the
+   list was empty, and a remove returns NULL on an empty list. */
+static pthread_mutex_t list_lock = PTHREAD_MUTEX_INITIALIZER;
+
+LIST_ENTRY *FASTCALL ExfInterlockedInsertHeadList(LIST_ENTRY *Head, LIST_ENTRY *Entry)
+{
+    pthread_mutex_lock(&list_lock);
+    LIST_ENTRY *next = Head->Flink;
+    Entry->Flink = next;
+    Entry->Blink = Head;
+    Head->Flink = Entry;
+    next->Blink = Entry;
+    pthread_mutex_unlock(&list_lock);
+    return next == Head ? NULL : next;
+}
+
+LIST_ENTRY *FASTCALL ExfInterlockedInsertTailList(LIST_ENTRY *Head, LIST_ENTRY *Entry)
+{
+    pthread_mutex_lock(&list_lock);
+    LIST_ENTRY *prev = Head->Blink;
+    Entry->Flink = Head;
+    Entry->Blink = prev;
+    Head->Blink = Entry;
+    prev->Flink = Entry;
+    pthread_mutex_unlock(&list_lock);
+    return prev == Head ? NULL : prev;
+}
+
+LIST_ENTRY *FASTCALL ExfInterlockedRemoveHeadList(LIST_ENTRY *Head)
+{
+    pthread_mutex_lock(&list_lock);
+    LIST_ENTRY *e = Head->Flink;
+    if (e == Head) e = NULL;
+    else {
+        Head->Flink = e->Flink;
+        e->Flink->Blink = Head;
+    }
+    pthread_mutex_unlock(&list_lock);
+    return e;
+}
+
+/* Reader/writer locks (ex/rwlock.c, ex/i386/rwlocka.asm). LockCount starts
+   at -1 and counts holders plus waiters; the asm's cli/sti section is a
+   mutex here, and waiting happens outside it on the lock's own event or
+   semaphore, as there. */
+typedef struct {
+    LONG LockCount;
+    ULONG WritersWaitingCount;
+    ULONG ReadersWaitingCount;
+    ULONG ReadersEntryCount;
+    KEVENT WriterEvent;
+    KSEMAPHORE ReaderSemaphore;
+} ERWLOCK;
+
+extern void NTAPI KeInitializeEvent(KEVENT *, ULONG, BOOLEAN);
+extern LONG NTAPI KeSetEvent(KEVENT *, LONG, BOOLEAN);
+extern void NTAPI KeInitializeSemaphore(KSEMAPHORE *, LONG, LONG);
+extern LONG NTAPI KeReleaseSemaphore(KSEMAPHORE *, LONG, LONG, BOOLEAN);
+extern NTSTATUS NTAPI KeWaitForSingleObject(PVOID, ULONG, KPROCESSOR_MODE, BOOLEAN, LARGE_INTEGER *);
+
+static pthread_mutex_t rw_lock = PTHREAD_MUTEX_INITIALIZER;
+
+void NTAPI ExInitializeReadWriteLock(ERWLOCK *l)
+{
+    l->LockCount = -1;
+    l->WritersWaitingCount = 0;
+    l->ReadersWaitingCount = 0;
+    l->ReadersEntryCount = 0;
+    KeInitializeEvent(&l->WriterEvent, 1 /* SynchronizationEvent */, 0);
+    KeInitializeSemaphore(&l->ReaderSemaphore, 0, 0x7fffffff);
+}
+
+void NTAPI ExAcquireReadWriteLockExclusive(ERWLOCK *l)
+{
+    pthread_mutex_lock(&rw_lock);
+    if (++l->LockCount == 0) {
+        pthread_mutex_unlock(&rw_lock);
+        return;
+    }
+    l->WritersWaitingCount++;
+    pthread_mutex_unlock(&rw_lock);
+    KeWaitForSingleObject(&l->WriterEvent, 0, 0, 0, NULL);
+}
+
+void NTAPI ExAcquireReadWriteLockShared(ERWLOCK *l)
+{
+    pthread_mutex_lock(&rw_lock);
+    if (++l->LockCount == 0 || (l->ReadersEntryCount && !l->WritersWaitingCount)) {
+        /* Free, or held by readers with no writer queued: join them. */
+        l->ReadersEntryCount++;
+        pthread_mutex_unlock(&rw_lock);
+        return;
+    }
+    l->ReadersWaitingCount++;
+    pthread_mutex_unlock(&rw_lock);
+    KeWaitForSingleObject(&l->ReaderSemaphore, 0, 0, 0, NULL);
+}
+
+void NTAPI ExReleaseReadWriteLock(ERWLOCK *l)
+{
+    pthread_mutex_lock(&rw_lock);
+    if (--l->LockCount < 0) {
+        l->ReadersEntryCount = 0;
+        pthread_mutex_unlock(&rw_lock);
+        return;
+    }
+    if (l->ReadersEntryCount) {
+        /* A reader leaves; the last one hands over to a waiting writer. */
+        if (--l->ReadersEntryCount) {
+            pthread_mutex_unlock(&rw_lock);
+            return;
+        }
+    } else if (l->ReadersWaitingCount) {
+        /* A writer leaves with readers queued: let all of them in. */
+        ULONG n = l->ReadersWaitingCount;
+        l->ReadersEntryCount = n;
+        l->ReadersWaitingCount = 0;
+        pthread_mutex_unlock(&rw_lock);
+        KeReleaseSemaphore(&l->ReaderSemaphore, 1, (LONG)n, 0);
+        return;
+    }
+    l->WritersWaitingCount--;
+    pthread_mutex_unlock(&rw_lock);
+    KeSetEvent(&l->WriterEvent, 1, 0);
+}
+
 /* ---- crypto: save signatures (SHA-1 / HMAC) and RC4 ------------------ */
 
 /* The title's 116-byte SHA context holds this. */
