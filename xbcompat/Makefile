@@ -66,7 +66,7 @@ LDLIBS  += $(shell $(PKGCFG) --libs sdl2 $(GL)) -lpthread -lm
 
 LEAK    ?= ../xbox_leak_may_2020/xbox trunk/xbox
 KERNSRC  = src/kernel/ke.c src/kernel/ob.c src/kernel/io.c src/kernel/rtl.c src/kernel/misc.c src/kernel/xcrypt.c src/kernel/dvd.c \
-           src/kernel/kernel.c src/kernel/av.c src/kernel/reset.c src/kernel/exports.gen.c
+           src/kernel/kernel.c src/kernel/av.c src/kernel/reset.c src/kernel/irp.c src/kernel/exports.gen.c
 HLESRC   = src/hle/hle.c src/hle/d3d8.c src/hle/vsh.c src/hle/vsh_interp.c src/hle/psh.c src/hle/xinput.c src/hle/dsound.c
 ifeq ($(RENDERER),native)
 HLESRC := $(filter-out src/hle/d3d8.c src/hle/vsh.c src/hle/vsh_interp.c src/hle/psh.c,$(HLESRC)) src/renderer/client.c
@@ -164,6 +164,7 @@ $(BUILD)/%.o: %.c src/xbcompat.h src/xbox.h src/hle/hle.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+$(BUILD)/src/kernel/ob.o $(BUILD)/src/kernel/irp.o: src/kernel/driver.h
 $(BUILD)/src/hle/d3d8.o: src/hle/ff_vsh.h src/hle/dxt_decode.h src/hle/nv2a_shaders.h src/hle/async_draws.h
 
 $(BUILD)/glslcheck: tools/glslcheck.c

@@ -6,14 +6,15 @@ its native address (0x10000) inside a 32-bit Linux process and executed directly
 What differs from a PC is replaced underneath it:
 
 - **Kernel**: the 375 `xboxkrnl.exe` exports are listed from the leak's
-  `private/ntos/init/ntoskrnl.src`, and 321 of them are implemented. Threads,
+  `private/ntos/init/ntoskrnl.src`, and all of them are implemented. Threads,
   events, waits, queues and I/O completion ports, timers/DPCs, virtual and
   contiguous memory, the object manager, file I/O and Rtl are implemented on
   pthreads and the host filesystem (`src/kernel/`). Each guest thread gets a
-  KPCR at `fs:0` through an LDT entry. The other 54 are the driver model
-  (IRPs, device objects and queues, `IoCreateFile`), object directories, port
-  I/O, and debug/profiling exports. A title that imports one still loads; calling it
-  stops with a message that names it.
+  KPCR at `fs:0` through an LDT entry. The driver model is there too: device
+  objects whose drivers are title code, IRPs with completion routines and
+  start-I/O queues, object directories, and the kernel's own CD-ROM and disk
+  devices answering IRPs from the host files. Port I/O reads all ones and the
+  debug/profiling exports do nothing.
 - **Direct3D 8**: the XDK statically links D3D8 into every title. `tools/mksigs.py`
   builds signatures from the leak's own `d3d8.lib`/`d3d8d.lib`, and
   `tools/findsigs.py` finds those functions in the XBE. `src/hle/` patches

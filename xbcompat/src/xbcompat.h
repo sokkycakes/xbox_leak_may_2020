@@ -127,7 +127,8 @@ void thread_untrap_tsc(void);      /* back to the host's counter, before exec */
 /* ---- handles ---------------------------------------------------------- */
 
 enum obj_kind { OBJ_NONE, OBJ_EVENT, OBJ_SEMAPHORE, OBJ_MUTANT, OBJ_TIMER, OBJ_THREAD,
-                OBJ_FILE, OBJ_SYMLINK, OBJ_DEVICE, OBJ_IOCOMPLETION };
+                OBJ_FILE, OBJ_SYMLINK, OBJ_DEVICE, OBJ_IOCOMPLETION,
+                OBJ_OB };   /* made by ObCreateObject: body behind an OBJECT_HEADER (kernel/driver.h) */
 
 typedef struct xobject {
     enum obj_kind kind;
@@ -143,6 +144,9 @@ typedef struct xobject {
     xthread *thread;
     struct xfile *file;
     char *link_target;
+    PVOID body;                /* OBJ_OB: the object body */
+    PVOID ob_base;             /* OBJ_OB: the allocation holding header and body */
+    struct xobject *ob_next;   /* OBJ_OB: every live one, under ob.c's lock */
 } xobject;
 
 HANDLE handle_insert(xobject *obj);

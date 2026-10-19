@@ -825,6 +825,9 @@ static inline void set_irql(KIRQL v)
 KIRQL NTAPI KeGetCurrentIrql(void) { return get_irql(); }
 KIRQL FASTCALL KfRaiseIrql(KIRQL NewIrql) { KIRQL o = get_irql(); set_irql(NewIrql); return o; }
 void FASTCALL KfLowerIrql(KIRQL NewIrql) { set_irql(NewIrql); }
+/* KiLockDispatcherDatabase is KeRaiseIrqlToDpcLevel in guest code; with
+   no context switch to make here, unlocking is lowering the IRQL. */
+void FASTCALL KiUnlockDispatcherDatabase(KIRQL OldIrql) { KfLowerIrql(OldIrql); }
 KIRQL NTAPI KeRaiseIrqlToDpcLevel(void) { return KfRaiseIrql(2); }
 KIRQL NTAPI KeRaiseIrqlToSynchLevel(void) { return KfRaiseIrql(2); }
 
