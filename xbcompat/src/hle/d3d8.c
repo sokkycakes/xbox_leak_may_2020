@@ -1365,17 +1365,41 @@ static unsigned clear_serial;   /* bumped per Clear: see backbuffer_copy_texture
    last matched GL: the CPU wrote it through a pointer kept from an earlier
    lock, and the hardware would show that.  Splinter Cell presents for
    seconds without drawing while a level loads. */
+static bool frame_idle;   /* this Swap's frame had no draws or clears */
+
+/* Every byte of the back buffer's memory, for runs of frames with no draws:
+   the sampled hash can miss a few rows of progress bar. */
+static uint64_t backbuffer_memory_hash_full(void)
+{
+    ULONG w, h, pitch;
+    container_size((D3DPixelContainer *)d3d.backbuffer, &w, &h, &pitch);
+    if (h > (ULONG)d3d.height) h = d3d.height;
+    const uint64_t *q = (const uint64_t *)(d3d.backbuffer->Data | CONTIG_BASE);
+    uint64_t x = 0xcbf29ce484222325ull;
+    for (size_t i = 0, n = (size_t)pitch * h / 8; i < n; i++) x = (x ^ q[i]) * 0x100000001b3ull;
+    return x;
+}
+
 static void swap_cpu_backbuffer(void)
 {
     static unsigned long draws;
     static unsigned clears;
+    static bool was_idle;
+    static uint64_t idle_hash;
     bool idle = draws == draw_serial && clears == clear_serial;
     draws = draw_serial;
     clears = clear_serial;
+    /* Idle for the front buffer copy too, unless CPU writes go out. */
+    frame_idle = idle && !d3d.bb_cpu_dirty;
+    bool prev_idle = was_idle;
+    was_idle = false;
     if (!idle || d3d.bb_cpu_dirty || !d3d.backbuffer || d3d.backbuffer->Data != bbsync.data) return;
-    bool changed = backbuffer_memory_hash() != bbsync.hash;
+    uint64_t full = backbuffer_memory_hash_full();
+    bool changed = backbuffer_memory_hash() != bbsync.hash || (prev_idle && full != idle_hash);
+    was_idle = true;
+    idle_hash = full;
     TRACE_ALL("D3D: frame with no draws, back buffer memory %s", changed ? "written by the CPU, shown" : "unchanged");
-    if (changed) d3d.bb_cpu_dirty = true;
+    if (changed) d3d.bb_cpu_dirty = true, frame_idle = false;
 }
 static void NTAPI D3DDevice_Clear(ULONG Count, const D3DRECT *pRects, ULONG Flags, ULONG Color, float Z,
                                   ULONG Stencil)
@@ -6512,8 +6536,13 @@ static void trace_presented_colour(void)
     if (!px) return;
     backbuffer_read_begin(GL_COLOR_BUFFER_BIT);
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    while (glGetError() != GL_NO_ERROR) {}
     glReadPixels(0, 0, w, h, GL_BGRA, GL_UNSIGNED_BYTE, px);
+    GLenum err = glGetError();
+    GLint rfb = 0;
+    glGetIntegerv(0x8CAA /* GL_READ_FRAMEBUFFER_BINDING */, &rfb);
     backbuffer_read_end();
+    if (err) xlog("D3D: reading frame %lu back failed (GL error %#x, read framebuffer %d)", (unsigned long)d3d.frame, err, rfb);
     unsigned long long sum[3] = { 0, 0, 0 };
     for (size_t i = 0; i < (size_t)w * h; i++)
         for (int c = 0; c < 3; c++) sum[c] += px[i * 4 + c];
@@ -6527,6 +6556,10 @@ static void front_buffer_update(void)
 {
     trace_presented_colour();
     if (!front.used || !front.s || !window_fb.fbo || !window_fb.blit) return;
+    /* Nothing drawn: the frame on screen stays what it was.  Splinter Cell's
+       title picture sat through 38 such frames that read back black here, and
+       its cross-fade into the menu then faded from that. */
+    if (frame_idle && front.tex) return;
     ULONG w = d3d.width, h = d3d.height;
     if (!front.tex) {
         glGenTextures(1, &front.tex);
