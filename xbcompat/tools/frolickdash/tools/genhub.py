@@ -62,16 +62,17 @@ CAMERAS = {  # eye, view direction (-Z column), up (Y column), vertical fov in d
     "catalogfocus": ((-0.639461, 0.133682, 0.0213613), (0.0, -0.942063, -0.335435), (0.0, 0.335435, -0.942063), 80.1803),
 }
 ZOOM_DURATION = 0.75                           # the library carousel's zoom
-# The carousel camera (carousel.go carouselEyeTarget): low behind the library
-# pad, pitched up 23.3 degrees; Frolick's pad sits at y 0, so the offsets
-# are from the pad disc.
-CAROUSEL_EYE_OFFSET = (0.0, 0.033, 0.596)
-CAROUSEL_LOOK = (0.0, 0.430, -1.0)
-# The game belt (GameTap's, see art/gametap) lines the inside of the rail
-# ring as it lines GameTap's vault wall: its ring shares the rail's axis and
-# height, the regular covers sit this far in from the ribbon, and the
-# focused cover is on the far wall straight ahead of the carousel camera.
-BELT_INSET = 0.95
+# The carousel camera and the game belt, fitted to sokky's mockup
+# screenshot of the belt view (2026-10-19, 2560x1440): the camera from the
+# three pad labels (1.8 px rms), low behind the library pad and pitched up
+# 22.0 degrees, 0.19 ahead and 0.07 above carousel.go's carouselEyeTarget;
+# the belt (GameTap's, see art/gametap) from the cover corners, its ring
+# centred on the camera as GameTap shoots it, the regular covers at 0.97 of
+# the rail radius, the focused cover 4.7 ahead.
+CAROUSEL_EYE = (0.0, 0.1072, 0.6407)
+CAROUSEL_LOOK = (0.0, 0.4043, -1.0)
+BELT_CENTRE = (-0.084, 1.581, 0.894)           # the belt ring's axis, at the regular covers' height
+BELT_INSET = 0.97
 BELT_GAMES = 9                                 # placeholder count: carousel.go's carouselGames
 FOOTER_H, FOOTER_COLOR, FOOTER_ALPHA = 50, (0.68, 0.665493, 0.5712), 0.592157
 FOOTER_STOPS = [(0.0, 0.0), (0.387409, 0.647059), (0.939467, 1.0)]
@@ -112,8 +113,7 @@ def pad_world(name):
 def camera(name):
     """eye, direction, up, fov for a pad's view."""
     if name == "carousel":
-        eye = add(pad_world("library"), CAROUSEL_EYE_OFFSET)
-        return eye, norm(CAROUSEL_LOOK), (0.0, 1.0, 0.0), CAMERAS["library"][3]
+        return CAROUSEL_EYE, norm(CAROUSEL_LOOK), (0.0, 1.0, 0.0), CAMERAS["library"][3]
     if name.startswith("settings"):
         eye, d, up, fov = CAMERAS["catalog" + name[len("settings"):]]
         return mirrorx(eye), norm(mirrorx(d)), norm(mirrorx(up)), fov
@@ -458,9 +458,9 @@ DEF theHub Level
                 }
             ]
         }
-        // The library view: GameTap's game belt (art/gametap) on the rail
-        // ring, entered from the library pad with A, left and right step
-        // it, B leaves.
+        // The library view: GameTap's game belt (art/gametap) around the
+        // carousel camera, entered from the library pad with A, left and
+        // right step it, B leaves.
         DEF theBelt Belt
         {
             url "belt.bin"
@@ -703,7 +703,7 @@ def main():
     for name in ("catalogfocus", "settingsfocus", "carousel"):
         vals["vp_" + name] = viewpoint(name)
     vals["zoom_duration"] = ZOOM_DURATION
-    vals["belt_centre"] = v3(RAIL_ORIGIN)
+    vals["belt_centre"] = v3(BELT_CENTRE)
     vals["belt_radius"] = 0.5 * RAIL_SCALE[0] * BELT_INSET
     vals["belt_count"] = BELT_GAMES
     open(os.path.join(out, "default.xap"), "w").write(HUB % vals)
