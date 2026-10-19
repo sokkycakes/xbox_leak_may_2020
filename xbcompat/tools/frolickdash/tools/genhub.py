@@ -9,10 +9,10 @@ settings panel, derived from catalog.xui the way Frolick's RML settings
 panel is a relabelled catalog panel) and dashdir/pads/pad_*.xui (the floor
 pads, drawn as flat XUI scenes).
 
-The numbers come from Frolick's cmd/demo/pads.go: pad positions, the
-per-pad cameras, the panel placement (0.9 x 0.45 world units, between the
-camera and its target, shifted 0.256 toward the camera and 0.08 up) and the
-panels' right/up axes.  Frolick works in OpenGL's right-handed frame; the
+The numbers come from Frolick: pad positions and the per-pad cameras from
+cmd/demo/pads.go, the panels' world corners from running its pads.go +
+math3d, the backdrop gradient from backdrop.tres and the ring and dome
+from frolick_assets/main.tscn.  Frolick works in OpenGL's right-handed frame; the
 engine mirrors its world in z before the camera (CCamera::UpdateViewMatrix),
 so Transforms take Frolick's coordinates as they are and only the camera's
 rotation is built in the mirrored frame.
@@ -29,17 +29,29 @@ LOOKAT_Y = 0.3758
 CAM_CATALOG = ((-1.0784, 0.0988, 0.4766), (-0.5223, 0.4158, 0.0571))
 CAM_LIBRARY_OFFSET = (-0.0052, -0.2704, 0.7159)
 FOV = 1.3962634  # 80 degrees
-PANEL_W, PANEL_H = 0.9, 0.45
-PANEL_T, PANEL_TOWARD, PANEL_UP = 0.2, 0.256, 0.08
-# right and up axes of each panel (pads.go hubTargetR*/U*).  Those literals
-# have z pointing into the screen; here z is toward the viewer like the
-# cameras above, so their z is negated (the catalog panel, yawed -49.5
-# degrees, has its right axis at (0.65, 0, 0.76) and faces its camera).
-PANEL_AXES = {
-    "library": ((1.000, -0.000, 0.007), (-0.001, 0.997, 0.080)),
-    "catalog": ((0.641, -0.108, 0.760), (0.011, 0.991, 0.132)),
-    "settings": ((-0.645, 0.105, 0.757), (0.014, 0.992, -0.126)),
+# The hub panels are fixed quads in the world, not billboards.  Frolick's
+# math3d.NewFixedPanelFromRU stores its matrix transposed, so the side
+# panels come out as slightly skewed parallelograms, and that is the look.
+# These are the world corners of the quad the whole 1024x512 panel canvas
+# maps onto, computed by running Frolick's own pads.go + math3d: top left,
+# top right, bottom right, bottom left of the canvas.  The settings panel
+# samples its texture mirrored (flipTexX), so its canvas's left edge is at
+# the quad's right corners: its corners are listed from that edge.
+PANEL_CORNERS = {
+    "catalog": ((-1.1566, 0.5470, -0.0643), (-0.5797, 0.5518, 0.7032), (-0.4825, 0.1058, 0.6269), (-1.0594, 0.1009, -0.1406)),
+    "library": ((-0.4532, 0.5357, 0.6536), (0.4468, 0.5354, 0.6606), (0.4468, 0.0869, 0.5806), (-0.4532, 0.0871, 0.5737)),
+    "settings": ((0.5765, 0.5527, 0.6987), (1.1570, 0.5464, -0.0654), (1.0625, 0.1001, -0.1361), (0.4821, 0.1063, 0.6280)),
 }
+# The ribbon ring and the atmo dome (frolick_assets/main.tscn): Godot
+# CylinderMesh radius 0.5 height 0.02 scaled (11.8372, 90.7688, 11.8372);
+# SphereMesh hemisphere radius 0.891 height 1.09 scaled 7.82174.
+RAIL_CENTRE, RAIL_RADIUS, RAIL_HEIGHT = (-0.20688, 2.13097, -4.21954), 0.5 * 11.8372, 0.02 * 90.7688
+DOME_CENTRE, DOME_RADIUS, DOME_HEIGHT = (0, -2.12831, -4.93449), 0.891 * 7.82174, 0.545 * 7.82174
+# The screen backdrop (backdrop.tres): a radial gradient, centre low on
+# the screen, over 512x512 stretched to the whole screen.
+BACKDROP_FROM, BACKDROP_TO = (0.521368, 0.709402), (0.534188, 0.0)
+BACKDROP_STOPS = [(0.0, (0.42, 0.41104, 0.3528)), (0.32809, (0.29, 0.283813, 0.2436)),
+                  (0.665169, (0.201875, 0.198955, 0.179975)), (1.0, (0.13, 0.13, 0.13))]
 PAD_RADIUS = 0.42
 
 
@@ -130,21 +142,36 @@ def viewpoint(name):
 
 
 def panel(name):
-    """Transform translation/rotation text for the pad's panel.
+    """XuiPanel origin/axisX/axisY text: the canvas's top left corner, its
+    width vector and its height vector, in Frolick's coordinates (the engine
+    takes them as they are, see above)."""
+    tl, tr, br, bl = PANEL_CORNERS[name]
+    ax, ay = sub(tr, tl), sub(bl, tl)
+    return "origin %.4f %.4f %.4f\n                    axisX %.4f %.4f %.4f\n                    axisY %.4f %.4f %.4f" % (
+        tl + ax + ay)
 
-    Transforms take Frolick's coordinates as they are: the engine's z mirror
-    conjugates the rotation, so a proper rotation with rows (right, up,
-    right x up) in Frolick's frame is what to give."""
-    eye, target = camera(name)
-    centre = add(target, mul(sub(eye, target), PANEL_T))
-    centre = add(centre, mul(norm(sub(eye, centre)), PANEL_TOWARD))
-    centre = (centre[0], centre[1] + PANEL_UP, centre[2])
-    right, up = PANEL_AXES[name]
-    right = norm(right)
-    up = norm(sub(up, mul(right, dot(up, right))))  # make exactly perpendicular
-    ax, ay, az, angle = axis_angle(quat_from_rows(right, up, cross(right, up)))
-    return "translation %.4f %.4f %.4f\n            rotation %.4f %.4f %.4f %.4f" % (
-        centre[0], centre[1], centre[2], ax, ay, az, angle)
+
+def backdrop(path, size=512):
+    """Frolick's backdrop texture: the radial gradient of backdrop.tres,
+    rasterised the way the Go app does it (linear between stops)."""
+    from PIL import Image
+    (fx, fy), (tx, ty) = BACKDROP_FROM, BACKDROP_TO
+    radius = math.hypot(tx - fx, ty - fy)
+    im = Image.new("RGB", (size, size))
+    px = im.load()
+    for y in range(size):
+        v = 1 - y / size
+        for x in range(size):
+            u = x / size
+            t = min(1.0, math.hypot(u - fx, v - fy) / radius)
+            for i in range(len(BACKDROP_STOPS) - 1):
+                p0, c0 = BACKDROP_STOPS[i]
+                p1, c1 = BACKDROP_STOPS[i + 1]
+                if t <= p1:
+                    f = (t - p0) / (p1 - p0)
+                    px[x, y] = tuple(int((c0[k] + (c1[k] - c0[k]) * f) * 255 + 0.5) for k in range(3))
+                    break
+    im.save(path)
 
 
 def floor_pad(name, x, z):
@@ -263,6 +290,7 @@ NavigationInfo
 DEF theBackground Background
 {
     skyColor 0.039 0.039 0.059
+    backdrop XtxTexture { url "backdrop.xtx" }
 }
 
 // The library pad's camera loads first, so the dashboard opens on it.
@@ -300,6 +328,19 @@ DEF theHub Level
 {
     children
     [
+        // The atmo dome, multiplied over the backdrop, and the ribbon ring
+        // that circles the scene above and behind the pads.
+        Transform
+        {
+            translation %(dome_centre)s
+            children [ Dome { radius %(dome_radius).4f height %(dome_height).4f } ]
+        }
+        Transform
+        {
+            translation %(rail_centre)s
+            children [ Ribbon { radius %(rail_radius).4f height %(rail_height).4f } ]
+        }
+
         // The floor pads, in Frolick's arc.
         Transform
         {
@@ -317,10 +358,10 @@ DEF theHub Level
             children [ XuiPanel { url "pads/pad_settings.xui" width %(padw)g } ]
         }
 
-        // Each pad's panel floats in front of its camera.
+        // Each pad's panel is a fixed quad in front of its camera, faded
+        // in and out by its Transform.
         DEF xfCatalog Transform
         {
-            %(panel_catalog)s
             fade 0.55
             alpha 0
             children
@@ -329,14 +370,13 @@ DEF theHub Level
                 {
                     url "pads/catalog.xui"
                     skin "pads/frolick_skin.xui"
-                    width %(panelw)g
+                    %(panel_catalog)s
                     function OnPress(id) { OnPadPress(0, id); }
                 }
             ]
         }
         DEF xfLibrary Transform
         {
-            %(panel_library)s
             fade 0.55
             alpha 1
             children
@@ -345,14 +385,13 @@ DEF theHub Level
                 {
                     url "pads/library.xui"
                     skin "pads/frolick_skin.xui"
-                    width %(panelw)g
+                    %(panel_library)s
                     function OnPress(id) { OnPadPress(1, id); }
                 }
             ]
         }
         DEF xfSettings Transform
         {
-            %(panel_settings)s
             fade 0.55
             alpha 0
             children
@@ -361,8 +400,7 @@ DEF theHub Level
                 {
                     url "pads/settings.xui"
                     skin "pads/frolick_skin.xui"
-                    width %(panelw)g
-                    mirror true
+                    %(panel_settings)s
                     function OnPress(id) { OnPadPress(2, id); }
                 }
             ]
@@ -475,7 +513,10 @@ def main():
     out = sys.argv[1]
     pads = os.path.join(out, "pads")
     os.makedirs(pads, exist_ok=True)
-    vals = dict(fov=FOV, padw=PAD_RADIUS * 2, panelw=PANEL_W)
+    vals = dict(fov=FOV, padw=PAD_RADIUS * 2,
+                dome_centre="%.4f %.4f %.4f" % DOME_CENTRE, dome_radius=DOME_RADIUS, dome_height=DOME_HEIGHT,
+                rail_centre="%.4f %.4f %.4f" % RAIL_CENTRE, rail_radius=RAIL_RADIUS, rail_height=RAIL_HEIGHT)
+    backdrop(os.path.join(out, "backdrop.png"))
     for name, x, z, colour, accent in PADS:
         vals["vp_" + name] = viewpoint(name)
         vals["panel_" + name] = panel(name)

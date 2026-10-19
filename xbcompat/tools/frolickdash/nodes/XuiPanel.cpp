@@ -103,6 +103,13 @@ public:
 
 xui::Vec<CXuiResources::Cached> CXuiResources::c_cache;
 
+// The same file layer for the other Frolick nodes (textures at the XIP root).
+bool FrolickReadFile(const char* name, unsigned char** data, int* len)
+{
+    static CXuiResources res;
+    return res.read(name, data, len);
+}
+
 ////////////////////////////////////////////////////////////////////////////
 // D3D8 backend: linear textures, DrawIndexedVerticesUP, clipping by
 // geometry (the Xbox has no scissor).
@@ -116,12 +123,17 @@ public:
     struct Tex { LPDIRECT3DTEXTURE8 p; float us, vs; };
     xui::Vec<Tex> m_texes; // index + 1 is the xui::Texture handle
     float m_sx, m_sy, m_ox, m_oy; // scene pixels -> world units
+    // or, with m_basis, the canvas mapped onto world corners: origin is the
+    // canvas's top left, m_ax runs along its width, m_ay down its height
+    bool m_basis, m_flip;
+    D3DXVECTOR3 m_o, m_ax, m_ay;
+    float m_cw, m_ch;
     float m_alpha;
     bool m_clipping; float m_clip[4];
     xui::Vec<XUIVERTEX> m_verts;
     xui::Vec<unsigned short> m_idx;
 
-    CXuiBackend() : m_sx(1), m_sy(1), m_ox(0), m_oy(0), m_alpha(1), m_clipping(false) {}
+    CXuiBackend() : m_sx(1), m_sy(1), m_ox(0), m_oy(0), m_basis(false), m_flip(false), m_cw(1), m_ch(1), m_alpha(1), m_clipping(false) {}
 
     ~CXuiBackend()
     {
@@ -194,9 +206,20 @@ public:
     void emit(const xui::Vertex& v)
     {
         XUIVERTEX o;
-        o.x = (v.x - m_ox) * m_sx;
-        o.y = (v.y - m_oy) * m_sy;
-        o.z = 0.0f;
+        if (m_basis)
+        {
+            float fx = v.x / m_cw, fy = v.y / m_ch;
+            if (m_flip) fx = 1.0f - fx;
+            o.x = m_o.x + fx * m_ax.x + fy * m_ay.x;
+            o.y = m_o.y + fx * m_ax.y + fy * m_ay.y;
+            o.z = m_o.z + fx * m_ax.z + fy * m_ay.z;
+        }
+        else
+        {
+            o.x = (v.x - m_ox) * m_sx;
+            o.y = (v.y - m_oy) * m_sy;
+            o.z = 0.0f;
+        }
         float a = v.a * m_alpha;
         o.color = D3DCOLOR_COLORVALUE(v.r, v.g, v.b, a < 0 ? 0 : a > 1 ? 1 : a);
         o.u = v.u; o.v = v.v;
@@ -293,6 +316,11 @@ public:
     float m_height;     // or set it explicitly
     float m_alpha;
     bool m_mirror;      // flip in X (the settings pad)
+    // Or place the canvas on explicit world corners: origin is the canvas's
+    // top left, axisX its full width, axisY its full height downward (the
+    // way Frolick's hub panels are fixed, skewed quads in the world).  Set
+    // when axisX is not zero; width/height are ignored then.
+    D3DXVECTOR3 m_origin, m_axisX, m_axisY;
     float m_canvasWidth, m_canvasHeight; // read back by script
 
     void Advance(float nSeconds);
@@ -343,6 +371,9 @@ START_NODE_PROPS(CXuiPanel, CNode)
     NODE_PROP(pt_number, CXuiPanel, height)
     NODE_PROP(pt_number, CXuiPanel, alpha)
     NODE_PROP(pt_boolean, CXuiPanel, mirror)
+    NODE_PROP(pt_vec3, CXuiPanel, origin)
+    NODE_PROP(pt_vec3, CXuiPanel, axisX)
+    NODE_PROP(pt_vec3, CXuiPanel, axisY)
     NODE_PROP(pt_number, CXuiPanel, canvasWidth)
     NODE_PROP(pt_number, CXuiPanel, canvasHeight)
 END_NODE_PROPS()
@@ -363,6 +394,7 @@ END_NODE_FUN()
 CXuiPanel::CXuiPanel() :
     m_url(NULL), m_skin(NULL), m_font(NULL),
     m_width(0.9f), m_height(0.0f), m_alpha(1.0f), m_mirror(false),
+    m_origin(0.0f, 0.0f, 0.0f), m_axisX(0.0f, 0.0f, 0.0f), m_axisY(0.0f, 0.0f, 0.0f),
     m_canvasWidth(0.0f), m_canvasHeight(0.0f),
     m_bDirty(true), m_pRenderer(NULL), m_pRoot(NULL), m_pSkin(NULL), m_pScene(NULL), m_bFontLoaded(false)
 {
@@ -468,6 +500,10 @@ void CXuiPanel::Render()
     m_be.m_sy = -(m_height > 0 ? m_height / ch : s);
     m_be.m_ox = cw / 2;
     m_be.m_oy = ch / 2;
+    m_be.m_basis = m_axisX.x != 0.0f || m_axisX.y != 0.0f || m_axisX.z != 0.0f;
+    m_be.m_flip = m_mirror;
+    m_be.m_o = m_origin; m_be.m_ax = m_axisX; m_be.m_ay = m_axisY;
+    m_be.m_cw = cw; m_be.m_ch = ch;
     m_be.m_alpha = alpha;
 
     DWORD dwLighting;

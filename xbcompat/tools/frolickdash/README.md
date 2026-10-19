@@ -26,13 +26,21 @@ dashboard (`tools/dashbuild`), as its own `xboxdash.xbe` with its own
 - `nodes/CameraMover.cpp` – eased camera flights between Viewpoints
   (Frolick's 550 ms ease-in-out), since the engine only jumps or glides for
   a fixed second.
+- `nodes/FrolickWorld.cpp` – the rest of Frolick's world: `XtxTexture` (a
+  Texture node from a `.xtx`, for the Background's backdrop), `Ribbon` (the
+  open tube with the gradient-alpha material of Frolick's ring and pad
+  bumpers) and `Dome` (the "atmo" hemisphere, multiplied over the backdrop
+  with its slowly scrolling light stripes).
 - `dash/` – the data: `pads/*.xui` are Frolick's own panels (`catalog`,
   `library`, the `frolick_skin` FrolickTile visual, the carousel scenes);
-  `tools/genhub.py` generates `default.xap` (the hub: three floor pads in
-  Frolick's arc, a panel floating in front of each pad's camera, left/right
-  flights between pads once the panel's focus reaches its edge, as Frolick
-  does), `pads/settings.xui` (the catalog layout relabelled, like Frolick's
-  RML settings panel) and the floor pad scenes `pads/pad_*.xui`.
+  `tools/genhub.py` generates `default.xap` (the hub: the backdrop, the
+  dome and the ring from `frolick_assets/main.tscn`, three floor pads in
+  Frolick's arc, each pad's panel on the world corners Frolick's own
+  `pads.go` + `math3d` give it, left/right flights between pads once the
+  panel's focus reaches its edge, as Frolick does), `backdrop.png` (the
+  `backdrop.tres` radial gradient), `pads/settings.xui` (the catalog layout
+  relabelled, like Frolick's RML settings panel) and the floor pad scenes
+  `pads/pad_*.xui`.
 - `tools/mkassets.py` – packs the data into `default.xip`, converting PNGs
   to the raw `.xtx` textures the panel reads.  `tools/mkglyphs.py` makes
   stand-in button glyphs when Frolick's are not at hand (`GLYPHS=dir`).
@@ -50,7 +58,7 @@ pad; `XBCOMPAT_INPUT_SCRIPT="100:right 200:a"` presses buttons at frames.
 
 ## Not there yet
 
-The library carousel (A on the library pad), Frolick's pad textures,
-labels and the atmosphere dome (the hub's pads are drawn as flat shaded
-discs), and the woosh sound.  Frolick's `hero.png` and `cover.png` are
+The library carousel (A on the library pad), Frolick's pad textures and
+labels (the hub's pads are drawn as flat shaded discs), and the woosh
+sound.  Frolick's `hero.png` and `cover.png` are
 missing on the PC too.
