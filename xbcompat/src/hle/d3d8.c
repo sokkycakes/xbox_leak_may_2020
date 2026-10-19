@@ -5467,6 +5467,9 @@ static GLuint backbuffer_copy_texture(ULONG data, ULONG w, ULONG h)
         if (!slot[i].tex) glGenTextures(1, &slot[i].tex);
         glBindTexture(GL_TEXTURE_2D, slot[i].tex);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_BGRA, GL_UNSIGNED_BYTE, NULL);
+        /* One level: a stage with a mip filter (FocusBlur's blur passes)
+           would otherwise find the texture incomplete and sample black. */
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
         slot[i].data = data; slot[i].w = w; slot[i].h = h;
     }
     if (!fb) p_glGenFramebuffers(1, &fb);
@@ -5963,6 +5966,7 @@ static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
     if (d3d.target_depth) internal_release_surface(d3d.target_depth);
     d3d.target = target;
     d3d.target_depth = z;
+    d3d.scissors.count = 0;   /* via the library's SetViewport */
     sync_device_surfaces();
     }
     TRACE_ALL("D3D: render target %p (parent %p) depth %p", (void *)target, (void *)target->Parent, (void *)z);
