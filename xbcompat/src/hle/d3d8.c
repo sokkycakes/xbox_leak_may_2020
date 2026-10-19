@@ -9023,6 +9023,59 @@ static ULONG NTAPI D3D_GetAdapterModeCount2(UINT_ Adapter, ULONG Format)
     return Direct3D_GetAdapterModeCount(Adapter);
 }
 
+/* ---- more 5xxx entry points: internals LTCG titles call, renamed APIs -- */
+
+/* The library's texture constructor, which the Create*Texture APIs wrap
+   (d3dbase.cpp); LTCG titles call it themselves, isVolume a byte in dl. */
+static LONG NTAPI D3D_CreateTexture(UINT_ w, UINT_ h, UINT_ depth, UINT_ levels, ULONG usage, ULONG fmt,
+                                    ULONG cube, ULONG volume, D3DPixelContainer **pp)
+{
+    (void)usage;
+    bool is_cube = (cube & 0xFF) != 0, is_volume = (volume & 0xFF) != 0;
+    *pp = alloc_texture(w, is_cube ? w : h, is_volume ? depth : 1, levels, fmt, is_cube);
+    return *pp ? D3D_OK : 0x8007000E;
+}
+
+/* SetRenderTarget's body, with a flag word the host has no use for. */
+static void NTAPI D3D_CommonSetRenderTarget(D3DSurface *target, D3DSurface *z, ULONG unknown)
+{
+    (void)unknown;
+    D3DDevice_SetRenderTargetFast(target, z, 0);
+}
+
+static D3DSurface *NTAPI D3DDevice_GetPersistedSurface2(void)
+{
+    D3DSurface *s = NULL;
+    D3DDevice_GetPersistedSurface(&s);
+    return s;
+}
+
+/* The headers make Present a Swap(0); some libraries keep a body for it. */
+static LONG NTAPI D3DDevice_Present(const void *src, const void *dst, PVOID unused1, PVOID unused2)
+{
+    (void)src; (void)dst; (void)unused1; (void)unused2;
+    D3DDevice_Swap(0);
+    return D3D_OK;
+}
+
+/* SetVertexShaderConstantNotInline with every argument in a register
+   (slot in ebx, data in edx, dwords in eax): the same slot and dword count. */
+static void NTAPI SetVertexShaderConstantNotInline_LTCG(LONG Register, const float *data, ULONG dwords)
+{
+    SetVertexShaderConstantNotInline(Register, data, dwords);
+}
+
+static void FASTCALL D3D_BlockOnResourceFast(D3DResource *r) { D3D_BlockOnResource(r); }
+
+/* EnableOverlay with its argument folded in: which way is not known, and
+   UpdateOverlay decides what is shown. */
+static void NTAPI D3DDevice_EnableOverlay_LTCG(void)
+{
+    static bool said;
+    if (!said) xlog("D3D: EnableOverlay (LTCG, argument folded in) ignored");
+    said = true;
+}
+
 #include "async_draws.h"
 
 const struct hle_func d3d8_funcs[] = {
@@ -9174,6 +9227,20 @@ const struct hle_func d3d8_funcs[] = {
     F("_Lock3DSurface@20", Lock3DSurface),
     F("_Direct3D_CreateDevice_LTCG@12", Direct3D_CreateDevice_LTCG),
     F("_D3D_CommonSetMultiSampleModeAndScale@8", D3D_Nop8),
+    F("@D3D_CommonSetMultiSampleModeAndScale@8", D3D_FastNop),
+    F("@D3D_BlockOnResource@4", D3D_BlockOnResourceFast),
+    F("_D3D_CreateTexture@36", D3D_CreateTexture),
+    F("_D3D_CreateStandAloneSurface@16", D3DDevice_CreateImageSurface),
+    F("_D3D_CommonSetRenderTarget@12", D3D_CommonSetRenderTarget),
+    F("_D3DDevice_GetPersistedSurface2@0", D3DDevice_GetPersistedSurface2),
+    F("_D3DDevice_Present@16", D3DDevice_Present),
+    F("_D3DDevice_BeginStateBig@4", D3DDevice_BeginPushLTCG),
+    F("_D3DDevice_SetTextureStageStateNotInline2@12", D3DDevice_SetTextureStageStateNotInline),
+    F("_D3D_CDevice_SetTextureStageStateNotInline@12", D3DDevice_SetTextureStageStateNotInline),
+    F("_D3DDevice_SetVertexShaderConstantNotInline_LTCG@12", SetVertexShaderConstantNotInline_LTCG),
+    F("_D3DDevice_EnableOverlay_LTCG@0", D3DDevice_EnableOverlay_LTCG),
+    F("_D3DDevice_SetSoftDisplayFilter_LTCG@0", D3D_Nop0),
+    F("_IDirect3DVertexBuffer8_Lock@20", D3DVertexBuffer_Lock),
     F("_D3D_KickOffAndWaitForIdle2@8", D3D_Nop8),
     F("@D3DDevice_SetVertexShaderConstantNotInline@12", SetVertexShaderConstantNotInline),
     F("@D3DDevice_SetVertexShaderConstant1@8", SetVertexShaderConstant1),

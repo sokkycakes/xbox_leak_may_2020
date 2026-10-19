@@ -3222,12 +3222,23 @@ const struct hle_func dsound_funcs[] = {
     F("_IDirectSoundStream_Use3DVoiceData@8", Voice_Use3DVoiceData),
     F("_IDirectSoundStream_Set3DVoiceData@8", Voice_Use3DVoiceData),
     F("_IDirectSoundStream_GetVoiceProperties@8", Voice_GetVoiceProperties),
+    /* ... and the C++ methods behind those thunks, which XACT and LTCG
+       titles call themselves */
+    VOICE_CPP("Use3DVoiceData", "JPAU_DS3DVOICEDATA@@@Z", Voice_Use3DVoiceData),
+    VOICE_CPP("Set3DVoiceData", "JPBU_DS3DVOICEDATA@@@Z", Voice_Use3DVoiceData),
+    VOICE_CPP("GetVoiceProperties", "JPAU_DSVOICEPROPS@@@Z", Voice_GetVoiceProperties),
     F("_IDirectSound3DCalculator_Calculate3D@8", Calc_Calculate3D),
     F("_IDirectSound_SynchPlayback@4", DS_SynchPlayback),
     F("_CDirectSound_SynchPlayback@4", DS_SynchPlayback),
+    F("?SynchPlayback@CDirectSound@DirectSound@@QAGJXZ", DS_SynchPlayback),
     F("_IDirectSound3DCalculator_GetVoiceData@20", Calc_GetVoiceData),
     F("_IDirectSound3DCalculator_GetMixBinVolumes@12", Calc_GetMixBinVolumes),
     F("_IDirectSound3DCalculator_GetPanData@16", Calc_GetPanData),
+    /* the calculator's static members, under their class name */
+    F("?Calculate3D@CDirectSound3DCalculator@DirectSound@@SGJKPAU_DS3DVOICEDATA@@@Z", Calc_Calculate3D),
+    F("?GetVoiceData@CDirectSound3DCalculator@DirectSound@@SGJKKPAX00@Z", Calc_GetVoiceData),
+    F("?GetMixBinVolumes@CDirectSound3DCalculator@DirectSound@@SGJKKPAX@Z", Calc_GetMixBinVolumes),
+    F("?GetPanData@CDirectSound3DCalculator@DirectSound@@SGJKKKPAX@Z", Calc_GetPanData),
     F("_IDirectSoundBuffer_Pause@8", Buf_Pause),
     F("?Pause@CDirectSoundBuffer@DirectSound@@QAGJK@Z", Buf_Pause),
     F("_IDirectSoundBuffer_PauseEx@16", Buf_PauseEx),
