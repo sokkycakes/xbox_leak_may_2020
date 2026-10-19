@@ -709,10 +709,10 @@ void CXuiPanel::Reload()
 //   DEF theBelt Belt
 //   {
 //       url "belt.bin"  card "pads/carousel_card.xui"  focus "pads/carousel_focus.xui"
-//       eye x y z  target x y z     the carousel camera: GameTap's ring
-//                                   centre lands on eye, the belt is laid
-//                                   out in that camera's frame
-//       cardWidth 0.58              the focused cover's world width
+//       eye x y z                   the carousel camera, for the draw order
+//       centre x y z  radius r      the ring the belt lines: its axis at
+//                                   the regular covers' height, and their
+//                                   radius; the focused cover faces +z
 //       count 9                     games on the belt
 //       function OnStep() { ... }   a step finished; GetSelected() tells which
 //   }
@@ -732,8 +732,9 @@ public:
     TCHAR* m_focus;
     TCHAR* m_skin;
     TCHAR* m_font;
-    D3DXVECTOR3 m_eye, m_target;
-    float m_cardWidth;
+    D3DXVECTOR3 m_eye;      // the carousel camera, for the draw order
+    D3DXVECTOR3 m_centre;   // the belt ring's axis, at the regular covers' height
+    float m_radius;         // the regular covers' ring radius in the world
     float m_stepDuration;   // 20 frames at 30 fps, speed 2.5
     float m_zoomDuration;   // Frolick's zoom into the carousel
     int m_count;
@@ -762,6 +763,7 @@ protected:
     BELTHDR m_hdr;
     D3DXVECTOR3 m_ring;
     float m_nearW, m_nearH;
+    float m_circleX, m_circleZ, m_circleR, m_coverY;
     float* m_locals;            // nVerts * 5
     unsigned short* m_indices;
     float* m_poses;             // nNodes * nFrames * 16
@@ -794,8 +796,8 @@ START_NODE_PROPS(CBelt, CNode)
     NODE_PROP(pt_string, CBelt, skin)
     NODE_PROP(pt_string, CBelt, font)
     NODE_PROP(pt_vec3, CBelt, eye)
-    NODE_PROP(pt_vec3, CBelt, target)
-    NODE_PROP(pt_number, CBelt, cardWidth)
+    NODE_PROP(pt_vec3, CBelt, centre)
+    NODE_PROP(pt_number, CBelt, radius)
     NODE_PROP(pt_number, CBelt, stepDuration)
     NODE_PROP(pt_number, CBelt, zoomDuration)
     NODE_PROP(pt_integer, CBelt, count)
@@ -812,9 +814,10 @@ END_NODE_FUN()
 
 CBelt::CBelt() :
     m_url(NULL), m_card(NULL), m_focus(NULL), m_skin(NULL), m_font(NULL),
-    m_eye(0.0f, 0.0f, 1.0f), m_target(0.0f, 0.0f, 0.0f),
-    m_cardWidth(0.58f), m_stepDuration(20.0f / 30.0f / 2.5f), m_zoomDuration(0.75f), m_count(0),
-    m_ring(0.0f, 0.0f, 0.0f), m_nearW(1.0f), m_nearH(1.0f), m_locals(NULL), m_indices(NULL), m_poses(NULL),
+    m_eye(0.0f, 0.0f, 1.0f), m_centre(0.0f, 0.0f, 0.0f),
+    m_radius(1.0f), m_stepDuration(20.0f / 30.0f / 2.5f), m_zoomDuration(0.75f), m_count(0),
+    m_ring(0.0f, 0.0f, 0.0f), m_nearW(1.0f), m_nearH(1.0f),
+    m_circleX(0.0f), m_circleZ(0.0f), m_circleR(1.0f), m_coverY(0.0f), m_locals(NULL), m_indices(NULL), m_poses(NULL),
     m_pRenderer(NULL), m_pCardRoot(NULL), m_pFocusRoot(NULL), m_pSkinRoot(NULL), m_pCard(NULL), m_pFocus(NULL),
     m_bDirty(true), m_bFontLoaded(false),
     m_selected(0), m_open(false), m_zoomDir(0), m_zoom(0.0f), m_stepDir(0), m_stepStart(0.0), m_bStepDone(false)
@@ -858,7 +861,7 @@ bool CBelt::LoadData()
     ToAnsi(sz, m_url, MAX_PATH);
     unsigned char* data = NULL;
     int len = 0;
-    if (!FrolickReadFile(sz, &data, &len) || len < (int)sizeof (BELTHDR) + 20 || memcmp(data, "BLT1", 4) != 0)
+    if (!FrolickReadFile(sz, &data, &len) || len < (int)sizeof (BELTHDR) + 36 || memcmp(data, "BLT2", 4) != 0)
     {
         TRACE(_T("Belt: cannot read %s\n"), m_url);
         delete [] data;
@@ -868,7 +871,8 @@ bool CBelt::LoadData()
     const float* f = (const float*)(data + sizeof m_hdr);
     m_ring = D3DXVECTOR3(f[0], f[1], f[2]);
     m_nearW = f[3]; m_nearH = f[4];
-    f += 5;
+    m_circleX = f[5]; m_circleZ = f[6]; m_circleR = f[7]; m_coverY = f[8];
+    f += 9;
     int nl = m_hdr.nVerts * 5;
     m_locals = new float[nl];
     CopyMemory(m_locals, f, nl * sizeof (float));
@@ -1017,29 +1021,26 @@ void CBelt::Pose(int node, float frame, D3DXMATRIX* pm)
         o[k] = a[k] + (b[k] - a[k]) * t;
 }
 
-// The cover's 7x6 grid in Frolick's world: GameTap's ring centre (its
-// camera) lands on the carousel eye, GameTap's -x (its view) on the camera's
-// forward, y on its up and -z on its right, scaled so the focused cover is
-// cardWidth wide.  grow > 1 pushes the belt out from the eye (the fly-in).
+// The cover's 7x6 grid in Frolick's world.  GameTap's belt is a horizontal
+// ring of covers facing its axis, the focused one on the -x side pulled in
+// toward the viewer: that ring's axis lands on centre, the regular covers'
+// circle is scaled to radius, GameTap's -x (toward the focused cover) turns
+// to -z, y stays up and -z (GameTap's right) turns to +x, so the belt lines
+// the rail ring with the focused cover straight ahead of the carousel
+// camera.  grow > 1 spreads the ring out from its axis (the fly-in).
 void CBelt::CoverGrid(int node, float frame, float grow, D3DXVECTOR3 grid[6][7])
 {
     D3DXMATRIX m;
     Pose(node, frame, &m);
-    D3DXVECTOR3 fwd = m_target - m_eye;
-    D3DXVec3Normalize(&fwd, &fwd);
-    D3DXVECTOR3 worldUp(0.0f, 1.0f, 0.0f), right, up;
-    D3DXVec3Cross(&right, &fwd, &worldUp);
-    D3DXVec3Normalize(&right, &right);
-    D3DXVec3Cross(&up, &right, &fwd);
-    float scale = m_cardWidth / m_nearW * grow;
+    float scale = m_radius / m_circleR * grow;
     for (int col = 0; col < 7; col++)
         for (int row = 0; row < 6; row++)
         {
             const float* l = m_locals + (col * 6 + row) * 5;
             D3DXVECTOR3 p(l[0], l[1], l[2]), q;
             D3DXVec3TransformCoord(&q, &p, &m);
-            D3DXVECTOR3 rel = q - m_ring;
-            grid[5 - row][col] = m_eye + (fwd * -rel.x + up * rel.y + right * -rel.z) * scale;
+            float gx = q.x - m_circleX, gy = q.y - m_coverY, gz = q.z - m_circleZ;
+            grid[5 - row][col] = m_centre + D3DXVECTOR3(-gz, gy, gx) * scale;
         }
 }
 

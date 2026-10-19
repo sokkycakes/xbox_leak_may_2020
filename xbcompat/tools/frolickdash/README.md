@@ -59,9 +59,13 @@ The library carousel is GameTap's game belt (`art/gametap/`: the decoded
 packs the 13 cover nodes' frame 1000..1020 poses and the cover mesh into
 `belt.bin`; the `Belt` node in `nodes/XuiPanel.cpp` drapes Frolick's
 `carousel_card.xui` over each cover's 7x6 grid and the `carousel_focus.xui`
-overlay over the focused one, laid out in the carousel camera's frame
-(carousel.go's carouselEyeTarget) with GameTap's ring centre on the eye and
-the focused cover 0.58 wide.  A on the library panel flies in (750 ms, the
+overlay over the focused one.  The belt lines the inside of the rail ring
+as it lines GameTap's vault wall: its ring shares the rail's axis and
+height, the regular covers sit at 0.95 of the ribbon's radius facing the
+axis, and the focused cover is on the far wall straight ahead of the
+carousel camera, which sits on the ring's axis like GameTap's (50 of
+GameTap's units below the covers, looking level); the hub pads are behind it.
+A on the library panel flies in (750 ms, the
 panel fades, the covers fade in from further out); left and right play
 Belt_Right / Belt_Left (20 frames at speed 2.5, 0.267 s, input dropped while
 a step plays, as the client's lock does); B flies back.  The game list is

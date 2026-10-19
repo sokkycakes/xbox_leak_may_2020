@@ -11,10 +11,14 @@ vertex grid in its bone's space (mesh position times the bone's inverse
 bind matrix), so the file carries it once.
 
 belt.bin, little-endian:
-  "BLT1", int32 nodes (13), frames (21), verts (42), indices (180),
+  "BLT2", int32 nodes (13), frames (21), verts (42), indices (180),
   grid columns (7), grid rows (6)
   float32 ring centre x y z     where the covers face: GameTap's camera
   float32 near width, height    the focused cover (gsb_6shape) at frame 1000
+  float32 circle x, z, radius   the circle the twelve regular covers sit on
+                                at frame 1000 (least squares in the xz
+                                plane; the focused cover is pulled in)
+  float32 cover height          the regular covers' centre y
   verts * (x y z u v) float32   the cover grid: vertex col*6+row, row 0 at
                                 the bottom (v 0.83), row 5 at the top (v 0)
   indices * uint16              60 triangles
@@ -81,8 +85,37 @@ def main(src, out):
     P = [w(l) for l in locals_]
     near_w, near_h = length(sub(P[36], P[0])), length(sub(P[5], P[0]))
 
-    blob = b"BLT1" + struct.pack("<6i", len(nodes), nframes, nverts, len(indices), 7, 6)
-    blob += struct.pack("<5f", ring[0], ring[1], ring[2], near_w, near_h)
+    # The ring the regular covers sit on: a least-squares circle through
+    # their centres in the xz plane (x^2 + z^2 + a x + b z + c = 0), and the
+    # height they sit at.
+    cs = []
+    for i, n in enumerate(nodes):
+        if i == 6:
+            continue
+        w = mat(n["samples"][0]["local"]["worldMatrix"])
+        P = [w(l) for l in locals_]
+        cs.append(tuple(sum(p[k] for p in P) / nverts for k in range(3)))
+    N = [[0.0] * 4 for _ in range(3)]
+    for x, y, z in cs:
+        row, rhs = (x, z, 1.0), -(x * x + z * z)
+        for i in range(3):
+            for j in range(3):
+                N[i][j] += row[i] * row[j]
+            N[i][3] += row[i] * rhs
+    for i in range(3):
+        piv = max(range(i, 3), key=lambda r: abs(N[r][i]))
+        N[i], N[piv] = N[piv], N[i]
+        for r in range(3):
+            if r != i:
+                f = N[r][i] / N[i][i]
+                N[r] = [a - f * c for a, c in zip(N[r], N[i])]
+    a, b, c = [N[i][3] / N[i][i] for i in range(3)]
+    cx, cz = -a / 2, -b / 2
+    radius = math.sqrt(cx * cx + cz * cz - c)
+    cover_y = sum(p[1] for p in cs) / len(cs)
+
+    blob = b"BLT2" + struct.pack("<6i", len(nodes), nframes, nverts, len(indices), 7, 6)
+    blob += struct.pack("<9f", ring[0], ring[1], ring[2], near_w, near_h, cx, cz, radius, cover_y)
     for i, (x, y, z) in enumerate(locals_):
         blob += struct.pack("<5f", x, y, z, uvs[i][0], uvs[i][1])
     blob += struct.pack("<%dH" % len(indices), *indices)
@@ -91,8 +124,8 @@ def main(src, out):
         for s in n["samples"]:
             blob += struct.pack("<16f", *s["local"]["worldMatrix"])
     open(out, "wb").write(blob)
-    print("belt: %d covers, %d frames, ring centre (%.1f, %.1f, %.1f), focused cover %.0f x %.0f, %d bytes" % (
-        len(nodes), nframes, ring[0], ring[1], ring[2], near_w, near_h, len(blob)))
+    print("belt: %d covers, %d frames, facing (%.1f, %.1f, %.1f), circle (%.1f, %.1f) r %.1f at y %.1f, focused cover %.0f x %.0f, %d bytes" % (
+        len(nodes), nframes, ring[0], ring[1], ring[2], cx, cz, radius, cover_y, near_w, near_h, len(blob)))
 
 
 if __name__ == "__main__":

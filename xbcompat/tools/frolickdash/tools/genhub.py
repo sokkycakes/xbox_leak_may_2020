@@ -64,11 +64,22 @@ CAMERAS = {  # eye, view direction (-Z column), up (Y column), vertical fov in d
 ZOOM_DURATION = 0.75                           # the library carousel's zoom
 # The carousel camera (carousel.go carouselEyeTarget): low behind the library
 # pad, pitched up 23.3 degrees; Frolick's pad sits at y 0, so the offsets
-# are from the pad disc.  The belt (GameTap's, see art/gametap) is laid out
-# in this camera's frame with its ring centre on the eye.
+# are from the pad disc.
 CAROUSEL_EYE_OFFSET = (0.0, 0.033, 0.596)
 CAROUSEL_LOOK = (0.0, 0.430, -1.0)
-CAROUSEL_CARD_W = 0.58                         # carouselCardW
+# The belt (GameTap's, see art/gametap) lines the inside of the rail ring:
+# its ring shares the rail's axis and height, the regular covers sit this
+# far in from the ribbon, and the focused cover is straight ahead of the
+# carousel camera.
+BELT_INSET = 0.95
+# GameTap views the belt from the ring's axis, 50 units below the covers'
+# centre line (mkbelt.py prints the ring: radius 460.5, the covers facing
+# (-398, 69, 8) at y 119); the carousel camera goes there, looking level
+# at the focused cover (BELT_CAMERA_ON_AXIS); off, the carousel camera is
+# Frolick's own low one behind the library pad, and the belt is far away on
+# the ring's far wall.
+GAMETAP_RING_R, GAMETAP_CAMERA_DROP = 460.5, 69.0 - 119.0
+BELT_CAMERA_ON_AXIS = True
 CAROUSEL_GAMES = ["Game Title", "Stiletto Swift", "Game Title 3", "Game Title 4", "Game Title 5",
                   "Game Title 6", "Game Title 7", "Game Title 8", "Game Title 9"]  # carouselGames
 FOOTER_H, FOOTER_COLOR, FOOTER_ALPHA = 50, (0.68, 0.665493, 0.5712), 0.592157
@@ -110,6 +121,10 @@ def pad_world(name):
 def camera(name):
     """eye, direction, up, fov for a pad's view."""
     if name == "carousel":
+        if BELT_CAMERA_ON_AXIS:
+            s = 0.5 * RAIL_SCALE[0] * BELT_INSET / GAMETAP_RING_R
+            eye = add(RAIL_ORIGIN, (0.0, GAMETAP_CAMERA_DROP * s, 0.0))
+            return eye, (0.0, 0.0, -1.0), (0.0, 1.0, 0.0), CAMERAS["library"][3]
         eye = add(pad_world("library"), CAROUSEL_EYE_OFFSET)
         return eye, norm(CAROUSEL_LOOK), (0.0, 1.0, 0.0), CAMERAS["library"][3]
     if name.startswith("settings"):
@@ -465,8 +480,8 @@ DEF theHub Level
             focus "pads/carousel_focus.xui"
             skin "pads/frolick_skin.xui"
             eye %(belt_eye)s
-            target %(belt_target)s
-            cardWidth %(belt_card_w).3f
+            centre %(belt_centre)s
+            radius %(belt_radius).5f
             zoomDuration %(zoom_duration)s
             count %(belt_count)d
             function OnStep() { theBelt.SetTitle(GameName(theBelt.GetSelected())); }
@@ -708,8 +723,8 @@ def main():
     vals["zoom_duration"] = ZOOM_DURATION
     eye, d, up, fov = camera("carousel")
     vals["belt_eye"] = v3(eye)
-    vals["belt_target"] = v3(add(eye, d))
-    vals["belt_card_w"] = CAROUSEL_CARD_W
+    vals["belt_centre"] = v3(RAIL_ORIGIN)
+    vals["belt_radius"] = 0.5 * RAIL_SCALE[0] * BELT_INSET
     vals["belt_count"] = len(CAROUSEL_GAMES)
     names = ["// carousel.go carouselGames, until a real game list exists", "function GameName(i)", "{"]
     for i, g in enumerate(CAROUSEL_GAMES):
