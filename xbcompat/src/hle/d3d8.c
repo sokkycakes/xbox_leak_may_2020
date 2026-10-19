@@ -3554,9 +3554,17 @@ static void vs_set_program(ULONG h)
 
 static void NTAPI D3DDevice_SelectVertexShader(ULONG handle, ULONG address)
 {
-    /* The program at `address` in program memory runs with the handle's
-       declaration; with no handle, with the current shader's. */
-    ULONG layout_h = handle ? handle : vs_input_handle ? vs_program : d3d.vertex_shader;
+    /* With a handle, its own program runs (the program it was loaded with
+       is at `address`); xbcompat's program memory copy is not exact enough
+       to trust over it: Splinter Cell's models vanished when the program
+       was read back from there.  With no handle, the program at `address`
+       runs with the current shader's declaration. */
+    if (handle) {
+        vs_set_program(handle);
+        if (d3d.recording) pb_record(OP_VERTEX_SHADER, &d3d.vertex_shader, 4);
+        return;
+    }
+    ULONG layout_h = vs_input_handle ? vs_program : d3d.vertex_shader;
     if (layout_h & 1) {
         vshader *layout = (vshader *)(layout_h & ~1u);
         ULONG user = layout->user_handle ? layout->user_handle : layout_h;
