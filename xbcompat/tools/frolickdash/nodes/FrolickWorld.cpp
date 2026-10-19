@@ -48,34 +48,48 @@ END_NODE_PROPS()
 
 // Loads a .xtx into a swizzled A8R8G8B8 texture; the same name hands back
 // the same texture (AddRef'd), since the pads share their art.
-static LPDIRECT3DTEXTURE8 LoadXtx(const char* szName, int* pWidth, int* pHeight)
+// D3DX rounds the texture up to a power of two (swizzled textures must
+// be), so the image fills only the top left w x h texels of it; pTexWidth
+// and pTexHeight get the texture's real size for the caller's UVs.
+static LPDIRECT3DTEXTURE8 LoadXtx(const char* szName, int* pWidth, int* pHeight, int* pTexWidth = NULL, int* pTexHeight = NULL)
 {
-    struct Cached { char* name; LPDIRECT3DTEXTURE8 p; int w, h; };
+    struct Cached { char* name; LPDIRECT3DTEXTURE8 p; int w, h, tw, th; };
     static Cached c_rg[32];
     static int c_n;
     for (int i = 0; i < c_n; i++)
         if (_stricmp(c_rg[i].name, szName) == 0)
         {
             *pWidth = c_rg[i].w; *pHeight = c_rg[i].h;
+            if (pTexWidth) *pTexWidth = c_rg[i].tw;
+            if (pTexHeight) *pTexHeight = c_rg[i].th;
             if (c_rg[i].p) c_rg[i].p->AddRef();
             return c_rg[i].p;
         }
     LPDIRECT3DTEXTURE8 p = NULL;
-    int w = 0, h = 0;
+    int w = 0, h = 0, tw = 0, th = 0;
     unsigned char* data = NULL;
     int len = 0;
     if (FrolickReadFile(szName, &data, &len) && len >= 12 && memcmp(data, "XTX1", 4) == 0)
     {
         w = *(int*)(data + 4); h = *(int*)(data + 8);
+        for (tw = 1; tw < w; tw <<= 1) ;
+        for (th = 1; th < h; th <<= 1) ;
         if (len >= 12 + w * h * 4 &&
-            SUCCEEDED(D3DXCreateTexture(XAppGetD3DDev(), w, h, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &p)))
+            SUCCEEDED(D3DXCreateTexture(XAppGetD3DDev(), tw, th, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &p)))
         {
+            // the image in the top left of a power-of-two texture, the
+            // rest transparent
+            unsigned char* padded = new unsigned char[tw * th * 4];
+            memset(padded, 0, tw * th * 4);
+            for (int y = 0; y < h; y++)
+                memcpy(padded + y * tw * 4, data + 12 + y * w * 4, w * 4);
             D3DLOCKED_RECT lr;
             if (SUCCEEDED(p->LockRect(0, &lr, NULL, 0)))
             {
-                XGSwizzleRect(data + 12, w * 4, NULL, lr.pBits, w, h, NULL, 4);
+                XGSwizzleRect(padded, tw * 4, NULL, lr.pBits, tw, th, NULL, 4);
                 p->UnlockRect(0);
             }
+            delete [] padded;
         }
     }
     else
@@ -85,11 +99,13 @@ static LPDIRECT3DTEXTURE8 LoadXtx(const char* szName, int* pWidth, int* pHeight)
     {
         c_rg[c_n].name = new char[strlen(szName) + 1];
         strcpy(c_rg[c_n].name, szName);
-        c_rg[c_n].p = p; c_rg[c_n].w = w; c_rg[c_n].h = h;
+        c_rg[c_n].p = p; c_rg[c_n].w = w; c_rg[c_n].h = h; c_rg[c_n].tw = tw; c_rg[c_n].th = th;
         c_n++;
         if (p) p->AddRef();
     }
     *pWidth = w; *pHeight = h;
+    if (pTexWidth) *pTexWidth = tw;
+    if (pTexHeight) *pTexHeight = th;
     return p;
 }
 
@@ -369,7 +385,7 @@ class CSprite : public CNode
     DECLARE_NODE(CSprite, CNode)
 public:
     CSprite() : m_url(NULL), m_pixelSize(0.001f), m_color(1.0f, 1.0f, 1.0f), m_alpha(1.0f), m_depthTest(true),
-                m_pTexture(NULL), m_w(0), m_h(0), m_bDirty(true) {}
+                m_pTexture(NULL), m_w(0), m_h(0), m_tw(0), m_th(0), m_bDirty(true) {}
     ~CSprite() { delete [] m_url; if (m_pTexture) m_pTexture->Release(); }
 
     TCHAR* m_url;
@@ -385,7 +401,7 @@ public:
 
 protected:
     LPDIRECT3DTEXTURE8 m_pTexture;
-    int m_w, m_h;
+    int m_w, m_h, m_tw, m_th;
     bool m_bDirty;
 };
 
@@ -409,7 +425,7 @@ void CSprite::Render()
         {
             char szName[MAX_PATH];
             Ansi(szName, m_url, sizeof szName);
-            m_pTexture = LoadXtx(szName, &m_w, &m_h);
+            m_pTexture = LoadXtx(szName, &m_w, &m_h, &m_tw, &m_th);
         }
     }
     float alpha = m_alpha * g_nEffectAlpha;
@@ -425,6 +441,7 @@ void CSprite::Render()
     D3DXVECTOR3 right(g_matView._11, g_matView._21, g_matView._31);
     D3DXVECTOR3 up(g_matView._12, g_matView._22, g_matView._32);
     float hw = m_w * m_pixelSize * 0.5f, hh = m_h * m_pixelSize * 0.5f;
+    float u1 = m_tw > 0 ? (float)m_w / m_tw : 1.0f, v1 = m_th > 0 ? (float)m_h / m_th : 1.0f;
     D3DCOLOR c = D3DCOLOR_COLORVALUE(m_color.x, m_color.y, m_color.z, alpha);
     WORLDVERTEX v[4];
     for (int i = 0; i < 4; i++)
@@ -434,8 +451,8 @@ void CSprite::Render()
         v[i].y = origin.y + right.y * sx + up.y * sy;
         v[i].z = origin.z + right.z * sx + up.z * sy;
         v[i].color = c;
-        v[i].u = (i & 1) ? 1.0f : 0.0f;
-        v[i].v = (i & 2) ? 1.0f : 0.0f;
+        v[i].u = (i & 1) ? u1 : 0.0f;
+        v[i].v = (i & 2) ? v1 : 0.0f;
     }
     static const WORD idx[6] = { 0, 1, 2, 2, 1, 3 };
 
