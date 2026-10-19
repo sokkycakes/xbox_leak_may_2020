@@ -207,9 +207,11 @@ int main(int argc, char **argv)
         void (NTAPI *set_rt)(void *,void *) = find("_D3DDevice_SetRenderTarget@8");
         void (NTAPI *copy_rects)(void *,const LONG *,ULONG,void *,const LONG *) =
             find("_D3DDevice_CopyRects@20");
-        void *back = NULL, *source_surface = NULL;
+        LONG (NTAPI *get_zs)(void **) = find("_D3DDevice_GetDepthStencilSurface@4");
+        void *back = NULL, *back_depth = NULL, *source_surface = NULL;
         void *source_tex = create_tex(16,16,1,1,0,6,3);
         get_rt(&back);
+        assert(get_zs(&back_depth) == 0);
         assert(surface(source_tex,0,&source_surface) == 0);
         texture_states[5] = 0;
         for (unsigned layout = 0; layout < 2; layout++) {
@@ -220,7 +222,7 @@ int main(int argc, char **argv)
                 set_tex(0,NULL);
                 set_rt(source_surface,NULL);
                 clear(0,NULL,0xf0,frame ? 0xff0000ff : 0xff00ff00,1.0f,0);
-                set_rt(back,NULL);
+                set_rt(back,back_depth);   /* later tests read the device depth back */
                 copy_rects(source_surface,NULL,0,dest_surface,NULL);
                 set_tex(0,dest_tex);
                 for (unsigned v = 0; v < 3; v++) {
@@ -1859,6 +1861,179 @@ int main(int argc, char **argv)
             set_vs(0x144);
             texture_states[5] = 2;
             puts("renderer compressed volumes: DXT1/3/5 slab slices and authored mip passed");
+        }
+        /* Per-pass state a lighting renderer leans on (Splinter Cell's
+         * stage lighting): render target switches reset the viewport and
+         * scissors, clears stay inside the viewport, visibility test indices
+         * are independent up to D3DVISIBILITY_TEST_MAX, and an adjusting
+         * pixel shader compares a shadow buffer against r/q. */
+        {
+            uint32_t saved_tss[128]; memcpy(saved_tss,texture_states,sizeof saved_tss);
+            uint32_t saved_zenable = render_states[124];
+            struct viewport { ULONG x,y,w,h; float minz,maxz; };
+            void (NTAPI *set_viewport)(const struct viewport *) = find("_D3DDevice_SetViewport@4");
+            void (NTAPI *set_scissors)(ULONG,ULONG,const LONG *) = find("_D3DDevice_SetScissors@12");
+            void (NTAPI *set_target)(void *,void *) = find("_D3DDevice_SetRenderTarget@8");
+            void (NTAPI *vis_begin)(void) = find("_D3DDevice_BeginVisibilityTest@0");
+            LONG (NTAPI *vis_end)(ULONG) = find("_D3DDevice_EndVisibilityTest@4");
+            LONG (NTAPI *vis_result)(ULONG,ULONG *,unsigned long long *) =
+                find("_D3DDevice_GetVisibilityTestResult@12");
+            void *bb = back, *bz = back_depth;   /* the device's own */
+            set_tex(0,NULL); set_ps(0); set_vs(0x44);
+            texture_states[14] = texture_states[18] = 0;   /* select diffuse */
+            render_states[124] = 0;                         /* no depth test */
+            struct vertex cover[] = {   /* the whole 64x64 target */
+                {-64,-64,0.5f,1,0xffff0000}, {192,-64,0.5f,1,0xffff0000}, {32,192,0.5f,1,0xffff0000}
+            };
+            const struct viewport corner_vp = {0,0,16,16,0,1}, full_vp = {0,0,64,64,0,1};
+            LONG corner[4] = {0,0,16,16};
+
+            /* A pass with a small viewport and scissor, then a switch of
+             * targets: the library's SetRenderTarget ends with SetViewport
+             * over the whole target, which resets the scissors. */
+            clear(0,NULL,0xf0,0xff000000,1.0f,0);
+            set_viewport(&corner_vp);
+            set_scissors(1,0,corner);
+            set_target(bb,bz);
+            draw(5,3,cover,sizeof cover[0]);
+            glReadPixels(48,8,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+            assert(pixel[0] > 240 && pixel[1] < 8 && pixel[2] < 8);
+
+            /* Clear only reaches the viewport (the library clips to it). */
+            clear(0,NULL,0xf0,0xff000000,1.0f,0);
+            const struct viewport right_vp = {32,0,32,64,0,1};
+            set_viewport(&right_vp);
+            clear(0,NULL,0xf0,0xff0000ff,1.0f,0);
+            unsigned char left[4] = {0}, right[4] = {0};
+            glReadPixels(8,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,left);
+            glReadPixels(48,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,right);
+            assert(left[0] < 8 && left[1] < 8 && left[2] < 8);
+            assert(right[2] > 240 && right[0] < 8);
+            set_viewport(&full_vp);
+
+            /* Indices 5 and 5 + 256 are separate reports. */
+            vis_begin(); draw(5,3,cover,sizeof cover[0]); assert(vis_end(5) == 0);
+            vis_begin(); assert(vis_end(5 + 256) == 0);
+            ULONG drawn = 0, none = 1;
+            LONG r;
+            while ((r = vis_result(5,&drawn,NULL)) == (LONG)0x88760828) {}
+            assert(r == 0 && drawn == 64*64);
+            while ((r = vis_result(5 + 256,&none,NULL)) == (LONG)0x88760828) {}
+            assert(r == 0 && none == 0);
+
+            /* A LIN_D16 shadow buffer at half depth, read by a PROJECT2D
+             * shader with PS_GLOBALFLAGS_TEXMODE_ADJUST: the library makes
+             * the stage PROJECT3D, so SHADOWFUNC GREATER passes for r/q
+             * below the stored depth and fails above it. */
+            void *shadow = create_tex(4,4,1,1,0,0x30,3);
+            assert(shadow);
+            ULONG shadow_lock[2];
+            lock_tex(shadow,0,shadow_lock,NULL,0);
+            for (unsigned y = 0; y < 4; y++)
+                for (unsigned x = 0; x < 4; x++)
+                    ((uint16_t *)(shadow_lock[1] + y * shadow_lock[0]))[x] = 0x8000;
+            ULONG shadow_def[60] = {0}, shadow_ps = 0;
+            shadow_def[8] = 8;             /* final RGB = T0 */
+            shadow_def[9] = 0x18u << 8;    /* final alpha = T0.a */
+            shadow_def[54] = 1;            /* PROJECT2D ... */
+            shadow_def[59] = 0x100;        /* ... adjusted to the texture */
+            create_ps(shadow_def,&shadow_ps);
+            assert(shadow_ps);
+            set_tex(0,shadow); set_ps(shadow_ps);
+            texture_states[0] = texture_states[1] = texture_states[2] = 3;   /* clamp */
+            texture_states[3] = texture_states[4] = 1; texture_states[5] = 0;
+            render_states[137] = 0x204;    /* D3DRS_SHADOWFUNC = D3DCMP_GREATER */
+            set_vs(0x10144);               /* XYZRHW, diffuse, one 3D coordinate */
+            struct { float x,y,z,w; uint32_t color; float u,v,r; } shadowed[3] = {
+                {-64,-64,0.5f,1,0xffffffff,2,2,0}, {192,-64,0.5f,1,0xffffffff,2,2,0},
+                {32,192,0.5f,1,0xffffffff,2,2,0}
+            };
+            for (unsigned pass = 0; pass < 2; pass++) {
+                for (int v = 0; v < 3; v++) shadowed[v].r = (pass ? 0.75f : 0.25f) * 65535.0f;
+                clear(0,NULL,0xf0,0xff000000,1.0f,0);
+                draw(5,3,shadowed,sizeof shadowed[0]);
+                glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+                if (pass) assert(pixel[0] < 8 && pixel[1] < 8 && pixel[2] < 8);
+                else assert(pixel[0] > 240 && pixel[1] > 240 && pixel[2] > 240);
+            }
+            render_states[137] = 0;
+            render_states[124] = saved_zenable;
+            set_ps(0);
+            set_tex(0,tex);
+            set_vs(0x144);
+            memcpy(texture_states,saved_tss,sizeof saved_tss);
+            puts("renderer passes: target switch resets viewport/scissors, viewport-clipped clear, "
+                 "4096 visibility reports, adjusted shadow-buffer compare passed");
+
+            /* Rewritten geometry is drawn on the next draw, not up to 16
+             * frames later.  Both edits miss every position the cache
+             * samples: an index list of 3000 (rebuilt in place with the
+             * same count, as a per-view batch is) and a locked vertex
+             * buffer whose only visible triangle changes color. */
+            void (NTAPI *set_stream)(ULONG,void *,ULONG) = find("_D3DDevice_SetStreamSource@12");
+            void (NTAPI *draw_indexed)(ULONG,ULONG,const uint16_t *) =
+                find("_D3DDevice_DrawIndexedVertices@12");
+            void (NTAPI *draw_vb)(ULONG,ULONG,ULONG) = find("_D3DDevice_DrawVertices@12");
+            void (NTAPI *set_indices)(void *,ULONG) = find("_D3DDevice_SetIndices@8");
+            LONG (NTAPI *create_vshader)(const ULONG *,const ULONG *,ULONG *,ULONG) =
+                find("_D3DDevice_CreateVertexShader@16");
+            void (NTAPI *delete_vshader)(ULONG) = find("_D3DDevice_DeleteVertexShader@4");
+            /* The caches sit on the vertex program path: MOV oPos, v0;
+               MOV oD0, v3 over (float4 position, D3DCOLOR) from stream 0. */
+            const ULONG copy_decl[] = {0x20000000,0x40420000,0x40400003,0xffffffff};
+            const ULONG copy_code[] = {0x00022078,
+                0,0x0020001b,0x08000000,0x0000f800,
+                0,0x0020061b,0x08000000,0x0000f819};
+            ULONG copy_vs = 0;
+            assert(create_vshader(copy_decl,copy_code,&copy_vs,0) == 0 && copy_vs);
+            set_tex(0,NULL); set_ps(0); set_vs(copy_vs);
+            texture_states[14] = texture_states[18] = 0;
+            render_states[124] = 0;
+            void *halves_vb = create_vb(6 * sizeof(struct vertex));
+            struct vertex *halves = NULL;
+            lock_vb(halves_vb,0,0,(void **)&halves,0);
+            const struct vertex left_tri[3] = {{0,0,0.5f,1,0xffff0000},{32,0,0.5f,1,0xffff0000},{0,64,0.5f,1,0xffff0000}};
+            const struct vertex right_tri[3] = {{64,0,0.5f,1,0xff00ff00},{64,64,0.5f,1,0xff00ff00},{32,64,0.5f,1,0xff00ff00}};
+            memcpy(halves,left_tri,sizeof left_tri);
+            memcpy(halves + 3,right_tri,sizeof right_tri);
+            set_stream(0,halves_vb,sizeof(struct vertex));
+            set_indices(NULL,0);
+            static uint16_t batch[3000];   /* degenerate triangles but one */
+            unsigned char lpix[4], rpix[4];
+            for (unsigned frame = 0; frame < 2; frame++) {
+                memset(batch,0,sizeof batch);
+                for (unsigned k = 0; k < 3; k++) batch[51 + k] = frame ? 3 + k : k;
+                clear(0,NULL,0xf0,0xff000000,1.0f,0);
+                draw_indexed(5,3000,batch);
+                glReadPixels(4,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,lpix);
+                glReadPixels(60,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,rpix);
+                if (frame) assert(lpix[0] < 8 && rpix[1] > 240);
+                else assert(lpix[0] > 240 && rpix[1] < 8);
+            }
+            void *long_vb = create_vb(249 * sizeof(struct vertex));
+            struct vertex *verts = NULL;
+            lock_vb(long_vb,0,0,(void **)&verts,0);
+            memset(verts,0,249 * sizeof(struct vertex));
+            memcpy(verts + 3,left_tri,sizeof left_tri);
+            set_stream(0,long_vb,sizeof(struct vertex));
+            for (unsigned frame = 0; frame < 2; frame++) {
+                if (frame) {
+                    lock_vb(long_vb,0,0,(void **)&verts,0);
+                    for (unsigned k = 3; k < 6; k++) verts[k].color = 0xff0000ff;
+                }
+                clear(0,NULL,0xf0,0xff000000,1.0f,0);
+                draw_vb(5,0,249);
+                glReadPixels(4,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,lpix);
+                if (frame) assert(lpix[0] < 8 && lpix[2] > 240);
+                else assert(lpix[0] > 240 && lpix[2] < 8);
+            }
+            set_stream(0,NULL,0);
+            render_states[124] = saved_zenable;
+            set_tex(0,tex);
+            set_vs(0x144);
+            delete_vshader(copy_vs);
+            memcpy(texture_states,saved_tss,sizeof saved_tss);
+            puts("renderer caches: in-place index rebuild and locked vertex rewrite drawn at once passed");
         }
         /* The outstanding 65th callback executes inside Swap; device creation
          * resets scale, so restore the values its reentrant check expects. */

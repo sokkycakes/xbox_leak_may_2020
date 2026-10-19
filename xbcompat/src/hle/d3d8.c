@@ -1211,18 +1211,31 @@ static void NTAPI D3DDevice_Clear(ULONG Count, const D3DRECT *pRects, ULONG Flag
     }
     if (Flags & 1) { glClearDepth(Z); glDepthMask(GL_TRUE); mask |= GL_DEPTH_BUFFER_BIT; }
     if (Flags & 2) { glClearStencil(Stencil); glStencilMask(0xFF); mask |= GL_STENCIL_BUFFER_BIT; }
-    if (Count && pRects) {
-        glEnable(GL_SCISSOR_TEST);
-        for (ULONG i = 0; i < Count; i++) {
-            const D3DRECT *r = &pRects[i];
-            if (d3d.rt_texture) glScissor(r->x1, r->y1, r->x2 - r->x1, r->y2 - r->y1);
-            else glScissor(r->x1, d3d.rt_height - r->y2, r->x2 - r->x1, r->y2 - r->y1);
-            glClear(mask);
+    /* The library clips each rectangle, and the whole-target clear without
+       any, to the viewport; the scissors play no part.  GL's clear ignores
+       the viewport, so without this a clear of one viewport (a shadow
+       buffer tile, a split screen) wiped the whole target, and a clear
+       after a draw kept that draw's scissor. */
+    const D3DVIEWPORT8 *v = &d3d.viewport;
+    D3DRECT whole = { (LONG)v->X, (LONG)v->Y, (LONG)(v->X + v->Width), (LONG)(v->Y + v->Height) };
+    if (!Count || !pRects) { Count = 1; pRects = &whole; }
+    for (ULONG i = 0; i < Count; i++) {
+        D3DRECT r = pRects[i];
+        if (r.x1 < whole.x1) r.x1 = whole.x1;
+        if (r.y1 < whole.y1) r.y1 = whole.y1;
+        if (r.x2 > whole.x2) r.x2 = whole.x2;
+        if (r.y2 > whole.y2) r.y2 = whole.y2;
+        if (r.x1 >= r.x2 || r.y1 >= r.y2) continue;
+        if (r.x1 <= 0 && r.y1 <= 0 && r.x2 >= (LONG)d3d.rt_width && r.y2 >= (LONG)d3d.rt_height) {
+            glDisable(GL_SCISSOR_TEST);   /* the whole target: a plain (fast) clear */
+        } else {
+            glEnable(GL_SCISSOR_TEST);
+            if (d3d.rt_texture) glScissor(r.x1, r.y1, r.x2 - r.x1, r.y2 - r.y1);
+            else glScissor(r.x1, d3d.rt_height - r.y2, r.x2 - r.x1, r.y2 - r.y1);
         }
-        glDisable(GL_SCISSOR_TEST);
-    } else {
         glClear(mask);
     }
+    glDisable(GL_SCISSOR_TEST);
     glColorMask(1, 1, 1, 1);
 }
 
@@ -1251,10 +1264,14 @@ static LONG NTAPI D3DDevice_CreateVertexBuffer(UINT_ Length, ULONG Usage, ULONG 
     return D3D_OK;
 }
 
+static void note_vb_lock(const UCHAR *p, size_t len);
+
 static void NTAPI D3DVertexBuffer_Lock(D3DResource *vb, UINT_ Offset, UINT_ Size, PVOID *ppbData, ULONG Flags)
 {
-    (void)Size; (void)Flags;
     *ppbData = (UCHAR *)resource_data(vb) + Offset;
+    /* Size 0 locks to the end of the buffer.  The cached GL copies of what
+       a write lock covers are compared in full at their next draw. */
+    if (!(Flags & 0x80 /* D3DLOCK_READONLY */)) note_vb_lock(*ppbData, Size);
 }
 
 static ULONG NTAPI D3DResource_AddRef(D3DResource *r)
@@ -2349,6 +2366,26 @@ static void NTAPI D3DDevice_SetViewport(const D3DVIEWPORT8 *v)
     }
 }
 
+/* The end of the library's SetRenderTarget: the depth scale (m_ZScale)
+   follows the new depth buffer, kept when there is none, and SetViewport
+   over the whole w x h target resets the scissors and rewrites the reserved
+   viewport constants.  Without this a scissor set for a pass on the back
+   buffer stayed on into the next target: a shadow buffer rendered (and
+   cleared) after a per-light scissor kept only that rectangle, which moves
+   with the camera. */
+static void target_viewport_reset(D3DSurface *z, ULONG w, ULONG h)
+{
+    if (z) d3d.zscale = depth_format_max((z->Format >> 8) & 0xFF);
+    d3d.viewport = (D3DVIEWPORT8){ 0, 0, w, h, 0, 1 };
+    d3d.scissors.count = 0;
+    if (!(d3d.constant_mode & 0x10)) {   /* D3DSCM_NORESERVEDCONSTANTS */
+        float vp[2][4];
+        viewport_constants(vp);
+        memcpy(d3d.vs_const[58], vp, sizeof(vp));
+        if (async_front()) { async_vs_touch(58); async_vs_touch(59); }
+    }
+}
+
 /* The NV097 method each simple state (D3DRS_PSALPHAINPUTS0 to
    D3DRS_SOLIDOFFSETENABLE) writes, the library's D3DSIMPLERENDERSTATEENCODE
    (public/xdk/inc/d3d8.h); their values go to the GPU unchanged. */
@@ -3378,9 +3415,13 @@ static ULONG adjusted_texture_modes(void)
         if (!t && m != 0x04 && m != 0x05 && m != 0x0A && m != 0x11)
             m = 0;
         else if (t && m >= 0x01 && m <= 0x03) {
-            /* A 2D depth image still needs PROJECT3D to supply reference r/q. */
-            if (!(m == 0x02 && target == GL_TEXTURE_2D && is_depth_format((t->Format >> 8) & 0xFF)))
-                m = target == GL_TEXTURE_CUBE_MAP ? 0x03 : target == GL_TEXTURE_3D ? 0x02 : 0x01;
+            /* A depth image (a shadow buffer) becomes PROJECT3D, as a volume
+               does, so the compare gets its reference from r/q: the library
+               picks PROJECT3D for every depth color format here.  Kept as
+               PROJECT2D, the compare used a zero reference and the ATG
+               ShadowBuffer sample (a "tex t1" shader) drew no shadow. */
+            bool depth = target == GL_TEXTURE_2D && is_depth_format((t->Format >> 8) & 0xFF);
+            m = target == GL_TEXTURE_CUBE_MAP ? 0x03 : target == GL_TEXTURE_3D || depth ? 0x02 : 0x01;
         }
         else if (t && (m == 0x0D || m == 0x0E))
             m = target == GL_TEXTURE_CUBE_MAP ? 0x0E : 0x0D;
@@ -3831,7 +3872,12 @@ typedef struct { ULONG lo, hi; } vrange;
    dashboard reads about 3 MB a frame), so a draw compares 33 samples spread
    over the data and the whole copy is compared every CONV_FULL_EVERY frames:
    a rewritten buffer is caught at once, a small edit to one within that
-   many frames. */
+   many frames.  That delay is too long for data the title is known to
+   rewrite, so two cases are compared in full on every use: index lists
+   (small next to the vertices, and rebuilt in place per view: a batch of
+   the same length with a few triangles swapped kept drawing the old ones),
+   and vertex data in a range locked for writing since the entry last
+   looked (see conv_locked). */
 #define CONV_FULL_EVERY 16
 enum { CONV_RANGE, CONV_NORMPACKED3, CONV_RGBA, CONV_VBO };
 typedef struct {
@@ -3847,7 +3893,39 @@ typedef struct {
     size_t span;                 /* CONV_VBO: bytes from vertex 0 in buf and raw */
     unsigned verified;           /* draw serial of the last check against the source */
     size_t verified_to;          /* CONV_VBO: bytes from vertex 0 that check covered */
+    unsigned lock_seen;          /* vb_lock_serial when the entry last looked at the locks */
 } conv_entry;
+
+/* Vertex buffer ranges locked for writing, the last VB_LOCKS of them.  A
+   lock is the title saying it rewrites those bytes (a dynamic buffer
+   refilled each frame, lighting colors or projector coordinates computed on
+   the CPU), which the sampled compare can miss for CONV_FULL_EVERY frames.
+   The title's thread adds them and the draws (maybe on the worker) read
+   them; a lost race only falls back to sampling. */
+#define VB_LOCKS 64
+static struct { uintptr_t lo, hi; } vb_locks[VB_LOCKS];
+static unsigned vb_lock_serial;
+
+static void note_vb_lock(const UCHAR *p, size_t len)
+{
+    unsigned n = __atomic_load_n(&vb_lock_serial, __ATOMIC_RELAXED);
+    vb_locks[n % VB_LOCKS].lo = (uintptr_t)p;
+    vb_locks[n % VB_LOCKS].hi = len ? (uintptr_t)p + len : UINTPTR_MAX;
+    __atomic_store_n(&vb_lock_serial, n + 1, __ATOMIC_RELEASE);
+}
+
+/* Whether bytes lo to hi - 1, which `e` copied, were locked for writing
+   since the entry last asked (the caller then compares the whole entry). */
+static bool conv_locked(conv_entry *e, uintptr_t lo, uintptr_t hi)
+{
+    unsigned now = __atomic_load_n(&vb_lock_serial, __ATOMIC_ACQUIRE), seen = e->lock_seen;
+    if (now == seen) return false;
+    e->lock_seen = now;
+    if (now - seen > VB_LOCKS) return true;   /* some fell out of the ring: assume so */
+    for (unsigned i = seen; i != now; i++)
+        if (vb_locks[i % VB_LOCKS].lo < hi && vb_locks[i % VB_LOCKS].hi > lo) return true;
+    return false;
+}
 
 #define CONV_SLOTS 1024
 static conv_entry conv_cache[CONV_SLOTS];
@@ -3878,7 +3956,8 @@ static conv_entry *conv_find(const UCHAR *src, ULONG stride, ULONG kind, ULONG c
     free(victim->raw);
     free(victim->out);
     if (victim->buf) { p_glDeleteBuffers(1, &victim->buf); gc_forget_buffer(victim->buf); }
-    *victim = (conv_entry){ src, stride, kind, count, 0, 0, NULL, 0, NULL, 0, d3d.frame, 0, 0, 0, 0 };
+    *victim = (conv_entry){ src, stride, kind, count, 0, 0, NULL, 0, NULL, 0, d3d.frame, 0, 0, 0, 0,
+                            __atomic_load_n(&vb_lock_serial, __ATOMIC_ACQUIRE) };
     return victim;
 }
 
@@ -3936,10 +4015,7 @@ static conv_entry *index_entry(const USHORT *ix, ULONG count, bool upload)
     /* A draw looks its indices up twice (the range, the buffer); the source
        cannot change in between. */
     if (e->raw && e->verified == conv_serial) same = true;
-    else if (e->raw) {
-        if (conv_full_due(e)) same = !memcmp(e->raw, ix, count * 2);
-        else same = conv_sampled_same(e->raw, (const UCHAR *)ix, count * 2, 2, 2) || !memcmp(e->raw, ix, count * 2);
-    }
+    else if (e->raw) same = !memcmp(e->raw, ix, count * 2);   /* in full: see CONV_FULL_EVERY */
     if (upload && (!same || !e->buf)) {
         if (!e->buf) p_glGenBuffers(1, &e->buf);
         gc_bind_buffer(GL_ELEMENT_ARRAY_BUFFER, e->buf);
@@ -3994,7 +4070,7 @@ static GLuint stream_buffer(const UCHAR *base, ULONG stride, vrange r, size_t ne
     e->verified = conv_serial;
     if (e->buf && need <= e->span) {
         size_t from = (size_t)r.lo * stride, to = need;
-        if (conv_full_due(e)) from = 0, to = e->span;
+        if (conv_locked(e, (uintptr_t)base, (uintptr_t)base + e->span) | conv_full_due(e)) from = 0, to = e->span;
         e->verified_to = to;
         if (to == need && conv_sampled_same(e->raw + from, base + from, to - from, stride, 4)) return e->buf;
         if (!conv_refresh(e->raw + from, base + from, to - from)) return e->buf;
@@ -4038,7 +4114,8 @@ static const void *convert_cached(const UCHAR *src, ULONG stride, vrange r, ULON
     e->used = conv_serial;
     if (e->out && r.lo >= e->lo && r.hi <= e->hi) {
         ULONG lo = r.lo, hi = r.hi;
-        if (conv_full_due(e)) {
+        if (conv_locked(e, (uintptr_t)(src + (size_t)e->lo * stride), (uintptr_t)(src + (size_t)e->hi * stride))
+            | conv_full_due(e)) {
             lo = e->lo, hi = e->hi;
         } else {
             size_t len = (size_t)(hi - lo - 1) * stride + 4;   /* each vertex reads 4 bytes */
@@ -6003,7 +6080,7 @@ static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
         d3d.rt_texture = false;
         d3d.target_zmax = z ? depth_format_max((z->Format >> 8) & 0xFF) : d3d.zscale;
         d3d.host_zmax = window_fb.depth_storage == 0x81A5 /* GL_DEPTH_COMPONENT16 */ ? 65535.0f : 16777215.0f;
-        d3d.viewport = (D3DVIEWPORT8){ 0, 0, d3d.rt_width, d3d.rt_height, 0, 1 };
+        target_viewport_reset(z, d3d.rt_width, d3d.rt_height);
         return;
     }
     if (!p_glGenFramebuffers) {
@@ -6043,7 +6120,10 @@ static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
             return;
         }
         bool d24 = depth_format_max((z->Format >> 8) & 0xFF) > 65535.0f;
-        d3d.host_zmax = d24 ? 16777215.0f : 65535.0f;
+        /* upload_image3 stores D16 images as GL_DEPTH_COMPONENT24 too, so
+           GL's polygon offset unit is 2^-24 for both: with 65535 here a D16
+           shadow buffer got 1/256 of its D3DRS_POLYGONOFFSETZOFFSET. */
+        d3d.host_zmax = 16777215.0f;
         p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, 0);
         p_glFramebufferTexture2D(GL_FRAMEBUFFER, d24 ? GL_DEPTH_STENCIL_ATTACHMENT : GL_DEPTH_ATTACHMENT,
                                  depth_face, dt, depth_level);
@@ -6052,7 +6132,7 @@ static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
         d3d.rt_width = w;
         d3d.rt_height = h;
         d3d.rt_texture = true;
-        d3d.viewport = (D3DVIEWPORT8){ 0, 0, w, h, 0, 1 };
+        target_viewport_reset(z, w, h);
         return;
     }
     /* Any other depth surface gets a scratch renderbuffer in its own format;
@@ -6078,7 +6158,7 @@ static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
     d3d.rt_width = w;
     d3d.rt_height = h;
     d3d.rt_texture = true;
-    d3d.viewport = (D3DVIEWPORT8){ 0, 0, w, h, 0, 1 };
+    target_viewport_reset(z, w, h);
 }
 
 static void NTAPI D3DSurface_GetDesc(D3DSurface *s, ULONG *desc)
@@ -7989,8 +8069,14 @@ static void NTAPI D3DDevice_GetBackMaterial(float *m)
     m[16] = d3d.back_material_power;
 }
 
-/* Visibility tests are GL occlusion queries, one per index the title uses. */
-#define VIS_SLOTS 256
+/* Visibility tests are GL occlusion queries, one per index the title uses.
+   Indices run to D3DVISIBILITY_TEST_MAX (4096) and each keeps its own
+   report, as the library's do.  With 256 slots, index i and i + 256 shared
+   one: the later EndVisibilityTest dropped the earlier query, whose result
+   then read as "nothing drawn" (D3DERR_INVALIDCALL, 0 pixels), so whatever
+   the title culls on that result vanished depending on which tests the
+   view happened to issue. */
+#define VIS_SLOTS 4096
 static struct { ULONG index; GLuint query; bool used; } vis[VIS_SLOTS];
 static GLuint vis_active;
 
