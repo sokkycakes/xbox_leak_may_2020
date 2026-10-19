@@ -1350,6 +1350,38 @@ static ULONG NTAPI XInputGetState(HANDLE hDevice, XINPUT_STATE *pState)
     return err;
 }
 
+/* XDK 4831+: the device's USB ids (XINPUT_DEVICE_DESCRIPTION: vendor,
+   product, version), which light gun titles read to pick a calibration.
+   Every device here answers as a Microsoft controller. */
+static ULONG NTAPI XInputGetDeviceDescription(HANDLE hDevice, USHORT *pDescription)
+{
+    pthread_mutex_lock(&xi.lock);
+    sync_devices(false);
+    ULONG err = ERROR_SUCCESS;
+    xi_handle *d = check_handle(hDevice, "XInputGetDeviceDescription");
+    if (!d || !pDescription) err = ERROR_INVALID_PARAMETER;
+    else if (!handle_connected(d)) err = ERROR_DEVICE_NOT_CONNECTED;
+    else { pDescription[0] = 0x045E; pDescription[1] = 0x0289; pDescription[2] = 0x0100; }
+    pthread_mutex_unlock(&xi.lock);
+    return err;
+}
+
+/* Light gun calibration offsets: nothing here aims, so they are only checked. */
+static ULONG NTAPI XInputSetLightgunCalibration(HANDLE hDevice, PVOID pCalibrationOffsets)
+{
+    pthread_mutex_lock(&xi.lock);
+    ULONG err = ERROR_SUCCESS;
+    xi_handle *d = check_handle(hDevice, "XInputSetLightgunCalibration");
+    if (!d || !pCalibrationOffsets) err = ERROR_INVALID_PARAMETER;
+    else if (!handle_connected(d)) err = ERROR_DEVICE_NOT_CONNECTED;
+    pthread_mutex_unlock(&xi.lock);
+    return err;
+}
+
+/* Devices are enumerated when asked for here, so enumeration is never busy
+   (XDEVICE_ENUMERATION_IDLE). */
+static ULONG NTAPI XGetDeviceEnumerationStatus(void) { return 0; }
+
 static ULONG NTAPI XInputPoll(HANDLE hDevice)
 {
     pthread_mutex_lock(&xi.lock);
@@ -1502,6 +1534,9 @@ const struct hle_func xinput_funcs[] = {
     F("_XInputGetState@8", XInputGetState),
     F("_XInputSetState@8", XInputSetState),
     F("_XInputPoll@4", XInputPoll),
+    F("_XInputGetDeviceDescription@8", XInputGetDeviceDescription),
+    F("_XInputSetLightgunCalibration@8", XInputSetLightgunCalibration),
+    F("_XGetDeviceEnumerationStatus@0", XGetDeviceEnumerationStatus),
     F("_XMountMUA@12", XMountMUA),
     F("_XMountMURootA@12", XMountMURootA),
     F("_XUnmountMU@8", XUnmountMU),
