@@ -26,24 +26,32 @@ dashboard (`tools/dashbuild`), as its own `xboxdash.xbe` with its own
 - `nodes/CameraMover.cpp` – eased camera flights between Viewpoints
   (Frolick's 550 ms ease-in-out), since the engine only jumps or glides for
   a fixed second.
-- `nodes/FrolickWorld.cpp` – the rest of Frolick's world: `XtxTexture` (a
-  Texture node from a `.xtx`, for the Background's backdrop), `Ribbon` (the
-  open tube with the gradient-alpha material of Frolick's ring and pad
-  bumpers) and `Dome` (the "atmo" hemisphere, multiplied over the backdrop
+- `nodes/FrolickWorld.cpp` – the rest of Frolick's world, node for node
+  from `frolick_assets/main.tscn`: `XtxTexture` (a Texture node from a
+  `.xtx`, for the Background's backdrop), `Ribbon` (the open tube with the
+  gradient-alpha material of the rail ring and the pad bumpers), `Disc`
+  (the pad discs and the highlight ring), `Sprite` (Godot's billboard
+  Sprite3D / Label3D: the pad emblems and labels, always facing the
+  camera) and `Dome` (the "atmo" hemisphere, multiplied over the backdrop
   with its slowly scrolling light stripes).
 - `dash/` – the data: `pads/*.xui` are Frolick's own panels (`catalog`,
   `library`, the `frolick_skin` FrolickTile visual, the carousel scenes);
-  `tools/genhub.py` generates `default.xap` (the hub: the backdrop, the
-  dome and the ring from `frolick_assets/main.tscn`, three floor pads in
-  Frolick's arc, each pad's panel on the world corners Frolick's own
-  `pads.go` + `math3d` give it, left/right flights between pads once the
-  panel's focus reaches its edge, as Frolick does), `backdrop.png` (the
-  `backdrop.tres` radial gradient), `pads/settings.xui` (the catalog layout
-  relabelled, like Frolick's RML settings panel) and the floor pad scenes
-  `pads/pad_*.xui`.
+  `tools/genhub.py` generates `default.xap` (the hub, from
+  `frolick_assets/main.tscn`: the backdrop, dome and rail, the `nav` group's
+  three pads with their bumpers, emblems and labels, the scene's cameras
+  (`Camera3D` for the library, `cam_angle_pad` and its mirror for the
+  sides), each pad's panel facing its camera, left/right flights between
+  pads once the panel's focus reaches its edge, as Frolick does),
+  `backdrop.png` (the `backdrop.tres` radial gradient), `pads/overlay.xui`
+  (the screen overlay: the faded word behind the view, the A prompt, the
+  footer with the wordmark) and `pads/settings.xui` (the catalog layout
+  relabelled, like Frolick's RML settings panel).
 - `tools/mkassets.py` – packs the data into `default.xip`, converting PNGs
   to the raw `.xtx` textures the panel reads.  `tools/mkglyphs.py` makes
-  stand-in button glyphs when Frolick's are not at hand (`GLYPHS=dir`).
+  stand-in button glyphs when Frolick's are not at hand (`GLYPHS=dir`);
+  `tools/mkart.py` renders the pad labels as `main.tscn`'s Label3D nodes
+  describe them and a ring for the emblems, until Frolick's `Circle.png`
+  and pad textures arrive (`ART=dir`).
 
 ## Build and run
 
@@ -58,7 +66,7 @@ pad; `XBCOMPAT_INPUT_SCRIPT="100:right 200:a"` presses buttons at frames.
 
 ## Not there yet
 
-The library carousel (A on the library pad), Frolick's pad textures and
-labels (the hub's pads are drawn as flat shaded discs), and the woosh
-sound.  Frolick's `hero.png` and `cover.png` are
+The library carousel (A on the library pad), Frolick's pad textures
+(`_albedo003..005`, tiled 2x2 on the discs) and its `Circle.png`, and the
+woosh sound.  Frolick's `hero.png` and `cover.png` are
 missing on the PC too.

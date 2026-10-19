@@ -12,6 +12,8 @@
 # writes WORK/frolick.  Environment:
 #   FONT    the TTF the panels use (default: DejaVu Sans from the system)
 #   GLYPHS  a directory with Frolick's glyph_*.png (default: stand-ins)
+#   ART     a directory with Frolick's Circle.png / label_*.png and pad
+#           textures (default: tools/mkart.py's renderings)
 set -eo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 DASHBUILD="$HERE/../dashbuild"
@@ -55,6 +57,8 @@ timeout 600 wine "$WORK/xb/public/mstools/vc70/link.exe" /nologo -subsystem:xbox
 rm -rf "$OUT/dash"; mkdir -p "$OUT/dash/pads" "$OUT/dash/obj"
 cp "$HERE"/dash/pads/*.xui "$OUT/dash/pads/"
 python3 "$HERE/tools/genhub.py" "$OUT/dash"
+python3 "$HERE/tools/mkart.py" "$OUT/dash"
+[ -n "$ART" ] && cp "$ART"/*.png "$OUT/dash/"
 if [ -n "$GLYPHS" ]; then cp "$GLYPHS"/glyph_*.png "$OUT/dash/pads/"; else python3 "$HERE/tools/mkglyphs.py" "$OUT/dash/pads"; fi
 cp "${FONT:-/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf}" "$OUT/dash/font.ttf"
 (

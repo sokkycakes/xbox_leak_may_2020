@@ -542,6 +542,8 @@ void CXuiPanel::Render()
 
 xui::Node* CXuiPanel::Find(const TCHAR* szId)
 {
+    if (m_bDirty)
+        Load();  // script may reach the panel before its first frame
     if (m_pScene == NULL || szId == NULL)
         return NULL;
     char sz[128];

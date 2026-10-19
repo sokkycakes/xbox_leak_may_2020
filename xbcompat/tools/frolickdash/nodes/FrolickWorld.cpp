@@ -7,12 +7,16 @@
 //   Background { backdrop XtxTexture { url "backdrop.xtx" } }
 //   Transform { translation x y z  children [ Ribbon { radius 5.92 height 1.815 } ] }
 //   Transform { translation x y z  children [ Dome { radius 6.97 height 4.26 } ] }
+//   Transform { translation x y z  children [ Disc { radius 0.276 color r g b } ] }
+//   Transform { translation x y z  children [ Sprite { url "circle.xtx" pixelSize 0.00066 color r g b } ] }
 #include "std.h"
 #include "xapp.h"
 #include "node.h"
 #include "Texture.h"
 
 extern bool FrolickReadFile(const char* name, unsigned char** data, int* len);
+extern float g_nEffectAlpha;
+extern D3DXMATRIX g_matIdentity;
 
 ////////////////////////////////////////////////////////////////////////////
 // XtxTexture: a Texture node from a .xtx (tools/mkassets.py: "XTX1",
@@ -42,6 +46,53 @@ START_NODE_PROPS(CXtxTexture, CTexture)
     NODE_PROP(pt_string, CXtxTexture, url)
 END_NODE_PROPS()
 
+// Loads a .xtx into a swizzled A8R8G8B8 texture; the same name hands back
+// the same texture (AddRef'd), since the pads share their art.
+static LPDIRECT3DTEXTURE8 LoadXtx(const char* szName, int* pWidth, int* pHeight)
+{
+    struct Cached { char* name; LPDIRECT3DTEXTURE8 p; int w, h; };
+    static Cached c_rg[32];
+    static int c_n;
+    for (int i = 0; i < c_n; i++)
+        if (_stricmp(c_rg[i].name, szName) == 0)
+        {
+            *pWidth = c_rg[i].w; *pHeight = c_rg[i].h;
+            if (c_rg[i].p) c_rg[i].p->AddRef();
+            return c_rg[i].p;
+        }
+    LPDIRECT3DTEXTURE8 p = NULL;
+    int w = 0, h = 0;
+    unsigned char* data = NULL;
+    int len = 0;
+    if (FrolickReadFile(szName, &data, &len) && len >= 12 && memcmp(data, "XTX1", 4) == 0)
+    {
+        w = *(int*)(data + 4); h = *(int*)(data + 8);
+        if (len >= 12 + w * h * 4 &&
+            SUCCEEDED(D3DXCreateTexture(XAppGetD3DDev(), w, h, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &p)))
+        {
+            D3DLOCKED_RECT lr;
+            if (SUCCEEDED(p->LockRect(0, &lr, NULL, 0)))
+            {
+                XGSwizzleRect(data + 12, w * 4, NULL, lr.pBits, w, h, NULL, 4);
+                p->UnlockRect(0);
+            }
+        }
+    }
+    else
+        TRACE(_T("Frolick: cannot read texture %S\n"), szName);
+    delete [] data;
+    if (c_n < sizeof c_rg / sizeof c_rg[0])
+    {
+        c_rg[c_n].name = new char[strlen(szName) + 1];
+        strcpy(c_rg[c_n].name, szName);
+        c_rg[c_n].p = p; c_rg[c_n].w = w; c_rg[c_n].h = h;
+        c_n++;
+        if (p) p->AddRef();
+    }
+    *pWidth = w; *pHeight = h;
+    return p;
+}
+
 LPDIRECT3DTEXTURE8 CXtxTexture::GetTextureSurface()
 {
     if (m_bDirty && m_url != NULL)
@@ -54,24 +105,7 @@ LPDIRECT3DTEXTURE8 CXtxTexture::GetTextureSurface()
         }
         char szName[MAX_PATH];
         Ansi(szName, m_url, sizeof szName);
-        unsigned char* data = NULL;
-        int len = 0;
-        if (FrolickReadFile(szName, &data, &len) && len >= 12 && memcmp(data, "XTX1", 4) == 0)
-        {
-            int w = *(int*)(data + 4), h = *(int*)(data + 8);
-            if (len >= 12 + w * h * 4 && Create(w, h))
-            {
-                D3DLOCKED_RECT lr;
-                if (SUCCEEDED(m_pSurface->LockRect(0, &lr, NULL, 0)))
-                {
-                    XGSwizzleRect(data + 12, w * 4, NULL, lr.pBits, w, h, NULL, 4);
-                    m_pSurface->UnlockRect(0);
-                }
-            }
-        }
-        else
-            TRACE(_T("XtxTexture: cannot read %s\n"), m_url);
-        delete [] data;
+        m_pSurface = LoadXtx(szName, &m_nImageWidth, &m_nImageHeight);
     }
     return m_pSurface;
 }
@@ -123,13 +157,15 @@ class CRibbon : public CNode
     DECLARE_NODE(CRibbon, CNode)
 public:
     CRibbon();
-    ~CRibbon() { delete [] m_verts; delete [] m_idx; }
+    ~CRibbon() { delete [] m_verts; delete [] m_innerVerts; delete [] m_idx; }
 
     float m_radius;
     float m_height;
     D3DXVECTOR3 m_color;
     float m_alpha;
     int m_segments;
+    bool m_inner;           // an opaque tube of the same size inside
+    D3DXVECTOR3 m_innerColor;
 
     void Render();
     bool OnSetProperty(const PRD* pprd, const void* pvValue) { m_bDirty = true; return true; }
@@ -140,6 +176,7 @@ protected:
     void Build();
     bool m_bDirty;
     WORLDVERTEX* m_verts;
+    WORLDVERTEX* m_innerVerts;
     WORD* m_idx;
     int m_nVerts, m_nIdx;
 };
@@ -152,11 +189,14 @@ START_NODE_PROPS(CRibbon, CNode)
     NODE_PROP(pt_vec3, CRibbon, color)
     NODE_PROP(pt_number, CRibbon, alpha)
     NODE_PROP(pt_integer, CRibbon, segments)
+    NODE_PROP(pt_boolean, CRibbon, inner)
+    NODE_PROP(pt_vec3, CRibbon, innerColor)
 END_NODE_PROPS()
 
 CRibbon::CRibbon() :
     m_radius(0.5f), m_height(0.02f), m_color(0.587f, 0.569f, 0.441f), m_alpha(1.0f), m_segments(128),
-    m_bDirty(true), m_verts(NULL), m_idx(NULL), m_nVerts(0), m_nIdx(0)
+    m_inner(false), m_innerColor(0.785f, 0.775f, 0.691f),
+    m_bDirty(true), m_verts(NULL), m_innerVerts(NULL), m_idx(NULL), m_nVerts(0), m_nIdx(0)
 {
 }
 
@@ -188,12 +228,14 @@ static void RibbonSample(float u, float* pGrey, float* pAlpha)
 
 void CRibbon::Build()
 {
-    delete [] m_verts; delete [] m_idx;
+    delete [] m_verts; delete [] m_innerVerts; delete [] m_idx;
     int n = m_segments < 8 ? 8 : m_segments;
     m_nVerts = (n + 1) * 2;
     m_nIdx = n * 6;
     m_verts = new WORLDVERTEX[m_nVerts];
+    m_innerVerts = new WORLDVERTEX[m_nVerts];
     m_idx = new WORD[m_nIdx];
+    D3DCOLOR cInner = D3DCOLOR_COLORVALUE(m_innerColor.x, m_innerColor.y, m_innerColor.z, 1.0f);
     for (int i = 0; i <= n; i++)
     {
         // Godot's cylinder: u around the circumference, x = sin, z = cos,
@@ -211,6 +253,8 @@ void CRibbon::Build()
             v.z = cosf(a) * m_radius;
             v.color = c;
             v.u = u; v.v = (float)k;
+            m_innerVerts[i * 2 + k] = v;
+            m_innerVerts[i * 2 + k].color = cInner;
         }
     }
     for (int j = 0; j < n; j++)
@@ -233,7 +277,190 @@ void CRibbon::Render()
     XAppSetTextureStageState(0, D3DTSS_COLORARG2, D3DTA_DIFFUSE);
     XAppSetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG2);
     XAppSetTextureStageState(0, D3DTSS_ALPHAARG2, D3DTA_DIFFUSE);
+    if (m_inner)
+    {
+        XAppSetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
+        XAppSetRenderState(D3DRS_ZWRITEENABLE, TRUE);
+        XAppGetD3DDev()->DrawIndexedVerticesUP(D3DPT_TRIANGLELIST, m_nIdx, m_idx, m_innerVerts, sizeof (WORLDVERTEX));
+        XAppSetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+        XAppSetRenderState(D3DRS_ZWRITEENABLE, FALSE);
+    }
     XAppGetD3DDev()->DrawIndexedVerticesUP(D3DPT_TRIANGLELIST, m_nIdx, m_idx, m_verts, sizeof (WORLDVERTEX));
+    EndUnlit(dwLighting);
+}
+
+////////////////////////////////////////////////////////////////////////////
+// Disc: a flat, unlit disc in the XZ plane (Godot's CylinderMesh of height
+// 0.001 as the pads use it), or an annulus when innerRadius is set (the
+// pad highlight ring).  Opaque, so it writes depth.
+
+class CDisc : public CNode
+{
+    DECLARE_NODE(CDisc, CNode)
+public:
+    CDisc() : m_radius(0.5f), m_innerRadius(0.0f), m_color(1.0f, 1.0f, 1.0f), m_segments(96) {}
+
+    float m_radius;
+    float m_innerRadius;
+    D3DXVECTOR3 m_color;
+    int m_segments;
+
+    void Render();
+
+    DECLARE_NODE_PROPS()
+};
+
+IMPLEMENT_NODE("Disc", CDisc, CNode)
+
+START_NODE_PROPS(CDisc, CNode)
+    NODE_PROP(pt_number, CDisc, radius)
+    NODE_PROP(pt_number, CDisc, innerRadius)
+    NODE_PROP(pt_vec3, CDisc, color)
+    NODE_PROP(pt_integer, CDisc, segments)
+END_NODE_PROPS()
+
+void CDisc::Render()
+{
+    int n = m_segments < 8 ? 8 : m_segments > 256 ? 256 : m_segments;
+    WORLDVERTEX verts[2 * 257];
+    WORD idx[256 * 6];
+    D3DCOLOR c = D3DCOLOR_COLORVALUE(m_color.x, m_color.y, m_color.z, 1.0f);
+    for (int i = 0; i <= n; i++)
+    {
+        float a = (float)i / n * 2.0f * D3DX_PI;
+        WORLDVERTEX& o = verts[i * 2];
+        o.x = sinf(a) * m_radius; o.y = 0.0f; o.z = cosf(a) * m_radius;
+        o.color = c; o.u = o.v = 0.0f;
+        WORLDVERTEX& q = verts[i * 2 + 1];
+        q.x = sinf(a) * m_innerRadius; q.y = 0.0f; q.z = cosf(a) * m_innerRadius;
+        q.color = c; q.u = q.v = 0.0f;
+    }
+    for (int j = 0; j < n; j++)
+    {
+        WORD* p = idx + j * 6;
+        p[0] = j * 2; p[1] = j * 2 + 2; p[2] = j * 2 + 1;
+        p[3] = j * 2 + 1; p[4] = j * 2 + 2; p[5] = j * 2 + 3;
+    }
+    DWORD dwLighting;
+    BeginUnlit(&dwLighting, D3DBLEND_SRCALPHA, D3DBLEND_INVSRCALPHA);
+    XAppSetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
+    XAppSetRenderState(D3DRS_ZWRITEENABLE, TRUE);
+    XAppSetTexture(0, NULL);
+    XAppSetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG2);
+    XAppSetTextureStageState(0, D3DTSS_COLORARG2, D3DTA_DIFFUSE);
+    XAppSetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG2);
+    XAppSetTextureStageState(0, D3DTSS_ALPHAARG2, D3DTA_DIFFUSE);
+    XAppGetD3DDev()->DrawIndexedVerticesUP(D3DPT_TRIANGLELIST, n * 6, idx, verts, sizeof (WORLDVERTEX));
+    XAppSetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+    EndUnlit(dwLighting);
+}
+
+////////////////////////////////////////////////////////////////////////////
+// Sprite: Godot's Sprite3D / Label3D with billboard on: a textured quad
+// that always faces the camera, upright, centred on the node's origin and
+// sized by the texture's pixels times pixelSize, tinted by color.  Used
+// for the pad emblems and the pad labels (depthTest false: drawn over
+// everything, like Label3D's no_depth_test).
+
+extern D3DXMATRIX g_matView;
+
+class CSprite : public CNode
+{
+    DECLARE_NODE(CSprite, CNode)
+public:
+    CSprite() : m_url(NULL), m_pixelSize(0.001f), m_color(1.0f, 1.0f, 1.0f), m_alpha(1.0f), m_depthTest(true),
+                m_pTexture(NULL), m_w(0), m_h(0), m_bDirty(true) {}
+    ~CSprite() { delete [] m_url; if (m_pTexture) m_pTexture->Release(); }
+
+    TCHAR* m_url;
+    float m_pixelSize;
+    D3DXVECTOR3 m_color;
+    float m_alpha;
+    bool m_depthTest;
+
+    void Render();
+    bool OnSetProperty(const PRD* pprd, const void* pvValue) { m_bDirty = true; return true; }
+
+    DECLARE_NODE_PROPS()
+
+protected:
+    LPDIRECT3DTEXTURE8 m_pTexture;
+    int m_w, m_h;
+    bool m_bDirty;
+};
+
+IMPLEMENT_NODE("Sprite", CSprite, CNode)
+
+START_NODE_PROPS(CSprite, CNode)
+    NODE_PROP(pt_string, CSprite, url)
+    NODE_PROP(pt_number, CSprite, pixelSize)
+    NODE_PROP(pt_vec3, CSprite, color)
+    NODE_PROP(pt_number, CSprite, alpha)
+    NODE_PROP(pt_boolean, CSprite, depthTest)
+END_NODE_PROPS()
+
+void CSprite::Render()
+{
+    if (m_bDirty)
+    {
+        m_bDirty = false;
+        if (m_pTexture) { m_pTexture->Release(); m_pTexture = NULL; }
+        if (m_url != NULL)
+        {
+            char szName[MAX_PATH];
+            Ansi(szName, m_url, sizeof szName);
+            m_pTexture = LoadXtx(szName, &m_w, &m_h);
+        }
+    }
+    float alpha = m_alpha * g_nEffectAlpha;
+    if (m_pTexture == NULL || alpha <= 0.0f)
+        return;
+
+    // The node's origin in world space, and the view's right and up in
+    // world space (the view's rotation is orthogonal, so its transpose is
+    // its inverse; the engine's z mirror does not change that).
+    D3DXMATRIX world;
+    XAppGetTransform(D3DTS_WORLD, &world);
+    D3DXVECTOR3 origin(world._41, world._42, world._43);
+    D3DXVECTOR3 right(g_matView._11, g_matView._21, g_matView._31);
+    D3DXVECTOR3 up(g_matView._12, g_matView._22, g_matView._32);
+    float hw = m_w * m_pixelSize * 0.5f, hh = m_h * m_pixelSize * 0.5f;
+    D3DCOLOR c = D3DCOLOR_COLORVALUE(m_color.x, m_color.y, m_color.z, alpha);
+    WORLDVERTEX v[4];
+    for (int i = 0; i < 4; i++)
+    {
+        float sx = (i & 1) ? hw : -hw, sy = (i & 2) ? -hh : hh;
+        v[i].x = origin.x + right.x * sx + up.x * sy;
+        v[i].y = origin.y + right.y * sx + up.y * sy;
+        v[i].z = origin.z + right.z * sx + up.z * sy;
+        v[i].color = c;
+        v[i].u = (i & 1) ? 1.0f : 0.0f;
+        v[i].v = (i & 2) ? 1.0f : 0.0f;
+    }
+    static const WORD idx[6] = { 0, 1, 2, 2, 1, 3 };
+
+    DWORD dwLighting, dwZEnable;
+    XAppGetRenderState(D3DRS_ZENABLE, &dwZEnable);
+    BeginUnlit(&dwLighting, D3DBLEND_SRCALPHA, D3DBLEND_INVSRCALPHA);
+    if (!m_depthTest)
+        XAppSetRenderState(D3DRS_ZENABLE, D3DZB_FALSE);
+    XAppSetTransform(D3DTS_WORLD, &g_matIdentity);
+    XAppSetTexture(0, m_pTexture);
+    XAppSetTextureStageState(0, D3DTSS_ADDRESSU, D3DTADDRESS_CLAMP);
+    XAppSetTextureStageState(0, D3DTSS_ADDRESSV, D3DTADDRESS_CLAMP);
+    XAppSetTextureStageState(0, D3DTSS_MINFILTER, D3DTEXF_LINEAR);
+    XAppSetTextureStageState(0, D3DTSS_MAGFILTER, D3DTEXF_LINEAR);
+    XAppSetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_MODULATE);
+    XAppSetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+    XAppSetTextureStageState(0, D3DTSS_COLORARG2, D3DTA_DIFFUSE);
+    XAppSetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_MODULATE);
+    XAppSetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
+    XAppSetTextureStageState(0, D3DTSS_ALPHAARG2, D3DTA_DIFFUSE);
+    XAppGetD3DDev()->DrawIndexedVerticesUP(D3DPT_TRIANGLELIST, 6, idx, v, sizeof (WORLDVERTEX));
+    XAppSetTextureStageState(0, D3DTSS_ADDRESSU, D3DTADDRESS_WRAP);
+    XAppSetTextureStageState(0, D3DTSS_ADDRESSV, D3DTADDRESS_WRAP);
+    XAppSetTransform(D3DTS_WORLD, &world);
+    XAppSetRenderState(D3DRS_ZENABLE, dwZEnable);
     EndUnlit(dwLighting);
 }
 
