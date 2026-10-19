@@ -311,6 +311,11 @@ static void backbuffer_read_begin(GLbitfield mask);
 static void backbuffer_read_end(void);
 static void hud_batch_flush(void), hud_profile_log(double frames);   /* fvf_batch.h */
 static GLuint cur_program;   /* the GL program bound for draws (see use_program) */
+/* Set from /tmp/xbcompat-trace-boot (a frame count; the file is removed):
+   the next title to create its device is traced from there until that frame,
+   for catching what it shows before its first videos. */
+static unsigned long trace_boot_frames;
+
 static bool ff_lighting_candidate, ff_primary_present, ff_secondary_present;
 static unsigned ff_texture_units, ff_weight_components;
 static bool ff_pretransformed;
@@ -546,6 +551,17 @@ static LONG NTAPI Direct3D_CreateDevice(UINT_ Adapter, ULONG DeviceType, PVOID p
          pp->BackBufferFormat, pp->EnableAutoDepthStencil ? "yes" : "no", pp->MultiSampleType);
 
     av_title_starting();
+    FILE *boot = fopen("/tmp/xbcompat-trace-boot", "r");
+    if (boot) {
+        unsigned long n = 0;
+        if (fscanf(boot, "%lu", &n) != 1 || !n) n = 30;
+        fclose(boot);
+        if (!unlink("/tmp/xbcompat-trace-boot")) {
+            trace_boot_frames = d3d.frame + n;
+            g_trace = 1;
+            xlog("D3D: tracing from device creation to frame %lu", trace_boot_frames);
+        }
+    }
     if (SDL_Init(SDL_INIT_VIDEO) != 0) fatal("SDL_Init: %s", SDL_GetError());
     install_fault_handlers();
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
@@ -1043,6 +1059,11 @@ static void swap_begin_frame(void)
            for catching a frame in the middle of play. */
         static int traced_by_file;
         if (traced_by_file) { g_trace = 0; traced_by_file = 0; }
+        if (trace_boot_frames && d3d.frame >= trace_boot_frames) {
+            trace_boot_frames = 0;
+            g_trace = 0;
+            xlog("D3D: boot trace ends at frame %lu", (unsigned long)d3d.frame);
+        }
         if (trace_frame < 0 && !access("/tmp/xbcompat-trace-frame", F_OK) && !unlink("/tmp/xbcompat-trace-frame")) {
             g_trace = 1;
             traced_by_file = 1;
@@ -1950,6 +1971,8 @@ static void readback_surface(D3DSurface *s, bool depth)
     free(tmp);
 }
 
+static void upload_depth_memory(void);
+
 /* FNV-1a over the device depth buffer's visible rows. */
 static uint64_t depth_memory_hash(void)
 {
@@ -2015,6 +2038,7 @@ static GLuint texture_for(D3DPixelContainer *t)
            memory since then. */
         uint64_t h = depth_memory_hash();
         if (h != zsync.hash) {
+            upload_depth_memory();
             zsync.hash = h;
             zsync.writes = depth_gpu_writes;
             tex_invalidate(t->res.Data);
@@ -3058,8 +3082,13 @@ static void apply_render_states(bool pretransformed, bool has_normal)
         float w = d3d.viewport.Width, h = d3d.viewport.Height, top = d3d.rt_texture ? h : 0, bottom = h - top;
         float ortho[16] = { 2 / w, 0, 0, 0,  0, 2 / (top - bottom), 0, 0,  0, 0, 2, 0,
                             -1, -(top + bottom) / (top - bottom), -1, 1 };
+        /* The NV2A puts pixel centres on whole screen positions (the
+           library's 0.53125 border), GL on halves: without the half pixel a
+           full-target quad from -0.5 to w-0.5 missed its last column and
+           row and sampled half a texel up and left, so Splinter Cell's
+           blur chain left stale bright edges and crept to the top left. */
         float move[16] = { 1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,
-                           -(float)d3d.viewport.X, -(float)d3d.viewport.Y, 0, 1 };
+                           0.5f - (float)d3d.viewport.X, 0.5f - (float)d3d.viewport.Y, 0, 1 };
         glMatrixMode(GL_PROJECTION);
         glLoadMatrixf(ortho);
         glMatrixMode(GL_MODELVIEW);
@@ -5857,6 +5886,51 @@ static struct {
     void (APIENTRY *bind)(GLenum, GLuint);
     void (APIENTRY *blit)(GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield, GLenum);
 } window_fb;
+
+/* The reverse of readback_surface for the device depth buffer: the CPU
+   wrote its memory, so the GPU's depth becomes those bytes, as on the NV2A
+   where the memory is the depth buffer.  A later readback then keeps them
+   wherever the GPU did not draw since. */
+static void upload_depth_memory(void)
+{
+    if (!window_fb.fbo || window_fb.depth_storage != 0x88F0 /* GL_DEPTH24_STENCIL8 */) return;
+    if (!p_glWindowPos2i) p_glWindowPos2i = SDL_GL_GetProcAddress("glWindowPos2i");
+    if (!p_glWindowPos2i) return;
+    hud_batch_flush();
+    ULONG w, h, pitch;
+    container_size((D3DPixelContainer *)d3d.depth, &w, &h, &pitch);
+    if (w > (ULONG)d3d.width) w = d3d.width;
+    if (h > (ULONG)d3d.height) h = d3d.height;
+    const uint8_t *px = (const uint8_t *)(d3d.depth->Data | CONTIG_BASE);
+    uint8_t *tmp = malloc(w * h * 4);
+    if (!tmp) return;
+    ULONG row = pitch < w * 4 ? pitch : w * 4;
+    for (ULONG y = 0; y < h; y++) memcpy(tmp + (h - 1 - y) * w * 4, px + y * pitch, row);
+    /* Called while a draw binds its textures: its program comes back after. */
+    GLuint program = cur_program;
+    p_glUseProgram(0);
+    glPushAttrib(GL_ALL_ATTRIB_BITS);
+    for (int u = 3; u >= 0; u--) {
+        p_glActiveTexture(GL_TEXTURE0 + u);
+        glDisable(GL_TEXTURE_2D); glDisable(GL_TEXTURE_3D); glDisable(GL_TEXTURE_CUBE_MAP);
+    }
+    glDisable(GL_SCISSOR_TEST); glDisable(GL_ALPHA_TEST); glDisable(GL_STENCIL_TEST);
+    glEnable(GL_DEPTH_TEST);   /* glDrawPixels writes depth only with the test on */
+    glDepthFunc(GL_ALWAYS);
+    glDepthMask(GL_TRUE);
+    glStencilMask(0xFF);
+    glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    if (p_glBindFramebuffer) p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    p_glWindowPos2i(0, 0);
+    glDrawPixels(w, h, 0x84F9 /* GL_DEPTH_STENCIL */, 0x84FA /* GL_UNSIGNED_INT_24_8 */, tmp);
+    if (p_glBindFramebuffer) p_glBindFramebuffer(GL_FRAMEBUFFER, d3d.rt_texture ? d3d.fbo : 0);
+    glPopAttrib();
+    gc_reset();   /* the cached GL state no longer matches */
+    if (program) p_glUseProgram(program);
+    free(tmp);
+    TRACE_ALL("D3D: depth memory written by the CPU loaded into the depth buffer");
+}
 
 /* The back buffer keeps the title's formats where GL has them: R5G6B5
    stays 16-bit (its banding and its blending are the title's), X8R8G8B8
