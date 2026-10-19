@@ -3360,9 +3360,13 @@ static ULONG adjusted_texture_modes(void)
         if (!t && m != 0x04 && m != 0x05 && m != 0x0A && m != 0x11)
             m = 0;
         else if (t && m >= 0x01 && m <= 0x03) {
-            /* A 2D depth image still needs PROJECT3D to supply reference r/q. */
-            if (!(m == 0x02 && target == GL_TEXTURE_2D && is_depth_format((t->Format >> 8) & 0xFF)))
-                m = target == GL_TEXTURE_CUBE_MAP ? 0x03 : target == GL_TEXTURE_3D ? 0x02 : 0x01;
+            /* A depth image (a shadow buffer) becomes PROJECT3D, as a volume
+               does, so the compare gets its reference from r/q: the library
+               picks PROJECT3D for every depth color format here.  Kept as
+               PROJECT2D, the compare used a zero reference and the ATG
+               ShadowBuffer sample (a "tex t1" shader) drew no shadow. */
+            bool depth = target == GL_TEXTURE_2D && is_depth_format((t->Format >> 8) & 0xFF);
+            m = target == GL_TEXTURE_CUBE_MAP ? 0x03 : target == GL_TEXTURE_3D || depth ? 0x02 : 0x01;
         }
         else if (t && (m == 0x0D || m == 0x0E))
             m = target == GL_TEXTURE_CUBE_MAP ? 0x0E : 0x0D;
