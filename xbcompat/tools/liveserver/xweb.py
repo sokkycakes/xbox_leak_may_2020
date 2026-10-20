@@ -31,6 +31,33 @@ COUNTRIES = {
     },
 }
 MASTER_KEYS = ('LocaleCode',)
+# The billing screens' fields, as repeatable keys.  BillingField is "field,
+# label loc tag, keyboard, required" (fields BillingStreet_1/_2, BillingDistrict,
+# BillingCity, BillingState, BillingPostal, BillingEmail; keyboards 10Key,
+# 10KeyHyphen, Alpha, OnlyGlobalsDisabled, Apostrophe, Email, State, Korean,
+# Japanese, Taiwanese).  A key with a dot sets a property of a typed field:
+# CreditCardType.CardType adds a payment method (VISA, MASTERCARD,
+# AMERICAN_EXPRESS, DISCOVER, JCB, DINERS, KLCC), StateListItem.State adds
+# "code,name" to the state list, and PostalCode/PhoneNumber/CreditCardNumber
+# take Min and Max lengths (and a Formula we leave out, so any digits pass).
+BILLING_FIELDS = {
+    'US': [
+        ('BillingField', 'BillingStreet_1,BIL_STREET_ADDRESS,Alpha,1'),
+        ('BillingField', 'BillingCity,BIL_CITY,Alpha,1'),
+        ('BillingField', 'BillingState,BIL_STATE,State,1'),
+        ('BillingField', 'BillingPostal,BIL_ZIP,10Key,1'),
+        ('CreditCardType.CardType', 'VISA'),
+        ('CreditCardType.CardType', 'MASTERCARD'),
+        ('CreditCardType.CardType', 'AMERICAN_EXPRESS'),
+        ('CreditCardNumber.Min', 13), ('CreditCardNumber.Max', 16),
+        ('PhoneNumber.Min', 10), ('PhoneNumber.Max', 10),
+        ('PostalCode.Min', 5), ('PostalCode.Max', 5),
+        ('StateListItem.State', 'CA,California'),
+        ('StateListItem.State', 'NY,New York'),
+        ('StateListItem.State', 'TX,Texas'),
+        ('StateListItem.State', 'WA,Washington'),
+    ],
+}
 TERMS = {
     'TermsOfUse.ini': 'Terms of Use\r\n\r\nThis is a private test server. There are no terms.\r\n',
     'CodeOfConduct.ini': 'Code of Conduct\r\n\r\nBe nice.\r\n',
@@ -44,6 +71,8 @@ def inx(keys=None):
     for name, info in COUNTRIES.items():
         lines.append(f'[{name}]')
         lines += [f'{k}="{v}"' for k, v in info.items() if keys is None or k in keys]
+        if keys is None:
+            lines += [f'{k}="{v}"' for k, v in BILLING_FIELDS.get(name, ())]
         lines.append('')
     return utf16('\r\n'.join(lines))
 
