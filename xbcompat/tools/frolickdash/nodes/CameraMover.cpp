@@ -36,11 +36,16 @@ public:
     DECLARE_NODE_FUNCTIONS()
 
 protected:
-    bool Target(CObject* pObject, D3DXVECTOR3* pPosition, D3DXQUATERNION* pOrientation);
+    bool Target(CObject* pObject, D3DXVECTOR3* pPosition, D3DXQUATERNION* pOrientation, float* pFov);
+    void SetFov(float fov);
 
     XTIME m_startTime;
     D3DXVECTOR3 m_fromPosition, m_toPosition;
     D3DXQUATERNION m_fromOrientation, m_toOrientation;
+    // The projection takes its field of view from the bound Viewpoint, so a
+    // flight to a Viewpoint with a different one lerps the bound Viewpoint's
+    // value; m_boundFov keeps what it was authored with, for a flight back.
+    float m_fromFov, m_toFov, m_curFov, m_boundFov;
 };
 
 IMPLEMENT_NODE("CameraMover", CCameraMover, CNode)
@@ -56,11 +61,22 @@ START_NODE_FUN(CCameraMover, CNode)
     NODE_FUN_NV(Progress)
 END_NODE_FUN()
 
-CCameraMover::CCameraMover() : m_duration(0.55f), m_moving(false), m_startTime(0.0f)
+CCameraMover::CCameraMover() : m_duration(0.55f), m_moving(false), m_startTime(0.0f),
+    m_fromFov(0.0f), m_toFov(0.0f), m_curFov(-1.0f), m_boundFov(0.0f)
 {
 }
 
-bool CCameraMover::Target(CObject* pObject, D3DXVECTOR3* pPosition, D3DXQUATERNION* pOrientation)
+void CCameraMover::SetFov(float fov)
+{
+    m_curFov = fov;
+    if (theApp.m_pViewpoint != NULL && theApp.m_pViewpoint->m_fieldOfView != fov)
+    {
+        theApp.m_pViewpoint->m_fieldOfView = fov;
+        theApp.m_bProjectionDirty = true;
+    }
+}
+
+bool CCameraMover::Target(CObject* pObject, D3DXVECTOR3* pPosition, D3DXQUATERNION* pOrientation, float* pFov)
 {
     if (pObject == NULL)
         return false;
@@ -71,15 +87,19 @@ bool CCameraMover::Target(CObject* pObject, D3DXVECTOR3* pPosition, D3DXQUATERNI
     *pPosition = pVp->m_position;
     pPosition->z = -pPosition->z;
     D3DXQuaternionRotationAxis(pOrientation, (D3DXVECTOR3*)&pVp->m_orientation, -pVp->m_orientation.w);
+    if (m_curFov < 0.0f)
+        m_curFov = m_boundFov = theApp.m_pViewpoint != NULL ? theApp.m_pViewpoint->m_fieldOfView : D3DX_PI / 2.0f;
+    *pFov = pVp == theApp.m_pViewpoint ? m_boundFov : pVp->m_fieldOfView;
     return true;
 }
 
 void CCameraMover::GoTo(CObject* pViewpoint)
 {
-    if (!Target(pViewpoint, &m_toPosition, &m_toOrientation))
+    if (!Target(pViewpoint, &m_toPosition, &m_toOrientation, &m_toFov))
         return;
     m_fromPosition = theCamera.m_position;
     m_fromOrientation = theCamera.m_orientation;
+    m_fromFov = m_curFov;
     m_startTime = XAppGetNow();
     m_moving = true;
     if (m_duration <= 0.0f)
@@ -90,10 +110,12 @@ void CCameraMover::Jump(CObject* pViewpoint)
 {
     D3DXVECTOR3 position;
     D3DXQUATERNION orientation;
-    if (!Target(pViewpoint, &position, &orientation))
+    float fov;
+    if (!Target(pViewpoint, &position, &orientation, &fov))
         return;
     m_moving = false;
     theCamera.Set(&position, &orientation, 0.0f);
+    SetFov(fov);
 }
 
 float CCameraMover::Progress()
@@ -116,6 +138,7 @@ void CCameraMover::Advance(float nSeconds)
     D3DXVec3Lerp(&position, &m_fromPosition, &m_toPosition, f);
     D3DXQuaternionSlerp(&orientation, &m_fromOrientation, &m_toOrientation, f);
     theCamera.Set(&position, &orientation, 0.0f);
+    SetFov(m_fromFov + (m_toFov - m_fromFov) * f);
     if (t >= 1.0f)
     {
         m_moving = false;

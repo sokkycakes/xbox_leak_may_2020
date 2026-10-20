@@ -69,12 +69,12 @@ ZOOM_DURATION = 0.75                           # the library carousel's zoom
 # the belt (GameTap's, see art/gametap) from the cover corners, its ring
 # centred on the camera as GameTap shoots it, the regular covers at 0.97 of
 # the rail radius, the focused cover 4.7 ahead.
-# Then pulled back 0.2 along its own view line so the three pad labels sit
-# inside the NTSC title-safe area (the inner 80%) in this view, as sokky
-# asked (2026-10-20); that puts the eye almost on carousel.go's own.
+# The view is widened from the hub's 80 degrees so the three pad labels
+# sit inside the NTSC title-safe area (the inner 80%) in this view, as
+# sokky asked (2026-10-20): same position and angle, zoomed out.
+CAROUSEL_EYE = (0.0, 0.1072, 0.6407)
 CAROUSEL_LOOK = (0.0, 0.4043, -1.0)
-CAROUSEL_PULLBACK = 0.2
-CAROUSEL_EYE_MOCKUP = (0.0, 0.1072, 0.6407)
+CAROUSEL_FOV = 96.0
 BELT_CENTRE = (-0.084, 1.581, 0.894)           # the belt ring's axis, at the regular covers' height
 BELT_INSET = 0.97
 CAROUSEL_GAMES = ["Game Title", "Stiletto Swift", "Game Title 3", "Game Title 4", "Game Title 5",
@@ -118,8 +118,7 @@ def pad_world(name):
 def camera(name):
     """eye, direction, up, fov for a pad's view."""
     if name == "carousel":
-        d = norm(CAROUSEL_LOOK)
-        return sub(CAROUSEL_EYE_MOCKUP, mul(d, CAROUSEL_PULLBACK)), d, (0.0, 1.0, 0.0), CAMERAS["library"][3]
+        return CAROUSEL_EYE, norm(CAROUSEL_LOOK), (0.0, 1.0, 0.0), CAROUSEL_FOV
     if name.startswith("settings"):
         eye, d, up, fov = CAMERAS["catalog" + name[len("settings"):]]
         return mirrorx(eye), norm(mirrorx(d)), norm(mirrorx(up)), fov
@@ -297,19 +296,20 @@ def overlay_scene():
                    " <Stroke>\n  <StrokeWidth>3</StrokeWidth>\n  <StrokeColor>0xffffffff</StrokeColor>\n </Stroke>",
                    " <Fill>\n  <FillType>0</FillType>\n </Fill>", " <Closed>false</Closed>",
                    " <Points>22,12;0,0;11,12;22,0</Points>", "</Properties>", "</XuiFigure>"]),
-        # B + return arrow of the belt view: screen space, centred above the
-        # library label where sokky's mockup has it (B at 0.506 W, 0.828 H,
-        # the arrow box 0.482-0.519 W by 0.845-0.887 H), shown only while
+        # B + return arrow of the belt view: screen space, centred between
+        # the focused cover and the library label as in sokky's mockup (B at
+        # 0.506 W, the arrow box 0.482-0.519 W; 52 px above the mockup's
+        # 0.828 H because the wider view lifts the label), shown only while
         # the belt is open
         "\n".join(["<XuiImage>", "<Properties>", " <Id>bGlyph</Id>", " <Width>14.4</Width>", " <Height>14.4</Height>",
-                   " <Position>357.1,390.2,0</Position>", " <Opacity>0</Opacity>", " <ImagePath>glyph_b.png</ImagePath>", " <SizeMode>4</SizeMode>",
+                   " <Position>357.1,338.2,0</Position>", " <Opacity>0</Opacity>", " <ImagePath>glyph_b.png</ImagePath>", " <SizeMode>4</SizeMode>",
                    "</Properties>", "</XuiImage>"]),
         "\n".join(["<XuiFigure>", "<Properties>", " <Id>backStem</Id>", " <Width>26.6</Width>", " <Height>9.6</Height>",
-                   " <Position>347.0,405.6,0</Position>", " <Opacity>0</Opacity>",
+                   " <Position>347.0,353.6,0</Position>", " <Opacity>0</Opacity>",
                    " <Stroke>\n  <StrokeWidth>3</StrokeWidth>\n  <StrokeColor>0xffd8d8d8</StrokeColor>\n </Stroke>",
                    " <Fill>\n  <FillType>0</FillType>\n </Fill>", " <Closed>false</Closed>", " <Points>26.6,9.6;25.1,0.0;25.1,9.6;1.0,9.6</Points>", "</Properties>", "</XuiFigure>"]),
         "\n".join(["<XuiFigure>", "<Properties>", " <Id>backHead</Id>", " <Width>9.4</Width>", " <Height>20.2</Height>",
-                   " <Position>347.0,405.6,0</Position>", " <Opacity>0</Opacity>",
+                   " <Position>347.0,353.6,0</Position>", " <Opacity>0</Opacity>",
                    " <Stroke>\n  <StrokeWidth>3</StrokeWidth>\n  <StrokeColor>0xffd8d8d8</StrokeColor>\n </Stroke>",
                    " <Fill>\n  <FillType>0</FillType>\n </Fill>", " <Closed>false</Closed>", " <Points>9.4,20.2;9.4,0.0;0.0,9.6;9.4,20.2</Points>", "</Properties>", "</XuiFigure>"]),
         # the footer strip
