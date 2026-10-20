@@ -103,6 +103,16 @@ class Db:
                     return v
         return None
 
+    def find_user(self, nick):
+        """A user by gamertag alone (retail has no kingdoms)."""
+        for v in self.d['users'].values():
+            if v['nick'].lower() == nick.lower():
+                return v
+        return None
+
+    def user_by_xuid(self, xuid):
+        return next((v for v in self.d['users'].values() if v['xuid'] == xuid), None)
+
     def name_taken(self, nick, kingdom):
         return any(u['nick'].lower() == nick.lower() and u['kingdom'].lower() == kingdom.lower()
                    for u in self.d['users'].values())

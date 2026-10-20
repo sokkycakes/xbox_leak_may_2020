@@ -9,7 +9,7 @@ import struct
 
 import der
 from der import app, bits32, ctx, fields, gstr, integer, ktime, octets, seq
-from kcrypto import nonce_key, rc4hmac_decrypt, rc4hmac_encrypt
+from kcrypto import compound_key, nonce_key, rc4hmac_decrypt, rc4hmac_encrypt
 
 ETYPE_RC4 = 23
 NT_ENTERPRISE, NT_SRV_INST = 10, 2
@@ -20,6 +20,7 @@ U_CLIENT_VERSION = 1027
 U_SERVICE_REQUEST, U_SERVICE_ADDRESS, U_ACCOUNT_CREATION = 1201, 1202, 1203
 
 PA_TGS_REQ, PA_ENC_TIMESTAMP = 1, 2
+PA_COMPOUND_IDENTITY = 130       # the TGT of the users already signed in (kerberos.cpp:1640)
 PA_CLIENT_VERSION = 132          # the 2002 client: encrypted with the nonce key of 0
 PA_CLIENT_VERSION_SIGNED = 206   # retail: HMAC-SHA1(nonce key of 0, text) then the text
 PA_XBOX_SERVICE_REQUEST, PA_XBOX_SERVICE_ADDRESS, PA_XBOX_ACCOUNT_CREATION = 201, 202, 203
@@ -33,6 +34,7 @@ DEVKIT_SERIAL = '999999999999'
 DEVKIT_ONLINE_KEY = bytes.fromhex('7B592E4F8178B4C75788531B2E747687')
 
 TICKET_LIFE = datetime.timedelta(days=1)
+DEFAULT_COUNTRY = 103           # United States, XONLINE_COUNTRY_*
 
 
 def now():
@@ -155,6 +157,18 @@ class Kdc:
                 return self.error(KDC_ERR_C_PRINCIPAL_UNKNOWN, realm, sname_raw)
             keys = [bytes.fromhex(acct['key'])]
 
+        # A logon with users chains AS-REQs: each user, then the machine, each
+        # carrying the TGT before it and keyed with that TGT's session key too.
+        users = []
+        chain = padata.get(PA_COMPOUND_IDENTITY)
+        if chain is not None:
+            for _, _, raw in der.items(der.unwrap(chain)):
+                prev = self.open_ticket(self.db.krbtgt_key(), raw)
+                if prev is None:
+                    return self.error(KDC_ERR_PREAUTH_FAILED, realm, sname_raw)
+                users += prev.get('u', [])
+                keys = [compound_key(k, bytes.fromhex(prev['k'])) for k in keys]
+
         ts = padata.get(PA_ENC_TIMESTAMP)
         key = ts is not None and next((k for k in keys if dec_data(k, U_TIMESTAMP, der.unwrap(ts)) is not None), None)
         if not key:
@@ -178,8 +192,12 @@ class Kdc:
             info = {'k': session.hex(), 'macs': cname}
             self.log(f'kdc: MACS made machine {acct["name"]}@{acct["domain"]} xuid {acct["xuid"]:#x}')
         else:
+            if not acct.get('machine', False):
+                users.append(acct['xuid'])
             info = {'k': session.hex(), 'c': cname, 'r': realm, 'x': acct['xuid'],
-                    'm': acct.get('machine', False)}
+                    'm': acct.get('machine', False), 'u': users}
+            if users:
+                self.log(f'kdc: TGT for {cname} carries users {[hex(u) for u in users]}')
         ticket = self.make_ticket(self.db.krbtgt_key(), realm, sname_raw, info)
         # Clients decrypt an AS-REP with the TGS-REP usage (8), retail too: they
         # pass KERB_ENCRYPTED_AS_REPLY_PDU where kerberos.cpp:3697 tests
@@ -209,6 +227,12 @@ class Kdc:
         except (AttributeError, IndexError, ValueError):
             return False
 
+    def user_flags(self, xuid):
+        """A signed-in user's dwUserFlags: only the country (XONLINE_USER_COUNTRY_MASK,
+        bits 8-15), which the dashboard needs to pick the account's country."""
+        acct = self.db.user_by_xuid(xuid) if xuid else None
+        return acct.get('country', DEFAULT_COUNTRY) << 8 if acct else 0
+
     def tgs_req(self, data):
         padata, body, _ = self.parse_req(data)
         realm = der.unwrap(body[2][1]).decode()
@@ -230,6 +254,7 @@ class Kdc:
 
         services = []
         users = []
+        slots = (0, 0, 0, 0)
         retail = False
         req = padata.get(PA_XBOX_SERVICE_REQUEST)
         if req is not None:
@@ -244,7 +269,8 @@ class Kdc:
             else:
                 self.log(f'kdc: service request of {None if plain is None else len(plain)} bytes')
                 return self.error(KDC_ERR_PREAUTH_FAILED, realm, sname_raw)
-            users = [u for u in struct.unpack_from('<4Q', plain, 28 + o) if u]
+            slots = struct.unpack_from('<4Q', plain, 28 + o)
+            users = [u for u in slots if u]
             n = struct.unpack_from('<I', plain, 60 + o)[0]
             services = list(struct.unpack_from('<12I', plain, 64 + o)[:min(n, 12)])
             title = struct.unpack_from('<I', plain, 16 + o)[0]
@@ -254,9 +280,10 @@ class Kdc:
         end = now() + TICKET_LIFE
         info = {'k': session.hex(), 'c': tgt['c'], 'r': tgt['r'], 'x': tgt['x'], 'u': users, 's': services}
         ticket = self.make_ticket(self.db.sg_key(), realm, sname_raw, info)
-        # {hr, hrUser[4], userFlags[4], (retail: 36 more bytes), siteIPAddress,
+        # {hr, hrUser[4], dwUserFlags[4], (retail: 36 more bytes), siteIPAddress,
         # numServices, 12 x {serviceID, hr, port, reserved}}: 188 bytes, or 224 retail.
-        addr = struct.pack('<i4i4I', 0, 0, 0, 0, 0, 0, 0, 0, 0) + bytes(36 if retail else 0) + \
+        flags = [self.user_flags(u) for u in slots]
+        addr = struct.pack('<i4i4I', 0, 0, 0, 0, 0, *flags) + bytes(36 if retail else 0) + \
             bytes(self.site_ip) + struct.pack('<I', len(services))
         for i in range(12):
             if i < len(services):

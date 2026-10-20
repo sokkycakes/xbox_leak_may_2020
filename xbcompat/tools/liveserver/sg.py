@@ -12,6 +12,7 @@ import der
 from der import app, ctx, fields, integer, octets, seq
 from kcrypto import Des, des_parity, hmac_sha1, rc4hmac_decrypt, rc4hmac_encrypt
 import xuacs
+import xweb
 
 SG_PORT = 3074
 SERVICE_PORT = 80          # the TCP port the KDC hands out for every service
@@ -81,7 +82,7 @@ class Tcp:
             self.inbuf += data
             self.rcv_nxt = (self.rcv_nxt + len(data)) & 0xFFFFFFFF
             self.send(TCP_ACK)
-            reply = xuacs.handle(self.sa.gw, self.sa, self.inbuf)
+            reply = (xweb if self.sa.retail else xuacs).handle(self.sa.gw, self.sa, self.inbuf)
             if reply is not None:
                 for i in range(0, len(reply), MSS):
                     self.send(TCP_ACK | TCP_PSH, reply[i:i + MSS])
@@ -128,21 +129,7 @@ class SecurityAssociation:
     def send(self, proto, payload):
         self.seq_xmit += 1
         if self.retail:
-            # Retail frames the secure packet as spi(4) + cipher(8n) + seq(2 LE)
-            # + HMAC(seq(4 LE)+spi+cipher)[0:10].  There is no ESP pad/next-header
-            # trailer: the inner protocol is carried in the low byte of the SPI
-            # (bits 0-4 = protocol, 0 for secmsg), and the payload is simply zero
-            # padded up to the DES block size.  The per-packet IV is never sent.
-            ctrl = 0 if proto == PROTO_SECMSG else proto
-            plain = payload + bytes((-len(payload)) % 8)
-            cipher = self.des_xmit.cbc_encrypt(self._pkt_iv(self.xmit_iv, self.seq_xmit), plain)
-            spi = struct.pack('<I', (self.spi_init & 0xFFFFFF00) | (ctrl & 0xFF))
-            mac = hmac_sha1(self.sha_xmit, struct.pack('<I', self.seq_xmit) + spi + cipher)[:10]
-            wire = spi + cipher + struct.pack('<H', self.seq_xmit) + mac
-            if os.environ.get('LIVE_DEBUG'):
-                self.gw.log(f'sg: retail xmit seq={self.seq_xmit} ctrl={ctrl:#04x} '
-                            f'plain={plain.hex()} wire={wire.hex()}')
-            self.gw.sock.sendto(wire, self.peer)
+            self.send_retail(proto, payload)
             return
         pad = (-(len(payload) + 2)) % 8
         plain = payload + bytes(range(1, pad + 1)) + bytes([pad, proto])
@@ -169,28 +156,90 @@ class SecurityAssociation:
         payload = plain[:-2 - pad]
         self.dispatch(proto, payload)
 
+    # Retail packets are spi(4) + cipher(8n) + clear header + seq(2 LE) + HMAC[0:10].
+    # There is no ESP trailer.  The low byte of the SPI is a control byte
+    # (xonlinedash 0x138a06): p = ctrl & 0x1f says what is inside (0 = secmsg,
+    # else IP header compression: r = (p-1) % 3 ports carried, 0 = both 1000,
+    # 1 = 1000 + one byte each, 2 = two big-endian words; q = p - r is the
+    # protocol, 1 = TCP with seq, ack, offset/flags and window, 4 = UDP).  The
+    # compressed header, H = 2r (+12 for TCP) bytes, is split: its first
+    # m = min(v, H) bytes sit at the end of the cipher, where v = ctrl >> 5 counts
+    # them plus the zero padding before them, and the rest follows the cipher in
+    # clear.  The HMAC covers clear + seq(4 LE) + spi (zero padded to 4) + cipher.
+    # The per-packet IV comes from the sequence and is never sent.
+
+    @staticmethod
+    def _layout(ctrl):
+        p, v = ctrl & 0x1F, ctrl >> 5
+        if p == 0:
+            return p, v, 0, 0, 0
+        r = (p - 1) % 3
+        q = p - r
+        hlen = 2 * r + (12 if q == 1 else 0)
+        return q, v, r, hlen, min(v, hlen)
+
+    def _mac(self, key, spi, seq, cipher, clear):
+        head = clear + struct.pack('<I', seq) + spi
+        return hmac_sha1(key, head + bytes((-len(head)) % 4) + cipher)[:10]
+
+    def send_retail(self, proto, payload):
+        if proto == PROTO_TCP:
+            # Our own segments come in as plain TCP; send them as compressed
+            # TCP with both ports given (p = 3) and the header tucked into the
+            # cipher's padding as far as it goes.
+            hdr, body = payload[:20], payload[20:]
+            h = hdr[0:4] + hdr[4:16]
+            v = (-len(body)) % 8
+            plain, clear, ctrl = body + h[:v], h[v:], 3 | (v << 5)
+        else:
+            v = (-len(payload)) % 8
+            plain, clear, ctrl = payload + bytes(v), b'', (v << 5)
+        spi = struct.pack('<I', (self.spi_init & 0xFFFFFF00) | ctrl)
+        cipher = self.des_xmit.cbc_encrypt(self._pkt_iv(self.xmit_iv, self.seq_xmit), plain) if plain else b''
+        wire = spi + cipher + clear + struct.pack('<H', self.seq_xmit) + \
+            self._mac(self.sha_xmit, spi, self.seq_xmit, cipher, clear)
+        if os.environ.get('LIVE_DEBUG'):
+            self.gw.log(f'sg: retail xmit seq={self.seq_xmit} ctrl={ctrl:#04x} plain={plain.hex()} '
+                        f'clear={clear.hex()}')
+        self.gw.sock.sendto(wire, self.peer)
+
     def esp_retail(self, data, peer):
-        spi, cipher, seqn, mac = data[:4], data[4:-12], data[-12:-10], data[-10:]
-        if len(cipher) < 8 or len(cipher) % 8:
-            self.gw.log(f'sg: retail ESP bad length {len(data)}')
+        spi, seqn, mac = data[:4], data[-12:-10], data[-10:]
+        ctrl = spi[0]
+        q, v, r, hlen, m = self._layout(ctrl)
+        clear_len = hlen - m
+        clen = len(data) - 16 - clear_len
+        if clen < 0 or clen % 8 or clen < v:
+            self.gw.log(f'sg: retail ESP bad length {len(data)} (ctrl {ctrl:#04x})')
             return
-        want = hmac_sha1(self.sha_recv, seqn.ljust(4, b'\0') + spi + cipher)[:10]
-        if not hmac.compare_digest(want, mac):
+        cipher, clear = data[4:4 + clen], data[4 + clen:4 + clen + clear_len]
+        ctr = int.from_bytes(seqn, 'little')
+        if not hmac.compare_digest(self._mac(self.sha_recv, spi, ctr, cipher, clear), mac):
             self.gw.log(f'sg: retail ESP ({len(data)} bytes) failed authentication')
             return
-        ctr = int.from_bytes(seqn, 'little')
-        plain = self.des_recv.cbc_decrypt(self._pkt_iv(self.recv_iv, ctr), cipher)
+        plain = self.des_recv.cbc_decrypt(self._pkt_iv(self.recv_iv, ctr), cipher) if cipher else b''
         self.peer = peer
         self.last_recv = time.time()
-        # The inner protocol is the low 5 bits of the SPI's low byte (the high 3
-        # bits encode the compressed IP-header variant).  There is no pad/next-
-        # header trailer; secmsg payloads are entries zero padded to the block.
-        ctrl = struct.unpack_from('<I', data)[0] & 0xFF
-        proto = ctrl & 0x1F
         if os.environ.get('LIVE_DEBUG'):
-            self.gw.log(f'sg: retail recv seq={ctr} ctrl={ctrl:#04x} proto={proto} '
-                        f'plain={plain.hex()}')
-        self.dispatch(proto, plain, ctr)
+            self.gw.log(f'sg: retail recv seq={ctr} ctrl={ctrl:#04x} proto={q} '
+                        f'plain={plain.hex()} clear={clear.hex()}')
+        if q == 0:
+            self.dispatch(PROTO_SECMSG, plain, ctr)
+            return
+        h = plain[clen - m:clen] + clear
+        body = plain[:clen - v]
+        if r == 0:
+            sport = dport = 1000
+        elif r == 1:
+            sport, dport = 1000 + h[0], 1000 + h[1]
+        else:
+            sport, dport = struct.unpack_from('>HH', h)
+        if q == 1:
+            # A plain TCP segment again: ports, seq, ack, offset/flags, window,
+            # no checksum, then the options and data.
+            self.tcp_in(struct.pack('>HH', sport, dport) + h[2 * r:2 * r + 12] + bytes(4) + body)
+        else:
+            self.gw.log(f'sg: retail compressed proto {q} {sport}->{dport} {body.hex()}')
 
     def dispatch(self, proto, payload, seq=0):
         if proto == PROTO_SECMSG:
