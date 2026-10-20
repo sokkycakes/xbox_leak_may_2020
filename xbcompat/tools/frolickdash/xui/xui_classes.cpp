@@ -102,7 +102,6 @@ static const PropDef L8_XuiText[] = {
     { "Text", 5, 4, 0 },
     { "TextColor", 6, 0, 0 },
     { "DropShadowColor", 6, 0, 0 },
-    { "OutlineColor", 6, 0, 0 },   // ours: an outline round the glyphs (no XUI equivalent)
     { "PointSize", 4, 12, 0 },
     { "Font", 5, 0, 0 },
     { "TextStyle", 3, 8, 0 },
@@ -111,7 +110,6 @@ static const PropDef L8_XuiText[] = {
 static const PropDef L9_XuiTextPresenter[] = {
     { "TextColor", 6, 0, 0 },
     { "DropShadowColor", 6, 0, 0 },
-    { "OutlineColor", 6, 0, 0 },   // ours: an outline round the glyphs (no XUI equivalent)
     { "PointSize", 4, 12, 0 },
     { "Font", 5, 0, 0 },
     { "TextStyle", 3, 8, 0 },

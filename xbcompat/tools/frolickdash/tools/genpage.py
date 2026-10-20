@@ -52,10 +52,7 @@ PANEL_TOP, PANEL_BOTTOM = "0xd9424c5a", "0xd9313b49"
 TEXT, SHADOW = "0xe60f0f0f", "0x5aebebeb"
 # Item text on the pages: white at rest, the Blades' dark only on the
 # highlighted row (sokky, 2026-10-20); skin() keys the visuals so.
-ITEM_REST, ITEM_FOCUS = "0xffffffff", TEXT
-# The highlighted item's text carries a light outline (the runtime's
-# OutlineColor) in place of the skin's drop shadow (sokky, 2026-10-20).
-ITEM_OUTLINE, NO_COLOUR = "0xc0ebebeb", "0x00000000"
+ITEM_REST, ITEM_FOCUS = "0xffffffff", "0xff0a0a0a"   # the focus a touch blacker than the Blades' (sokky)
 
 CANVAS_W, CANVAS_H = 1120, 770
 # The screen on the canvas: 720x480 at 0.643, so x 0..1120 and y 12..758.
@@ -213,26 +210,23 @@ def item_text_colours(visual):
     frames = [(m.group(1), int(m.group(2))) for m in re.finditer(r"<NamedFrame><Name>([^<]*)</Name><Time>(\d+)</Time>", visual)]
     if not frames:
         return visual
-    # (time, rest?) per state frame; the colours follow: text white at rest
-    # and dark on focus, the drop shadow at rest only, the outline on focus only
     keys = []
     for i, (name, t) in enumerate(frames):
         nxt = frames[i + 1][1] if i + 1 < len(frames) else t
         if name == "KillFocus":
-            keys += [(t, False), (nxt, True)]
+            keys += [(t, ITEM_FOCUS), (nxt, ITEM_REST)]
         elif name == "Focus":
-            keys += [(t, True), (nxt, False)]
+            keys += [(t, ITEM_REST), (nxt, ITEM_FOCUS)]
+        elif name in REST_STATES:
+            keys.append((t, ITEM_REST))
         else:
-            keys.append((t, name in REST_STATES))
+            keys.append((t, ITEM_FOCUS))
     keys = sorted(dict(keys).items())
     ids = re.findall(r"<XuiTextPresenter>\n<Properties>\n <Id>([^<]*)</Id>", visual)
     tracks = []
     for id in ids:
-        tracks.append("<Timeline>\n <Id>%s</Id>\n <TimelineProp>TextColor</TimelineProp>\n <TimelineProp>DropShadowColor</TimelineProp>\n"
-                      " <TimelineProp>OutlineColor</TimelineProp>\n%s</Timeline>\n" % (
-            id, "".join("<KeyFrame><Time>%d</Time><Interpolation>0</Interpolation><Prop>%s</Prop><Prop>%s</Prop><Prop>%s</Prop></KeyFrame>\n"
-                        % (t, ITEM_REST if rest else ITEM_FOCUS, SHADOW if rest else NO_COLOUR, NO_COLOUR if rest else ITEM_OUTLINE)
-                        for t, rest in keys)))
+        tracks.append("<Timeline>\n <Id>%s</Id>\n <TimelineProp>TextColor</TimelineProp>\n%s</Timeline>\n" % (
+            id, "".join("<KeyFrame><Time>%d</Time><Interpolation>0</Interpolation><Prop>%s</Prop></KeyFrame>\n" % k for k in keys)))
         visual = re.sub(r"(<Id>%s</Id>\n(?:[^\n]*\n){0,12}? <TextColor>)%s(</TextColor>)" % (re.escape(id), TEXT),
                         r"\g<1>%s\g<2>" % ITEM_REST, visual, count=1)
     k = visual.rfind("</Timelines>")
