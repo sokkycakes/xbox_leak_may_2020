@@ -58,6 +58,7 @@ timeout 600 wine "$WORK/xb/public/mstools/vc70/link.exe" /nologo -subsystem:xbox
 rm -rf "$OUT/dash"; mkdir -p "$OUT/dash/pads" "$OUT/dash/obj"
 cp "$HERE"/dash/pads/*.xui "$OUT/dash/pads/"
 python3 "$HERE/tools/genhub.py" "$OUT/dash"
+python3 "$HERE/tools/genpage.py" "$OUT/dash"
 python3 "$HERE/tools/mkart.py" "$OUT/dash"
 python3 "$HERE/tools/mkbelt.py" "$HERE/art/gametap/beta2scene-belt.json" "$OUT/dash/belt.bin"
 [ -n "$ART" ] && cp "$ART"/*.png "$OUT/dash/"

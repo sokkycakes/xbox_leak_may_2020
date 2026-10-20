@@ -62,6 +62,21 @@ CAMERAS = {  # eye, view direction (-Z column), up (Y column), vertical fov in d
     "catalogfocus": ((-0.639461, 0.133682, 0.0213613), (0.0, -0.942063, -0.335435), (0.0, 0.335435, -0.942063), 80.1803),
 }
 ZOOM_DURATION = 0.75                           # the library carousel's zoom
+# The settings padfocus page is the Blades' Console Settings list
+# (art/blades/dashSysCslSet.xui, drawn by tools/genpage.py); the meta
+# panel shows the focused item's current setting, the Sion's as it stands.
+PAGE_FIRST = "btnDisplay"
+PAGE_META = [
+    ("btnDisplay", "480i NTSC, 4:3"),
+    ("btnAudio", "Stereo"),
+    ("btnLanguage", "English"),
+    ("btnClock", "Set from the network"),
+    ("btnCountry", "United States"),
+    ("btnAutoOff", "Off"),
+    ("btnScreensaver", "Off"),
+    ("btnRemote", "Not set up"),
+    ("btnPolicy", "Frolick on the Sion"),
+]
 # The carousel camera and the game belt, fitted to sokky's mockup
 # screenshot of the belt view (2026-10-19, 2560x1440): the camera from the
 # three pad labels (1.8 px rms), low behind the library pad and pitched up
@@ -442,6 +457,14 @@ DEF theZoomer CameraMover
     function OnArrive()
     {
         bMoving = false;
+        if (bZoomed)
+            OpenPage();
+        else if (bLibraryOpen == false)
+        {
+            // back on the pad's view: the hub's A prompt returns
+            theOverlay.SetOpacity("promptA", 1);
+            theOverlay.SetOpacity("chevron", 1);
+        }
     }
 }
 
@@ -449,6 +472,7 @@ var nPad;       // 0 catalog, 1 library, 2 settings
 var bMoving;
 var bZoomed;    // the camera is on the pad's focus view (catalog, settings)
 var bLibraryOpen;   // the camera is in the game belt
+var bPageOpen;      // the padfocus page is up (after the zoom)
 
 DEF theHub Level
 {
@@ -546,6 +570,17 @@ DEF theHub Level
         {
             children
             [
+                // The padfocus page: a Blades-style full-screen page
+                // (tools/genpage.py) opened when the camera lands on the
+                // catalog or settings focus view.
+                DEF thePage XuiPanel
+                {
+                    url "pads/page_console.xui"
+                    skin "pads/page_skin.xui"
+                    width %(hud_w)d
+                    function OnFocus(id) { PageFocus(id); }
+                    function OnPress(id) { PagePress(id); }
+                }
                 DEF theOverlay XuiPanel
                 {
                     url "pads/overlay.xui"
@@ -574,7 +609,12 @@ function PadMove(dir, step)
     if (bMoving)
         return;
     if (bZoomed)
+    {
+        // the page: up and down walk its list (its own NavUp/NavDown)
+        if (bPageOpen)
+            thePage.Navigate(dir);
         return;
+    }
     if (bLibraryOpen)
     {
         // the belt: left scrolls it right (Belt_Right), right scrolls it left
@@ -601,7 +641,11 @@ function PadPress()
     if (bMoving)
         return;
     if (bZoomed)
+    {
+        if (bPageOpen)
+            thePage.Press();
         return;
+    }
     if (bLibraryOpen)
         return;     // launching a game: nothing to launch yet
 
@@ -688,6 +732,8 @@ function PadBack()
     }
     if (bZoomed == false)
         return;
+    if (bPageOpen)
+        ClosePage();
     bMoving = true;
     bZoomed = false;
     SetPadAlpha(nPad, 1);
@@ -705,6 +751,43 @@ function SetPadAlpha(pad, a)
         xfLibrary.SetAlpha(a);
     else
         xfSettings.SetAlpha(a);
+}
+
+// The padfocus page.  The camera lands on the pad's focus view and the
+// page opens over it (30 frames, the Blades' 1OpenFull); B closes it (the
+// same backwards) while the camera flies back up.  While it is open the
+// hub's own A prompt gives way to the page's legend.
+function OpenPage()
+{
+    bPageOpen = true;
+    thePage.Play("page", "Open");
+    thePage.SetFocus("%(page_first)s");
+    PageFocus("%(page_first)s");
+    theOverlay.SetOpacity("promptA", 0);
+    theOverlay.SetOpacity("chevron", 0);
+}
+
+function ClosePage()
+{
+    bPageOpen = false;
+    thePage.Play("page", "Close");
+}
+
+// The focused item's current setting, in the meta panel (the Blades'
+// "Current Setting" pane).  Nothing is read from the console yet: these
+// are the Sion's settings as they stand.
+function PageFocus(id)
+{
+    var s;
+    s = "";
+%(page_meta)s
+    thePage.SetText("metaPanelScene", s);
+}
+
+function PagePress(id)
+{
+    // the items' own pages (dashSysCslSetDisplay.xur and so on) are not
+    // built yet; a press plays the bar's Press frame and stays
 }
 
 function GoPad(n)
@@ -740,6 +823,7 @@ function initialize()
     bMoving = false;
     bZoomed = false;
     bLibraryOpen = false;
+    bPageOpen = false;
     EnableInput(true);
     theHub.GoTo();
     padLibrary.Play("", "Intro");
@@ -779,6 +863,12 @@ def main():
     names.append("    return \"\";")
     names.append("}")
     vals["game_names"] = "\n".join(names)
+    vals["page_first"] = PAGE_FIRST
+    meta = []
+    for id, value in PAGE_META:
+        meta.append("    if (id == \"%s\")" % id)
+        meta.append("        s = \"%s\";" % value)
+    vals["page_meta"] = "\n".join(meta)
     open(os.path.join(out, "default.xap"), "w").write(HUB % vals)
     open(os.path.join(pads, "overlay.xui"), "w").write(overlay_scene())
     catalog = open(os.path.join(pads, "catalog.xui")).read()
