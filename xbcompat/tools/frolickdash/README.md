@@ -60,17 +60,28 @@ dashboard (`tools/dashbuild`), as its own `xboxdash.xbe` with its own
   first so its classes are the engine's) to the text `.xui` the runtime
   reads; the converted scenes are kept in `art/blades/` as they came out,
   so each page's ids, sizes, positions and navigation are Microsoft's.
-  `tools/genpage.py` turns them into `pads/page_*.xui` dressed after
-  sokky's catalog padfocus mockup and the 360's own sub-pages: the page
-  spans the screen edge to edge, a darker header strip over a translucent
-  slate body with the pad showing through, a legend bar below, and the
-  list bars in the Blades' button style (rounded, thin light border, dark
-  glassy fill, white text, the focused bar lit) in the panel's tones;
-  `pads/page_skin.xui` holds those visuals, with Frolick's glyphs on the
-  legends.  The Blades' lists are filled at run time by the 360 dashboard;
-  here a list becomes its items as buttons stacked the way the list would
-  stack them, with the texts from `genpage.py`'s PAGES table (placeholders
-  until the pages read the console).  The hub shows a page on a HUD
+  `tools/genpage.py` turns them into `pads/page_*.xui` laid out after
+  sokky's catalog padfocus mockup: the page spans the screen edge to
+  edge, a darker header strip over a translucent slate body with the pad
+  showing through, a legend bar below.  Everything on the page is drawn
+  by the Blades' own skin: `art/blades/skin.xui` is the subset of
+  `dash_dashuisk.xzp`'s `skin.xur` the pages use (`tools/skinsubset.py`
+  pulls named visuals out of the converted skin), with its button PNGs
+  beside it, so the buttons, highlights, legends, meta pane, list items
+  and progress bar are the 360's visuals as XuiTool made them (dark text
+  with a light shadow, a white glow on the focused row, lines between
+  rows).  The Blades' lists are filled at run time by the 360 dashboard;
+  here a list becomes its items as buttons with the list's item visual,
+  stacked the way the list would stack them, their bound lines drawn as
+  texts in the presenters' slots, with the texts from `genpage.py`'s
+  PAGES table (placeholders until the pages read the console).  The meta
+  pane gets its text through the control's data slots (`SetData(id, k,
+  text)` fills `Data<k>`, which a presenter with `DataAssociation` k
+  shows, as the 360 binds list and meta data).  Runtime details the skin
+  needed: a visual with no Normal frame rests at frame 0 when a Stop
+  command sits there; a progress bar's visual is held at the frame its
+  Value picks between Normal and EndNormal; a fill's Translation is a
+  fraction of the figure's box, as XuiTool writes it.  The hub shows a page on a HUD
   `XuiPanel` (`thePage`) once the camera lands on the focus view, opening
   it over 30 frames like `dashmain.xur`'s `1OpenFull`: up and down walk
   the list, A opens the item's page (a 10-frame fade, the Blades'

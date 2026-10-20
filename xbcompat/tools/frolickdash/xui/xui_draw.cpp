@@ -287,12 +287,14 @@ static void triangulate(const float* poly, int n, Vec<unsigned short>& out)
     delete [] idx;
 }
 
-// Brush transform for gradient and texture fills: Translation, Scale and
-// Rotation about the figure's centre, mapping figure space to 0..1.
+// Brush transform for gradient and texture fills: Translation (a fraction
+// of the figure's box, as XuiTool writes it: -0.5 puts the centre on the
+// left edge), Scale and Rotation about the figure's centre, mapping figure
+// space to 0..1.
 struct Brush {
     float tx, ty, sx, sy, cs, sn, pw, ph;
     void uv(float x, float y, float* u, float* v) const {
-        float a = (x - tx) / pw - 0.5f, b = (y - ty) / ph - 0.5f;
+        float a = x / pw - 0.5f - tx, b = y / ph - 0.5f - ty;
         float a2 = a * cs - b * sn, b2 = a * sn + b * cs;
         *u = a2 / sx + 0.5f; *v = b2 / sy + 0.5f;
     }
@@ -513,11 +515,26 @@ Texture Renderer::imageTex(const char* path, int* w, int* h)
     return t;
 }
 
+// What a presenter shows: its owner's Text / ImagePath, or, when the
+// presenter is bound to a data slot (DataAssociation k, the dashboard's
+// list and meta data on the 360), the owner's Data<k>, which script sets
+// (XuiPanel.SetData); unbound slots show nothing.
+static const char* dataSlot(Node* n)
+{
+    unsigned k = propU(n->props, "DataAssociation", 0);
+    if (k == 0) return propS(n->owner->props, strcmp(n->cls->name, "XuiTextPresenter") == 0 ? "Text" : "ImagePath");
+    char key[16];
+    sprintf(key, "Data%u", k);
+    return propS(n->owner->props, key);
+}
+
 void Renderer::image(Node* n, const Affine& m, float alpha, Blend blend)
 {
     const char* path = propS(n->props, "ImagePath");
     if (n->owner && n->cls && strcmp(n->cls->name, "XuiImagePresenter") == 0) {
-        const char* p = propS(n->owner->props, "ImagePath");
+        // the owner's ImagePath, or the data slot the presenter is bound to
+        // (DataAssociation k: the owner's Data<k>, set by script)
+        const char* p = dataSlot(n);
         if (p[0]) path = p;
     }
     int iw, ih;
@@ -618,7 +635,7 @@ void Renderer::text(Node* n, const Affine& m, float alpha, Blend blend)
 {
     if (!font || !font->ok) return;
     const char* src = propS(n->props, "Text");
-    if (n->owner && n->cls && strcmp(n->cls->name, "XuiTextPresenter") == 0) src = propS(n->owner->props, "Text");
+    if (n->owner && n->cls && strcmp(n->cls->name, "XuiTextPresenter") == 0) src = dataSlot(n);
     char txt[1024]; int tl = 0;
     for (const char* p = src; *p && tl < (int)sizeof txt - 1; p++) if (*p != '\r') txt[tl++] = *p;
     txt[tl] = 0;

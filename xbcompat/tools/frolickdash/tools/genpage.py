@@ -15,12 +15,13 @@ script adds is the page's dress, after sokky's catalog padfocus mockup
 (2026-10-20) and the 360's own sub-pages: the page spans the whole screen
 edge to edge like the 360's, a darker header strip over a translucent
 slate body (the mockup's panel: no border, square edges, the pad showing
-through), the legends below it, and the list bars in the Blades' button
-style (rounded, a thin light border, a dark glassy fill with a top
-highlight, white text at the left, the focused bar lit) in the panel's
-slate tones, with Frolick's glyphs on the legends.  The open and close
-motion is timed like dashmain.xur's 1OpenFull (30 frames at 30 fps).  The
-Blades skin's visuals are not used; page_skin.xui draws every control.
+through) and the legend bar below it.  Every control on it is drawn by
+the Blades dashboard's own skin: art/blades/skin.xui holds the visuals
+the pages use (buttons, list items, labels, the legends with the skin's
+A/B/X/Y button images, the meta panes), pulled byte for byte out of
+dash_dashuisk.xzp's skin.xur by tools/skinsubset.py, and page_skin.xui is
+that file.  The open and close motion is timed like dashmain.xur's
+1OpenFull (30 frames at 30 fps).
 
 The Blades' lists (XuiList, XuiCommonList) are filled by the dashboard at
 run time; the runtime draws no lists, so a list becomes its items as
@@ -44,11 +45,8 @@ from genhub import CAROUSEL_GAMES, BELT_START
 # The panel, sampled from sokky's mockup: slate, about 85% opaque, a
 # little darker at the bottom; the header strip darker still.
 PANEL_TOP, PANEL_BOTTOM, HEADER_FILL = "0xd9424c5a", "0xd9313b49", "0xe6283140"
-# The Blades' buttons in the panel's tones: the border, the glassy fill
-# (top to bottom), the focused bar's fill (top to bottom).
-BAR_STROKE, BAR_TOP, BAR_BOTTOM = "0xff8494a8", "0xc0384456", "0xc0222b38"
-FOCUS_TOP, FOCUS_BOTTOM = "0xff8d9db5", "0xff5a6a80"
-TEXT, TEXT_DIM = "0xffffffff", "0xffe4e8ee"
+# The Blades skin's body text (its presenters' TextColor / DropShadowColor).
+TEXT, SHADOW = "0xe60f0f0f", "0x5aebebeb"
 
 CANVAS_W, CANVAS_H = 1120, 770
 # The screen on the canvas: 720x480 at 0.643, so x 0..1120 and y 12..758.
@@ -56,14 +54,16 @@ CANVAS_W, CANVAS_H = 1120, 770
 # their lists end (603) and the legends (611..686) sit below it.
 HEADER_Y, BODY_Y, BODY_END, LEGEND_END = 60, 150, 603, 707
 
-# The Blades' list visuals: the item visual and its height (the skin's
-# control_ListItem), and the item's second line and icon slots, if any.
+# The Blades' list visuals: the item visual, its height (the skin's
+# control_ListItem) and the lines the item visual's presenters show that
+# are bound to the dashboard's list data (DataAssociation 1, 2: x, y, w,
+# h, point size, text style); the unbound presenter shows the item's Text.
 LIST_ITEMS = {
-    "": ("XuiButton", 45, None, None),                                   # list_Common
-    "list_twoline-icon": ("btn_twoline-icon", 72, (83, 35, 328, 40), (11, 6, 60, 60)),
-    "List_3Line_Icon_prgbr": ("btn_3Line_Icon_prgbr", 105, (83, 60, 574, 47), (6, 5, 60, 60)),
-    "List_Fullwidth_3Icon_4string": ("ListItem_Fullwidth_3Icon_4String", 47, None, (11, 8, 32, 32)),
-    "List_oneline_icon": ("btn_oneline_icon", 72, None, (11, 4, 64, 64)),
+    "": ("XuiButton", 45, []),                                              # list_Common
+    "list_twoline-icon": ("btn_twoline-icon", 72, [None, (83, 35, 328, 40, 18, 16401)]),
+    "List_3Line_Icon_prgbr": ("btn_3Line_Icon_prgbr", 105, [(83, 0, 769, 72, 20, 20497), (83, 60, 574, 47, 20, 20497)]),
+    "List_Fullwidth_3Icon_4string": ("ListItem_Fullwidth_3Icon_4String", 47, []),
+    "List_oneline_icon": ("btn_oneline_icon", 72, []),
 }
 
 # The pages.  scene: the Blades scene in art/blades/ (None: the System
@@ -122,14 +122,6 @@ def rect(w, h):
     return "%g,%g;0,0;%g,0;%g,%g;0,%g" % (w, h, w, w, h, h)
 
 
-def rounded(w, h, r):
-    """A rounded rectangle the way the XUI Tool writes one (FrolickTile's bg)."""
-    k = 0.4477 * r  # control points of a quarter circle
-    return ("%g,%g;%g,0;%g,0,%g,0,%g,%g;%g,%g;%g,%g,%g,%g,%g,%g;%g,%g;%g,%g,%g,%g,0,%g;0,%g;0,%g,0,%g,%g,0"
-            % (w, h, r, w - r, w - k, w, k, w, r, w, h - r, w, h - k, w - k, h, w - r, h, r, h, k, h, h - k,
-               h - r, r, k, k))
-
-
 def figure(id, x, y, w, h, fill, stroke=None, extra="", points=None, opacity=None, anchor=None):
     s = ["<XuiFigure>", "<Properties>", " <Id>%s</Id>" % id, " <Width>%g</Width>" % w, " <Height>%g</Height>" % h,
          " <Position>%g,%g,0</Position>" % (x, y)]
@@ -152,10 +144,6 @@ def solid(color):
     return " <Fill>\n  <FillType>1</FillType>\n  <FillColor>%s</FillColor>\n </Fill>" % color
 
 
-def nofill():
-    return " <Fill>\n  <FillType>0</FillType>\n </Fill>"
-
-
 def gradient(stops, rotation=90):
     return (" <Fill>\n  <FillType>2</FillType>\n  <Gradient>\n   <NumStops>%d</NumStops>\n%s\n%s\n  </Gradient>\n  <Rotation>%g</Rotation>\n </Fill>"
             % (len(stops), "\n".join("   <StopColor>%s</StopColor>" % c for _, c in stops),
@@ -175,12 +163,6 @@ def text(id, x, y, w, h, size, style, color=TEXT, presenter=True, value=None, sh
     return "\n".join(s)
 
 
-def image(id, x, y, w, h, path):
-    return "\n".join(["<XuiImage>", "<Properties>", " <Id>%s</Id>" % id, " <Width>%g</Width>" % w, " <Height>%g</Height>" % h,
-                      " <Position>%g,%g,0</Position>" % (x, y), " <ImagePath>%s</ImagePath>" % path, " <SizeMode>4</SizeMode>",
-                      "</Properties>", "</XuiImage>"])
-
-
 def frames(names):
     return "<NamedFrames>\n%s\n</NamedFrames>" % "\n".join(
         "<NamedFrame><Name>%s</Name><Time>%d</Time><Command>%s</Command><CommandParams>%s</CommandParams></NamedFrame>"
@@ -192,100 +174,13 @@ def track(id, prop, keys):
         "<KeyFrame><Time>%d</Time><Interpolation>%d</Interpolation><Prop>%s</Prop></KeyFrame>" % (t, i, v) for t, i, v in keys))
 
 
-ONE_LINE, RIGHT, CENTER_H, CENTER_V, SHADOW = 0x10, 0x200, 0x400, 0x1000, 0x4000
 
 
 # ---- the skin ---------------------------------------------------------------
 
-def visual(id, w, h, body, timelines=None):
-    s = ["<XuiVisual>", "<Properties>", " <Id>%s</Id>" % id, " <Width>%g</Width>" % w, " <Height>%g</Height>" % h, "</Properties>"]
-    s += body
-    if timelines:
-        s += ["<Timelines>"] + timelines + ["</Timelines>"]
-    s.append("</XuiVisual>")
-    return "\n".join(s)
-
-
-def bar_visual(id, w, h, label):
-    """A list bar in the Blades' button style: a rounded box with a thin
-    light border, a dark glassy fill with a highlight along its top, the
-    label (the control's Text) where the Blades' item visual puts its
-    first line; focus lights the box up, a press dips it.  The box sits a
-    pixel inside the control so bars on the Blades' 45 pitch keep a gap."""
-    tx, ty, tw, th = label
-    bw, bh, r = w - 2, h - 3, 9
-    body = [
-        figure("bg", 1, 1, bw, bh, gradient([(0, BAR_TOP), (1, BAR_BOTTOM)]), (2, BAR_STROKE), points=rounded(bw, bh, r), anchor=15),
-        figure("lit", 1, 1, bw, bh, gradient([(0, FOCUS_TOP), (1, FOCUS_BOTTOM)]), (2, "0xffb8c4d4"), points=rounded(bw, bh, r),
-               opacity=0, anchor=15),
-        figure("hi", 3, 3, bw - 4, (bh - 4) * 0.42, gradient([(0, "0x5affffff"), (1, "0x00ffffff")]), points=rounded(bw - 4, (bh - 4) * 0.42, 6), anchor=7),
-        text("text_Label", tx, ty, tw, th, 18, ONE_LINE | CENTER_V),
-    ]
-    tl = [
-        frames([("KillFocus", 0, "play", ""), ("Normal", 8, "play", ""), ("EndNormal", 9, "stop", ""),
-                ("Focus", 10, "play", ""), ("EndFocus", 18, "stop", ""),
-                ("Press", 20, "play", ""), ("EndPress", 30, "stop", "")]),
-        track("lit", "Opacity", [(0, 0, 1), (8, 0, 0), (10, 0, 0), (18, 0, 1), (20, 0, 1), (23, 0, 0.5), (30, 0, 1)]),
-    ]
-    return visual(id, w, h, body, tl)
-
-
-def legend_visual(button, glyph, right):
-    """legend_A/B: the label, then the glyph at the right (the Blades put
-    the glyph at x 386 of a 420 bar); legend_X/Y: the glyph at the left,
-    then the label.  Frolick's glyph art."""
-    w, h = 420, 47
-    if right:
-        body = [text("label", 6, 0, 378, 40, 18, ONE_LINE | RIGHT | CENTER_V), image("glyph", 388, 4, 32, 32, glyph)]
-    else:
-        body = [image("glyph", 0, 4, 32, 32, glyph), text("label", 38, 0, 378, 40, 18, ONE_LINE | CENTER_V)]
-    return visual("legend_" + button, w, h, body)
-
-
-def label_visual(id, size, style, color=TEXT, x=0, w=415, opacity=None):
-    return visual(id, 420, 47, [text("Text", x, 0, w, 47, size, style, color, opacity=opacity)])
-
-
-def card_visual(id, w, h, pane=False):
-    """The meta panes: the Blades' box without the focus."""
-    return visual(id, w, h, [
-        figure("bg", 0, 0, w, h, gradient([(0, BAR_TOP), (1, BAR_BOTTOM)]), (2, BAR_STROKE), points=rounded(w, h, 9), anchor=15),
-        figure("hi", 2, 2, w - 4, 40, gradient([(0, "0x3cffffff"), (1, "0x00ffffff")]), points=rounded(w - 4, 40, 6), anchor=7),
-    ] + ([text("Pane_txtCurrentSetting", 17.5, 50, w - 35, h - 60, 18, 0)] if pane else []))
-
-
 def skin():
-    body = [
-        bar_visual("XuiButton", 423, 47, (16, 0, 391, 47)),
-        bar_visual("btn_oneline_icon", 420, 72, (83, 0, 328, 72)),
-        bar_visual("btn_twoline-icon", 420, 72, (83, 5, 328, 40)),
-        bar_visual("btn_3Line_Icon_prgbr", 855, 105, (83, 0, 574, 72)),
-        bar_visual("ListItem_Fullwidth_3Icon_4String", 855, 47, (9, 4, 385, 42)),
-        label_visual("Label_Head", 22, ONE_LINE | CENTER_V),
-        label_visual("Label_MetaHead_1line", 20, ONE_LINE | CENTER_V, TEXT_DIM),
-        label_visual("Label_TabTitle", 20, ONE_LINE | CENTER_V, x=5),
-        label_visual("Label_Body", 18, 0, x=11, w=400),
-        label_visual("Label_Body_1line", 18, ONE_LINE | CENTER_V, x=11, w=400),
-        label_visual("Label_BodyRight", 18, ONE_LINE | RIGHT | CENTER_V, x=5),
-        label_visual("Label_BodyCentered", 18, CENTER_H | CENTER_V, x=10, w=400),
-        label_visual("XuiLabelCenterJustify", 18, CENTER_H | CENTER_V, w=420),
-        label_visual("Label_Sub", 16, ONE_LINE | CENTER_V, TEXT_DIM, x=5, opacity=0.75),
-        label_visual("Label_SubRight", 16, ONE_LINE | RIGHT | CENTER_V, TEXT_DIM, x=5, opacity=0.75),
-        legend_visual("A", "glyph_a_button.png", True),
-        legend_visual("B", "glyph_b.png", True),
-        legend_visual("X", "glyph_x.png", False),
-        legend_visual("Y", "glyph_y.png", False),
-        card_visual("metaScene_1line", 395, 426, pane=True),
-        card_visual("Metapane", 420, 446),
-        # the Blades' content back panel, loading dots and banner slot: the
-        # page's card is the panel, nothing loads, and the banner art is
-        # Frolick's to supply
-        visual("back panel", 855, 570, []),
-        visual("Loading_Large", 121, 104, []),
-        visual("XuiScene", 420, 358, []),
-    ]
-    return ('<XuiCanvas version="000c">\n<XuiScene>\n<Properties>\n <Id>FrolickPageSkin</Id>\n <Width>1280</Width>\n <Height>720</Height>\n'
-            '</Properties>\n%s\n</XuiScene>\n</XuiCanvas>\n' % "\n".join(body))
+    """The Blades skin's visuals, as tools/skinsubset.py pulled them."""
+    return open(os.path.join(BLADES, "skin.xui")).read()
 
 
 # ---- the pages --------------------------------------------------------------
@@ -333,11 +228,15 @@ def nav_button(id, x, y, w, h, label, visual=None, nav=None, children=""):
 def list_items(block, items):
     """A Blades list as its items: buttons with the skin's item visual,
     stacked down the list's box, chained up and down, the list's own
-    sideways navigation on each."""
+    sideways navigation on each.  The lines the dashboard would feed the
+    item's bound presenters are drawn in their place."""
     id = prop(block, "Id")
     x, y = [float(v) for v in prop(block, "Position").split(",")[:2]]
     w = float(prop(block, "Width"))
-    vis, h, line2, icon = LIST_ITEMS[prop(block, "Visual") or ""]
+    vis, h, lines = LIST_ITEMS[prop(block, "Visual") or ""]
+    # btn_3Line_Icon_prgbr's bar (the 360 feeds it the device's fill): the
+    # same visual over it, held at the item's fraction
+    bar = (5, 76, 65, 21, "prgbr_Memory") if vis == "btn_3Line_Icon_prgbr" else None
     pitch = h if h == 45 else h + 2
     # the list's box holds so many; the rest would scroll on the 360
     items = items[:int(float(prop(block, "Height")) // pitch)]
@@ -349,16 +248,20 @@ def list_items(block, items):
             n["NavUp"] = "%s_%d" % (id, i - 1)
         if i < len(items) - 1:
             n["NavDown"] = "%s_%d" % (id, i + 1)
-        kids = []
-        if line2 and l2:
-            lx, ly, lw, lh = line2
-            kids.append(text("line2", lx, ly, lw, lh, 18, ONE_LINE | CENTER_V, TEXT_DIM, presenter=False, value=l2))
-        if frac:
-            # the Blades' device bar (prgbr_Memory): the used share, drawn as
-            # Frolick's download bar
-            kids.append(figure("barTrack", 5, 82, 65, 9, solid("0x66000000"), (1, BAR_STROKE)))
-            kids.append(figure("barFill", 6, 83, 63 * frac, 7, solid("0xff7ac142")))
-        out.append(nav_button("%s_%d" % (id, i), x, y + i * pitch, w, h, l1, vis if vis != "XuiButton" else None, n, "\n".join(kids)))
+        kids, label = [], l1
+        for j, slot in enumerate(lines):
+            if slot is None:
+                continue
+            lx, ly, lw, lh, size, style = slot
+            kids.append(text("line%d" % (j + 1), lx, ly, lw, lh, size, style, TEXT, presenter=False, value=(l1, l2)[j], shadow=SHADOW))
+            if j == 0:
+                label = ""      # the first line has its own slot; the Text would double it
+        if bar:
+            bx, by, bw, bh, bvis = bar
+            kids.append("\n".join(["<XuiProgressBar>", "<Properties>", " <Id>bar</Id>", " <Width>%g</Width>" % bw, " <Height>%g</Height>" % bh,
+                                   " <Position>%g,%g,0</Position>" % (bx, by), " <Visual>%s</Visual>" % bvis,
+                                   " <RangeMin>0</RangeMin>", " <RangeMax>1</RangeMax>", " <Value>%g</Value>" % frac, "</Properties>", "</XuiProgressBar>"]))
+        out.append(nav_button("%s_%d" % (id, i), x, y + i * pitch, w, h, label, vis if vis != "XuiButton" else None, n, "\n".join(kids)))
     return out
 
 

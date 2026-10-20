@@ -144,6 +144,7 @@ struct Node {
     double frameTime(const char* name, double def);
     double lastKey();
     bool hasCommandsAfter(double t);
+    bool stopsAt(double t);
     template <class F> bool walk(F& f);
 };
 

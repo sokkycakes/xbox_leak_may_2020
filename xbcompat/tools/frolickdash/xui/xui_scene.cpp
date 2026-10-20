@@ -45,8 +45,21 @@ bool Node::focusable()
 
 // ---- construction ----------------------------------------------------------
 
+// A timeline starts at frame 0 unless it has a Normal frame; a Stop command
+// at frame 0 (the Blades' meta panes rest at "Default") holds it there.
+// A progress bar's visual is held at the frame between Normal and
+// EndNormal that its Value picks in RangeMin..RangeMax.
 struct InitTimelines { bool operator()(Node* n) {
-    if (n->timeline && !n->play("Normal")) { n->time = 0; n->playing = true; n->apply(); }
+    if (!n->timeline) return true;
+    if (n->owner && n->owner->visual == n && strcmp(n->owner->cls->name, "XuiProgressBar") == 0) {
+        float lo = propF(n->owner->props, "RangeMin", 0), hi = propF(n->owner->props, "RangeMax", 100);
+        float f = hi > lo ? (propF(n->owner->props, "Value", 0) - lo) / (hi - lo) : 0;
+        if (f < 0) f = 0; if (f > 1) f = 1;
+        double a = n->frameTime("Normal", 0), b = n->frameTime("EndNormal", n->lastKey());
+        n->time = a + (b - a) * f; n->playing = false; n->apply();
+        return true;
+    }
+    if (!n->play("Normal")) { n->time = 0; n->playing = !n->stopsAt(0); n->apply(); }
     return true; } };
 
 struct FirstFocus { Scene* s; bool operator()(Node* n) {
@@ -208,6 +221,12 @@ double Node::lastKey()
     }
     for (int i = 0; i < tmpl->frames.n; i++) if (tmpl->frames[i].time > last) last = tmpl->frames[i].time;
     return last;
+}
+
+bool Node::stopsAt(double t)
+{
+    for (int i = 0; i < tmpl->frames.n; i++) if (tmpl->frames[i].time == t && tmpl->frames[i].command == 1) return true;
+    return false;
 }
 
 bool Node::hasCommandsAfter(double t)

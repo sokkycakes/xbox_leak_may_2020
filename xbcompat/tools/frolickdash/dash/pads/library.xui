@@ -109,7 +109,7 @@
    <StopPos>0.55</StopPos>
    <StopPos>1</StopPos>
   </Gradient>
-  <Translation>-94,79,0</Translation>
+  <Translation>-0.431193,0.438889,0</Translation>
   <Scale>2,2,1</Scale>
  </Fill>
  <Closed>true</Closed>
@@ -172,7 +172,7 @@
    <StopPos>0</StopPos>
    <StopPos>1</StopPos>
   </Gradient>
-  <Translation>-94,-62,0</Translation>
+  <Translation>-0.431193,-0.344444,0</Translation>
   <Scale>2,2,1</Scale>
  </Fill>
  <Closed>true</Closed>

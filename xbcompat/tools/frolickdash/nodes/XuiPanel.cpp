@@ -364,6 +364,7 @@ public:
     CStrObject* GetFocus();
     CObject* SetVisible(CObject** rgparam, int nParam);
     CObject* SetOpacity(CObject** rgparam, int nParam);
+    CObject* SetData(CObject** rgparam, int nParam);
     void Reload();
 
     DECLARE_NODE_PROPS()
@@ -416,6 +417,7 @@ START_NODE_FUN(CXuiPanel, CNode)
     NODE_FUN_SV(GetFocus)
     NODE_FUN(SetVisible)
     NODE_FUN(SetOpacity)
+    NODE_FUN(SetData)
     NODE_FUN_VV(Reload)
 END_NODE_FUN()
 
@@ -686,6 +688,22 @@ CObject* CXuiPanel::SetOpacity(CObject** rgparam, int nParam)
     v.free();
     v.type = xui::TFloat;
     v.f = rgparam[1]->Deref()->ToNum()->m_nValue;
+    return NULL;
+}
+
+// SetData(id, k, text): the control's data slot k, shown by the presenters
+// of its visual bound to it (DataAssociation k), as the 360 dashboard
+// fills a list item's or meta panel's strings.
+CObject* CXuiPanel::SetData(CObject** rgparam, int nParam)
+{
+    if (nParam != 3)
+        return NULL;
+    // A property name is kept by pointer, so the key must outlive this call.
+    static const char* const rgszKey[] = { "Data0", "Data1", "Data2", "Data3", "Data4", "Data5", "Data6", "Data7", "Data8", "Data9" };
+    int k = (int)rgparam[1]->Deref()->ToNum()->m_nValue;
+    if (k < 0 || k > 9)
+        return NULL;
+    SetString(Find(rgparam[0]->Deref()->ToStr()->GetSz()), rgszKey[k], rgparam[2]->Deref()->ToStr()->GetSz());
     return NULL;
 }
 

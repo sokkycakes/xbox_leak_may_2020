@@ -795,7 +795,7 @@ function PageFocus(id)
 {
     var s;
     s = PageMeta(sPage, id);
-    thePage.SetText("metaPanelScene", s);
+    thePage.SetData("metaPanelScene", 4, s);   // metaScene_1line's Pane_txtCurrentSetting
     thePage.SetText("txt_Meta", s);
 }
 
