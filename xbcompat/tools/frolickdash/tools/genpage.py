@@ -147,7 +147,7 @@ def solid(color):
     return " <Fill>\n  <FillType>1</FillType>\n  <FillColor>%s</FillColor>\n </Fill>" % color
 
 
-def gradient(stops, rotation=90):
+def gradient(stops, rotation=-90):   # -90: from the top down
     return (" <Fill>\n  <FillType>2</FillType>\n  <Gradient>\n   <NumStops>%d</NumStops>\n%s\n%s\n  </Gradient>\n  <Rotation>%g</Rotation>\n </Fill>"
             % (len(stops), "\n".join("   <StopColor>%s</StopColor>" % c for _, c in stops),
                "\n".join("   <StopPos>%g</StopPos>" % p for p, _ in stops), rotation))

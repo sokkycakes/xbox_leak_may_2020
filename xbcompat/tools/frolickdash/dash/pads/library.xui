@@ -47,7 +47,7 @@
    <StopPos>0.97</StopPos>
    <StopPos>1</StopPos>
   </Gradient>
-  <Rotation>90</Rotation>
+  <Rotation>-90</Rotation>
  </Fill>
  <Closed>true</Closed>
  <Points>580,396;33,0;547,0,565.226,0,580,14.7741;580,33;580,363,580,381.226,565.226,396;547,396;33,396,14.7741,396,0,381.226;0,363;0,33,0,14.7741,14.7741,0</Points>
@@ -70,7 +70,7 @@
    <StopPos>0.3</StopPos>
    <StopPos>1</StopPos>
   </Gradient>
-  <Rotation>90</Rotation>
+  <Rotation>-90</Rotation>
  </Fill>
  <Closed>true</Closed>
  <Points>330,370;8,0;322,0,326.418,0,330,3.5816;330,8;330,362,330,366.418,326.418,370;322,370;8,370,3.5816,370,0,366.418;0,362;0,8,0,3.5816,3.5816,0</Points>
@@ -109,7 +109,7 @@
    <StopPos>0.55</StopPos>
    <StopPos>1</StopPos>
   </Gradient>
-  <Translation>-0.431193,0.438889,0</Translation>
+  <Translation>0.431193,-0.438889,0</Translation>
   <Scale>0.5,0.5,1</Scale>
  </Fill>
  <Closed>true</Closed>
@@ -135,7 +135,7 @@
    <StopPos>0.7</StopPos>
    <StopPos>1</StopPos>
   </Gradient>
-  <Rotation>90</Rotation>
+  <Rotation>-90</Rotation>
  </Fill>
  <Closed>true</Closed>
  <Points>218,180;8,0;210,0,214.418,0,218,3.5816;218,8;218,172,218,176.418,214.418,180;210,180;8,180,3.5816,180,0,176.418;0,172;0,8,0,3.5816,3.5816,0</Points>
@@ -172,7 +172,7 @@
    <StopPos>0</StopPos>
    <StopPos>1</StopPos>
   </Gradient>
-  <Translation>-0.431193,-0.344444,0</Translation>
+  <Translation>0.431193,0.344444,0</Translation>
   <Scale>0.5,0.5,1</Scale>
  </Fill>
  <Closed>true</Closed>
@@ -196,7 +196,7 @@
    <StopPos>0.7</StopPos>
    <StopPos>1</StopPos>
   </Gradient>
-  <Rotation>90</Rotation>
+  <Rotation>-90</Rotation>
  </Fill>
  <Closed>true</Closed>
  <Points>218,180;8,0;210,0,214.418,0,218,3.5816;218,8;218,172,218,176.418,214.418,180;210,180;8,180,3.5816,180,0,176.418;0,172;0,8,0,3.5816,3.5816,0</Points>
@@ -248,7 +248,7 @@
  <Text>Game Title</Text>
  <TextColor>0xffd2d2d2</TextColor>
  <DropShadowColor>0</DropShadowColor>
- <PointSize>26</PointSize>
+ <PointSize>16.75</PointSize>
  <Font>Convection</Font>
  <TextStyle>1024</TextStyle>
 </Properties>
@@ -262,7 +262,7 @@
  <Text>Developer</Text>
  <TextColor>0xffd2d2d2</TextColor>
  <DropShadowColor>0</DropShadowColor>
- <PointSize>18</PointSize>
+ <PointSize>11.60</PointSize>
  <Font>Convection</Font>
  <TextStyle>1024</TextStyle>
 </Properties>
@@ -297,7 +297,7 @@
  <Text>recent</Text>
  <TextColor>0xffffffff</TextColor>
  <DropShadowColor>0</DropShadowColor>
- <PointSize>32</PointSize>
+ <PointSize>20.62</PointSize>
  <Font>Convection</Font>
  <TextStyle>0</TextStyle>
 </Properties>
@@ -311,7 +311,7 @@
  <Text>games</Text>
  <TextColor>0xffd2d2d2</TextColor>
  <DropShadowColor>0</DropShadowColor>
- <PointSize>17</PointSize>
+ <PointSize>10.95</PointSize>
  <Font>Convection</Font>
  <TextStyle>0</TextStyle>
 </Properties>
@@ -346,7 +346,7 @@
  <Text>favorite</Text>
  <TextColor>0xffffffff</TextColor>
  <DropShadowColor>0</DropShadowColor>
- <PointSize>32</PointSize>
+ <PointSize>20.62</PointSize>
  <Font>Convection</Font>
  <TextStyle>0</TextStyle>
 </Properties>
@@ -360,7 +360,7 @@
  <Text>games</Text>
  <TextColor>0xffffffff</TextColor>
  <DropShadowColor>0</DropShadowColor>
- <PointSize>17</PointSize>
+ <PointSize>10.95</PointSize>
  <Font>Convection</Font>
  <TextStyle>16</TextStyle>
 </Properties>

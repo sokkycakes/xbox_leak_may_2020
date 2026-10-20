@@ -117,6 +117,17 @@ PANEL_DIST, PANEL_RAISE, PANEL_TILT = 0.37, 0.06, 10.6
 # The screen overlay canvas (the engine's HUD is 720 x 480).
 HUD_W, HUD_H = 720, 480
 UI = HUD_H / 720.0                             # Godot's 720-high UI to the HUD
+# PointSize is in points (the em is 4/3 PointSize pixels, as in the XUI
+# engine); Frolick's sizes were authored as the pixel height of DejaVu's
+# ascent + descent (2384/2048 em), so they convert by this factor.
+PT = 0.75 * 2048 / 2384
+# The Blades pages are 1120 x 770 canvases; a 360 at 16:9 shows the window
+# of rows 58.7..688.7 scaled to the full screen height, so the page panel
+# is wider than the HUD (66 px cropped each side) and centred on that
+# window.
+PAGE_WINDOW = (58.7, 688.7)
+PAGE_W = 1120 * HUD_H / (PAGE_WINDOW[1] - PAGE_WINDOW[0])
+PAGE_VIEW_Y = (PAGE_WINDOW[0] + PAGE_WINDOW[1]) / 2
 
 
 def sub(a, b): return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
@@ -306,7 +317,7 @@ def overlay_scene():
         # the big faded word, top left, cropped by the top edge like the mockup
         "\n".join(["<XuiText>", "<Properties>", " <Id>word</Id>", " <Width>640</Width>", " <Height>120</Height>",
                    " <Position>-4,-26,0</Position>", " <Text>discover</Text>", " <TextColor>0x37ffffff</TextColor>",
-                   " <PointSize>%d</PointSize>" % round(111 * UI), " <TextStyle>16</TextStyle>", "</Properties>", "</XuiText>"]),
+                   " <PointSize>%.2f</PointSize>" % (111 * UI * PT), " <TextStyle>16</TextStyle>", "</Properties>", "</XuiText>"]),
         # A + chevron under the panel
         "\n".join(["<XuiImage>", "<Properties>", " <Id>promptA</Id>", " <Width>26</Width>", " <Height>26</Height>",
                    " <Position>347,336,0</Position>", " <ImagePath>glyph_a_button.png</ImagePath>", " <SizeMode>4</SizeMode>",
@@ -321,7 +332,7 @@ def overlay_scene():
         # in the 96-degree view), 1.25x the size it had on the cover
         "\n".join(["<XuiText>", "<Properties>", " <Id>title</Id>", " <Width>%d</Width>" % w, " <Height>30</Height>",
                    " <Position>0,122,0</Position>", " <Opacity>0</Opacity>", " <Text></Text>", " <TextColor>0xffffffff</TextColor>",
-                   " <DropShadowColor>0</DropShadowColor>", " <PointSize>22</PointSize>", " <TextStyle>1040</TextStyle>",
+                   " <DropShadowColor>0</DropShadowColor>", " <PointSize>%.2f</PointSize>" % (22 * PT), " <TextStyle>1040</TextStyle>",
                    "</Properties>", "</XuiText>"]),
         # B + return arrow of the belt view: screen space, centred between
         # the focused cover and the library label as in sokky's mockup (B at
@@ -342,11 +353,11 @@ def overlay_scene():
         # the footer strip
         "\n".join(["<XuiFigure>", "<Properties>", " <Id>footer</Id>", " <Width>%d</Width>" % w, " <Height>%g</Height>" % fh,
                    " <Position>0,%g,0</Position>" % (h - fh),
-                   " <Fill>\n  <FillType>2</FillType>\n  <Gradient>\n   <NumStops>%d</NumStops>\n%s\n%s\n  </Gradient>\n  <Rotation>90</Rotation>\n </Fill>" % (len(FOOTER_STOPS), stops, pos),
+                   " <Fill>\n  <FillType>2</FillType>\n  <Gradient>\n   <NumStops>%d</NumStops>\n%s\n%s\n  </Gradient>\n  <Rotation>-90</Rotation>\n </Fill>" % (len(FOOTER_STOPS), stops, pos),
                    " <Closed>true</Closed>", " <Points>%s</Points>" % rect_points(w, fh), "</Properties>", "</XuiFigure>"]),
         "\n".join(["<XuiText>", "<Properties>", " <Id>frolick</Id>", " <Width>%g</Width>" % (136 * UI), " <Height>%g</Height>" % (42 * UI),
                    " <Position>%g,%g,0</Position>" % (w - 136 * UI, h - 42 * UI), " <Text>frolick</Text>",
-                   " <TextColor>%s</TextColor>" % hexcol(WORDMARK_COLOR), " <PointSize>%d</PointSize>" % round(37 * UI),
+                   " <TextColor>%s</TextColor>" % hexcol(WORDMARK_COLOR), " <PointSize>%.2f</PointSize>" % (37 * UI * PT),
                    " <TextStyle>%d</TextStyle>" % (0x10 | 0x400 | 0x1000), "</Properties>", "</XuiText>"]),
     ])
     return ('<XuiCanvas version="000c">\n<Properties>\n <Id>canvas</Id>\n <Width>%d</Width>\n <Height>%d</Height>\n'
@@ -565,7 +576,8 @@ DEF theHub Level
                 {
                     url "pads/page_console.xui"
                     skin "pads/page_skin.xui"
-                    width %(hud_w)d
+                    width %(page_w).1f
+                    viewY %(page_vy).1f
                     function OnFocus(id) { PageFocus(id); }
                     function OnPress(id) { PagePress(id); }
                 }
@@ -767,6 +779,7 @@ function PadLabel(a)
     if (nPad == 0) label_catalog.alpha = a;
     if (nPad == 2) label_settings.alpha = a;
     theOverlay.SetOpacity("word", a);   // the overlay's faded word too
+    theOverlay.SetOpacity("frolick", a);   // and the wordmark under the legend
 }
 
 function ShowPage(page, how)
@@ -869,7 +882,7 @@ def main():
     vals = dict(
         atmo_origin=v3(ATMO_ORIGIN), atmo_radius=0.891 * ATMO_SCALE, atmo_height=0.545 * ATMO_SCALE,
         rail_origin=v3(RAIL_ORIGIN), rail_radius=0.5 * RAIL_SCALE[0], rail_height=0.02 * RAIL_SCALE[1],
-        rail_color=v3(RAIL_COLOR), hud_w=HUD_W)
+        rail_color=v3(RAIL_COLOR), hud_w=HUD_W, page_w=PAGE_W, page_vy=PAGE_VIEW_Y)
     for name in PAD_ORDER:
         vals["vp_" + name] = viewpoint(name)
         vals["panel_" + name] = panel(name)

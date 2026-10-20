@@ -350,6 +350,11 @@ public:
     // when axisX is not zero; width/height are ignored then.
     D3DXVECTOR3 m_origin, m_axisX, m_axisY;
     float m_canvasWidth, m_canvasHeight; // read back by script
+    // The canvas y that sits at the panel's centre (default: the middle).
+    // With a width wider than the panel's place this shows a window of the
+    // canvas: the Blades pages show the 360's 16:9 window, canvas rows
+    // 58.7..688.7, scaled to the HUD's height.
+    float m_viewY;
 
     void Advance(float nSeconds);
     void Render();
@@ -405,6 +410,7 @@ START_NODE_PROPS(CXuiPanel, CNode)
     NODE_PROP(pt_vec3, CXuiPanel, axisY)
     NODE_PROP(pt_number, CXuiPanel, canvasWidth)
     NODE_PROP(pt_number, CXuiPanel, canvasHeight)
+    NODE_PROP(pt_number, CXuiPanel, viewY)
 END_NODE_PROPS()
 
 START_NODE_FUN(CXuiPanel, CNode)
@@ -425,7 +431,7 @@ CXuiPanel::CXuiPanel() :
     m_url(NULL), m_skin(NULL), m_font(NULL),
     m_width(0.9f), m_height(0.0f), m_alpha(1.0f), m_mirror(false),
     m_origin(0.0f, 0.0f, 0.0f), m_axisX(0.0f, 0.0f, 0.0f), m_axisY(0.0f, 0.0f, 0.0f),
-    m_canvasWidth(0.0f), m_canvasHeight(0.0f),
+    m_canvasWidth(0.0f), m_canvasHeight(0.0f), m_viewY(0.0f),
     m_bDirty(true), m_pRenderer(NULL), m_pRoot(NULL), m_pSkin(NULL), m_pScene(NULL), m_bFontLoaded(false)
 {
 }
@@ -529,7 +535,7 @@ void CXuiPanel::Render()
     m_be.m_sx = m_mirror ? -s : s;
     m_be.m_sy = -(m_height > 0 ? m_height / ch : s);
     m_be.m_ox = cw / 2;
-    m_be.m_oy = ch / 2;
+    m_be.m_oy = m_viewY > 0.0f ? m_viewY : ch / 2;
     m_be.m_basis = m_axisX.x != 0.0f || m_axisX.y != 0.0f || m_axisX.z != 0.0f;
     m_be.m_flip = m_mirror;
     m_be.m_o = m_origin; m_be.m_ax = m_axisX; m_be.m_ay = m_axisY;

@@ -47,7 +47,7 @@
    <StopPos>0.97</StopPos>
    <StopPos>1</StopPos>
   </Gradient>
-  <Rotation>90</Rotation>
+  <Rotation>-90</Rotation>
  </Fill>
  <Closed>true</Closed>
  <Points>580,396;33,0;547,0,565.226,0,580,14.7741;580,33;580,363,580,381.226,565.226,396;547,396;33,396,14.7741,396,0,381.226;0,363;0,33,0,14.7741,14.7741,0</Points>
@@ -70,7 +70,7 @@
    <StopPos>0.55</StopPos>
    <StopPos>1</StopPos>
   </Gradient>
-  <Rotation>90</Rotation>
+  <Rotation>-90</Rotation>
  </Fill>
  <Closed>true</Closed>
  <Points>563,194;30,0;533,0,549.569,0,563,13.431;563,30;563,194;0,194;0,30,0,13.431,13.431,0</Points>
@@ -95,7 +95,7 @@
  <Text>STILETTO</Text>
  <TextColor>0xffe3121b</TextColor>
  <DropShadowColor>0</DropShadowColor>
- <PointSize>44</PointSize>
+ <PointSize>28.35</PointSize>
  <Font>Convection</Font>
  <TextStyle>16</TextStyle>
 </Properties>
@@ -109,7 +109,7 @@
  <Text>SWIFT</Text>
  <TextColor>0xffe3121b</TextColor>
  <DropShadowColor>0</DropShadowColor>
- <PointSize>44</PointSize>
+ <PointSize>28.35</PointSize>
  <Font>Convection</Font>
  <TextStyle>16</TextStyle>
 </Properties>
@@ -175,7 +175,7 @@
    <StopPos>0.7</StopPos>
    <StopPos>1</StopPos>
   </Gradient>
-  <Rotation>90</Rotation>
+  <Rotation>-90</Rotation>
  </Fill>
  <Closed>true</Closed>
  <Points>284,186;0,0;284,0;284,186;30,186,13.431,186,0,172.569;0,156</Points>
@@ -197,7 +197,7 @@
    <StopPos>0</StopPos>
    <StopPos>1</StopPos>
   </Gradient>
-  <Translation>0.359155,-0.446237,0</Translation>
+  <Translation>-0.359155,0.446237,0</Translation>
   <Scale>0.714286,0.714286,1</Scale>
  </Fill>
  <Closed>true</Closed>
@@ -240,7 +240,7 @@
    <StopPos>0.68</StopPos>
    <StopPos>1</StopPos>
   </Gradient>
-  <Rotation>90</Rotation>
+  <Rotation>-90</Rotation>
  </Fill>
  <Closed>true</Closed>
  <Points>279,186;0,0;279,0;279,156,279,172.569,265.569,186;249,186;0,186</Points>
@@ -262,7 +262,7 @@
    <StopPos>0</StopPos>
    <StopPos>1</StopPos>
   </Gradient>
-  <Translation>-0.284946,-0.446237,0</Translation>
+  <Translation>0.284946,0.446237,0</Translation>
   <Scale>0.714286,0.714286,1</Scale>
  </Fill>
  <Closed>true</Closed>
@@ -314,7 +314,7 @@
  <Text>START</Text>
  <TextColor>0xffffffff</TextColor>
  <DropShadowColor>0</DropShadowColor>
- <PointSize>8</PointSize>
+ <PointSize>5.15</PointSize>
  <Font>Convection</Font>
  <TextStyle>1040</TextStyle>
 </Properties>
@@ -328,7 +328,7 @@
  <Text>explore</Text>
  <TextColor>0xffeeeeee</TextColor>
  <DropShadowColor>0</DropShadowColor>
- <PointSize>20</PointSize>
+ <PointSize>12.89</PointSize>
  <Font>Convection</Font>
  <TextStyle>16</TextStyle>
 </Properties>
@@ -363,7 +363,7 @@
  <Text>spotlight +</Text>
  <TextColor>0xffffffff</TextColor>
  <DropShadowColor>0</DropShadowColor>
- <PointSize>38</PointSize>
+ <PointSize>24.48</PointSize>
  <Font>Convection</Font>
  <TextStyle>16</TextStyle>
 </Properties>
@@ -377,7 +377,7 @@
  <Text>featured</Text>
  <TextColor>0xffffffff</TextColor>
  <DropShadowColor>0</DropShadowColor>
- <PointSize>24</PointSize>
+ <PointSize>15.46</PointSize>
  <Font>Convection</Font>
  <TextStyle>16</TextStyle>
 </Properties>
@@ -412,7 +412,7 @@
  <Text>downloads</Text>
  <TextColor>0xffffffff</TextColor>
  <DropShadowColor>0</DropShadowColor>
- <PointSize>38</PointSize>
+ <PointSize>24.48</PointSize>
  <Font>Convection</Font>
  <TextStyle>16</TextStyle>
 </Properties>
@@ -426,7 +426,7 @@
  <Text>Stiletto Swift</Text>
  <TextColor>0xffffffff</TextColor>
  <DropShadowColor>0</DropShadowColor>
- <PointSize>14</PointSize>
+ <PointSize>9.02</PointSize>
  <Font>Convection</Font>
  <TextStyle>16</TextStyle>
 </Properties>
@@ -440,7 +440,7 @@
  <Text>70%</Text>
  <TextColor>0xffffffff</TextColor>
  <DropShadowColor>0</DropShadowColor>
- <PointSize>14</PointSize>
+ <PointSize>9.02</PointSize>
  <Font>Convection</Font>
  <TextStyle>528</TextStyle>
 </Properties>
@@ -480,7 +480,7 @@
    <StopPos>0.45</StopPos>
    <StopPos>1</StopPos>
   </Gradient>
-  <Rotation>90</Rotation>
+  <Rotation>-90</Rotation>
  </Fill>
  <Closed>true</Closed>
  <Points>153,14;7,0;146,0,149.866,0,153,3.1339;153,7;153,7,153,10.8661,149.866,14;146,14;7,14,3.1339,14,0,10.8661;0,7;0,7,0,3.1339,3.1339,0</Points>

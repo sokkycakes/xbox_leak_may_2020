@@ -18,7 +18,7 @@
  <Position>-4,-26,0</Position>
  <Text>discover</Text>
  <TextColor>0x37ffffff</TextColor>
- <PointSize>74</PointSize>
+ <PointSize>47.68</PointSize>
  <TextStyle>16</TextStyle>
 </Properties>
 </XuiText>
@@ -66,7 +66,7 @@
    <StopPos>0.387409</StopPos>
    <StopPos>0.939467</StopPos>
   </Gradient>
-  <Rotation>90</Rotation>
+  <Rotation>-90</Rotation>
  </Fill>
  <Closed>true</Closed>
  <Points>720,33.3333;0,0;720,0;720,33.3333;0,33.3333</Points>
@@ -80,7 +80,7 @@
  <Position>629.333,452,0</Position>
  <Text>frolick</Text>
  <TextColor>0xffc9c5a9</TextColor>
- <PointSize>25</PointSize>
+ <PointSize>16.11</PointSize>
  <TextStyle>5136</TextStyle>
 </Properties>
 </XuiText>

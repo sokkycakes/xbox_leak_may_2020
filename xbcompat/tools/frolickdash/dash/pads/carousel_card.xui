@@ -33,7 +33,7 @@
    <StopPos>0.6</StopPos>
    <StopPos>1</StopPos>
   </Gradient>
-  <Rotation>90</Rotation>
+  <Rotation>-90</Rotation>
  </Fill>
  <Closed>true</Closed>
  <Points>500,340;52,0;448,0,476.72,0,500,23.2804;500,52;500,288,500,316.72,476.72,340;448,340;52,340,23.2804,340,0,316.72;0,288;0,52,0,23.2804,23.2804,0</Points>

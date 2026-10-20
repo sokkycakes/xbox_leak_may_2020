@@ -85,13 +85,23 @@ dashboard (`tools/dashbuild`), as its own `xboxdash.xbe` with its own
   brush space (0.4 stretches a gradient over 2.5 boxes), as XuiTool
   writes them and the 360 draws them (checked against the Blades
   running in the GFWL XUI engine host, `/mnt/project-files/xui360`, which
-  renders the same scenes); a control with Enabled false rests in its
-  visual's NormalDisable state (the greyed Y and X legends).  The list
-  items' icons are the dump's own `ico_64x_*.png`, pulled from the
-  packages into `art/blades/`; the pad's big word and the overlay's
-  faded word hide while a page is open.  The hub shows a page on a HUD
-  `XuiPanel` (`thePage`) once the camera lands on the focus view, opening
-  it over 30 frames like `dashmain.xur`'s `1OpenFull`: up and down walk
+  renders the same scenes), the brush rotating first and translating in
+  the rotated frame (the Metapane's top corners are 90-degree-rotated
+  radial fills whose centres only land on the inner corner that way);
+  PointSize is in points, the em 4/3 PointSize pixels, with the baseline
+  the font's ascent below the box's top (the engine's legend and header
+  glyphs and sokky's real-console capture measure so; Frolick's own
+  scenes, authored as pixel heights, carry converted sizes); a control
+  with Enabled false rests in its visual's NormalDisable state (the
+  greyed Y and X legends).  The list items' icons are the dump's own
+  `ico_64x_*.png`, pulled from the packages into `art/blades/`; the pad's
+  big word and the overlay's faded word and wordmark hide while a page is
+  open.  The hub shows a page on a HUD `XuiPanel` (`thePage`) once the
+  camera lands on the focus view; the panel is wider than the HUD and
+  centred on canvas row 373.7 (`viewY`) so the Sion's 720x480 shows the
+  window a 360 shows at 16:9, rows 58.7 to 688.7 of the 1120x770 canvas,
+  at the engine's scale with 66 output pixels cropped each side.  The
+  page opens over 30 frames like `dashmain.xur`'s `1OpenFull`: up and down walk
   the list, A opens the item's page (a 10-frame fade, the Blades'
   FadeIn), B returns to the parent page or, on the root page, closes it as
   the camera flies back.  Pages so far: settings pad: Settings (Console

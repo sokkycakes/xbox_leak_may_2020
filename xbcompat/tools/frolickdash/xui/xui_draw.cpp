@@ -288,16 +288,24 @@ static void triangulate(const float* poly, int n, Vec<unsigned short>& out)
 }
 
 // Brush transform for gradient and texture fills, as XuiTool writes it:
-// Translation is a fraction of the figure's box (-0.5 puts the centre on
-// the left edge), Scale multiplies the box into brush space (a Scale of
+// Translation moves the brush, as a fraction of the figure's box (a y of
+// 0.59 pulls a radial gradient's centre 0.59 boxes UP, so the Blades'
+// button shadow is dark at its top edge, right under the button, and
+// fades downward), Scale multiplies the box into brush space (a Scale of
 // 0.4 stretches the gradient over 2.5 boxes: the Blades' pane edges are
 // strips with a radial fill scaled 0.9,0.4, drawn by the 360 as a soft
-// line the strip's whole height), Rotation turns about the centre.
+// line the strip's whole height), Rotation turns about the centre.  All
+// three checked against the GFWL XUI engine's rendering of the skin.
+// The order is rotate, then translate, in the rotated frame: the Blades'
+// Metapane rounds its top corners with 20x20 radial fills rotated 90 and
+// translated 0.5,-0.5 (top left) and 0.5,0.5 (top right), whose centres
+// land on the inner corner only this way.  A linear gradient runs along
+// the box's width at Rotation 0 and from the box's bottom up at 90.
 struct Brush {
     float tx, ty, sx, sy, cs, sn, pw, ph;
     void uv(float x, float y, float* u, float* v) const {
-        float a = x / pw - 0.5f - tx, b = y / ph - 0.5f - ty;
-        float a2 = a * cs - b * sn, b2 = a * sn + b * cs;
+        float a = x / pw - 0.5f, b = y / ph - 0.5f;
+        float a2 = a * cs - b * sn + tx, b2 = a * sn + b * cs + ty;
         *u = a2 * sx + 0.5f; *v = b2 * sy + 0.5f;
     }
 };
@@ -311,7 +319,7 @@ static Brush brush(Object* fill, float pw, float ph)
     double rot = propF(*fill, "Rotation", 0) * M_PI / 180;
     b.tx = t.x; b.ty = t.y;
     b.sx = s.x == 0 ? 1 : s.x; b.sy = s.y == 0 ? 1 : s.y;
-    b.cs = (float)cos(-rot); b.sn = (float)sin(-rot);
+    b.cs = (float)cos(rot); b.sn = (float)sin(rot);
     b.pw = pw; b.ph = ph;
     return b;
 }
@@ -595,7 +603,7 @@ Texture Renderer::lineTex(const char* line, float px, int* w, int* h, int* adv)
     char key[600];
     _snprintf(key, sizeof key, "txt:%g:%s", px, line); key[sizeof key - 1] = 0;
     Texture t = lookup(key, w, h);
-    float scale = stbtt_ScaleForPixelHeight(&font->info, px);
+    float scale = stbtt_ScaleForMappingEmToPixels(&font->info, px);
     int len = (int)strlen(line);
     *adv = measure(font, scale, line, len);
     if (t != (Texture)-1) return t;
@@ -647,8 +655,11 @@ void Renderer::text(Node* n, const Affine& m, float alpha, Blend blend)
     // Draw glyphs at the on-screen scale so text stays sharp.
     float scale = (float)sqrt(fabs(m.a * m.d - m.b * m.c));
     if (scale <= 0) return;
-    float px = size * scale;
-    float fs = stbtt_ScaleForPixelHeight(&font->info, px);
+    // PointSize is in points: the XUI engine sizes the em at 96 dpi (the
+    // GFWL engine's legend and header glyphs and baselines, and sokky's
+    // real-console capture of the legend, all measure 4/3 PointSize per em).
+    float px = size * (96.0f / 72.0f) * scale;
+    float fs = stbtt_ScaleForMappingEmToPixels(&font->info, px);
     float w = n->width(), h = n->height();
 
     // wrap into lines (word wrap unless one-line style)

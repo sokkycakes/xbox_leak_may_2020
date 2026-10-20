@@ -134,16 +134,22 @@ void Node::markOwner(Node* o)
     for (int i = 0; i < children.n; i++) if (!children[i]->visual) children[i]->markOwner(o);
 }
 
+// Anchor bits: 1 left, 2 top, 4 right, 8 bottom.  A node anchored to
+// both sides stretches with its parent, and its own children then anchor
+// to it in turn (the Blades' Metapane is a group of edge strips anchored
+// inside a group that stretches to the pane).
 void Node::anchor(float dw, float dh)
 {
     unsigned a = propU(props, "Anchor", 0);
     Vec3 zero = { 0, 0, 0 };
     Vec3 pos = propV(props, "Position", zero);
-    if ((a & 1) && (a & 4)) { Value& v = props.set("Width"); v.free(); v.type = TFloat; v.f = width() + dw; }
+    float mw = 0, mh = 0;
+    if ((a & 1) && (a & 4)) { Value& v = props.set("Width"); v.free(); v.type = TFloat; v.f = width() + dw; mw = dw; }
     else if (a & 4) pos.x += dw;
-    if ((a & 2) && (a & 8)) { Value& v = props.set("Height"); v.free(); v.type = TFloat; v.f = height() + dh; }
+    if ((a & 2) && (a & 8)) { Value& v = props.set("Height"); v.free(); v.type = TFloat; v.f = height() + dh; mh = dh; }
     else if (a & 8) pos.y += dh;
     Value& p = props.set("Position"); p.free(); p.type = TVector; p.v = pos;
+    if (mw != 0 || mh != 0) for (int i = 0; i < children.n; i++) children[i]->anchor(mw, mh);
 }
 
 // ---- focus -----------------------------------------------------------------
