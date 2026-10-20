@@ -280,8 +280,8 @@ def pad_nodes(name):
     out.append('''        Transform
         {
             translation %s
-            children [ Sprite { url "label_%s.xtx" pixelSize %.6f depthTest false } ]
-        }''' % (v3(add(centre, (0, LABEL_Y * S, 0))), name, LABEL_PIXEL * S / LABEL_OVERSAMPLE))
+            children [ DEF label_%s Sprite { url "label_%s.xtx" pixelSize %.6f depthTest false } ]
+        }''' % (v3(add(centre, (0, LABEL_Y * S, 0))), name, name, LABEL_PIXEL * S / LABEL_OVERSAMPLE))
     return "\n".join(out)
 
 
@@ -759,6 +759,14 @@ function OpenPage()
     ShowPage(PageRoot(nPad), "Open");
     theOverlay.SetOpacity("promptA", 0);
     theOverlay.SetOpacity("chevron", 0);
+    PadLabel(0);    // the pad's big word would show through the page header
+}
+
+function PadLabel(a)
+{
+    if (nPad == 0) label_catalog.alpha = a;
+    if (nPad == 2) label_settings.alpha = a;
+    theOverlay.SetOpacity("word", a);   // the overlay's faded word too
 }
 
 function ShowPage(page, how)
@@ -776,6 +784,7 @@ function ClosePage()
 {
     bPageOpen = false;
     thePage.Play("page", "Close");
+    PadLabel(1);
 }
 
 // B on a page: the parent page, or the end of the page

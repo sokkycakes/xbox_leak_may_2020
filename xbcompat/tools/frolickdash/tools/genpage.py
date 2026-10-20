@@ -59,12 +59,14 @@ HEADER_Y, BODY_Y, BODY_END, LEGEND_END = 60, 150, 603, 707
 # are bound to the dashboard's list data (DataAssociation 1, 2: x, y, w,
 # h, point size, text style); the unbound presenter shows the item's Text.
 LIST_ITEMS = {
-    "": ("XuiButton", 45, []),                                              # list_Common
-    "list_twoline-icon": ("btn_twoline-icon", 72, [None, (83, 35, 328, 40, 18, 16401)]),
-    "List_3Line_Icon_prgbr": ("btn_3Line_Icon_prgbr", 105, [(83, 0, 769, 72, 20, 20497), (83, 60, 574, 47, 20, 20497)]),
-    "List_Fullwidth_3Icon_4string": ("ListItem_Fullwidth_3Icon_4String", 47, []),
-    "List_oneline_icon": ("btn_oneline_icon", 72, []),
+    "": ("XuiButton", 45, [], None),                                        # list_Common
+    "list_twoline-icon": ("btn_twoline-icon", 72, [None, (83, 35, 328, 40, 18, 16401)], (11, 6, 60, 60)),
+    "List_3Line_Icon_prgbr": ("btn_3Line_Icon_prgbr", 105, [(83, 0, 769, 72, 20, 20497), (83, 60, 574, 47, 20, 20497)], (6, 5, 60, 60)),
+    "List_Fullwidth_3Icon_4string": ("ListItem_Fullwidth_3Icon_4String", 47, [], (11, 8, 32, 32)),
+    "List_oneline_icon": ("btn_oneline_icon", 72, [], (11, 4.25, 64, 64)),
 }
+# The last tuple is the item visual's image presenter (x, y, w, h), where
+# an item's icon (the 360's ico_64x_*.png, kept in art/blades/) goes.
 
 # The pages.  scene: the Blades scene in art/blades/ (None: the System
 # list, built here in the Console Settings layout); pad; first: the
@@ -84,15 +86,16 @@ PAGES = [
                                 "btnClock": "Set from the network", "btnCountry": "United States", "btnAutoOff": "Off",
                                 "btnScreensaver": "Off", "btnRemote": "Not set up", "btnPolicy": "Frolick on the Sion"})),
     ("page_memory", dict(scene="DeviceSelector.xui", pad="settings", first="list_devices_0", parent="page_system",
-                         lists={"list_devices": [("Hard Drive", "7.2 GB free of 8.0 GB", 0.1)]},
+                         lists={"list_devices": [("Hard Drive", "7.2 GB free of 8.0 GB", 0.1, "ico_64x_HD.png")]},
                          press={"list_devices_0": "page_memory_items"}, labels={"labTotal": "1 of 1"})),
     ("page_memory_items", dict(scene="Items.xui", pad="settings", first="list_items_0", parent="page_memory",
                                header="Hard Drive",
-                               lists={"list_items": [("Games", "", 0), ("Saved Games", "", 0), ("Music", "", 0),
-                                                     ("Pictures", "", 0), ("Videos", "", 0)]},
+                               # the dump has no 64px icon for Saved Games or Videos
+                               lists={"list_items": [("Games", "", 0, "ico_64x_games.png"), ("Saved Games", "", 0), ("Music", "", 0, "ico_64x_music.png"),
+                                                     ("Pictures", "", 0, "ico_64x_PictureAlbum.png"), ("Videos", "", 0)]},
                                labels={"labTotal": "1 of 5"})),
     ("page_network", dict(scene="2000_NetworkConfigList.xui", pad="settings", first="list_items_0", parent="page_system",
-                          lists={"list_items": [("Wireless Network", "Connected", 0)]},
+                          lists={"list_items": [("Wireless Network", "Connected", 0, "ico_64x_Infrastructure.png")]},
                           meta={"list_items_0": "Wireless Network\nConnected\n\nIP address 192.168.1.247\nSubnet mask 255.255.255.0\nGateway 192.168.1.1"})),
     ("page_store", dict(scene="1400_StoreFrontScene.xui", pad="catalog", first="btnGameDownloads", parent="", header="Marketplace",
                         press={"btnGameDownloads": "page_store_games", "btnHotList": "page_store_hot",
@@ -233,7 +236,7 @@ def list_items(block, items):
     id = prop(block, "Id")
     x, y = [float(v) for v in prop(block, "Position").split(",")[:2]]
     w = float(prop(block, "Width"))
-    vis, h, lines = LIST_ITEMS[prop(block, "Visual") or ""]
+    vis, h, lines, icon = LIST_ITEMS[prop(block, "Visual") or ""]
     # btn_3Line_Icon_prgbr's bar (the 360 feeds it the device's fill): the
     # same visual over it, held at the item's fraction
     bar = (5, 76, 65, 21, "prgbr_Memory") if vis == "btn_3Line_Icon_prgbr" else None
@@ -242,7 +245,9 @@ def list_items(block, items):
     items = items[:int(float(prop(block, "Height")) // pitch)]
     nav = {k: prop(block, k) for k in ("NavLeft", "NavRight") if prop(block, k)}
     out = []
-    for i, (l1, l2, frac) in enumerate(items):
+    for i, item in enumerate(items):
+        l1, l2, frac = item[:3]
+        ico = item[3] if len(item) > 3 else ""
         n = dict(nav)
         if i > 0:
             n["NavUp"] = "%s_%d" % (id, i - 1)
@@ -256,6 +261,10 @@ def list_items(block, items):
             kids.append(text("line%d" % (j + 1), lx, ly, lw, lh, size, style, TEXT, presenter=False, value=(l1, l2)[j], shadow=SHADOW))
             if j == 0:
                 label = ""      # the first line has its own slot; the Text would double it
+        if ico and icon:
+            ix, iy, iw, ih = icon
+            kids.append("\n".join(["<XuiImage>", "<Properties>", " <Id>icon</Id>", " <Width>%g</Width>" % iw, " <Height>%g</Height>" % ih,
+                                   " <Position>%g,%g,0</Position>" % (ix, iy), " <ImagePath>%s</ImagePath>" % ico, "</Properties>", "</XuiImage>"]))
         if bar:
             bx, by, bw, bh, bvis = bar
             kids.append("\n".join(["<XuiProgressBar>", "<Properties>", " <Id>bar</Id>", " <Width>%g</Width>" % bw, " <Height>%g</Height>" % bh,
@@ -292,7 +301,7 @@ def page(file, spec):
             # The Blades' disabled legend placeholders (Enabled false) show
             # nothing on these pages, nor do the loading dots, the "no
             # items" labels of a filled list, or what the page hides.
-            if "<Enabled>false</Enabled>" in b or id in spec.get("hide", []) or id in ("labDots", "ctlLoading", "txt_SelectProfile"):
+            if id in spec.get("hide", []) or id in ("labDots", "ctlLoading", "txt_SelectProfile"):
                 continue
             if ("Empty" in id or id == "txt_Directions") and spec.get("lists"):
                 continue

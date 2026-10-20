@@ -59,6 +59,7 @@ struct InitTimelines { bool operator()(Node* n) {
         n->time = a + (b - a) * f; n->playing = false; n->apply();
         return true;
     }
+    if (n->owner && n->owner->visual == n && !propB(n->owner->props, "Enabled", true) && n->play("NormalDisable")) return true;
     if (!n->play("Normal")) { n->time = 0; n->playing = !n->stopsAt(0); n->apply(); }
     return true; } };
 

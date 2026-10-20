@@ -198,7 +198,7 @@
    <StopPos>1</StopPos>
   </Gradient>
   <Translation>0.359155,-0.446237,0</Translation>
-  <Scale>1.4,1.4,1</Scale>
+  <Scale>0.714286,0.714286,1</Scale>
  </Fill>
  <Closed>true</Closed>
  <Points>284,186;0,0;284,0;284,186;30,186,13.431,186,0,172.569;0,156</Points>
@@ -263,7 +263,7 @@
    <StopPos>1</StopPos>
   </Gradient>
   <Translation>-0.284946,-0.446237,0</Translation>
-  <Scale>1.4,1.4,1</Scale>
+  <Scale>0.714286,0.714286,1</Scale>
  </Fill>
  <Closed>true</Closed>
  <Points>279,186;0,0;279,0;279,156,279,172.569,265.569,186;249,186;0,186</Points>

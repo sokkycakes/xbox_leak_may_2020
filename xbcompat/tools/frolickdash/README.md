@@ -81,7 +81,15 @@ dashboard (`tools/dashbuild`), as its own `xboxdash.xbe` with its own
   needed: a visual with no Normal frame rests at frame 0 when a Stop
   command sits there; a progress bar's visual is held at the frame its
   Value picks between Normal and EndNormal; a fill's Translation is a
-  fraction of the figure's box, as XuiTool writes it.  The hub shows a page on a HUD
+  fraction of the figure's box and its Scale multiplies the box into
+  brush space (0.4 stretches a gradient over 2.5 boxes), as XuiTool
+  writes them and the 360 draws them (checked against the Blades
+  running in the GFWL XUI engine host, `/mnt/project-files/xui360`, which
+  renders the same scenes); a control with Enabled false rests in its
+  visual's NormalDisable state (the greyed Y and X legends).  The list
+  items' icons are the dump's own `ico_64x_*.png`, pulled from the
+  packages into `art/blades/`; the pad's big word and the overlay's
+  faded word hide while a page is open.  The hub shows a page on a HUD
   `XuiPanel` (`thePage`) once the camera lands on the focus view, opening
   it over 30 frames like `dashmain.xur`'s `1OpenFull`: up and down walk
   the list, A opens the item's page (a 10-frame fade, the Blades'

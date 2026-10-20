@@ -287,16 +287,18 @@ static void triangulate(const float* poly, int n, Vec<unsigned short>& out)
     delete [] idx;
 }
 
-// Brush transform for gradient and texture fills: Translation (a fraction
-// of the figure's box, as XuiTool writes it: -0.5 puts the centre on the
-// left edge), Scale and Rotation about the figure's centre, mapping figure
-// space to 0..1.
+// Brush transform for gradient and texture fills, as XuiTool writes it:
+// Translation is a fraction of the figure's box (-0.5 puts the centre on
+// the left edge), Scale multiplies the box into brush space (a Scale of
+// 0.4 stretches the gradient over 2.5 boxes: the Blades' pane edges are
+// strips with a radial fill scaled 0.9,0.4, drawn by the 360 as a soft
+// line the strip's whole height), Rotation turns about the centre.
 struct Brush {
     float tx, ty, sx, sy, cs, sn, pw, ph;
     void uv(float x, float y, float* u, float* v) const {
         float a = x / pw - 0.5f - tx, b = y / ph - 0.5f - ty;
         float a2 = a * cs - b * sn, b2 = a * sn + b * cs;
-        *u = a2 / sx + 0.5f; *v = b2 / sy + 0.5f;
+        *u = a2 * sx + 0.5f; *v = b2 * sy + 0.5f;
     }
 };
 
