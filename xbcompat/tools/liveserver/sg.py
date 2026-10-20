@@ -27,10 +27,15 @@ RETAIL_DH, RETAIL_APREQ, RETAIL_APREP, RETAIL_PAD = 0x5880, 0x5882, 0x5883, 0x58
 SXRF_ENCRYPT_DES = 1
 SECMSG_DELETE, SECMSG_PULSE, SECMSG_XBTOSG_PULSE, SECMSG_SGTOXB_PULSE = 0x0200, 0x0201, 0x0202, 0x0203
 # Retail renumbers the secmsg types to a 0x53xx base but keeps the layouts from
-# inc/xonlinep.h.  The pulse (XbToSg and SgToXb alike) is 0x5300 with an 8-byte
-# body {_wType, _cbEnt=8, _dwSeqAck}; the bare keepalive is 0x5301.  Confirmed
-# live from xonlinedash's own xnet (cmp $0x5300/$0x5301 at the recv dispatch).
+# inc/xonlinep.h.  From xonlinedash's own xnet recv dispatch (0x1387a4) the
+# directions are: 0x5300 = SgToXb pulse (gateway->console, {_wType,_cbEnt=8,
+# _dwSeqAck}); 0x5301 = XbToSg pulse (console->gateway, no body, ack the ESP
+# seq); 0x5307 = XbToSg service-connect/poll (console->gateway, built at
+# 0x13b392); 0x5308 = SgToXb service reply (gateway->console, parsed at
+# 0x13c061).  Other recv types: 0x5304 re-key, 0x5306 disconnect, 0x5309
+# presence/user change, 0x530c state ack.
 RETAIL_SECMSG_PULSE, RETAIL_SECMSG_ALIVE = 0x5300, 0x5301
+RETAIL_SVC_REQ, RETAIL_SVC_RESP = 0x5307, 0x5308
 PROTO_SECMSG, PROTO_TCP, PROTO_UDP = 0, 6, 17
 U_SG_AUTH, U_AP_REP = 11, 12
 CKSUM_SHA1 = -131
@@ -225,7 +230,30 @@ class SecurityAssociation:
                 self.send(PROTO_SECMSG, struct.pack('<HHI', RETAIL_SECMSG_PULSE, 8, seq))
             elif t == RETAIL_SECMSG_PULSE:
                 pass            # 0x5300 is gateway->console; never sent to us
+            elif t == RETAIL_SVC_REQ:
+                self.svc_req(payload[p:p + cb], seq)
             p += cb
+
+    def svc_req(self, entry, seq=0):
+        """Console's XbToSg service-connect/poll (secmsg 0x5307, built at
+        0x13b392).  Entry layout (16 bytes): type, cbEnt, 8-byte service id,
+        16-bit index, counter byte, flag byte.  The gateway answers with 0x5308
+        (parsed at 0x13c061): it matches the service by the 8-byte id and the
+        index, checks the service record is in state 4/5 on this SA, then either
+        copies control data to the record (flag bit 2 set) or feeds the windowed
+        data stream (flag clear).  First cut: a control-style 0x5308 that echoes
+        the id/index with an empty payload, to see how far the console's handler
+        gets (probe 0x13c061)."""
+        svc_id = entry[4:12]
+        index = entry[12:14]
+        subidx = entry[14:15]
+        if os.environ.get('LIVE_DEBUG'):
+            self.gw.log(f'sg: svc-req id={svc_id.hex()} index={index.hex()} '
+                        f'sub={subidx.hex()} flag={entry[15]:#x}')
+        # 0x5308: type, cbEnt=0x18, service id, index, sub byte, flag (bit2=control), 8 bytes
+        resp = struct.pack('<HH', RETAIL_SVC_RESP, 0x18) + svc_id + index + subidx + \
+            bytes([0x04]) + bytes(8)
+        self.send(PROTO_SECMSG, resp)
 
     def tcp_in(self, seg):
         sport, dport, seqn, ackn, off, flags = struct.unpack_from('>HHIIBB', seg)
