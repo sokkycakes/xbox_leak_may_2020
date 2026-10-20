@@ -1,5 +1,6 @@
 /* Hal, Av, Dbg, Ex settings, Xe section loading and the kernel's data exports. */
 #define _GNU_SOURCE
+#include <sys/mman.h>
 #include <errno.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -246,9 +247,66 @@ static void relaunch(const char *path)
     xlog("relaunch failed: %s", strerror(errno));
 }
 
+/* Where in the title a reboot came from: the return address and the saved
+   EBP chain of the guest code that called in (titles built with frame
+   pointers), for finding which of a title's exits fired. */
+static void log_guest_callers(const char *what, uintptr_t ret, const uint32_t *frame)
+{
+#if defined(__i386__)
+    char buf[256];
+    int n = snprintf(buf, sizeof(buf), "%s called from %#x", what, (unsigned)ret);
+    for (int i = 0; i < 8 && n < (int)sizeof(buf) - 16; i++) {
+        uintptr_t f = (uintptr_t)frame;
+        if (f < ARENA_BASE || f >= ARENA_END || (f & 3)) break;
+        uint32_t r = frame[1];
+        if (r < 0x10000 || r >= IMAGE_REGION_END) break;
+        n += snprintf(buf + n, sizeof(buf) - n, " <- %#x", (unsigned)r);
+        const uint32_t *next = (const uint32_t *)(uintptr_t)frame[0];
+        if (next <= frame) break;
+        frame = next;
+    }
+    xlog("%s", buf);
+#else
+    (void)what; (void)ret; (void)frame;
+#endif
+}
+
+/* Optimized titles often have no frame pointers: words on the guest stack
+   that point into the image are candidate return addresses. */
+static void log_guest_stack_scan(const char *what, const uint32_t *sp)
+{
+#if defined(__i386__)
+    char buf[400];
+    int n = snprintf(buf, sizeof(buf), "%s stack:", what);
+    for (int i = 0; i < 256 && n < (int)sizeof(buf) - 12; i++) {
+        uintptr_t a = (uintptr_t)&sp[i];
+        if (i == 0 || !(a & 0xfff)) {
+            /* stop at the end of the mapped stack */
+            unsigned char in;
+            if (mincore((void *)(a & ~(uintptr_t)0xfff), 4096, &in) != 0) break;
+        }
+        uint32_t v = sp[i];
+        if (v >= 0x10000 && v < IMAGE_REGION_END) n += snprintf(buf + n, sizeof(buf) - n, " +%x:%#x", i * 4, (unsigned)v);
+    }
+    xlog("%s", buf);
+#else
+    (void)what; (void)sp;
+#endif
+}
+
 void NTAPI HalReturnToFirmware(ULONG Routine)
 {
     const char *path = LaunchDataPage ? (const char *)LaunchDataPage + 8 : NULL;
+#if defined(__i386__)
+    {
+        /* This function's frame holds the guest's EBP and return address;
+           the guest's stack starts right after them. */
+        const uint32_t *frame = __builtin_frame_address(0);
+        log_guest_callers("HalReturnToFirmware", (uintptr_t)__builtin_return_address(0),
+                          (const uint32_t *)(uintptr_t)frame[0]);
+        log_guest_stack_scan("HalReturnToFirmware", frame + 2);
+    }
+#endif
     av_hand_over();
     if (Routine == 2 && path && path[0]) relaunch(path);
     xlog("HalReturnToFirmware(%u): title asked to reboot or return to the dashboard", Routine);
