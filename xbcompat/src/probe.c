@@ -54,6 +54,17 @@ bool probe_trap(void *ucontext)
         xlog("probe %08x: eax=%08x ecx=%08x edx=%08x ebx=%08x esi=%08x edi=%08x ebp=%08x | %08x %08x %08x %08x %08x",
              (uint32_t)(uintptr_t)at, r[REG_EAX], r[REG_ECX], r[REG_EDX], r[REG_EBX], r[REG_ESI], r[REG_EDI],
              r[REG_EBP], sp[0], sp[1], sp[2], sp[3], sp[4]);
+        /* XBCOMPAT_PROBE_MEM=REG also dumps 32 bytes at that register */
+        static const char *const rn[] = { "eax", "ecx", "edx", "ebx", "esi", "edi", "ebp" };
+        static const int ri[] = { REG_EAX, REG_ECX, REG_EDX, REG_EBX, REG_ESI, REG_EDI, REG_EBP };
+        const char *mem = getenv("XBCOMPAT_PROBE_MEM");
+        for (int k = 0; mem && k < 7; k++) {
+            uint32_t a = (uint32_t)r[ri[k]];
+            if (strcmp(mem, rn[k]) || a < 0x10000 || a >= 0xc0000000) continue;
+            const uint32_t *m = (const uint32_t *)(uintptr_t)a;
+            xlog("probe %08x: [%s] %08x %08x %08x %08x %08x %08x %08x %08x", (uint32_t)(uintptr_t)at, mem,
+                 m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7]);
+        }
         *at = probes[i].orig;
         r[REG_EIP] = (greg_t)(uintptr_t)at;
         r[REG_EFL] |= 0x100;

@@ -27,14 +27,15 @@ RETAIL_DH, RETAIL_APREQ, RETAIL_APREP, RETAIL_PAD = 0x5880, 0x5882, 0x5883, 0x58
 SXRF_ENCRYPT_DES = 1
 SECMSG_DELETE, SECMSG_PULSE, SECMSG_XBTOSG_PULSE, SECMSG_SGTOXB_PULSE = 0x0200, 0x0201, 0x0202, 0x0203
 # Retail renumbers the secmsg types to a 0x53xx base but keeps the layouts from
-# inc/xonlinep.h.  From xonlinedash's own xnet recv dispatch (0x1387a4) the
-# directions are: 0x5300 = SgToXb pulse (gateway->console, {_wType,_cbEnt=8,
-# _dwSeqAck}); 0x5301 = XbToSg pulse (console->gateway, no body, ack the ESP
-# seq); 0x5307 = XbToSg service-connect/poll (console->gateway, built at
+# inc/xonlinep.h.  From xonlinedash's own xnet recv dispatch (0x1387a4):
+# 0x5300 = DELETE ({_wType,_cbEnt=8,_dwReason}; the console tears the SA down
+# at 0x136367 and, for the logon SA, keeps the reason at +0xd0c); 0x5301 =
+# bare PULSE (cbEnt=4, ignored on receipt, only refreshes the SA's last-receive
+# time); 0x5307 = XbToSg service-connect/poll (console->gateway, built at
 # 0x13b392); 0x5308 = SgToXb service reply (gateway->console, parsed at
 # 0x13c061).  Other recv types: 0x5304 re-key, 0x5306 disconnect, 0x5309
-# presence/user change, 0x530c state ack.
-RETAIL_SECMSG_PULSE, RETAIL_SECMSG_ALIVE = 0x5300, 0x5301
+# SgToXb pulse with change list (logon SA only), 0x530c state ack.
+RETAIL_SECMSG_DELETE, RETAIL_SECMSG_PULSE = 0x5300, 0x5301
 RETAIL_SVC_REQ, RETAIL_SVC_RESP = 0x5307, 0x5308
 PROTO_SECMSG, PROTO_TCP, PROTO_UDP = 0, 6, 17
 U_SG_AUTH, U_AP_REP = 11, 12
@@ -217,42 +218,40 @@ class SecurityAssociation:
             if t == SECMSG_XBTOSG_PULSE:
                 seq_ack = struct.unpack_from('<I', payload, p + 4)[0] if cb >= 8 else 0
                 self.send(PROTO_SECMSG, struct.pack('<HHI', SECMSG_SGTOXB_PULSE, 8, seq_ack))
-            elif t == RETAIL_SECMSG_ALIVE:
-                # 0x5301 is the console's XbToSg pulse (it ignores 0x5301 on its
-                # own receive path, and its 0x5300 handler at 0x1387a4 is what
-                # processes a *gateway* pulse).  It is sent with no body (cbEnt=4);
-                # the sequence to acknowledge is the ESP sequence of this packet.
-                # Reply with an SgToXb pulse (0x5300, cbEnt=8, dwSeqAck=seq) so the
-                # console's pulse handler advances the SA to alive and, for the
-                # logon SA, stores the ack at +0xd0c.  Without this reply the
-                # console never sees its pulse answered and reports a
-                # communication error.
-                self.send(PROTO_SECMSG, struct.pack('<HHI', RETAIL_SECMSG_PULSE, 8, seq))
             elif t == RETAIL_SECMSG_PULSE:
-                pass            # 0x5300 is gateway->console; never sent to us
+                # The console's keepalive.  Answer with our own bare pulse: any
+                # authenticated packet refreshes its inbound timer.  Never answer
+                # with 0x5300, which is DELETE and drops the association.
+                self.send(PROTO_SECMSG, struct.pack('<HH', RETAIL_SECMSG_PULSE, 4))
+            elif t == RETAIL_SECMSG_DELETE:
+                self.gw.log(f'sg: console closed the association {self.spi_resp:#x}')
+                self.gw.drop(self)
+                return
             elif t == RETAIL_SVC_REQ:
                 self.svc_req(payload[p:p + cb], seq)
             p += cb
 
     def svc_req(self, entry, seq=0):
-        """Console's XbToSg service-connect/poll (secmsg 0x5307, built at
-        0x13b392).  Entry layout (16 bytes): type, cbEnt, 8-byte service id,
-        16-bit index, counter byte, flag byte.  The gateway answers with 0x5308
-        (parsed at 0x13c061): it matches the service by the 8-byte id and the
-        index, checks the service record is in state 4/5 on this SA, then either
-        copies control data to the record (flag bit 2 set) or feeds the windowed
-        data stream (flag clear).  First cut: a control-style 0x5308 that echoes
-        the id/index with an empty payload, to see how far the console's handler
-        gets (probe 0x13c061)."""
-        svc_id = entry[4:12]
-        index = entry[12:14]
-        subidx = entry[14:15]
+        """A QoS probe to the data center (secmsg 0x5307, built at 0x13b392):
+        this is XNetQosServiceLookup, which the connection test and sign-in use
+        to decide whether Xbox Live is reachable.  Entry (16 bytes, more when a
+        bandwidth probe pads it with zeros): type, cbEnt, 8-byte request nonce,
+        16-bit target index, probe counter, flags (bit 0 = second packet of the
+        pair, bit 1 = no probes wanted, only the target's QoS data).
+
+        The console times each probe pair (0x13c061): a 0x5308 reply echoing
+        nonce, index and counter, with flags bit 0 copied from the probe, and
+        two dwords of time the responder held the packets (we answer at once,
+        so 0).  A request for data only gets one reply with flags bit 2 set
+        (data reply; the bytes after the 24-byte header are the target's QoS
+        data, none here)."""
+        nonce, index, counter, flags = entry[4:12], entry[12:14], entry[14], entry[15]
         if os.environ.get('LIVE_DEBUG'):
-            self.gw.log(f'sg: svc-req id={svc_id.hex()} index={index.hex()} '
-                        f'sub={subidx.hex()} flag={entry[15]:#x}')
-        # 0x5308: type, cbEnt=0x18, service id, index, sub byte, flag (bit2=control), 8 bytes
-        resp = struct.pack('<HH', RETAIL_SVC_RESP, 0x18) + svc_id + index + subidx + \
-            bytes([0x04]) + bytes(8)
+            self.gw.log(f'sg: qos probe nonce={nonce.hex()} target={index.hex()} '
+                        f'n={counter} flags={flags:#x} cb={len(entry)}')
+        rflags = 0x04 if flags & 0x02 else flags & 0x01
+        resp = struct.pack('<HH', RETAIL_SVC_RESP, 0x18) + nonce + index + \
+            bytes([counter, rflags]) + bytes(8)
         self.send(PROTO_SECMSG, resp)
 
     def tcp_in(self, seg):
@@ -408,12 +407,8 @@ class Gateway:
         self.log(f'sg: {ticket.get("c")} connected ({"retail" if retail else "beta"}), '
                  f'services {ticket.get("s")}, SPI {spi_resp:#x}')
         if retail:
-            # Retail: do NOT pulse unsolicited.  Right after the key exchange the
-            # console's SecReg is in state 5 (established, pre-pulse), and its ESP
-            # inner dispatcher (0x138dfc) treats any gateway data arriving while in
-            # state 5 as an error -> _uiLogonState = 6.  The console pulses first
-            # (XbToSg, 0x5301); we only answer it (see secmsg()), by which time its
-            # SecReg has advanced out of state 5.
+            # Retail: nothing to send until the console speaks.  It pulses
+            # first (0x5301) and then probes QoS (0x5307); see secmsg().
             pass
         else:
             sa.send(PROTO_SECMSG, struct.pack('<HH', SECMSG_PULSE, 4))
