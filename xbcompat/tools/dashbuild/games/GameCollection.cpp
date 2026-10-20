@@ -31,6 +31,7 @@ struct GAMEINFO
     CHAR m_szCart[64];          // the cart's .kzi or .kzp file on the card
     CHAR m_szRuntime[32];       // the cart's Kazeta runtime
     CHAR m_szId[64];            // the cart's Kazeta save Id
+    CHAR m_szPlatform[32];      // the cart's Platform key, when its .kzi names one
     WCHAR m_szName[41];
     DWORD m_dwTitleID;
     DWORD m_dwTimeDate;         // XBE build time (seconds since 1970)
@@ -268,6 +269,8 @@ static void ReadCart(const CHAR* szKzi, GAMEINFO* pGame)
                 lstrcpynA(pGame->m_szId, pchValue, sizeof (pGame->m_szId));
             else if (_stricmp(pchLine, "Runtime") == 0)
                 lstrcpynA(pGame->m_szRuntime, pchValue, sizeof (pGame->m_szRuntime));
+            else if (_stricmp(pchLine, "Platform") == 0)
+                lstrcpynA(pGame->m_szPlatform, pchValue, sizeof (pGame->m_szPlatform));
             else if (_stricmp(pchLine, "Exec") == 0)
                 lstrcpynA(szExec, pchValue, sizeof (szExec));
         }
@@ -517,6 +520,13 @@ CStrObject* CGameCollection::GetGamePlatform(int nGame)
     const GAMEINFO* pGame = &c_rgGames[nGame];
     if (pGame->m_nKind != KIND_CARD || pGame->m_bXbox)
         return new CStrObject(_T("Xbox"));
+    if (pGame->m_szPlatform[0] != 0)
+    {
+        // a Platform key in the .kzi says it outright
+        TCHAR szOwn [32];
+        _stprintf(szOwn, _T("%hs"), pGame->m_szPlatform);
+        return new CStrObject(szOwn);
+    }
     if (EndsWith(pGame->m_szCart, ".kzp"))
         return new CStrObject(_T("Packaged cart"));
     CHAR szPlat [32];

@@ -9,7 +9,7 @@ the power button, returns to the dashboard.
 |---|---|---|
 | default.xbe | E:\Games\Frolick\default.xbe | title ID 46524C4B "Frolick"; loads its files from D: (beside itself) |
 | default.xip | E:\Games\Frolick\default.xip | the scene, art and XUI panels |
-| 486f2cda...-d3d8+dsound+xapilib-9e55a416902bf3c8.map | the HLE map cache (/data/xbox/cache/xbcompat) | optional: xbrun makes its own on the first launch otherwise |
+| 5f033f68...-d3d8+dsound+xapilib-9e55a416902bf3c8.map | the HLE map cache (/data/xbox/cache/xbcompat) | optional: xbrun makes its own on the first launch otherwise |
 | install-game.sh | runs on the Sion | makes the folder, copies the engine's fonts (Xbox.xtf, XBox Book.xtf, Fonts/tahoma.ttf) from /opt/xbcompat/dash beside the XBE |
 | sion-game.sh | runs on the PC | scp + ssh wrapper: `sh sion-game.sh` installs, `sh sion-game.sh remove` deletes the folder |
 
