@@ -104,9 +104,10 @@ class Db:
         return None
 
     def find_user(self, nick):
-        """A user by gamertag alone (retail has no kingdoms)."""
+        """A user by gamertag alone (retail has no kingdoms, so a beta
+        account with a kingdom never matches)."""
         for v in self.d['users'].values():
-            if v['nick'].lower() == nick.lower():
+            if v['nick'].lower() == nick.lower() and not v['kingdom']:
                 return v
         return None
 
