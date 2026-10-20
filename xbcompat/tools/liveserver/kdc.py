@@ -16,9 +16,12 @@ NT_ENTERPRISE, NT_SRV_INST = 10, 2
 
 # Key usages the client uses (kerberos.cpp:295-316).
 U_TIMESTAMP, U_TICKET, U_REP_PART, U_TGS_AUTH = 1, 2, 8, 7
+U_CLIENT_VERSION = 1027
 U_SERVICE_REQUEST, U_SERVICE_ADDRESS, U_ACCOUNT_CREATION = 1201, 1202, 1203
 
 PA_TGS_REQ, PA_ENC_TIMESTAMP = 1, 2
+PA_CLIENT_VERSION = 132          # the 2002 client: encrypted with the nonce key of 0
+PA_CLIENT_VERSION_SIGNED = 206   # retail: HMAC-SHA1(nonce key of 0, text) then the text
 PA_XBOX_SERVICE_REQUEST, PA_XBOX_SERVICE_ADDRESS, PA_XBOX_ACCOUNT_CREATION = 201, 202, 203
 
 KDC_ERR_C_PRINCIPAL_UNKNOWN, KDC_ERR_PREAUTH_FAILED, KRB_ERR_GENERIC = 6, 24, 60
@@ -98,6 +101,19 @@ class Kdc:
 
     def handle(self, data):
         tag = data[0]
+        dump = os.environ.get('LIVESERVER_DUMP')   # a directory: each request and reply, for debugging
+        if dump:
+            self.seq = getattr(self, 'seq', 0) + 1
+            with open(os.path.join(dump, f'{self.seq:03d}-req.bin'), 'wb') as f:
+                f.write(data)
+        reply = self._handle(data)
+        if dump and reply:
+            with open(os.path.join(dump, f'{self.seq:03d}-rep.bin'), 'wb') as f:
+                f.write(reply)
+        return reply
+
+    def _handle(self, data):
+        tag = data[0]
         try:
             if tag == 0x6A:
                 return self.as_req(data)
@@ -146,12 +162,16 @@ class Kdc:
                      f'PA types {sorted(padata)}); request {data.hex()}')
             return self.error(KDC_ERR_PREAUTH_FAILED, realm, sname_raw)
 
+        retail = self.retail(padata, key, nonce)
         session = os.urandom(16)
         end = now() + TICKET_LIFE
         reply_pa = []
         if realm.lower() == MACS_REALM:
             acct = self.db.new_machine(cname)
-            blob = struct.pack('<Q16s12s20s24s16s', acct['xuid'], acct['name'].encode(), b'',
+            # {qwUserID, name, kingdom (2002 only), domain, realm, key}: retail
+            # dropped the kingdom, so its record is 84 bytes instead of 96.
+            fmt = '<Q16s0s20s24s16s' if retail else '<Q16s12s20s24s16s'
+            blob = struct.pack(fmt, acct['xuid'], acct['name'].encode(), b'',
                                acct['domain'].encode(), acct['realm'].encode(), bytes.fromhex(acct['key']))
             reply_pa.append((PA_XBOX_ACCOUNT_CREATION,
                              enc_data(nonce_key(key, nonce), U_ACCOUNT_CREATION, blob)))
@@ -161,7 +181,33 @@ class Kdc:
             info = {'k': session.hex(), 'c': cname, 'r': realm, 'x': acct['xuid'],
                     'm': acct.get('machine', False)}
         ticket = self.make_ticket(self.db.krbtgt_key(), realm, sname_raw, info)
+        # Clients decrypt an AS-REP with the TGS-REP usage (8), retail too: they
+        # pass KERB_ENCRYPTED_AS_REPLY_PDU where kerberos.cpp:3697 tests
+        # KERB_AS_REPLY_PDU.
         return self.rep(11, 25, reply_pa, realm, cname_raw, ticket, key, session, nonce, realm, sname_raw, end)
+
+    def client_version(self, padata, key, nonce):
+        """PA 132, "Xbox Version=1.00.5849.3 Title=0x... TitleVersion=...", keyed
+        with the nonce key of 0 (the 2002 client) or of the request's nonce."""
+        pa = padata.get(PA_CLIENT_VERSION_SIGNED)
+        if pa is not None and len(pa) > 20:
+            return pa[20:].split(b'\0')[0].decode('latin-1')
+        pa = padata.get(PA_CLIENT_VERSION)
+        if pa is None:
+            return None
+        for n in (0, nonce):
+            plain = dec_data(nonce_key(key, n), U_CLIENT_VERSION, der.unwrap(pa))
+            if plain is not None:
+                return plain.split(b'\0')[0].decode('latin-1')
+        return None
+
+    def retail(self, padata, key, nonce):
+        v = self.client_version(padata, key, nonce)
+        self.log(f'kdc: client {v!r}')
+        try:
+            return int(v.split('Version=')[1].split('.')[2]) >= 5000
+        except (AttributeError, IndexError, ValueError):
+            return False
 
     def tgs_req(self, data):
         padata, body, _ = self.parse_req(data)
@@ -184,23 +230,34 @@ class Kdc:
 
         services = []
         users = []
+        retail = False
         req = padata.get(PA_XBOX_SERVICE_REQUEST)
         if req is not None:
             plain = dec_data(nonce_key(tgt_key, nonce), U_SERVICE_REQUEST, der.unwrap(req))
-            if plain is None or len(plain) != 112:
+            # 2002: {ver, ethernet[6], clientVersion[4], title, titleVer, region,
+            # qwUserID[4], numServices, serviceID[12]}, 112 bytes. Retail: the
+            # ethernet address became a u16 size (108), the rest moves up 4.
+            if plain is not None and len(plain) == 108:
+                retail, o = True, -4
+            elif plain is not None and len(plain) == 112:
+                o = 0
+            else:
+                self.log(f'kdc: service request of {None if plain is None else len(plain)} bytes')
                 return self.error(KDC_ERR_PREAUTH_FAILED, realm, sname_raw)
-            users = [u for u in struct.unpack_from('<4Q', plain, 28) if u]
-            n = struct.unpack_from('<I', plain, 60)[0]
-            services = list(struct.unpack_from('<12I', plain, 64)[:min(n, 12)])
-            title = struct.unpack_from('<I', plain, 16)[0]
+            users = [u for u in struct.unpack_from('<4Q', plain, 28 + o) if u]
+            n = struct.unpack_from('<I', plain, 60 + o)[0]
+            services = list(struct.unpack_from('<12I', plain, 64 + o)[:min(n, 12)])
+            title = struct.unpack_from('<I', plain, 16 + o)[0]
             self.log(f'kdc: title {title:#010x} wants services {services}, users {[hex(u) for u in users]}')
 
         session = os.urandom(16)
         end = now() + TICKET_LIFE
         info = {'k': session.hex(), 'c': tgt['c'], 'r': tgt['r'], 'x': tgt['x'], 'u': users, 's': services}
         ticket = self.make_ticket(self.db.sg_key(), realm, sname_raw, info)
-        addr = struct.pack('<i4i4I', 0, 0, 0, 0, 0, 0, 0, 0, 0) + bytes(self.site_ip) + \
-            struct.pack('<I', len(services))
+        # {hr, hrUser[4], userFlags[4], (retail: 36 more bytes), siteIPAddress,
+        # numServices, 12 x {serviceID, hr, port, reserved}}: 188 bytes, or 224 retail.
+        addr = struct.pack('<i4i4I', 0, 0, 0, 0, 0, 0, 0, 0, 0) + bytes(36 if retail else 0) + \
+            bytes(self.site_ip) + struct.pack('<I', len(services))
         for i in range(12):
             if i < len(services):
                 addr += struct.pack('<IiHH', services[i], 0, self.service_port, 0)
