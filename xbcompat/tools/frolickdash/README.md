@@ -56,7 +56,7 @@ dashboard (`tools/dashbuild`), as its own `xboxdash.xbe` with its own
   sides), each pad's panel facing its camera, left/right flights between
   pads; the tiles inside a panel are not navigated, at sokky's request),
   `backdrop.png` (the `backdrop.tres` radial gradient), `pads/overlay.xui`
-  (the screen overlay: the faded word behind the view, the A prompt, the
+  (the screen overlay: the faded word behind the view, the A pin over the focused pad (sokky's `art/frolick/pad_hint.png`), the
   footer with the wordmark) and `pads/settings.xui` (the catalog layout
   relabelled, like Frolick's RML settings panel).
 - `tools/mkassets.py` – packs the data into `default.xip`, converting PNGs
@@ -161,7 +161,7 @@ each slot takes the next game.  A on the library panel flies the camera in
 Frolick's tile art, `carousel_card.xui` draped over the cover mesh at the
 card's own aspect, and the focused cover the `carousel_focus.xui` overlay
 (arrows, the lime A capsule over its bottom-right corner, the title).  In
-the belt view the hub's A prompt and chevron are hidden and the B/back hint
+the belt view the hub's A pin is hidden and the B/back hint
 sits in the screen overlay above the library label, placed as in sokky's
 mockup.  The two tiles at the left end are
 reserved: "All games" (grid mode, not built yet) and the game in the disc

@@ -318,15 +318,12 @@ def overlay_scene():
         "\n".join(["<XuiText>", "<Properties>", " <Id>word</Id>", " <Width>640</Width>", " <Height>120</Height>",
                    " <Position>-4,-26,0</Position>", " <Text>discover</Text>", " <TextColor>0x37ffffff</TextColor>",
                    " <PointSize>%.2f</PointSize>" % (111 * UI * PT), " <TextStyle>16</TextStyle>", "</Properties>", "</XuiText>"]),
-        # A + chevron under the panel
-        "\n".join(["<XuiImage>", "<Properties>", " <Id>promptA</Id>", " <Width>26</Width>", " <Height>26</Height>",
-                   " <Position>347,336,0</Position>", " <ImagePath>glyph_a_button.png</ImagePath>", " <SizeMode>4</SizeMode>",
+        # the A pin under the panel (sokky's art/frolick/pad_hint.png, a
+        # 256 px image whose pin fills rows 26..230): drawn 70 px square,
+        # centred on the pad, its tip just above the pad label
+        "\n".join(["<XuiImage>", "<Properties>", " <Id>promptA</Id>", " <Width>70</Width>", " <Height>70</Height>",
+                   " <Position>325,315,0</Position>", " <ImagePath>pad_hint.png</ImagePath>", " <SizeMode>4</SizeMode>",
                    "</Properties>", "</XuiImage>"]),
-        "\n".join(["<XuiFigure>", "<Properties>", " <Id>chevron</Id>", " <Width>22</Width>", " <Height>12</Height>",
-                   " <Position>349,366,0</Position>",
-                   " <Stroke>\n  <StrokeWidth>3</StrokeWidth>\n  <StrokeColor>0xffffffff</StrokeColor>\n </Stroke>",
-                   " <Fill>\n  <FillType>0</FillType>\n </Fill>", " <Closed>false</Closed>",
-                   " <Points>22,12;0,0;11,12;22,0</Points>", "</Properties>", "</XuiFigure>"]),
         # the game title of the belt view: screen space, facing the camera,
         # centred above the focused cover (the cover's top is at about y 165
         # in the 96-degree view), 1.25x the size it had on the cover
@@ -462,7 +459,6 @@ DEF theZoomer CameraMover
         {
             // back on the pad's view: the hub's A prompt returns
             theOverlay.SetOpacity("promptA", 1);
-            theOverlay.SetOpacity("chevron", 1);
         }
     }
 }
@@ -682,12 +678,11 @@ function OpenLibrary()
     ShowBeltHints(1);
 }
 
-// In the belt view the hub's A prompt and chevron go and the B/back hint
+// In the belt view the hub's A prompt goes and the B/back hint
 // comes, in the screen overlay (not on the cover).
 function ShowBeltHints(on)
 {
     theOverlay.SetOpacity("promptA", 1 - on);
-    theOverlay.SetOpacity("chevron", 1 - on);
     theOverlay.SetOpacity("title", on);
     theOverlay.SetOpacity("bGlyph", on);
     theOverlay.SetOpacity("backStem", on);
@@ -770,7 +765,6 @@ function OpenPage()
     bPageOpen = true;
     ShowPage(PageRoot(nPad), "Open");
     theOverlay.SetOpacity("promptA", 0);
-    theOverlay.SetOpacity("chevron", 0);
     PadLabel(0);    // the pad's big word would show through the page header
 }
 
