@@ -4,7 +4,8 @@
 //
 //   guideview DIR SCENE.xui OUT.ppm [options]
 //     --skin F      skin scene (default hudskin.xui)
-//     --play NAME   play a named frame first (runs to its end)
+//     --play NAME   play a named frame first (runs to its end; with
+//                   --guide, on the Guide's frame, e.g. HalfToFull)
 //     --frames N    frames to step at 30 fps before the shot (default 60)
 //     --scale S --at X,Y   where to draw the scene (default 1, 0,0)
 //     --size WxH    window (default 1280x720)
@@ -82,6 +83,8 @@ int main(int argc, char** argv) {
         if (page && !strcmp(page, "volume")) { settings_text(); show_menu(g.volume, "sliderVolume"); }
         if (page && !strcmp(page, "vibration")) { settings_text(); show_menu(g.vibration, "chkVibration"); }
         if (focus) g.menu->setFocus(g.menu->find(focus));
+        if (play) for (int i = 0; i < 6; i++) { g.lastTime = now_s() - 1.0 / 30; guide_frame(W, H); }
+        if (play) g.hud->play(play);  // the frame's state, e.g. HalfToFull
         for (int i = 0; i < frames; i++) {
             g.lastTime = now_s() - 1.0 / 30;  // a steady 30 fps whatever the host does
             guide_frame(W, H);

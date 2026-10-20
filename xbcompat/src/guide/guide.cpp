@@ -664,6 +664,65 @@ bool guide_frame(int w, int h) {
     return true;
 }
 
+// The box of a prompt's button disc in the prompt's own frame: the button
+// image in its visual, whose disc fills the middle 3/4.
+bool legend_disc(xui::Node* n, float ox, float oy, float* x0, float* y0, float* x1, float* y1) {
+    for (int i = 0; i < n->children.n; i++) {
+        xui::Node* c = n->children[i];
+        xui::Vec3 z = {0, 0, 0}, one = {1, 1, 1};
+        xui::Vec3 p = xui::propV(c->props, "Position", z);
+        if (c->cls && !strcmp(c->cls->name, "XuiImage") && strstr(xui::propS(c->props, "ImagePath"), "utton")) {
+            xui::Vec3 sc = xui::propV(c->props, "Scale", one), pv = xui::propV(c->props, "Pivot", z);
+            float w = c->width() * sc.x, h = c->height() * sc.y;
+            float l = ox + p.x + pv.x * (1 - sc.x), t = oy + p.y + pv.y * (1 - sc.y);
+            *x0 = l + w / 8; *x1 = l + w * 7 / 8; *y0 = t + h / 8; *y1 = t + h * 7 / 8;
+            return true;
+        }
+        if (legend_disc(c, ox + p.x, oy + p.y, x0, y0, x1, y1)) return true;
+    }
+    return false;
+}
+
+// Keeps the frame's button prompts' discs inside the title-safe box (canvas
+// rect l,t-r,b) at frame scale k about (cx,cy).  The prompts on each side
+// move together, just enough for all of them to fit, so a stack (Back over
+// Select) keeps its spacing; their labels run inward from the disc.  The
+// timelines own the prompts' Position, so the base is kept and the move
+// re-applied whenever they write a new one.
+void fit_legends(float cx, float cy, float k, float l, float t, float r, float b) {
+    // (X is never drawn.  A prompt a page hides still counts, so the
+    // others don't jump between pages.)
+    static const char* ids[] = { "Legend_A", "Legend_B", "Legend_Y" };
+    static xui::Vec3 lastSet[3], lastBase[3];
+    static bool seen[3];
+    xui::Node* n[3]; xui::Vec3 base[3]; int side[3];
+    float dx[2] = {0, 0}, dy[2] = {0, 0};
+    for (int i = 0; i < 3; i++) {
+        n[i] = g.frame->find(ids[i]);
+        if (!n[i]) continue;
+        xui::Vec3 z = {0, 0, 0};
+        xui::Vec3 p = xui::propV(n[i]->props, "Position", z);
+        base[i] = seen[i] && p.x == lastSet[i].x && p.y == lastSet[i].y ? lastBase[i] : p;
+        float x0, y0, x1, y1;
+        if (!legend_disc(n[i]->visual ? n[i]->visual : n[i], 0, 0, &x0, &y0, &x1, &y1)) { n[i] = 0; continue; }
+        // the disc on screen at the base position, in canvas units
+        float sx0 = cx + k * (base[i].x + x0 - cx), sx1 = cx + k * (base[i].x + x1 - cx);
+        float sy0 = cy + k * (base[i].y + y0 - cy), sy1 = cy + k * (base[i].y + y1 - cy);
+        int sd = side[i] = sx0 + sx1 > 2 * cx;
+        if (sx1 > r && (r - sx1) / k < dx[sd]) dx[sd] = (r - sx1) / k;
+        if (sx0 < l && (l - sx0) / k > dx[sd]) dx[sd] = (l - sx0) / k;
+        if (sy1 > b && (b - sy1) / k < dy[sd]) dy[sd] = (b - sy1) / k;
+        if (sy0 < t && (t - sy0) / k > dy[sd]) dy[sd] = (t - sy0) / k;
+    }
+    for (int i = 0; i < 3; i++) {
+        if (!n[i]) continue;
+        xui::Vec3 q = base[i];
+        q.x += dx[side[i]]; q.y += dy[side[i]];
+        xui::Value& v = n[i]->props.set("Position"); v.free(); v.type = xui::TVector; v.v = q;
+        lastSet[i] = q; lastBase[i] = base[i]; seen[i] = true;
+    }
+}
+
 void guide_draw(int w, int h) {
     // The frame is a 4:3 canvas (800x600); fit the height and stretch x to
     // the window the way the game image is stretched.
@@ -672,8 +731,28 @@ void guide_draw(int w, int h) {
     float kx = (w / cw) / s;
     { static const char* dbg = getenv("XBCOMPAT_GUIDE_DEBUG");
       if (dbg && strstr(dbg, "glerr")) { GLenum e = glGetError(); if (e) xlog("Guide: GL error %#x before drawing", e); } }
+    // TV safe area.  GFWL's frame was drawn for a PC window, edge to edge.
+    // On a TV the half-open panel is scaled about the screen's centre so it
+    // sits inside the action-safe box (90%) with its button prompts, laid out
+    // as GFWL has them, inside the title-safe box (80%).  It eases back to
+    // full size as the frame expands, the full view filling the screen; the
+    // prompts are moved in wherever they'd still leave the title-safe box.
+    // XBCOMPAT_GUIDE_SAFE sets the half-open scale (1 turns it off).
+    static float safe = getenv("XBCOMPAT_GUIDE_SAFE") ? (float)atof(getenv("XBCOMPAT_GUIDE_SAFE")) : 0.87f;
+    if (safe <= 0.1f || safe > 1) safe = 1;
+    float k = safe;
+    if (xui::Node* lb = g.frame->find("leftBlade")) {
+        xui::Vec3 z = {0, 0, 0};
+        float t = (82 - xui::propV(lb->props, "Position", z).x) / 81;  // half 82, full 1
+        if (t < 0) t = 0; if (t > 1) t = 1;
+        k = safe + (1 - safe) * t;
+    }
+    float ccx = cw / 2, ccy = ch / 2;
+    fit_legends(ccx, ccy, k, cw * 0.1f, ch * 0.1f, cw * 0.9f, ch * 0.9f);
+    float fx = ccx * s * (1 - k), fy = ccy * s * (1 - k);
+    s *= k;
     g.be.begin(w, h, kx);
-    g.r->draw(g.frame, 0, 0, s);
+    g.r->draw(g.frame, fx, fy, s);
     // The menu sits in the frame's AppHostElementId and fades with it.
     xui::Node* host = g.frame->find("AppHostElementId");
     // Its origin and scale on the canvas (the slot is at 0.85).
@@ -691,14 +770,14 @@ void guide_draw(int w, int h) {
     }
     if (host && shown && op > 0.001f) {
         xui::Value& o = g.menu->root->props.set("Opacity"); o.free(); o.type = xui::TFloat; o.f = op;
-        g.r->draw(g.menu, hx * s, hy * s, s * hs);
+        g.r->draw(g.menu, fx + hx * s, fy + hy * s, s * hs);
         xui::Node* slot = g.menu == g.main && g.card ? g.main->find("ctlGamerCard") : 0;
         if (slot && xui::propB(slot->props, "Show", true)) {
             xui::Vec3 z = {0, 0, 0};
             xui::Vec3 v = xui::propV(slot->props, "Position", z);
             xui::Value& co = g.card->root->props.set("Opacity"); co.free(); co.type = xui::TFloat; co.f = op;
             float ms = s * hs;
-            g.r->draw(g.card, hx * s + v.x * ms, hy * s + v.y * ms, ms);
+            g.r->draw(g.card, fx + hx * s + v.x * ms, fy + hy * s + v.y * ms, ms);
         }
     }
     g.be.end();
