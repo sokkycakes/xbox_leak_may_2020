@@ -743,7 +743,23 @@ void Renderer::text(Node* n, const Affine& m, float alpha, Blend blend)
             int iw, ih, adv;
             Texture tex = lineTex(font, txt, gpx, &iw, &ih, &adv);
             float lfs = stbtt_ScaleForMappingEmToPixels(&font->info, gpx);
-            float qx = (float)floor(cx - (x0 + x1) / 2.0f * lfs - 1 + 0.5f);
+            // across, centre the letter's weight rather than its box: a B's
+            // stem pulls its ink left of its box's middle, and box-centred
+            // it looks off to the left
+            float inkx = (x0 + x1) / 2.0f * lfs;
+            int bx0, by0, bx1, by1;
+            stbtt_GetCodepointBitmapBox(&font->info, gcp, lfs, lfs, &bx0, &by0, &bx1, &by1);
+            int bw = bx1 - bx0, bh = by1 - by0;
+            if (bw > 0 && bh > 0) {
+                unsigned char* cov = new unsigned char[bw * bh];
+                stbtt_MakeCodepointBitmap(&font->info, cov, bw, bh, bw, lfs, lfs, gcp);
+                double sw = 0, sx = 0;
+                for (int yy = 0; yy < bh; yy++)
+                    for (int xx = 0; xx < bw; xx++) { sw += cov[yy * bw + xx]; sx += cov[yy * bw + xx] * (xx + 0.5); }
+                if (sw > 0) inkx = bx0 + (float)(sx / sw);
+                delete [] cov;
+            }
+            float qx = (float)floor(cx - inkx - 1 + 0.5f);
             float qy = (float)floor(cy + (y0 + y1) / 2.0f * lfs - (float)ceil(font->ascent * lfs) + 0.5f);
             Color col = propC(n->props, "TextColor", 0xffffffff);
             quad(tex, blend, aff(1, 0, 0, 1, qx, qy), 0, 0, (float)iw, (float)ih, 0, 0, 1, 1, col, alpha);
