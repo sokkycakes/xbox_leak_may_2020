@@ -84,8 +84,16 @@ dashboard (`tools/dashbuild`), as its own `xboxdash.xbe` with its own
   so each page's ids, sizes, positions and navigation are Microsoft's.
   `tools/genpage.py` turns them into `pads/page_*.xui` laid out after
   sokky's catalog padfocus mockup: the page spans the screen edge to
-  edge, a darker header strip over a translucent slate body with the pad
-  showing through, a legend bar below.  Everything on the page is drawn
+  edge, a translucent slate body with the pad showing through; the
+  header above it and the legend bar below have no fill, so the pad's
+  big label stays on screen as the page's title (the page's own header
+  is its sub-title, moved right of the label on the catalog's pages) and
+  the legends sit on the pad.  Item text is white at rest and the
+  Blades' dark on the highlighted row: `genpage.py` keys every button
+  and list-item visual's text presenters so in the page skin, and the
+  pages feed their list lines through the visuals' own presenters
+  (`Data<k>` on the item, the slot its presenter's `DataAssociation`
+  names, as the dashboard's lists do).  Everything on the page is drawn
   by the Blades' own skin: `art/blades/skin.xui` is the subset of
   `dash_dashuisk.xzp`'s `skin.xur` the pages use (`tools/skinsubset.py`
   pulls named visuals out of the converted skin), with its button PNGs

@@ -44,24 +44,36 @@ from genhub import CAROUSEL_GAMES, BELT_START
 
 # The panel, sampled from sokky's mockup: slate, about 85% opaque, a
 # little darker at the bottom; the header strip darker still.
-PANEL_TOP, PANEL_BOTTOM, HEADER_FILL = "0xd9424c5a", "0xd9313b49", "0xe6283140"
+PANEL_TOP, PANEL_BOTTOM = "0xd9424c5a", "0xd9313b49"
+# The header strip and the legend bar have no fill (sokky, 2026-10-20):
+# the pad's big label shows through above the body as the page's title,
+# the page's own header is its sub-title, and the legends sit on the pad.
 # The Blades skin's body text (its presenters' TextColor / DropShadowColor).
 TEXT, SHADOW = "0xe60f0f0f", "0x5aebebeb"
+# Item text on the pages: white at rest, the Blades' dark only on the
+# highlighted row (sokky, 2026-10-20); skin() keys the visuals so.
+ITEM_REST, ITEM_FOCUS = "0xffffffff", TEXT
 
 CANVAS_W, CANVAS_H = 1120, 770
 # The screen on the canvas: 720x480 at 0.643, so x 0..1120 and y 12..758.
 # The header strip holds the Blades' header (y 96); the body ends where
 # their lists end (603) and the legends (611..686) sit below it.
 HEADER_Y, BODY_Y, BODY_END, LEGEND_END = 60, 150, 603, 707
+# The page's header (the Blades' scene title at 156,96) is the sub-title
+# under the pad's big label.  The catalog's label sits top left in its
+# mirrored view, so its pages' header moves right of it.
+HEADER_IDS = ("labSceneTitle", "txt_Header", "labHeader", "labelHeading")
+CATALOG_HEADER_X = 430
 
 # The Blades' list visuals: the item visual, its height (the skin's
-# control_ListItem) and the lines the item visual's presenters show that
-# are bound to the dashboard's list data (DataAssociation 1, 2: x, y, w,
-# h, point size, text style); the unbound presenter shows the item's Text.
+# control_ListItem) and, per line of an item, the data slot its presenter
+# is bound to (DataAssociation k shows the item's Data<k>, which the
+# dashboard's lists feed and the pages write); None: the unbound
+# presenter, which shows the item's Text.
 LIST_ITEMS = {
     "": ("XuiButton", 45, [], None),                                        # list_Common
-    "list_twoline-icon": ("btn_twoline-icon", 72, [None, (83, 35, 328, 40, 18, 16401)], (11, 6, 60, 60)),
-    "List_3Line_Icon_prgbr": ("btn_3Line_Icon_prgbr", 105, [(83, 0, 769, 72, 20, 20497), (83, 60, 574, 47, 20, 20497)], (6, 5, 60, 60)),
+    "list_twoline-icon": ("btn_twoline-icon", 72, [None, 1], (11, 6, 60, 60)),
+    "List_3Line_Icon_prgbr": ("btn_3Line_Icon_prgbr", 105, [2, 1], (6, 5, 60, 60)),
     "List_Fullwidth_3Icon_4string": ("ListItem_Fullwidth_3Icon_4String", 47, [], (11, 8, 32, 32)),
     "List_oneline_icon": ("btn_oneline_icon", 72, [], (11, 4.25, 64, 64)),
 }
@@ -181,9 +193,49 @@ def track(id, prop, keys):
 
 # ---- the skin ---------------------------------------------------------------
 
+# The visuals whose text follows focus: the buttons and list items.
+ITEM_VISUALS = ("XuiButton", "btn_oneline_icon", "btn_twoline-icon", "btn_3Line_Icon_prgbr", "ListItem_Fullwidth_3Icon_4String")
+REST_STATES = ("Normal", "EndNormal", "NormalDisable", "EndNormalDisable", "NormalSelDisable", "EndNormalSelDisable")
+
+
+def item_text_colours(visual):
+    """Keys every text presenter's TextColor in a button visual: white in
+    the rest states, the Blades' dark in the focus, press and init-focus
+    states, fading with the highlight over the KillFocus and Focus runs
+    (the named frames give each visual's own times)."""
+    frames = [(m.group(1), int(m.group(2))) for m in re.finditer(r"<NamedFrame><Name>([^<]*)</Name><Time>(\d+)</Time>", visual)]
+    if not frames:
+        return visual
+    keys = []
+    for i, (name, t) in enumerate(frames):
+        nxt = frames[i + 1][1] if i + 1 < len(frames) else t
+        if name == "KillFocus":
+            keys += [(t, ITEM_FOCUS), (nxt, ITEM_REST)]
+        elif name == "Focus":
+            keys += [(t, ITEM_REST), (nxt, ITEM_FOCUS)]
+        elif name in REST_STATES:
+            keys.append((t, ITEM_REST))
+        else:
+            keys.append((t, ITEM_FOCUS))
+    keys = sorted(dict(keys).items())
+    ids = re.findall(r"<XuiTextPresenter>\n<Properties>\n <Id>([^<]*)</Id>", visual)
+    tracks = []
+    for id in ids:
+        tracks.append("<Timeline>\n <Id>%s</Id>\n <TimelineProp>TextColor</TimelineProp>\n%s</Timeline>\n" % (
+            id, "".join("<KeyFrame><Time>%d</Time><Interpolation>0</Interpolation><Prop>%s</Prop></KeyFrame>\n" % k for k in keys)))
+        visual = re.sub(r"(<Id>%s</Id>\n(?:[^\n]*\n){0,12}? <TextColor>)%s(</TextColor>)" % (re.escape(id), TEXT),
+                        r"\g<1>%s\g<2>" % ITEM_REST, visual, count=1)
+    k = visual.rfind("</Timelines>")
+    return visual[:k] + "".join(tracks) + visual[k:]
+
+
 def skin():
-    """The Blades skin's visuals, as tools/skinsubset.py pulled them."""
-    return open(os.path.join(BLADES, "skin.xui")).read()
+    """The Blades skin's visuals, as tools/skinsubset.py pulled them, the
+    buttons' and list items' text keyed white at rest and dark on focus."""
+    s = open(os.path.join(BLADES, "skin.xui")).read()
+    def fix(m):
+        return item_text_colours(m.group(0)) if m.group(1) in ITEM_VISUALS else m.group(0)
+    return re.sub(r"<XuiVisual>\n<Properties>\n <Id>([^<]*)</Id>.*?</XuiVisual>", fix, s, flags=re.S)
 
 
 # ---- the pages --------------------------------------------------------------
@@ -253,12 +305,11 @@ def list_items(block, items):
             n["NavUp"] = "%s_%d" % (id, i - 1)
         if i < len(items) - 1:
             n["NavDown"] = "%s_%d" % (id, i + 1)
-        kids, label = [], l1
+        kids, label, data = [], l1, {}
         for j, slot in enumerate(lines):
             if slot is None:
                 continue
-            lx, ly, lw, lh, size, style = slot
-            kids.append(text("line%d" % (j + 1), lx, ly, lw, lh, size, style, TEXT, presenter=False, value=(l1, l2)[j], shadow=SHADOW))
+            data["Data%d" % slot] = (l1, l2)[j]
             if j == 0:
                 label = ""      # the first line has its own slot; the Text would double it
         if ico and icon:
@@ -270,6 +321,7 @@ def list_items(block, items):
             kids.append("\n".join(["<XuiProgressBar>", "<Properties>", " <Id>bar</Id>", " <Width>%g</Width>" % bw, " <Height>%g</Height>" % bh,
                                    " <Position>%g,%g,0</Position>" % (bx, by), " <Visual>%s</Visual>" % bvis,
                                    " <RangeMin>0</RangeMin>", " <RangeMax>1</RangeMax>", " <Value>%g</Value>" % frac, "</Properties>", "</XuiProgressBar>"]))
+        n.update(data)
         out.append(nav_button("%s_%d" % (id, i), x, y + i * pitch, w, h, label, vis if vis != "XuiButton" else None, n, "\n".join(kids)))
     return out
 
@@ -328,13 +380,14 @@ def page(file, spec):
                 b = set_prop(b, "Text", "")
             kept.append(b)
 
+    if pad == "catalog":
+        kept = [set_prop(b, "Position", "%d,96,0" % CATALOG_HEADER_X) if prop(b, "Id") in HEADER_IDS else b for b in kept]
+
     panel = "\n".join(["<XuiGroup>", "<Properties>", " <Id>panel</Id>", " <Width>%d</Width>" % CANVAS_W, " <Height>%d</Height>" % CANVAS_H,
                         " <Position>0,0,0</Position>", " <Opacity>0</Opacity>", "</Properties>",
-                        # the header strip and the body, edge to edge
-                        figure("header", 0, HEADER_Y, CANVAS_W, BODY_Y - HEADER_Y, solid(HEADER_FILL)),
+                        # the body, edge to edge; the header above it and the
+                        # legend bar below have no fill
                         figure("body", 0, BODY_Y, CANVAS_W, BODY_END - BODY_Y, gradient([(0, PANEL_TOP), (1, PANEL_BOTTOM)])),
-                        # the legend bar under the body, down to Frolick's footer
-                        figure("legendBar", 0, BODY_END, CANVAS_W, LEGEND_END - BODY_END, solid(HEADER_FILL)),
                         "</XuiGroup>"])
     content = "\n".join(["<XuiGroup>", "<Properties>", " <Id>content</Id>", " <Width>%d</Width>" % CANVAS_W,
                          " <Height>%d</Height>" % CANVAS_H, " <Position>0,0,0</Position>", " <Opacity>0</Opacity>",

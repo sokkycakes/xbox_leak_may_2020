@@ -783,15 +783,23 @@ function OpenPage()
     bPageOpen = true;
     ShowPage(PageRoot(nPad), "Open");
     theOverlay.SetOpacity("promptA", 0);
-    PadLabel(0);    // the pad's big word would show through the page header
+    PageChrome(0);
+}
+
+// While a page is open the pad's big label stays, as the page's title
+// (sokky: the page's own header is a sub-title under it); the overlay's
+// faded word and the wordmark under the legend go.
+function PageChrome(a)
+{
+    theOverlay.SetOpacity("word", a);
+    theOverlay.SetOpacity("frolick", a);
 }
 
 function PadLabel(a)
 {
     if (nPad == 0) label_catalog.alpha = a;
     if (nPad == 2) label_settings.alpha = a;
-    theOverlay.SetOpacity("word", a);   // the overlay's faded word too
-    theOverlay.SetOpacity("frolick", a);   // and the wordmark under the legend
+    PageChrome(a);
 }
 
 function ShowPage(page, how)
@@ -809,7 +817,7 @@ function ClosePage()
 {
     bPageOpen = false;
     thePage.Play("page", "Close");
-    PadLabel(1);
+    PageChrome(1);
 }
 
 // B on a page: the parent page, or the end of the page

@@ -37,6 +37,10 @@ static const PropDef L2_XuiControl[] = {
     { "ImagePath", 5, 4, 0 },
     { "PointSize", 4, 6, 0 },
     { "_Slot12", 5, 16, 0 },
+    // the list-data slots presenters bind to (DataAssociation k shows
+    // Data<k>): the 360 feeds them from code, our pages write them
+    { "Data1", 5, 0, 0 }, { "Data2", 5, 0, 0 }, { "Data3", 5, 0, 0 }, { "Data4", 5, 0, 0 },
+    { "Data5", 5, 0, 0 }, { "Data6", 5, 0, 0 }, { "Data7", 5, 0, 0 }, { "Data8", 5, 0, 0 },
     { 0, 0, 0, 0 } };
 static const PropDef L3_XuiScene[] = {
     { "DefaultFocus", 5, 8, 0 },
