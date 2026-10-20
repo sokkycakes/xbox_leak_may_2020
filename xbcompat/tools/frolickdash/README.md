@@ -215,6 +215,13 @@ unchanged, and only the script and two small nodes are Frolick's:
   key names the platform, and its `.kzr` image on the card, found the way
   Kazeta looks for it, the runtime), the saved game count and where the
   game is.
+- The hub's A pin (sokky, 2026-10-20): `XuiPanel.Fade(id, opacity, s)` and
+  `Pulse(id, dy, period, s)` animate overlay controls from script.  The
+  pin fades out (0.15 s) the moment A lands on a pad or a pad flight
+  starts, and back in (0.2 s) when the camera settles on a pad (the
+  movers' OnArrive); it never shows in the belt or on a page.  Idle it
+  dips 5 HUD px every 2 s over 0.6 s, a half sine on an eased-out clock
+  (PIN_* in genhub.py).
 - Settings > Memory are the dashboard's Memory screen on the Blades pages:
   `nodes/Storage.cpp` hands script the engine's `CTitleArray` (the titles
   under a device's UDATA/TDATA with their saves, downloads and installed

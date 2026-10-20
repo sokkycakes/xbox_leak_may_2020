@@ -13,6 +13,7 @@
 // Script functions: Navigate("left"|"right"|"up"|"down") -> 1 if the
 // focus moved, Press(), Play(id, frame), SetText(id, text),
 // SetImage(id, path), SetFocus(id), GetFocus(), SetVisible(id, 0|1),
+// Fade(id, opacity, seconds), Pulse(id, dy, period, seconds),
 // SetOpacity(id, n), SetData(id, k, text), SetValue(id, n), Reload().  OnPress and OnFocus are delivered from
 // Advance, after the call that caused them, so script can trigger them.  Images and fonts are .xtx / .ttf files
 // packed by tools/mkassets.py beside the scene.
@@ -399,6 +400,16 @@ public:
     void SetText(const TCHAR* szId, const TCHAR* szText);
     void SetImage(const TCHAR* szId, const TCHAR* szPath);
     CObject* SetValue(CObject** rgparam, int nParam);
+    CObject* Fade(CObject** rgparam, int nParam);
+    CObject* Pulse(CObject** rgparam, int nParam);
+    // Fade(id, opacity, seconds): the control's opacity eased to a value
+    struct FadeAnim { xui::Node* n; float from, to, t, dur; };
+    xui::Vec<FadeAnim> m_fades;
+    // Pulse(id, dy, period, seconds): every period the control dips dy
+    // and eases back over seconds (dy 0 stops it)
+    struct PulseAnim { xui::Node* n; xui::Vec3 base; float dy, period, dur, t; };
+    xui::Vec<PulseAnim> m_pulses;
+    void Animate(float nSeconds);
     void SetFocus(const TCHAR* szId);
     CStrObject* GetFocus();
     CObject* SetVisible(CObject** rgparam, int nParam);
@@ -459,6 +470,8 @@ START_NODE_FUN(CXuiPanel, CNode)
     NODE_FUN(SetOpacity)
     NODE_FUN(SetData)
     NODE_FUN(SetValue)
+    NODE_FUN(Fade)
+    NODE_FUN(Pulse)
     NODE_FUN_VV(Reload)
 END_NODE_FUN()
 
@@ -499,6 +512,8 @@ static void ToAnsi(char* sz, const TCHAR* wsz, int n)
 void CXuiPanel::Load()
 {
     m_bDirty = false;
+    m_fades.clear();
+    m_pulses.clear();
     delete m_pScene; m_pScene = NULL;
     delete m_pRoot; m_pRoot = NULL;
     delete m_pSkin; m_pSkin = NULL;
@@ -543,6 +558,7 @@ void CXuiPanel::Advance(float nSeconds)
         Load();
     if (m_pScene != NULL)
         m_pScene->update(nSeconds);
+    Animate(nSeconds);
     // Deliver queued events now, outside any script call that caused them.
     for (int i = 0; i < m_events.n; i++)
     {
@@ -716,6 +732,122 @@ CObject* CXuiPanel::SetVisible(CObject** rgparam, int nParam)
     v.type = xui::TBool;
     v.b = rgparam[1]->Deref()->ToNum()->m_nValue != 0.0f;
     return NULL;
+}
+
+static void SetNodeOpacity(xui::Node* n, float a)
+{
+    xui::Value& v = n->props.set("Opacity");
+    v.free();
+    v.type = xui::TFloat;
+    v.f = a;
+}
+
+CObject* CXuiPanel::Fade(CObject** rgparam, int nParam)
+{
+    if (nParam != 3)
+        return NULL;
+    xui::Node* n = Find(rgparam[0]->Deref()->ToStr()->GetSz());
+    if (n == NULL)
+        return NULL;
+    FadeAnim a;
+    a.n = n;
+    a.from = xui::propF(n->props, "Opacity", 1.0f);
+    a.to = rgparam[1]->Deref()->ToNum()->m_nValue;
+    a.t = 0.0f;
+    a.dur = rgparam[2]->Deref()->ToNum()->m_nValue;
+    for (int i = 0; i < m_fades.n; i++)
+    {
+        if (m_fades[i].n == n)
+        {
+            m_fades[i] = a;
+            return NULL;
+        }
+    }
+    m_fades.push(a);
+    return NULL;
+}
+
+CObject* CXuiPanel::Pulse(CObject** rgparam, int nParam)
+{
+    if (nParam != 4)
+        return NULL;
+    xui::Node* n = Find(rgparam[0]->Deref()->ToStr()->GetSz());
+    if (n == NULL)
+        return NULL;
+    float dy = rgparam[1]->Deref()->ToNum()->m_nValue;
+    int i;
+    for (i = 0; i < m_pulses.n; i++)
+    {
+        if (m_pulses[i].n == n)
+            break;
+    }
+    if (dy == 0.0f)
+    {
+        if (i < m_pulses.n)
+        {
+            // back to rest
+            xui::Value& v = n->props.set("Position");
+            v.free();
+            v.type = xui::TVector;
+            v.v = m_pulses[i].base;
+            m_pulses[i] = m_pulses[m_pulses.n - 1];
+            m_pulses.n -= 1;
+        }
+        return NULL;
+    }
+    PulseAnim a;
+    a.n = n;
+    xui::Vec3 zero = { 0.0f, 0.0f, 0.0f };
+    a.base = i < m_pulses.n ? m_pulses[i].base : xui::propV(n->props, "Position", zero);
+    a.dy = dy;
+    a.period = rgparam[2]->Deref()->ToNum()->m_nValue;
+    a.dur = rgparam[3]->Deref()->ToNum()->m_nValue;
+    a.t = i < m_pulses.n ? m_pulses[i].t : 0.0f;
+    if (i < m_pulses.n)
+        m_pulses[i] = a;
+    else
+        m_pulses.push(a);
+    return NULL;
+}
+
+// The fades and pulses, a frame on.
+void CXuiPanel::Animate(float nSeconds)
+{
+    for (int i = 0; i < m_fades.n; )
+    {
+        FadeAnim& a = m_fades[i];
+        a.t += nSeconds;
+        float u = a.dur > 0.0f ? a.t / a.dur : 1.0f;
+        if (u >= 1.0f)
+        {
+            SetNodeOpacity(a.n, a.to);
+            m_fades[i] = m_fades[m_fades.n - 1];
+            m_fades.n -= 1;
+            continue;
+        }
+        SetNodeOpacity(a.n, a.from + (a.to - a.from) * u);
+        i++;
+    }
+    for (int j = 0; j < m_pulses.n; j++)
+    {
+        PulseAnim& a = m_pulses[j];
+        a.t += nSeconds;
+        float phase = a.period > 0.0f ? (float)fmod(a.t, a.period) : 0.0f;
+        float off = 0.0f;
+        if (a.dur > 0.0f && phase < a.dur)
+        {
+            // down and back as a half sine, the time eased out so the dip
+            // is quick and the return settles
+            float u = phase / a.dur;
+            float e = 1.0f - (1.0f - u) * (1.0f - u) * (1.0f - u);
+            off = a.dy * (float)sin(3.14159265f * e);
+        }
+        xui::Value& v = a.n->props.set("Position");
+        v.free();
+        v.type = xui::TVector;
+        v.v = a.base;
+        v.v.y += off;
+    }
 }
 
 CObject* CXuiPanel::SetOpacity(CObject** rgparam, int nParam)

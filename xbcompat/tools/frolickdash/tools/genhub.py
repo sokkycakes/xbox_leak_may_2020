@@ -138,6 +138,15 @@ PAGE_WINDOW = (58.7, 688.7)
 # inside NTSC action safe (the inner 90%) with a little to spare (sokky,
 # 2026-10-20).
 PAGE_SAFE = 0.93
+
+# The hub's A pin (sokky, 2026-10-20): it fades out as a pad flight or a
+# zoom starts and back in once the camera has settled on a pad; idle, it
+# dips a few pixels every two seconds, eased out.
+PIN_FADE_OUT = 0.15     # s
+PIN_FADE_IN = 0.2       # s
+PIN_PULSE_DY = 5        # HUD px (of 480), down
+PIN_PULSE_PERIOD = 2.0  # s
+PIN_PULSE_DUR = 0.6     # s, the dip and the return
 PAGE_W = 1120 * HUD_H / (PAGE_WINDOW[1] - PAGE_WINDOW[0]) * PAGE_SAFE
 PAGE_VIEW_Y = (PAGE_WINDOW[0] + PAGE_WINDOW[1]) / 2
 
@@ -487,6 +496,12 @@ DEF theMover CameraMover
     function OnArrive()
     {
         bMoving = false;
+        // settled on the pad: the A pin fades back in
+        if (bZoomed == false)
+        {
+            if (bLibraryOpen == false)
+                theOverlay.Fade("promptA", 1, %(pin_fade_in)s);
+        }
     }
 }
 
@@ -502,7 +517,7 @@ DEF theZoomer CameraMover
         else if (bLibraryOpen == false)
         {
             // back on the pad's view: the hub's A prompt returns
-            theOverlay.SetOpacity("promptA", 1);
+            theOverlay.Fade("promptA", 1, %(pin_fade_in)s);
         }
     }
 }
@@ -767,6 +782,9 @@ function PadPress()
         return;
     }
 
+    // the A pin goes as A lands, not when the pad's press animation
+    // ends and the flight starts
+    theOverlay.Fade("promptA", 0, %(pin_fade_out)s);
     if (nPad == 0)
         padCatalog.Press();
     else if (nPad == 1)
@@ -854,7 +872,7 @@ function OpenGamePage()
     nGame = sel - 1;
     bPageOpen = true;
     ShowBeltHints(0);
-    theOverlay.SetOpacity("promptA", 0);
+    theOverlay.Fade("promptA", 0, %(pin_fade_out)s);
     ShowPage("page_game", "Open");
     PageChrome(0);
 }
@@ -932,7 +950,9 @@ function InstallDone()
 // comes, in the screen overlay (not on the cover).
 function ShowBeltHints(on)
 {
-    theOverlay.SetOpacity("promptA", 1 - on);
+    // (the pin comes back with the camera's arrival on the hub)
+    if (on)
+        theOverlay.Fade("promptA", 0, %(pin_fade_out)s);
     theOverlay.SetOpacity("title", on);
     theOverlay.SetOpacity("bGlyph", on);
     theOverlay.SetOpacity("backStem", on);
@@ -1038,7 +1058,7 @@ function OpenPage()
 {
     bPageOpen = true;
     ShowPage(PageRoot(nPad), "Open");
-    theOverlay.SetOpacity("promptA", 0);
+    theOverlay.Fade("promptA", 0, %(pin_fade_out)s);
     PageChrome(0);
 }
 
@@ -1147,6 +1167,7 @@ function PagePress(id)
 function GoPad(n)
 {
     bMoving = true;
+    theOverlay.Fade("promptA", 0, %(pin_fade_out)s);
     SetPadAlpha(nPad, 0);
     nPad = n;
     SetPadAlpha(nPad, 1);
@@ -1191,6 +1212,8 @@ function initialize()
     nSave = 0;
     nDest = 8;
     nGame = 0;
+    // the A pin's idle pulse: a small dip every PIN_PULSE_PERIOD seconds
+    theOverlay.Pulse("promptA", %(pin_pulse_dy)s, %(pin_pulse_period)s, %(pin_pulse_dur)s);
     EnableInput(true);
     theHub.GoTo();
     padLibrary.Play("", "Intro");
@@ -1676,6 +1699,11 @@ def main():
     vals["belt_icons"] = ";".join(icon for _, icon in BELT_RESERVED)
     vals["belt_start"] = BELT_START
     vals["memory_script"] = MEMORY_SCRIPT
+    vals["pin_fade_out"] = "%g" % PIN_FADE_OUT
+    vals["pin_fade_in"] = "%g" % PIN_FADE_IN
+    vals["pin_pulse_dy"] = "%g" % PIN_PULSE_DY
+    vals["pin_pulse_period"] = "%g" % PIN_PULSE_PERIOD
+    vals["pin_pulse_dur"] = "%g" % PIN_PULSE_DUR
     import genpage
     vals["page_tables"] = genpage.script()
     open(os.path.join(out, "default.xap"), "w").write(HUB % vals)
