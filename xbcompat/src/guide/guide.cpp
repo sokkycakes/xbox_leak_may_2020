@@ -348,6 +348,10 @@ void write_settings() {
 void settings_text();
 void load_sound(Sound& snd, const char* name);
 
+// the menus' panel-wide rows, squeezed with the frame on a TV (below)
+static xui::Node* rows[64]; static int nrows;
+static void collect_rows(xui::Node* n, bool underRow);
+
 bool load() {
     tried = true;
     const char* e = getenv("XBCOMPAT_GUIDE");
@@ -391,6 +395,9 @@ bool load() {
     g.settings = new xui::Scene(g.settingsEl, g.skinEl);
     g.volume = new xui::Scene(g.volumeEl, g.skinEl);
     g.vibration = new xui::Scene(g.vibrationEl, g.skinEl);
+    nrows = 0;
+    collect_rows(g.main->root, false); collect_rows(g.settings->root, false);
+    collect_rows(g.volume->root, false); collect_rows(g.vibration->root, false);
     // Frame legends (the 360 fills them from the menu's hidden legend buttons).
     set_text(g.frame, "Legend_A", "Select");
     set_text(g.frame, "Legend_B", "Back");
@@ -678,6 +685,8 @@ bool guide_frame(int w, int h) {
     return true;
 }
 
+namespace {
+
 // The box of a prompt's button disc in the prompt's own frame: the button
 // image in its visual, whose disc fills the middle 3/4.
 bool legend_disc(xui::Node* n, float ox, float oy, float* x0, float* y0, float* x1, float* y1) {
@@ -697,45 +706,122 @@ bool legend_disc(xui::Node* n, float ox, float oy, float* x0, float* y0, float* 
     return false;
 }
 
+// ---- SD layout ------------------------------------------------------------
+// The scene's timelines own the frame's positions and widths, so an offset
+// of ours is kept apart from them: the base is what the scene last wrote,
+// and the offset is re-applied over it every frame.
+struct Track { xui::Node* n; char key; float lastSet, lastBase; };
+static Track tracks[160]; static int ntracks;
+static Track* track_of(xui::Node* n, char key) {
+    for (int i = 0; i < ntracks; i++) if (tracks[i].n == n && tracks[i].key == key) return &tracks[i];
+    if (ntracks == (int)(sizeof tracks / sizeof tracks[0])) return 0;
+    Track* t = &tracks[ntracks++]; t->n = n; t->key = key; t->lastSet = t->lastBase = -1e30f;
+    return t;
+}
+// key: 'x' Position.x, 'y' Position.y, 'w' Width, 's' Scale.x
+static float tracked_prop(xui::Node* n, char key) {
+    xui::Vec3 z = {0, 0, 0}, one = {1, 1, 1};
+    if (key == 'x') return xui::propV(n->props, "Position", z).x;
+    if (key == 'y') return xui::propV(n->props, "Position", z).y;
+    if (key == 's') return xui::propV(n->props, "Scale", one).x;
+    return n->width();
+}
+static void set_vec(xui::Node* n, const char* key, xui::Vec3 v) {
+    xui::Value& p = n->props.set(key); p.free(); p.type = xui::TVector; p.v = v;
+}
+// the value the scene gave the property, under our offset
+static float base_of(xui::Node* n, char key) {
+    Track* t = track_of(n, key); float cur = tracked_prop(n, key);
+    return t && cur == t->lastSet ? t->lastBase : cur;
+}
+// sets the property to the scene's value plus d
+static void offset(xui::Node* n, char key, float d) {
+    Track* t = track_of(n, key);
+    if (!t) return;
+    float base = base_of(n, key), v = base + d;
+    xui::Vec3 z = {0, 0, 0}, one = {1, 1, 1};
+    if (key == 'x' || key == 'y') { xui::Vec3 p = xui::propV(n->props, "Position", z); (key == 'x' ? p.x : p.y) = v; set_vec(n, "Position", p); }
+    else if (key == 's') { xui::Vec3 p = xui::propV(n->props, "Scale", one); p.x = v; set_vec(n, "Scale", p); }
+    else { xui::Value& w = n->props.set("Width"); w.free(); w.type = xui::TFloat; w.f = v; }
+    t->lastSet = v; t->lastBase = base;
+}
+
+// The menus' rows: the highlight bars and rules that span the panel's face
+// (about 615 of the scene's units, the controls themselves 420).
+static void collect_rows(xui::Node* n, bool underRow) {
+    float w = n->width();
+    bool row = n->cls && (!strcmp(n->cls->name, "XuiFigure") || !strcmp(n->cls->name, "XuiGroup")) && w >= 600 && w <= 640;
+    if (row && !underRow && nrows < 64) rows[nrows++] = n;
+    if (n->visual) collect_rows(n->visual, underRow || row);
+    for (int i = 0; i < n->children.n; i++) collect_rows(n->children[i], underRow || row);
+}
+
+// Narrows the half-open frame by n canvas units each side: the blades,
+// the panel and its reflection, the clock, the close box and the gamer tag
+// move in, and the menus' rows are squeezed about their middle, so the
+// content column stays centred in the panel.
+static void narrow_frame(float n) {
+    static const struct { const char* id; float dx, dw; } adj[] = {
+        { "leftBlade", 1, 0 }, { "reflectLeft", 1, 0 },
+        { "rightBlade", -1, 0 }, { "reflectRight", -1, 0 }, { "GamerTag", -1, 0 },
+        { "CloseX", -1, 0 }, { "DateTimeTextId", -1, 0 },
+        { "backpanel", 1, -2 }, { "reflectMid", 1, -2 },
+    };
+    for (unsigned i = 0; i < sizeof adj / sizeof adj[0]; i++) {
+        xui::Node* nd = g.frame->find(adj[i].id);
+        if (!nd) continue;
+        offset(nd, 'x', n * adj[i].dx);
+        if (adj[i].dw) offset(nd, 'w', n * adj[i].dw);
+    }
+    xui::Node* host = g.frame->find("AppHostElementId");
+    xui::Vec3 one = {1, 1, 1};
+    float hs = host ? xui::propV(host->props, "Scale", one).x : 0.85f;
+    if (hs <= 0) hs = 0.85f;
+    for (int i = 0; i < nrows; i++) {
+        xui::Node* r = rows[i];
+        float w = base_of(r, 'w');
+        xui::Vec3 pv = { w / 2, r->height() / 2, 0 };
+        set_vec(r, "Pivot", pv);
+        offset(r, 's', w > 0 ? -2 * n / hs / w : 0);
+    }
+}
+
 // Keeps the frame's button prompts' discs inside the title-safe box (canvas
-// rect l,t-r,b) at frame scale k about (cx,cy).  The prompts on each side
-// move together, just enough for all of them to fit, so a stack (Back over
-// Select) keeps its spacing; their labels run inward from the disc.  The
-// timelines own the prompts' Position, so the base is kept and the move
-// re-applied whenever they write a new one.
-void fit_legends(float cx, float cy, float k, float l, float t, float r, float b) {
+// rect l,t-r,b).  The prompts on each side move together, just enough for
+// all of them to fit, so a stack (Back over Select) keeps its spacing;
+// their labels run inward from the disc.  (They don't follow the narrowed
+// panel's edges: GFWL sets them in from the edges by about as much as the
+// narrowing, and Back sits at the LIVE logo's corner as it is.)  Returns
+// how far the right-hand stack was lifted (0 or less).
+float fit_legends(float l, float t, float r, float b) {
     // (X is never drawn.  A prompt a page hides still counts, so the
     // others don't jump between pages.)
     static const char* ids[] = { "Legend_A", "Legend_B", "Legend_Y" };
-    static xui::Vec3 lastSet[3], lastBase[3];
-    static bool seen[3];
-    xui::Node* n[3]; xui::Vec3 base[3]; int side[3];
+    xui::Node* nd[3]; float bx[3], by[3]; int side[3];
     float dx[2] = {0, 0}, dy[2] = {0, 0};
     for (int i = 0; i < 3; i++) {
-        n[i] = g.frame->find(ids[i]);
-        if (!n[i]) continue;
-        xui::Vec3 z = {0, 0, 0};
-        xui::Vec3 p = xui::propV(n[i]->props, "Position", z);
-        base[i] = seen[i] && p.x == lastSet[i].x && p.y == lastSet[i].y ? lastBase[i] : p;
+        nd[i] = g.frame->find(ids[i]);
+        if (!nd[i]) continue;
         float x0, y0, x1, y1;
-        if (!legend_disc(n[i]->visual ? n[i]->visual : n[i], 0, 0, &x0, &y0, &x1, &y1)) { n[i] = 0; continue; }
-        // the disc on screen at the base position, in canvas units
-        float sx0 = cx + k * (base[i].x + x0 - cx), sx1 = cx + k * (base[i].x + x1 - cx);
-        float sy0 = cy + k * (base[i].y + y0 - cy), sy1 = cy + k * (base[i].y + y1 - cy);
-        int sd = side[i] = sx0 + sx1 > 2 * cx;
-        if (sx1 > r && (r - sx1) / k < dx[sd]) dx[sd] = (r - sx1) / k;
-        if (sx0 < l && (l - sx0) / k > dx[sd]) dx[sd] = (l - sx0) / k;
-        if (sy1 > b && (b - sy1) / k < dy[sd]) dy[sd] = (b - sy1) / k;
-        if (sy0 < t && (t - sy0) / k > dy[sd]) dy[sd] = (t - sy0) / k;
+        if (!legend_disc(nd[i]->visual ? nd[i]->visual : nd[i], 0, 0, &x0, &y0, &x1, &y1)) { nd[i] = 0; continue; }
+        bx[i] = base_of(nd[i], 'x'); by[i] = base_of(nd[i], 'y');
+        // the disc on the canvas at the scene's position
+        float sx0 = bx[i] + x0, sx1 = bx[i] + x1, sy0 = by[i] + y0, sy1 = by[i] + y1;
+        int sd = side[i] = sx0 + sx1 > l + r;
+        if (sx1 > r && r - sx1 < dx[sd]) dx[sd] = r - sx1;
+        if (sx0 < l && l - sx0 > dx[sd]) dx[sd] = l - sx0;
+        if (sy1 > b && b - sy1 < dy[sd]) dy[sd] = b - sy1;
+        if (sy0 < t && t - sy0 > dy[sd]) dy[sd] = t - sy0;
     }
     for (int i = 0; i < 3; i++) {
-        if (!n[i]) continue;
-        xui::Vec3 q = base[i];
-        q.x += dx[side[i]]; q.y += dy[side[i]];
-        xui::Value& v = n[i]->props.set("Position"); v.free(); v.type = xui::TVector; v.v = q;
-        lastSet[i] = q; lastBase[i] = base[i]; seen[i] = true;
+        if (!nd[i]) continue;
+        offset(nd[i], 'x', dx[side[i]]);
+        offset(nd[i], 'y', dy[side[i]]);
     }
+    return dy[1];
 }
+
+}  // namespace
 
 void guide_draw(int w, int h) {
     // The frame is a 4:3 canvas (800x600); fit the height and stretch x to
@@ -745,32 +831,30 @@ void guide_draw(int w, int h) {
     float kx = (w / cw) / s;
     { static const char* dbg = getenv("XBCOMPAT_GUIDE_DEBUG");
       if (dbg && strstr(dbg, "glerr")) { GLenum e = glGetError(); if (e) xlog("Guide: GL error %#x before drawing", e); } }
-    // TV safe area.  GFWL's frame was drawn for a PC window, edge to edge.
-    // On a TV the half-open panel is scaled about the screen's centre so it
-    // sits inside the action-safe box (90%) with its button prompts, laid out
-    // as GFWL has them, inside the title-safe box (80%).  It eases back to
-    // full size as the frame expands, the full view filling the screen; the
-    // prompts are moved in wherever they'd still leave the title-safe box.
-    // XBCOMPAT_GUIDE_SAFE sets the half-open scale (1 turns it off).
-    static float safe = getenv("XBCOMPAT_GUIDE_SAFE") ? (float)atof(getenv("XBCOMPAT_GUIDE_SAFE")) : 0.87f;
-    if (safe <= 0.1f || safe > 1) safe = 1;
-    float k = safe;
+    // TV layout.  GFWL's frame was drawn for a PC window, its half-open
+    // panel 80% of the screen's width.  On a TV it is narrowed by layout
+    // (the text stays its size): the blades, panel and prompts move in by
+    // `narrow` canvas units each side, easing back to the authored layout
+    // as the frame expands, the full view filling the screen.  The button
+    // prompts are moved in wherever they'd leave the title-safe box (80%).
+    // XBCOMPAT_GUIDE_NARROW sets the amount (0 turns it off).
+    static float narrow = getenv("XBCOMPAT_GUIDE_NARROW") ? (float)atof(getenv("XBCOMPAT_GUIDE_NARROW")) : 60;
+    float t = 0;
     if (xui::Node* lb = g.frame->find("leftBlade")) {
-        xui::Vec3 z = {0, 0, 0};
-        float t = (82 - xui::propV(lb->props, "Position", z).x) / 81;  // half 82, full 1
+        t = (82 - base_of(lb, 'x')) / 81;  // half 82, full 1
         if (t < 0) t = 0; if (t > 1) t = 1;
-        k = safe + (1 - safe) * t;
     }
-    // On an SD screen the scenes' text, sized for a PC window, comes out
-    // too small to read from the couch: draw it larger (to about Frolick's
-    // size at 480 lines), each label growing about its own box.
+    float n = narrow * (1 - t);
+    // On an SD screen the scenes' text, sized for a PC window, comes out a
+    // little small from the couch: draw it larger, each label growing about
+    // its own box, to the size of Frolick's rows at 480 lines (their
+    // capitals 12-13 px to the authored size's 10-11).
     // XBCOMPAT_GUIDE_TEXT sets the factor (1 keeps the authored size).
-    static float zoom = getenv("XBCOMPAT_GUIDE_TEXT") ? (float)atof(getenv("XBCOMPAT_GUIDE_TEXT")) : 1.4f;
+    static float zoom = getenv("XBCOMPAT_GUIDE_TEXT") ? (float)atof(getenv("XBCOMPAT_GUIDE_TEXT")) : 1.2f;
     g.r->textZoom = h <= 576 && zoom > 0 ? zoom : 1;
-    float ccx = cw / 2, ccy = ch / 2;
-    fit_legends(ccx, ccy, k, cw * 0.1f, ch * 0.1f, cw * 0.9f, ch * 0.9f);
-    float fx = ccx * s * (1 - k), fy = ccy * s * (1 - k);
-    s *= k;
+    narrow_frame(n);
+    float lift = fit_legends(cw * 0.1f, ch * 0.1f, cw * 0.9f, ch * 0.9f);
+    float fx = 0, fy = 0;
     g.be.begin(w, h, kx);
     g.r->draw(g.frame, fx, fy, s);
     // The menu sits in the frame's AppHostElementId and fades with it.
@@ -787,6 +871,17 @@ void guide_draw(int w, int h) {
         hs *= sc.x;
         shown = shown && xui::propB(p->props, "Show", true);
         op *= xui::propF(p->props, "Opacity", 1);
+    }
+    // Lifted into the safe box, the Back prompt would sit under the main
+    // menu's LIVE logo, whose corner GFWL puts over it as it is: the menu's
+    // block (sign-in line, items and logo) moves up with the prompts while
+    // the frame is half open; the full view, the prompts beside the logo,
+    // keeps its layout.
+    {
+        static const char* ids[] = { "txtSignInLive", "btnBlank1", "btnQuickChat", "btnOptions", "xboxlive_logo_wide" };
+        float d = hs > 0 ? lift * (1 - t) / hs : 0;
+        for (unsigned i = 0; i < sizeof ids / sizeof ids[0]; i++)
+            if (xui::Node* nd = g.main->find(ids[i])) offset(nd, 'y', d);
     }
     if (host && shown && op > 0.001f) {
         xui::Value& o = g.menu->root->props.set("Opacity"); o.free(); o.type = xui::TFloat; o.f = op;

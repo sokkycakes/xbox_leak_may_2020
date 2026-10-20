@@ -13,6 +13,7 @@
 //     --focus ID    focus this control
 //     --guide       the whole Guide as xbcompat draws it (frame + main)
 //     --page P      ... with page P open: settings, volume, vibration
+//     --dump        print the frame's tree (id, class, size, position, scale, show)
 //
 // make build/guideview.  Builds against src/guide/guide.cpp (included) with
 // stand-ins for the xbcompat calls it makes.
@@ -48,11 +49,21 @@ static void shot(const char* out, int w, int h) {
     delete[] px;
 }
 
+static void dump_tree(xui::Node* n, int depth) {
+    xui::Vec3 z = {0, 0, 0}, one = {1, 1, 1};
+    xui::Vec3 p = xui::propV(n->props, "Position", z), sc = xui::propV(n->props, "Scale", one);
+    float op = xui::propF(n->props, "Opacity", 1);
+    printf("%*s%s [%s] %gx%g at %g,%g scale %g,%g%s op %g\n", depth * 2, "", n->id(), n->cls ? n->cls->name : "?",
+           n->width(), n->height(), p.x, p.y, sc.x, sc.y, xui::propB(n->props, "Show", true) ? "" : " hidden", op);
+    if (n->visual) dump_tree(n->visual, depth + 1);
+    for (int i = 0; i < n->children.n; i++) dump_tree(n->children[i], depth + 1);
+}
+
 int main(int argc, char** argv) {
     if (argc < 4) { fprintf(stderr, "usage: guideview DIR SCENE.xui OUT.ppm [options]\n"); return 2; }
     const char *dir = argv[1], *sceneName = argv[2], *out = argv[3], *skinName = "hudskin.xui", *play = 0, *focus = 0;
     int frames = 60, W = 1280, H = 720; float scale = 1, ax = 0, ay = 0; unsigned bg = 0x1a1c20;
-    bool whole = false; const char* page = 0;
+    bool whole = false, dump = false; const char* page = 0;
     for (int i = 4; i < argc; i++) {
         const char* a = argv[i];
         const char* v = i + 1 < argc ? argv[i + 1] : "";
@@ -66,6 +77,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(a, "--focus")) focus = v, i++;
         else if (!strcmp(a, "--guide")) whole = true;
         else if (!strcmp(a, "--page")) whole = true, page = v, i++;
+        else if (!strcmp(a, "--dump")) dump = true;
     }
     SDL_Init(SDL_INIT_VIDEO);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
@@ -92,6 +104,7 @@ int main(int argc, char** argv) {
         glClearColor(br, bgc, bb, 1); glClear(GL_COLOR_BUFFER_BIT);
         guide_draw(W, H);
         shot(out, W, H);
+        if (dump) { dump_tree(g.frame->root, 0); printf("== menu\n"); dump_tree(g.menu->root, 0); }
         return 0;
     }
     snprintf(g.res.dir, sizeof g.res.dir, "%s", dir);
