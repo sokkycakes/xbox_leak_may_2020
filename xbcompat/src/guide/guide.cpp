@@ -253,6 +253,19 @@ void set_pos(xui::Scene* s, const char* id, float x, float y) {
 }
 
 // Hide an element whose Show the frame's timelines own: hide what it draws.
+// A slider's label and value sit tight around its track, and the gamer
+// card's lines are packed 25 units apart: grown as far as the rest of the
+// text, they'd run into each other.
+float text_zoom_for(xui::Node* n, float zoom) {
+    xui::Node* o = n->owner;
+    if (o && o->cls && !strcmp(o->cls->name, "XuiSlider")) {
+        // its number has a box just three digits wide
+        if (!strcmp(n->id(), "Text_Slider")) return 1;
+        if (zoom > 1.15f) return 1.15f;
+    }
+    return zoom;
+}
+
 void hide_drawn(xui::Scene* s, const char* id) {
     xui::Node* n = s->find(id);
     if (!n) return;
@@ -369,6 +382,7 @@ bool load() {
     // label sat about 3 px high in its row.  1.12 em centres the capitals in
     // the menu rows and the card's header strip.
     g.r->ascentEm = 1.12f;
+    g.r->textZoomFor = text_zoom_for;
     g.frame = new xui::Scene(g.frameEl, g.skinEl);
     g.frame->setFocus(0);
     g.hud = g.frame->find("HUDRootScene");
@@ -747,6 +761,12 @@ void guide_draw(int w, int h) {
         if (t < 0) t = 0; if (t > 1) t = 1;
         k = safe + (1 - safe) * t;
     }
+    // On an SD screen the scenes' text, sized for a PC window, comes out
+    // too small to read from the couch: draw it larger (to about Frolick's
+    // size at 480 lines), each label growing about its own box.
+    // XBCOMPAT_GUIDE_TEXT sets the factor (1 keeps the authored size).
+    static float zoom = getenv("XBCOMPAT_GUIDE_TEXT") ? (float)atof(getenv("XBCOMPAT_GUIDE_TEXT")) : 1.4f;
+    g.r->textZoom = h <= 576 && zoom > 0 ? zoom : 1;
     float ccx = cw / 2, ccy = ch / 2;
     fit_legends(ccx, ccy, k, cw * 0.1f, ch * 0.1f, cw * 0.9f, ch * 0.9f);
     float fx = ccx * s * (1 - k), fy = ccy * s * (1 - k);
@@ -777,7 +797,10 @@ void guide_draw(int w, int h) {
             xui::Vec3 v = xui::propV(slot->props, "Position", z);
             xui::Value& co = g.card->root->props.set("Opacity"); co.free(); co.type = xui::TFloat; co.f = op;
             float ms = s * hs;
+            float tz = g.r->textZoom;
+            if (g.r->textZoom > 1.15f) g.r->textZoom = 1.15f;
             g.r->draw(g.card, fx + hx * s + v.x * ms, fy + hy * s + v.y * ms, ms);
+            g.r->textZoom = tz;
         }
     }
     g.be.end();

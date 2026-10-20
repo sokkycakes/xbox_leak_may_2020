@@ -79,7 +79,7 @@ struct Font {
     ~Font() { delete [] data; }
 };
 
-Renderer::Renderer(Backend* b, Resources* r) : be(b), res(r), defaultTextColor(0xffffffff), ascentEm(0), font(0), clipping(false) {}
+Renderer::Renderer(Backend* b, Resources* r) : be(b), res(r), defaultTextColor(0xffffffff), ascentEm(0), textZoom(1), textZoomFor(0), font(0), clipping(false) {}
 
 Renderer::~Renderer()
 {
@@ -819,7 +819,8 @@ void Renderer::text(Node* n, const Affine& m, float alpha, Blend blend)
     // PointSize is in points: the XUI engine sizes the em at 96 dpi (the
     // GFWL engine's legend and header glyphs and baselines, and sokky's
     // real-console capture of the legend, all measure 4/3 PointSize per em).
-    float px = size * (96.0f / 72.0f) * scale;
+    float zoom = textZoomFor ? textZoomFor(n, textZoom) : textZoom;
+    float px = size * (96.0f / 72.0f) * scale * zoom;
     float fs = stbtt_ScaleForMappingEmToPixels(&font->info, px);
     float w = n->width(), h = n->height();
 
@@ -856,6 +857,7 @@ void Renderer::text(Node* n, const Affine& m, float alpha, Blend blend)
     float total = lh * nl;
     float y = 0;
     if (style & styleCenterV) y = (h - total) / 2;
+    else if (zoom != 1) y = total * (1 - 1 / zoom) / -2;  // grow about the authored lines' middle
     Color col = propC(n->props, "TextColor", defaultTextColor);
     Color shadow = propC(n->props, "DropShadowColor", 0);
     Affine inv = aff(1 / scale, 0, 0, 1 / scale, 0, 0);

@@ -211,6 +211,8 @@ struct Renderer {
     void setFont(const char* path); // the TTF text elements use unless their Font names another
     Color defaultTextColor;  // a text's colour when it sets none (white; GFWL's engine uses black)
     float ascentEm;          // baseline below a text box's top, in ems (0: the font's own ascent)
+    float textZoom;          // text drawn this much larger than its PointSize, about its box (1: as authored)
+    float (*textZoomFor)(Node* n, float zoom);  // optional per-text override of textZoom
 
 private:
     struct TexEntry { char* key; Texture tex; int w, h; };
