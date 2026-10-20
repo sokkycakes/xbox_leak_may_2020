@@ -1,6 +1,6 @@
 # Extract PNGs from .xzp packages into assets/ as .xtx (XTX1 BGRA, like mkassets.py) and .png
 import sys, os, struct
-sys.path.insert(0, '/home/user/xbox_leak_may_2020/xbcompat/tools/frolickdash/tools')
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'frolickdash', 'tools'))
 from xur2xui import xzp_entries
 from PIL import Image
 import io
