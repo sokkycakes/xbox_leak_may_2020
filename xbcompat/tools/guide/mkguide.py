@@ -10,7 +10,7 @@ CLASSES.LOG is GFWL-Guide.exe --dump-classes (xui360/classes.log); xurconv.py
 built-in ones.  xbcompat looks for OUT_DIR as "guide" beside its binary, or
 XBCOMPAT_GUIDE_DIR.  Writes hudbkgnd.xui (the frame), hudskin.xui,
 GuideMain.xui (MainMenuSignedIn), GuideSettings.xui (Options), every PNG as
-.xtx, and font.ttf.
+.xtx, the .wav sounds, and font.ttf.
 """
 import io, os, re, struct, subprocess, sys, tempfile
 
@@ -57,7 +57,12 @@ def main():
         blob = d[offs[i]:offs[i + 1]]
         entries = xzp_entries(blob)
         for name, data in entries.items():
-            if '\\' in name or not name.lower().endswith('.png'):
+            if '\\' in name:
+                continue
+            if name.lower().endswith('.wav'):  # the Guide's sounds
+                open(os.path.join(out, name), 'wb').write(data)
+                continue
+            if not name.lower().endswith('.png'):
                 continue
             from PIL import Image
             im = Image.open(io.BytesIO(data)).convert('RGBA')

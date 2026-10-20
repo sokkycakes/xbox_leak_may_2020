@@ -238,6 +238,7 @@ unsigned xinput_guide_read(int *port);
 void xinput_guide_mask(bool on);
 void ds_set_duck(float gain);
 void ds_set_volume(float gain);
+void ds_play_ui(const float *pcm, int frames);
 unsigned xinput_guide_ports(void);
 void xinput_guide_vibration(bool on);
 void reset_request_always(const char *why);

@@ -28,6 +28,7 @@ unsigned xinput_guide_read(int *port);
 void xinput_guide_mask(bool on);
 void ds_set_duck(float gain);
 void ds_set_volume(float gain);
+void ds_play_ui(const float *pcm, int frames);
 unsigned xinput_guide_ports(void);
 void xinput_guide_vibration(bool on);
 const char *fs_hdd_root(void);
@@ -164,6 +165,11 @@ struct GLBackend : xui::Backend {
 
 enum State { Off, Closed, Opening, Open, Closing, Leaving };
 
+// A Guide sound (the .wav files from xlive), as 48 kHz stereo float.
+struct Sound { float* pcm; int frames; Sound() : pcm(0), frames(0) {} };
+enum { SndOpen, SndClose, SndFocus, SndSelect, SndBack, SndCount };
+const char* const soundFiles[SndCount] = { "HUD_open.wav", "HUD_close.wav", "btn_Focus.wav", "btn_Select.wav", "btn_Back.wav" };
+
 struct Guide {
     DirResources res;
     GLBackend be;
@@ -178,6 +184,7 @@ struct Guide {
     bool armed;  // Back + Start must be let go once before they open it
     int volume;  // 0..10
     bool vibration;
+    Sound sounds[SndCount];
     Guide() : r(0), frameEl(0), mainEl(0), settingsEl(0), skinEl(0), frame(0), main(0), settings(0), menu(0),
               hud(0), state(Off), prev(0), holdStart(-1), lastTime(-1), repeatAt(0), leaveAt(0), port(0),
               armed(false), volume(10), vibration(true) {}
@@ -270,6 +277,7 @@ void write_settings() {
 }
 
 void settings_text();
+void load_sound(Sound& snd, const char* name);
 
 bool load() {
     tried = true;
@@ -334,9 +342,44 @@ bool load() {
     set_str(g.settings, "btnNotifications", "NavDown", "");
     read_settings();
     settings_text();
+    for (int i = 0; i < SndCount; i++) load_sound(g.sounds[i], soundFiles[i]);
     g.state = Closed;
     xlog("Guide: ready (%s); hold Back + Start, or Guide / F1", g.res.dir);
     return true;
+}
+
+void load_sound(Sound& snd, const char* name) {
+    unsigned char* data; int len;
+    if (!g.res.read(name, &data, &len)) return;
+    SDL_AudioSpec spec; Uint8* buf; Uint32 blen;
+    // The Guide's sounds are 16-bit PCM, mono or stereo, 44.1 or 48 kHz:
+    // to 48 kHz stereo float with a linear resample.
+    if (SDL_LoadWAV_RW(SDL_RWFromConstMem(data, len), 1, &spec, &buf, &blen)) {
+        int ch = spec.channels;
+        if (spec.format == AUDIO_S16LSB && (ch == 1 || ch == 2) && spec.freq > 0) {
+            const Sint16* in = (const Sint16*)buf;
+            int inFrames = (int)(blen / (2 * ch));
+            int frames = (int)((long long)inFrames * 48000 / spec.freq);
+            float* out = (float*)malloc(sizeof(float) * 2 * (frames + 1));
+            double step = spec.freq / 48000.0;
+            for (int i = 0; i < frames; i++) {
+                double p = i * step; int k = (int)p; float f = (float)(p - k);
+                int k1 = k + 1 < inFrames ? k + 1 : k;
+                for (int c = 0; c < 2; c++) {
+                    int cc = ch == 2 ? c : 0;
+                    float x0 = in[k * ch + cc], x1 = in[k1 * ch + cc];
+                    out[2 * i + c] = (x0 + (x1 - x0) * f) / 32768.0f;
+                }
+            }
+            snd.pcm = out; snd.frames = frames;
+        }
+        SDL_FreeWAV(buf);
+    }
+    delete[] data;
+}
+
+void play(int which) {
+    if (g.sounds[which].pcm) ds_play_ui(g.sounds[which].pcm, g.sounds[which].frames);
 }
 
 void update_clock() {
@@ -384,12 +427,14 @@ void open_guide() {
     show_port();
     xinput_guide_mask(true);
     ds_set_duck(0.3f);
+    play(SndOpen);
     xlog("Guide: open (pad %d)", g.port + 1);
 }
 
 void close_guide() {
     g.state = Closing;
     g.hud->play("HalfToClosed");
+    play(SndClose);
     xinput_guide_mask(false);
     ds_set_duck(1.0f);
 }
@@ -424,20 +469,29 @@ void step(double t) {
     case Opening:
     case Open:
         if (g.state == Opening && !g.hud->playing) g.state = Open;
-        if ((down & GUIDE_B) && g.menu == g.settings) { show_menu(g.main, "btnOptions"); break; }
+        if ((down & GUIDE_B) && g.menu == g.settings) { play(SndBack); show_menu(g.main, "btnOptions"); break; }
         if (toggle || (down & GUIDE_B)) { close_guide(); break; }
         if ((down & (GUIDE_LEFT | GUIDE_RIGHT)) && g.menu == g.settings && g.menu->focus &&
             !strcmp(g.menu->focus->id(), "btnOnlineStatus")) {
             g.volume += (down & GUIDE_RIGHT) ? 1 : -1;
             g.volume = g.volume < 0 ? 0 : g.volume > 10 ? 10 : g.volume;
             apply_settings(); write_settings(); settings_text();
+            play(SndFocus);
             break;
         }
         if (down & GUIDE_Y) { press("btnQuickChat"); break; }
-        if (down & GUIDE_A) { if (g.menu->focus) { g.menu->press(); press(g.menu->focus->id()); } break; }
+        if (down & GUIDE_A) {
+            if (g.menu->focus) {
+                const char* id = g.menu->focus->id();
+                if (strcmp(id, "btnBlank1")) play(SndSelect);  // Resume plays the close sound
+                g.menu->press();
+                press(id);
+            }
+            break;
+        }
         if (b & (GUIDE_UP | GUIDE_DOWN)) {
             if ((down & (GUIDE_UP | GUIDE_DOWN)) || t >= g.repeatAt) {
-                g.menu->navigate((b & GUIDE_UP) ? "up" : "down");
+                if (g.menu->navigate((b & GUIDE_UP) ? "up" : "down")) play(SndFocus);
                 g.repeatAt = t + ((down & (GUIDE_UP | GUIDE_DOWN)) ? 0.4 : 0.12);
             }
         }

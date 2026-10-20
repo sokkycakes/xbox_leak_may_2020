@@ -1161,6 +1161,35 @@ void ds_set_volume(float gain)
     __atomic_store_n(&volume_bits, b, __ATOMIC_RELAXED);
 }
 
+/* ... and plays its own short sounds (48 kHz stereo float, loaded once and
+   never freed), mixed in after the duck so they aren't turned down with the
+   game; the newest replaces the one playing. */
+static const float *ui_next;
+static int ui_next_frames;
+static uint32_t ui_seq;
+
+void ds_play_ui(const float *pcm, int frames)
+{
+    ui_next = pcm;
+    ui_next_frames = frames;
+    __atomic_add_fetch(&ui_seq, 1, __ATOMIC_RELEASE);
+}
+
+static void ui_block(float *out, int n, float volume)
+{
+    static uint32_t seen;
+    static const float *pcm;
+    static int pos, frames;
+    uint32_t q = __atomic_load_n(&ui_seq, __ATOMIC_ACQUIRE);
+    if (q != seen) { seen = q; pcm = ui_next; frames = ui_next_frames; pos = 0; }
+    if (!pcm) return;
+    for (int i = 0; i < n && pos < frames; i++, pos++) {
+        out[2 * i] += pcm[2 * pos] * volume;
+        out[2 * i + 1] += pcm[2 * pos + 1] * volume;
+    }
+    if (pos >= frames) pcm = NULL;
+}
+
 static void duck_block(float *out, int n)
 {
     uint32_t b = __atomic_load_n(&duck_bits, __ATOMIC_RELAXED);
@@ -1169,14 +1198,16 @@ static void duck_block(float *out, int n)
     memcpy(&target, &b, 4);
     memcpy(&volume, &v, 4);
     target *= volume;
-    if (target == 1.0f && duck_now == 1.0f) return;
-    float step = (target - duck_now) / (float)n;
-    for (int i = 0; i < n; i++) {
-        float k = duck_now + step * (float)(i + 1);
-        out[2 * i] *= k;
-        out[2 * i + 1] *= k;
+    if (target != 1.0f || duck_now != 1.0f) {
+        float step = (target - duck_now) / (float)n;
+        for (int i = 0; i < n; i++) {
+            float k = duck_now + step * (float)(i + 1);
+            out[2 * i] *= k;
+            out[2 * i + 1] *= k;
+        }
+        duck_now = target;
     }
-    duck_now = target;
+    ui_block(out, n, volume);
 }
 
 void ds_mix_block(float *out, int n)
