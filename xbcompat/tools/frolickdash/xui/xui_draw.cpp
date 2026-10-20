@@ -725,6 +725,10 @@ void Renderer::text(Node* n, const Affine& m, float alpha, Blend blend)
     if (style & styleCenterV) y = (h - total) / 2;
     Color col = propC(n->props, "TextColor", 0xffffffff);
     Color shadow = propC(n->props, "DropShadowColor", 0);
+    // OutlineColor (ours): the line drawn eight times, 1.4 scene pixels
+    // out, under the text; the Blades pages use it on the highlighted item
+    // in place of the drop shadow
+    Color outline = propC(n->props, "OutlineColor", 0);
     Affine inv = aff(1 / scale, 0, 0, 1 / scale, 0, 0);
     for (int i = 0; i < nl; i++) {
         int iw, ih, adv;
@@ -737,6 +741,13 @@ void Renderer::text(Node* n, const Affine& m, float alpha, Blend blend)
         if ((style & styleShadow) && (shadow >> 24) != 0) {
             Affine sm = mul(mul(m, aff(1, 0, 0, 1, x + 1.5f, y + 1.5f)), inv);
             quad(tex, blend, sm, 0, 0, (float)iw, (float)ih, 0, 0, 1, 1, shadow, alpha);
+        }
+        if ((outline >> 24) != 0) {
+            static const float o[16] = { 1.4f, 0, -1.4f, 0, 0, 1.4f, 0, -1.4f, 1, 1, -1, 1, 1, -1, -1, -1 };
+            for (int k = 0; k < 8; k++) {
+                Affine om = mul(mul(m, aff(1, 0, 0, 1, x + o[k * 2], y + o[k * 2 + 1])), inv);
+                quad(tex, blend, om, 0, 0, (float)iw, (float)ih, 0, 0, 1, 1, outline, alpha);
+            }
         }
         quad(tex, blend, lm, 0, 0, (float)iw, (float)ih, 0, 0, 1, 1, col, alpha);
         y += lh;

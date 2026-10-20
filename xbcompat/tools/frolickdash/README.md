@@ -93,7 +93,8 @@ dashboard (`tools/dashbuild`), as its own `xboxdash.xbe` with its own
   sub-title resting on the body (right of the label on the catalog's
   pages), the body has 6 output lines of padding above its content and
   below it before the legends, which sit on the pad; body and meta text
-  are white.  Item text is white at rest and the
+  are white; the highlighted item's text carries a light outline (the
+  runtime's `OutlineColor`, keyed in the page skin) instead of the drop shadow.  Item text is white at rest and the
   Blades' dark on the highlighted row: `genpage.py` keys every button
   and list-item visual's text presenters so in the page skin, and the
   pages feed their list lines through the visuals' own presenters
