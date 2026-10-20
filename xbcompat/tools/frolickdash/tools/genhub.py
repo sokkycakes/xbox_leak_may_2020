@@ -85,7 +85,7 @@ BELT_CENTRE = RAIL_ORIGIN
 BELT_INSET = 0.95
 BELT_COVER_SCALE = 1.0
 BELT_FOCUS_PULL = 5.6
-BELT_STRIDE = 3            # the two slots either side of the focus hide behind it, so they hold nothing
+BELT_HIDE = 2              # covers within two slots of the focus sit behind it, so they are not drawn
 # The belt's list: two reserved tiles at the left end (sokky, 2026-10-20),
 # "show all games" (grid mode, not built yet) and the game in the disc
 # tray or game card, each with an icon centred on its tile, then the games
@@ -519,7 +519,7 @@ DEF theHub Level
             radius %(belt_radius).5f
             coverScale %(belt_cover_scale).2f
             focusPull %(belt_focus_pull).2f
-            stride %(belt_stride)d
+            hide %(belt_hide).1f
             fadeDuration %(zoom_duration)s
             count %(belt_count)d
             function OnStep() { theOverlay.SetText("title", GameName(theBelt.GetSelected())); }
@@ -778,7 +778,7 @@ def main():
     vals["belt_radius"] = 0.5 * RAIL_SCALE[0] * BELT_INSET
     vals["belt_cover_scale"] = BELT_COVER_SCALE
     vals["belt_focus_pull"] = BELT_FOCUS_PULL
-    vals["belt_stride"] = BELT_STRIDE
+    vals["belt_hide"] = BELT_HIDE
     vals["belt_count"] = len(CAROUSEL_GAMES)
     vals["belt_icons"] = ";".join(icon for _, icon in BELT_RESERVED)
     vals["belt_start"] = BELT_START
