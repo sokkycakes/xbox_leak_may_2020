@@ -848,6 +848,27 @@
 </XuiVisual>
 <XuiVisual>
 <Properties>
+ <Id>Label_MetaHead_VH</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>1,1,0</Position>
+</Properties>
+<XuiTextPresenter>
+<Properties>
+ <Id>Text</Id>
+ <Width>415</Width>
+ <Height>47</Height>
+ <Position>10,0,0</Position>
+ <Anchor>15</Anchor>
+ <TextColor>0xe60f0f0f</TextColor>
+ <DropShadowColor>0x5aebebeb</DropShadowColor>
+ <PointSize>20</PointSize>
+ <TextStyle>20753</TextStyle>
+</Properties>
+</XuiTextPresenter>
+</XuiVisual>
+<XuiVisual>
+<Properties>
  <Id>Label_Body</Id>
  <Width>420</Width>
  <Height>47</Height>
@@ -5804,36 +5825,6 @@
 </XuiVisual>
 <XuiVisual>
 <Properties>
- <Id>back panel</Id>
- <Width>855</Width>
- <Height>570</Height>
- <Position>0,3,0</Position>
-</Properties>
-<XuiFigure>
-<Properties>
- <Id>back panel</Id>
- <Width>930</Width>
- <Height>570</Height>
- <Show>false</Show>
- <Fill>
-  <FillColor>0xffc8c8c8</FillColor>
-  <Gradient>
-   <NumStops>2</NumStops>
-   <StopColor>0xc8ebebeb</StopColor>
-   <StopColor>0xd2ebebeb</StopColor>
-   <StopPos>0</StopPos>
-   <StopPos>1</StopPos>
-  </Gradient>
-  <Scale>0.1,-0.2,1</Scale>
-  <Rotation>90</Rotation>
- </Fill>
- <Closed>true</Closed>
- <Points>539,282;0,0,0,0,539,0;539,0,539,0,539,282;539,282,539,282,0,282;0,282,0,282,0,0</Points>
-</Properties>
-</XuiFigure>
-</XuiVisual>
-<XuiVisual>
-<Properties>
  <Id>btn_oneline_icon</Id>
  <Width>420</Width>
  <Height>72</Height>
@@ -10186,10 +10177,80 @@
 </XuiVisual>
 <XuiVisual>
 <Properties>
- <Id>XuiScene</Id>
- <Width>300</Width>
- <Height>300</Height>
- <Opacity>0</Opacity>
+ <Id>btn_Frame</Id>
+ <Width>70</Width>
+ <Height>70</Height>
 </Properties>
+<XuiGroup>
+<Properties>
+ <Id>TileBorder8</Id>
+ <Width>70</Width>
+ <Height>69.9959</Height>
+</Properties>
+<XuiFigure>
+<Properties>
+ <Width>70</Width>
+ <Height>3</Height>
+ <Position>0,4e-06,0</Position>
+ <Fill>
+  <FillColor>0x640f0f0f</FillColor>
+ </Fill>
+ <Closed>true</Closed>
+ <Points>72,4;0,0,0,0,72,0;72,0,72,0,72,4;72,4,72,4,0,4;0,4,0,4,0,0</Points>
+</Properties>
+</XuiFigure>
+<XuiFigure>
+<Properties>
+ <Width>70</Width>
+ <Height>3</Height>
+ <Position>0,66.9959,0</Position>
+ <Fill>
+  <FillColor>0x5a0f0f0f</FillColor>
+ </Fill>
+ <Closed>true</Closed>
+ <Points>72,4;0,0,0,0,72,0;72,0,72,0,72,4;72,4,72,4,0,4;0,4,0,4,0,0</Points>
+</Properties>
+</XuiFigure>
+<XuiFigure>
+<Properties>
+ <Width>3</Width>
+ <Height>64</Height>
+ <Position>0,3,0</Position>
+ <Fill>
+  <FillColor>0x410f0f0f</FillColor>
+ </Fill>
+ <Closed>true</Closed>
+ <Points>72,4;0,0,0,0,72,0;72,0,72,0,72,4;72,4,72,4,0,4;0,4,0,4,0,0</Points>
+</Properties>
+</XuiFigure>
+<XuiFigure>
+<Properties>
+ <Width>3</Width>
+ <Height>64</Height>
+ <Position>67,3,0</Position>
+ <Fill>
+  <FillColor>0x410f0f0f</FillColor>
+ </Fill>
+ <Closed>true</Closed>
+ <Points>72,4;0,0,0,0,72,0;72,0,72,0,72,4;72,4,72,4,0,4;0,4,0,4,0,0</Points>
+</Properties>
+</XuiFigure>
+</XuiGroup>
+<XuiImagePresenter>
+<Properties>
+ <Id>XuiImagePresenter1</Id>
+ <Width>64</Width>
+ <Height>64</Height>
+ <Position>3.0535,2.94377,0</Position>
+</Properties>
+</XuiImagePresenter>
+<Timelines>
+<NamedFrames>
+<NamedFrame><Name>Normal</Name><Time>0</Time><Command>Play</Command><CommandParams /></NamedFrame>
+<NamedFrame><Name>EndNormal</Name><Time>1</Time><Command>Stop</Command><CommandParams /></NamedFrame>
+<NamedFrame><Name>Focus</Name><Time>2</Time><Command>Play</Command><CommandParams /></NamedFrame>
+<NamedFrame><Name>EndFocus</Name><Time>3</Time><Command>Stop</Command><CommandParams /></NamedFrame>
+</NamedFrames>
+</Timelines>
 </XuiVisual>
 </XuiScene></XuiCanvas>

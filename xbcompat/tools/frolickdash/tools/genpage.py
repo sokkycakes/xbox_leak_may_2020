@@ -96,7 +96,12 @@ GAMES = [(g, "", 0) for g in CAROUSEL_GAMES[BELT_START:]]   # the belt's games, 
 PAGES = [
     ("page_system", dict(scene=None, pad="settings", first="btnConsole", parent="", header="Settings",
                          items=[("btnConsole", "Console Settings", "page_console"), ("btnMemory", "Memory", "page_memory"),
-                                ("btnNetwork", "Network Settings", "page_network")])),
+                                ("btnNetwork", "Network Settings", "page_network"), ("btnGame", "Game Info", "page_game")])),
+    # The Blades' Game Summary page (dash_games.xzp 401_GameDetails), a
+    # preview with placeholder numbers
+    ("page_game", dict(scene="401_GameDetails.xui", pad="settings", first="btnViewAchievements", parent="page_system",
+                       header="Game Summary", labels={"labGameTitle": "Test Game A", "labAchievementsNum": "12 of 40",
+                                                      "labGamerPointsNum": "230", "labGamerPointsText": "amerscore"})),
     ("page_console", dict(scene="dashSysCslSet.xui", pad="settings", first="btnDisplay", parent="page_system",
                           meta={"btnDisplay": "480i NTSC, 4:3", "btnAudio": "Stereo", "btnLanguage": "English",
                                 "btnClock": "Set from the network", "btnCountry": "United States", "btnAutoOff": "Off",
