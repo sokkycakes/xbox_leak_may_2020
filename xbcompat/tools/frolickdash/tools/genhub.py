@@ -134,7 +134,11 @@ PT = 0.75 * 2048 / 2384
 # is wider than the HUD (66 px cropped each side) and centred on that
 # window.
 PAGE_WINDOW = (58.7, 688.7)
-PAGE_W = 1120 * HUD_H / (PAGE_WINDOW[1] - PAGE_WINDOW[0])
+# ... scaled in about the centre so the whole page, legends included, sits
+# inside NTSC action safe (the inner 90%) with a little to spare (sokky,
+# 2026-10-20).
+PAGE_SAFE = 0.93
+PAGE_W = 1120 * HUD_H / (PAGE_WINDOW[1] - PAGE_WINDOW[0]) * PAGE_SAFE
 PAGE_VIEW_Y = (PAGE_WINDOW[0] + PAGE_WINDOW[1]) / 2
 
 
