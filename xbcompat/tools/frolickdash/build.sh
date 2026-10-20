@@ -41,11 +41,54 @@ for src in "$HERE"/xui/*.cpp "$HERE"/nodes/*.cpp; do
         python3 "$DASHBUILD/cc.py" "$(echo "Z:$src" | tr / '\\')" -D_AUDIO -D_CDPLAYER
 done
 
+# main.cpp, with the app's files found beside the XBE when it runs as a
+# game (D:, from E:\Games\Frolick on a console) and on the dashboard
+# partition (Y:) when it is the dashboard.  Built from dashbuild's patched
+# copy, in place of the engine's main.obj.
+mkdir -p "$OUT/patch"
+python3 - "$WORK/patch/main.cpp" "$OUT/patch/main.cpp" <<'PY'
+import sys
+src, dst = sys.argv[1:3]
+s = open(src, encoding="latin-1").read()
+fn = r"""
+// Frolick: its XIP, scenes and fonts sit beside the XBE when it runs as a
+// game (D:), on the dashboard partition (Y:) when it is the dashboard.
+static const TCHAR* AppDrive()
+{
+	static TCHAR szDrive [4];
+	if (!szDrive[0])
+		_tcscpy(szDrive, GetFileAttributes("d:\\default.xip") != 0xFFFFFFFF ? _T("d:\\") : _T("y:\\"));
+	return szDrive;
+}
+"""
+assert s.count('#include "xlaunch.h"\n') == 1
+s = s.replace('#include "xlaunch.h"\n', '#include "xlaunch.h"\n' + fn)
+reps = [
+    ('LoadXIP(_T("y:\\\\default.xip"), true);',
+     '{ TCHAR szXip [32]; _tcscpy(szXip, AppDrive()); _tcscat(szXip, _T("default.xip")); LoadXIP(szXip, true); }'),
+    ('_tcscpy(szFileToLoad, _T("y:\\\\default.xap"));',
+     '_tcscpy(szFileToLoad, AppDrive()); _tcscat(szFileToLoad, _T("default.xap"));'),
+    ('_tcscpy(szAppDir, _T("y:\\\\"));', '_tcscpy(szAppDir, AppDrive());'),
+    ('_tcscpy(g_szCurDir, _T("y:/default.xap"));',
+     "_tcscpy(g_szCurDir, AppDrive()); g_szCurDir[2] = _T('/'); _tcscat(g_szCurDir, _T(\"default.xap\"));"),
+]
+for old, new in reps:
+    assert s.count(old) == 1, old
+    s = s.replace(old, new)
+open(dst, "w", encoding="latin-1").write(s)
+PY
+if [ ! -s "$OUT/obj/main.obj" ] || [ "$OUT/patch/main.cpp" -nt "$OUT/obj/main.obj" ]; then
+    echo "cc main.cpp"
+    WORK="$WORK" XB="$XB" CC_DIR="$OUT/patch" CC_OUT="$(echo "Z:$OUT/obj/" | tr / '\\')" \
+        python3 "$DASHBUILD/cc.py" "$(echo "Z:$OUT/patch/main.cpp" | tr / '\\')" -D_AUDIO -D_CDPLAYER
+fi
+
 # Link: the engine's objects (dashbuild's patched TitleCollection needs its
-# GameCollection, so that comes along unused) plus our objects.
+# GameCollection, so that comes along unused; main.obj is ours) plus our
+# objects.
 L="$XB\\public\\xdk\\lib"; P="$XB\\private\\lib\\aug01\\i386"
 cd "$OUT"
-objs=$(ls "$WORK"/obj/*.obj | sed "s|^$WORK/obj/|..\\\\obj\\\\|"; ls obj/*.obj | sed 's|^obj/|obj\\|')
+objs=$(ls "$WORK"/obj/*.obj | grep -v '/main\.obj$' | sed "s|^$WORK/obj/|..\\\\obj\\\\|"; ls obj/*.obj | sed 's|^obj/|obj\\|')
 echo "link xboxdash.exe"
 timeout 600 wine "$WORK/xb/public/mstools/vc70/link.exe" /nologo -subsystem:xbox -fixed:no -nodefaultlib \
   -map:xboxdash.map -IGNORE:4001,4037,4039,4044,4065,4070,4078,4087,4089,4198,4108,4088 -STACK:262144,4096 \
@@ -90,6 +133,16 @@ timeout 300 wine "$WORK/xb/public/idw/imagebld.exe" /TESTID:0xFFFE0000 /TESTRATI
   /TESTREGION:0x7FFFFFFF "/TESTNAME:Frolick" /INITFLAGS:0x00000004 /LIMITMEM \
   "/INSERTFILE:$D\\obj\\xipsums.bin,XIPS,R" $ins /TESTMEDIATYPES:1 /NOLIBWARN /NOSETUPHD \
   /INITFLAGS:0x00000000 /IN:xboxdash.exe /OUT:xboxdash.xbe | tr -d '\r'
+
+# The same image as a game, E:\Games\Frolick\default.xbe, with its own
+# title ID so the dashboard's Memory and Games screens list it apart from
+# the dashboard ("FRLK").
+echo "imagebld default.xbe (game)"
+mkdir -p "$OUT/game"
+timeout 300 wine "$WORK/xb/public/idw/imagebld.exe" /TESTID:0x46524C4B /TESTRATINGS:0xFFFFFFFF \
+  /TESTREGION:0x7FFFFFFF "/TESTNAME:Frolick" /INITFLAGS:0x00000004 /LIMITMEM \
+  "/INSERTFILE:$D\\obj\\xipsums.bin,XIPS,R" $ins /TESTMEDIATYPES:1 /NOLIBWARN /NOSETUPHD \
+  /INITFLAGS:0x00000000 /IN:xboxdash.exe /OUT:game\\default.xbe | tr -d '\r'
 
 # Stage partition 2 (Y:): our XIP, the engine's outline fonts, the XBE.
 R="$OUT/run"

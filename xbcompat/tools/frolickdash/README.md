@@ -53,6 +53,15 @@ dashboard (`tools/dashbuild`), as its own `xboxdash.xbe` with its own
   `tools/mkart.py` renders the pad labels as `main.tscn`'s Label3D nodes
   describe them and a ring for the emblems, until Frolick's `Circle.png`
   and pad textures arrive (`ART=dir`).  A on a catalog or settings tile flies the camera (750 ms, like Frolick's carousel zoom) down to `main.tscn`'s `cam_angle_padfocus`, mirrored for settings, with the panel faded out; B flies back.
+- Frolick also runs as an installed game: `build.sh` writes `game/default.xbe`
+  (title ID 46524C4B "Frolick") from the same link, and the XBE finds its
+  XIP, scenes and fonts beside itself on D: when `d:\default.xip` exists
+  (`E:\Games\Frolick` on a console) and on the dashboard partition Y:
+  otherwise, so one image serves both installs (`build.sh` compiles its
+  own `main.cpp` from dashbuild's patched copy for that).  The real
+  dashboard lists it in Games and Play Game launches it; `dist/game` is
+  the Sion kit (XBE, XIP, HLE map, install script that copies the engine's
+  fonts beside the XBE), `dist/sion` the dashboard-replacement kit.
 - The padfocus pages, the full-screen menus the catalog and settings pads
   open, are the Xbox 360 Blades dashboard's third-level pages (the ones
   that slide the blades away and expand).  `tools/xur2xui.py` converts a
