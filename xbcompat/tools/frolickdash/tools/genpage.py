@@ -77,12 +77,19 @@ CATALOG_HEADER_X = 500
 LIST_ITEMS = {
     "": ("XuiButton", 45, [], None),                                        # list_Common
     "list_twoline-icon": ("btn_twoline-icon", 72, [None, 1], (11, 6, 60, 60)),
+    # btn_twoline-icon with a status at the right of line 2 (Data3), built in skin()
+    "btn_twoline-status": ("btn_twoline-status", 72, [None, 1], (11, 6, 60, 60)),
     "List_3Line_Icon_prgbr": ("btn_3Line_Icon_prgbr", 105, [2, 1], (6, 5, 60, 60)),
     "List_Fullwidth_3Icon_4string": ("ListItem_Fullwidth_3Icon_4String", 47, [], (11, 8, 32, 32)),
     "List_oneline_icon": ("btn_oneline_icon", 72, [], (11, 4.25, 64, 64)),
 }
 # The last tuple is the item visual's image presenter (x, y, w, h), where
 # an item's icon (the 360's ico_64x_*.png, kept in art/blades/) goes.
+# A list's section headers (the NXE's Active / Pending over its downloads)
+# are SECTION_H tall and sit over the row they name; a page's bar (the
+# download's progress) runs under line 2 of each row.
+SECTION_H = 36
+ROW_BAR = (83, 63, 740, 6)
 
 # The pages.  scene: the Blades scene in art/blades/ (None: the System
 # list, built here in the Console Settings layout); pad; first: the
@@ -149,14 +156,17 @@ PAGES = [
     ("page_favorites", dict(scene="Items.xui", pad="library", first="list_items_0", parent="",
                             header="Favorite Games", visual="list_twoline-icon", dynamic="favorites",
                             labels={"legend_y": "", "txt_EmptyList": "Favorites are not available yet."})),
-    # The Blades' download screen (marketplace_media.xzp 1443_DownloadScene):
-    # a look at it for Frolick's download UI (sokky 2026-10-20), not wired
-    # to anything yet.
-    ("page_download", dict(scene="1443_DownloadScene.xui", pad="catalog", first="btnContinue", parent="",
-                           header="Download",
-                           labels={"labSceneTitle": "Stiletto Swift", "labContentTitle": "Stiletto Swift",
-                                   "labContentSize": "412 MB", "edtContentMetaText": "Frolick game card image",
-                                   "btnContinue": "Pause", "labDownloadProgress": "70% (288 MB of 412 MB)"})),
+    # Downloads (catalog pad, Y; sokky 2026-10-20, from the NXE's Active
+    # Downloads): the active download under "Active", the queue under
+    # "Pending"; each row the title, its kind, the status at the right and,
+    # on the active one, the progress.  A starts a pending item now or
+    # pauses/resumes the active one, X removes an item.  Filled by the hub
+    # (kind "downloads") from the Downloads node, a placeholder queue until
+    # Frolick can download.
+    ("page_downloads", dict(scene="Items.xui", pad="catalog", first="list_items_0", parent="",
+                            header="Downloads", visual="btn_twoline-status", dynamic="downloads",
+                            sections={0: "Active", 1: "Pending"}, bar=True,
+                            labels={"legend_y": "", "legend_x": "Remove", "legend_a": "Start Now", "txt_EmptyList": "No downloads."})),
     ("page_memory_actions", dict(scene=None, pad="settings", first="btnCopy", parent="page_memory_saves", header="Saved Game",
                                  items=[("btnCopy", "Copy", ""), ("btnMove", "Move", ""), ("btnDelete", "Delete", "")])),
     ("page_memory_dest", dict(scene="DeviceSelector.xui", pad="settings", first="list_devices_0", parent="page_memory_actions",
@@ -172,7 +182,7 @@ PAGES = [
     ("page_store", dict(scene="1400_StoreFrontScene.xui", pad="catalog", first="btnGameDownloads", parent="", header="Marketplace",
                         press={"btnGameDownloads": "page_store_games", "btnHotList": "page_store_hot",
                                "btnDemosAndTrailers": "page_store_demos", "btnThemes": "page_store_themes",
-                               "btnDownloadStatusAndHistory": "page_store_history"},
+                               "btnDownloadStatusAndHistory": "page_downloads"},
                         hide=["btnX"])),
     ("page_store_games", dict(scene="1412_GameListScene.xui", pad="catalog", first="lstGames_0", parent="page_store",
                               header="Game Downloads", lists={"lstGames": GAMES}, hide=["btnX"],
@@ -254,7 +264,8 @@ def track(id, prop, keys):
 # ---- the skin ---------------------------------------------------------------
 
 # The visuals whose text follows focus: the buttons and list items.
-ITEM_VISUALS = ("XuiButton", "btn_oneline_icon", "btn_twoline-icon", "btn_3Line_Icon_prgbr", "ListItem_Fullwidth_3Icon_4String")
+ITEM_VISUALS = ("XuiButton", "btn_oneline_icon", "btn_twoline-icon", "btn_twoline-status", "btn_3Line_Icon_prgbr",
+                "ListItem_Fullwidth_3Icon_4String")
 REST_STATES = ("Normal", "EndNormal", "NormalDisable", "EndNormalDisable", "NormalSelDisable", "EndNormalSelDisable")
 
 
@@ -298,7 +309,45 @@ def skin():
             return item_text_colours(m.group(0))
         # labels and the meta pane: white body text
         return m.group(0).replace("<TextColor>%s</TextColor>" % TEXT, "<TextColor>%s</TextColor>" % ITEM_REST)
-    return re.sub(r"<XuiVisual>\n<Properties>\n <Id>([^<]*)</Id>.*?</XuiVisual>", fix, s, flags=re.S)
+    s = re.sub(r"<XuiVisual>\n<Properties>\n <Id>([^<]*)</Id>.*?</XuiVisual>", fix, s, flags=re.S)
+    return s.replace("</XuiScene></XuiCanvas>", status_visual(s) + bar_visual() + "</XuiScene></XuiCanvas>")
+
+
+def status_visual(skin):
+    """btn_twoline-status: the Blades' two-line list item with a third
+    presenter, right-aligned at the end of line 2, showing the item's
+    Data3 (a download's Downloading / Paused / Pending), keyed white and
+    dark with the other two.  (Anchored right: the visual is 420 wide and
+    the row 855, and a presenter anchored to both sides, as the Blades'
+    are, would stretch past the row.)"""
+    m = re.search(r"<XuiVisual>\n<Properties>\n <Id>btn_twoline-icon</Id>.*?</XuiVisual>", skin, flags=re.S)
+    v = m.group(0).replace("<Id>btn_twoline-icon</Id>", "<Id>btn_twoline-status</Id>", 1)
+    status = "\n".join(["<XuiTextPresenter>", "<Properties>", " <Id>txt_status</Id>", " <Width>395</Width>", " <Height>40</Height>",
+                        " <Position>5,35,0</Position>", " <Anchor>4</Anchor>", " <TextColor>%s</TextColor>" % ITEM_REST,
+                        " <DropShadowColor>%s</DropShadowColor>" % SHADOW, " <PointSize>18</PointSize>", " <TextStyle>16913</TextStyle>",
+                        " <LineSpacingAdjust>-4</LineSpacingAdjust>", " <DataAssociation>3</DataAssociation>", "</Properties>",
+                        "</XuiTextPresenter>"])
+    k = v.find("</XuiTextPresenter>", v.find("<Id>txt_line4</Id>")) + len("</XuiTextPresenter>")
+    v = v[:k] + "\n" + status + v[k:]
+    # the colour track for the new presenter (the other two have theirs)
+    track = re.search(r"<Timeline>\n <Id>txt_line4</Id>\n <TimelineProp>TextColor</TimelineProp>.*?</Timeline>\n", v, flags=re.S).group(0)
+    k = v.rfind("</Timelines>")
+    return v[:k] + track.replace("txt_line4", "txt_status") + v[k:]
+
+
+def bar_visual():
+    """prgbr_Download: a progress bar for a list row, a dark track with a
+    white fill scaled from nothing (Normal) to the full width (EndNormal),
+    the frame a XuiProgressBar's Value picks."""
+    bx, by, bw, bh = ROW_BAR
+    return "\n".join(["<XuiVisual>", "<Properties>", " <Id>prgbr_Download</Id>", " <Width>%g</Width>" % bw, " <Height>%g</Height>" % bh,
+                      "</Properties>",
+                      figure("track", 0, 0, bw, bh, solid("0x50000000")),
+                      figure("fill", 0, 0, bw, bh, solid("0xffffffff")),
+                      "<Timelines>",
+                      frames([("Normal", 0, "Stop", ""), ("EndNormal", 100, "Stop", "")]),
+                      track("fill", "Scale", [(0, 0, "0,1,1"), (100, 0, "1,1,1")]),
+                      "</Timelines>", "</XuiVisual>"])
 
 
 # ---- the pages --------------------------------------------------------------
@@ -343,14 +392,20 @@ def nav_button(id, x, y, w, h, label, visual=None, nav=None, children=""):
     return "\n".join(s)
 
 
-def list_capacity(block, visual=None):
+def list_capacity(block, visual=None, sections=None):
     """How many items the list's box holds (the rows of a dynamic page)."""
     vis, h, lines, icon = LIST_ITEMS[visual or prop(block, "Visual") or ""]
     pitch = h if h == 45 else h + 2
-    return int(float(prop(block, "Height")) // pitch)
+    return int((float(prop(block, "Height")) - len(sections or {}) * SECTION_H) // pitch)
 
 
-def list_items(block, items, visual=None, dynamic=False):
+def section_label(id, x, y, w, text):
+    return "\n".join(["<XuiText>", "<Properties>", " <Id>%s</Id>" % id, " <Width>%g</Width>" % w, " <Height>%g</Height>" % SECTION_H,
+                      " <Position>%g,%g,0</Position>" % (x, y), " <TextColor>0xffb4c0c8</TextColor>", " <PointSize>16</PointSize>",
+                      " <TextStyle>16400</TextStyle>", " <Text>%s</Text>" % text, "</Properties>", "</XuiText>"])
+
+
+def list_items(block, items, visual=None, dynamic=False, sections=None, bar=False):
     """A Blades list as its items: buttons with the skin's item visual,
     stacked down the list's box, chained up and down, the list's own
     sideways navigation on each.  The lines the dashboard would feed the
@@ -361,17 +416,23 @@ def list_items(block, items, visual=None, dynamic=False):
     vis, h, lines, icon = LIST_ITEMS[visual or prop(block, "Visual") or ""]
     # btn_3Line_Icon_prgbr's bar (the 360 feeds it the device's fill): the
     # same visual over it, held at the item's fraction
-    bar = (5, 76, 65, 21, "prgbr_Memory") if vis == "btn_3Line_Icon_prgbr" else None
+    if vis == "btn_3Line_Icon_prgbr":
+        bar = (5, 76, 65, 21, "prgbr_Memory")
     pitch = h if h == 45 else h + 2
     # the list's box holds so many; the rest would scroll on the 360
-    items = items[:int(float(prop(block, "Height")) // pitch)]
+    capacity = list_capacity(block, visual, sections)
+    items = items[:capacity]
     if dynamic:
         # every row, blank, with an icon slot and the gauge: the script
         # fills them (SetText, SetData, SetImage, SetValue, SetVisible)
-        items = [("", "", 0, "blank")] * int(float(prop(block, "Height")) // pitch)
+        items = [("", "", 0, "blank")] * capacity
     nav = {k: prop(block, k) for k in ("NavLeft", "NavRight") if prop(block, k)}
     out = []
+    dy = 0
     for i, item in enumerate(items):
+        if i in (sections or {}):
+            out.append(section_label("%s_section_%d" % (id, i), x + 8, y + i * pitch + dy, w, sections[i]))
+            dy += SECTION_H
         l1, l2, frac = item[:3]
         ico = item[3] if len(item) > 3 else ""
         n = dict(nav)
@@ -391,13 +452,18 @@ def list_items(block, items, visual=None, dynamic=False):
             kids.append("\n".join(["<XuiImage>", "<Properties>", " <Id>%s_%d_icon</Id>" % (id, i), " <Width>%g</Width>" % iw, " <Height>%g</Height>" % ih,
                                    " <Position>%g,%g,0</Position>" % (ix, iy), " <ImagePath>%s</ImagePath>" % ("" if ico == "blank" else ico),
                                    "</Properties>", "</XuiImage>"]))
-        if bar:
+        if bar is True:
+            bx, by, bw, bh = ROW_BAR
+            kids.append("\n".join(["<XuiProgressBar>", "<Properties>", " <Id>%s_%d_bar</Id>" % (id, i), " <Width>%g</Width>" % bw, " <Height>%g</Height>" % bh,
+                                   " <Position>%g,%g,0</Position>" % (bx, by), " <Visual>prgbr_Download</Visual>",
+                                   " <RangeMin>0</RangeMin>", " <RangeMax>1</RangeMax>", " <Value>%g</Value>" % frac, "</Properties>", "</XuiProgressBar>"]))
+        elif bar:
             bx, by, bw, bh, bvis = bar
             kids.append("\n".join(["<XuiProgressBar>", "<Properties>", " <Id>%s_%d_bar</Id>" % (id, i), " <Width>%g</Width>" % bw, " <Height>%g</Height>" % bh,
                                    " <Position>%g,%g,0</Position>" % (bx, by), " <Visual>%s</Visual>" % bvis,
                                    " <RangeMin>0</RangeMin>", " <RangeMax>1</RangeMax>", " <Value>%g</Value>" % frac, "</Properties>", "</XuiProgressBar>"]))
         n.update(data)
-        out.append(nav_button("%s_%d" % (id, i), x, y + i * pitch, w, h, label, vis if vis != "XuiButton" else None, n, "\n".join(kids)))
+        out.append(nav_button("%s_%d" % (id, i), x, y + i * pitch + dy, w, h, label, vis if vis != "XuiButton" else None, n, "\n".join(kids)))
     return out
 
 
@@ -433,7 +499,8 @@ def page(file, spec):
             if ("Empty" in id or id == "txt_Directions") and spec.get("lists"):
                 continue
             if b.startswith("<XuiList>") or b.startswith("<XuiCommonList>"):
-                kept += list_items(b, spec.get("lists", {}).get(id, []), spec.get("visual"), bool(spec.get("dynamic")))
+                kept += list_items(b, spec.get("lists", {}).get(id, []), spec.get("visual"), bool(spec.get("dynamic")),
+                                   spec.get("sections"), spec.get("bar", False))
                 continue
             # The meta panel is a nested scene with a Visual on the 360,
             # which the runtime does not skin; a label carries the same
@@ -513,7 +580,7 @@ def dynamic_info(spec):
     src = open(os.path.join(BLADES, spec["scene"])).read()
     for b in element_blocks(src)[1]:
         if b.startswith("<XuiList>") or b.startswith("<XuiCommonList>"):
-            return prop(b, "Id"), list_capacity(b, spec.get("visual"))
+            return prop(b, "Id"), list_capacity(b, spec.get("visual"), spec.get("sections"))
     return "", 0
 
 

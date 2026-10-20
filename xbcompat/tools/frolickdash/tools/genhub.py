@@ -539,6 +539,19 @@ DEF theLaunchLevel Level
             if (bLaunchSoundDone)
                 theGameCollection.LaunchGame(nLaunchGame);
         }
+        // the Downloads page follows its active download (twice a second)
+        if (bPageOpen)
+        {
+            if (sPage == "page_downloads")
+            {
+                nDlTick = nDlTick + 1;
+                if (nDlTick >= 10)
+                {
+                    nDlTick = 0;
+                    DlTick();
+                }
+            }
+        }
     }
 }
 
@@ -616,6 +629,10 @@ DEF theMemoryMonitor MemoryMonitor
     function OnTotalFreeChanged() { }
     function OnInvalidMU(a, b) { }
     function OnInvalidMURemoved() { }
+}
+
+DEF theDownloads Downloads
+{
 }
 
 DEF theStorage Storage
@@ -1002,8 +1019,8 @@ function PadStart()
 // the button that opens it, and a press first flies to the pad's focus
 // view, then opens the menu).  Library: Start launches the disc or game
 // card at once, X the recent games, Y the favorites.  Catalog: Start the
-// Marketplace, X (spotlight) its hot list, Y (downloads) its download
-// history.  Settings: Start the settings menu, X (quick panel) and Y
+// Marketplace, X (spotlight) its hot list, Y (downloads) the Downloads
+// page.  Settings: Start the settings menu, X (quick panel) and Y
 // (video) the console settings, Display first; the Blades scenes stand in
 // until the real pages exist.
 function HubButton(btn)
@@ -1033,7 +1050,7 @@ function HubButton(btn)
         if (btn == "x")
             FocusPad("page_store_hot");
         else
-            FocusPad("page_store_history");
+            FocusPad("page_downloads");
     }
     else
         FocusPad("page_console");
@@ -1052,6 +1069,12 @@ function PadX()
         return;
     if (bBusy)
         return;
+    if (bPageOpen)
+    {
+        if (PageKind(sPage) == "downloads")
+            DlRemove();
+        return;
+    }
     if (bZoomed)
         return;
     if (bLibraryOpen)
@@ -1373,6 +1396,8 @@ function PageFocus(id)
     {
         nSel = nScroll + r;
         UpdateTotal();
+        if (PageKind(sPage) == "downloads")
+            DlLegend();
     }
 }
 
@@ -1443,6 +1468,8 @@ function initialize()
     bLaunchPending = false;
     bLaunchSoundDone = false;
     nLaunchWait = 0;
+    nDlTick = 0;
+    nDlItem = 0;
     // the A pin's idle pulse: a small dip every PIN_PULSE_PERIOD seconds
     theOverlay.Pulse("promptA", %(pin_pulse_dy)s, %(pin_pulse_period)s, %(pin_pulse_dur)s);
     UpdateLibraryTile();
@@ -1472,6 +1499,8 @@ var nSave;          // the save the actions page is about
 var nDest;          // the device a copy goes to
 var sAction;        // "copy", "move", "delete", "deleteall"
 var sConfirmBack;   // the page behind the confirm or notice page
+var nDlTick;        // frames since the Downloads page last refreshed
+var nDlItem;        // the download a confirm is about
 
 // ---- the lists ----------------------------------------------------------
 
@@ -1551,6 +1580,8 @@ function ListCount()
         return theStorage.GetSaveCount(nTitle);
     if (k == "recent")
         return theGameCollection.GetRecentCount();
+    if (k == "downloads")
+        return DlListCount();
     return 0;
 }
 
@@ -1589,6 +1620,11 @@ function FillRow(r)
             img = "ico_64x_games.png";
         thePage.SetImage(id + "_icon", img);
     }
+    else if (k == "downloads")
+    {
+        DlFillRow(id, i);
+        return;
+    }
     else if (k == "saves")
     {
         thePage.SetText(id, theStorage.GetSaveName(i));
@@ -1619,6 +1655,11 @@ function UpdateTotal()
 {
     if (nRows == 0)
         return;
+    if (PageKind(sPage) == "downloads")
+    {
+        DlTotal();
+        return;
+    }
     if (nListCount == 0)
         thePage.SetText("labTotal", "");
     else
@@ -1667,6 +1708,8 @@ function PageEnter()
     FillPage();
     if (nListCount > 0)
         thePage.SetFocus(RowId(0));
+    if (k == "downloads")
+        DlEnter();
 }
 
 // The focus ran off an end of the rows: the list moves one item.
@@ -1674,6 +1717,8 @@ function PageScroll(dir)
 {
     if (nRows == 0)
         return;
+    if (PageKind(sPage) == "downloads")
+        return;     // its sections are fixed to their rows (no scrolling yet)
     if (dir == "down")
     {
         if (nScroll + nRows < nListCount)
@@ -1765,6 +1810,11 @@ function PageSpecial(id)
     }
     if (k == "favorites")
         return 1;
+    if (k == "downloads")
+    {
+        DlPress();
+        return 1;
+    }
     if (k == "dest")
     {
         nDest = DeviceAt(nSel, nDev);
@@ -1815,7 +1865,12 @@ function PageSpecial(id)
     if (sPage == "page_confirm")
     {
         if (id == "btnYes")
-            StorageStart();
+        {
+            if (sAction == "dlremove")
+                DlRemoveNow();
+            else
+                StorageStart();
+        }
         else
             ShowPage(sConfirmBack, "Fade");
         return 1;
@@ -1927,6 +1982,169 @@ function StorageFailed(text)
     bBusy = false;
     sAction = "";
     Notice(text, "page_memory_saves");
+}
+
+// ---- the Downloads page --------------------------------------------------
+// The NXE's Active Downloads (sokky 2026-10-20): row 0 is the active
+// download under "Active" (blank when none), the rows under "Pending"
+// the queue.  theDownloads lists the active item first, so the list's
+// virtual item v is download v - nDlOff (nDlOff 1 when nothing is
+// active, the blank row).  A starts a pending download now or pauses /
+// resumes the active one, X removes the focused one (asking first when
+// it is under way), the legend's A names what it does.
+
+function DlOff()
+{
+    return 1 - theDownloads.HasActive();
+}
+
+function DlListCount()
+{
+    var n = theDownloads.GetCount() + DlOff();
+    if (n > nRows)
+        n = nRows;      // no scrolling: the sections are fixed to their rows
+    return n;
+}
+
+function DlFillRow(id, v)
+{
+    var d = v - DlOff();
+    if (d < 0)
+    {
+        thePage.SetVisible(id, 0);
+        return;
+    }
+    thePage.SetText(id, theDownloads.GetName(d));
+    thePage.SetData(id, 1, theDownloads.GetKind(d) + "   " + theDownloads.GetDetail(d));
+    thePage.SetData(id, 3, theDownloads.GetStatus(d));
+    thePage.SetImage(id + "_icon", theDownloads.GetIcon(d));
+    if (d == 0)
+    {
+        if (theDownloads.HasActive() == 1)
+        {
+            thePage.SetValue(id + "_bar", theDownloads.GetProgress(d));
+            thePage.SetVisible(id + "_bar", 1);
+        }
+        else
+            thePage.SetVisible(id + "_bar", 0);
+    }
+    else
+        thePage.SetVisible(id + "_bar", 0);
+}
+
+function DlTotal()
+{
+    var n = theDownloads.GetCount();
+    var d = nSel - DlOff();
+    if (n == 0)
+        thePage.SetText("labTotal", "");
+    else if (d < 0)
+        thePage.SetText("labTotal", n + " waiting");
+    else
+        thePage.SetText("labTotal", (d + 1) + " of " + n);
+}
+
+// what A does to the focused item
+function DlLegend()
+{
+    var d = nSel - DlOff();
+    if (d < 0)
+        thePage.SetText("legend_a", "");
+    else if (d > 0)
+        thePage.SetText("legend_a", "Start Now");
+    else if (theDownloads.HasActive() == 0)
+        thePage.SetText("legend_a", "Start Now");
+    else if (theDownloads.IsPaused() == 1)
+        thePage.SetText("legend_a", "Resume");
+    else
+        thePage.SetText("legend_a", "Pause");
+    if (theDownloads.GetCount() == 0)
+        thePage.SetText("legend_x", "");
+    else
+        thePage.SetText("legend_x", "Remove");
+}
+
+// the page just opened: the first download focused (row 0 is blank when
+// nothing is active)
+function DlEnter()
+{
+    if (theDownloads.GetCount() == 0)
+        return;
+    nSel = DlOff();
+    thePage.SetFocus(RowId(nSel));
+    DlTotal();
+    DlLegend();
+}
+
+// the list again after a change, the focus kept on the same row
+function DlRefresh()
+{
+    var n = DlListCount();
+    nListCount = n;
+    if (nSel >= n)
+        nSel = n - 1;
+    if (nSel < DlOff())
+        nSel = DlOff();
+    FillPage();
+    if (n > DlOff())
+        thePage.SetFocus(RowId(nSel));
+    DlLegend();
+}
+
+// twice a second while the page shows: the active row's progress, or
+// the whole list when a download finished (the queue moved up)
+function DlTick()
+{
+    if (nRows == 0)
+        return;
+    if (DlListCount() != nListCount)
+        DlRefresh();
+    else if (theDownloads.HasActive() == 1)
+        DlFillRow(RowId(0), 0);
+}
+
+function DlPress()
+{
+    var d = nSel - DlOff();
+    if (d < 0)
+        return;
+    if (d == 0)
+    {
+        if (theDownloads.HasActive() == 1)
+            theDownloads.TogglePause();
+        else
+            theDownloads.StartNow(0);
+    }
+    else
+    {
+        theDownloads.StartNow(d);
+        nSel = 0;
+    }
+    DlRefresh();
+}
+
+function DlRemove()
+{
+    var d = nSel - DlOff();
+    if (d < 0)
+        return;
+    nDlItem = d;
+    if (theDownloads.GetProgress(d) > 0)
+    {
+        sAction = "dlremove";
+        Confirm("Remove " + theDownloads.GetName(d) + "?", "page_downloads");
+        return;
+    }
+    DlRemoveNow();
+}
+
+function DlRemoveNow()
+{
+    theDownloads.Remove(nDlItem);
+    if (sPage == "page_downloads")
+        DlRefresh();
+    else
+        ShowPage("page_downloads", "Fade");
 }
 """
 

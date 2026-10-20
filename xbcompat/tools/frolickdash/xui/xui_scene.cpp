@@ -52,8 +52,8 @@ bool Node::focusable()
 struct InitTimelines { bool operator()(Node* n) {
     if (!n->timeline) return true;
     if (n->owner && n->owner->visual == n && strcmp(n->owner->cls->name, "XuiProgressBar") == 0) {
-        float lo = propF(n->owner->props, "RangeMin", 0), hi = propF(n->owner->props, "RangeMax", 100);
-        float f = hi > lo ? (propF(n->owner->props, "Value", 0) - lo) / (hi - lo) : 0;
+        float lo = propN(n->owner->props, "RangeMin", 0), hi = propN(n->owner->props, "RangeMax", 100);
+        float f = hi > lo ? (propN(n->owner->props, "Value", 0) - lo) / (hi - lo) : 0;
         if (f < 0) f = 0; if (f > 1) f = 1;
         double a = n->frameTime("Normal", 0), b = n->frameTime("EndNormal", n->lastKey());
         n->time = a + (b - a) * f; n->playing = false; n->apply();

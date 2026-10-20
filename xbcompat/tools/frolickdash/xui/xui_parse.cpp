@@ -65,6 +65,10 @@ Object* Object::clone() const
 }
 
 float propF(Object& o, const char* k, float def) { Value* v = o.get(k); return v && v->type == TFloat ? v->f : def; }
+// a number whatever the class types it (RangeMin/RangeMax/Value are ints
+// in the XUI classes; script sets them as floats)
+float propN(Object& o, const char* k, float def) { Value* v = o.get(k); if (!v) return def;
+    return v->type == TFloat ? v->f : v->type == TInt ? (float)v->i : v->type == TUint ? (float)v->u : def; }
 unsigned int propU(Object& o, const char* k, unsigned int def) { Value* v = o.get(k); return v && (v->type == TUint || v->type == TInt) ? v->u : def; }
 bool propB(Object& o, const char* k, bool def) { Value* v = o.get(k); return v && v->type == TBool ? v->b != 0 : def; }
 Color propC(Object& o, const char* k, Color def) { Value* v = o.get(k); return v && v->type == TColor ? v->c : def; }
