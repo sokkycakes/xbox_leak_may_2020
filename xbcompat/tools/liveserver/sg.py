@@ -469,7 +469,7 @@ class Gateway:
         import socket
         sgaddr = self.site_ip + struct.pack('<I', spi_resp) + struct.pack('<Q', ticket.get('x', 0)) + bytes(4)
         tail = sgaddr + socket.inet_aton(peer[0]) + struct.pack('>H', peer[1]) + \
-            struct.pack('<HHH', 30, 900, 0)        # wPulseTimeout, wXbToSgTimeout, reserved
+            struct.pack('<HHH', 900, 30, 0)        # wXbToSgTimeoutInSecs, wXbToSgPulseTimeoutInSecs, pad
         enc = Des(keys[3]).cbc_encrypt(nonce_resp, tail)
         if os.environ.get('LIVE_DEBUG'):
             self.log(f'sg: retail tail key={keys[3].hex()} iv={nonce_resp.hex()} '
