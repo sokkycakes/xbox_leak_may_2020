@@ -198,11 +198,19 @@ unchanged, and only the script and two small nodes are Frolick's:
   game, or "No Disc"), the games follow.  Each cover carries the game's
   title image out of its XBE (`GetGameImage`, cached in `T:\GameImages`),
   drawn across the card (`pads/carousel_cover.xui`, set by
-  `Belt.SetGameImage`; the grid and tray tiles keep their small icons).  A
-  on a cover launches
-  it (`LaunchGame`: D: becomes the game's directory and the console
-  reboots into its XBE; when Frolick runs as a game, the game comes back
-  to the dashboard that launched Frolick, not to Frolick).
+  `Belt.SetGameImage`; the grid and tray tiles keep their small icons).
+  Start on a cover launches it (`LaunchGame`: D: becomes the game's
+  directory and the console reboots into its XBE; when Frolick runs as a
+  game, the game comes back to the dashboard that launched Frolick, not
+  to Frolick).  A opens the game's page over the belt: the Blades' Game
+  Summary scene (`art/blades/401_GameDetails.xui`, `page_game` in
+  genpage.py) as the Xbox dashboard's Games pod shows a game, with Play
+  Game, Game Storage (the title's saved games page from Settings >
+  Memory, B climbs back out through its parents) and, for a disc or card
+  game not on the hard disk, Install Game (`GameCollection.StartInstall`,
+  the header shows the copy's progress, a notice when it is done and the
+  belt rescans).  The meta pane carries the title image, title ID, saved
+  game count and where the game is.
 - Settings > Memory are the dashboard's Memory screen on the Blades pages:
   `nodes/Storage.cpp` hands script the engine's `CTitleArray` (the titles
   under a device's UDATA/TDATA with their saves, downloads and installed

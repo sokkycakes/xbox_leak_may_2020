@@ -25,7 +25,7 @@
 //   GetDeviceSpace(dev)  "12,345 blocks free of 123,456"
 //   GetDeviceFill(dev)   the used fraction, for a gauge
 //   Refresh()            scan the device's titles; returns their count
-//   GetTitleCount(), GetTitleName(i), GetTitleID(i), GetTitleInfo(i)
+//   GetTitleCount(), FindTitle(id), GetTitleName(i), GetTitleID(i), GetTitleInfo(i)
 //   GetTitleImage(i)     the title's TitleImage.xbx, or ""
 //   GetSaveCount(i)
 //   GetSaveName(s), GetSaveInfo(s), GetSaveImage(s), GetSaveKind(s)
@@ -71,6 +71,7 @@ public:
 
     int Refresh();
     int GetTitleCount();
+    CObject* FindTitle(CObject** rgparam, int nParam);   // FindTitle(id): the title's index on the device, -1 for none
     CStrObject* GetTitleName(int nTitle);
     CStrObject* GetTitleID(int nTitle);
     CStrObject* GetTitleInfo(int nTitle);
@@ -126,6 +127,7 @@ START_NODE_FUN(CStorage, CNode)
     NODE_FUN_NI(GetDeviceFill)
     NODE_FUN_IV(Refresh)
     NODE_FUN_IV(GetTitleCount)
+    NODE_FUN(FindTitle)
     NODE_FUN_SI(GetTitleName)
     NODE_FUN_SI(GetTitleID)
     NODE_FUN_SI(GetTitleInfo)
@@ -272,6 +274,22 @@ int CStorage::Refresh()
 int CStorage::GetTitleCount()
 {
     return DevOK(m_device) ? g_titles[m_device].GetTitleCount() : 0;
+}
+
+// The index of the title with this ID (as GetTitleID gives it) on the
+// device, after a refresh, or -1.
+CObject* CStorage::FindTitle(CObject** rgparam, int nParam)
+{
+    if (nParam != 1)
+        return new CNumObject(-1.0f);
+    const TCHAR* szID = rgparam[0]->Deref()->ToStr()->GetSz();
+    int n = Refresh();
+    for (int i = 0; i < n; i++)
+    {
+        if (lstrcmpi(g_titles[m_device].GetTitleID(i), szID) == 0)
+            return new CNumObject((float)i);
+    }
+    return new CNumObject(-1.0f);
 }
 
 CStrObject* CStorage::GetTitleName(int nTitle)

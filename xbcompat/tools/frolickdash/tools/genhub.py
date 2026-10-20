@@ -520,9 +520,9 @@ DEF theGameCollection GameCollection
         if (bLibraryOpen)
             RefreshBelt();
     }
-    function OnInstallProgress() { }
-    function OnInstallComplete() { }
-    function OnInstallError() { }
+    function OnInstallProgress() { InstallProgress(); }
+    function OnInstallComplete() { InstallDone(); }
+    function OnInstallError() { Notice(theGameCollection.GetInstallError(), "page_game"); bBusy = false; }
 }
 
 DEF theMemoryMonitor MemoryMonitor
@@ -556,6 +556,7 @@ var nPad;       // 0 catalog, 1 library, 2 settings
 var bMoving;
 var bZoomed;    // the camera is on the pad's focus view (catalog, settings)
 var bLibraryOpen;   // the camera is in the game belt
+var nGame;          // the belt game whose page is open (GameCollection index)
 var bPageOpen;      // the padfocus page is up (after the zoom)
 var bBusy;          // a copy or delete runs: input waits
 
@@ -686,6 +687,7 @@ DEF theHub Level
         function OnADown() { PadPress(); }
         function OnBDown() { PadBack(); }
         function OnYDown() { PadY(); }
+        function OnStartDown() { PadStart(); }
     }
 }
 
@@ -711,6 +713,14 @@ function PadMove(dir, step)
     }
     if (bLibraryOpen)
     {
+        if (bPageOpen)
+        {
+            if (bBusy)
+                return;
+            if (thePage.Navigate(dir) == 0)
+                PageScroll(dir);
+            return;
+        }
         // the belt: left scrolls it right (Belt_Right), right scrolls it left
         if (step < 0)
             theBelt.Step(0 - 1);
@@ -744,8 +754,16 @@ function PadPress()
     }
     if (bLibraryOpen)
     {
+        // A on a cover opens the game's page; Start launches it (PadStart)
+        if (bPageOpen)
+        {
+            if (bBusy)
+                return;
+            thePage.Press();
+            return;
+        }
         if (theBelt.IsBusy() == 0)
-            LaunchSelected();
+            OpenGamePage();
         return;
     }
 
@@ -796,9 +814,9 @@ function RefreshBelt()
     theOverlay.SetText("title", GameName(theBelt.GetSelected()));
 }
 
-// A on a cover: the game starts (D: becomes its directory and the
-// console reboots into its XBE).  The empty tray and the grid tile do
-// nothing yet.
+// Start on a cover: the game starts at once (D: becomes its directory
+// and the console reboots into its XBE).  The empty tray and the grid
+// tile do nothing yet.
 function LaunchSelected()
 {
     var sel = theBelt.GetSelected();
@@ -807,6 +825,104 @@ function LaunchSelected()
     if (theGameCollection.IsPlayable(sel - 1) == 0)
         return;
     theGameCollection.LaunchGame(sel - 1);
+}
+
+function PadStart()
+{
+    if (bMoving)
+        return;
+    if (bBusy)
+        return;
+    if (bLibraryOpen == false)
+        return;
+    if (bPageOpen)
+        return;
+    if (theBelt.IsBusy() == 0)
+        LaunchSelected();
+}
+
+// A on a cover: the game's page (the Blades' Game Summary) over the
+// belt: Play Game, Game Storage (its saved games in Settings > Memory),
+// Install Game for a disc or card game not on the hard disk.
+function OpenGamePage()
+{
+    var sel = theBelt.GetSelected();
+    if (sel == 0)
+        return;
+    if (theGameCollection.IsPlayable(sel - 1) == 0)
+        return;
+    nGame = sel - 1;
+    bPageOpen = true;
+    ShowBeltHints(0);
+    theOverlay.SetOpacity("promptA", 0);
+    ShowPage("page_game", "Open");
+    PageChrome(0);
+}
+
+// The page's facts about the game, and whether Install Game applies.
+function FillGamePage()
+{
+    var kind = theGameCollection.GetGameKind(nGame);
+    var where = "Hard drive";
+    var bInstall = 0;
+    if (kind == 1)
+        where = "Disc";
+    if (kind == 2)
+        where = "Game card";
+    if (kind != 3)
+    {
+        if (theGameCollection.IsInstalled(nGame) == 1)
+            where = where + ", installed";
+        else
+            bInstall = 1;
+    }
+    thePage.SetText("labGameTitle", theGameCollection.GetGameName(nGame));
+    thePage.SetImage("imgGameIcon", theGameCollection.GetGameImage(nGame));
+    thePage.SetText("labRecentAchievementsText", "Title ID " + theGameCollection.GetGameTitleID(nGame));
+    thePage.SetText("labAchievementsNum", "" + theGameCollection.GetSavedGameCount(nGame));
+    thePage.SetText("labGamerPointsNum", where);
+    thePage.SetVisible("btnBrowseDownloads", bInstall);
+}
+
+// Game Storage: the title's saved games page, as Settings > Memory shows
+// it (B climbs out through the titles and devices pages).
+function OpenGameStorage()
+{
+    var t;
+    nDev = 8;
+    theStorage.device = nDev;
+    t = theStorage.FindTitle(theGameCollection.GetGameTitleID(nGame));
+    if (t < 0)
+    {
+        Notice("This game has no saved games or stored items yet.", "page_game");
+        return;
+    }
+    nTitle = t;
+    ShowPage("page_memory_saves", "Fade");
+}
+
+function StartInstall()
+{
+    if (theGameCollection.StartInstall(nGame) == 0)
+    {
+        Notice("This game can't be installed.", "page_game");
+        return;
+    }
+    bBusy = true;
+    SetHeader("Installing...");
+}
+
+function InstallProgress()
+{
+    if (bBusy)
+        SetHeader("Installing... " + theGameCollection.GetInstallStatus());
+}
+
+function InstallDone()
+{
+    bBusy = false;
+    RefreshBelt();
+    Notice("The game is installed on the hard drive.", "page_game");
 }
 
 // In the belt view the hub's A prompt goes and the B/back hint
@@ -866,6 +982,15 @@ function PadBack()
         return;
     if (bLibraryOpen)
     {
+        if (bPageOpen)
+        {
+            // the game's page, or a Memory page reached from it
+            if (PageBack() == 1)
+                return;
+            ClosePage();
+            ShowBeltHints(1);
+            return;
+        }
         if (theBelt.IsBusy() == 0)
             CloseLibrary();
         return;
@@ -1062,6 +1187,7 @@ function initialize()
     nTitle = 0;
     nSave = 0;
     nDest = 8;
+    nGame = 0;
     EnableInput(true);
     theHub.GoTo();
     padLibrary.Play("", "Intro");
@@ -1244,6 +1370,11 @@ function FillPage()
 function PageEnter()
 {
     var k = PageKind(sPage);
+    if (k == "game")
+    {
+        FillGamePage();
+        return;
+    }
     nRows = PageRows(sPage);
     if (nRows == 0)
         return;
@@ -1306,6 +1437,8 @@ function PageHeader()
         SetHeader(theStorage.GetTitleName(nTitle));
     if (sPage == "page_memory_actions")
         SetHeader(theStorage.GetSaveName(nSave));
+    if (sPage == "page_game")
+        SetHeader(theGameCollection.GetGameName(nGame));
 }
 
 // ---- what A does on the Memory pages ------------------------------------
@@ -1362,6 +1495,16 @@ function PageSpecial(id)
             Confirm("Replace the copy on " + theStorage.GetDeviceName(nDest) + "?", "page_memory_dest");
         else
             StorageStart();
+        return 1;
+    }
+    if (k == "game")
+    {
+        if (id == "btnViewAchievements")
+            theGameCollection.LaunchGame(nGame);
+        else if (id == "btnManageGameFiles")
+            OpenGameStorage();
+        else
+            StartInstall();
         return 1;
     }
     if (sPage == "page_memory_actions")
