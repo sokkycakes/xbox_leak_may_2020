@@ -32,6 +32,7 @@ struct GAMEINFO
     CHAR m_szRuntime[32];       // the cart's Kazeta runtime
     CHAR m_szId[64];            // the cart's Kazeta save Id
     CHAR m_szPlatform[32];      // the cart's Platform key, when its .kzi names one
+    CHAR m_szPublisher[48];     // the cart's Publisher (or Developer) key, when its .kzi names one
     WCHAR m_szName[41];
     DWORD m_dwTitleID;
     DWORD m_dwTimeDate;         // XBE build time (seconds since 1970)
@@ -70,6 +71,7 @@ public:
     CStrObject* GetGameFolder(int nGame);
     CStrObject* GetGameTitleID(int nGame);
     CStrObject* GetGamePlatform(int nGame);
+    CStrObject* GetGamePublisher(int nGame);
     CStrObject* GetGameRuntime(int nGame);
     CStrObject* GetGameInfo(int nGame);
     CStrObject* GetSavedGames(int nGame);
@@ -108,6 +110,7 @@ START_NODE_FUN(CGameCollection, CNode)
     NODE_FUN_SI(GetGameFolder)
     NODE_FUN_SI(GetGameTitleID)
     NODE_FUN_SI(GetGamePlatform)
+    NODE_FUN_SI(GetGamePublisher)
     NODE_FUN_SI(GetGameRuntime)
     NODE_FUN_SI(GetGameInfo)
     NODE_FUN_SI(GetSavedGames)
@@ -271,6 +274,10 @@ static void ReadCart(const CHAR* szKzi, GAMEINFO* pGame)
                 lstrcpynA(pGame->m_szRuntime, pchValue, sizeof (pGame->m_szRuntime));
             else if (_stricmp(pchLine, "Platform") == 0)
                 lstrcpynA(pGame->m_szPlatform, pchValue, sizeof (pGame->m_szPlatform));
+            else if (_stricmp(pchLine, "Publisher") == 0)
+                lstrcpynA(pGame->m_szPublisher, pchValue, sizeof (pGame->m_szPublisher));
+            else if (_stricmp(pchLine, "Developer") == 0 && pGame->m_szPublisher[0] == 0)
+                lstrcpynA(pGame->m_szPublisher, pchValue, sizeof (pGame->m_szPublisher));
             else if (_stricmp(pchLine, "Exec") == 0)
                 lstrcpynA(szExec, pchValue, sizeof (szExec));
         }
@@ -587,23 +594,79 @@ static void GetXbePath(int nGame, CHAR* szPath)
     sprintf(szPath, "%s\\%s", c_rgGames[nGame].m_szDir, c_rgGames[nGame].m_szXbe);
 }
 
+// The publisher behind a title ID: its top two bytes are two ASCII letters
+// the publisher was assigned.  The names are the Title ID table of the
+// XboxDev wiki's Xbe page (https://xboxdevwiki.net/Xbe, read 2026-10-20);
+// a code not in it comes back as its two letters.
+static const struct { CHAR sz[3]; const TCHAR* szName; } c_rgPublishers [] =
+{
+    { "AC", _T("Acclaim Entertainment") }, { "AH", _T("ARUSH Entertainment") }, { "AP", _T("Aquaplus") },
+    { "AQ", _T("Aqua System") }, { "AS", _T("ASK") }, { "AT", _T("Atlus") }, { "AV", _T("Activision") },
+    { "AY", _T("Aspyr Media") }, { "BA", _T("Bandai") }, { "BL", _T("Black Box") },
+    { "BM", _T("BAM! Entertainment") }, { "BR", _T("Broccoli Co.") }, { "BS", _T("Bethesda Softworks") },
+    { "BU", _T("Bunkasha Co.") }, { "BV", _T("Buena Vista Games") }, { "BW", _T("BBC Multimedia") },
+    { "BZ", _T("Blizzard") }, { "CC", _T("Capcom") }, { "CK", _T("Kemco Corporation") },
+    { "CM", _T("Codemasters") }, { "CT", _T("CTO S.p.A.") }, { "CV", _T("Crave Entertainment") },
+    { "DC", _T("DreamCatcher Interactive") }, { "DX", _T("Davilex") }, { "EA", _T("Electronic Arts") },
+    { "EC", _T("Encore") }, { "EL", _T("Enlight Software") }, { "EM", _T("Empire Interactive") },
+    { "ES", _T("Eidos Interactive") }, { "FI", _T("Fox Interactive") }, { "FS", _T("From Software") },
+    { "GE", _T("Genki Co.") }, { "GV", _T("Groove Games") }, { "HE", _T("Tru Blu") }, { "HP", _T("Hip Games") },
+    { "HU", _T("Hudson Soft") }, { "HW", _T("Highwaystar") }, { "IA", _T("Mad Catz Interactive") },
+    { "IF", _T("Idea Factory") }, { "IG", _T("Infogrames") }, { "IL", _T("Interlex Corporation") },
+    { "IM", _T("Imagine Media") }, { "IO", _T("Ignition Entertainment") }, { "IP", _T("Interplay Entertainment") },
+    { "IX", _T("InXile Entertainment") }, { "JA", _T("Jaleco") }, { "JW", _T("JoWooD") }, { "KB", _T("Kemco") },
+    { "KI", _T("Kids Station Inc.") }, { "KK", _T("KiKi") }, { "KN", _T("Konami") }, { "KO", _T("KOEI") },
+    { "KT", _T("Konami Tokyo") }, { "KU", _T("Kobi / GAE") }, { "LA", _T("LucasArts") },
+    { "LS", _T("Black Bean Games") }, { "MD", _T("Metro3D") }, { "ME", _T("Medix") }, { "MI", _T("Microids") },
+    { "MJ", _T("Majesco Entertainment") }, { "MM", _T("Myelin Media") }, { "MP", _T("MediaQuest") },
+    { "MS", _T("Microsoft Game Studios") }, { "MW", _T("Midway Games") }, { "MX", _T("Empire Interactive") },
+    { "NK", _T("NewKidCo") }, { "NL", _T("NovaLogic") }, { "NM", _T("Namco") }, { "OX", _T("Oxygen Interactive") },
+    { "PC", _T("Playlogic Entertainment") }, { "PL", _T("Phantagram Co., Ltd.") }, { "RA", _T("Rage") },
+    { "SA", _T("Sammy") }, { "SC", _T("SCi Games") }, { "SE", _T("SEGA") }, { "SN", _T("SNK") },
+    { "SS", _T("Simon & Schuster") }, { "SU", _T("Success Corporation") }, { "SW", _T("Swing! Deutschland") },
+    { "TA", _T("Takara") }, { "TC", _T("Tecmo") }, { "TD", _T("The 3DO Company") }, { "TK", _T("Takuyo") },
+    { "TM", _T("TDK Mediactive") }, { "TQ", _T("THQ") }, { "TS", _T("Titus Interactive") },
+    { "TT", _T("Take-Two Interactive Software") }, { "US", _T("Ubisoft") }, { "VC", _T("Victor Interactive Software") },
+    { "VN", _T("Vivendi Universal") }, { "VU", _T("Vivendi Universal Games") }, { "VV", _T("Vivendi Universal Games") },
+    { "WE", _T("Wanadoo Edition") }, { "WR", _T("Warner Bros. Interactive Entertainment") },
+    { "XM", _T("Evolved Games") }, { "XP", _T("XPEC Entertainment") }, { "XR", _T("Panorama") },
+    { "YB", _T("YBM Sisa") }, { "ZD", _T("Zushi Games") },
+};
+
 static const TCHAR* GetPublisher(DWORD dwTitleID)
 {
-    static const struct { CHAR sz[3]; const TCHAR* szName; } rgPub [] =
-    {
-        { "MS", _T("Microsoft") }, { "EA", _T("Electronic Arts") }, { "AC", _T("Acclaim") },
-        { "AV", _T("Activision") }, { "CM", _T("Capcom") }, { "KN", _T("Konami") },
-        { "NM", _T("Namco") }, { "SE", _T("Sega") }, { "TC", _T("Tecmo") },
-        { "TQ", _T("THQ") }, { "UB", _T("Ubisoft") }, { "EM", _T("Eidos") },
-        { "IF", _T("Infogrames") }, { "MW", _T("Midway") }, { "SQ", _T("Square Enix") },
-    };
     CHAR sz[3] = { (CHAR)(dwTitleID >> 24), (CHAR)(dwTitleID >> 16), 0 };
-    for (int i = 0; i < countof(rgPub); i += 1)
+    for (int i = 0; i < countof(c_rgPublishers); i += 1)
     {
-        if (strcmp(sz, rgPub[i].sz) == 0)
-            return rgPub[i].szName;
+        if (strcmp(sz, c_rgPublishers[i].sz) == 0)
+            return c_rgPublishers[i].szName;
     }
     return NULL;
+}
+
+// The publisher as the library tile shows it: an Xbox game's from its
+// title ID (the two letters themselves when the table has no name for
+// them), a cart's from its .kzi Publisher (or Developer) key, else nothing.
+CStrObject* CGameCollection::GetGamePublisher(int nGame)
+{
+    if (nGame < 0 || nGame >= c_nGameCount)
+        return new CStrObject;
+    const GAMEINFO* pGame = &c_rgGames[nGame];
+    if (pGame->m_szPublisher[0] != 0)
+    {
+        TCHAR szOwn [48];
+        _stprintf(szOwn, _T("%hs"), pGame->m_szPublisher);
+        return new CStrObject(szOwn);
+    }
+    if (pGame->m_nKind != KIND_CARD || pGame->m_bXbox)
+    {
+        const TCHAR* szPub = GetPublisher(pGame->m_dwTitleID);
+        if (szPub != NULL)
+            return new CStrObject(szPub);
+        TCHAR szCode [3] = { (TCHAR)(BYTE)(pGame->m_dwTitleID >> 24), (TCHAR)(BYTE)(pGame->m_dwTitleID >> 16), 0 };
+        return new CStrObject(szCode);
+    }
+    return new CStrObject;
 }
 
 // Days since 1970-01-01 to a calendar date.

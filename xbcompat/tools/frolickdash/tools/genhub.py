@@ -882,7 +882,7 @@ function OpenLibrary()
 // console's games as GameCollection lists them (the disc tray or game
 // card slots first, then E:\Games), each cover with the game's title image.
 // The library pad's game tile: the disc or game card that is in (its
-// cover, name and platform, Start to launch), or sokky's no-media variant
+// cover, name and publisher, Start to launch), or sokky's no-media variant
 // of the panel (Figma 143:47: "Insert a Game Disc or Game Card." and the
 // disc and card icons) when neither is present.  Kept current by
 // OnMediaChanged.
@@ -908,7 +908,7 @@ function UpdateLibraryTile()
     {
         on = 1;
         padLibrary.SetText("title", theGameCollection.GetGameName(found));
-        padLibrary.SetText("subtitle", theGameCollection.GetGamePlatform(found));
+        padLibrary.SetText("subtitle", theGameCollection.GetGamePublisher(found));
         padLibrary.SetImage("cover", theGameCollection.GetGameImage(found));
     }
     padLibrary.SetVisible("coverFrame", on);

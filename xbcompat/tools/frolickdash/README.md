@@ -192,7 +192,11 @@ and launching games) comes from the dashboard's own code, compiled in
 unchanged, and only the script and two small nodes are Frolick's:
 
   The library pad's own game tile shows the disc or game card that is
-  in (cover, name, platform, Start) and, when neither is present, sokky's
+  in (cover, name, publisher, Start; the publisher is the title ID's
+  two-letter code named through the XboxDev wiki's table in
+  GameCollection.cpp, the bare code when the table has no name, a cart's
+  Publisher= or Developer= .kzi key, since an XBE carries no developer
+  name) and, when neither is present, sokky's
   no-media variant of the panel (Figma 143:47: "Insert a Game Disc or
   Game Card." with the Material Symbols disc and card icons,
   art/figma/nodisc_*.svg rasterised by tools/svgicon.py); the hub's
