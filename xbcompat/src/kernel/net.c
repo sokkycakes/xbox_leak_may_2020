@@ -199,12 +199,18 @@ static void nat_udp(uint32_t src, uint32_t dst, const uint8_t *udp, unsigned len
     if (dst == 0xFFFFFFFF || (dst & ~NET_MASK) == (~NET_MASK & 0xFFFFFFFF) || (dst >> 28) == 0xE) return;   /* broadcast, multicast */
 
     struct sockaddr_in to = { .sin_family = AF_INET, .sin_addr.s_addr = htonl(dst), .sin_port = htons(dport) };
-    if (dst == NET_DNS && dport == 53) to = dns_server;
+    /* Any DNS question goes to our resolver, whatever server the title
+       asks: its settings may name one of their own. */
+    if (dport == 53) to = dns_server;
     else if (dst == NET_GW) to.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     else if ((dst & NET_MASK) == (NET_GW & NET_MASK)) return;
 
     pthread_mutex_lock(&net_lock);
+    int had = nflows;
     struct flow *f = flow_for(sport);
+    if (f && nflows != had)
+        xlog("net: console UDP port %u first sends to %u.%u.%u.%u:%u", sport, dst >> 24, (dst >> 16) & 255,
+             (dst >> 8) & 255, dst & 255, dport);
     if (f) {
         f->last_used = time(NULL);
         if (sendto(f->fd, data, dlen, 0, (struct sockaddr *)&to, sizeof to) < 0)
@@ -219,6 +225,9 @@ static void nat_tcp(uint32_t src, uint32_t dst, const uint8_t *tcp, unsigned len
     if (len < 20) return;
     uint8_t flags = tcp[13];
     if (flags & 0x04) return;   /* never answer a reset */
+    if ((flags & 0x12) == 0x02)
+        xlog("net: refused a TCP connection to %u.%u.%u.%u:%u", dst >> 24, (dst >> 16) & 255, (dst >> 8) & 255,
+             dst & 255, rd16(tcp + 2));
     uint8_t r[20] = { 0 };
     wr16(r, rd16(tcp + 2));
     wr16(r + 2, rd16(tcp));

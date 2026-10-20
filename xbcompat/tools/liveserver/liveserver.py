@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """A stand-in for the 2002 Xbox Live data center, for xbcompat.
 
-  DNS      answers the Live host names (macs/kdc/passport.*.xbox.com) with the
+  DNS      answers the Live host names (*.xbox.com, and retail's *.xboxlive.com) with the
            server's address and forwards everything else
   UDP 88   MACS, AS and the Xbox KDC (kdc.py)
   UDP 3074 the security gateway and the account service behind it (sg.py)
@@ -23,7 +23,7 @@ import db as dbmod      # noqa: E402
 import kdc as kdcmod    # noqa: E402
 import sg as sgmod      # noqa: E402
 
-LIVE_NAMES = ('xbox.com',)
+LIVE_NAMES = ('xbox.com', 'xboxlive.com')   # the 2002 beta's names, then retail's
 
 
 def log(msg):
@@ -58,6 +58,7 @@ class Dns:
                 bytes(4)
             sock.sendto(hdr + question + answer, peer)
             return
+        log(f'dns: {name} (type {qtype}) passed upstream')
         self.pending[data[:2]] = (sock, peer)
         self.up.sendto(data, self.upstream)
 
