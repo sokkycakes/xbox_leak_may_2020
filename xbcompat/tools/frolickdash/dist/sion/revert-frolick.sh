@@ -6,6 +6,7 @@ D=/opt/xbcompat/dash
 for f in xboxdash.xbe xboxdash.map default.xip; do
   [ -f "$D/$f.pre-frolick" ] && mv "$D/$f.pre-frolick" "$D/$f"
 done
+rm -f "$D/launch.wav"   # Frolick's launch sound; the Xbox dashboard has none
 chmod 644 $D/xboxdash.xbe $D/xboxdash.map $D/default.xip
 sion persist $D/xboxdash.xbe $D/xboxdash.map $D/default.xip >/dev/null
 /etc/init.d/S98xbox start >/dev/null

@@ -202,10 +202,14 @@ unchanged, and only the script and two small nodes are Frolick's:
   Start on a cover launches it the way the Xbox dashboard launches a
   game (`LaunchGameWithLogo`, as default.xap's theLauncherLevel): the
   launch Level's backdrop, the dashboard's own xboxlogo.bmp on black,
-  binds at once and the hub cross-fades out over it in the Level's
-  0.75 s (every node of the hub multiplies by `g_nEffectAlpha`; the
-  ribbon, discs and dome fade through the texture factor), the logo
-  holds 1.1 s after arrival, then `LaunchGame` keeps the frame
+  binds at once, the launch sound starts (`theLaunchSound`, an
+  AudioClip on launch.wav, sokky's pick in art/sounds, a loose file
+  beside the XBE as the dashboard keeps its own sounds) and the hub
+  cross-fades out over it in the Level's 0.75 s (every node of the hub
+  multiplies by `g_nEffectAlpha`; the ribbon, discs and dome fade through
+  the texture factor), the logo holds until the sound has finished
+  (`OnEndOfAudio`; at once if the sound could not start, after 10 s if
+  it never reports its end), then `LaunchGame` keeps the frame
   (`PersistDisplay`), D: becomes the game's directory and the console
   reboots into its XBE; when Frolick runs as a game, the game comes back
   to the dashboard that launched Frolick, not to Frolick.  Play Game on

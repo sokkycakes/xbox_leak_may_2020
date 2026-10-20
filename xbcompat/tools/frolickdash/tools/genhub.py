@@ -501,6 +501,16 @@ DEF theXboxLogoBackground Background
     backdrop ImageTexture { url "xboxlogo.bmp" }
 }
 
+// The launch sound (art/sounds/launch.wav, sokky's pick, a loose file beside
+// the XBE as the dashboard keeps its own sounds) starts with the launch;
+// the logo holds until it has finished playing.
+DEF theLaunchSound AudioClip
+{
+    url "launch.wav"
+    volume 1
+    function OnEndOfAudio() { bLaunchSoundDone = true; }
+}
+
 DEF theLaunchLevel Level
 {
     function OnActivate()
@@ -511,18 +521,23 @@ DEF theLaunchLevel Level
     function OnArrival()
     {
         theXboxLogoBackground.isBound = true;
-        // the hold starts once the cross-fade has landed on the logo
+        // the cross-fade has landed on the logo
         bLaunching = true;
     }
     behavior
     {
         // (a level's behavior runs from start-up, before any GoTo, so it
-        // polls for the arrival flag, as the dashboard's g_bAboutToReboot)
+        // polls for the arrival flag, as the dashboard's g_bAboutToReboot;
+        // the launch waits for the sound to end as well, or for 10 s if
+        // the sound never reports its end)
         sleep 0.05;
         if (bLaunching)
         {
-            sleep 1.1;
-            theGameCollection.LaunchGame(nLaunchGame);
+            nLaunchWait = nLaunchWait + 1;
+            if (nLaunchWait > 200)
+                bLaunchSoundDone = true;
+            if (bLaunchSoundDone)
+                theGameCollection.LaunchGame(nLaunchGame);
         }
     }
 }
@@ -612,6 +627,8 @@ var nGame;          // the belt game whose page is open (GameCollection index)
 var nLaunchGame;    // the game the launch level starts
 var bLaunching;     // set when the launch level has faded in
 var bLaunchPending; // a launch is under way (ignore further presses)
+var bLaunchSoundDone; // the launch sound has finished (OnEndOfAudio)
+var nLaunchWait;    // polls since arrival, the 10 s fallback
 var bPageOpen;      // the padfocus page is up (after the zoom)
 var bBusy;          // a copy or delete runs: input waits
 
@@ -893,6 +910,11 @@ function LaunchGameWithLogo(n)
         return;
     bLaunchPending = true;
     nLaunchGame = n;
+    bLaunchSoundDone = false;
+    nLaunchWait = 0;
+    theLaunchSound.Play();
+    if (theLaunchSound.transportMode != 1)   // no sound: don't wait for it
+        bLaunchSoundDone = true;
     theLaunchLevel.GoTo();
 }
 
@@ -1266,6 +1288,8 @@ function initialize()
     nLaunchGame = 0;
     bLaunching = false;
     bLaunchPending = false;
+    bLaunchSoundDone = false;
+    nLaunchWait = 0;
     // the A pin's idle pulse: a small dip every PIN_PULSE_PERIOD seconds
     theOverlay.Pulse("promptA", %(pin_pulse_dy)s, %(pin_pulse_period)s, %(pin_pulse_dur)s);
     EnableInput(true);
