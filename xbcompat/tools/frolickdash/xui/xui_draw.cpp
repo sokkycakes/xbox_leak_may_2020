@@ -542,6 +542,13 @@ Texture Renderer::imageTex(const char* path, int* w, int* h)
     Texture t = lookup(key, w, h);
     if (t != (Texture)-1) return t;
     t = 0;
+    // the console's own texture files (.xbx) are the host's to decode
+    const char* ext = strrchr(path, '.');
+    if (ext && (ext[1] == 'x' || ext[1] == 'X') && (ext[2] == 'b' || ext[2] == 'B') && (ext[3] == 'x' || ext[3] == 'X') && !ext[4]) {
+        t = be->native(path, w, h);
+        remember(key, t, *w, *h);
+        return t;
+    }
     Image* img = res->image(path);
     if (img) {
         t = be->upload(*img);

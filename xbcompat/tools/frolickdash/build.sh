@@ -37,7 +37,9 @@ for src in "$HERE"/xui/*.cpp "$HERE"/nodes/*.cpp; do
     f=$(basename "$src"); o="$OUT/obj/${f%.cpp}.obj"
     [ -s "$o" ] && [ "$o" -nt "$src" ] && [ "$o" -nt "$HERE/xui/xui.h" ] && continue
     echo "cc $f"
-    WORK="$WORK" XB="$XB" CC_DIR="$WORK/xb/private/ui/xapp" CC_OUT="$(echo "Z:$OUT/obj/" | tr / '\\')" \
+    # (dashbuild's patched TitleCollection.h first: the Storage node reads
+    # the Memory screen's title list, downloads and installed games included)
+    WORK="$WORK" XB="$XB" CC_DIR="$WORK/xb/private/ui/xapp" CC_INC_PRE="$W\\patch;" CC_OUT="$(echo "Z:$OUT/obj/" | tr / '\\')" \
         python3 "$DASHBUILD/cc.py" "$(echo "Z:$src" | tr / '\\')" -D_AUDIO -D_CDPLAYER
 done
 
@@ -53,11 +55,18 @@ s = open(src, encoding="latin-1").read()
 fn = r"""
 // Frolick: its XIP, scenes and fonts sit beside the XBE when it runs as a
 // game (D:), on the dashboard partition (Y:) when it is the dashboard.
+// The dashboard build is told by its title ID (imagebld /TESTID FFFE0000;
+// the game and test builds carry their own): the XBE header's certificate
+// pointer at 0x118, the certificate's title ID at 8.  A disc in the tray
+// with a default.xip of its own must not pull the dashboard off Y:.
 static const TCHAR* AppDrive()
 {
 	static TCHAR szDrive [4];
 	if (!szDrive[0])
-		_tcscpy(szDrive, GetFileAttributes("d:\\default.xip") != 0xFFFFFFFF ? _T("d:\\") : _T("y:\\"));
+	{
+		DWORD dwCert = *(DWORD*)0x10118;
+		_tcscpy(szDrive, *(DWORD*)(dwCert + 8) == 0xFFFE0000 ? _T("y:\\") : _T("d:\\"));
+	}
 	return szDrive;
 }
 """

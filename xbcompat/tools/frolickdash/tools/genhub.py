@@ -507,11 +507,57 @@ DEF theZoomer CameraMover
     }
 }
 
+// The console behind the views, the dashboard's own code: the games on
+// the disc, the game card and the hard disk (GameCollection, which also
+// launches them), the saved games and their devices (Storage over the
+// Memory screen's title lists and copier), the memory units coming and
+// going (MemoryMonitor).
+DEF theGameCollection GameCollection
+{
+    // a disc or game card came or went: the belt's tiles change
+    function OnMediaChanged()
+    {
+        if (bLibraryOpen)
+            RefreshBelt();
+    }
+    function OnInstallProgress() { }
+    function OnInstallComplete() { }
+    function OnInstallError() { }
+}
+
+DEF theMemoryMonitor MemoryMonitor
+{
+    enumerationOn true
+    function OnDeviceChange()
+    {
+        if (bPageOpen)
+        {
+            if (PageKind(sPage) == "devices")
+                PageEnter();
+            if (PageKind(sPage) == "dest")
+                PageEnter();
+        }
+    }
+    function OnCurDevUnitChange() { }
+    function OnTotalFreeChanged() { }
+    function OnInvalidMU(a, b) { }
+    function OnInvalidMURemoved() { }
+}
+
+DEF theStorage Storage
+{
+    function OnCopyProgress() { StorageProgress(); }
+    function OnCopyComplete() { StorageCopied(); }
+    function OnCopyError() { StorageFailed("The copy failed."); }
+    function OnDeleteEnd() { StorageDeleted(); }
+}
+
 var nPad;       // 0 catalog, 1 library, 2 settings
 var bMoving;
 var bZoomed;    // the camera is on the pad's focus view (catalog, settings)
 var bLibraryOpen;   // the camera is in the game belt
 var bPageOpen;      // the padfocus page is up (after the zoom)
+var bBusy;          // a copy or delete runs: input waits
 
 DEF theHub Level
 {
@@ -576,6 +622,7 @@ DEF theHub Level
             focus "pads/carousel_focus.xui"
             skin "pads/frolick_skin.xui"
             icon "pads/carousel_icon.xui"
+            cover "pads/carousel_cover.xui"
             icons "%(belt_icons)s"
             start %(belt_start)d
             centre %(belt_centre)s
@@ -638,6 +685,7 @@ DEF theHub Level
         function OnMoveDown() { PadMove("down", 0); }
         function OnADown() { PadPress(); }
         function OnBDown() { PadBack(); }
+        function OnYDown() { PadY(); }
     }
 }
 
@@ -650,9 +698,15 @@ function PadMove(dir, step)
         return;
     if (bZoomed)
     {
-        // the page: up and down walk its list (its own NavUp/NavDown)
+        // the page: up and down walk its list (its own NavUp/NavDown);
+        // a list the script fills scrolls at its ends
+        if (bBusy)
+            return;
         if (bPageOpen)
-            thePage.Navigate(dir);
+        {
+            if (thePage.Navigate(dir) == 0)
+                PageScroll(dir);
+        }
         return;
     }
     if (bLibraryOpen)
@@ -682,12 +736,18 @@ function PadPress()
         return;
     if (bZoomed)
     {
+        if (bBusy)
+            return;
         if (bPageOpen)
             thePage.Press();
         return;
     }
     if (bLibraryOpen)
-        return;     // launching a game: nothing to launch yet
+    {
+        if (theBelt.IsBusy() == 0)
+            LaunchSelected();
+        return;
+    }
 
     if (nPad == 0)
         padCatalog.Press();
@@ -717,9 +777,36 @@ function OpenLibrary()
     bLibraryOpen = true;
     SetPadAlpha(1, 0);
     theZoomer.GoTo(vpCarousel);
+    RefreshBelt();
     theBelt.Open();
     theOverlay.SetText("title", GameName(theBelt.GetSelected()));
     ShowBeltHints(1);
+}
+
+// The belt's tiles: All games (the grid, not built yet), then the
+// console's games as GameCollection lists them (the disc tray or game
+// card slots first, then E:\Games), each cover with the game's title image.
+function RefreshBelt()
+{
+    var n = theGameCollection.Scan();
+    var i;
+    theBelt.count = n + 1;
+    for (i = 0; i < n; i = i + 1)
+        theBelt.SetGameImage(i + 1, theGameCollection.GetGameImage(i));
+    theOverlay.SetText("title", GameName(theBelt.GetSelected()));
+}
+
+// A on a cover: the game starts (D: becomes its directory and the
+// console reboots into its XBE).  The empty tray and the grid tile do
+// nothing yet.
+function LaunchSelected()
+{
+    var sel = theBelt.GetSelected();
+    if (sel == 0)
+        return;
+    if (theGameCollection.IsPlayable(sel - 1) == 0)
+        return;
+    theGameCollection.LaunchGame(sel - 1);
 }
 
 // In the belt view the hub's A prompt goes and the B/back hint
@@ -743,7 +830,18 @@ function CloseLibrary()
     ShowBeltHints(0);
 }
 
-%(game_names)s
+// The belt's titles: tile 0 is the grid, the rest GameCollection's games
+// (an empty tray says so).
+function GameName(i)
+{
+    if (i == 0)
+        return "All games";
+    if (theGameCollection.GetGameKind(i - 1) == 0)
+        return "No Disc";
+    return theGameCollection.GetGameName(i - 1);
+}
+
+%(memory_script)s
 
 
 // A on the catalog or settings panel: the panel fades out and the camera
@@ -763,6 +861,8 @@ function ZoomIn()
 function PadBack()
 {
     if (bMoving)
+        return;
+    if (bBusy)
         return;
     if (bLibraryOpen)
     {
@@ -859,6 +959,8 @@ function ShowPage(page, how)
     first = PageFirst(page);
     thePage.SetFocus(first);
     PageFocus(first);
+    PageEnter();
+    PageHeader();
 }
 
 function ClosePage()
@@ -872,7 +974,12 @@ function ClosePage()
 function PageBack()
 {
     var parent;
-    parent = PageParent(sPage);
+    if (sPage == "page_confirm")
+        parent = sConfirmBack;
+    else if (sPage == "page_notice")
+        parent = sConfirmBack;
+    else
+        parent = PageParent(sPage);
     if (parent == "")
         return 0;
     ShowPage(parent, "Fade");
@@ -884,14 +991,23 @@ function PageBack()
 function PageFocus(id)
 {
     var s;
+    var r;
     s = PageMeta(sPage, id);
     thePage.SetData("metaPanelScene", 4, s);   // metaScene_1line's Pane_txtCurrentSetting
     thePage.SetText("txt_Meta", s);
+    r = RowOf(id);
+    if (r >= 0)
+    {
+        nSel = nScroll + r;
+        UpdateTotal();
+    }
 }
 
 function PagePress(id)
 {
     var target;
+    if (PageSpecial(id) == 1)
+        return;
     target = PageTarget(sPage, id);
     if (target == "")
         return;     // no page behind this item yet: the bar's Press frame plays and that is all
@@ -934,13 +1050,455 @@ function initialize()
     bZoomed = false;
     bLibraryOpen = false;
     bPageOpen = false;
+    bBusy = false;
     sPage = "";
+    sConfirmBack = "";
+    sAction = "";
+    nRows = 0;
+    nScroll = 0;
+    nSel = 0;
+    nListCount = 0;
+    nDev = 8;
+    nTitle = 0;
+    nSave = 0;
+    nDest = 8;
     EnableInput(true);
     theHub.GoTo();
     padLibrary.Play("", "Intro");
     theOverlay.SetText("word", "%(word_library)s");
 }
 '''
+
+
+# The Memory pages' script: the lists the pages show are filled a row at
+# a time from theStorage / theMemoryMonitor (the pages are the Blades'
+# list scenes with as many rows as their box holds, tools/genpage.py
+# PAGES dynamic), scrolled when the focus runs off an end, and the
+# copy, move and delete of a save or a title's data run through
+# theStorage with the dashboard's confirmations.  (The script language
+# has no &&, || or unary minus, and a var declared in a block ends with it.)
+MEMORY_SCRIPT = r"""
+var nScroll;        // the first row's item
+var nRows;          // rows on the page (0: not a list page)
+var nListCount;     // items in the list
+var nSel;           // the focused item
+var nDev;           // the device the titles page shows (8 the hard disk)
+var nTitle;         // the title the saves page shows
+var nSave;          // the save the actions page is about
+var nDest;          // the device a copy goes to
+var sAction;        // "copy", "move", "delete", "deleteall"
+var sConfirmBack;   // the page behind the confirm or notice page
+
+// ---- the lists ----------------------------------------------------------
+
+function RowId(r)
+{
+    return PageList(sPage) + "_" + r;
+}
+
+function RowOf(id)
+{
+    var r;
+    for (r = 0; r < nRows; r = r + 1)
+    {
+        if (id == RowId(r))
+            return r;
+    }
+    return 0 - 1;
+}
+
+// The devices in the order the pages list them: the hard disk, then the
+// memory units that are in (units 0..7); skipDev left out (the source of
+// a copy).
+function DeviceAt(i, skipDev)
+{
+    var n = 0;
+    var d;
+    var k;
+    for (k = 0; k < 9; k = k + 1)
+    {
+        if (k == 0)
+            d = 8;
+        else
+            d = k - 1;
+        if (d != skipDev)
+        {
+            if (theStorage.IsDeviceReady(d) == 1)
+            {
+                if (n == i)
+                    return d;
+                n = n + 1;
+            }
+        }
+    }
+    return 0 - 1;
+}
+
+function DeviceCount(skipDev)
+{
+    var n = 0;
+    var d;
+    var k;
+    for (k = 0; k < 9; k = k + 1)
+    {
+        if (k == 0)
+            d = 8;
+        else
+            d = k - 1;
+        if (d != skipDev)
+        {
+            if (theStorage.IsDeviceReady(d) == 1)
+                n = n + 1;
+        }
+    }
+    return n;
+}
+
+function ListCount()
+{
+    var k = PageKind(sPage);
+    if (k == "devices")
+        return DeviceCount(0 - 1);
+    if (k == "dest")
+        return DeviceCount(nDev);
+    if (k == "titles")
+        return theStorage.GetTitleCount();
+    if (k == "saves")
+        return theStorage.GetSaveCount(nTitle);
+    return 0;
+}
+
+// Row r shows item nScroll + r: its lines, its icon (the title's or
+// save's own image, else the Blades' icon), a device's gauge.
+function FillRow(r)
+{
+    var id = RowId(r);
+    var i = nScroll + r;
+    var k = PageKind(sPage);
+    var d;
+    var img;
+    if (i >= nListCount)
+    {
+        thePage.SetVisible(id, 0);
+        return;
+    }
+    thePage.SetVisible(id, 1);
+    if (k == "titles")
+    {
+        thePage.SetText(id, theStorage.GetTitleName(i));
+        thePage.SetData(id, 1, theStorage.GetTitleInfo(i));
+        img = theStorage.GetTitleImage(i);
+        if (img == "")
+            img = "ico_64x_games.png";
+        thePage.SetImage(id + "_icon", img);
+    }
+    else if (k == "saves")
+    {
+        thePage.SetText(id, theStorage.GetSaveName(i));
+        thePage.SetData(id, 1, theStorage.GetSaveInfo(i));
+        img = theStorage.GetSaveImage(i);
+        if (img == "")
+            img = "ico_64x_games.png";
+        thePage.SetImage(id + "_icon", img);
+    }
+    else
+    {
+        if (k == "devices")
+            d = DeviceAt(i, 0 - 1);
+        else
+            d = DeviceAt(i, nDev);
+        thePage.SetData(id, 2, theStorage.GetDeviceName(d));
+        thePage.SetData(id, 1, theStorage.GetDeviceSpace(d));
+        thePage.SetValue(id + "_bar", theStorage.GetDeviceFill(d));
+        if (d == 8)
+            img = "ico_64x_HD.png";
+        else
+            img = "ico_64x_MU.png";
+        thePage.SetImage(id + "_icon", img);
+    }
+}
+
+function UpdateTotal()
+{
+    if (nRows == 0)
+        return;
+    if (nListCount == 0)
+        thePage.SetText("labTotal", "");
+    else
+        thePage.SetText("labTotal", (nSel + 1) + " of " + nListCount);
+}
+
+function FillPage()
+{
+    var r;
+    for (r = 0; r < nRows; r = r + 1)
+        FillRow(r);
+    if (nListCount == 0)
+        thePage.SetVisible("txt_EmptyList", 1);
+    else
+        thePage.SetVisible("txt_EmptyList", 0);
+    UpdateTotal();
+}
+
+// A list page just shown: its data from the console, the first row focused.
+function PageEnter()
+{
+    var k = PageKind(sPage);
+    nRows = PageRows(sPage);
+    if (nRows == 0)
+        return;
+    if (k == "titles")
+    {
+        theStorage.device = nDev;
+        theStorage.Refresh();
+    }
+    if (k == "saves")
+    {
+        theStorage.device = nDev;
+        theStorage.title = nTitle;
+    }
+    nScroll = 0;
+    nSel = 0;
+    nListCount = ListCount();
+    FillPage();
+    if (nListCount > 0)
+        thePage.SetFocus(RowId(0));
+}
+
+// The focus ran off an end of the rows: the list moves one item.
+function PageScroll(dir)
+{
+    if (nRows == 0)
+        return;
+    if (dir == "down")
+    {
+        if (nScroll + nRows < nListCount)
+        {
+            nScroll = nScroll + 1;
+            nSel = nSel + 1;
+            FillPage();
+        }
+    }
+    else if (dir == "up")
+    {
+        if (nScroll > 0)
+        {
+            nScroll = nScroll - 1;
+            nSel = nSel - 1;
+            FillPage();
+        }
+    }
+}
+
+// The page's sub-title (the Blades scenes name it three ways).
+function SetHeader(s)
+{
+    thePage.SetText("labHeader", s);
+    thePage.SetText("txt_Header", s);
+    thePage.SetText("labelHeading", s);
+}
+
+function PageHeader()
+{
+    if (sPage == "page_memory_titles")
+        SetHeader(theStorage.GetDeviceName(nDev));
+    if (sPage == "page_memory_saves")
+        SetHeader(theStorage.GetTitleName(nTitle));
+    if (sPage == "page_memory_actions")
+        SetHeader(theStorage.GetSaveName(nSave));
+}
+
+// ---- what A does on the Memory pages ------------------------------------
+
+function Confirm(question, back)
+{
+    sConfirmBack = back;
+    ShowPage("page_confirm", "Fade");
+    SetHeader(question);
+}
+
+function Notice(text, back)
+{
+    sConfirmBack = back;
+    ShowPage("page_notice", "Fade");
+    SetHeader(text);
+}
+
+function PageSpecial(id)
+{
+    var k = PageKind(sPage);
+    if (k == "devices")
+    {
+        nDev = DeviceAt(nSel, 0 - 1);
+        if (nDev < 0)
+            return 1;
+        ShowPage("page_memory_titles", "Fade");
+        return 1;
+    }
+    if (k == "titles")
+    {
+        if (nListCount == 0)
+            return 1;
+        nTitle = nSel;
+        ShowPage("page_memory_saves", "Fade");
+        return 1;
+    }
+    if (k == "saves")
+    {
+        if (nListCount == 0)
+            return 1;
+        nSave = nSel;
+        theStorage.save = nSave;
+        ShowPage("page_memory_actions", "Fade");
+        return 1;
+    }
+    if (k == "dest")
+    {
+        nDest = DeviceAt(nSel, nDev);
+        if (nDest < 0)
+            return 1;
+        theStorage.save = nSave;
+        if (theStorage.SaveExists(nDest) == 1)
+            Confirm("Replace the copy on " + theStorage.GetDeviceName(nDest) + "?", "page_memory_dest");
+        else
+            StorageStart();
+        return 1;
+    }
+    if (sPage == "page_memory_actions")
+    {
+        if (id == "btnDelete")
+        {
+            sAction = "delete";
+            Confirm("Delete " + theStorage.GetSaveName(nSave) + "?", "page_memory_actions");
+            return 1;
+        }
+        if (theStorage.CanCopy(nSave) == 0)
+        {
+            Notice("This item can't be copied.", "page_memory_actions");
+            return 1;
+        }
+        if (DeviceCount(nDev) == 0)
+        {
+            Notice("Insert a memory unit to copy to.", "page_memory_actions");
+            return 1;
+        }
+        if (id == "btnCopy")
+            sAction = "copy";
+        else
+            sAction = "move";
+        ShowPage("page_memory_dest", "Fade");
+        return 1;
+    }
+    if (sPage == "page_confirm")
+    {
+        if (id == "btnYes")
+            StorageStart();
+        else
+            ShowPage(sConfirmBack, "Fade");
+        return 1;
+    }
+    if (sPage == "page_notice")
+    {
+        ShowPage(sConfirmBack, "Fade");
+        return 1;
+    }
+    return 0;
+}
+
+// Y: delete the focused title's data, or the focused save.
+function PadY()
+{
+    if (bMoving)
+        return;
+    if (bBusy)
+        return;
+    if (bPageOpen == false)
+        return;
+    if (PageKind(sPage) == "titles")
+    {
+        if (nListCount == 0)
+            return;
+        nTitle = nSel;
+        sAction = "deleteall";
+        Confirm("Delete all data for " + theStorage.GetTitleName(nTitle) + "?", "page_memory_titles");
+    }
+    else if (PageKind(sPage) == "saves")
+    {
+        if (nListCount == 0)
+            return;
+        nSave = nSel;
+        sAction = "delete";
+        Confirm("Delete " + theStorage.GetSaveName(nSave) + "?", "page_memory_saves");
+    }
+}
+
+// ---- the copy, move and delete ------------------------------------------
+
+function StorageStart()
+{
+    bBusy = true;
+    theStorage.device = nDev;
+    theStorage.title = nTitle;
+    if (sAction == "deleteall")
+        theStorage.save = 0 - 1;
+    else
+        theStorage.save = nSave;
+    if (sAction == "copy")
+    {
+        SetHeader("Copying...");
+        theStorage.StartCopy(nDest);
+    }
+    else if (sAction == "move")
+    {
+        SetHeader("Moving...");
+        theStorage.StartCopy(nDest);
+    }
+    else
+    {
+        SetHeader("Deleting...");
+        theStorage.StartDelete();
+    }
+}
+
+function StorageProgress()
+{
+    if (sAction == "move")
+        SetHeader("Moving... " + Math.floor(theStorage.copyProgress * 100) + "%");
+    else
+        SetHeader("Copying... " + Math.floor(theStorage.copyProgress * 100) + "%");
+}
+
+// A move is a copy, then the source goes.
+function StorageCopied()
+{
+    if (sAction == "move")
+    {
+        theStorage.save = nSave;
+        theStorage.StartDelete();
+        return;
+    }
+    bBusy = false;
+    ShowPage("page_memory_saves", "Fade");
+}
+
+function StorageDeleted()
+{
+    var a = sAction;
+    bBusy = false;
+    sAction = "";
+    if (a == "deleteall")
+        ShowPage("page_memory_titles", "Fade");
+    else
+        ShowPage("page_memory_saves", "Fade");
+}
+
+function StorageFailed(text)
+{
+    bBusy = false;
+    sAction = "";
+    Notice(text, "page_memory_saves");
+}
+"""
 
 
 def main():
@@ -971,13 +1529,7 @@ def main():
     vals["belt_count"] = len(CAROUSEL_GAMES)
     vals["belt_icons"] = ";".join(icon for _, icon in BELT_RESERVED)
     vals["belt_start"] = BELT_START
-    names = ["// carousel.go carouselGames, until a real game list exists", "function GameName(i)", "{"]
-    for i, g in enumerate(CAROUSEL_GAMES):
-        names.append("    if (i == %d)" % i)
-        names.append("        return \"%s\";" % g.replace('"', ''))
-    names.append("    return \"\";")
-    names.append("}")
-    vals["game_names"] = "\n".join(names)
+    vals["memory_script"] = MEMORY_SCRIPT
     import genpage
     vals["page_tables"] = genpage.script()
     open(os.path.join(out, "default.xap"), "w").write(HUB % vals)

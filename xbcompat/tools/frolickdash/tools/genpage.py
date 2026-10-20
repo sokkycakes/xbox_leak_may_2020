@@ -101,15 +101,28 @@ PAGES = [
                           meta={"btnDisplay": "480i NTSC, 4:3", "btnAudio": "Stereo", "btnLanguage": "English",
                                 "btnClock": "Set from the network", "btnCountry": "United States", "btnAutoOff": "Off",
                                 "btnScreensaver": "Off", "btnRemote": "Not set up", "btnPolicy": "Frolick on the Sion"})),
+    # The Memory pages read the console (hub script: theStorage,
+    # theMemoryMonitor, the dashboard's own saved-game code): a dynamic page
+    # is a list the script fills a row at a time (dynamic: what it lists,
+    # rows: as many as the Blades' list box holds, scrolled by the script).
     ("page_memory", dict(scene="DeviceSelector.xui", pad="settings", first="list_devices_0", parent="page_system",
-                         lists={"list_devices": [("Hard Drive", "7.2 GB free of 8.0 GB", 0.1, "ico_64x_HD.png")]},
-                         press={"list_devices_0": "page_memory_items"}, labels={"labTotal": "1 of 1"})),
-    ("page_memory_items", dict(scene="Items.xui", pad="settings", first="list_items_0", parent="page_memory",
-                               header="Hard Drive",
-                               # the dump has no 64px icon for Saved Games or Videos
-                               lists={"list_items": [("Games", "", 0, "ico_64x_games.png"), ("Saved Games", "", 0), ("Music", "", 0, "ico_64x_music.png"),
-                                                     ("Pictures", "", 0, "ico_64x_PictureAlbum.png"), ("Videos", "", 0)]},
-                               labels={"labTotal": "1 of 5"})),
+                         header="Memory", dynamic="devices", hide=["txt_Directions"],
+                         labels={"legend_y": "", "txt_EmptyList": "No storage devices found."})),
+    ("page_memory_titles", dict(scene="Items.xui", pad="settings", first="list_items_0", parent="page_memory",
+                                header="Hard Drive", visual="list_twoline-icon", dynamic="titles",
+                                labels={"legend_y": "Delete All", "txt_EmptyList": "No game data on this device."})),
+    ("page_memory_saves", dict(scene="Items.xui", pad="settings", first="list_items_0", parent="page_memory_titles",
+                               header="Saved Games", visual="list_twoline-icon", dynamic="saves",
+                               labels={"legend_y": "Delete", "txt_EmptyList": "No saved games."})),
+    ("page_memory_actions", dict(scene=None, pad="settings", first="btnCopy", parent="page_memory_saves", header="Saved Game",
+                                 items=[("btnCopy", "Copy", ""), ("btnMove", "Move", ""), ("btnDelete", "Delete", "")])),
+    ("page_memory_dest", dict(scene="DeviceSelector.xui", pad="settings", first="list_devices_0", parent="page_memory_actions",
+                              header="Copy To", dynamic="dest", hide=["txt_Directions"],
+                              labels={"legend_y": "", "txt_EmptyList": "Insert a memory unit to copy to."})),
+    ("page_confirm", dict(scene=None, pad="settings", first="btnNo", parent="page_memory_saves", header="Are you sure?",
+                          items=[("btnYes", "Yes", ""), ("btnNo", "No", "")])),
+    ("page_notice", dict(scene=None, pad="settings", first="btnOK", parent="page_memory_saves", header="",
+                         items=[("btnOK", "OK", "")])),
     ("page_network", dict(scene="2000_NetworkConfigList.xui", pad="settings", first="list_items_0", parent="page_system",
                           lists={"list_items": [("Wireless Network", "Connected", 0, "ico_64x_Infrastructure.png")]},
                           meta={"list_items_0": "Wireless Network\nConnected\n\nIP address 192.168.1.247\nSubnet mask 255.255.255.0\nGateway 192.168.1.1"})),
@@ -287,7 +300,14 @@ def nav_button(id, x, y, w, h, label, visual=None, nav=None, children=""):
     return "\n".join(s)
 
 
-def list_items(block, items):
+def list_capacity(block, visual=None):
+    """How many items the list's box holds (the rows of a dynamic page)."""
+    vis, h, lines, icon = LIST_ITEMS[visual or prop(block, "Visual") or ""]
+    pitch = h if h == 45 else h + 2
+    return int(float(prop(block, "Height")) // pitch)
+
+
+def list_items(block, items, visual=None, dynamic=False):
     """A Blades list as its items: buttons with the skin's item visual,
     stacked down the list's box, chained up and down, the list's own
     sideways navigation on each.  The lines the dashboard would feed the
@@ -295,13 +315,17 @@ def list_items(block, items):
     id = prop(block, "Id")
     x, y = [float(v) for v in prop(block, "Position").split(",")[:2]]
     w = float(prop(block, "Width"))
-    vis, h, lines, icon = LIST_ITEMS[prop(block, "Visual") or ""]
+    vis, h, lines, icon = LIST_ITEMS[visual or prop(block, "Visual") or ""]
     # btn_3Line_Icon_prgbr's bar (the 360 feeds it the device's fill): the
     # same visual over it, held at the item's fraction
     bar = (5, 76, 65, 21, "prgbr_Memory") if vis == "btn_3Line_Icon_prgbr" else None
     pitch = h if h == 45 else h + 2
     # the list's box holds so many; the rest would scroll on the 360
     items = items[:int(float(prop(block, "Height")) // pitch)]
+    if dynamic:
+        # every row, blank, with an icon slot and the gauge: the script
+        # fills them (SetText, SetData, SetImage, SetValue, SetVisible)
+        items = [("", "", 0, "blank")] * int(float(prop(block, "Height")) // pitch)
     nav = {k: prop(block, k) for k in ("NavLeft", "NavRight") if prop(block, k)}
     out = []
     for i, item in enumerate(items):
@@ -321,11 +345,12 @@ def list_items(block, items):
                 label = ""      # the first line has its own slot; the Text would double it
         if ico and icon:
             ix, iy, iw, ih = icon
-            kids.append("\n".join(["<XuiImage>", "<Properties>", " <Id>icon</Id>", " <Width>%g</Width>" % iw, " <Height>%g</Height>" % ih,
-                                   " <Position>%g,%g,0</Position>" % (ix, iy), " <ImagePath>%s</ImagePath>" % ico, "</Properties>", "</XuiImage>"]))
+            kids.append("\n".join(["<XuiImage>", "<Properties>", " <Id>%s_%d_icon</Id>" % (id, i), " <Width>%g</Width>" % iw, " <Height>%g</Height>" % ih,
+                                   " <Position>%g,%g,0</Position>" % (ix, iy), " <ImagePath>%s</ImagePath>" % ("" if ico == "blank" else ico),
+                                   "</Properties>", "</XuiImage>"]))
         if bar:
             bx, by, bw, bh, bvis = bar
-            kids.append("\n".join(["<XuiProgressBar>", "<Properties>", " <Id>bar</Id>", " <Width>%g</Width>" % bw, " <Height>%g</Height>" % bh,
+            kids.append("\n".join(["<XuiProgressBar>", "<Properties>", " <Id>%s_%d_bar</Id>" % (id, i), " <Width>%g</Width>" % bw, " <Height>%g</Height>" % bh,
                                    " <Position>%g,%g,0</Position>" % (bx, by), " <Visual>%s</Visual>" % bvis,
                                    " <RangeMin>0</RangeMin>", " <RangeMax>1</RangeMax>", " <Value>%g</Value>" % frac, "</Properties>", "</XuiProgressBar>"]))
         n.update(data)
@@ -365,7 +390,7 @@ def page(file, spec):
             if ("Empty" in id or id == "txt_Directions") and spec.get("lists"):
                 continue
             if b.startswith("<XuiList>") or b.startswith("<XuiCommonList>"):
-                kept += list_items(b, spec.get("lists", {}).get(id, []))
+                kept += list_items(b, spec.get("lists", {}).get(id, []), spec.get("visual"), bool(spec.get("dynamic")))
                 continue
             # The meta panel is a nested scene with a Visual on the 360,
             # which the runtime does not skin; a label carries the same
@@ -383,6 +408,11 @@ def page(file, spec):
                 b = set_prop(b, "Text", spec["header"])
             if id in spec.get("labels", {}):
                 b = set_prop(b, "Text", spec["labels"][id])
+                # a legend reads as live only when enabled (the skin's
+                # NormalDisable frame shows a grey button and no text); an
+                # empty label makes it the Blades' blank placeholder
+                if id.startswith("legend_"):
+                    b = set_prop(b, "Enabled", "true" if spec["labels"][id] else "false")
             if id == "txt_Meta":
                 b = set_prop(b, "Text", "")
             kept.append(b)
@@ -429,6 +459,15 @@ def page(file, spec):
 
 # ---- the hub script's tables -------------------------------------------------
 
+def dynamic_info(spec):
+    """A dynamic page's list id and its rows."""
+    src = open(os.path.join(BLADES, spec["scene"])).read()
+    for b in element_blocks(src)[1]:
+        if b.startswith("<XuiList>") or b.startswith("<XuiCommonList>"):
+            return prop(b, "Id"), list_capacity(b, spec.get("visual"))
+    return "", 0
+
+
 def script():
     """PageRoot, PageUrl, PageFirst, PageParent, PageTarget and PageMeta
     for default.xap: the pages as the hub walks them."""
@@ -444,6 +483,16 @@ def script():
             out.append("    if (page == %s)" % q(file))
             out.append("        return %s;" % q("pads/%s.xui" % file if key is None else spec[key]))
         out += ['    return "";', "}", ""]
+    for name, key, default in [("PageKind", "dynamic", '""'), ("PageList", "list", '""'), ("PageRows", "rows", "0")]:
+        out += ["function %s(page)" % name, "{"]
+        for file, spec in PAGES:
+            if not spec.get("dynamic"):
+                continue
+            info = dynamic_info(spec)
+            v = {"dynamic": q(spec["dynamic"]), "list": q(info[0]), "rows": str(info[1])}[key]
+            out.append("    if (page == %s)" % q(file))
+            out.append("        return %s;" % v)
+        out += ["    return %s;" % default, "}", ""]
     for name, key in [("PageTarget", "press"), ("PageMeta", "meta")]:
         out += ["function %s(page, id)" % name, "{"]
         for file, spec in PAGES:

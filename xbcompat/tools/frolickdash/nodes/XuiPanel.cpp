@@ -13,7 +13,7 @@
 // Script functions: Navigate("left"|"right"|"up"|"down") -> 1 if the
 // focus moved, Press(), Play(id, frame), SetText(id, text),
 // SetImage(id, path), SetFocus(id), GetFocus(), SetVisible(id, 0|1),
-// SetOpacity(id, n), Reload().  OnPress and OnFocus are delivered from
+// SetOpacity(id, n), SetData(id, k, text), SetValue(id, n), Reload().  OnPress and OnFocus are delivered from
 // Advance, after the call that caused them, so script can trigger them.  Images and fonts are .xtx / .ttf files
 // packed by tools/mkassets.py beside the scene.
 #include "std.h"
@@ -21,6 +21,8 @@
 #include "node.h"
 #include "runner.h"
 #include "Camera.h"
+#include "activefile.h"
+#include "Texture.h"
 #include "../xui/xui.h"
 
 extern float g_nEffectAlpha;
@@ -115,6 +117,8 @@ bool FrolickReadFile(const char* name, unsigned char** data, int* len)
 // D3D8 backend: linear textures, DrawIndexedVerticesUP, clipping by
 // geometry (the Xbox has no scissor).
 
+#define MAX_BELT_GAMES 256
+
 struct XUIVERTEX { float x, y, z; D3DCOLOR color; float u, v; };
 #define XUIVERTEX_FVF (D3DFVF_XYZ | D3DFVF_DIFFUSE | D3DFVF_TEX1)
 
@@ -195,6 +199,31 @@ public:
     {
         m_clipping = r != NULL;
         if (r) CopyMemory(m_clip, r, sizeof m_clip);
+    }
+
+    // An Xbox texture file (.xbx: a save's SaveImage.xbx, a game's title
+    // image out of its XBE), read the way the engine's materials read them
+    // (Image.cpp ParseTexture: swizzled, so its coordinates are 0..1).
+    xui::Texture native(const char* path, int* w, int* h)
+    {
+        *w = *h = 0;
+        TCHAR szURL[MAX_PATH];
+        Unicode(szURL, path, MAX_PATH);
+        CActiveFile file;
+        if (!file.Fetch(szURL, false, true) || file.GetContent() == NULL)
+            return 0;
+        LPDIRECT3DTEXTURE8 p = ParseTexture(szURL, file.GetContent(), file.GetContentLength(), 0, 0);
+        if (p == NULL)
+            return 0;
+        D3DSURFACE_DESC desc;
+        if (SUCCEEDED(p->GetLevelDesc(0, &desc)))
+        {
+            *w = desc.Width;
+            *h = desc.Height;
+        }
+        Tex t; t.p = p; t.us = 1.0f; t.vs = 1.0f;
+        m_texes.push(t);
+        return (xui::Texture)m_texes.n;
     }
 
     static void lerp(const xui::Vertex& a, const xui::Vertex& b, float t, xui::Vertex& o)
@@ -369,6 +398,7 @@ public:
     void Play(const TCHAR* szId, const TCHAR* szFrame);
     void SetText(const TCHAR* szId, const TCHAR* szText);
     void SetImage(const TCHAR* szId, const TCHAR* szPath);
+    CObject* SetValue(CObject** rgparam, int nParam);
     void SetFocus(const TCHAR* szId);
     CStrObject* GetFocus();
     CObject* SetVisible(CObject** rgparam, int nParam);
@@ -428,6 +458,7 @@ START_NODE_FUN(CXuiPanel, CNode)
     NODE_FUN(SetVisible)
     NODE_FUN(SetOpacity)
     NODE_FUN(SetData)
+    NODE_FUN(SetValue)
     NODE_FUN_VV(Reload)
 END_NODE_FUN()
 
@@ -717,6 +748,21 @@ CObject* CXuiPanel::SetData(CObject** rgparam, int nParam)
     return NULL;
 }
 
+// SetValue(id, n): a progress bar's Value (a gauge's fill).
+CObject* CXuiPanel::SetValue(CObject** rgparam, int nParam)
+{
+    if (nParam != 2)
+        return NULL;
+    xui::Node* n = Find(rgparam[0]->Deref()->ToStr()->GetSz());
+    if (n == NULL)
+        return NULL;
+    xui::Value& v = n->props.set("Value");
+    v.free();
+    v.type = xui::TFloat;
+    v.f = rgparam[1]->Deref()->ToNum()->m_nValue;
+    return NULL;
+}
+
 void CXuiPanel::Reload()
 {
     m_bDirty = true;
@@ -800,7 +846,9 @@ public:
     TCHAR* m_skin;
     TCHAR* m_font;
     TCHAR* m_icon;          // a scene with an XuiImage "icon", drawn centred on a tile
+    TCHAR* m_cover;         // a scene with an XuiImage "image": a game's own cover art on its tile
     TCHAR* m_icons;         // the tiles' icon images, ';' separated, game 0 first
+    TCHAR* m_rgImage[MAX_BELT_GAMES];  // a game's own cover image (SetGameImage), over m_icons
     int m_start;            // the game focused when the belt first opens
     D3DXVECTOR3 m_centre;   // the belt ring's axis, at the regular covers' height
     float m_radius;         // the regular covers' ring radius in the world
@@ -821,6 +869,7 @@ public:
     int GetSelected();
     int IsBusy();
     void SetTitle(const TCHAR* szText);
+    void SetGameImage(int game, const TCHAR* szPath);
 
     DECLARE_NODE_PROPS()
     DECLARE_NODE_FUNCTIONS()
@@ -848,12 +897,15 @@ protected:
     xui::Element* m_pFocusRoot;
     xui::Element* m_pSkinRoot;
     xui::Element* m_pIconRoot;
+    xui::Element* m_pCoverRoot;
     xui::Scene* m_pCard;
     xui::Scene* m_pFocus;
     xui::Scene* m_pIcon;
+    xui::Scene* m_pCover;
     bool m_bFontLoaded;
     bool m_bStarted;
     bool IconFor(int game, TCHAR* sz, int len);
+    bool CoverFor(int game, TCHAR* sz, int len);
 
     int m_selected;
     bool m_open;
@@ -873,6 +925,7 @@ START_NODE_PROPS(CBelt, CNode)
     NODE_PROP(pt_string, CBelt, skin)
     NODE_PROP(pt_string, CBelt, font)
     NODE_PROP(pt_string, CBelt, icon)
+    NODE_PROP(pt_string, CBelt, cover)
     NODE_PROP(pt_string, CBelt, icons)
     NODE_PROP(pt_integer, CBelt, start)
     NODE_PROP(pt_vec3, CBelt, centre)
@@ -892,30 +945,36 @@ START_NODE_FUN(CBelt, CNode)
     NODE_FUN_IV(GetSelected)
     NODE_FUN_IV(IsBusy)
     NODE_FUN_VS(SetTitle)
+    NODE_FUN_VIS(SetGameImage)
 END_NODE_FUN()
 
 CBelt::CBelt() :
-    m_url(NULL), m_card(NULL), m_focus(NULL), m_skin(NULL), m_font(NULL), m_icon(NULL), m_icons(NULL), m_start(0),
+    m_url(NULL), m_card(NULL), m_focus(NULL), m_skin(NULL), m_font(NULL), m_icon(NULL), m_cover(NULL), m_icons(NULL), m_start(0),
     m_centre(0.0f, 0.0f, 0.0f), m_radius(1.0f), m_coverScale(1.0f), m_focusPull(0.0f), m_skip(0),
     m_stepDuration(20.0f / 30.0f / 2.5f), m_fadeDuration(0.75f), m_count(0),
     m_circleX(0.0f), m_circleZ(0.0f), m_circleR(1.0f), m_coverY(0.0f), m_slotAngle(0.5f),
     m_verts(NULL), m_indices(NULL), m_poses(NULL), m_bDirty(true),
-    m_pRenderer(NULL), m_pCardRoot(NULL), m_pFocusRoot(NULL), m_pSkinRoot(NULL), m_pIconRoot(NULL),
-    m_pCard(NULL), m_pFocus(NULL), m_pIcon(NULL), m_bFontLoaded(false), m_bStarted(false),
+    m_pRenderer(NULL), m_pCardRoot(NULL), m_pFocusRoot(NULL), m_pSkinRoot(NULL), m_pIconRoot(NULL), m_pCoverRoot(NULL),
+    m_pCard(NULL), m_pFocus(NULL), m_pIcon(NULL), m_pCover(NULL), m_bFontLoaded(false), m_bStarted(false),
     m_selected(0), m_open(false), m_fadeDir(0), m_fade(0.0f), m_stepDir(0), m_stepStart(0.0), m_bStepDone(false)
 {
     ZeroMemory(&m_hdr, sizeof m_hdr);
+    ZeroMemory(m_rgImage, sizeof m_rgImage);
 }
 
 CBelt::~CBelt()
 {
+    for (int i = 0; i < MAX_BELT_GAMES; i++)
+        delete [] m_rgImage[i];
     delete m_pCard;
     delete m_pFocus;
     delete m_pIcon;
+    delete m_pCover;
     delete m_pCardRoot;
     delete m_pFocusRoot;
     delete m_pSkinRoot;
     delete m_pIconRoot;
+    delete m_pCoverRoot;
     delete m_pRenderer;
     delete [] m_verts;
     delete [] m_indices;
@@ -926,6 +985,7 @@ CBelt::~CBelt()
     delete [] m_skin;
     delete [] m_font;
     delete [] m_icon;
+    delete [] m_cover;
     delete [] m_icons;
 }
 
@@ -1003,10 +1063,12 @@ void CBelt::Load()
     delete m_pCard; m_pCard = NULL;
     delete m_pFocus; m_pFocus = NULL;
     delete m_pIcon; m_pIcon = NULL;
+    delete m_pCover; m_pCover = NULL;
     delete m_pCardRoot; m_pCardRoot = NULL;
     delete m_pFocusRoot; m_pFocusRoot = NULL;
     delete m_pSkinRoot; m_pSkinRoot = NULL;
     delete m_pIconRoot; m_pIconRoot = NULL;
+    delete m_pCoverRoot; m_pCoverRoot = NULL;
     if (m_pRenderer == NULL)
         m_pRenderer = new xui::Renderer(&m_be, &m_res);
     if (!LoadData())
@@ -1040,6 +1102,13 @@ void CBelt::Load()
         if (m_pIconRoot == NULL)
             TRACE(_T("Belt: %s: %S\n"), m_icon, err);
     }
+    if (m_cover != NULL && m_cover[0])
+    {
+        ToAnsi(sz, m_cover, MAX_PATH);
+        m_pCoverRoot = m_res.scene(sz, err, sizeof err);
+        if (m_pCoverRoot == NULL)
+            TRACE(_T("Belt: %s: %S\n"), m_cover, err);
+    }
     if (!m_bFontLoaded)
     {
         ToAnsi(sz, m_font != NULL && m_font[0] ? m_font : _T("font.ttf"), MAX_PATH);
@@ -1052,6 +1121,17 @@ void CBelt::Load()
         m_pFocus = new xui::Scene(m_pFocusRoot, m_pSkinRoot);
     if (m_pIconRoot != NULL)
         m_pIcon = new xui::Scene(m_pIconRoot, m_pSkinRoot);
+    if (m_pCoverRoot != NULL)
+        m_pCover = new xui::Scene(m_pCoverRoot, m_pSkinRoot);
+}
+
+// A game's own cover image (SetGameImage), empty for none.
+bool CBelt::CoverFor(int game, TCHAR* sz, int len)
+{
+    if (game < 0 || game >= MAX_BELT_GAMES || m_rgImage[game] == NULL || m_rgImage[game][0] == 0)
+        return false;
+    lstrcpyn(sz, m_rgImage[game], len);
+    return true;
 }
 
 // The icon image of a game's tile: entry game of the ';' separated icons
@@ -1096,9 +1176,14 @@ void CBelt::Open()
     if (!m_bStarted)
     {
         m_bStarted = true;
-        if (m_start >= 0 && m_start < m_count)
+        if (m_start >= 0)
             m_selected = m_start;
     }
+    // the list may have shrunk since (a disc out, a game deleted)
+    if (m_selected >= m_count)
+        m_selected = m_count - 1;
+    if (m_selected < 0)
+        m_selected = 0;
     m_open = true;
     m_fadeDir = 1;
 }
@@ -1113,6 +1198,21 @@ void CBelt::Close()
 
 int CBelt::GetSelected() { return m_selected; }
 int CBelt::IsBusy() { return m_fadeDir != 0 || m_stepDir != 0; }
+
+// A game's cover image (its title image out of its XBE, T:\GameImages);
+// "" goes back to the icons list.
+void CBelt::SetGameImage(int game, const TCHAR* szPath)
+{
+    if (game < 0 || game >= MAX_BELT_GAMES)
+        return;
+    delete [] m_rgImage[game];
+    m_rgImage[game] = NULL;
+    if (szPath != NULL && szPath[0])
+    {
+        m_rgImage[game] = new TCHAR [_tcslen(szPath) + 1];
+        _tcscpy(m_rgImage[game], szPath);
+    }
+}
 
 void CBelt::SetTitle(const TCHAR* szText)
 {
@@ -1331,9 +1431,15 @@ void CBelt::Render()
         CoverGrid(SlotOf(x), w > 0.0f ? w : 0.0f, m_be.m_grid);
         DrawScene(m_pCard, alpha, 0.0f, 0.0f, cw > 0 ? cw : 1.0f, ch > 0 ? ch : 1.0f);
 
-        // a reserved tile's icon, centred on the card
+        // a game's cover art across the card, else a reserved tile's
+        // icon, centred on it
         TCHAR szIcon[MAX_PATH];
-        if (m_pIcon != NULL && IconFor(game, szIcon, MAX_PATH))
+        if (m_pCover != NULL && CoverFor(game, szIcon, MAX_PATH))
+        {
+            SetString(m_pCover->find("image"), "ImagePath", szIcon);
+            DrawScene(m_pCover, alpha, 0.0f, 0.0f, cw > 0 ? cw : 1.0f, ch > 0 ? ch : 1.0f);
+        }
+        else if (m_pIcon != NULL && IconFor(game, szIcon, MAX_PATH))
         {
             SetString(m_pIcon->find("icon"), "ImagePath", szIcon);
             DrawScene(m_pIcon, alpha, 0.0f, 0.0f, cw > 0 ? cw : 1.0f, ch > 0 ? ch : 1.0f);

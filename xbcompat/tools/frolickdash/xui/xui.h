@@ -184,6 +184,8 @@ struct Backend {
     virtual Texture upload(const Image& img) = 0;
     virtual void triangles(Texture tex, Blend blend, const Vertex* v, int nv, const unsigned short* idx, int ni) = 0;
     virtual void clip(const float* r) = 0; // x0 y0 x1 y1 in scene pixels, or NULL
+    // A texture the host decodes itself (an Xbox .xbx), 0 for none.
+    virtual Texture native(const char* path, int* w, int* h) { (void)path; *w = *h = 0; return 0; }
     virtual ~Backend() {}
 };
 

@@ -22,19 +22,6 @@
   <StrokeWidth>10</StrokeWidth>
   <StrokeColor>0xff8e8e8e</StrokeColor>
  </Stroke>
- <Fill>
-  <FillType>2</FillType>
-  <Gradient>
-   <NumStops>3</NumStops>
-   <StopColor>0xff5c5a55</StopColor>
-   <StopColor>0xff53514c</StopColor>
-   <StopColor>0xff4b4945</StopColor>
-   <StopPos>0</StopPos>
-   <StopPos>0.6</StopPos>
-   <StopPos>1</StopPos>
-  </Gradient>
-  <Rotation>-90</Rotation>
- </Fill>
  <Closed>true</Closed>
  <Points>640,440;64,0;576,0,611.347,0,640,28.6528;640,64;640,376,640,411.347,611.347,440;576,440;64,440,28.6528,440,0,411.347;0,376;0,64,0,28.6528,28.6528,0</Points>
 </Properties>

@@ -72,6 +72,7 @@ public:
     CStrObject* GetSavedGames(int nGame);
     int GetSavedGameCount(int nGame);
     int SelectGameImage(int nGame);
+    CStrObject* GetGameImage(int nGame);
     void LaunchGame(int nGame);
 
     int IsInstalled(int nGame);
@@ -107,6 +108,7 @@ START_NODE_FUN(CGameCollection, CNode)
     NODE_FUN_SI(GetSavedGames)
     NODE_FUN_II(GetSavedGameCount)
     NODE_FUN_II(SelectGameImage)
+    NODE_FUN_SI(GetGameImage)
     NODE_FUN_VI(LaunchGame)
     NODE_FUN_II(IsInstalled)
     NODE_FUN_II(StartInstall)
@@ -734,6 +736,22 @@ bool CacheXbeTitleImage(const CHAR* szXbe, CHAR* szCache /*[MAX_PATH]*/)
     GAMEINFO game;
     ZeroMemory(&game, sizeof (game));
     return ReadXbeTitle(szXbe, &game) && CacheTitleImage(szXbe, &game, szCache);
+}
+
+// The game's title image as a file (T:\GameImages, cached out of the XBE),
+// for Frolick's belt covers; "" when the XBE has none.
+CStrObject* CGameCollection::GetGameImage(int nGame)
+{
+    if (nGame < 0 || nGame >= c_nGameCount || c_rgGames[nGame].m_dwImageSize == 0)
+        return new CStrObject;
+    CHAR szPath [MAX_PATH];
+    CHAR szCache [MAX_PATH];
+    GetXbePath(nGame, szPath);
+    if (!CacheTitleImage(szPath, &c_rgGames[nGame], szCache))
+        return new CStrObject;
+    TCHAR sz [MAX_PATH];
+    _stprintf(sz, _T("%hs"), szCache);
+    return new CStrObject(sz);
 }
 
 // Points the "SelectedIcon" material at the game's title image, or at the

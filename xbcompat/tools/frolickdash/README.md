@@ -184,8 +184,50 @@ reserved: "All games" (grid mode, not built yet) and the game in the disc
 tray or game card, each with an icon centred on its tile (`Belt` `icons`;
 the icon images themselves are not in the cloud yet).  The belt opens on
 the first game.  Not there yet: the icons, real cover art, grid mode, the
-disc tile's empty and loaded states, the step sounds, and what the list
-ends do (nine placeholder games, no wrap).
+step sounds, and what the list ends do (no wrap).
+
+The console's data behind the views (2026-10-20, sokky: "dashboard
+functionality added back into it", starting with game data management
+and launching games) comes from the dashboard's own code, compiled in
+unchanged, and only the script and two small nodes are Frolick's:
+
+- The belt lists the console's games: `GameCollection` (dashbuild's
+  node, the Games screen's list) scans the disc tray or game card slots
+  and `E:\Games` when the belt opens (`RefreshBelt`, and again when a
+  card comes or goes); tile 0 stays the grid, tile 1 is the tray (its
+  game, or "No Disc"), the games follow.  Each cover carries the game's
+  title image out of its XBE (`GetGameImage`, cached in `T:\GameImages`),
+  drawn across the card (`pads/carousel_cover.xui`, set by
+  `Belt.SetGameImage`; the grid and tray tiles keep their small icons).  A
+  on a cover launches
+  it (`LaunchGame`: D: becomes the game's directory and the console
+  reboots into its XBE; when Frolick runs as a game, the game comes back
+  to the dashboard that launched Frolick, not to Frolick).
+- Settings > Memory are the dashboard's Memory screen on the Blades pages:
+  `nodes/Storage.cpp` hands script the engine's `CTitleArray` (the titles
+  under a device's UDATA/TDATA with their saves, downloads and installed
+  games, dashbuild's patched list), the saves' SaveMeta names, dates and
+  block counts, their images, and runs copies through the engine's
+  `CGameCopier` and deletes on a thread as `SavedGameGrid.cpp` does
+  (events OnCopyProgress / OnCopyComplete / OnCopyError / OnDeleteEnd).
+  A `MemoryMonitor` node mounts memory units as they come.  The pages
+  (`genpage.py` PAGES, `dynamic`) are the Blades' list scenes with as many
+  rows as their box holds; the hub script fills the rows from the node
+  (`MEMORY_SCRIPT` in `genhub.py`: devices with their free space and a
+  gauge, titles with icon and "N saved games, N blocks", saves with icon,
+  date and size) and scrolls when the focus runs off an end.  A on a save
+  opens Copy / Move / Delete (copy and move want a second device), Y on a
+  title deletes all its data, Y on a save deletes it; every delete and
+  overwrite asks first, as the Memory screen does, and the page's
+  sub-title shows the copy's progress.
+- Icons: an `ImagePath` ending in `.xbx` (a save's SaveImage.xbx, a
+  title's TitleImage.xbx, a cached title image) is read by the engine's
+  own texture parser (`Image.cpp ParseTexture`, `Backend::native` in the
+  XUI runtime), so the pages show the console's images as they are.
+- `tools/mkteststage.sh WORK` stages a test console under `WORK/frolick/run`
+  for the cloud: three games built from Frolick's image with their own
+  title images, one of them in the disc tray, and saved games for two of
+  them and for a title with no game.
 
 ## Build and run
 
