@@ -429,29 +429,70 @@ static struct {
 } user_settings = {
     .TimeZoneStdName = "GMT", .TimeZoneDltName = "BST",
     .Language = 1,                         /* English */
-    .MiscFlags = 2,                        /* XC_MISC_FLAG_DONT_USE_DST: plain UTC */
+    /* XC_MISC_FLAG_DONT_USE_DST (plain UTC), and 0x8: the Xbox Live terms
+       were accepted. The retail dashboard sets that on its legal screen; the
+       retail online dashboard goes straight back to the dashboard without it. */
+    .MiscFlags = 2 | 8,
 };
 #pragma pack(pop)
 _Static_assert(sizeof(user_settings) == 96, "XBOX_USER_SETTINGS is 96 bytes");
 
+/* The user settings persist in <hdd>/.eeprom-user, as the EEPROM does. */
+static void user_settings_path(char *path, size_t len)
+{
+    snprintf(path, len, "%s/.eeprom-user", fs_hdd_root());
+}
+
+static void user_settings_load(void)
+{
+    static int loaded;
+    char path[4096];
+    FILE *f;
+
+    if (loaded) return;
+    loaded = 1;
+    user_settings_path(path, sizeof(path));
+    if (!(f = fopen(path, "rb"))) return;
+    if (fread(&user_settings, 1, sizeof(user_settings), f) != sizeof(user_settings))
+        TRACE("%s: short read, settings may be partly default", path);
+    fclose(f);
+}
+
+static void user_settings_save(void)
+{
+    char path[4096], tmp[4200];
+    FILE *f;
+
+    user_settings_path(path, sizeof(path));
+    snprintf(tmp, sizeof(tmp), "%s.new", path);
+    if (!(f = fopen(tmp, "wb"))) {
+        TRACE("%s: %s", tmp, strerror(errno));
+        return;
+    }
+    fwrite(&user_settings, 1, sizeof(user_settings), f);
+    if (fclose(f) == 0) rename(tmp, path);
+}
+
+/* User settings by XC_VALUE_INDEX: offset and size in user_settings. */
+static const struct { UCHAR off, len; } user_index[] = {
+    { 4, 4 }, { 8, 4 }, { 24, 4 }, { 40, 4 }, { 12, 4 }, { 28, 4 }, { 44, 4 },   /* time zone */
+    { 48, 4 }, { 52, 4 }, { 56, 4 }, { 60, 4 }, { 64, 4 }, { 68, 4 },           /* language .. movies */
+    { 72, 4 }, { 76, 4 }, { 80, 4 }, { 84, 4 }, { 88, 4 }, { 92, 4 },           /* online, misc, DVD */
+};
+
 NTSTATUS NTAPI ExQueryNonVolatileSetting(ULONG ValueIndex, ULONG *Type, PVOID Value, ULONG ValueLength,
                                          ULONG *ResultLength)
 {
-    /* User settings by XC_VALUE_INDEX: offset and size in user_settings. */
-    static const struct { UCHAR off, len; } user[] = {
-        { 4, 4 }, { 8, 4 }, { 24, 4 }, { 40, 4 }, { 12, 4 }, { 28, 4 }, { 44, 4 },   /* time zone */
-        { 48, 4 }, { 52, 4 }, { 56, 4 }, { 60, 4 }, { 64, 4 }, { 68, 4 },           /* language .. movies */
-        { 72, 4 }, { 76, 4 }, { 80, 4 }, { 84, 4 }, { 88, 4 }, { 92, 4 },           /* online, misc, DVD */
-    };
     static const ULONG av_region = 0x00400100;    /* NTSC-M */
     static const ULONG game_region = 1;           /* North America */
     static UCHAR all[256];
     const void *src;
     ULONG len, type = 4;   /* REG_DWORD */
 
-    if (ValueIndex < sizeof(user) / sizeof(user[0])) {
-        src = (const UCHAR *)&user_settings + user[ValueIndex].off;
-        len = user[ValueIndex].len;
+    user_settings_load();
+    if (ValueIndex < sizeof(user_index) / sizeof(user_index[0])) {
+        src = (const UCHAR *)&user_settings + user_index[ValueIndex].off;
+        len = user_index[ValueIndex].len;
         if (ValueIndex == 1 || ValueIndex == 2 || ValueIndex == 4 || ValueIndex == 5) type = 3;
     } else switch (ValueIndex) {
     case 0xFF: src = &user_settings; len = sizeof(user_settings); type = 3; break;   /* XC_MAX_OS */
@@ -485,8 +526,25 @@ NTSTATUS NTAPI ExQueryNonVolatileSetting(ULONG ValueIndex, ULONG *Type, PVOID Va
 
 NTSTATUS NTAPI ExSaveNonVolatileSetting(ULONG ValueIndex, ULONG Type, PVOID Value, ULONG ValueLength)
 {
-    (void)Type; (void)Value; (void)ValueLength;
-    TRACE("ExSaveNonVolatileSetting(%#x) ignored", ValueIndex);
+    UCHAR *dst;
+    ULONG len;
+
+    (void)Type;
+    user_settings_load();
+    if (ValueIndex < sizeof(user_index) / sizeof(user_index[0])) {
+        dst = (UCHAR *)&user_settings + user_index[ValueIndex].off;
+        len = user_index[ValueIndex].len;
+    } else if (ValueIndex == 0xFF) {                                     /* XC_MAX_OS */
+        dst = (UCHAR *)&user_settings;
+        len = sizeof(user_settings);
+    } else {
+        TRACE("ExSaveNonVolatileSetting(%#x) ignored", ValueIndex);
+        return STATUS_SUCCESS;
+    }
+    if (ValueLength > len) return STATUS_INVALID_PARAMETER;
+    memcpy(dst, Value, ValueLength);
+    TRACE("ExSaveNonVolatileSetting(%#x, %u bytes)", ValueIndex, ValueLength);
+    user_settings_save();
     return STATUS_SUCCESS;
 }
 
