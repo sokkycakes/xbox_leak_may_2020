@@ -292,6 +292,21 @@ def overlay_scene():
                    " <Stroke>\n  <StrokeWidth>3</StrokeWidth>\n  <StrokeColor>0xffffffff</StrokeColor>\n </Stroke>",
                    " <Fill>\n  <FillType>0</FillType>\n </Fill>", " <Closed>false</Closed>",
                    " <Points>22,12;0,0;11,12;22,0</Points>", "</Properties>", "</XuiFigure>"]),
+        # B + return arrow of the belt view: screen space, centred above the
+        # library label where sokky's mockup has it (B at 0.506 W, 0.828 H,
+        # the arrow box 0.482-0.519 W by 0.845-0.887 H), shown only while
+        # the belt is open
+        "\n".join(["<XuiImage>", "<Properties>", " <Id>bGlyph</Id>", " <Width>14.4</Width>", " <Height>14.4</Height>",
+                   " <Position>357.1,390.2,0</Position>", " <Opacity>0</Opacity>", " <ImagePath>glyph_b.png</ImagePath>", " <SizeMode>4</SizeMode>",
+                   "</Properties>", "</XuiImage>"]),
+        "\n".join(["<XuiFigure>", "<Properties>", " <Id>backStem</Id>", " <Width>26.6</Width>", " <Height>9.6</Height>",
+                   " <Position>347.0,405.6,0</Position>", " <Opacity>0</Opacity>",
+                   " <Stroke>\n  <StrokeWidth>3</StrokeWidth>\n  <StrokeColor>0xffd8d8d8</StrokeColor>\n </Stroke>",
+                   " <Fill>\n  <FillType>0</FillType>\n </Fill>", " <Closed>false</Closed>", " <Points>26.6,9.6;25.1,0.0;25.1,9.6;1.0,9.6</Points>", "</Properties>", "</XuiFigure>"]),
+        "\n".join(["<XuiFigure>", "<Properties>", " <Id>backHead</Id>", " <Width>9.4</Width>", " <Height>20.2</Height>",
+                   " <Position>347.0,405.6,0</Position>", " <Opacity>0</Opacity>",
+                   " <Stroke>\n  <StrokeWidth>3</StrokeWidth>\n  <StrokeColor>0xffd8d8d8</StrokeColor>\n </Stroke>",
+                   " <Fill>\n  <FillType>0</FillType>\n </Fill>", " <Closed>false</Closed>", " <Points>9.4,20.2;9.4,0.0;0.0,9.6;9.4,20.2</Points>", "</Properties>", "</XuiFigure>"]),
         # the footer strip
         "\n".join(["<XuiFigure>", "<Properties>", " <Id>footer</Id>", " <Width>%d</Width>" % w, " <Height>%g</Height>" % fh,
                    " <Position>0,%g,0</Position>" % (h - fh),
@@ -595,6 +610,18 @@ function OpenLibrary()
     theZoomer.GoTo(vpCarousel);
     theBelt.SetTitle(GameName(theBelt.GetSelected()));
     theBelt.Open();
+    ShowBeltHints(1);
+}
+
+// In the belt view the hub's A prompt and chevron go and the B/back hint
+// comes, in the screen overlay (not on the cover).
+function ShowBeltHints(on)
+{
+    theOverlay.SetOpacity("promptA", 1 - on);
+    theOverlay.SetOpacity("chevron", 1 - on);
+    theOverlay.SetOpacity("bGlyph", on);
+    theOverlay.SetOpacity("backStem", on);
+    theOverlay.SetOpacity("backHead", on);
 }
 
 function CloseLibrary()
@@ -604,6 +631,7 @@ function CloseLibrary()
     SetPadAlpha(1, 1);
     theZoomer.GoTo(vpLibrary);
     theBelt.Close();
+    ShowBeltHints(0);
 }
 
 %(game_names)s

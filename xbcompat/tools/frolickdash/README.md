@@ -71,7 +71,10 @@ each slot takes the next game.  A on the library panel flies the camera in
 (750 ms, the panel fades, the covers fade in); B flies back.  Each cover wears
 Frolick's tile art, `carousel_card.xui` draped over the cover mesh at the
 card's own aspect, and the focused cover the `carousel_focus.xui` overlay
-(arrows, A pill, title and back hint).  Not there yet: real cover art, the
+(arrows, the lime A capsule over its bottom-right corner, the title).  In
+the belt view the hub's A prompt and chevron are hidden and the B/back hint
+sits in the screen overlay above the library label, placed as in sokky's
+mockup.  Not there yet: real cover art, the
 step sounds, and what the list ends do (nine placeholder games, no wrap).
 
 ## Build and run

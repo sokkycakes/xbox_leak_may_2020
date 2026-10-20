@@ -70,23 +70,23 @@
 <XuiFigure>
 <Properties>
  <Id>aPill</Id>
- <Width>120</Width>
- <Height>110</Height>
- <Position>682,360,0</Position>
+ <Width>109.0</Width>
+ <Height>109.2</Height>
+ <Position>711.9,368.2,0</Position>
  <Fill>
   <FillType>1</FillType>
   <FillColor>0xffc6f23a</FillColor>
  </Fill>
  <Closed>true</Closed>
- <Points>120,110;50,0;65,0,95.3765,0,120,24.6235;120,55;120,55,120,85.3765,95.3765,110;65,110;50,110,22.385,110,0,87.615;0,60;0,50,0,22.385,22.385,0</Points>
+ <Points>109.0,109.2;97.5,40.7;103.1,47.8;107.0,56.0;109.0,64.8;108.9,73.8;106.9,82.6;102.9,90.7;97.3,97.8;90.2,103.4;82.0,107.2;73.2,109.2;64.2,109.2;55.4,107.1;47.3,103.2;40.3,97.5;11.5,68.5;5.9,61.4;2.0,53.2;0.0,44.4;0.0,35.4;2.1,26.6;6.0,18.5;11.7,11.5;18.8,5.9;26.9,2.0;35.7,0.0;44.8,0.0;53.6,2.1;61.7,6.0;68.7,11.7</Points>
 </Properties>
 </XuiFigure>
 <XuiImage>
 <Properties>
  <Id>aGlyph</Id>
- <Width>90</Width>
- <Height>90</Height>
- <Position>676,350,0</Position>
+ <Width>62.7</Width>
+ <Height>62.7</Height>
+ <Position>720.6,376.9,0</Position>
  <ImagePath>glyph_a_button.png</ImagePath>
  <SizeMode>4</SizeMode>
 </Properties>
@@ -105,44 +105,6 @@
  <TextStyle>1040</TextStyle>
 </Properties>
 </XuiText>
-<XuiImage>
-<Properties>
- <Id>bGlyph</Id>
- <Width>48</Width>
- <Height>48</Height>
- <Position>488.0,584,0</Position>
- <ImagePath>glyph_b.png</ImagePath>
- <SizeMode>4</SizeMode>
-</Properties>
-</XuiImage>
-<XuiFigure>
-<Properties>
- <Id>backStem</Id>
- <Width>100</Width>
- <Height>40</Height>
- <Position>462.0,630,0</Position>
- <Stroke>
-  <StrokeWidth>9</StrokeWidth>
-  <StrokeColor>0xffdedede</StrokeColor>
- </Stroke>
- <Closed>false</Closed>
- <Points>100,40;90,0;90,32;16,32</Points>
-</Properties>
-</XuiFigure>
-<XuiFigure>
-<Properties>
- <Id>backHead</Id>
- <Width>34</Width>
- <Height>36</Height>
- <Position>446.0,644,0</Position>
- <Fill>
-  <FillType>1</FillType>
-  <FillColor>0xffdedede</FillColor>
- </Fill>
- <Closed>true</Closed>
- <Points>34,36;34,0;34,36;0,18</Points>
-</Properties>
-</XuiFigure>
 <Timelines>
 <NamedFrames>
 <NamedFrame><Name>Intro</Name><Time>0</Time><Command>play</Command><CommandParams></CommandParams></NamedFrame>
