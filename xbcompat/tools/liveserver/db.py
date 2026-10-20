@@ -4,6 +4,7 @@ import json
 import os
 import threading
 
+import kcrypto
 import kdc
 
 
@@ -47,16 +48,25 @@ class Db:
         and online key): retail clients go to MACS as <serial>@MACS.XBOX.COM,
         pre-authenticated with the console's own online key."""
         ident = dict(line.split(None, 1) for line in open(path).read().split('\n') if ' ' in line)
-        serial, key = ident['serial'].strip(), ident['online-key'].strip()
+        serial = ident['serial'].strip()
+        entry = {'online-key': ident['online-key'].strip(), 'hdd-key': ident['hdd-key'].strip()}
         with self.lock:
-            if self.d['consoles'].get(serial) != key:
-                self.d['consoles'][serial] = key
+            if self.d['consoles'].get(serial) != entry:
+                self.d['consoles'][serial] = entry
                 self.save()
         return serial
 
-    def online_key(self, serial):
+    def online_keys(self, serial):
+        """The keys a console may pre-authenticate to MACS with: its online key
+        as the HDD-key morph leaves it (retail), then as stored (the leak's
+        devkit path)."""
         k = self.d['consoles'].get(serial)
-        return bytes.fromhex(k) if k else None
+        if k is None:
+            return []
+        if isinstance(k, str):
+            return [bytes.fromhex(k)]
+        raw = bytes.fromhex(k['online-key'])
+        return [kcrypto.morph_by_hdd_key(bytes.fromhex(k['hdd-key']), raw), raw]
 
     def _xuid(self):
         x = self.d['next_xuid']

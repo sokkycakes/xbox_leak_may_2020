@@ -130,17 +130,20 @@ class Kdc:
         self.log(f'kdc: AS-REQ {cname}@{realm} for {"/".join(sname)}')
 
         if realm.lower() == MACS_REALM:
-            key = self.db.online_key(cname)
-            if key is None:
+            keys = self.db.online_keys(cname)
+            if not keys:
                 return self.error(KDC_ERR_C_PRINCIPAL_UNKNOWN, realm, sname_raw)
         else:
             acct = self.db.find_principal(cname, realm)
             if acct is None:
                 return self.error(KDC_ERR_C_PRINCIPAL_UNKNOWN, realm, sname_raw)
-            key = bytes.fromhex(acct['key'])
+            keys = [bytes.fromhex(acct['key'])]
 
         ts = padata.get(PA_ENC_TIMESTAMP)
-        if ts is None or dec_data(key, U_TIMESTAMP, der.unwrap(ts)) is None:
+        key = ts is not None and next((k for k in keys if dec_data(k, U_TIMESTAMP, der.unwrap(ts)) is not None), None)
+        if not key:
+            self.log(f'kdc: pre-auth failed for {cname}@{realm} ({len(keys)} keys tried, '
+                     f'PA types {sorted(padata)}); request {data.hex()}')
             return self.error(KDC_ERR_PREAUTH_FAILED, realm, sname_raw)
 
         session = os.urandom(16)

@@ -50,6 +50,15 @@ def rc4hmac_decrypt(key, usage, cipher):
     return data[8:]
 
 
+HDMORPH_RAND_KEY = bytes.fromhex('6059E82EDFBF7FD32335742A648BB12C')
+
+
+def morph_by_hdd_key(hdd_key, key):
+    """MorphKeyByHardDriveKeyEx: RC4 keyed with HMAC-SHA1(HDMORPH_RAND_KEY, HDKey),
+    which a retail console applies to its EEPROM online key."""
+    return rc4(hmac_sha1(HDMORPH_RAND_KEY, hdd_key), key)
+
+
 def nonce_key(key, nonce):
     """KerbComputeKdcRequestNonceHmacKey: the key for the Xbox pre-auth entries."""
     ksign = hmac_md5(key, b'signaturekey\0')
