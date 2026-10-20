@@ -237,6 +237,9 @@ void xinput_check_reset_combo(void);
 unsigned xinput_guide_read(int *port);
 void xinput_guide_mask(bool on);
 void ds_set_duck(float gain);
+void ds_set_volume(float gain);
+unsigned xinput_guide_ports(void);
+void xinput_guide_vibration(bool on);
 void reset_request_always(const char *why);
 
 /* ---- loader ----------------------------------------------------------- */

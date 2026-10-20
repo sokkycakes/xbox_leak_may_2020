@@ -1143,7 +1143,7 @@ static void mix_voices(struct dsmix_job *job)
    thread, the clock thread, or a test. */
 /* The Guide overlay turns the game down while it is open (ds_set_duck from
    any thread; the mixer ramps to it across a block, so there is no click). */
-static uint32_t duck_bits = 0x3F800000u; /* 1.0f */
+static uint32_t duck_bits = 0x3F800000u, volume_bits = 0x3F800000u; /* 1.0f */
 static float duck_now = 1.0f;
 
 void ds_set_duck(float gain)
@@ -1153,11 +1153,22 @@ void ds_set_duck(float gain)
     __atomic_store_n(&duck_bits, b, __ATOMIC_RELAXED);
 }
 
+/* ... and sets the user's volume, kept across titles in its settings file. */
+void ds_set_volume(float gain)
+{
+    uint32_t b;
+    memcpy(&b, &gain, 4);
+    __atomic_store_n(&volume_bits, b, __ATOMIC_RELAXED);
+}
+
 static void duck_block(float *out, int n)
 {
     uint32_t b = __atomic_load_n(&duck_bits, __ATOMIC_RELAXED);
-    float target;
+    uint32_t v = __atomic_load_n(&volume_bits, __ATOMIC_RELAXED);
+    float target, volume;
     memcpy(&target, &b, 4);
+    memcpy(&volume, &v, 4);
+    target *= volume;
     if (target == 1.0f && duck_now == 1.0f) return;
     float step = (target - duck_now) / (float)n;
     for (int i = 0; i < n; i++) {

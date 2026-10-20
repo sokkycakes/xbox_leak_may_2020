@@ -25,6 +25,10 @@ const char *xbe_title_name(void);
 unsigned xinput_guide_read(int *port);
 void xinput_guide_mask(bool on);
 void ds_set_duck(float gain);
+void ds_set_volume(float gain);
+unsigned xinput_guide_ports(void);
+void xinput_guide_vibration(bool on);
+const char *fs_hdd_root(void);
 void reset_request_always(const char *why);
 void xlog(const char *fmt, ...);
 bool guide_frame(int w, int h);
@@ -162,16 +166,19 @@ struct Guide {
     DirResources res;
     GLBackend be;
     xui::Renderer* r;
-    xui::Element *frameEl, *menuEl, *skinEl;
-    xui::Scene *frame, *menu;
+    xui::Element *frameEl, *mainEl, *settingsEl, *skinEl;
+    xui::Scene *frame, *main, *settings, *menu;  // menu: the one showing
     xui::Node* hud;  // HUDRootScene: owns the open/close timelines
     State state;
     unsigned prev;
     double holdStart, lastTime, repeatAt, leaveAt;
     int port;
     bool armed;  // Back + Start must be let go once before they open it
-    Guide() : r(0), frameEl(0), menuEl(0), skinEl(0), frame(0), menu(0), hud(0), state(Off),
-              prev(0), holdStart(-1), lastTime(-1), repeatAt(0), leaveAt(0), port(0), armed(false) {}
+    int volume;  // 0..10
+    bool vibration;
+    Guide() : r(0), frameEl(0), mainEl(0), settingsEl(0), skinEl(0), frame(0), main(0), settings(0), menu(0),
+              hud(0), state(Off), prev(0), holdStart(-1), lastTime(-1), repeatAt(0), leaveAt(0), port(0),
+              armed(false), volume(10), vibration(true) {}
 };
 
 Guide g;
@@ -200,6 +207,44 @@ void set_image(xui::Scene* s, const char* id, const char* path) {
     xui::Value& v = n->props.set("ImagePath"); v.free(); v.type = xui::TString; v.s = xui::strdup2(path);
 }
 
+// Settings live beside the hard disk partitions, so every title (each its
+// own xbcompat process) shares them: <hdd>/.guide, "volume=N vibration=N".
+void settings_path(char* out, int n) {
+    const char* e = getenv("XBCOMPAT_GUIDE_SETTINGS");
+    if (e) snprintf(out, n, "%s", e);
+    else snprintf(out, n, "%s/.guide", fs_hdd_root() ? fs_hdd_root() : ".");
+}
+
+void apply_settings() {
+    float v = g.volume / 10.0f;
+    ds_set_volume(v * v);
+    xinput_guide_vibration(g.vibration);
+}
+
+void read_settings() {
+    char path[600]; settings_path(path, sizeof path);
+    FILE* f = fopen(path, "r");
+    if (f) {
+        int v = 10, r = 1;
+        if (fscanf(f, "volume=%d vibration=%d", &v, &r) >= 1) {
+            g.volume = v < 0 ? 0 : v > 10 ? 10 : v;
+            g.vibration = r != 0;
+        }
+        fclose(f);
+    }
+    apply_settings();
+}
+
+void write_settings() {
+    char path[600]; settings_path(path, sizeof path);
+    FILE* f = fopen(path, "w");
+    if (!f) return;
+    fprintf(f, "volume=%d vibration=%d\n", g.volume, g.vibration ? 1 : 0);
+    fclose(f);
+}
+
+void settings_text();
+
 bool load() {
     tried = true;
     const char* e = getenv("XBCOMPAT_GUIDE");
@@ -220,29 +265,40 @@ bool load() {
     g.skinEl = g.res.scene("hudskin.xui", err, sizeof err);
     if (!g.skinEl) { xlog("Guide: off, no skin in %s (%s)", g.res.dir, err); return false; }
     g.frameEl = g.res.scene("hudbkgnd.xui", err, sizeof err);
-    g.menuEl = g.frameEl ? g.res.scene("GuideMain.xui", err, sizeof err) : 0;
-    if (!g.frameEl || !g.menuEl) { xlog("Guide: off, scene load failed: %s", err); return false; }
+    g.mainEl = g.frameEl ? g.res.scene("GuideMain.xui", err, sizeof err) : 0;
+    g.settingsEl = g.mainEl ? g.res.scene("GuideSettings.xui", err, sizeof err) : 0;
+    if (!g.settingsEl) { xlog("Guide: off, scene load failed: %s", err); return false; }
     g.r = new xui::Renderer(&g.be, &g.res);
     g.r->setFont("font.ttf");
     g.frame = new xui::Scene(g.frameEl, g.skinEl);
     g.frame->setFocus(0);
     g.hud = g.frame->find("HUDRootScene");
     if (!g.hud) g.hud = g.frame->root;
-    g.menu = new xui::Scene(g.menuEl, g.skinEl);
+    g.main = g.menu = new xui::Scene(g.mainEl, g.skinEl);
+    g.settings = new xui::Scene(g.settingsEl, g.skinEl);
     // Frame legends (the 360 fills them from the menu's hidden legend buttons).
     set_text(g.frame, "Legend_A", "Select");
     set_text(g.frame, "Legend_B", "Back");
     set_text(g.frame, "Legend_Y", "Xbox Dashboard");
-    set_show(g.frame, "Legend_X", false);
+    // Legend_X's Show belongs to the frame's timelines; hide its visual.
+    xui::Node* lx = g.frame->find("Legend_X");
+    if (lx && lx->visual) { xui::Value& v = lx->visual->props.set("Show"); v.free(); v.type = xui::TBool; v.b = 0; }
     set_text(g.frame, "GamerTag", "Player");
     // The header: what's playing.
     char title[64]; snprintf(title, sizeof title, "%s", xbe_title_name());
-    set_text(g.menu, "LabelSignIn", "Now Playing");
-    set_text(g.menu, "labelProfiles", title[0] ? title : "Xbox Game");
-    set_text(g.menu, "btnSignIn", "");
-    set_text(g.menu, "btnNewProfile", "Resume Game");
-    set_text(g.menu, "btnRecoverProfile", "Xbox Dashboard");
-    set_show(g.menu, "btnOptions", false);
+    set_text(g.main, "LabelSignIn", "Now Playing");
+    set_text(g.main, "labelProfiles", title[0] ? title : "Xbox Game");
+    set_text(g.main, "btnSignIn", "");
+    set_text(g.main, "btnNewProfile", "Resume Game");
+    set_text(g.main, "btnRecoverProfile", "Xbox Dashboard");
+    set_text(g.main, "btnOptions", "Settings");
+    // Settings: the 360's Personal Settings page with our three rows.
+    set_text(g.settings, "labelHeading", "Settings");
+    set_show(g.settings, "btnNotifications", false);
+    set_show(g.settings, "btnPersonalization", false);
+    set_show(g.settings, "btnTurnOff", false);
+    read_settings();
+    settings_text();
     g.state = Closed;
     xlog("Guide: ready (%s); hold Back + Start, or Guide / F1", g.res.dir);
     return true;
@@ -266,10 +322,29 @@ void show_port() {
     }
 }
 
+void settings_text() {
+    char buf[64];
+    snprintf(buf, sizeof buf, "Volume   %d%%", g.volume * 10);
+    set_text(g.settings, "btnOnlineStatus", buf);
+    snprintf(buf, sizeof buf, "Vibration   %s", g.vibration ? "On" : "Off");
+    set_text(g.settings, "btnVoice", buf);
+    unsigned ports = xinput_guide_ports();
+    int k = snprintf(buf, sizeof buf, "Controllers  ");
+    for (int i = 0; i < 4; i++)
+        if (ports & (1u << i)) k += snprintf(buf + k, sizeof buf - k, " %d", i + 1);
+    if (!ports) snprintf(buf + k, sizeof buf - k, " none");
+    set_text(g.settings, "btnController", buf);
+}
+
+void show_menu(xui::Scene* m, const char* focus) {
+    g.menu = m;
+    m->setFocus(m->find(focus));
+}
+
 void open_guide() {
     g.state = Opening;
     g.hud->play("ClosedToHalf");
-    g.menu->setFocus(g.menu->find("btnNewProfile"));
+    show_menu(g.main, "btnNewProfile");
     update_clock();
     show_port();
     xinput_guide_mask(true);
@@ -286,6 +361,8 @@ void close_guide() {
 
 void press(const char* id) {
     if (!strcmp(id, "btnNewProfile") || !strcmp(id, "btnSignIn")) close_guide();
+    else if (!strcmp(id, "btnOptions")) { settings_text(); show_menu(g.settings, "btnOnlineStatus"); }
+    else if (!strcmp(id, "btnVoice")) { g.vibration = !g.vibration; apply_settings(); write_settings(); settings_text(); }
     else if (!strcmp(id, "btnRecoverProfile")) {
         g.state = Leaving;
         g.leaveAt = now_s() + 0.15;  // let the audio fade first
@@ -312,7 +389,15 @@ void step(double t) {
     case Opening:
     case Open:
         if (g.state == Opening && !g.hud->playing) g.state = Open;
+        if ((down & GUIDE_B) && g.menu == g.settings) { show_menu(g.main, "btnOptions"); break; }
         if (toggle || (down & GUIDE_B)) { close_guide(); break; }
+        if ((down & (GUIDE_LEFT | GUIDE_RIGHT)) && g.menu == g.settings && g.menu->focus &&
+            !strcmp(g.menu->focus->id(), "btnOnlineStatus")) {
+            g.volume += (down & GUIDE_RIGHT) ? 1 : -1;
+            g.volume = g.volume < 0 ? 0 : g.volume > 10 ? 10 : g.volume;
+            apply_settings(); write_settings(); settings_text();
+            break;
+        }
         if (down & GUIDE_Y) { press("btnRecoverProfile"); break; }
         if (down & GUIDE_A) { if (g.menu->focus) { g.menu->press(); press(g.menu->focus->id()); } break; }
         if (b & (GUIDE_UP | GUIDE_DOWN)) {
@@ -348,6 +433,10 @@ bool guide_frame(int w, int h) {
     if (g.state == Closed) return false;
     g.frame->update(dt);
     g.menu->update(dt);
+    if (g.menu == g.settings && g.state == Open) {
+        static double next;
+        if (t >= next) { settings_text(); next = t + 1; }  // pads come and go
+    }
     (void)w; (void)h;
     return true;
 }

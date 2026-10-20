@@ -1039,8 +1039,28 @@ void xinput_check_reset_combo(void)
  * Hiding lasts until each pad has let go of everything, so the button that
  * closed the Guide doesn't reach the game.
  */
-static volatile int guide_masked;
+static volatile int guide_masked, rumble_off;
 static bool guide_latch[XI_PORTS];
+
+unsigned xinput_guide_ports(void)
+{
+    unsigned m = 0;
+    pthread_mutex_lock(&xi.lock);
+    for (unsigned i = 0; i < XI_PORTS; i++) if (xi.port[i].connected) m |= 1u << i;
+    pthread_mutex_unlock(&xi.lock);
+    return m;
+}
+
+/* The Guide's Vibration setting. */
+void xinput_guide_vibration(bool on)
+{
+    rumble_off = !on;
+    if (on) return;
+    pthread_mutex_lock(&xi.lock);
+    for (unsigned i = 0; i < XI_PORTS; i++)
+        if (xi.port[i].gc) SDL_GameControllerRumble(xi.port[i].gc, 0, 0, 0);
+    pthread_mutex_unlock(&xi.lock);
+}
 
 static unsigned guide_bits(const XINPUT_GAMEPAD *g)
 {
@@ -1490,7 +1510,7 @@ static ULONG NTAPI XInputSetState(HANDLE hDevice, XINPUT_FEEDBACK *pFeedback)
     } else {
         xi_port *p = &xi.port[d->port];
         USHORT l = pFeedback->Rumble.wLeftMotorSpeed, r = pFeedback->Rumble.wRightMotorSpeed;
-        if (p->gc && !guide_masked) SDL_GameControllerRumble(p->gc, l, r, (l || r) ? XI_RUMBLE_MS : 0);
+        if (p->gc && !guide_masked && !rumble_off) SDL_GameControllerRumble(p->gc, l, r, (l || r) ? XI_RUMBLE_MS : 0);
         TRACE_ALL("XInput: XInputSetState port %u: rumble %u/%u", d->port, l, r);
 
         /* The driver references the completion event when the report is
