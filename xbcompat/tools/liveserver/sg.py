@@ -212,13 +212,19 @@ class SecurityAssociation:
             if t == SECMSG_XBTOSG_PULSE:
                 seq_ack = struct.unpack_from('<I', payload, p + 4)[0] if cb >= 8 else 0
                 self.send(PROTO_SECMSG, struct.pack('<HHI', SECMSG_SGTOXB_PULSE, 8, seq_ack))
-            elif t == RETAIL_SECMSG_PULSE:
-                # Console's XbToSg pulse.  Reply with an SgToXb pulse that
-                # acknowledges this packet's sequence so the console marks the
-                # gateway alive and clears any pending change it was carrying.
-                self.send(PROTO_SECMSG, struct.pack('<HHI', RETAIL_SECMSG_PULSE, 8, seq))
             elif t == RETAIL_SECMSG_ALIVE:
-                pass            # bare keepalive, nothing to answer
+                # 0x5301 is the console's XbToSg pulse (it ignores 0x5301 on its
+                # own receive path, and its 0x5300 handler at 0x1387a4 is what
+                # processes a *gateway* pulse).  It is sent with no body (cbEnt=4);
+                # the sequence to acknowledge is the ESP sequence of this packet.
+                # Reply with an SgToXb pulse (0x5300, cbEnt=8, dwSeqAck=seq) so the
+                # console's pulse handler advances the SA to alive and, for the
+                # logon SA, stores the ack at +0xd0c.  Without this reply the
+                # console never sees its pulse answered and reports a
+                # communication error.
+                self.send(PROTO_SECMSG, struct.pack('<HHI', RETAIL_SECMSG_PULSE, 8, seq))
+            elif t == RETAIL_SECMSG_PULSE:
+                pass            # 0x5300 is gateway->console; never sent to us
             p += cb
 
     def tcp_in(self, seg):
@@ -374,10 +380,13 @@ class Gateway:
         self.log(f'sg: {ticket.get("c")} connected ({"retail" if retail else "beta"}), '
                  f'services {ticket.get("s")}, SPI {spi_resp:#x}')
         if retail:
-            # Announce the gateway is alive straight after the key exchange, the
-            # way the beta does, so the console marks the logon link fully up
-            # instead of waiting on its first pulse round-trip.
-            sa.send(PROTO_SECMSG, struct.pack('<HHI', RETAIL_SECMSG_PULSE, 8, 0))
+            # Retail: do NOT pulse unsolicited.  Right after the key exchange the
+            # console's SecReg is in state 5 (established, pre-pulse), and its ESP
+            # inner dispatcher (0x138dfc) treats any gateway data arriving while in
+            # state 5 as an error -> _uiLogonState = 6.  The console pulses first
+            # (XbToSg, 0x5301); we only answer it (see secmsg()), by which time its
+            # SecReg has advanced out of state 5.
+            pass
         else:
             sa.send(PROTO_SECMSG, struct.pack('<HH', SECMSG_PULSE, 4))
 
