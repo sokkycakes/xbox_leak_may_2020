@@ -59,13 +59,15 @@ The library view is GameTap's game belt (`art/gametap/`: the decoded
 packs the 13 cover nodes gsb_0shape..gsb_12shape, each with its own cover
 mesh and its frame 1000..1020 poses, into `belt.bin`; the `Belt` node in
 `nodes/XuiPanel.cpp` draws each cover mesh at its sampled world matrix, in
-shape-list order, depth tested.  The camera and the belt's placement are fitted to sokky's mockup screenshot
-of the belt view: the camera from the pad labels (Frolick's carousel camera
-0.19 ahead and 0.07 up, pitched up 22 degrees), the belt ring centred on the
-camera as GameTap shoots it, the regular covers at 0.97 of the rail radius,
-the focused cover 4.7 ahead.  That view is 96 degrees wide (the hub's are
-80) so the three pad labels sit inside the NTSC title-safe area; the
-CameraMover lerps the field of view along with the flight.  Motion is
+shape-list order, depth tested.  The camera is fitted to sokky's mockup screenshot of the belt view (from
+the pad labels: Frolick's carousel camera 0.19 ahead and 0.07 up, pitched
+up 22 degrees), widened to 96 degrees (the hub's are 80) so the three pad
+labels sit inside the NTSC title-safe area; the CameraMover lerps the
+field of view along with the flight.  The belt's ring is the rail ring,
+its axis and height, the covers at 0.95 of the ribbon radius at GameTap's
+sizes, and the focused slot is pulled 5.6 off the wall toward the camera
+(sokky's pick, to keep the focused tile large); a cover sliding in or out
+follows by its angle from the slot.  Motion is
 the sampled clip only: left and right play Belt_Right / Belt_Left (20 frames
 at speed 2.5, 0.267 s, input dropped while a step plays, as the client's lock
 does); when a step ends the covers are back on their frame-1000 slots and

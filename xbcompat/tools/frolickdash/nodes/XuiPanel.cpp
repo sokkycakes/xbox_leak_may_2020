@@ -734,6 +734,10 @@ void CXuiPanel::Reload()
 //                                   the regular covers' height, and their
 //                                   radius; the focused cover faces +z
 //       coverScale 2                every cover grown about its own centre
+//       focusPull 5.6               the focused slot pulled this far off the
+//                                   ring toward the camera (a cover sliding
+//                                   in or out follows, by its angle from
+//                                   the slot)
 //       count 9                     games on the belt
 //       function OnStep() { ... }   a step finished; GetSelected() tells which
 //   }
@@ -757,6 +761,7 @@ public:
     D3DXVECTOR3 m_centre;   // the belt ring's axis, at the regular covers' height
     float m_radius;         // the regular covers' ring radius in the world
     float m_coverScale;     // every cover grown about its own centre
+    float m_focusPull;      // the focused slot pulled this far toward the camera
     float m_stepDuration;   // 20 frames at 30 fps, speed 2.5
     float m_fadeDuration;   // the covers fade with Frolick's camera flight
     int m_count;
@@ -784,6 +789,7 @@ protected:
 
     BELTHDR m_hdr;
     float m_circleX, m_circleZ, m_circleR, m_coverY;
+    float m_slotAngle;          // the neighbour slots' angle from the focused one
     BELTVERTEX* m_verts;        // nNodes * nVerts, in each bone's space
     unsigned short* m_indices;  // nNodes * nIdx
     float* m_poses;             // nNodes * nFrames * 16
@@ -819,6 +825,7 @@ START_NODE_PROPS(CBelt, CNode)
     NODE_PROP(pt_vec3, CBelt, centre)
     NODE_PROP(pt_number, CBelt, radius)
     NODE_PROP(pt_number, CBelt, coverScale)
+    NODE_PROP(pt_number, CBelt, focusPull)
     NODE_PROP(pt_number, CBelt, stepDuration)
     NODE_PROP(pt_number, CBelt, fadeDuration)
     NODE_PROP(pt_integer, CBelt, count)
@@ -835,9 +842,9 @@ END_NODE_FUN()
 
 CBelt::CBelt() :
     m_url(NULL), m_card(NULL), m_focus(NULL), m_skin(NULL), m_font(NULL),
-    m_centre(0.0f, 0.0f, 0.0f), m_radius(1.0f), m_coverScale(1.0f),
+    m_centre(0.0f, 0.0f, 0.0f), m_radius(1.0f), m_coverScale(1.0f), m_focusPull(0.0f),
     m_stepDuration(20.0f / 30.0f / 2.5f), m_fadeDuration(0.75f), m_count(0),
-    m_circleX(0.0f), m_circleZ(0.0f), m_circleR(1.0f), m_coverY(0.0f),
+    m_circleX(0.0f), m_circleZ(0.0f), m_circleR(1.0f), m_coverY(0.0f), m_slotAngle(0.5f),
     m_verts(NULL), m_indices(NULL), m_poses(NULL), m_bDirty(true),
     m_pRenderer(NULL), m_pCardRoot(NULL), m_pFocusRoot(NULL), m_pSkinRoot(NULL), m_pCard(NULL), m_pFocus(NULL),
     m_bFontLoaded(false),
@@ -914,6 +921,21 @@ bool CBelt::LoadData()
         b += m_hdr.nFrames * 16 * sizeof (float);
     }
     delete [] data;
+
+    // the neighbour slot's angle round the ring from the focused slot
+    // (GameTap's -x), from cover 5 at frame 0
+    if (m_hdr.nNodes > 5)
+    {
+        const float* w = m_poses + 5 * m_hdr.nFrames * 16;
+        const BELTVERTEX* v = m_verts + 5 * m_hdr.nVerts;
+        float cx = 0.0f, cy = 0.0f, cz = 0.0f;
+        for (int i = 0; i < m_hdr.nVerts; i++) { cx += v[i].x; cy += v[i].y; cz += v[i].z; }
+        cx /= m_hdr.nVerts; cy /= m_hdr.nVerts; cz /= m_hdr.nVerts;
+        float qx = w[0] * cx + w[4] * cy + w[8] * cz + w[12];
+        float qz = w[2] * cx + w[6] * cy + w[10] * cz + w[14];
+        m_slotAngle = (float)fabs(atan2(qz - m_circleZ, -(qx - m_circleX)));
+        if (m_slotAngle < 0.05f) m_slotAngle = 0.5f;
+    }
     return true;
 }
 
@@ -1065,6 +1087,25 @@ void CBelt::CoverGrid(int node, float frame, D3DXVECTOR3 grid[6][7])
     for (i = 0; i < 42; i++)
         c += D3DXVECTOR3(v[i].x, v[i].y, v[i].z);
     c /= 42.0f;
+
+    // the pull off the ring toward the camera: full in the focused slot,
+    // fading to nothing at the neighbour slots
+    D3DXVECTOR3 pull(0.0f, 0.0f, 0.0f);
+    if (m_focusPull != 0.0f)
+    {
+        D3DXVECTOR3 qc;
+        D3DXVec3TransformCoord(&qc, &c, &m);
+        float ang = (float)fabs(atan2(qc.z - m_circleZ, -(qc.x - m_circleX)));
+        float w = 1.0f - ang / m_slotAngle;
+        if (w > 0.0f)
+        {
+            D3DXVECTOR3 wc(m_centre.x - (qc.z - m_circleZ) * scale, 0.0f, m_centre.z + (qc.x - m_circleX) * scale);
+            D3DXVECTOR3 eye = theCamera.m_position;
+            pull = D3DXVECTOR3(eye.x - wc.x, 0.0f, -eye.z - wc.z);
+            D3DXVec3Normalize(&pull, &pull);
+            pull *= m_focusPull * w * w;
+        }
+    }
     for (int col = 0; col < 7; col++)
         for (int row = 0; row < 6; row++)
         {
@@ -1074,7 +1115,7 @@ void CBelt::CoverGrid(int node, float frame, D3DXVECTOR3 grid[6][7])
             grid[5 - row][col] = D3DXVECTOR3(
                 m_centre.x - (q.z - m_circleZ) * scale,
                 m_centre.y + (q.y - m_coverY) * scale,
-                m_centre.z + (q.x - m_circleX) * scale);
+                m_centre.z + (q.x - m_circleX) * scale) + pull;
         }
 }
 

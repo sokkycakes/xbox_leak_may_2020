@@ -78,11 +78,13 @@ CAROUSEL_FOV = 96.0
 # sokky then (2026-10-20) wanted the belt back on the rail ring, which it
 # follows nicely from this camera, with the focused tile kept at the size
 # it had with the ring on the camera: the ring's axis is the rail's, the
-# covers sit at 0.95 of the ribbon radius, and every cover is grown 2x
-# about its own centre (the focused one is twice as far away as before).
+# covers sit at 0.95 of the ribbon radius at GameTap's sizes, and the
+# focused slot is pulled 5.6 off the wall toward the camera (sokky's pick),
+# a cover sliding in or out following by its angle from the slot.
 BELT_CENTRE = RAIL_ORIGIN
 BELT_INSET = 0.95
-BELT_COVER_SCALE = 2.0
+BELT_COVER_SCALE = 1.0
+BELT_FOCUS_PULL = 5.6
 CAROUSEL_GAMES = ["Game Title", "Stiletto Swift", "Game Title 3", "Game Title 4", "Game Title 5",
                   "Game Title 6", "Game Title 7", "Game Title 8", "Game Title 9"]  # carousel.go carouselGames
 FOOTER_H, FOOTER_COLOR, FOOTER_ALPHA = 50, (0.68, 0.665493, 0.5712), 0.592157
@@ -303,10 +305,10 @@ def overlay_scene():
                    " <Fill>\n  <FillType>0</FillType>\n </Fill>", " <Closed>false</Closed>",
                    " <Points>22,12;0,0;11,12;22,0</Points>", "</Properties>", "</XuiFigure>"]),
         # the game title of the belt view: screen space, facing the camera,
-        # centred above the focused cover (the cover's top is at about y 190
+        # centred above the focused cover (the cover's top is at about y 165
         # in the 96-degree view), 1.25x the size it had on the cover
         "\n".join(["<XuiText>", "<Properties>", " <Id>title</Id>", " <Width>%d</Width>" % w, " <Height>30</Height>",
-                   " <Position>0,152,0</Position>", " <Opacity>0</Opacity>", " <Text></Text>", " <TextColor>0xffffffff</TextColor>",
+                   " <Position>0,122,0</Position>", " <Opacity>0</Opacity>", " <Text></Text>", " <TextColor>0xffffffff</TextColor>",
                    " <DropShadowColor>0</DropShadowColor>", " <PointSize>22</PointSize>", " <TextStyle>1040</TextStyle>",
                    "</Properties>", "</XuiText>"]),
         # B + return arrow of the belt view: screen space, centred between
@@ -504,6 +506,7 @@ DEF theHub Level
             centre %(belt_centre)s
             radius %(belt_radius).5f
             coverScale %(belt_cover_scale).2f
+            focusPull %(belt_focus_pull).2f
             fadeDuration %(zoom_duration)s
             count %(belt_count)d
             function OnStep() { theOverlay.SetText("title", GameName(theBelt.GetSelected())); }
@@ -761,6 +764,7 @@ def main():
     vals["belt_centre"] = v3(BELT_CENTRE)
     vals["belt_radius"] = 0.5 * RAIL_SCALE[0] * BELT_INSET
     vals["belt_cover_scale"] = BELT_COVER_SCALE
+    vals["belt_focus_pull"] = BELT_FOCUS_PULL
     vals["belt_count"] = len(CAROUSEL_GAMES)
     names = ["// carousel.go carouselGames, until a real game list exists", "function GameName(i)", "{"]
     for i, g in enumerate(CAROUSEL_GAMES):
