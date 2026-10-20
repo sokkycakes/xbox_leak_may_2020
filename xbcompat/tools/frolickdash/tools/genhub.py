@@ -117,6 +117,7 @@ PANEL_DIST, PANEL_RAISE, PANEL_TILT = 0.37, 0.06, 10.6
 # The screen overlay canvas (the engine's HUD is 720 x 480).
 HUD_W, HUD_H = 720, 480
 UI = HUD_H / 720.0                             # Godot's 720-high UI to the HUD
+PIN_TIP_Y = 378                                # the A pin's point, just above the pad label
 # PointSize is in points (the em is 4/3 PointSize pixels, as in the XUI
 # engine); Frolick's sizes were authored as the pixel height of DejaVu's
 # ascent + descent (2384/2048 em), so they convert by this factor.
@@ -318,12 +319,29 @@ def overlay_scene():
         "\n".join(["<XuiText>", "<Properties>", " <Id>word</Id>", " <Width>640</Width>", " <Height>120</Height>",
                    " <Position>-4,-26,0</Position>", " <Text>discover</Text>", " <TextColor>0x37ffffff</TextColor>",
                    " <PointSize>%.2f</PointSize>" % (111 * UI * PT), " <TextStyle>16</TextStyle>", "</Properties>", "</XuiText>"]),
-        # the A pin under the panel (sokky's art/frolick/pad_hint.png, a
-        # 256 px image whose pin fills rows 26..230): drawn 70 px square,
-        # centred on the pad, its tip just above the pad label
-        "\n".join(["<XuiImage>", "<Properties>", " <Id>promptA</Id>", " <Width>70</Width>", " <Height>70</Height>",
-                   " <Position>325,315,0</Position>", " <ImagePath>pad_hint.png</ImagePath>", " <SizeMode>4</SizeMode>",
-                   "</Properties>", "</XuiImage>"]),
+        # the A pin over the focused pad: sokky's Figma A_Focus (node
+        # 143:146 of fL710Dg0cpzZzYe0OZSBVu), a 128 px frame holding the lime
+        # pin (its Material teardrop, point down, as a figure in the Figma's
+        # own points) with the Xelu A in its round head, at the mockup's
+        # 720-high UI scale, centred on the pad, the tip just above the label
+        "\n".join(["<XuiGroup>", "<Properties>", " <Id>promptA</Id>",
+                   " <Width>%.3f</Width>" % (128 * UI), " <Height>%.3f</Height>" % (128 * UI),
+                   " <Position>%.3f,%.3f,0</Position>" % (360 - 64 * UI, PIN_TIP_Y - 114.667 * UI),
+                   "</Properties>",
+                   "<XuiFigure>", "<Properties>", " <Id>pin</Id>",
+                   " <Width>%.3f</Width>" % (85.334 * UI), " <Height>%.3f</Height>" % (101.334 * UI),
+                   " <Position>%.3f,%.3f,0</Position>" % (21.3333 * UI, 13.3333 * UI),
+                   " <Fill>\n  <FillType>1</FillType>\n  <FillColor>0xffc4ff46</FillColor>\n </Fill>", " <Closed>true</Closed>",
+                   " <Points>85.334,101.334;42.667,0,54.489,0,64.556,4.089;72.867,12.267,81.178,20.444,85.333,30.4;"
+                   "85.333,42.133,85.333,47.733,84.244,53.089;82.067,58.2,79.889,63.311,76.8,67.822;72.8,71.733;"
+                   "42.667,101.333;12.533,71.733,8.533,67.822,5.445,63.311;3.267,58.2,1.089,53.089,0,47.733;"
+                   "0,42.133,0,30.4,4.156,20.444;12.467,12.267,20.778,4.089,30.845,0</Points>",
+                   "</Properties>", "</XuiFigure>",
+                   "<XuiImage>", "<Properties>", " <Id>pinA</Id>",
+                   " <Width>%.3f</Width>" % (61 * UI), " <Height>%.3f</Height>" % (61 * UI),
+                   " <Position>%.3f,%.3f,0</Position>" % (33 * UI, 24 * UI),
+                   " <ImagePath>glyph_a_button.png</ImagePath>", " <SizeMode>4</SizeMode>",
+                   "</Properties>", "</XuiImage>", "</XuiGroup>"]),
         # the game title of the belt view: screen space, facing the camera,
         # centred above the focused cover (the cover's top is at about y 165
         # in the 96-degree view), 1.25x the size it had on the cover

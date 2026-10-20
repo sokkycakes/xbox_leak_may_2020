@@ -101,7 +101,6 @@ timeout 600 wine "$WORK/xb/public/mstools/vc70/link.exe" /nologo -subsystem:xbox
 rm -rf "$OUT/dash"; mkdir -p "$OUT/dash/pads" "$OUT/dash/obj"
 cp "$HERE"/dash/pads/*.xui "$OUT/dash/pads/"
 cp "$HERE"/art/blades/*.png "$OUT/dash/pads/"     # the Blades skin's button glyphs
-cp "$HERE/art/frolick/pad_hint.png" "$OUT/dash/pads/"   # sokky's A pin over the focused pad
 python3 "$HERE/tools/genhub.py" "$OUT/dash"
 python3 "$HERE/tools/genpage.py" "$OUT/dash"
 python3 "$HERE/tools/mkart.py" "$OUT/dash"

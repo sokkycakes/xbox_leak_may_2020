@@ -56,7 +56,7 @@ dashboard (`tools/dashbuild`), as its own `xboxdash.xbe` with its own
   sides), each pad's panel facing its camera, left/right flights between
   pads; the tiles inside a panel are not navigated, at sokky's request),
   `backdrop.png` (the `backdrop.tres` radial gradient), `pads/overlay.xui`
-  (the screen overlay: the faded word behind the view, the A pin over the focused pad (sokky's `art/frolick/pad_hint.png`), the
+  (the screen overlay: the faded word behind the view, the A pin over the focused pad (the Figma's `A_Focus`: its pin shape as a figure with the Xelu A in the head), the
   footer with the wordmark) and `pads/settings.xui` (the catalog layout
   relabelled, like Frolick's RML settings panel).
 - `tools/mkassets.py` – packs the data into `default.xip`, converting PNGs
