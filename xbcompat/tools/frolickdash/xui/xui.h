@@ -140,6 +140,7 @@ struct Node {
     void playState(const char* a, const char* b = 0);
     void setPath(PropPath* pp, const Value& v);
     void anchor(float dw, float dh);
+    void fitVisual();
     void markOwner(Node* owner);
     double frameTime(const char* name, double def);
     double lastKey();
@@ -208,6 +209,10 @@ struct Renderer {
     ~Renderer();
     void draw(Scene* s, float x, float y, float scale);
     void setFont(const char* path); // the TTF text elements use unless their Font names another
+    Color defaultTextColor;  // a text's colour when it sets none (white; GFWL's engine uses black)
+    float ascentEm;          // baseline below a text box's top, in ems (0: the font's own ascent)
+    float textZoom;          // text drawn this much larger than its PointSize, about its box (1: as authored)
+    float (*textZoomFor)(Node* n, float zoom);  // optional per-text override of textZoom
 
 private:
     struct TexEntry { char* key; Texture tex; int w, h; };
@@ -225,6 +230,8 @@ private:
     void node(Node* n, const Affine& parent, float alpha, Blend blend);
     void figure(Node* n, const Affine& m, float alpha, Blend blend);
     void image(Node* n, const Affine& m, float alpha, Blend blend);
+    void nineGrid(Node* n, const Affine& m, float alpha, Blend blend);
+    void slider(Node* n);
     void text(Node* n, const Affine& m, float alpha, Blend blend);
     void quad(Texture tex, Blend blend, const Affine& m, float x0, float y0, float x1, float y1,
               float u0, float v0, float u1, float v1, Color c, float alpha);

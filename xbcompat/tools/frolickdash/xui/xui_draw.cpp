@@ -79,7 +79,7 @@ struct Font {
     ~Font() { delete [] data; }
 };
 
-Renderer::Renderer(Backend* b, Resources* r) : be(b), res(r), font(0), clipping(false) {}
+Renderer::Renderer(Backend* b, Resources* r) : be(b), res(r), defaultTextColor(0xffffffff), ascentEm(0), textZoom(1), textZoomFor(0), font(0), clipping(false) {}
 
 Renderer::~Renderer()
 {
@@ -208,6 +208,7 @@ void Renderer::node(Node* n, const Affine& parent, float alpha, Blend blend)
     if (strcmp(cls, "XuiFigure") == 0) figure(n, m, alpha, blend);
     else if (strcmp(cls, "XuiImage") == 0 || strcmp(cls, "XuiImagePresenter") == 0) image(n, m, alpha, blend);
     else if (strcmp(cls, "XuiText") == 0 || strcmp(cls, "XuiTextPresenter") == 0) text(n, m, alpha, blend);
+    else if (strcmp(cls, "XuiNineGrid") == 0) nineGrid(n, m, alpha, blend);
 
     bool savedClipping = clipping; float saved[4];
     memcpy(saved, clipBuf, sizeof saved);
@@ -224,7 +225,11 @@ void Renderer::node(Node* n, const Affine& parent, float alpha, Blend blend)
         clipping = true;
         be->clip(clipBuf);
     }
-    if (n->visual) node(n->visual, m, alpha, blend);
+    if (n->visual) {
+        n->fitVisual();
+        if (strcmp(cls, "XuiSlider") == 0) slider(n);
+        node(n->visual, m, alpha, blend);
+    }
     for (int i = 0; i < n->children.n; i++) node(n->children[i], m, alpha, blend);
     if (clipping != savedClipping || memcmp(saved, clipBuf, sizeof saved) != 0) {
         clipping = savedClipping;
@@ -602,6 +607,51 @@ void Renderer::image(Node* n, const Affine& m, float alpha, Blend blend)
     quad(tex, blend, m, x0, y0, x1, y1, 0, 0, 1, 1, 0xffffffff, alpha);
 }
 
+// A slider's visual has a SliderBody group whose children (the thumb) sit at
+// Value's place in RangeMin..RangeMax; Data1 (the number beside it) is Value.
+void Renderer::slider(Node* n)
+{
+    Node* body = n->visual->find("SliderBody");
+    Value* lo = n->props.get("RangeMin"), *hi = n->props.get("RangeMax"), *val = n->props.get("Value");
+    int a = lo && lo->type == TInt ? lo->i : 0, b = hi && hi->type == TInt ? hi->i : 100;
+    int v = val && val->type == TInt ? val->i : 0;
+    float f = b > a ? (float)(v - a) / (b - a) : 0;
+    if (f < 0) f = 0; if (f > 1) f = 1;
+    for (int i = 0; body && i < body->children.n; i++) {
+        Node* c = body->children[i];
+        Vec3 zero = { 0, 0, 0 };
+        Vec3 p = propV(c->props, "Position", zero);
+        p.x = f * (body->width() - c->width());
+        Value& pv = c->props.set("Position"); pv.free(); pv.type = TVector; pv.v = p;
+    }
+    char num[16]; sprintf(num, "%d", v);
+    if (strcmp(propS(n->props, "Data1"), num) != 0) {
+        Value& d = n->props.set("Data1"); d.free(); d.type = TString; d.s = strdup2(num);
+    }
+}
+
+// A nine-grid stretches the middle of its texture and keeps the borders
+// (Left/Top/Right/BottomOffset texels) at their size.
+void Renderer::nineGrid(Node* n, const Affine& m, float alpha, Blend blend)
+{
+    int iw, ih;
+    Texture tex = imageTex(propS(n->props, "TextureFileName"), &iw, &ih);
+    if (tex == 0 || iw <= 0 || ih <= 0) return;
+    float w = n->width(), h = n->height();
+    float l = (float)propU(n->props, "LeftOffset", 0), t = (float)propU(n->props, "TopOffset", 0);
+    float r = (float)propU(n->props, "RightOffset", 0), b = (float)propU(n->props, "BottomOffset", 0);
+    // borders that do not fit share the space
+    if (l + r > w && l + r > 0) { float k = w / (l + r); l *= k; r *= k; }
+    if (t + b > h && t + b > 0) { float k = h / (t + b); t *= k; b *= k; }
+    float xs[4] = { 0, l, w - r, w }, ys[4] = { 0, t, h - b, h };
+    float us[4] = { 0, l / iw, 1 - r / iw, 1 }, vs[4] = { 0, t / ih, 1 - b / ih, 1 };
+    for (int j = 0; j < 3; j++)
+        for (int i = 0; i < 3; i++)
+            if (xs[i + 1] > xs[i] && ys[j + 1] > ys[j])
+                quad(tex, blend, m, xs[i], ys[j], xs[i + 1], ys[j + 1], us[i], vs[j], us[i + 1], vs[j + 1],
+                     0xffffffff, alpha);
+}
+
 void Renderer::quad(Texture tex, Blend blend, const Affine& m, float x0, float y0, float x1, float y1,
                     float u0, float v0, float u1, float v1, Color c, float alpha)
 {
@@ -761,7 +811,7 @@ void Renderer::text(Node* n, const Affine& m, float alpha, Blend blend)
             }
             float qx = (float)floor(cx - inkx - 1 + 0.5f);
             float qy = (float)floor(cy + (y0 + y1) / 2.0f * lfs - (float)ceil(font->ascent * lfs) + 0.5f);
-            Color col = propC(n->props, "TextColor", 0xffffffff);
+            Color col = propC(n->props, "TextColor", defaultTextColor);
             quad(tex, blend, aff(1, 0, 0, 1, qx, qy), 0, 0, (float)iw, (float)ih, 0, 0, 1, 1, col, alpha);
             return;
         }
@@ -769,7 +819,8 @@ void Renderer::text(Node* n, const Affine& m, float alpha, Blend blend)
     // PointSize is in points: the XUI engine sizes the em at 96 dpi (the
     // GFWL engine's legend and header glyphs and baselines, and sokky's
     // real-console capture of the legend, all measure 4/3 PointSize per em).
-    float px = size * (96.0f / 72.0f) * scale;
+    float zoom = textZoomFor ? textZoomFor(n, textZoom) : textZoom;
+    float px = size * (96.0f / 72.0f) * scale * zoom;
     float fs = stbtt_ScaleForMappingEmToPixels(&font->info, px);
     float w = n->width(), h = n->height();
 
@@ -806,7 +857,8 @@ void Renderer::text(Node* n, const Affine& m, float alpha, Blend blend)
     float total = lh * nl;
     float y = 0;
     if (style & styleCenterV) y = (h - total) / 2;
-    Color col = propC(n->props, "TextColor", 0xffffffff);
+    else if (zoom != 1) y = total * (1 - 1 / zoom) / -2;  // grow about the authored lines' middle
+    Color col = propC(n->props, "TextColor", defaultTextColor);
     Color shadow = propC(n->props, "DropShadowColor", 0);
     Affine inv = aff(1 / scale, 0, 0, 1 / scale, 0, 0);
     for (int i = 0; i < nl; i++) {
@@ -821,7 +873,8 @@ void Renderer::text(Node* n, const Affine& m, float alpha, Blend blend)
         // starts at the box's left edge and the baseline sits exactly one
         // ascent below its top (the button glyphs' letters sat a pixel
         // right and low in their circles otherwise)
-        float ox = x - 1 / scale, oy = y - ((float)ceil(font->ascent * fs) - font->ascent * fs) / scale;
+        float asc = ascentEm > 0 ? ascentEm * px : font->ascent * fs;
+        float ox = x - 1 / scale, oy = y + (asc - (float)ceil(font->ascent * fs)) / scale;
         Affine lm = mul(mul(m, aff(1, 0, 0, 1, ox, oy)), inv);
         if ((style & styleShadow) && (shadow >> 24) != 0) {
             Affine sm = mul(mul(m, aff(1, 0, 0, 1, ox + 1.5f, oy + 1.5f)), inv);

@@ -1,6 +1,7 @@
 // Live scenes: instantiation with skin visuals, timelines, focus (scene.go).
 #include "xui.h"
 #include <math.h>
+#include <stdio.h>
 
 namespace xui {
 
@@ -45,6 +46,14 @@ bool Node::focusable()
 
 // ---- construction ----------------------------------------------------------
 
+// A checked checkbox plays the Check variant of each state (NormalCheck,
+// FocusCheck); Checked is set from code.
+static bool checked(Node* n)
+{
+    return n && n->cls && strcmp(n->cls->name, "XuiCheckbox") == 0 && propB(n->props, "Checked", false);
+}
+
+
 // A timeline starts at frame 0 unless it has a Normal frame; a Stop command
 // at frame 0 (the Blades' meta panes rest at "Default") holds it there.
 // A progress bar's visual is held at the frame between Normal and
@@ -60,6 +69,7 @@ struct InitTimelines { bool operator()(Node* n) {
         return true;
     }
     if (n->owner && n->owner->visual == n && !propB(n->owner->props, "Enabled", true) && n->play("NormalDisable")) return true;
+    if (n->owner && n->owner->visual == n && checked(n->owner) && n->play("NormalCheck")) return true;
     if (!n->play("Normal")) { n->time = 0; n->playing = !n->stopsAt(0); n->apply(); }
     return true; } };
 
@@ -128,13 +138,26 @@ void Scene::attachVisual(Node* n)
     n->visual = vis;
 }
 
+// A visual takes its control's size; timelines that resize the control
+// (the Guide's back panel widens as it opens) stretch the visual again.
+void Node::fitVisual()
+{
+    if (!visual) return;
+    float w = width(), h = height(), vw = visual->width(), vh = visual->height();
+    if (w == vw && h == vh) return;
+    Value& a = visual->props.set("Width"); a.free(); a.type = TFloat; a.f = w;
+    Value& b = visual->props.set("Height"); b.free(); b.type = TFloat; b.f = h;
+    for (int i = 0; i < visual->children.n; i++) visual->children[i]->anchor(w - vw, h - vh);
+}
+
 void Node::markOwner(Node* o)
 {
     owner = o;
     for (int i = 0; i < children.n; i++) if (!children[i]->visual) children[i]->markOwner(o);
 }
 
-// Anchor bits: 1 left, 2 top, 4 right, 8 bottom.  A node anchored to
+// Anchor bits: 1 left, 2 top, 4 right, 8 bottom, 16 centre across, 32
+// centre down (the GFWL buttons keep icon and text centred in a taller row).  A node anchored to
 // both sides stretches with its parent, and its own children then anchor
 // to it in turn (the Blades' Metapane is a group of edge strips anchored
 // inside a group that stretches to the pane).
@@ -146,8 +169,10 @@ void Node::anchor(float dw, float dh)
     float mw = 0, mh = 0;
     if ((a & 1) && (a & 4)) { Value& v = props.set("Width"); v.free(); v.type = TFloat; v.f = width() + dw; mw = dw; }
     else if (a & 4) pos.x += dw;
+    else if (a & 16) pos.x += dw / 2;
     if ((a & 2) && (a & 8)) { Value& v = props.set("Height"); v.free(); v.type = TFloat; v.f = height() + dh; mh = dh; }
     else if (a & 8) pos.y += dh;
+    else if (a & 32) pos.y += dh / 2;
     Value& p = props.set("Position"); p.free(); p.type = TVector; p.v = pos;
     if (mw != 0 || mh != 0) for (int i = 0; i < children.n; i++) children[i]->anchor(mw, mh);
 }
@@ -191,6 +216,12 @@ void Scene::press()
 void Node::playState(const char* a, const char* b)
 {
     Node* t = visual ? visual : this;
+    if (checked(this)) {
+        char c[48];
+        sprintf(c, "%.40sCheck", a);
+        if (t->play(c)) return;
+        if (b) { sprintf(c, "%.40sCheck", b); if (t->play(c)) return; }
+    }
     if (t->play(a)) return;
     if (b) t->play(b);
 }
