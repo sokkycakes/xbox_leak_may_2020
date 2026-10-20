@@ -403,6 +403,7 @@ NTSTATUS NTAPI NtCreateFile(HANDLE *FileHandle, ACCESS_MASK DesiredAccess, OBJEC
                             ULONG FileAttributes, ULONG ShareAccess, ULONG CreateDisposition,
                             ULONG CreateOptions)
 {
+    gl_yield_point();
     (void)AllocationSize; (void)FileAttributes; (void)ShareAccess;
     char *xpath = full_xbox_path(oa);
     char host[PATH_MAX];
@@ -528,6 +529,7 @@ out:
 NTSTATUS NTAPI NtOpenFile(HANDLE *FileHandle, ACCESS_MASK DesiredAccess, OBJECT_ATTRIBUTES *oa,
                           IO_STATUS_BLOCK *iosb, ULONG ShareAccess, ULONG OpenOptions)
 {
+    gl_yield_point();
     return NtCreateFile(FileHandle, DesiredAccess, oa, iosb, NULL, 0, ShareAccess, FILE_OPEN,
                         OpenOptions);
 }
@@ -657,6 +659,7 @@ static NTSTATUS volume_io(xfile *f, HANDLE Event, PVOID ApcRoutine, PVOID ApcCon
 NTSTATUS NTAPI NtReadFile(HANDLE FileHandle, HANDLE Event, PVOID ApcRoutine, PVOID ApcContext,
                           IO_STATUS_BLOCK *iosb, PVOID Buffer, ULONG Length, LARGE_INTEGER *ByteOffset)
 {
+    gl_yield_point();
     (void)ApcContext;
     xfile *f = file_of(FileHandle);
     if (f && f->is_dvd) {
@@ -695,6 +698,7 @@ NTSTATUS NTAPI NtReadFile(HANDLE FileHandle, HANDLE Event, PVOID ApcRoutine, PVO
 NTSTATUS NTAPI NtWriteFile(HANDLE FileHandle, HANDLE Event, PVOID ApcRoutine, PVOID ApcContext,
                            IO_STATUS_BLOCK *iosb, PVOID Buffer, ULONG Length, LARGE_INTEGER *ByteOffset)
 {
+    gl_yield_point();
     (void)ApcContext;
     xfile *f = file_of(FileHandle);
     if (f && f->is_dvd) return fcomplete(f, Event, ApcRoutine, ApcContext, iosb, STATUS_MEDIA_WRITE_PROTECTED, 0);
@@ -746,6 +750,7 @@ NTSTATUS NTAPI NtReadFileScatter(HANDLE FileHandle, HANDLE Event, PVOID ApcRouti
                                  IO_STATUS_BLOCK *iosb, const ULONGLONG *SegmentArray, ULONG Length,
                                  LARGE_INTEGER *ByteOffset)
 {
+    gl_yield_point();
     return scatter_gather(FileHandle, Event, ApcRoutine, ApcContext, iosb, SegmentArray, Length, ByteOffset, false);
 }
 
@@ -753,6 +758,7 @@ NTSTATUS NTAPI NtWriteFileGather(HANDLE FileHandle, HANDLE Event, PVOID ApcRouti
                                  IO_STATUS_BLOCK *iosb, const ULONGLONG *SegmentArray, ULONG Length,
                                  LARGE_INTEGER *ByteOffset)
 {
+    gl_yield_point();
     return scatter_gather(FileHandle, Event, ApcRoutine, ApcContext, iosb, SegmentArray, Length, ByteOffset, true);
 }
 
@@ -797,6 +803,7 @@ static ULONG attributes_of(const struct stat *sb)
 NTSTATUS NTAPI NtQueryInformationFile(HANDLE FileHandle, IO_STATUS_BLOCK *iosb, PVOID Info,
                                       ULONG Length, ULONG Class)
 {
+    gl_yield_point();
     xfile *f = file_of(FileHandle);
     if (!f) return STATUS_INVALID_HANDLE;
     struct stat sb;
@@ -1099,6 +1106,7 @@ NTSTATUS NTAPI NtDeviceIoControlFile(HANDLE FileHandle, HANDLE Event, PVOID ApcR
                                      IO_STATUS_BLOCK *iosb, ULONG Code, PVOID In, ULONG InLen,
                                      PVOID Out, ULONG OutLen)
 {
+    gl_yield_point();
     (void)ApcContext; (void)In; (void)InLen;
     TRACE("NtDeviceIoControlFile(%p, %#x, out %u)", FileHandle, Code, OutLen);
     switch (Code) {

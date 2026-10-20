@@ -159,6 +159,7 @@ NTSTATUS handle_close(HANDLE h)
 
 NTSTATUS NTAPI NtClose(HANDLE Handle)
 {
+    gl_yield_point();
     TRACE("NtClose(%p)", Handle);
     if (Handle == NtCurrentThread) return STATUS_SUCCESS;
     return handle_close(Handle);
@@ -630,6 +631,7 @@ NTSTATUS NTAPI NtDuplicateObject(HANDLE Source, HANDLE *Target, ULONG Options)
 
 NTSTATUS NTAPI NtYieldExecution(void)
 {
+    gl_yield_point();
     xthread *xt = thread_current();
     if (xt) __atomic_store_n(&xt->in_wait, 1, __ATOMIC_SEQ_CST);
     cpu_block();

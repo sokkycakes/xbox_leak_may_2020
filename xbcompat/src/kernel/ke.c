@@ -119,6 +119,15 @@ void disp_signal_all(void)
     for (struct disp_waiter *w = disp_waiters; w; w = w->next) pthread_cond_signal(&w->cv);
 }
 
+/* A thread waits for the GL context (hle/d3d8.c): one blocked here may hold
+   it, and lets it go when it looks again. */
+void ke_wake_waiters(void)
+{
+    pthread_mutex_lock(&g_disp_lock);
+    disp_signal_all();
+    pthread_mutex_unlock(&g_disp_lock);
+}
+
 /* ---- time ------------------------------------------------------------- */
 
 #define EPOCH_DIFF_100NS 116444736000000000ULL   /* 1601 -> 1970 */
@@ -499,6 +508,11 @@ NTSTATUS wait_objects(ULONG count, PVOID objects[], int wait_any, KPROCESSOR_MOD
         goto done;
     }
     for (;;) {
+        if (xbc_gl_yield_due && xbc_gl_yield_due()) {
+            pthread_mutex_unlock(&g_disp_lock);
+            xbc_gl_yield();
+            pthread_mutex_lock(&g_disp_lock);
+        }
         if (xt && xt->apc_head) apc_drain(xt, false);
         if (wait_any) {
             for (ULONG i = 0; i < count; i++) {
@@ -591,6 +605,7 @@ NTSTATUS NTAPI KeDelayExecutionThread(KPROCESSOR_MODE WaitMode, BOOLEAN Alertabl
         NTSTATUS st = wait_objects(0, NULL, 1, WaitMode, Alertable, Interval);
         return st == STATUS_TIMEOUT ? STATUS_SUCCESS : st;
     }
+    gl_yield_point();
     LONGLONG t = Interval->QuadPart;
     ULONGLONG rel = t < 0 ? (ULONGLONG)-t : (t > (LONGLONG)system_time_now() ? t - system_time_now() : 0);
     uint64_t prof_start = prof_wait_begin();

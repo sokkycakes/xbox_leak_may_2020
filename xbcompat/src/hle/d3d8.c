@@ -339,6 +339,113 @@ static void pusher_init(ULONG *dev);
 static void sync_device_surfaces(void);
 static bool device_layout_5849;   /* d3d.device is laid out like the 5849 CDevice */
 
+/* ---- the GL context across guest threads -------------------------------- */
+
+/* Each guest thread is a host thread, and the GL context is current on one
+   thread at a time.  On the Xbox any thread may draw, so long as the title
+   takes turns (D3D isn't thread safe there either): Splinter Cell draws its
+   loading bar and Swaps from a thread of its own while the first thread
+   loads, and those draws reached no context (black loading screens, no
+   bar).  So a thread that draws while another holds the context asks for it
+   (gl_require), and the holder lets it go at its next kernel call (a wait, a
+   sleep, a file read: xbc_gl_yield) or when it exits, never inside a D3D
+   call.  Threads that only set state or lock resources never ask.  With
+   queued drawing the render worker owns the context and none of this
+   applies. */
+static pthread_mutex_t gl_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t gl_cond XBC_COND_ALIGN = PTHREAD_COND_INITIALIZER;
+static bool gl_held;               /* current on some thread (under gl_lock) */
+static __thread bool gl_mine;      /* current on this thread */
+static __thread int gl_no_yield;   /* running a title callback from inside D3D: keep it */
+static volatile int gl_wanted;     /* threads waiting in gl_require */
+static pthread_t gl_creator;       /* made the window, and reads its events */
+/* Textures a thread without the context let go of, for the next holder. */
+static GLuint gl_deferred_deletes[256];
+static unsigned gl_deferred_count;
+void ke_wake_waiters(void) __attribute__((weak));   /* kernel/ke.c */
+
+static bool gl_lost(void) { return d3d.gl && !async_on && !gl_mine; }
+
+/* False when it couldn't get the context (GL calls then go nowhere, as
+   before any of this). */
+static bool gl_require(void)
+{
+    if (gl_mine || !d3d.gl || async_on) return true;
+    cpu_block();   /* translated builds: the holder needs the guest CPU to get to a kernel call */
+    pthread_mutex_lock(&gl_lock);
+    struct timespec give_up;
+    clock_gettime(CLOCK_REALTIME, &give_up);
+    give_up.tv_sec += 2;
+    __atomic_add_fetch(&gl_wanted, 1, __ATOMIC_SEQ_CST);
+    while (gl_held) {
+        /* A holder blocked in a kernel wait looks again. */
+        pthread_mutex_unlock(&gl_lock);
+        if (ke_wake_waiters) ke_wake_waiters();
+        pthread_mutex_lock(&gl_lock);
+        if (!gl_held) break;
+        struct timespec t;
+        clock_gettime(CLOCK_REALTIME, &t);
+        if (t.tv_sec > give_up.tv_sec || (t.tv_sec == give_up.tv_sec && t.tv_nsec >= give_up.tv_nsec)) break;
+        t.tv_nsec += 50000000;
+        if (t.tv_nsec >= 1000000000) { t.tv_sec++; t.tv_nsec -= 1000000000; }
+        pthread_cond_timedwait(&gl_cond, &gl_lock, &t);
+    }
+    __atomic_sub_fetch(&gl_wanted, 1, __ATOMIC_SEQ_CST);
+    if (gl_held || SDL_GL_MakeCurrent(d3d.window, d3d.gl) != 0) {
+        static unsigned warned;
+        if (warned++ < 4)
+            xlog("D3D: a thread draws without the GL context (%s)",
+                 gl_held ? "the thread holding it made no kernel call for 2 s" : SDL_GetError());
+        pthread_mutex_unlock(&gl_lock);
+        return false;
+    }
+    gl_held = gl_mine = true;
+    if (gl_deferred_count) glDeleteTextures(gl_deferred_count, gl_deferred_deletes);
+    gl_deferred_count = 0;
+    pthread_mutex_unlock(&gl_lock);
+    gc_reset();   /* anything set without the context never reached GL */
+    static unsigned handoffs;
+    if (handoffs++ < 8)
+        xlog("D3D: the GL context goes to host thread %#lx, which draws now (frame %lu)",
+             (unsigned long)pthread_self(), (unsigned long)d3d.frame);
+    return true;
+}
+
+static void gl_delete_texture(GLuint id)
+{
+    if (!gl_lost()) { glDeleteTextures(1, &id); return; }
+    pthread_mutex_lock(&gl_lock);
+    if (gl_deferred_count < sizeof(gl_deferred_deletes) / sizeof(gl_deferred_deletes[0]))
+        gl_deferred_deletes[gl_deferred_count++] = id;
+    pthread_mutex_unlock(&gl_lock);
+}
+
+static void gl_release(void)
+{
+    pthread_mutex_lock(&gl_lock);
+    SDL_GL_MakeCurrent(d3d.window, NULL);
+    gl_held = gl_mine = false;
+    pthread_cond_broadcast(&gl_cond);
+    pthread_mutex_unlock(&gl_lock);
+}
+
+/* From kernel calls: true while this thread holds the context another
+   thread waits for. */
+bool xbc_gl_yield_due(void)
+{
+    return gl_mine && !gl_no_yield && __atomic_load_n(&gl_wanted, __ATOMIC_RELAXED);
+}
+
+void xbc_gl_yield(void)
+{
+    if (xbc_gl_yield_due()) gl_release();
+}
+
+void xbc_gl_thread_exit(void)
+{
+    if (gl_mine) gl_release();
+}
+
 static ULONG direct3d_object[4];
 
 static PVOID NTAPI Direct3DCreate8(UINT_ SDKVersion)
@@ -597,6 +704,8 @@ static LONG NTAPI Direct3D_CreateDevice(UINT_ Adapter, ULONG DeviceType, PVOID p
     if (!d3d.window) fatal("SDL_CreateWindow: %s", SDL_GetError());
     d3d.gl = SDL_GL_CreateContext(d3d.window);
     if (!d3d.gl) fatal("SDL_GL_CreateContext: %s", SDL_GetError());
+    gl_held = gl_mine = true;
+    gl_creator = pthread_self();
     shader_diagnostics_init();
     gc_reset();
     glGetIntegerv(GL_MAX_VERTEX_ATTRIBS, &host_vertex_attribs);
@@ -626,6 +735,7 @@ static LONG NTAPI Direct3D_CreateDevice(UINT_ Adapter, ULONG DeviceType, PVOID p
     load_fbo_functions();
     if (!create_window_framebuffer()) {
         SDL_GL_DeleteContext(d3d.gl); d3d.gl = NULL;
+        gl_held = gl_mine = false;
         SDL_DestroyWindow(d3d.window); d3d.window = NULL;
         if (ppDevice) *ppDevice = NULL;
         return D3DERR_NOTAVAILABLE;
@@ -1179,11 +1289,14 @@ static void swap_gpu_frame_end(void)
     cpu_compare_audit_frame(d3d.frame);
 }
 
-/* Window events; true when the window was closed. */
+/* Window events; true when the window was closed.  Only the thread that
+   made the window reads them (SDL wants that); another thread's Swap leaves
+   them for the next. */
 static bool swap_window_events(void)
 {
     SDL_Event e;
     bool quit = false;
+    if (!pthread_equal(pthread_self(), gl_creator)) return false;
     while (SDL_PollEvent(&e))
         if (e.type == SDL_QUIT) quit = true;
     return quit;
@@ -1200,11 +1313,13 @@ static void swap_finish(void)
         ULONG vb = d3dv.vblank_count, missed = vb - d3dv.vblank_at_swap > 1 ? vb - d3dv.vblank_at_swap - 1 : 0;
         ULONG data[5] = { d3d.frame, vb, missed, 0, 16667 };
         d3dv.vblank_at_swap = vb;
+        gl_no_yield++;
 #ifdef XBC_TRANSLATED
         CPU_CALL(swap_cb, CONV_CDECL, (uint32_t)data);
 #else
         ((void (CDECLAPI *)(ULONG *))swap_cb)(data);
 #endif
+        gl_no_yield--;
     }
 }
 
@@ -1233,6 +1348,7 @@ static void swap_exit_check(void)
 
 static ULONG NTAPI D3DDevice_Swap(ULONG Flags)
 {
+    gl_require();
     (void)Flags;
     if (async_front()) return async_swap();
     pusher_drain();
@@ -1406,6 +1522,7 @@ static void swap_cpu_backbuffer(void)
 static void NTAPI D3DDevice_Clear(ULONG Count, const D3DRECT *pRects, ULONG Flags, ULONG Color, float Z,
                                   ULONG Stencil)
 {
+    gl_require();
     pusher_drain();
     if (async_front()) { async_clear(Count, pRects, Flags, Color, Z, Stencil); return; }
     hud_batch_flush();
@@ -1694,7 +1811,7 @@ static void tex_invalidate(ULONG data)
     while (*pp) {
         tex_entry *e = *pp;
         if (e->data == data) {
-            glDeleteTextures(1, &e->id);
+            gl_delete_texture(e->id);
             *pp = e->next;
             free(e);
         } else {
@@ -3636,6 +3753,7 @@ static program_entry *program_lookup[256];
 static void NTAPI D3DDevice_DeleteVertexShader(ULONG handle)
 {
     if (!(handle & 1)) return;
+    gl_require();
     vshader *sh = (vshader *)(handle & ~1u);
     if (vp_slot0_pending == sh) vp_flush_pending();   /* program memory keeps its copy */
     if (sh->vs || sh->vs_z) {
@@ -5803,6 +5921,7 @@ static void draw_patch_mesh(vshader *layout, vshader *real, const float (*verts)
 
 static LONG NTAPI D3DDevice_DrawRectPatch(UINT_ Handle, const float *pNumSegs, const ULONG *info)
 {
+    gl_require();
     pusher_drain();
     patch_entry *pe = NULL;
     if (Handle) {
@@ -5906,6 +6025,7 @@ static LONG NTAPI D3DDevice_DrawRectPatch(UINT_ Handle, const float *pNumSegs, c
    higher orders take their first three control points as the corners. */
 static LONG NTAPI D3DDevice_DrawTriPatch(UINT_ Handle, const float *pNumSegs, const ULONG *info)
 {
+    gl_require();
     pusher_drain();
     patch_entry *pe = NULL;
     if (Handle) {
@@ -5970,6 +6090,7 @@ static void NTAPI D3DDevice_DeletePatch(UINT_ Handle)
 
 static void NTAPI D3DDevice_DrawVertices(ULONG PrimitiveType, UINT_ StartVertex, UINT_ VertexCount)
 {
+    gl_require();
     pusher_drain();
     if (async_front()) { async_draw(PrimitiveType, StartVertex, VertexCount); return; }
     if (d3d.recording) { ULONG a[3] = { PrimitiveType, StartVertex, VertexCount }; pb_record(OP_DRAW, a, sizeof(a)); return; }
@@ -5981,6 +6102,7 @@ static void NTAPI D3DDevice_DrawVertices(ULONG PrimitiveType, UINT_ StartVertex,
 static void NTAPI D3DDevice_DrawVerticesUP(ULONG PrimitiveType, UINT_ VertexCount, const void *pData,
                                            UINT_ Stride)
 {
+    gl_require();
     pusher_drain();
     if (async_front()) { async_draw_up(PrimitiveType, VertexCount, pData, Stride); return; }
     if (d3d.recording) {
@@ -5993,6 +6115,7 @@ static void NTAPI D3DDevice_DrawVerticesUP(ULONG PrimitiveType, UINT_ VertexCoun
 
 static void NTAPI D3DDevice_DrawIndexedVertices(ULONG PrimitiveType, UINT_ VertexCount, const USHORT *pIndexData)
 {
+    gl_require();
     pusher_drain();
     if (async_front()) { async_draw_indexed(PrimitiveType, VertexCount, pIndexData); return; }
     if (d3d.recording) {
@@ -6009,6 +6132,7 @@ static void NTAPI D3DDevice_DrawIndexedVertices(ULONG PrimitiveType, UINT_ Verte
 static void NTAPI D3DDevice_DrawIndexedVerticesUP(ULONG PrimitiveType, UINT_ VertexCount, const USHORT *pIndexData,
                                                   const void *pVertexData, UINT_ Stride)
 {
+    gl_require();
     pusher_drain();
     if (async_front()) { async_draw_indexed_up(PrimitiveType, VertexCount, pIndexData, pVertexData, Stride); return; }
     if (d3d.recording) {
@@ -6627,6 +6751,7 @@ static void front_buffer_overlay(void)
 static void front_buffer_memory(void)
 {
     if (!front.memory_stale || !front.tex) return;
+    gl_require();
     front.memory_stale = false;
     ULONG w, h, pitch;
     container_size((D3DPixelContainer *)front.s, &w, &h, &pitch);
@@ -7207,6 +7332,9 @@ static bool readback_rt_surface(D3DSurface *s)
     GLenum face;
     tex_entry *e = surface_image(s, &face, &level);
     if (!e) return false;
+    if (gl_lost()) {   /* the holder may drop the copy meanwhile: look again once ours */
+        if (!gl_require() || !(e = surface_image(s, &face, &level))) return false;
+    }
     ULONG w, h, pitch;
     container_size((D3DPixelContainer *)s, &w, &h, &pitch);
     if (!w || !h || w > SIZE_MAX / h / bytes) return false;
@@ -7272,6 +7400,7 @@ static void trace_dump_target(D3DSurface *s)
 
 static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
 {
+    gl_require();
     trace_dump_target(d3d.target);
     pusher_drain();
     if (async_front()) { async_target(target, z); return; }
@@ -7432,7 +7561,7 @@ static void NTAPI D3DSurface_LockRect(D3DSurface *s, ULONG *locked, const LONG *
     container_size((D3DPixelContainer *)s, &w, &h, &pitch);
     TRACE_ALL("D3D: LockRect surface %p data %#x %ux%u flags %#x%s%s", (void *)s, (unsigned)s->Data, (unsigned)w,
               (unsigned)h, (unsigned)flags, s == d3d.backbuffer ? " backbuffer" : "", s == d3d.depth ? " depth" : "");
-    if (s == d3d.backbuffer && !d3d.bb_cpu_dirty) {
+    if (s == d3d.backbuffer && !d3d.bb_cpu_dirty && gl_require()) {
         /* Hand out the real pixels: read the frame back.  Not while memory
            holds writes from an earlier lock: GL hasn't seen them yet (a draw
            flushes them first), so memory is already the newest frame, and
@@ -7547,6 +7676,7 @@ static void copy_compressed_surface(D3DSurface *src, const LONG *rects, UINT_ n,
 static void NTAPI D3DDevice_CopyRects(D3DSurface *src, const LONG *rects, UINT_ n, D3DSurface *dst,
                                       const LONG *points)
 {
+    gl_require();
     pusher_drain();
     ULONG sw, sh, sp, dw, dh, dp;
     container_size((D3DPixelContainer *)src, &sw, &sh, &sp);
@@ -8170,6 +8300,7 @@ static void NTAPI D3DDevice_GetScissors(ULONG *Count, ULONG *Exclusive, D3DRECT 
 static void run_callbacks(void)
 {
     hud_batch_flush();
+    gl_no_yield++;
     for (unsigned i = 0; i < d3d.ncallbacks; i++) {
 #ifdef XBC_TRANSLATED
         CPU_CALL(d3d.callbacks[i].fn, CONV_CDECL, (uint32_t)d3d.callbacks[i].ctx);
@@ -8178,6 +8309,7 @@ static void run_callbacks(void)
         fn(d3d.callbacks[i].ctx);
 #endif
     }
+    gl_no_yield--;
     d3d.ncallbacks = 0;
 }
 
@@ -8605,6 +8737,7 @@ static void NTAPI D3DDevice_SetVertexDataColor(LONG r, ULONG color)
 static void imm_flush(ULONG prim)
 {
     if (!imm.n) return;
+    gl_require();
     hud_batch_flush();   /* batched draws made before this one land first */
     vshader *sh = (d3d.vertex_shader & 1) ? (vshader *)(d3d.vertex_shader & ~1u) : NULL;
     if (sh && sh->code) {
@@ -8844,6 +8977,7 @@ static void NTAPI D3DDevice_BeginPushBuffer(D3DPushBuffer *pb)
 
 static LONG NTAPI D3DDevice_EndPushBuffer(void)
 {
+    gl_require();
     D3DPushBuffer *pb = d3d.recording;
     if (!pb) return D3DERR_INVALIDCALL;
     pb_flush_state();
@@ -9192,6 +9326,7 @@ static void pb_run(D3DPushBuffer *b, D3DFixup *fx, int depth)
 
 static void NTAPI D3DDevice_RunPushBuffer(D3DPushBuffer *pb, D3DFixup *fx)
 {
+    gl_require();
     pusher_drain();
     if (d3d.recording) {
         ULONG a[2] = { (ULONG)pb, (ULONG)fx };
@@ -9400,6 +9535,7 @@ static void pb_interpret(const ULONG *p, unsigned n)
 
 static void NTAPI D3DDevice_EndPush(ULONG *end)
 {
+    gl_require();
     unsigned n = end - push_scratch;
     if (!push_scratch || n > push_scratch_cap) return;
     if (d3d.recording) {
@@ -9454,6 +9590,7 @@ static void pusher_drain(void)
         ULONG h = n;
         pb_record2(OP_RAW, &h, 4, pusher_buf, n * 4);
     } else {
+        if (!pb_state_only(pusher_buf, n)) gl_require();
         Uint64 t0 = prof_draw_begin();
         pb_interpret(pusher_buf, n);
         if (t0) prof.drain += SDL_GetPerformanceCounter() - t0;
@@ -9511,6 +9648,7 @@ static void NTAPI D3DDevice_GetDirect3D(PVOID *pp) { *pp = direct3d_object; }
    persists it). */
 static LONG NTAPI D3DDevice_PersistDisplay(void)
 {
+    gl_require();
     pusher_drain();
     if (!d3d.window) return D3DERR_INVALIDCALL;
     flush_cpu_backbuffer();
@@ -9579,6 +9717,7 @@ static GLuint vis_active;
 
 static void NTAPI D3DDevice_BeginVisibilityTest(void)
 {
+    gl_require();
     pusher_drain();
     if (d3d.recording) { ULONG a = 0; pb_record(OP_VIS_BEGIN, &a, 4); return; }
     if (async_front()) { async_vis_begin(); return; }
@@ -9591,6 +9730,7 @@ static void NTAPI D3DDevice_BeginVisibilityTest(void)
 
 static LONG NTAPI D3DDevice_EndVisibilityTest(ULONG index)
 {
+    gl_require();
     pusher_drain();
     if (d3d.recording) { pb_record(OP_VIS_END, &index, 4); return D3D_OK; }
     if (async_front()) { async_vis_end(index); return D3D_OK; }
@@ -9613,6 +9753,7 @@ static LONG NTAPI D3DDevice_EndVisibilityTest(ULONG index)
 
 static LONG NTAPI D3DDevice_GetVisibilityTestResult(ULONG index, UINT_ *result, ULONGLONG *stamp)
 {
+    gl_require();
     unsigned slot = index % VIS_SLOTS;
     if (stamp) *stamp = d3d.frame;
     if (async_front()) return async_vis_result(index, result);
@@ -10025,6 +10166,7 @@ static void NTAPI D3DDevice_GetViewportOffsetAndScale(float *offset, float *scal
 
 static void NTAPI D3DDevice_SetRenderTargetFast(D3DSurface *target, D3DSurface *z, ULONG Flags)
 {
+    gl_require();
     pusher_drain();
     (void)Flags;
     D3DDevice_SetRenderTarget(target, z);
@@ -10125,6 +10267,7 @@ static D3DSurface *NTAPI D3DDevice_GetPersistedSurface2(void)
 /* The headers make Present a Swap(0); some libraries keep a body for it. */
 static LONG NTAPI D3DDevice_Present(const void *src, const void *dst, PVOID unused1, PVOID unused2)
 {
+    gl_require();
     (void)src; (void)dst; (void)unused1; (void)unused2;
     D3DDevice_Swap(0);
     return D3D_OK;

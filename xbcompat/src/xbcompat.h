@@ -117,6 +117,15 @@ ULONG NTAPI RtlNtStatusToDosError(NTSTATUS st);
 void timers_init(void);
 extern void (*g_vblank_hook)(void);   /* run 60 times a second on the DPC thread */
 extern void (*g_render_drain)(void);  /* before freeing guest memory queued drawing may still read */
+/* hle/d3d8.c: the GL context goes between the title's threads that draw.
+   The thread holding it lets it go at kernel calls while another waits for
+   it (gl_yield_point), and when it exits.  Weak: builds whose renderer is a
+   library of its own have none of this. */
+bool xbc_gl_yield_due(void) __attribute__((weak));
+void xbc_gl_yield(void) __attribute__((weak));
+void xbc_gl_thread_exit(void) __attribute__((weak));
+static inline void gl_yield_point(void) { if (xbc_gl_yield) xbc_gl_yield(); }
+void ke_wake_waiters(void);   /* every thread in a kernel wait looks again */
 void ke_frame_presented(void);   /* XBCOMPAT_FIXED_FPS clock step */
 ULONGLONG system_time_now(void);   /* 100 ns units since 1601 */
 ULONGLONG ke_guest_tsc(void);      /* what a guest rdtsc reads */

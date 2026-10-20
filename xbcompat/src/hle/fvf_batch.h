@@ -108,12 +108,13 @@ static bool hud_batch_capture_key(hud_batch_key *key, const fvf_plan_key *state,
 
 static void hud_batch_flush(void)
 {
+    if (!hud_batch.count) return;
+    gl_require();   /* queued before another title thread took the context */
     /* Only the thread holding the context draws.  Anywhere else (the
        guest's thread while the worker owns GL) the batch stays queued for
        the worker's next flush; its barrier gets there before anything that
        must see the draws. */
     if (!d3d.gl || SDL_GL_GetCurrentContext() != d3d.gl) return;
-    if (!hud_batch.count) return;
     /* The program, textures and render state are still the batch's: a draw
        that would change any of them flushes first. */
     ULONG stride = hud_batch.key.stride;

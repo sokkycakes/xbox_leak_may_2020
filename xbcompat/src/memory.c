@@ -104,6 +104,7 @@ static inline uint32_t page_of(uint32_t a) { return (a - ARENA_BASE) / PAGE_SIZE
 NTSTATUS NTAPI NtAllocateVirtualMemory(PVOID *BaseAddress, ULONG_PTR ZeroBits,
                                        SIZE_T *RegionSize, ULONG AllocationType, ULONG Protect)
 {
+    gl_yield_point();
     (void)ZeroBits;
     uint32_t base = (uint32_t)*BaseAddress, size = *RegionSize;
     NTSTATUS st = STATUS_SUCCESS;
@@ -161,6 +162,7 @@ static void render_drain(void)
 
 NTSTATUS NTAPI NtFreeVirtualMemory(PVOID *BaseAddress, SIZE_T *RegionSize, ULONG FreeType)
 {
+    gl_yield_point();
     uint32_t base = (uint32_t)*BaseAddress & ~(PAGE_SIZE - 1), size = *RegionSize;
     TRACE_ALL("NtFreeVirtualMemory(%#x, %#x, %#x)", base, size, FreeType);
     if (!in_arena(base))
