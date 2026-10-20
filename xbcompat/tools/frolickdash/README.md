@@ -78,8 +78,13 @@ card's own aspect, and the focused cover the `carousel_focus.xui` overlay
 (arrows, the lime A capsule over its bottom-right corner, the title).  In
 the belt view the hub's A prompt and chevron are hidden and the B/back hint
 sits in the screen overlay above the library label, placed as in sokky's
-mockup.  Not there yet: real cover art, the
-step sounds, and what the list ends do (nine placeholder games, no wrap).
+mockup.  The two tiles at the left end are
+reserved: "All games" (grid mode, not built yet) and the game in the disc
+tray or game card, each with an icon centred on its tile (`Belt` `icons`;
+the icon images themselves are not in the cloud yet).  The belt opens on
+the first game.  Not there yet: the icons, real cover art, grid mode, the
+disc tile's empty and loaded states, the step sounds, and what the list
+ends do (nine placeholder games, no wrap).
 
 ## Build and run
 

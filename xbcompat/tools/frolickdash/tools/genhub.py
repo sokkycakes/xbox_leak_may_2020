@@ -85,8 +85,16 @@ BELT_CENTRE = RAIL_ORIGIN
 BELT_INSET = 0.95
 BELT_COVER_SCALE = 1.0
 BELT_FOCUS_PULL = 5.6
-CAROUSEL_GAMES = ["Game Title", "Stiletto Swift", "Game Title 3", "Game Title 4", "Game Title 5",
-                  "Game Title 6", "Game Title 7", "Game Title 8", "Game Title 9"]  # carousel.go carouselGames
+# The belt's list: two reserved tiles at the left end (sokky, 2026-10-20),
+# "show all games" (grid mode, not built yet) and the game in the disc
+# tray or game card, each with an icon centred on its tile, then the games
+# (carousel.go's placeholder titles until a real list exists).  The icon
+# images are not in the cloud yet; the names are placeholders for them.
+BELT_RESERVED = [("All games", "icon_grid.png"), ("Disc", "icon_disc.png")]
+CAROUSEL_GAMES = [n for n, _ in BELT_RESERVED] + [
+    "Game Title", "Stiletto Swift", "Game Title 3", "Game Title 4", "Game Title 5",
+    "Game Title 6", "Game Title 7", "Game Title 8", "Game Title 9"]
+BELT_START = len(BELT_RESERVED)                # the first game is focused when the belt opens
 FOOTER_H, FOOTER_COLOR, FOOTER_ALPHA = 50, (0.68, 0.665493, 0.5712), 0.592157
 FOOTER_STOPS = [(0.0, 0.0), (0.387409, 0.647059), (0.939467, 1.0)]
 WORDMARK_COLOR = (0.79, 0.773147, 0.6636)      # LabelSettings_1bvp3, 37 px
@@ -503,6 +511,9 @@ DEF theHub Level
             card "pads/carousel_card.xui"
             focus "pads/carousel_focus.xui"
             skin "pads/frolick_skin.xui"
+            icon "pads/carousel_icon.xui"
+            icons "%(belt_icons)s"
+            start %(belt_start)d
             centre %(belt_centre)s
             radius %(belt_radius).5f
             coverScale %(belt_cover_scale).2f
@@ -630,8 +641,8 @@ function OpenLibrary()
     bLibraryOpen = true;
     SetPadAlpha(1, 0);
     theZoomer.GoTo(vpCarousel);
-    theOverlay.SetText("title", GameName(theBelt.GetSelected()));
     theBelt.Open();
+    theOverlay.SetText("title", GameName(theBelt.GetSelected()));
     ShowBeltHints(1);
 }
 
@@ -766,6 +777,8 @@ def main():
     vals["belt_cover_scale"] = BELT_COVER_SCALE
     vals["belt_focus_pull"] = BELT_FOCUS_PULL
     vals["belt_count"] = len(CAROUSEL_GAMES)
+    vals["belt_icons"] = ";".join(icon for _, icon in BELT_RESERVED)
+    vals["belt_start"] = BELT_START
     names = ["// carousel.go carouselGames, until a real game list exists", "function GameName(i)", "{"]
     for i, g in enumerate(CAROUSEL_GAMES):
         names.append("    if (i == %d)" % i)

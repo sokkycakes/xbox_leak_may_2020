@@ -730,6 +730,9 @@ void CXuiPanel::Reload()
 //   {
 //       url "belt.bin"  card "pads/carousel_card.xui"  focus "pads/carousel_focus.xui"
 //       skin "pads/frolick_skin.xui"  font "font.ttf"
+//       icon "pads/carousel_icon.xui"  icons "icon_grid.png;icon_disc.png"
+//                                   reserved tiles' icons, game 0 first
+//       start 2                     the game focused when the belt first opens
 //       centre x y z  radius r      the ring the belt lines: its axis at
 //                                   the regular covers' height, and their
 //                                   radius; the focused cover faces +z
@@ -758,6 +761,9 @@ public:
     TCHAR* m_focus;
     TCHAR* m_skin;
     TCHAR* m_font;
+    TCHAR* m_icon;          // a scene with an XuiImage "icon", drawn centred on a tile
+    TCHAR* m_icons;         // the tiles' icon images, ';' separated, game 0 first
+    int m_start;            // the game focused when the belt first opens
     D3DXVECTOR3 m_centre;   // the belt ring's axis, at the regular covers' height
     float m_radius;         // the regular covers' ring radius in the world
     float m_coverScale;     // every cover grown about its own centre
@@ -801,9 +807,13 @@ protected:
     xui::Element* m_pCardRoot;
     xui::Element* m_pFocusRoot;
     xui::Element* m_pSkinRoot;
+    xui::Element* m_pIconRoot;
     xui::Scene* m_pCard;
     xui::Scene* m_pFocus;
+    xui::Scene* m_pIcon;
     bool m_bFontLoaded;
+    bool m_bStarted;
+    bool IconFor(int game, TCHAR* sz, int len);
 
     int m_selected;
     bool m_open;
@@ -822,6 +832,9 @@ START_NODE_PROPS(CBelt, CNode)
     NODE_PROP(pt_string, CBelt, focus)
     NODE_PROP(pt_string, CBelt, skin)
     NODE_PROP(pt_string, CBelt, font)
+    NODE_PROP(pt_string, CBelt, icon)
+    NODE_PROP(pt_string, CBelt, icons)
+    NODE_PROP(pt_integer, CBelt, start)
     NODE_PROP(pt_vec3, CBelt, centre)
     NODE_PROP(pt_number, CBelt, radius)
     NODE_PROP(pt_number, CBelt, coverScale)
@@ -841,13 +854,13 @@ START_NODE_FUN(CBelt, CNode)
 END_NODE_FUN()
 
 CBelt::CBelt() :
-    m_url(NULL), m_card(NULL), m_focus(NULL), m_skin(NULL), m_font(NULL),
+    m_url(NULL), m_card(NULL), m_focus(NULL), m_skin(NULL), m_font(NULL), m_icon(NULL), m_icons(NULL), m_start(0),
     m_centre(0.0f, 0.0f, 0.0f), m_radius(1.0f), m_coverScale(1.0f), m_focusPull(0.0f),
     m_stepDuration(20.0f / 30.0f / 2.5f), m_fadeDuration(0.75f), m_count(0),
     m_circleX(0.0f), m_circleZ(0.0f), m_circleR(1.0f), m_coverY(0.0f), m_slotAngle(0.5f),
     m_verts(NULL), m_indices(NULL), m_poses(NULL), m_bDirty(true),
-    m_pRenderer(NULL), m_pCardRoot(NULL), m_pFocusRoot(NULL), m_pSkinRoot(NULL), m_pCard(NULL), m_pFocus(NULL),
-    m_bFontLoaded(false),
+    m_pRenderer(NULL), m_pCardRoot(NULL), m_pFocusRoot(NULL), m_pSkinRoot(NULL), m_pIconRoot(NULL),
+    m_pCard(NULL), m_pFocus(NULL), m_pIcon(NULL), m_bFontLoaded(false), m_bStarted(false),
     m_selected(0), m_open(false), m_fadeDir(0), m_fade(0.0f), m_stepDir(0), m_stepStart(0.0), m_bStepDone(false)
 {
     ZeroMemory(&m_hdr, sizeof m_hdr);
@@ -857,9 +870,11 @@ CBelt::~CBelt()
 {
     delete m_pCard;
     delete m_pFocus;
+    delete m_pIcon;
     delete m_pCardRoot;
     delete m_pFocusRoot;
     delete m_pSkinRoot;
+    delete m_pIconRoot;
     delete m_pRenderer;
     delete [] m_verts;
     delete [] m_indices;
@@ -869,6 +884,8 @@ CBelt::~CBelt()
     delete [] m_focus;
     delete [] m_skin;
     delete [] m_font;
+    delete [] m_icon;
+    delete [] m_icons;
 }
 
 bool CBelt::OnSetProperty(const PRD* pprd, const void* pvValue)
@@ -944,9 +961,11 @@ void CBelt::Load()
     m_bDirty = false;
     delete m_pCard; m_pCard = NULL;
     delete m_pFocus; m_pFocus = NULL;
+    delete m_pIcon; m_pIcon = NULL;
     delete m_pCardRoot; m_pCardRoot = NULL;
     delete m_pFocusRoot; m_pFocusRoot = NULL;
     delete m_pSkinRoot; m_pSkinRoot = NULL;
+    delete m_pIconRoot; m_pIconRoot = NULL;
     if (m_pRenderer == NULL)
         m_pRenderer = new xui::Renderer(&m_be, &m_res);
     if (!LoadData())
@@ -973,6 +992,13 @@ void CBelt::Load()
         ToAnsi(sz, m_skin, MAX_PATH);
         m_pSkinRoot = m_res.scene(sz, err, sizeof err);
     }
+    if (m_icon != NULL && m_icon[0])
+    {
+        ToAnsi(sz, m_icon, MAX_PATH);
+        m_pIconRoot = m_res.scene(sz, err, sizeof err);
+        if (m_pIconRoot == NULL)
+            TRACE(_T("Belt: %s: %S\n"), m_icon, err);
+    }
     if (!m_bFontLoaded)
     {
         ToAnsi(sz, m_font != NULL && m_font[0] ? m_font : _T("font.ttf"), MAX_PATH);
@@ -983,6 +1009,28 @@ void CBelt::Load()
         m_pCard = new xui::Scene(m_pCardRoot, m_pSkinRoot);
     if (m_pFocusRoot != NULL)
         m_pFocus = new xui::Scene(m_pFocusRoot, m_pSkinRoot);
+    if (m_pIconRoot != NULL)
+        m_pIcon = new xui::Scene(m_pIconRoot, m_pSkinRoot);
+}
+
+// The icon image of a game's tile: entry game of the ';' separated icons
+// list, empty for none.
+bool CBelt::IconFor(int game, TCHAR* sz, int len)
+{
+    if (m_icons == NULL || game < 0)
+        return false;
+    const TCHAR* p = m_icons;
+    for (int i = 0; i < game; i++)
+    {
+        while (*p && *p != ';') p++;
+        if (*p == 0) return false;
+        p++;
+    }
+    int n = 0;
+    while (*p && *p != ';' && n < len - 1)
+        sz[n++] = *p++;
+    sz[n] = 0;
+    return n > 0;
 }
 
 // scroll_belt_right / scroll_belt_left for one step: nothing while the lock
@@ -1004,6 +1052,12 @@ void CBelt::Open()
 {
     if (m_bDirty)
         Load();
+    if (!m_bStarted)
+    {
+        m_bStarted = true;
+        if (m_start >= 0 && m_start < m_count)
+            m_selected = m_start;
+    }
     m_open = true;
     m_fadeDir = 1;
 }
@@ -1210,6 +1264,14 @@ void CBelt::Render()
             continue;
         CoverGrid(node, frame, m_be.m_grid);
         DrawScene(m_pCard, alpha, 0.0f, 0.0f, cw > 0 ? cw : 1.0f, ch > 0 ? ch : 1.0f);
+
+        // a reserved tile's icon, centred on the card
+        TCHAR szIcon[MAX_PATH];
+        if (m_pIcon != NULL && IconFor(game, szIcon, MAX_PATH))
+        {
+            SetString(m_pIcon->find("icon"), "ImagePath", szIcon);
+            DrawScene(m_pIcon, alpha, 0.0f, 0.0f, cw > 0 ? cw : 1.0f, ch > 0 ? ch : 1.0f);
+        }
 
         // the focus overlay rides the cover in the focus slot: its card
         // rectangle (192,40 640x440 of 1024x768) is the cover
