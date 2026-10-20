@@ -566,8 +566,9 @@ DEF theHub Level
     }
 }
 
-// Focus moves inside the panel first; at its edge, left and right fly to
-// the next pad, as in Frolick.
+// Left and right fly to the next pad; the tiles inside a panel are not
+// navigated (sokky: the pads are the choices, not the tiles), so up and
+// down do nothing on the hub.
 function PadMove(dir, step)
 {
     if (bMoving)
@@ -584,24 +585,13 @@ function PadMove(dir, step)
         return;
     }
 
-    var moved = 0;
-    if (nPad == 0)
-        moved = padCatalog.Navigate(dir);
-    else if (nPad == 1)
-        moved = padLibrary.Navigate(dir);
-    else
-        moved = padSettings.Navigate(dir);
-
-    if (moved == 0)
+    var n = nPad + step;
+    if (n >= 0)
     {
-        var n = nPad + step;
-        if (n >= 0)
+        if (n <= 2)
         {
-            if (n <= 2)
-            {
-                if (n != nPad)
-                    GoPad(n);
-            }
+            if (n != nPad)
+                GoPad(n);
         }
     }
 }

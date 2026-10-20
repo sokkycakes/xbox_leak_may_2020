@@ -41,7 +41,7 @@ dashboard (`tools/dashbuild`), as its own `xboxdash.xbe` with its own
   three pads with their bumpers, emblems and labels, the scene's cameras
   (`Camera3D` for the library, `cam_angle_pad` and its mirror for the
   sides), each pad's panel facing its camera, left/right flights between
-  pads once the panel's focus reaches its edge, as Frolick does),
+  pads; the tiles inside a panel are not navigated, at sokky's request),
   `backdrop.png` (the `backdrop.tres` radial gradient), `pads/overlay.xui`
   (the screen overlay: the faded word behind the view, the A prompt, the
   footer with the wordmark) and `pads/settings.xui` (the catalog layout
