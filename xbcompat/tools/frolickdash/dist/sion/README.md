@@ -1,7 +1,7 @@
 # Frolick dashboard, Sion kit
 
 The Frolick dashboard built on the Xbox dashboard engine (`tools/frolickdash`,
-commit 244e40b1), packaged to run on the Sion in place of the Xbox dashboard.
+the commit it ships in), packaged to run on the Sion in place of the Xbox dashboard.
 
 | File | Goes to | Note |
 |---|---|---|

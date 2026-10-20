@@ -67,10 +67,13 @@ field of view along with the flight.  The belt's ring is the rail ring,
 its axis and height, the covers at 0.95 of the ribbon radius at GameTap's
 sizes, and the focused slot is pulled 5.6 off the wall toward the camera
 (sokky's pick, to keep the focused tile large); a cover sliding in or out
-follows by its angle from the slot.  The covers within two slots of the
-focus sit behind the pulled-in cover from this camera, so they are not
-drawn (hide 2); they keep their games and slide as ever, fading over the
-slot into and out of that zone.  Motion is
+follows.  The two slots either side of the focus sit behind the pulled-in
+cover from this camera, so they hold nothing (skip 2): the previous and
+next game are on the first slots past them, the rest follow outward slot
+by slot, and the belt beyond stays contiguous.  On a step the game
+entering or leaving the focus crosses the empty slots within the step
+time, cover pose to cover pose, while every other game moves one slot.
+Motion is
 the sampled clip only: left and right play Belt_Right / Belt_Left (20 frames
 at speed 2.5, 0.267 s, input dropped while a step plays, as the client's lock
 does); when a step ends the covers are back on their frame-1000 slots and
