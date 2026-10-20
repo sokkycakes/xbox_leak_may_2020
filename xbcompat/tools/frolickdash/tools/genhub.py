@@ -75,8 +75,14 @@ ZOOM_DURATION = 0.75                           # the library carousel's zoom
 CAROUSEL_EYE = (0.0, 0.1072, 0.6407)
 CAROUSEL_LOOK = (0.0, 0.4043, -1.0)
 CAROUSEL_FOV = 96.0
-BELT_CENTRE = (-0.084, 1.581, 0.894)           # the belt ring's axis, at the regular covers' height
-BELT_INSET = 0.97
+# sokky then (2026-10-20) wanted the belt back on the rail ring, which it
+# follows nicely from this camera, with the focused tile kept at the size
+# it had with the ring on the camera: the ring's axis is the rail's, the
+# covers sit at 0.95 of the ribbon radius, and every cover is grown 2x
+# about its own centre (the focused one is twice as far away as before).
+BELT_CENTRE = RAIL_ORIGIN
+BELT_INSET = 0.95
+BELT_COVER_SCALE = 2.0
 CAROUSEL_GAMES = ["Game Title", "Stiletto Swift", "Game Title 3", "Game Title 4", "Game Title 5",
                   "Game Title 6", "Game Title 7", "Game Title 8", "Game Title 9"]  # carousel.go carouselGames
 FOOTER_H, FOOTER_COLOR, FOOTER_ALPHA = 50, (0.68, 0.665493, 0.5712), 0.592157
@@ -497,6 +503,7 @@ DEF theHub Level
             skin "pads/frolick_skin.xui"
             centre %(belt_centre)s
             radius %(belt_radius).5f
+            coverScale %(belt_cover_scale).2f
             fadeDuration %(zoom_duration)s
             count %(belt_count)d
             function OnStep() { theOverlay.SetText("title", GameName(theBelt.GetSelected())); }
@@ -753,6 +760,7 @@ def main():
     vals["zoom_duration"] = ZOOM_DURATION
     vals["belt_centre"] = v3(BELT_CENTRE)
     vals["belt_radius"] = 0.5 * RAIL_SCALE[0] * BELT_INSET
+    vals["belt_cover_scale"] = BELT_COVER_SCALE
     vals["belt_count"] = len(CAROUSEL_GAMES)
     names = ["// carousel.go carouselGames, until a real game list exists", "function GameName(i)", "{"]
     for i, g in enumerate(CAROUSEL_GAMES):

@@ -733,6 +733,7 @@ void CXuiPanel::Reload()
 //       centre x y z  radius r      the ring the belt lines: its axis at
 //                                   the regular covers' height, and their
 //                                   radius; the focused cover faces +z
+//       coverScale 2                every cover grown about its own centre
 //       count 9                     games on the belt
 //       function OnStep() { ... }   a step finished; GetSelected() tells which
 //   }
@@ -755,6 +756,7 @@ public:
     TCHAR* m_font;
     D3DXVECTOR3 m_centre;   // the belt ring's axis, at the regular covers' height
     float m_radius;         // the regular covers' ring radius in the world
+    float m_coverScale;     // every cover grown about its own centre
     float m_stepDuration;   // 20 frames at 30 fps, speed 2.5
     float m_fadeDuration;   // the covers fade with Frolick's camera flight
     int m_count;
@@ -816,6 +818,7 @@ START_NODE_PROPS(CBelt, CNode)
     NODE_PROP(pt_string, CBelt, font)
     NODE_PROP(pt_vec3, CBelt, centre)
     NODE_PROP(pt_number, CBelt, radius)
+    NODE_PROP(pt_number, CBelt, coverScale)
     NODE_PROP(pt_number, CBelt, stepDuration)
     NODE_PROP(pt_number, CBelt, fadeDuration)
     NODE_PROP(pt_integer, CBelt, count)
@@ -832,7 +835,7 @@ END_NODE_FUN()
 
 CBelt::CBelt() :
     m_url(NULL), m_card(NULL), m_focus(NULL), m_skin(NULL), m_font(NULL),
-    m_centre(0.0f, 0.0f, 0.0f), m_radius(1.0f),
+    m_centre(0.0f, 0.0f, 0.0f), m_radius(1.0f), m_coverScale(1.0f),
     m_stepDuration(20.0f / 30.0f / 2.5f), m_fadeDuration(0.75f), m_count(0),
     m_circleX(0.0f), m_circleZ(0.0f), m_circleR(1.0f), m_coverY(0.0f),
     m_verts(NULL), m_indices(NULL), m_poses(NULL), m_bDirty(true),
@@ -1057,11 +1060,16 @@ void CBelt::CoverGrid(int node, float frame, D3DXVECTOR3 grid[6][7])
     Pose(node, frame, &m);
     float scale = m_radius / m_circleR;
     const BELTVERTEX* v = m_verts + node * m_hdr.nVerts;
+    D3DXVECTOR3 c(0.0f, 0.0f, 0.0f);
+    int i;
+    for (i = 0; i < 42; i++)
+        c += D3DXVECTOR3(v[i].x, v[i].y, v[i].z);
+    c /= 42.0f;
     for (int col = 0; col < 7; col++)
         for (int row = 0; row < 6; row++)
         {
             const BELTVERTEX& l = v[col * 6 + row];
-            D3DXVECTOR3 p(l.x, l.y, l.z), q;
+            D3DXVECTOR3 p = c + (D3DXVECTOR3(l.x, l.y, l.z) - c) * m_coverScale, q;
             D3DXVec3TransformCoord(&q, &p, &m);
             grid[5 - row][col] = D3DXVECTOR3(
                 m_centre.x - (q.z - m_circleZ) * scale,
