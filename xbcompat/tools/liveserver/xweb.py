@@ -220,7 +220,11 @@ def offer_details(gw, sa, body, offer):
     blob = utf16('[SubInfo]\r\nVERSION="1"\r\n'
                  f'TITLE="{title}"\r\n'
                  f'DATA="{title}. Play online with friends for a year. This is a test server: '
-                 'nothing is charged."\r\n')
+                 'nothing is charged."\r\n'
+                 # New Account's Purchase Details page reads this key; the dash fills
+                 # the [NAME] [PRICE] [FREQUENCY] [TAX_STRING] tokens itself.
+                 'PURCHASE_DETAILS="[NAME]: [PRICE] [FREQUENCY] [TAX_STRING]. '
+                 'This is a test server: nothing is charged."\r\n')
     p = price(offer if offer in OFFERS else SUB_OFFER)
     return struct.pack('<I', 0x15 + len(blob)) + p + struct.pack('<I', len(blob)) + blob
 
@@ -255,17 +259,16 @@ def read_ustr(body, pos):
 # New Account.  reservename's request (built at 0x121dbc) is {qwMachineID,
 # BYTE country, WORD wMaxNames, gamertag}; the reply (read at 0x120b71) is
 # {WORD count, names}, each name a {WORD length (16 at most), UTF-8} string.
-# A free name comes back as itself, a taken one as suggestions.
+# No names means the gamertag is free and now reserved; names are suggestions
+# for a taken one (the dashboard's check is at 0x5d92d).
 MAX_NAME = 15
 
 
 def reservename(gw, sa, body):
     country, most = struct.unpack_from('<BH', body, 8)
     name, _ = read_ustr(body, 11)
-    if not gw.db.find_user(name):
-        names = [name]
-    else:
-        names = []
+    names = []
+    if gw.db.find_user(name):
         n = 1
         while len(names) < max(1, min(most, 5)):
             alt = name[:MAX_NAME - len(str(n))] + str(n)
