@@ -741,12 +741,11 @@ void CXuiPanel::Reload()
 //                                   ring toward the camera (a cover sliding
 //                                   in or out follows, by its angle from
 //                                   the slot)
-//       focusSpread 1.9             the neighbour slots swung this many
-//                                   times their angle out from the focused
-//                                   one, around the ring, so the pulled-in
-//                                   cover does not hide them; the slots
-//                                   beyond close up to fit (1 = GameTap's
-//                                   spacing)
+//       stride 2                    slots per game: the slots next to the
+//                                   focused one are hidden behind the
+//                                   pulled-in cover, so they hold nothing
+//                                   and a step slides every cover two slots
+//                                   (the clip played twice, in stepDuration)
 //       count 9                     games on the belt
 //       function OnStep() { ... }   a step finished; GetSelected() tells which
 //   }
@@ -774,7 +773,7 @@ public:
     float m_radius;         // the regular covers' ring radius in the world
     float m_coverScale;     // every cover grown about its own centre
     float m_focusPull;      // the focused slot pulled this far toward the camera
-    float m_focusSpread;    // the neighbour slots' angle, as a multiple of GameTap's
+    int m_stride;           // slots per game (the slots between hold nothing)
     float m_stepDuration;   // 20 frames at 30 fps, speed 2.5
     float m_fadeDuration;   // the covers fade with Frolick's camera flight
     int m_count;
@@ -846,7 +845,7 @@ START_NODE_PROPS(CBelt, CNode)
     NODE_PROP(pt_number, CBelt, radius)
     NODE_PROP(pt_number, CBelt, coverScale)
     NODE_PROP(pt_number, CBelt, focusPull)
-    NODE_PROP(pt_number, CBelt, focusSpread)
+    NODE_PROP(pt_integer, CBelt, stride)
     NODE_PROP(pt_number, CBelt, stepDuration)
     NODE_PROP(pt_number, CBelt, fadeDuration)
     NODE_PROP(pt_integer, CBelt, count)
@@ -863,7 +862,7 @@ END_NODE_FUN()
 
 CBelt::CBelt() :
     m_url(NULL), m_card(NULL), m_focus(NULL), m_skin(NULL), m_font(NULL), m_icon(NULL), m_icons(NULL), m_start(0),
-    m_centre(0.0f, 0.0f, 0.0f), m_radius(1.0f), m_coverScale(1.0f), m_focusPull(0.0f), m_focusSpread(1.0f),
+    m_centre(0.0f, 0.0f, 0.0f), m_radius(1.0f), m_coverScale(1.0f), m_focusPull(0.0f), m_stride(1),
     m_stepDuration(20.0f / 30.0f / 2.5f), m_fadeDuration(0.75f), m_count(0),
     m_circleX(0.0f), m_circleZ(0.0f), m_circleR(1.0f), m_coverY(0.0f), m_slotAngle(0.5f),
     m_verts(NULL), m_indices(NULL), m_poses(NULL), m_bDirty(true),
@@ -1150,35 +1149,15 @@ void CBelt::CoverGrid(int node, float frame, D3DXVECTOR3 grid[6][7])
         c += D3DXVECTOR3(v[i].x, v[i].y, v[i].z);
     c /= 42.0f;
 
-    // the cover's angle around the ring from the focused slot (GameTap's
-    // -x side), signed
-    D3DXVECTOR3 qc;
-    D3DXVec3TransformCoord(&qc, &c, &m);
-    float sang = (float)atan2(qc.z - m_circleZ, -(qc.x - m_circleX));
-    float ang = (float)fabs(sang);
-
-    // the spread: the slots within a neighbour's angle of the focus swung
-    // out by focusSpread, the rest closed up so the far side of the ring
-    // stays put; the cover turns with its slot (a rotation about the axis),
-    // so it keeps facing the centre
-    float sinD = 0.0f, cosD = 1.0f;
-    if (m_focusSpread != 1.0f)
-    {
-        float t = m_slotAngle * m_focusSpread;
-        if (t > 3.0f) t = 3.0f;
-        float a = ang <= m_slotAngle ? ang * (t / m_slotAngle)
-                                     : t + (ang - m_slotAngle) * ((D3DX_PI - t) / (D3DX_PI - m_slotAngle));
-        float d = sang < 0.0f ? -(a - ang) : a - ang;
-        sinD = (float)sin(d);
-        cosD = (float)cos(d);
-    }
-
     // the pull off the ring toward the camera: full in the focused slot,
-    // fading to nothing at the neighbour slots
+    // fading to nothing at the nearest slots that hold a game
     D3DXVECTOR3 pull(0.0f, 0.0f, 0.0f);
     if (m_focusPull != 0.0f)
     {
-        float w = 1.0f - ang / m_slotAngle;
+        D3DXVECTOR3 qc;
+        D3DXVec3TransformCoord(&qc, &c, &m);
+        float ang = (float)fabs(atan2(qc.z - m_circleZ, -(qc.x - m_circleX)));
+        float w = 1.0f - ang / (m_slotAngle * (m_stride > 1 ? m_stride : 1));
         if (w > 0.0f)
         {
             D3DXVECTOR3 wc(m_centre.x - (qc.z - m_circleZ) * scale, 0.0f, m_centre.z + (qc.x - m_circleX) * scale);
@@ -1194,14 +1173,6 @@ void CBelt::CoverGrid(int node, float frame, D3DXVECTOR3 grid[6][7])
             const BELTVERTEX& l = v[col * 6 + row];
             D3DXVECTOR3 p = c + (D3DXVECTOR3(l.x, l.y, l.z) - c) * m_coverScale, q;
             D3DXVec3TransformCoord(&q, &p, &m);
-            if (sinD != 0.0f)
-            {
-                // swing about the ring's axis, in GameTap's frame (u toward
-                // the focus, w to its right)
-                float u = -(q.x - m_circleX), w = q.z - m_circleZ;
-                q.x = m_circleX - (u * cosD - w * sinD);
-                q.z = m_circleZ + (u * sinD + w * cosD);
-            }
             grid[5 - row][col] = D3DXVECTOR3(
                 m_centre.x - (q.z - m_circleZ) * scale,
                 m_centre.y + (q.y - m_coverY) * scale,
@@ -1243,10 +1214,19 @@ void CBelt::Render()
         if (u < 0.0f) u = 0.0f;
         if (u > 1.0f) u = 1.0f;
     }
+    // A step is the clip played stride times over stepDuration: pass p
+    // moves every cover one more slot.  The cover drawn with node's pose
+    // (sliding from slot node to node+1, or back) is the one that started
+    // the step on slot c; it holds a game only when c is a whole number
+    // of strides from the focus slot 6.
     int last = m_hdr.nFrames - 1;
-    float frame = m_stepDir < 0 ? u * last : m_stepDir > 0 ? (1.0f - u) * last : 0.0f;
-    int base = m_selected + (m_stepDir > 0 ? 1 : 0) - 6;  // game on cover 0
-    int leaving = m_stepDir < 0 ? 6 : 5, arriving = m_stepDir < 0 ? 5 : 6;
+    int stride = m_stride > 1 ? m_stride : 1;
+    int pass = (int)(u * stride);
+    if (pass >= stride) pass = stride - 1;
+    float up = u * stride - pass;
+    if (m_stepDir == 0) { pass = 0; up = 0.0f; }
+    float frame = m_stepDir < 0 ? up * last : m_stepDir > 0 ? (1.0f - up) * last : 0.0f;
+    int leaving = 6, arriving = m_stepDir < 0 ? 6 - stride : 6 + stride;
 
     // back to front: the art is blended, so the farthest cover first
     D3DXVECTOR3 eye = theCamera.m_position;
@@ -1295,7 +1275,11 @@ void CBelt::Render()
     for (i = 0; i < n; i++)
     {
         int node = order[i];
-        int game = base + node;
+        int c = m_stepDir < 0 ? node - pass : m_stepDir > 0 ? node + pass + 1 : node;
+        int o = c - 6;
+        if (((o % stride) + stride) % stride != 0)
+            continue;
+        int game = m_selected + o / stride;
         if (game < 0 || game >= m_count)
             continue;
         CoverGrid(node, frame, m_be.m_grid);
@@ -1312,9 +1296,9 @@ void CBelt::Render()
         // the focus overlay rides the cover in the focus slot: its card
         // rectangle (192,40 640x440 of 1024x768) is the cover
         float fa = 0.0f;
-        if (m_stepDir == 0) fa = node == 6 ? 1.0f : 0.0f;
-        else if (node == leaving) fa = 1.0f - 2.0f * u;
-        else if (node == arriving) fa = 2.0f * u - 1.0f;
+        if (m_stepDir == 0) fa = c == 6 ? 1.0f : 0.0f;
+        else if (c == leaving) fa = 1.0f - 2.0f * u;
+        else if (c == arriving) fa = 2.0f * u - 1.0f;
         if (m_pFocus != NULL && fa > 0.01f)
             DrawScene(m_pFocus, alpha * fa, 192.0f, 40.0f, 640.0f, 440.0f);
     }
