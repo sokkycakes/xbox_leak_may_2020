@@ -99,6 +99,7 @@ int main(int argc, char** argv) {
     xui::Renderer r(&g.be, &g.res);
     r.setFont("font.ttf");
     r.defaultTextColor = 0xff000000;
+    r.ascentEm = 1.12f;
     xui::Scene sc(el, skin);
     if (focus) sc.setFocus(sc.find(focus));
     if (play) { xui::Node* n = sc.root; n->play(play);

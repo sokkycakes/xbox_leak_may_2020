@@ -210,6 +210,7 @@ struct Renderer {
     void draw(Scene* s, float x, float y, float scale);
     void setFont(const char* path); // the TTF text elements use unless their Font names another
     Color defaultTextColor;  // a text's colour when it sets none (white; GFWL's engine uses black)
+    float ascentEm;          // baseline below a text box's top, in ems (0: the font's own ascent)
 
 private:
     struct TexEntry { char* key; Texture tex; int w, h; };

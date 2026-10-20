@@ -79,7 +79,7 @@ struct Font {
     ~Font() { delete [] data; }
 };
 
-Renderer::Renderer(Backend* b, Resources* r) : be(b), res(r), defaultTextColor(0xffffffff), font(0), clipping(false) {}
+Renderer::Renderer(Backend* b, Resources* r) : be(b), res(r), defaultTextColor(0xffffffff), ascentEm(0), font(0), clipping(false) {}
 
 Renderer::~Renderer()
 {
@@ -871,7 +871,8 @@ void Renderer::text(Node* n, const Affine& m, float alpha, Blend blend)
         // starts at the box's left edge and the baseline sits exactly one
         // ascent below its top (the button glyphs' letters sat a pixel
         // right and low in their circles otherwise)
-        float ox = x - 1 / scale, oy = y - ((float)ceil(font->ascent * fs) - font->ascent * fs) / scale;
+        float asc = ascentEm > 0 ? ascentEm * px : font->ascent * fs;
+        float ox = x - 1 / scale, oy = y + (asc - (float)ceil(font->ascent * fs)) / scale;
         Affine lm = mul(mul(m, aff(1, 0, 0, 1, ox, oy)), inv);
         if ((style & styleShadow) && (shadow >> 24) != 0) {
             Affine sm = mul(mul(m, aff(1, 0, 0, 1, ox + 1.5f, oy + 1.5f)), inv);

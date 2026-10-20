@@ -364,6 +364,11 @@ bool load() {
     g.r = new xui::Renderer(&g.be, &g.res);
     g.r->setFont("font.ttf");
     g.r->defaultTextColor = 0xff000000;
+    // The scenes are laid out for Convection, whose ascent is taller than
+    // the stand-in font's: with the stand-in's own ascent (0.93 em) every
+    // label sat about 3 px high in its row.  1.12 em centres the capitals in
+    // the menu rows and the card's header strip.
+    g.r->ascentEm = 1.12f;
     g.frame = new xui::Scene(g.frameEl, g.skinEl);
     g.frame->setFocus(0);
     g.hud = g.frame->find("HUDRootScene");
