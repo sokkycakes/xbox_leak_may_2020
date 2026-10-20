@@ -53,6 +53,13 @@ EMBLEM = [  # local offset in the parent sprite, pixel_size
 ]
 LABEL_Y, LABEL_PIXEL = 0.115168, 0.002         # Label3D, billboard, no depth test
 LABEL_OVERSAMPLE = 2                           # mkart.py renders the labels at 2x
+# In a pad's focus view the label is the page's title; the camera frames
+# it cut by the screen edge, so it slides this far (720x480 output pixels,
+# right and down) during the zoom to show the whole word (sokky 2026-10-20:
+# move the label, not the camera); label_focus_offset turns that into the
+# world offset the Sprite node takes.
+LABEL_FOCUS_SHIFT = {"catalog": (75.0, -8.0), "settings": (-95.0, -8.0)}
+RAW_W, RAW_H = 640, 480                        # the frame the engine renders (shown 720 wide)
 CAMERAS = {  # eye, view direction (-Z column), up (Y column), vertical fov in degrees
     "library": ((0.0, 0.106559, 0.917581), (0.0, 0.286932, -0.708153), (0.0, 1.46646, 0.594187), 80.0),
     "catalog": ((-0.848216, 0.1074, 0.464691), (0.628121, 0.375529, -0.6815), (-0.254505, 0.926811, 0.276133), 80.1803),
@@ -145,6 +152,21 @@ def v3(a): return "%.5f %.5f %.5f" % a
 def pad_world(name):
     """World centre of a pad disc."""
     return add(NAV_ORIGIN, mul(PADS[name][0], NAV_SCALE))
+
+
+def label_focus_offset(name):
+    """World offset that moves a pad's label by LABEL_FOCUS_SHIFT on the
+    screen in the pad's focus view: along the view's right and up at the
+    label's depth (vertical fov over 480 lines, 4:3 frame shown 720 wide)."""
+    eye, d, up, fov = camera(name + "focus")
+    r = norm(cross(d, up))
+    p = add(pad_world(name), (0, LABEL_Y * S, 0))
+    depth = dot(sub(p, eye), d)
+    half = depth * math.tan(math.radians(fov) / 2)      # world half-height at the label
+    dx, dy = LABEL_FOCUS_SHIFT[name]
+    ax = dx * (RAW_W / float(HUD_W)) * half * (RAW_W / float(RAW_H)) / (RAW_W / 2.0)
+    ay = -dy * half / (RAW_H / 2.0)
+    return add(mul(r, ax), mul(up, ay))
 
 
 def camera(name):
@@ -727,6 +749,7 @@ function ZoomIn()
     bMoving = true;
     bZoomed = true;
     SetPadAlpha(nPad, 0);
+    LabelFocus(1);
     if (nPad == 0)
         theZoomer.GoTo(vpCatalogFocus);
     else
@@ -754,6 +777,7 @@ function PadBack()
     bMoving = true;
     bZoomed = false;
     SetPadAlpha(nPad, 1);
+    LabelFocus(0);
     if (nPad == 0)
         theZoomer.GoTo(vpCatalog);
     else
@@ -793,6 +817,26 @@ function PageChrome(a)
 {
     theOverlay.SetOpacity("word", a);
     theOverlay.SetOpacity("frolick", a);
+}
+
+// The pad's label slides into the frame with the zoom (it is the page's
+// title there) and back with the flight out.
+function LabelFocus(on)
+{
+    label_catalog.moveTime = %(zoom_duration)s;
+    label_settings.moveTime = %(zoom_duration)s;
+    if (nPad == 0)
+    {
+        label_catalog.offsetX = on * %(lofs_catalog_x)s;
+        label_catalog.offsetY = on * %(lofs_catalog_y)s;
+        label_catalog.offsetZ = on * %(lofs_catalog_z)s;
+    }
+    if (nPad == 2)
+    {
+        label_settings.offsetX = on * %(lofs_settings_x)s;
+        label_settings.offsetY = on * %(lofs_settings_y)s;
+        label_settings.offsetZ = on * %(lofs_settings_z)s;
+    }
 }
 
 function PadLabel(a)
@@ -911,6 +955,10 @@ def main():
     for name in ("catalogfocus", "settingsfocus", "carousel"):
         vals["vp_" + name] = viewpoint(name)
     vals["zoom_duration"] = ZOOM_DURATION
+    for name in ("catalog", "settings"):
+        o = label_focus_offset(name)
+        for k, v in zip("xyz", o):
+            vals["lofs_%s_%s" % (name, k)] = "%.5f" % v
     vals["belt_centre"] = v3(BELT_CENTRE)
     vals["belt_radius"] = 0.5 * RAIL_SCALE[0] * BELT_INSET
     vals["belt_cover_scale"] = BELT_COVER_SCALE

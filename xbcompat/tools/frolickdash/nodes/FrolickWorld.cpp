@@ -385,6 +385,8 @@ class CSprite : public CNode
     DECLARE_NODE(CSprite, CNode)
 public:
     CSprite() : m_url(NULL), m_pixelSize(0.001f), m_color(1.0f, 1.0f, 1.0f), m_alpha(1.0f), m_depthTest(true),
+                m_offsetX(0.0f), m_offsetY(0.0f), m_offsetZ(0.0f), m_moveTime(0.0f),
+                m_shown(0.0f, 0.0f, 0.0f), m_from(0.0f, 0.0f, 0.0f), m_target(0.0f, 0.0f, 0.0f), m_moveStart(0.0f),
                 m_pTexture(NULL), m_w(0), m_h(0), m_tw(0), m_th(0), m_bDirty(true) {}
     ~CSprite() { delete [] m_url; if (m_pTexture) m_pTexture->Release(); }
 
@@ -393,6 +395,11 @@ public:
     D3DXVECTOR3 m_color;
     float m_alpha;
     bool m_depthTest;
+    // A world-space offset from the node's origin that script can set
+    // (label_settings.offsetX = 0.2); the sprite eases there over moveTime
+    // seconds (Frolick's ease-in-out), so a label can slide into the
+    // frame while the camera flies.
+    float m_offsetX, m_offsetY, m_offsetZ, m_moveTime;
 
     void Render();
     bool OnSetProperty(const PRD* pprd, const void* pvValue) { m_bDirty = true; return true; }
@@ -400,6 +407,8 @@ public:
     DECLARE_NODE_PROPS()
 
 protected:
+    D3DXVECTOR3 m_shown, m_from, m_target;
+    XTIME m_moveStart;
     LPDIRECT3DTEXTURE8 m_pTexture;
     int m_w, m_h, m_tw, m_th;
     bool m_bDirty;
@@ -413,6 +422,10 @@ START_NODE_PROPS(CSprite, CNode)
     NODE_PROP(pt_vec3, CSprite, color)
     NODE_PROP(pt_number, CSprite, alpha)
     NODE_PROP(pt_boolean, CSprite, depthTest)
+    NODE_PROP(pt_number, CSprite, offsetX)
+    NODE_PROP(pt_number, CSprite, offsetY)
+    NODE_PROP(pt_number, CSprite, offsetZ)
+    NODE_PROP(pt_number, CSprite, moveTime)
 END_NODE_PROPS()
 
 void CSprite::Render()
@@ -438,6 +451,18 @@ void CSprite::Render()
     D3DXMATRIX world;
     XAppGetTransform(D3DTS_WORLD, &world);
     D3DXVECTOR3 origin(world._41, world._42, world._43);
+    D3DXVECTOR3 target(m_offsetX, m_offsetY, m_offsetZ);
+    if (target != m_target)
+    {
+        m_from = m_shown;
+        m_target = target;
+        m_moveStart = XAppGetNow();
+    }
+    float t = m_moveTime > 0.0f ? (float)(XAppGetNow() - m_moveStart) / m_moveTime : 1.0f;
+    if (t > 1.0f) t = 1.0f;
+    float f = t < 0.5f ? 2.0f * t * t : 1.0f - 2.0f * (1.0f - t) * (1.0f - t);
+    D3DXVec3Lerp(&m_shown, &m_from, &m_target, f);
+    origin += m_shown;
     D3DXVECTOR3 right(g_matView._11, g_matView._21, g_matView._31);
     D3DXVECTOR3 up(g_matView._12, g_matView._22, g_matView._32);
     float hw = m_w * m_pixelSize * 0.5f, hh = m_h * m_pixelSize * 0.5f;

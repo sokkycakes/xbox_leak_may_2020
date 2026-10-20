@@ -58,12 +58,16 @@ CANVAS_W, CANVAS_H = 1120, 770
 # The screen on the canvas: 720x480 at 0.643, so x 0..1120 and y 12..758.
 # The header strip holds the Blades' header (y 96); the body ends where
 # their lists end (603) and the legends (611..686) sit below it.
-HEADER_Y, BODY_Y, BODY_END, LEGEND_END = 60, 150, 603, 707
+# The body starts 8 canvas rows (6 output lines) above the Blades' lists
+# and meta text and ends 8 above their legends, the padding sokky asked
+# for (2026-10-20); the sub-title sits with its text 4 rows above the body.
+HEADER_Y, BODY_Y, BODY_END, LEGEND_END = 60, 142, 595, 707
+HEADER_LABEL_Y = 107
 # The page's header (the Blades' scene title at 156,96) is the sub-title
 # under the pad's big label.  The catalog's label sits top left in its
 # mirrored view, so its pages' header moves right of it.
 HEADER_IDS = ("labSceneTitle", "txt_Header", "labHeader", "labelHeading")
-CATALOG_HEADER_X = 430
+CATALOG_HEADER_X = 500
 
 # The Blades' list visuals: the item visual, its height (the skin's
 # control_ListItem) and, per line of an item, the data slot its presenter
@@ -234,7 +238,10 @@ def skin():
     buttons' and list items' text keyed white at rest and dark on focus."""
     s = open(os.path.join(BLADES, "skin.xui")).read()
     def fix(m):
-        return item_text_colours(m.group(0)) if m.group(1) in ITEM_VISUALS else m.group(0)
+        if m.group(1) in ITEM_VISUALS:
+            return item_text_colours(m.group(0))
+        # labels and the meta pane: white body text
+        return m.group(0).replace("<TextColor>%s</TextColor>" % TEXT, "<TextColor>%s</TextColor>" % ITEM_REST)
     return re.sub(r"<XuiVisual>\n<Properties>\n <Id>([^<]*)</Id>.*?</XuiVisual>", fix, s, flags=re.S)
 
 
@@ -380,8 +387,12 @@ def page(file, spec):
                 b = set_prop(b, "Text", "")
             kept.append(b)
 
-    if pad == "catalog":
-        kept = [set_prop(b, "Position", "%d,96,0" % CATALOG_HEADER_X) if prop(b, "Id") in HEADER_IDS else b for b in kept]
+    hx = CATALOG_HEADER_X if pad == "catalog" else 156
+    kept = [set_prop(b, "Position", "%d,%d,0" % (hx, HEADER_LABEL_Y)) if prop(b, "Id") in HEADER_IDS else b for b in kept]
+    # body text is white on the slate (sokky, 2026-10-20), the Blades' dark
+    # stays only on highlighted items (the skin's own tracks)
+    kept = [b.replace("<TextColor>0xe60f0f0f</TextColor>", "<TextColor>0xffffffff</TextColor>")
+             .replace("<TextColor>0xff0f0f0f</TextColor>", "<TextColor>0xffffffff</TextColor>") for b in kept]
 
     panel = "\n".join(["<XuiGroup>", "<Properties>", " <Id>panel</Id>", " <Width>%d</Width>" % CANVAS_W, " <Height>%d</Height>" % CANVAS_H,
                         " <Position>0,0,0</Position>", " <Opacity>0</Opacity>", "</Properties>",

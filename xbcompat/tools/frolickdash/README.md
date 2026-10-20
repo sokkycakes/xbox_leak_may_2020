@@ -86,9 +86,14 @@ dashboard (`tools/dashbuild`), as its own `xboxdash.xbe` with its own
   sokky's catalog padfocus mockup: the page spans the screen edge to
   edge, a translucent slate body with the pad showing through; the
   header above it and the legend bar below have no fill, so the pad's
-  big label stays on screen as the page's title (the page's own header
-  is its sub-title, moved right of the label on the catalog's pages) and
-  the legends sit on the pad.  Item text is white at rest and the
+  big label stays on screen as the page's title, sliding into the frame
+  with the zoom so the whole word shows (`LABEL_FOCUS_SHIFT` in
+  `genhub.py`, output pixels turned into a world offset the `Sprite`
+  node eases to; the camera stays sokky's), the page's own header is its
+  sub-title resting on the body (right of the label on the catalog's
+  pages), the body has 6 output lines of padding above its content and
+  below it before the legends, which sit on the pad; body and meta text
+  are white.  Item text is white at rest and the
   Blades' dark on the highlighted row: `genpage.py` keys every button
   and list-item visual's text presenters so in the page skin, and the
   pages feed their list lines through the visuals' own presenters
