@@ -442,7 +442,9 @@ void d3d_bind_globals(void)
     d3d.device_ptr = (ULONG *)hle_lookup_prefix("?g_pDevice@D3D@@");
     d3d.rs_count = D3DRS_MAX;
     bind_render_state_layout();
-    xlog("D3D: render states at %p, device at %p", (void *)d3d.render_state, (void *)d3d.device);
+    xlog("D3D: render states at %p, texture stage states at %p%s, device at %p", (void *)d3d.render_state,
+         (void *)d3d.texture_state, d3d.texture_state == d3d.texture_state_fallback ? " (not the title's)" : "",
+         (void *)d3d.device);
 }
 
 /* The D3D build the title links (its XBE library version table). */
@@ -2286,8 +2288,9 @@ static void combine_arg(bool alpha, int n, ULONG arg, bool use_alpha, bool inver
     glTexEnvi(GL_TEXTURE_ENV, alpha ? op_a[n] : op_rgb[n], operand);
 }
 
-/* Map one D3D texture op onto GL_COMBINE for either RGB or alpha. */
-static void combine(bool alpha, ULONG op, ULONG arg0, ULONG arg1, ULONG arg2)
+/* Map one D3D texture op onto GL_COMBINE for either RGB or alpha.
+   `no_texture`: the stage has no texture set. */
+static void combine(bool alpha, ULONG op, ULONG arg0, ULONG arg1, ULONG arg2, bool no_texture)
 {
     GLenum mode_p = alpha ? GL_COMBINE_ALPHA : GL_COMBINE_RGB;
     GLenum scale = alpha ? GL_ALPHA_SCALE : GL_RGB_SCALE;
@@ -2345,6 +2348,16 @@ static void combine(bool alpha, ULONG op, ULONG arg0, ULONG arg1, ULONG arg2)
         default:
             mode = GL_MODULATE;
         }
+    }
+    if (no_texture) {
+        /* A stage reading a texture it doesn't have selects CURRENT instead
+           (combiner.cpp, TSS_USES_NULL_TEXTURE): the diffuse colour in stage
+           0.  Splinter Cell draws its loading bar through its fade's stages
+           with the textures taken away; a white stand-in texture made the
+           bar white and the fade's last frame white. */
+        unsigned used = mode == GL_REPLACE ? 1 : mode == GL_INTERPOLATE || mode == GL_MODULATE_ADD_ATI ? 3 : 2;
+        for (unsigned n = 0; n < used; n++)
+            if ((a[n] & 0xF) == 2 /* D3DTA_TEXTURE */) { mode = GL_REPLACE; a[0] = 1; s = 1; break; }
     }
     glTexEnvi(GL_TEXTURE_ENV, mode_p, mode);
     for (int n = 0; n < 3; n++) combine_arg(alpha, n, a[n], ua[n], inv[n]);
@@ -2516,8 +2529,8 @@ static unsigned apply_textures(void)
         float tf[4];
         color4(tf, RS(D3DRS_TEXTUREFACTOR));
         glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, tf);
-        combine(false, TSS(s, D3DTSS_COLOROP), TSS(s, D3DTSS_COLORARG0), TSS(s, D3DTSS_COLORARG1), TSS(s, D3DTSS_COLORARG2));
-        combine(true, TSS(s, D3DTSS_ALPHAOP), TSS(s, D3DTSS_ALPHAARG0), TSS(s, D3DTSS_ALPHAARG1), TSS(s, D3DTSS_ALPHAARG2));
+        combine(false, TSS(s, D3DTSS_COLOROP), TSS(s, D3DTSS_COLORARG0), TSS(s, D3DTSS_COLORARG1), TSS(s, D3DTSS_COLORARG2), !t);
+        combine(true, TSS(s, D3DTSS_ALPHAOP), TSS(s, D3DTSS_ALPHAARG0), TSS(s, D3DTSS_ALPHAARG1), TSS(s, D3DTSS_ALPHAARG2), !t);
         mask |= 1u << s;
     }
     p_glActiveTexture(GL_TEXTURE0);
@@ -6635,10 +6648,12 @@ static void front_buffer_memory(void)
 }
 
 /* PersistDisplay's frame for the next title, which is its own process:
-   <hdd>/.persisted holds its size and BGRA rows, top first.  The library
-   frees the persisted frame at the first Present, after which
-   GetPersistedSurface returns NULL. */
-static struct { D3DSurface *s; bool loaded, presented; } persisted;
+   <hdd>/.persisted holds its size and BGRA rows, top first.  Within a title
+   the library keeps its copy at AvGetSavedDataAddress too, until the next
+   PersistDisplay replaces it or the first Present after CreateDevice or
+   Reset frees it (present.cpp SwapFirstFlip).  Splinter Cell persists each
+   loading picture and fades the next one in from that copy. */
+static struct { D3DSurface *s, *own; bool loaded, presented, first_flip; } persisted;
 void NTAPI AvSetSavedDataAddress(PVOID p);
 
 static D3DSurface *new_linear_surface(ULONG fmt, ULONG w, ULONG h);
@@ -6661,6 +6676,17 @@ static void persisted_save(void)
         fwrite(hdr, sizeof hdr, 1, f);
         for (ULONG y = h; y-- > 0;) fwrite(px + (size_t)y * w * 4, w * 4, 1, f);
         fclose(f);
+    }
+    /* The library's own copy, which replaces the last one. */
+    ULONG ow = 0, oh = 0, pitch = 0;
+    if (persisted.own) container_size((D3DPixelContainer *)persisted.own, &ow, &oh, &pitch);
+    if (!persisted.own || ow != w || oh != h) persisted.own = new_linear_surface(0x1E /* LIN_X8R8G8B8 */, w, h);
+    if (persisted.own) {
+        container_size((D3DPixelContainer *)persisted.own, &ow, &oh, &pitch);
+        uint8_t *dst = (uint8_t *)(persisted.own->Data | CONTIG_BASE);
+        for (ULONG y = 0; y < h; y++) memcpy(dst + y * pitch, px + (size_t)(h - 1 - y) * w * 4, w * 4);
+        tex_invalidate(persisted.own->Data);
+        AvSetSavedDataAddress(persisted.own);
     }
     free(px);
 }
@@ -6691,11 +6717,18 @@ static void persisted_load(void)
     fclose(f);
 }
 
+PVOID NTAPI AvGetSavedDataAddress(void);
 static void persisted_first_present(void)
 {
+    if (persisted.first_flip) {
+        persisted.first_flip = false;
+        if (AvGetSavedDataAddress()) {
+            AvSetSavedDataAddress(NULL);   /* the library frees it here */
+            TRACE_ALL("D3D: the first Present since the device was set up lets the persisted frame go");
+        }
+    }
     if (persisted.presented) return;
     persisted.presented = true;
-    if (persisted.s) AvSetSavedDataAddress(NULL);   /* the library frees it here */
     if (!persisted.loaded) {
         persisted.loaded = true;
         char path[600];
@@ -7002,6 +7035,7 @@ static void create_device_surfaces(ULONG format, ULONG depth_format)
         persisted_load();
         if (persisted.s) AvSetSavedDataAddress(persisted.s);
     }
+    persisted.first_flip = true;
     d3d.zscale = depth_format == 0x2C || depth_format == 0x2D || depth_format == 0x30 || depth_format == 0x31
                      ? 65535.0f : 16777215.0f;
     zsync.hash = depth_memory_hash();
@@ -7024,7 +7058,14 @@ static void NTAPI D3DDevice_GetBackBuffer(LONG BackBuffer, ULONG Type, D3DSurfac
     TRACE_ALL("D3D: GetBackBuffer(%d)", (int)BackBuffer);
     /* -1 is the frame on screen (see front_buffer_update). */
     D3DSurface *s = BackBuffer == -1 && front.s && window_fb.fbo ? front.s : d3d.backbuffer;
-    if (s == front.s) front.used = true;
+    if (s == front.s) {
+        front.used = true;
+        /* Its memory holds the frame on screen, as the hardware's does:
+           Splinter Cell builds texture headers over it (XGSetTextureHeader)
+           and copies from it with D3DX on the CPU.  The lock-free state call
+           of queued drawing has no GL to read it with; a lock still does. */
+        if (!async_front()) front_buffer_memory();
+    }
     s->Common++;
     *pp = s;
 }
@@ -8564,6 +8605,7 @@ static void NTAPI D3DDevice_SetVertexDataColor(LONG r, ULONG color)
 static void imm_flush(ULONG prim)
 {
     if (!imm.n) return;
+    hud_batch_flush();   /* batched draws made before this one land first */
     vshader *sh = (d3d.vertex_shader & 1) ? (vshader *)(d3d.vertex_shader & ~1u) : NULL;
     if (sh && sh->code) {
         /* Feed the vertex registers to the program as 16 float4 attributes.
@@ -8594,20 +8636,30 @@ static void imm_flush(ULONG prim)
     if (!sh) { static const int two[4] = { 2, 2, 2, 2 }; apply_texture_transforms(units, two); }
     program_entry *e;
     if (!use_program(0, &e)) return;
-    glBegin(gl_primitive(prim));
-    for (unsigned i = 0; i < imm.n; i++) {
-        float (*v)[4] = imm.verts[i];
-        for (int u = 0; u < 4; u++) {
-            if (!((units >> u) & 1)) continue;
-            ULONG tci = TSS(u, D3DTSS_TEXCOORDINDEX) & 0xFFFF;
-            p_glMultiTexCoord4fv(GL_TEXTURE0 + u, v[9 + (tci < 4 ? tci : 0)]);
+    TRACE_ALL("D3D: immediate draw prim %u, %u vertices, vs %#x%s, colour %s, first at %g %g %g %g colour %g %g %g %g",
+              prim, imm.n, d3d.vertex_shader, pretransformed ? " (screen space)" : "",
+              imm.used[3] ? "per vertex" : "none", imm.verts[0][0][0], imm.verts[0][0][1], imm.verts[0][0][2],
+              imm.verts[0][0][3], imm.verts[0][3][0], imm.verts[0][3][1], imm.verts[0][3][2], imm.verts[0][3][3]);
+    shader_diagnostics_mark(d3d.frame, ++shader_diag_draw, d3d.vertex_shader, d3d.pixel_shader, cur_program, "immediate");
+    for (unsigned pass = 0; scissor_pass(pass); pass++) {
+        glBegin(gl_primitive(prim));
+        for (unsigned i = 0; i < imm.n; i++) {
+            float (*v)[4] = imm.verts[i];
+            for (int u = 0; u < 4; u++) {
+                if (!((units >> u) & 1)) continue;
+                ULONG tci = TSS(u, D3DTSS_TEXCOORDINDEX) & 0xFFFF;
+                p_glMultiTexCoord4fv(GL_TEXTURE0 + u, v[9 + (tci < 4 ? tci : 0)]);
+            }
+            if (imm.used[3]) glColor4fv(v[3]);
+            if (imm.used[2]) glNormal3fv(v[2]);
+            if (pretransformed) glVertex3f(v[0][0], v[0][1], v[0][2]);
+            else glVertex4fv(v[0]);
         }
-        if (imm.used[3]) glColor4fv(v[3]);
-        if (imm.used[2]) glNormal3fv(v[2]);
-        if (pretransformed) glVertex3f(v[0][0], v[0][1], v[0][2]);
-        else glVertex4fv(v[0]);
+        glEnd();
     }
-    glEnd();
+    /* A draw like any other (Splinter Cell's loading bar is one of these;
+       uncounted, its frames read as frames with nothing drawn). */
+    debug_dump_draw();
     end_program(e);
 }
 
@@ -9493,9 +9545,12 @@ static LONG NTAPI D3DDevice_PersistDisplay(void)
    (the library's own answer; it doesn't count references either). */
 static LONG NTAPI D3DDevice_GetPersistedSurface(D3DSurface **pp)
 {
-    if (!persisted.loaded && !persisted.presented) persisted_load();
-    *pp = persisted.presented ? NULL : persisted.s;
-    TRACE_ALL("D3D: GetPersistedSurface: %s", *pp ? "the last title's frame" : "none");
+    if (!persisted.loaded && !persisted.presented) {
+        persisted_load();
+        if (persisted.s) AvSetSavedDataAddress(persisted.s);
+    }
+    *pp = (D3DSurface *)AvGetSavedDataAddress();
+    TRACE_ALL("D3D: GetPersistedSurface: %s", !*pp ? "none" : *pp == persisted.own ? "this title's" : "the last title's frame");
     return *pp ? D3D_OK : D3DERR_INVALIDCALL;
 }
 
@@ -10033,7 +10088,12 @@ static void NTAPI D3D_Nop4(ULONG a) { (void)a; }
 static void NTAPI D3D_Nop8(ULONG a, ULONG b) { (void)a; (void)b; }
 static void NTAPI D3D_Nop12(ULONG a, ULONG b, ULONG c) { (void)a; (void)b; (void)c; }
 static void FASTCALL D3D_FastNop(ULONG a, ULONG b) { (void)a; (void)b; }
-static LONG NTAPI D3DDevice_Reset(PVOID pp) { (void)pp; return D3D_OK; }
+static LONG NTAPI D3DDevice_Reset(PVOID pp)
+{
+    (void)pp;
+    persisted.first_flip = true;   /* the mode is set again: the next Present frees the persisted frame */
+    return D3D_OK;
+}
 static void NTAPI SetRenderState_SampleAlpha(ULONG Value) { (void)Value; }
 
 static ULONG NTAPI D3D_GetAdapterModeCount2(UINT_ Adapter, ULONG Format)
