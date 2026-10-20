@@ -1,8 +1,10 @@
-// The Guide: a 360-style overlay over every title, drawn by xbcompat at
-// present time.  The frame (xam hudbkgnd) and the menu (hud MainMenu) are
-// the 360's own XUI scenes, converted to .xui by tools/guide/mkguide.sh and
-// played on the frolickdash XUI runtime; this file is their host: a GL
-// backend, a directory of assets, the open/close logic and the menu actions.
+// The Guide: an overlay over every title, drawn by xbcompat at present time.
+// The frame (hudbkgnd) and the menus (MainMenuSignedIn, Options) are the
+// Games for Windows - LIVE Guide's own XUI scenes from xlive.dll, converted
+// to .xui by tools/guide/mkguide.py and played on the frolickdash XUI
+// runtime; this file is their host: a GL backend, a directory of assets, the
+// open/close logic and the menu actions (xlive fills its texts from code,
+// so they are set here).
 //
 // Hold Back + Start for half a second (or press the Guide button, or F1) to
 // open it.  While it is open the title keeps running, sees idle pads and is
@@ -201,6 +203,30 @@ void set_show(xui::Scene* s, const char* id, bool on) {
     xui::Value& v = n->props.set("Show"); v.free(); v.type = xui::TBool; v.b = on;
 }
 
+void set_str(xui::Scene* s, const char* id, const char* key, const char* val) {
+    xui::Node* n = s->find(id);
+    if (!n) return;
+    xui::Value& v = n->props.set(key); v.free(); v.type = xui::TString; v.s = xui::strdup2(val);
+}
+
+void set_pos(xui::Scene* s, const char* id, float x, float y) {
+    xui::Node* n = s->find(id);
+    if (!n) return;
+    xui::Value& v = n->props.set("Position"); v.free(); v.type = xui::TVector; v.v.x = x; v.v.y = y; v.v.z = 0;
+}
+
+// Hide an element whose Show the frame's timelines own: hide what it draws.
+void hide_drawn(xui::Scene* s, const char* id) {
+    xui::Node* n = s->find(id);
+    if (!n) return;
+    xui::Node* t = n->visual ? n->visual : n;
+    xui::Value& v = t->props.set("Opacity"); v.free(); v.type = xui::TFloat; v.f = 0;
+    if (n->visual) return;
+    for (int i = 0; i < n->children.n; i++) {
+        xui::Value& c = n->children[i]->props.set("Opacity"); c.free(); c.type = xui::TFloat; c.f = 0;
+    }
+}
+
 void set_image(xui::Scene* s, const char* id, const char* path) {
     xui::Node* n = s->find(id);
     if (!n) return;
@@ -280,23 +306,32 @@ bool load() {
     set_text(g.frame, "Legend_A", "Select");
     set_text(g.frame, "Legend_B", "Back");
     set_text(g.frame, "Legend_Y", "Xbox Dashboard");
-    // Legend_X's Show belongs to the frame's timelines; hide its visual.
-    xui::Node* lx = g.frame->find("Legend_X");
-    if (lx && lx->visual) { xui::Value& v = lx->visual->props.set("Show"); v.free(); v.type = xui::TBool; v.b = 0; }
+    hide_drawn(g.frame, "Legend_X");
+    hide_drawn(g.frame, "CloseX");          // the PC Guide's mouse close box
+    hide_drawn(g.frame, "EvaluationTextId");
     set_text(g.frame, "GamerTag", "Player");
-    // The header: what's playing.
+    // The signed-in main menu: the game's name where the gamercard goes,
+    // then Resume Game, Xbox Dashboard and Settings in its button rows.
     char title[64]; snprintf(title, sizeof title, "%s", xbe_title_name());
-    set_text(g.main, "LabelSignIn", "Now Playing");
-    set_text(g.main, "labelProfiles", title[0] ? title : "Xbox Game");
-    set_text(g.main, "btnSignIn", "");
-    set_text(g.main, "btnNewProfile", "Resume Game");
-    set_text(g.main, "btnRecoverProfile", "Xbox Dashboard");
+    set_text(g.main, "txtSignInLive", title[0] ? title : "Xbox Game");
+    set_pos(g.main, "txtSignInLive", 146, 128);
+    set_show(g.main, "scnCommunity", false);
+    set_show(g.main, "btnBlank1", true);
+    set_text(g.main, "btnBlank1", "Resume Game");
+    set_image(g.main, "btnBlank1", "ico_32x_Controller.png");
+    set_text(g.main, "btnQuickChat", "Xbox Dashboard");
+    set_image(g.main, "btnQuickChat", "homekey.png");
     set_text(g.main, "btnOptions", "Settings");
-    // Settings: the 360's Personal Settings page with our three rows.
+    set_str(g.main, "btnBlank1", "NavUp", "");
+    set_str(g.main, "btnBlank1", "NavDown", "btnQuickChat");
+    set_str(g.main, "btnQuickChat", "NavUp", "btnBlank1");
+    // Settings: the Guide's Personal Settings page with our three rows.
     set_text(g.settings, "labelHeading", "Settings");
-    set_show(g.settings, "btnNotifications", false);
-    set_show(g.settings, "btnPersonalization", false);
-    set_show(g.settings, "btnTurnOff", false);
+    set_show(g.settings, "btnNetwork", false);
+    set_show(g.settings, "btnSQM", false);
+    set_show(g.settings, "btnAddLive", false);
+    set_show(g.settings, "btnUpgrade", false);
+    set_str(g.settings, "btnNotifications", "NavDown", "");
     read_settings();
     settings_text();
     g.state = Closed;
@@ -333,7 +368,7 @@ void settings_text() {
     for (int i = 0; i < 4; i++)
         if (ports & (1u << i)) k += snprintf(buf + k, sizeof buf - k, " %d", i + 1);
     if (!ports) snprintf(buf + k, sizeof buf - k, " none");
-    set_text(g.settings, "btnController", buf);
+    set_text(g.settings, "btnNotifications", buf);
 }
 
 void show_menu(xui::Scene* m, const char* focus) {
@@ -344,7 +379,7 @@ void show_menu(xui::Scene* m, const char* focus) {
 void open_guide() {
     g.state = Opening;
     g.hud->play("ClosedToHalf");
-    show_menu(g.main, "btnNewProfile");
+    show_menu(g.main, "btnBlank1");
     update_clock();
     show_port();
     xinput_guide_mask(true);
@@ -360,10 +395,10 @@ void close_guide() {
 }
 
 void press(const char* id) {
-    if (!strcmp(id, "btnNewProfile") || !strcmp(id, "btnSignIn")) close_guide();
+    if (!strcmp(id, "btnBlank1")) close_guide();
     else if (!strcmp(id, "btnOptions")) { settings_text(); show_menu(g.settings, "btnOnlineStatus"); }
     else if (!strcmp(id, "btnVoice")) { g.vibration = !g.vibration; apply_settings(); write_settings(); settings_text(); }
-    else if (!strcmp(id, "btnRecoverProfile")) {
+    else if (!strcmp(id, "btnQuickChat")) {
         g.state = Leaving;
         g.leaveAt = now_s() + 0.15;  // let the audio fade first
         ds_set_duck(0.0f);
@@ -398,7 +433,7 @@ void step(double t) {
             apply_settings(); write_settings(); settings_text();
             break;
         }
-        if (down & GUIDE_Y) { press("btnRecoverProfile"); break; }
+        if (down & GUIDE_Y) { press("btnQuickChat"); break; }
         if (down & GUIDE_A) { if (g.menu->focus) { g.menu->press(); press(g.menu->focus->id()); } break; }
         if (b & (GUIDE_UP | GUIDE_DOWN)) {
             if ((down & (GUIDE_UP | GUIDE_DOWN)) || t >= g.repeatAt) {
@@ -442,10 +477,11 @@ bool guide_frame(int w, int h) {
 }
 
 void guide_draw(int w, int h) {
-    // The scenes are 1120x770 4:3 canvases; fit the height and stretch x to
+    // The frame is a 4:3 canvas (800x600); fit the height and stretch x to
     // the window the way the game image is stretched.
-    float s = h / 770.0f;
-    float kx = (w / 1120.0f) / s;
+    float cw = g.frame->root->width(), ch = g.frame->root->height();
+    float s = h / ch;
+    float kx = (w / cw) / s;
     g.be.begin(w, h, kx);
     g.r->draw(g.frame, 0, 0, s);
     // The menu sits in the frame's AppHostElementId and fades with it.
