@@ -672,14 +672,18 @@ void Renderer::quad(Texture tex, Blend blend, const Affine& m, float x0, float y
 
 enum { styleOneLine = 0x10, styleRight = 0x200, styleCenterH = 0x400, styleCenterV = 0x1000, styleShadow = 0x4000 };
 
+// The XUI engine lays a line out with whole-pixel advances (each glyph's
+// advance rounded up) and no kerning: lines measured against the GFWL
+// engine's own renders come out the same width only this way.
+static float advOf(float a) { return (float)ceil(a); }
+
 static int measure(Font* f, float scale, const char* s, int len)
 {
     float x = 0; int prev = 0;
     for (int i = 0; i < len;) {
         int adv; int cp = utf8decode(s + i, &adv); i += adv;
         int aw, lsb; stbtt_GetCodepointHMetrics(&f->info, cp, &aw, &lsb);
-        if (prev) x += stbtt_GetCodepointKernAdvance(&f->info, prev, cp) * scale;
-        x += aw * scale;
+                x += advOf(aw * scale);
         prev = cp;
     }
     return (int)ceil(x);
@@ -706,8 +710,7 @@ Texture Renderer::lineTex(Font* font, const char* line, float px, int* w, int* h
     float x = 1; int prev = 0;
     for (int i = 0; i < len;) {
         int cadv; int cp = utf8decode(line + i, &cadv); i += cadv;
-        if (prev) x += stbtt_GetCodepointKernAdvance(&font->info, prev, cp) * scale;
-        int aw, lsb; stbtt_GetCodepointHMetrics(&font->info, cp, &aw, &lsb);
+                int aw, lsb; stbtt_GetCodepointHMetrics(&font->info, cp, &aw, &lsb);
         int ix0, iy0, ix1, iy1;
         float xs = x - (float)floor(x);
         stbtt_GetCodepointBitmapBoxSubpixel(&font->info, cp, scale, scale, xs, 0, &ix0, &iy0, &ix1, &iy1);
@@ -715,7 +718,7 @@ Texture Renderer::lineTex(Font* font, const char* line, float px, int* w, int* h
         int gw = ix1 - ix0, gh = iy1 - iy0;
         if (gw > 0 && gh > 0 && gx >= 0 && gy >= 0 && gx + gw <= img.w && gy + gh <= img.h)
             stbtt_MakeCodepointBitmapSubpixel(&font->info, cov + gy * img.w + gx, gw, gh, img.w, scale, scale, xs, 0, cp);
-        x += aw * scale;
+        x += advOf(aw * scale);
         prev = cp;
     }
     for (int i = 0; i < img.w * img.h; i++) {
@@ -794,9 +797,15 @@ void Renderer::text(Node* n, const Affine& m, float alpha, Blend blend)
         float x = 0;
         if (style & styleRight) x = w - lw;
         else if (style & styleCenterH) x = (w - lw) / 2;
-        Affine lm = mul(mul(m, aff(1, 0, 0, 1, x, y)), inv);
+        // the line texture has a pixel of padding left of the pen and its
+        // baseline at the ascent rounded up; take both back out so the pen
+        // starts at the box's left edge and the baseline sits exactly one
+        // ascent below its top (the button glyphs' letters sat a pixel
+        // right and low in their circles otherwise)
+        float ox = x - 1 / scale, oy = y - ((float)ceil(font->ascent * fs) - font->ascent * fs) / scale;
+        Affine lm = mul(mul(m, aff(1, 0, 0, 1, ox, oy)), inv);
         if ((style & styleShadow) && (shadow >> 24) != 0) {
-            Affine sm = mul(mul(m, aff(1, 0, 0, 1, x + 1.5f, y + 1.5f)), inv);
+            Affine sm = mul(mul(m, aff(1, 0, 0, 1, ox + 1.5f, oy + 1.5f)), inv);
             quad(tex, blend, sm, 0, 0, (float)iw, (float)ih, 0, 0, 1, 1, shadow, alpha);
         }
         quad(tex, blend, lm, 0, 0, (float)iw, (float)ih, 0, 0, 1, 1, col, alpha);
