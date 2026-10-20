@@ -149,6 +149,14 @@ PAGES = [
     ("page_favorites", dict(scene="Items.xui", pad="library", first="list_items_0", parent="",
                             header="Favorite Games", visual="list_twoline-icon", dynamic="favorites",
                             labels={"legend_y": "", "txt_EmptyList": "Favorites are not available yet."})),
+    # The Blades' download screen (marketplace_media.xzp 1443_DownloadScene):
+    # a look at it for Frolick's download UI (sokky 2026-10-20), not wired
+    # to anything yet.
+    ("page_download", dict(scene="1443_DownloadScene.xui", pad="catalog", first="btnContinue", parent="",
+                           header="Download",
+                           labels={"labSceneTitle": "Stiletto Swift", "labContentTitle": "Stiletto Swift",
+                                   "labContentSize": "412 MB", "edtContentMetaText": "Frolick game card image",
+                                   "btnContinue": "Pause", "labDownloadProgress": "70% (288 MB of 412 MB)"})),
     ("page_memory_actions", dict(scene=None, pad="settings", first="btnCopy", parent="page_memory_saves", header="Saved Game",
                                  items=[("btnCopy", "Copy", ""), ("btnMove", "Move", ""), ("btnDelete", "Delete", "")])),
     ("page_memory_dest", dict(scene="DeviceSelector.xui", pad="settings", first="list_devices_0", parent="page_memory_actions",
