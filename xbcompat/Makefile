@@ -102,7 +102,7 @@ else
 CXX      = g++
 CXXARCH  = -m32 -mstackrealign
 endif
-CXXFLAGS = $(CXXARCH) -O2 -g -std=c++98 -fno-exceptions -fno-rtti -fno-pie -fno-omit-frame-pointer \
+CXXFLAGS = $(CXXARCH) -O2 -g -std=c++98 -fno-exceptions -fno-rtti -fno-threadsafe-statics -fno-pie -fno-omit-frame-pointer \
            -D_snprintf=snprintf -Wno-misleading-indentation -I$(XUIDIR) -Isrc \
            $(shell $(PKGCFG) --cflags sdl2 $(GL))
 $(BUILD)/%.o: %.cpp $(XUIDIR)/xui.h
@@ -190,6 +190,10 @@ $(BUILD)/src/hle/d3d8.o: src/hle/ff_vsh.h src/hle/dxt_decode.h src/hle/nv2a_shad
 $(BUILD)/glslcheck: tools/glslcheck.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $< $(LDLIBS)
+
+# Renders a Guide scene to a .ppm with xbcompat's own XUI code (tools/guide).
+$(BUILD)/guideview: tools/guide/guideview.cpp src/guide/guide.cpp $(filter-out $(BUILD)/src/guide/guide.o,$(GUIDESRC:%.cpp=$(BUILD)/%.o))
+	$(CXX) $(CXXFLAGS) -o $@ $< $(filter %.o,$^) $(LDLIBS)
 
 src/kernel/exports.gen.c: tools/gen_exports.py
 	python3 tools/gen_exports.py "$(LEAK)/private/ntos/init/ntoskrnl.src" $@

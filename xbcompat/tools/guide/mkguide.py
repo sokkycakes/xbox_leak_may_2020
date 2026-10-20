@@ -9,7 +9,9 @@ CLASSES.LOG is GFWL-Guide.exe --dump-classes (xui360/classes.log); xurconv.py
 (xui360/tools) folds the Guide's own classes (HUDBkgndScene, ...) into the
 built-in ones.  xbcompat looks for OUT_DIR as "guide" beside its binary, or
 XBCOMPAT_GUIDE_DIR.  Writes hudbkgnd.xui (the frame), hudskin.xui,
-GuideMain.xui (MainMenuSignedIn), GuideSettings.xui (Options), every PNG as
+GuideMain.xui (MainMenuSignedIn), GuideSettings.xui (Options), GuideCard.xui
+(GamerCard, drawn in the main menu's ctlGamerCard), GuideVolume.xui and
+GuideVibration.xui (OptionsVoice, OptionsController: Settings' pages), every PNG as
 .xtx, the .wav sounds, and font.ttf.
 """
 import io, os, re, struct, subprocess, sys, tempfile
@@ -25,23 +27,22 @@ SCENES = [  # (scene in a package, output name)
     ('skin.xur', 'hudskin.xui'),
     ('MainMenuSignedIn.xur', 'GuideMain.xui'),
     ('Options.xur', 'GuideSettings.xui'),
+    ('GamerCard.xur', 'GuideCard.xui'),
+    ('OptionsVoice.xur', 'GuideVolume.xui'),
+    ('OptionsController.xur', 'GuideVibration.xui'),
 ]
-CONTROLS = ('XuiControl', 'XuiButton', 'XuiNavButton', 'XuiBackButton', 'XuiLabel', 'XuiCheckbox',
-            'XuiRadioButton', 'XuiList', 'XuiCommonList', 'XuiListItem', 'XuiSlider', 'XuiProgressBar', 'XuiEdit')
-
-
-def gfwl_text(xui):
-    """xur2xui's class table has the 360's XuiControl slot order (Text before
-    ImagePath); GFWL scenes store their strings in the other slot.  Move a
-    control's ImagePath that isn't a file name into Text."""
-    def fix(m):
-        props = m.group(2)
-        im = re.search(r'<ImagePath>(.*?)</ImagePath>', props, re.S)
-        if im and not re.search(r'\.(png|xur|dds|jpg)$|://', im.group(1), re.I) and '<Text>' not in props:
-            props = props.replace(im.group(0), '<Text>%s</Text>' % im.group(1))
-        return m.group(1) + props + m.group(3)
-    pat = r'(<(?:%s)>\s*<Properties>)(.*?)(</Properties>)' % '|'.join(CONTROLS)
-    return re.sub(pat, fix, xui, flags=re.S)
+# xurconv.py folds the Guide's own classes (HUDBkgndScene, XuiGamerCard, ...)
+# into built-in ones.  It also moves the 360's XuiControl slots (Text 8,
+# ImagePath 10) to GFWL's (10, 12); these scenes are GFWL's already, so that
+# step is skipped, or Text and ImagePath would land on one slot.
+FOLD = '''import sys
+sys.path.insert(0, __import__("os").path.dirname(sys.argv[1]))
+import xurconv
+xurconv.CONTROL_SLOTS = {}
+xurconv.fix_blocks = lambda blocks, chain, nstr: blocks
+sys.argv = sys.argv[1:]
+xurconv.main()
+'''
 
 
 def main():
@@ -76,13 +77,11 @@ def main():
         raw = os.path.join(tmp, 'p%02d.xzp' % i)
         conv = os.path.join(tmp, 'c%02d.xzp' % i)
         open(raw, 'wb').write(blob)
-        subprocess.run([sys.executable, XURCONV, classes, '--xzp', raw, conv], check=True,
+        subprocess.run([sys.executable, '-c', FOLD, XURCONV, classes, '--xzp', raw, conv], check=True,
                        stdout=subprocess.DEVNULL)
         for n in scenes:
             dst = os.path.join(out, want.pop(n))
             subprocess.run([sys.executable, XUR2XUI, conv, n, dst], check=True, stdout=subprocess.DEVNULL)
-            text = gfwl_text(open(dst).read())
-            open(dst, 'w').write(text)
     if want:
         sys.exit('not found: ' + ', '.join(want))
     with open(font, 'rb') as f, open(os.path.join(out, 'font.ttf'), 'wb') as g:

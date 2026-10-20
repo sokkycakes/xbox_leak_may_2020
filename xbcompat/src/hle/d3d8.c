@@ -7011,19 +7011,14 @@ static void guide_overlay(void)
 {
     if (!guide_frame || !guide_frame(window_fb.w, window_fb.h)) return;
     glPushAttrib(GL_ALL_ATTRIB_BITS);
-    glPushClientAttrib(GL_CLIENT_ALL_ATTRIB_BITS);
     window_fb.bind(GL_FRAMEBUFFER, 0);
     glViewport(0, 0, window_fb.w, window_fb.h);
-    gc_bind_buffer(GL_ARRAY_BUFFER, 0);
-    gc_bind_buffer(GL_ELEMENT_ARRAY_BUFFER, 0);
-    gc_disable_attrib_arrays();
     p_glActiveTexture(GL_TEXTURE0);
     GLuint samplers[2] = { bound_sampler[0], bound_sampler[1] };
     if (separate_samplers) bind_stage_sampler(0, 0);
     p_glUseProgram(0);
     guide_draw(window_fb.w, window_fb.h);
     if (separate_samplers) bind_stage_sampler(0, samplers[0]), bind_stage_sampler(1, samplers[1]);
-    glPopClientAttrib();
     glPopAttrib();
     p_glUseProgram(cur_program);
 }

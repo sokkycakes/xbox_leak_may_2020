@@ -84,13 +84,33 @@ struct DirResources : xui::Resources {
 // guide_overlay() bracket (attributes pushed, window framebuffer bound). ----
 
 typedef void (APIENTRY *PFNBLENDSEP)(GLenum, GLenum, GLenum, GLenum);
+typedef void (APIENTRY *PFNACTIVETEX)(GLenum);
+typedef void (APIENTRY *PFNBINDBUFFER)(GLenum, GLuint);
 typedef void (APIENTRY *PFNBLENDEQ)(GLenum);
 
 struct GLBackend : xui::Backend {
     int W, H; float kx;  // window size; extra x stretch (non-square output)
-    PFNBLENDSEP blendSep; PFNBLENDEQ blendEq;
-    GLBackend() : W(0), H(0), kx(1), blendSep(0), blendEq(0) {}
+    PFNBLENDSEP blendSep; PFNBLENDEQ blendEq; PFNACTIVETEX activeTex; PFNBINDBUFFER bindBuffer;
+    void procs() {
+        if (blendSep) return;
+        blendSep = (PFNBLENDSEP)SDL_GL_GetProcAddress("glBlendFuncSeparate");
+        blendEq = (PFNBLENDEQ)SDL_GL_GetProcAddress("glBlendEquation");
+        activeTex = (PFNACTIVETEX)SDL_GL_GetProcAddress("glActiveTexture");
+        bindBuffer = (PFNBINDBUFFER)SDL_GL_GetProcAddress("glBindBuffer");
+    }
+    GLBackend() : W(0), H(0), kx(1), blendSep(0), blendEq(0), activeTex(0), bindBuffer(0) {}
+    // Loading runs outside the overlay's state save (the scenes load before
+    // the first draw), so the title's bindings are put back by hand.
     xui::Texture upload(const xui::Image& img) {
+        procs();
+        GLint prevTex = 0, prevPbo = 0, align = 4, row = 0, skipRows = 0, skipPix = 0;
+        glGetIntegerv(GL_TEXTURE_BINDING_2D, &prevTex);
+        glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &prevPbo);
+        glGetIntegerv(GL_UNPACK_ALIGNMENT, &align);
+        glGetIntegerv(GL_UNPACK_ROW_LENGTH, &row);
+        glGetIntegerv(GL_UNPACK_SKIP_ROWS, &skipRows);
+        glGetIntegerv(GL_UNPACK_SKIP_PIXELS, &skipPix);
+        if (prevPbo && bindBuffer) bindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
         GLuint t = 0;
         glGenTextures(1, &t);
         glBindTexture(GL_TEXTURE_2D, t);
@@ -100,7 +120,15 @@ struct GLBackend : xui::Backend {
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
         glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+        glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
+        glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, img.w, img.h, 0, GL_BGRA, GL_UNSIGNED_BYTE, img.pix);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, align);
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, row);
+        glPixelStorei(GL_UNPACK_SKIP_ROWS, skipRows);
+        glPixelStorei(GL_UNPACK_SKIP_PIXELS, skipPix);
+        if (prevPbo && bindBuffer) bindBuffer(GL_PIXEL_UNPACK_BUFFER, prevPbo);
+        glBindTexture(GL_TEXTURE_2D, prevTex);
         return t;
     }
     void clip(const float* r) {
@@ -116,24 +144,32 @@ struct GLBackend : xui::Backend {
         if (blend == xui::BlendAdd) blendSep(GL_SRC_ALPHA, GL_ONE, GL_ZERO, GL_ONE);
         else if (blend == xui::BlendMultiply) blendSep(GL_ZERO, GL_SRC_COLOR, GL_ZERO, GL_ONE);
         else blendSep(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE);
-        glVertexPointer(2, GL_FLOAT, sizeof(xui::Vertex), &v[0].x);
-        glTexCoordPointer(2, GL_FLOAT, sizeof(xui::Vertex), &v[0].u);
-        glColorPointer(4, GL_FLOAT, sizeof(xui::Vertex), &v[0].r);
-        glDrawElements(GL_TRIANGLES, ni, GL_UNSIGNED_SHORT, idx);
-        (void)nv;
+        // Immediate mode: the title's client arrays and buffers stay as they were.
+        glBegin(GL_TRIANGLES);
+        for (int i = 0; i < ni; i++) {
+            if (idx[i] >= nv) continue;
+            const xui::Vertex& p = v[idx[i]];
+            glColor4f(p.r, p.g, p.b, p.a);
+            glTexCoord2f(p.u, p.v);
+            glVertex2f(p.x, p.y);
+        }
+        glEnd();
     }
     void begin(int w, int h, float stretch) {
         W = w; H = h; kx = stretch;
-        if (!blendSep) {
-            blendSep = (PFNBLENDSEP)SDL_GL_GetProcAddress("glBlendFuncSeparate");
-            blendEq = (PFNBLENDEQ)SDL_GL_GetProcAddress("glBlendEquation");
-        }
+        procs();
         glDisable(GL_DEPTH_TEST); glDisable(GL_STENCIL_TEST); glDisable(GL_ALPHA_TEST);
         glDisable(GL_CULL_FACE); glDisable(GL_LIGHTING); glDisable(GL_FOG);
         glDisable(GL_SCISSOR_TEST); glDisable(GL_COLOR_LOGIC_OP); glDisable(GL_POLYGON_STIPPLE);
         for (int i = 0; i < 6; i++) glDisable(GL_CLIP_PLANE0 + i);
-        glDisable(GL_TEXTURE_GEN_S); glDisable(GL_TEXTURE_GEN_T);
-        glDisable(GL_TEXTURE_GEN_R); glDisable(GL_TEXTURE_GEN_Q);
+        // The title's other texture units would modulate every Guide pixel.
+        for (int u = 7; u >= 0; u--) {
+            if (activeTex) activeTex(GL_TEXTURE0 + u); else if (u) continue;
+            glDisable(GL_TEXTURE_1D); glDisable(GL_TEXTURE_2D); glDisable(GL_TEXTURE_3D);
+            glDisable(GL_TEXTURE_CUBE_MAP); glDisable(GL_TEXTURE_RECTANGLE_ARB);
+            glDisable(GL_TEXTURE_GEN_S); glDisable(GL_TEXTURE_GEN_T);
+            glDisable(GL_TEXTURE_GEN_R); glDisable(GL_TEXTURE_GEN_Q);
+        }
         glColorMask(1, 1, 1, 1);
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
         glShadeModel(GL_SMOOTH);
@@ -145,14 +181,6 @@ struct GLBackend : xui::Backend {
         glOrtho(0, w, h, 0, -1, 1);
         glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity();
         glScalef(kx, 1, 1);
-        glDisableClientState(GL_NORMAL_ARRAY);
-        glDisableClientState(GL_SECONDARY_COLOR_ARRAY);
-        glDisableClientState(GL_FOG_COORD_ARRAY);
-        glDisableClientState(GL_EDGE_FLAG_ARRAY);
-        glDisableClientState(GL_INDEX_ARRAY);
-        glEnableClientState(GL_VERTEX_ARRAY);
-        glEnableClientState(GL_TEXTURE_COORD_ARRAY);
-        glEnableClientState(GL_COLOR_ARRAY);
     }
     void end() {
         glMatrixMode(GL_TEXTURE); glPopMatrix();
@@ -174,20 +202,22 @@ struct Guide {
     DirResources res;
     GLBackend be;
     xui::Renderer* r;
-    xui::Element *frameEl, *mainEl, *settingsEl, *skinEl;
-    xui::Scene *frame, *main, *settings, *menu;  // menu: the one showing
+    xui::Element *frameEl, *mainEl, *settingsEl, *skinEl, *cardEl, *volumeEl, *vibrationEl;
+    // menu: the page showing; volume and vibration are Settings' own pages
+    xui::Scene *frame, *main, *settings, *volume, *vibration, *menu;
+    xui::Scene* card;  // the gamercard in the main menu's ctlGamerCard
     xui::Node* hud;  // HUDRootScene: owns the open/close timelines
     State state;
     unsigned prev;
     double holdStart, lastTime, repeatAt, leaveAt;
     int port;
     bool armed;  // Back + Start must be let go once before they open it
-    int volume;  // 0..10
-    bool vibration;
+    int volumeLevel;  // 0..10
+    bool vibrationOn;
     Sound sounds[SndCount];
-    Guide() : r(0), frameEl(0), mainEl(0), settingsEl(0), skinEl(0), frame(0), main(0), settings(0), menu(0),
+    Guide() : r(0), frameEl(0), mainEl(0), settingsEl(0), skinEl(0), cardEl(0), volumeEl(0), vibrationEl(0), frame(0), main(0), settings(0), volume(0), vibration(0), menu(0), card(0),
               hud(0), state(Off), prev(0), holdStart(-1), lastTime(-1), repeatAt(0), leaveAt(0), port(0),
-              armed(false), volume(10), vibration(true) {}
+              armed(false), volumeLevel(10), vibrationOn(true) {}
 };
 
 Guide g;
@@ -234,6 +264,18 @@ void hide_drawn(xui::Scene* s, const char* id) {
     }
 }
 
+// The frame's legend buttons are never focused; GFWL shows them at their
+// visual's first frame (the lit look), not at Normal.
+void rest(xui::Node* v) {
+    if (v->timeline) { v->time = 0; v->playing = false; v->apply(); }
+    for (int i = 0; i < v->children.n; i++) rest(v->children[i]);
+}
+
+void rest_visual(xui::Scene* s, const char* id) {
+    xui::Node* n = s->find(id);
+    if (n && n->visual) rest(n->visual);
+}
+
 void set_image(xui::Scene* s, const char* id, const char* path) {
     xui::Node* n = s->find(id);
     if (!n) return;
@@ -249,9 +291,9 @@ void settings_path(char* out, int n) {
 }
 
 void apply_settings() {
-    float v = g.volume / 10.0f;
+    float v = g.volumeLevel / 10.0f;
     ds_set_volume(v * v);
-    xinput_guide_vibration(g.vibration);
+    xinput_guide_vibration(g.vibrationOn);
 }
 
 void read_settings() {
@@ -260,8 +302,8 @@ void read_settings() {
     if (f) {
         int v = 10, r = 1;
         if (fscanf(f, "volume=%d vibration=%d", &v, &r) >= 1) {
-            g.volume = v < 0 ? 0 : v > 10 ? 10 : v;
-            g.vibration = r != 0;
+            g.volumeLevel = v < 0 ? 0 : v > 10 ? 10 : v;
+            g.vibrationOn = r != 0;
         }
         fclose(f);
     }
@@ -272,7 +314,7 @@ void write_settings() {
     char path[600]; settings_path(path, sizeof path);
     FILE* f = fopen(path, "w");
     if (!f) return;
-    fprintf(f, "volume=%d vibration=%d\n", g.volume, g.vibration ? 1 : 0);
+    fprintf(f, "volume=%d vibration=%d\n", g.volumeLevel, g.vibrationOn ? 1 : 0);
     fclose(f);
 }
 
@@ -301,28 +343,35 @@ bool load() {
     g.frameEl = g.res.scene("hudbkgnd.xui", err, sizeof err);
     g.mainEl = g.frameEl ? g.res.scene("GuideMain.xui", err, sizeof err) : 0;
     g.settingsEl = g.mainEl ? g.res.scene("GuideSettings.xui", err, sizeof err) : 0;
-    if (!g.settingsEl) { xlog("Guide: off, scene load failed: %s", err); return false; }
+    g.volumeEl = g.settingsEl ? g.res.scene("GuideVolume.xui", err, sizeof err) : 0;
+    g.vibrationEl = g.volumeEl ? g.res.scene("GuideVibration.xui", err, sizeof err) : 0;
+    if (!g.vibrationEl) { xlog("Guide: off, scene load failed: %s", err); return false; }
+    g.cardEl = g.res.scene("GuideCard.xui", err, sizeof err);  // optional
     g.r = new xui::Renderer(&g.be, &g.res);
     g.r->setFont("font.ttf");
+    g.r->defaultTextColor = 0xff000000;
     g.frame = new xui::Scene(g.frameEl, g.skinEl);
     g.frame->setFocus(0);
     g.hud = g.frame->find("HUDRootScene");
     if (!g.hud) g.hud = g.frame->root;
     g.main = g.menu = new xui::Scene(g.mainEl, g.skinEl);
     g.settings = new xui::Scene(g.settingsEl, g.skinEl);
+    g.volume = new xui::Scene(g.volumeEl, g.skinEl);
+    g.vibration = new xui::Scene(g.vibrationEl, g.skinEl);
     // Frame legends (the 360 fills them from the menu's hidden legend buttons).
     set_text(g.frame, "Legend_A", "Select");
     set_text(g.frame, "Legend_B", "Back");
     set_text(g.frame, "Legend_Y", "Xbox Dashboard");
+    rest_visual(g.frame, "Legend_A");
+    rest_visual(g.frame, "Legend_B");
+    rest_visual(g.frame, "Legend_Y");
     hide_drawn(g.frame, "Legend_X");
     hide_drawn(g.frame, "CloseX");          // the PC Guide's mouse close box
     hide_drawn(g.frame, "EvaluationTextId");
     set_text(g.frame, "GamerTag", "Player");
-    // The signed-in main menu: the game's name where the gamercard goes,
-    // then Resume Game, Xbox Dashboard and Settings in its button rows.
-    char title[64]; snprintf(title, sizeof title, "%s", xbe_title_name());
-    set_text(g.main, "txtSignInLive", title[0] ? title : "Xbox Game");
-    set_pos(g.main, "txtSignInLive", 146, 128);
+    // The signed-in main menu as GFWL shows it for a profile that is not on
+    // LIVE: the gamercard, "Not connected to LIVE", then the button rows
+    // (Resume Game, Xbox Dashboard, Settings) above the GFWL logo.
     set_show(g.main, "scnCommunity", false);
     set_show(g.main, "btnBlank1", true);
     set_text(g.main, "btnBlank1", "Resume Game");
@@ -333,13 +382,42 @@ bool load() {
     set_str(g.main, "btnBlank1", "NavUp", "");
     set_str(g.main, "btnBlank1", "NavDown", "btnQuickChat");
     set_str(g.main, "btnQuickChat", "NavUp", "btnBlank1");
-    // Settings: the Guide's Personal Settings page with our three rows.
+    set_str(g.main, "btnQuickChat", "NavDown", "btnOptions");
+    set_str(g.main, "btnOptions", "NavUp", "btnQuickChat");
+    set_str(g.main, "btnOptions", "NavDown", "");
+    // xlive draws the card into ctlGamerCard from code: GamerCard.xur's
+    // offline pane, with the game being played on its first row.
+    if (g.cardEl) {
+        g.card = new xui::Scene(g.cardEl, g.skinEl);
+        g.card->setFocus(0);
+        set_show(g.card, "extendedScene", false);
+        set_show(g.card, "onlineBaseScene", false);
+        set_show(g.card, "baseMetaPane", false);
+        set_show(g.card, "offlineBaseScene", true);
+        set_text(g.card, "gamerTagText", "Player");
+        set_image(g.card, "gamerTileImage", "ico_64x_DefaultPicture.png");
+        char title[64]; snprintf(title, sizeof title, "%s", xbe_title_name());
+        set_text(g.card, "titlesPlayedLabel", title[0] ? title : "Xbox Game");
+        set_text(g.card, "titlesPlayedText", "");
+        set_text(g.card, "credText", "0");
+        set_text(g.card, "achievementsText", "0");
+    }
+    // Settings: GFWL's Personal Settings page with two rows, each opening
+    // a GFWL page: Volume (the Voice page's Playback Volume slider) and
+    // Vibration (the controller page's Enable Vibration box).
     set_text(g.settings, "labelHeading", "Settings");
-    set_show(g.settings, "btnNetwork", false);
-    set_show(g.settings, "btnSQM", false);
-    set_show(g.settings, "btnAddLive", false);
-    set_show(g.settings, "btnUpgrade", false);
-    set_str(g.settings, "btnNotifications", "NavDown", "");
+    set_text(g.settings, "btnOnlineStatus", "Volume");
+    set_text(g.settings, "btnVoice", "Vibration");
+    const char* unused[] = { "btnController", "btnNotifications", "btnNetwork", "btnSQM", "btnAddLive", "btnUpgrade" };
+    for (unsigned i = 0; i < sizeof unused / sizeof *unused; i++) set_show(g.settings, unused[i], false);
+    set_str(g.settings, "btnVoice", "NavDown", "");
+    set_text(g.volume, "labelHeading", "Volume");
+    set_text(g.volume, "sliderVolume", "Game Volume");
+    const char* voice[] = { "btnPlayback", "btnRecording", "sliderRecording", "sliderVad", "chkMute", "chkAuto",
+                            "chkMic", "graphicMetapane", "txtMetaFull", "txtCurrentdevice",
+                            "txtCurrentdevicedescription", "txtCurrentdevicebody" };
+    for (unsigned i = 0; i < sizeof voice / sizeof *voice; i++) set_show(g.volume, voice[i], false);
+    set_str(g.volume, "sliderVolume", "NavDown", "");
     read_settings();
     settings_text();
     for (int i = 0; i < SndCount; i++) load_sound(g.sounds[i], soundFiles[i]);
@@ -400,23 +478,47 @@ void show_port() {
     }
 }
 
+void set_value(xui::Scene* s, const char* id, const char* key, int v) {
+    xui::Node* n = s->find(id);
+    if (!n) return;
+    xui::Value& x = n->props.set(key); x.free(); x.type = xui::TInt; x.i = v;
+}
+
 void settings_text() {
-    char buf[64];
-    snprintf(buf, sizeof buf, "Volume   %d%%", g.volume * 10);
-    set_text(g.settings, "btnOnlineStatus", buf);
-    snprintf(buf, sizeof buf, "Vibration   %s", g.vibration ? "On" : "Off");
-    set_text(g.settings, "btnVoice", buf);
-    unsigned ports = xinput_guide_ports();
-    int k = snprintf(buf, sizeof buf, "Controllers  ");
-    for (int i = 0; i < 4; i++)
-        if (ports & (1u << i)) k += snprintf(buf + k, sizeof buf - k, " %d", i + 1);
-    if (!ports) snprintf(buf + k, sizeof buf - k, " none");
-    set_text(g.settings, "btnNotifications", buf);
+    set_value(g.volume, "sliderVolume", "RangeMin", 0);
+    set_value(g.volume, "sliderVolume", "RangeMax", 100);
+    set_value(g.volume, "sliderVolume", "Value", g.volumeLevel * 10);
+    xui::Node* box = g.vibration->find("chkVibration");
+    if (box) {
+        bool was = xui::propB(box->props, "Checked", false);
+        xui::Value& v = box->props.set("Checked"); v.free(); v.type = xui::TBool; v.b = g.vibrationOn;
+        if (was != g.vibrationOn) box->playState(box->focused ? "Focus" : "Normal");
+    }
+}
+
+// The frame's legend for the page showing: A and B as the page's own
+// hidden legend buttons say (GFWL copies them the same way), Y always.
+void set_legend(const char* id, const char* text) {
+    xui::Node* n = g.frame->find(id);
+    if (!n) return;
+    xui::Node* t = n->visual ? n->visual : n;
+    xui::Value& v = t->props.set("Opacity"); v.free(); v.type = xui::TFloat; v.f = text ? 1 : 0;
+    if (text) set_text(g.frame, id, text);
+}
+
+const char* page_legend(xui::Scene* m, const char* a, const char* b) {
+    xui::Node* n = 0;
+    for (int i = 0; i < 2 && !n; i++) n = m->find(i ? b : a);
+    return n ? xui::propS(n->props, "Text") : 0;
 }
 
 void show_menu(xui::Scene* m, const char* focus) {
     g.menu = m;
     m->setFocus(m->find(focus));
+    // The Volume page has nothing to select.
+    set_legend("Legend_A", m == g.volume ? 0 : "Select");
+    const char* back = page_legend(m, "btnB", "btnB");
+    set_legend("Legend_B", back && back[0] ? back : "Back");
 }
 
 void open_guide() {
@@ -425,7 +527,7 @@ void open_guide() {
     show_menu(g.main, "btnBlank1");
     update_clock();
     show_port();
-    xinput_guide_mask(true);
+    { static const char* dbg = getenv("XBCOMPAT_GUIDE_DEBUG"); if (!dbg || !strstr(dbg, "nomask")) xinput_guide_mask(true); }
     ds_set_duck(0.3f);
     play(SndOpen);
     xlog("Guide: open (pad %d)", g.port + 1);
@@ -441,8 +543,13 @@ void close_guide() {
 
 void press(const char* id) {
     if (!strcmp(id, "btnBlank1")) close_guide();
-    else if (!strcmp(id, "btnOptions")) { settings_text(); show_menu(g.settings, "btnOnlineStatus"); }
-    else if (!strcmp(id, "btnVoice")) { g.vibration = !g.vibration; apply_settings(); write_settings(); settings_text(); }
+    else if (!strcmp(id, "btnOptions")) show_menu(g.settings, "btnOnlineStatus");
+    else if (!strcmp(id, "btnOnlineStatus")) { settings_text(); show_menu(g.volume, "sliderVolume"); }
+    else if (!strcmp(id, "btnVoice")) { settings_text(); show_menu(g.vibration, "chkVibration"); }
+    else if (!strcmp(id, "chkVibration")) {
+        g.vibrationOn = !g.vibrationOn;
+        apply_settings(); write_settings(); settings_text();
+    }
     else if (!strcmp(id, "btnQuickChat")) {
         g.state = Leaving;
         g.leaveAt = now_s() + 0.15;  // let the audio fade first
@@ -469,20 +576,31 @@ void step(double t) {
     case Opening:
     case Open:
         if (g.state == Opening && !g.hud->playing) g.state = Open;
-        if ((down & GUIDE_B) && g.menu == g.settings) { play(SndBack); show_menu(g.main, "btnOptions"); break; }
-        if (toggle || (down & GUIDE_B)) { close_guide(); break; }
-        if ((down & (GUIDE_LEFT | GUIDE_RIGHT)) && g.menu == g.settings && g.menu->focus &&
-            !strcmp(g.menu->focus->id(), "btnOnlineStatus")) {
-            g.volume += (down & GUIDE_RIGHT) ? 1 : -1;
-            g.volume = g.volume < 0 ? 0 : g.volume > 10 ? 10 : g.volume;
-            apply_settings(); write_settings(); settings_text();
-            play(SndFocus);
+        if ((down & GUIDE_B) && g.menu != g.main && !toggle) {
+            play(SndBack);
+            if (g.menu == g.settings) show_menu(g.main, "btnOptions");
+            else show_menu(g.settings, g.menu == g.volume ? "btnOnlineStatus" : "btnVoice");
+            break;
+        }
+        if (toggle || (down & GUIDE_B)) { xlog("Guide: close (buttons %#x down %#x)", b, down); close_guide(); break; }
+        if ((b & (GUIDE_LEFT | GUIDE_RIGHT)) && g.menu == g.volume) {
+            if ((down & (GUIDE_LEFT | GUIDE_RIGHT)) || t >= g.repeatAt) {
+                int v = g.volumeLevel + ((b & GUIDE_RIGHT) ? 1 : -1);
+                v = v < 0 ? 0 : v > 10 ? 10 : v;
+                if (v != g.volumeLevel) {
+                    g.volumeLevel = v;
+                    apply_settings(); write_settings(); settings_text();
+                    play(SndFocus);
+                }
+                g.repeatAt = t + ((down & (GUIDE_LEFT | GUIDE_RIGHT)) ? 0.4 : 0.12);
+            }
             break;
         }
         if (down & GUIDE_Y) { press("btnQuickChat"); break; }
         if (down & GUIDE_A) {
             if (g.menu->focus) {
                 const char* id = g.menu->focus->id();
+                if (g.menu == g.volume) break;
                 if (strcmp(id, "btnBlank1")) play(SndSelect);  // Resume plays the close sound
                 g.menu->press();
                 press(id);
@@ -520,12 +638,9 @@ bool guide_frame(int w, int h) {
     g.lastTime = t;
     step(t);
     if (g.state == Closed) return false;
+    { static const char* dbg = getenv("XBCOMPAT_GUIDE_DEBUG"); if (dbg && strstr(dbg, "nodraw")) return false; }
     g.frame->update(dt);
     g.menu->update(dt);
-    if (g.menu == g.settings && g.state == Open) {
-        static double next;
-        if (t >= next) { settings_text(); next = t + 1; }  // pads come and go
-    }
     (void)w; (void)h;
     return true;
 }
@@ -536,21 +651,36 @@ void guide_draw(int w, int h) {
     float cw = g.frame->root->width(), ch = g.frame->root->height();
     float s = h / ch;
     float kx = (w / cw) / s;
+    { static const char* dbg = getenv("XBCOMPAT_GUIDE_DEBUG");
+      if (dbg && strstr(dbg, "glerr")) { GLenum e = glGetError(); if (e) xlog("Guide: GL error %#x before drawing", e); } }
     g.be.begin(w, h, kx);
     g.r->draw(g.frame, 0, 0, s);
     // The menu sits in the frame's AppHostElementId and fades with it.
     xui::Node* host = g.frame->find("AppHostElementId");
-    float hx = 0, hy = 0, op = 1; bool shown = true;
+    // Its origin and scale on the canvas (the slot is at 0.85).
+    float hx = 0, hy = 0, hs = 1, op = 1; bool shown = true;
     for (xui::Node* p = host; p; p = p->parent) {
-        xui::Vec3 z = {0, 0, 0};
+        xui::Vec3 z = {0, 0, 0}, one = {1, 1, 1};
         xui::Vec3 v = xui::propV(p->props, "Position", z);
-        hx += v.x; hy += v.y;
+        xui::Vec3 sc = xui::propV(p->props, "Scale", one);
+        xui::Vec3 pv = xui::propV(p->props, "Pivot", z);
+        hx = v.x + pv.x + sc.x * (hx - pv.x);
+        hy = v.y + pv.y + sc.y * (hy - pv.y);
+        hs *= sc.x;
         shown = shown && xui::propB(p->props, "Show", true);
         op *= xui::propF(p->props, "Opacity", 1);
     }
     if (host && shown && op > 0.001f) {
         xui::Value& o = g.menu->root->props.set("Opacity"); o.free(); o.type = xui::TFloat; o.f = op;
-        g.r->draw(g.menu, hx * s, hy * s, s);
+        g.r->draw(g.menu, hx * s, hy * s, s * hs);
+        xui::Node* slot = g.menu == g.main && g.card ? g.main->find("ctlGamerCard") : 0;
+        if (slot && xui::propB(slot->props, "Show", true)) {
+            xui::Vec3 z = {0, 0, 0};
+            xui::Vec3 v = xui::propV(slot->props, "Position", z);
+            xui::Value& co = g.card->root->props.set("Opacity"); co.free(); co.type = xui::TFloat; co.f = op;
+            float ms = s * hs;
+            g.r->draw(g.card, hx * s + v.x * ms, hy * s + v.y * ms, ms);
+        }
     }
     g.be.end();
     // Test aid: XBCOMPAT_GUIDE_SHOT=file.ppm saves the window (game and
@@ -559,6 +689,11 @@ void guide_draw(int w, int h) {
     const char* shot = getenv("XBCOMPAT_GUIDE_SHOT");
     const char* at = getenv("XBCOMPAT_GUIDE_SHOT_AT");
     if (shot && ++drawn == (at ? atoi(at) : 40)) {
+        GLint prog = -1, fb = -1, rb = -1; GLenum err = glGetError();
+        glGetIntegerv(0x8B8D /* GL_CURRENT_PROGRAM */, &prog);
+        glGetIntegerv(0x8CA6 /* GL_DRAW_FRAMEBUFFER_BINDING */, &fb);
+        glGetIntegerv(GL_READ_BUFFER, &rb);
+        xlog("Guide: shot state %d playing %d err %#x program %d fb %d readbuf %#x size %dx%d", g.state, g.hud->playing, err, prog, fb, rb, w, h);
         unsigned char* px = new unsigned char[w * h * 3];
         glPixelStorei(GL_PACK_ALIGNMENT, 1);
         glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, px);
