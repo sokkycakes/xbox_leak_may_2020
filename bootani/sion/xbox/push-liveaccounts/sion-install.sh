@@ -23,6 +23,9 @@ fi
 mkdir -p $L/liveserver
 cp $K/liveserver/*.py $L/liveserver/
 [ -f $L/live.json ] && cp $L/live.json $L/live.json.pre-accounts
+# The bundled 32-bit python needs the xbox environment (its library path)
+# outside the xbox services, e.g. over plain ssh.
+[ -f /usr/lib/xbox/xbox-env ] && . /usr/lib/xbox/xbox-env
 PYTHONHOME=$X PYTHONDONTWRITEBYTECODE=1 $X/bin/python3 $L/liveserver/mkuser.py --hdd $HDD --db $L/live.json "$@"
 rm -rf $K
 md5sum $L/liveserver/xweb.py $L/liveserver/sg.py $L/liveserver/kdc.py
