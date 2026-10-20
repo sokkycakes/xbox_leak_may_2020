@@ -96,7 +96,7 @@
  <Id>title</Id>
  <Width>1024</Width>
  <Height>60</Height>
- <Position>0,510,0</Position>
+ <Position>0,-50,0</Position>
  <Text>Game Title</Text>
  <TextColor>0xffffffff</TextColor>
  <DropShadowColor>0</DropShadowColor>
