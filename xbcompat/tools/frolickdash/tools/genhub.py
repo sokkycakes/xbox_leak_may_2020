@@ -490,6 +490,43 @@ DEF vpCarousel Viewpoint
     %(vp_carousel)s
 }
 
+// Launching a game, as the dashboard does it (default.xap theLauncherLevel):
+// the launcher level's black sky and Xbox logo backdrop bind as the
+// transition starts, the hub cross-fades out over the Level's 0.75 s,
+// input is off, the logo holds 1.1 s, then the frame is persisted and
+// the console reboots into the game (GameCollection.LaunchGame).
+DEF theXboxLogoBackground Background
+{
+    skyColor 0 0 0
+    backdrop ImageTexture { url "xboxlogo.bmp" }
+}
+
+DEF theLaunchLevel Level
+{
+    function OnActivate()
+    {
+        EnableInput(false);
+        theXboxLogoBackground.isBound = true;
+    }
+    function OnArrival()
+    {
+        theXboxLogoBackground.isBound = true;
+        // the hold starts once the cross-fade has landed on the logo
+        bLaunching = true;
+    }
+    behavior
+    {
+        // (a level's behavior runs from start-up, before any GoTo, so it
+        // polls for the arrival flag, as the dashboard's g_bAboutToReboot)
+        sleep 0.05;
+        if (bLaunching)
+        {
+            sleep 1.1;
+            theGameCollection.LaunchGame(nLaunchGame);
+        }
+    }
+}
+
 DEF theMover CameraMover
 {
     duration 0.55
@@ -572,11 +609,15 @@ var bMoving;
 var bZoomed;    // the camera is on the pad's focus view (catalog, settings)
 var bLibraryOpen;   // the camera is in the game belt
 var nGame;          // the belt game whose page is open (GameCollection index)
+var nLaunchGame;    // the game the launch level starts
+var bLaunching;     // set when the launch level has faded in
+var bLaunchPending; // a launch is under way (ignore further presses)
 var bPageOpen;      // the padfocus page is up (after the zoom)
 var bBusy;          // a copy or delete runs: input waits
 
 DEF theHub Level
 {
+    unloadable false    // no archive to unload when the launch level takes over
     children
     [
         // world3D/bg: the atmo dome, multiplied over the backdrop, and the
@@ -842,7 +883,17 @@ function LaunchSelected()
         return;
     if (theGameCollection.IsPlayable(sel - 1) == 0)
         return;
-    theGameCollection.LaunchGame(sel - 1);
+    LaunchGameWithLogo(sel - 1);
+}
+
+// The launch itself: the Xbox logo level, which launches when it has held
+function LaunchGameWithLogo(n)
+{
+    if (bLaunchPending)
+        return;
+    bLaunchPending = true;
+    nLaunchGame = n;
+    theLaunchLevel.GoTo();
 }
 
 function PadStart()
@@ -1212,6 +1263,9 @@ function initialize()
     nSave = 0;
     nDest = 8;
     nGame = 0;
+    nLaunchGame = 0;
+    bLaunching = false;
+    bLaunchPending = false;
     // the A pin's idle pulse: a small dip every PIN_PULSE_PERIOD seconds
     theOverlay.Pulse("promptA", %(pin_pulse_dy)s, %(pin_pulse_period)s, %(pin_pulse_dur)s);
     EnableInput(true);
@@ -1526,7 +1580,7 @@ function PageSpecial(id)
     if (k == "game")
     {
         if (id == "btnViewAchievements")
-            theGameCollection.LaunchGame(nGame);
+            LaunchGameWithLogo(nGame);
         else if (id == "btnManageGameFiles")
             OpenGameStorage();
         else

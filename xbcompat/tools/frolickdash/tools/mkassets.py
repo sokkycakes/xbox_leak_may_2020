@@ -11,7 +11,9 @@ B,G,R,A (not premultiplied).  Later directories override earlier ones.
 
 Layout (private/ui/xapp/xip.h): a header, FILEDATA[files], FILENAME[names]
 sorted for bsearch with _stricmp, the name strings, then the data.  All
-entries are plain files (type 0).
+entries are plain files (type 0) except .xbx textures (type 2, a bundled
+XPR the engine registers as a D3D texture, as ImageTexture url
+"xboxlogo.bmp" finds the archive's xboxlogo.xbx).
 """
 import os, struct, sys
 
@@ -45,7 +47,8 @@ def write_xip(out, files):
     blob, fd = b"", []
     for n in order:
         b = files[n]
-        fd.append(struct.pack("<IIII", len(blob), len(b), 0, 0))
+        xtype = 2 if n.lower().endswith(".xbx") else 0
+        fd.append(struct.pack("<IIII", len(blob), len(b), xtype, 0))
         blob += b
     strs, offs = b"", {}
     for n in order:

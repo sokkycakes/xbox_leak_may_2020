@@ -162,6 +162,19 @@ static void EndUnlit(DWORD dwLighting)
     XAppSetRenderState(D3DRS_LIGHTING, dwLighting);
 }
 
+// A level cross-fade multiplies every node by g_nEffectAlpha: the texture
+// factor carries it (white, alpha = g_nEffectAlpha) so a stage can modulate
+// its alpha by it, or blend its colour towards white (a multiply that
+// fades out), without touching the vertex colours.
+static DWORD BeginEffectAlpha()
+{
+    DWORD dwSave;
+    XAppGetRenderState(D3DRS_TEXTUREFACTOR, &dwSave);
+    XAppSetRenderState(D3DRS_TEXTUREFACTOR, D3DCOLOR_COLORVALUE(1.0f, 1.0f, 1.0f, g_nEffectAlpha));
+    return dwSave;
+}
+static void EndEffectAlpha(DWORD dwSave) { XAppSetRenderState(D3DRS_TEXTUREFACTOR, dwSave); }
+
 ////////////////////////////////////////////////////////////////////////////
 // Ribbon: an open tube (Godot's CylinderMesh, no caps) with the ring's
 // gradient material: opaque at the seam, fading to almost nothing on the
@@ -288,20 +301,24 @@ void CRibbon::Render()
         Build();
     DWORD dwLighting;
     BeginUnlit(&dwLighting, D3DBLEND_SRCALPHA, D3DBLEND_INVSRCALPHA);
+    DWORD dwFactor = BeginEffectAlpha();
+    bool bFading = g_nEffectAlpha < 1.0f;
     XAppSetTexture(0, NULL);
     XAppSetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG2);
     XAppSetTextureStageState(0, D3DTSS_COLORARG2, D3DTA_DIFFUSE);
-    XAppSetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG2);
+    XAppSetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_MODULATE);
+    XAppSetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_TFACTOR);
     XAppSetTextureStageState(0, D3DTSS_ALPHAARG2, D3DTA_DIFFUSE);
     if (m_inner)
     {
-        XAppSetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
+        XAppSetRenderState(D3DRS_ALPHABLENDENABLE, bFading);
         XAppSetRenderState(D3DRS_ZWRITEENABLE, TRUE);
         XAppGetD3DDev()->DrawIndexedVerticesUP(D3DPT_TRIANGLELIST, m_nIdx, m_idx, m_innerVerts, sizeof (WORLDVERTEX));
         XAppSetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
         XAppSetRenderState(D3DRS_ZWRITEENABLE, FALSE);
     }
     XAppGetD3DDev()->DrawIndexedVerticesUP(D3DPT_TRIANGLELIST, m_nIdx, m_idx, m_verts, sizeof (WORLDVERTEX));
+    EndEffectAlpha(dwFactor);
     EndUnlit(dwLighting);
 }
 
@@ -359,15 +376,18 @@ void CDisc::Render()
     }
     DWORD dwLighting;
     BeginUnlit(&dwLighting, D3DBLEND_SRCALPHA, D3DBLEND_INVSRCALPHA);
-    XAppSetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
+    DWORD dwFactor = BeginEffectAlpha();
+    XAppSetRenderState(D3DRS_ALPHABLENDENABLE, g_nEffectAlpha < 1.0f);
     XAppSetRenderState(D3DRS_ZWRITEENABLE, TRUE);
     XAppSetTexture(0, NULL);
     XAppSetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG2);
     XAppSetTextureStageState(0, D3DTSS_COLORARG2, D3DTA_DIFFUSE);
-    XAppSetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG2);
+    XAppSetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_MODULATE);
+    XAppSetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_TFACTOR);
     XAppSetTextureStageState(0, D3DTSS_ALPHAARG2, D3DTA_DIFFUSE);
     XAppGetD3DDev()->DrawIndexedVerticesUP(D3DPT_TRIANGLELIST, n * 6, idx, verts, sizeof (WORLDVERTEX));
     XAppSetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+    EndEffectAlpha(dwFactor);
     EndUnlit(dwLighting);
 }
 
@@ -664,12 +684,16 @@ void CDome::Render()
     XAppSetTextureStageState(0, D3DTSS_ADDRESSV, D3DTADDRESS_CLAMP);
     XAppSetTextureStageState(0, D3DTSS_MINFILTER, D3DTEXF_LINEAR);
     XAppSetTextureStageState(0, D3DTSS_MAGFILTER, D3DTEXF_LINEAR);
-    XAppSetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+    // a multiply fades out towards white: texture * a + white * (1 - a)
+    DWORD dwFactor = BeginEffectAlpha();
+    XAppSetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_BLENDFACTORALPHA);
     XAppSetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+    XAppSetTextureStageState(0, D3DTSS_COLORARG2, D3DTA_TFACTOR);
     XAppSetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
     XAppSetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
     XAppGetD3DDev()->DrawIndexedVerticesUP(D3DPT_TRIANGLELIST, m_nIdx, m_idx, m_verts, sizeof (WORLDVERTEX));
     XAppSetTextureStageState(0, D3DTSS_ADDRESSU, D3DTADDRESS_WRAP);
     XAppSetTextureStageState(0, D3DTSS_ADDRESSV, D3DTADDRESS_WRAP);
+    EndEffectAlpha(dwFactor);
     EndUnlit(dwLighting);
 }

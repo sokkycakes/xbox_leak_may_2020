@@ -199,10 +199,21 @@ unchanged, and only the script and two small nodes are Frolick's:
   title image out of its XBE (`GetGameImage`, cached in `T:\GameImages`),
   drawn across the card (`pads/carousel_cover.xui`, set by
   `Belt.SetGameImage`; the grid and tray tiles keep their small icons).
-  Start on a cover launches it (`LaunchGame`: D: becomes the game's
-  directory and the console reboots into its XBE; when Frolick runs as a
-  game, the game comes back to the dashboard that launched Frolick, not
-  to Frolick).  A opens the game's page over the belt: the Blades' Game
+  Start on a cover launches it the way the Xbox dashboard launches a
+  game (`LaunchGameWithLogo`, as default.xap's theLauncherLevel): the
+  launch Level's backdrop, the dashboard's own xboxlogo.bmp on black,
+  binds at once and the hub cross-fades out over it in the Level's
+  0.75 s (every node of the hub multiplies by `g_nEffectAlpha`; the
+  ribbon, discs and dome fade through the texture factor), the logo
+  holds 1.1 s after arrival, then `LaunchGame` keeps the frame
+  (`PersistDisplay`), D: becomes the game's directory and the console
+  reboots into its XBE; when Frolick runs as a game, the game comes back
+  to the dashboard that launched Frolick, not to Frolick.  Play Game on
+  the game page takes the same route.  Start reaches the script because
+  dashbuild patches the engine's Joystick.cpp to send OnStartDown and
+  OnBackDown (falling back to OnADown/OnBDown for a script without
+  them, so the stock dashboard is unchanged); the hub Level is
+  `unloadable false`, as it has no archive to drop when it is left.  A opens the game's page over the belt: the Blades' Game
   Summary scene (`art/blades/401_GameDetails.xui`, `page_game` in
   genpage.py) as the Xbox dashboard's Games pod shows a game, with Play
   Game, Game Storage (the title's saved games page from Settings >
