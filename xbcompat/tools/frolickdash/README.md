@@ -55,24 +55,32 @@ dashboard (`tools/dashbuild`), as its own `xboxdash.xbe` with its own
   and pad textures arrive (`ART=dir`).  A on a catalog or settings tile flies the camera (750 ms, like Frolick's carousel zoom) down to `main.tscn`'s `cam_angle_padfocus`, mirrored for settings, with the panel faded out; B flies back.
 - The padfocus pages, the full-screen menus the catalog and settings pads
   open, are the Xbox 360 Blades dashboard's third-level pages (the ones
-  that slide the blades away and expand) drawn with Frolick's art.
-  `tools/xur2xui.py` converts a Blades scene (XUIB v5 `.xur`, from a
-  package run through `xurconv.py` first so its classes are the engine's)
-  to the text `.xui` the runtime reads; the converted scenes are kept in
-  `art/blades/` as they came out, so each page's ids, sizes, positions and
-  navigation are Microsoft's.  `tools/genpage.py` turns them into
-  `pads/page_*.xui`: Frolick's panel card behind the content, the pad's
-  colour as the wing on its edge, and the open and close motion timed like
-  `dashmain.xur`'s `1OpenFull` (30 frames at 30 fps), plus `pads/page_skin.xui`,
-  the visuals every page uses in Frolick's palette (the FrolickTile
-  treatment on the list bars, the header, the meta panel card, the A/B
-  legends with Frolick's glyphs).  The hub shows a page on a HUD `XuiPanel`
-  (`thePage`) once the camera lands on the focus view: up and down walk
-  its list, A presses, B closes it as the camera flies back.  So far:
-  Console Settings (`dashSysCslSet`) at the settings pad, its meta panel
-  showing the focused item's setting as the Sion stands (not read from the
-  console yet).  The items' own pages, the Memory and Network pages and
-  the Marketplace pages for the catalog pad are next.
+  that slide the blades away and expand).  `tools/xur2xui.py` converts a
+  Blades scene (XUIB v5 `.xur`, from a package run through `xurconv.py`
+  first so its classes are the engine's) to the text `.xui` the runtime
+  reads; the converted scenes are kept in `art/blades/` as they came out,
+  so each page's ids, sizes, positions and navigation are Microsoft's.
+  `tools/genpage.py` turns them into `pads/page_*.xui` dressed after
+  sokky's catalog padfocus mockup and the 360's own sub-pages: the page
+  spans the screen edge to edge, a darker header strip over a translucent
+  slate body with the pad showing through, a legend bar below, and the
+  list bars in the Blades' button style (rounded, thin light border, dark
+  glassy fill, white text, the focused bar lit) in the panel's tones;
+  `pads/page_skin.xui` holds those visuals, with Frolick's glyphs on the
+  legends.  The Blades' lists are filled at run time by the 360 dashboard;
+  here a list becomes its items as buttons stacked the way the list would
+  stack them, with the texts from `genpage.py`'s PAGES table (placeholders
+  until the pages read the console).  The hub shows a page on a HUD
+  `XuiPanel` (`thePage`) once the camera lands on the focus view, opening
+  it over 30 frames like `dashmain.xur`'s `1OpenFull`: up and down walk
+  the list, A opens the item's page (a 10-frame fade, the Blades'
+  FadeIn), B returns to the parent page or, on the root page, closes it as
+  the camera flies back.  Pages so far: settings pad: Settings (Console
+  Settings, Memory, Network Settings) > Console Settings with its meta
+  panel, Storage Devices > the drive's items, Select Network
+  Configuration with its meta text; catalog pad: Marketplace > Game
+  Downloads, Featured Downloads, Demos and Trailers, Themes, Download
+  History.  Item icons and the Marketplace banner wait for Frolick's art.
 
 The library view is GameTap's game belt (`art/gametap/`: the decoded
 `beta2scene-belt.json` and the spec `game-belt-render.md`).  `tools/mkbelt.py`

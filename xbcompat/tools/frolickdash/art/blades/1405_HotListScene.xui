@@ -1,0 +1,165 @@
+<XuiCanvas>
+<Properties>
+ <Width>1120</Width>
+ <Height>770</Height>
+</Properties>
+<XuiScene>
+<Properties>
+ <Id>scnHotList</Id>
+ <Width>1120</Width>
+ <Height>770</Height>
+ <ClassOverride>CHotListScene</ClassOverride>
+ <DefaultFocus>lstHot</DefaultFocus>
+ <TransFrom>FadeOut</TransFrom>
+ <TransTo>FadeIn</TransTo>
+ <TransBackFrom>FadeOut</TransBackFrom>
+ <TransBackTo>FadeIn</TransBackTo>
+</Properties>
+<XuiControl>
+<Properties>
+ <Id>figBackground</Id>
+ <Width>855</Width>
+ <Height>570</Height>
+ <Position>143,100,0</Position>
+ <Visual>back panel</Visual>
+</Properties>
+</XuiControl>
+<XuiNavButton>
+<Properties>
+ <Id>btnY</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>165,611,0</Position>
+ <Visual>legend_Y</Visual>
+ <Enabled>false</Enabled>
+ <UnfocusedInput>true</UnfocusedInput>
+ <Text>Download Now</Text>
+ <PressKey>22531</PressKey>
+</Properties>
+</XuiNavButton>
+<XuiNavButton>
+<Properties>
+ <Id>btnX</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>146,639,0</Position>
+ <Visual>legend_X</Visual>
+ <UnfocusedInput>true</UnfocusedInput>
+ <Text>Add Microsoft Points</Text>
+ <PressKey>22530</PressKey>
+</Properties>
+</XuiNavButton>
+<XuiBackButton>
+<Properties>
+ <Id>btnB</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>555,611,0</Position>
+ <Visual>legend_B</Visual>
+ <UnfocusedInput>true</UnfocusedInput>
+ <Text>Back</Text>
+ <PressKey>22593</PressKey>
+</Properties>
+</XuiBackButton>
+<XuiButton>
+<Properties>
+ <Id>btnA</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>573,639,0</Position>
+ <Visual>legend_A</Visual>
+ <UnfocusedInput>true</UnfocusedInput>
+ <Text>Select</Text>
+</Properties>
+</XuiButton>
+<XuiList>
+<Properties>
+ <Id>lstHot</Id>
+ <Width>855</Width>
+ <Height>356</Height>
+ <Position>144,247,0</Position>
+ <ClassOverride>CHotListList</ClassOverride>
+ <Visual>List_Fullwidth_3Icon_4string</Visual>
+</Properties>
+</XuiList>
+<XuiLabel>
+<Properties>
+ <Id>labSceneTitle</Id>
+ <Width>855</Width>
+ <Height>47</Height>
+ <Position>156,96,0</Position>
+ <Visual>Label_Head</Visual>
+ <Text>Featured Downloads</Text>
+</Properties>
+</XuiLabel>
+<XuiLabel>
+<Properties>
+ <Id>labMembershipTitle</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>144,149,0</Position>
+ <Visual>Label_Body</Visual>
+ <Text>Membership:</Text>
+</Properties>
+</XuiLabel>
+<XuiLabel>
+<Properties>
+ <Id>labMembership</Id>
+ <Width>196</Width>
+ <Height>47</Height>
+ <Position>364,149,0</Position>
+ <Visual>Label_BodyRight</Visual>
+ <Text>&lt;mem&gt;</Text>
+</Properties>
+</XuiLabel>
+<XuiLabel>
+<Properties>
+ <Id>labCurrentBalanceTitle</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>144,189,0</Position>
+ <Visual>Label_Body</Visual>
+ <Text>Current balance:</Text>
+</Properties>
+</XuiLabel>
+<XuiLabel>
+<Properties>
+ <Id>labCurrentBalance</Id>
+ <Width>195</Width>
+ <Height>47</Height>
+ <Position>365,188,0</Position>
+ <Visual>Label_BodyRight</Visual>
+ <Text>&lt;points bal&gt;</Text>
+</Properties>
+</XuiLabel>
+<XuiControl>
+<Properties>
+ <Id>ctlLoading</Id>
+ <Width>100</Width>
+ <Height>100</Height>
+ <Position>522,320,0</Position>
+ <Visual>Loading_Large</Visual>
+</Properties>
+</XuiControl>
+<XuiLabel>
+<Properties>
+ <Id>labEmpty</Id>
+ <Width>855</Width>
+ <Height>75</Height>
+ <Position>132.5,347.5,0</Position>
+ <Visual>XuiLabelCenterJustify</Visual>
+ <Text>No featured downloads are available at this time.
+Please come back later.</Text>
+</Properties>
+</XuiLabel>
+<XuiLabel>
+<Properties>
+ <Id>labItemCount</Id>
+ <Width>344</Width>
+ <Height>47</Height>
+ <Position>544,576,0</Position>
+ <Visual>Label_SubRight</Visual>
+</Properties>
+</XuiLabel>
+</XuiScene>
+</XuiCanvas>
