@@ -90,7 +90,8 @@ LIST_ITEMS = {
 # page and flies the camera back); header: the title (the scene's own if
 # None); items: the buttons of the System list; lists: {list id: [(line
 # 1, line 2, fraction), ...]}; press: {control id: page}; meta: {control
-# id: the meta panel's text}; labels: {id: text}; positions: {id: "x,y,0"}; hide: ids shown nothing
+# id: the meta panel's text}; labels: {id: text}; positions: {id: "x,y,0"};
+# clone: {id: (new id, "x,y,0")}, a copy of a control; hide: ids shown nothing
 # here.  The list texts are placeholders until the pages read the console.
 GAMES = [(g, "", 0) for g in CAROUSEL_GAMES[BELT_START:]]   # the belt's games, not its All games / Disc tiles
 PAGES = [
@@ -102,8 +103,9 @@ PAGES = [
     # Games pod shows a game (sokky, 2026-10-20): Play Game, Game Storage
     # (the title's saved games in Settings > Memory), Install Game for a
     # disc or card game not yet on the hard disk (hidden otherwise), no
-    # achievements; the meta pane carries the title ID, the saves and
-    # where the game is.  Filled by the hub script (kind "game").
+    # achievements; the meta pane carries the platform and runtime (as a
+    # Kazeta cart names them: Xbox on xbcompat, Windows on Proton...), the
+    # saves and where the game is.  Filled by the hub script (kind "game").
     ("page_game", dict(scene="401_GameDetails.xui", pad="library", first="btnViewAchievements", parent="",
                        header="Game Summary", dynamic="game",
                        labels={"btnViewAchievements": "Play Game", "btnManageGameFiles": "Game Storage",
@@ -112,9 +114,14 @@ PAGES = [
                                "labAchievementsNum": "", "labGamerPointsText": "Location", "labGamerPointsNum": ""},
                        hide=["img_frame1", "img_frame2", "img_frame3", "img_frame4", "imgAchievements1", "imgAchievements2",
                              "imgAchievements3", "imgAchievements4", "icoGamerScore"],
-                       # the two counts close up under the title ID line where the achievement tiles were
-                       positions={"labAchievementsText": "581,326,0", "labAchievementsNum": "782,326,0",
-                                  "labGamerPointsText": "581,366,0", "labGamerPointsNum": "782,366,0"})),
+                       # four label/value rows on a 40 pitch where the achievement tiles were;
+                       # the Runtime row is a copy of the Achievements pair
+                       positions={"labRecentAchievementsText": "581,286,0", "labAchievementsText": "581,366,0",
+                                  "labAchievementsNum": "782,366,0", "labGamerPointsText": "581,406,0",
+                                  "labGamerPointsNum": "782,406,0"},
+                       clone={"labAchievementsNum": ("labRecentAchievementsNum", "782,286,0"),
+                              "labAchievementsText": ("labRuntimeText", "581,326,0"),
+                              "labAchievementsNum ": ("labRuntimeNum", "782,326,0")})),
     ("page_console", dict(scene="dashSysCslSet.xui", pad="settings", first="btnDisplay", parent="page_system",
                           meta={"btnDisplay": "480i NTSC, 4:3", "btnAudio": "Stereo", "btnLanguage": "English",
                                 "btnClock": "Set from the network", "btnCountry": "United States", "btnAutoOff": "Off",
@@ -426,13 +433,17 @@ def page(file, spec):
                 b = set_prop(b, "Text", spec["header"])
             if id in spec.get("labels", {}):
                 b = set_prop(b, "Text", spec["labels"][id])
-            if id in spec.get("positions", {}):
-                b = set_prop(b, "Position", spec["positions"][id])
                 # a legend reads as live only when enabled (the skin's
                 # NormalDisable frame shows a grey button and no text); an
                 # empty label makes it the Blades' blank placeholder
                 if id.startswith("legend_"):
                     b = set_prop(b, "Enabled", "true" if spec["labels"][id] else "false")
+            if id in spec.get("positions", {}):
+                b = set_prop(b, "Position", spec["positions"][id])
+            # clone: {source id (a trailing space makes a second copy): (new id, position)}
+            for src, (nid, pos) in spec.get("clone", {}).items():
+                if src.strip() == id:
+                    kept.append(set_prop(set_prop(set_prop(b, "Id", nid), "Position", pos), "Text", ""))
             if id == "txt_Meta":
                 b = set_prop(b, "Text", "")
             kept.append(b)

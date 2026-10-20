@@ -68,6 +68,8 @@ public:
     CStrObject* GetGameName(int nGame);
     CStrObject* GetGameFolder(int nGame);
     CStrObject* GetGameTitleID(int nGame);
+    CStrObject* GetGamePlatform(int nGame);
+    CStrObject* GetGameRuntime(int nGame);
     CStrObject* GetGameInfo(int nGame);
     CStrObject* GetSavedGames(int nGame);
     int GetSavedGameCount(int nGame);
@@ -104,6 +106,8 @@ START_NODE_FUN(CGameCollection, CNode)
     NODE_FUN_SI(GetGameName)
     NODE_FUN_SI(GetGameFolder)
     NODE_FUN_SI(GetGameTitleID)
+    NODE_FUN_SI(GetGamePlatform)
+    NODE_FUN_SI(GetGameRuntime)
     NODE_FUN_SI(GetGameInfo)
     NODE_FUN_SI(GetSavedGames)
     NODE_FUN_II(GetSavedGameCount)
@@ -474,6 +478,96 @@ CStrObject* CGameCollection::GetGameTitleID(int nGame)
         return new CStrObject;
     TCHAR sz [16];
     _stprintf(sz, _T("%08X"), c_rgGames[nGame].m_dwTitleID);
+    return new CStrObject(sz);
+}
+
+// The platform a game is for and the runtime that runs it, the way a
+// Kazeta cart names them (the .kzi's Runtime key: a platform, such as
+// windows, xbox or megadrive, or one with a version, windows-proton-ge-9),
+// for the game's page.  An Xbox game, wherever it sits, is Xbox on
+// xbcompat.  A cart's runtime image is looked for on the card the way
+// Kazeta resolves it (<runtime>.kzr, <runtime>-*.kzr), and that file's
+// name is the runtime shown; a cart whose runtime lives on the console
+// only names it.
+static const struct { const CHAR* szRuntime; const TCHAR* szPlatform; } c_rgPlatforms [] =
+{
+    { "xbox", _T("Xbox") }, { "windows", _T("Windows") }, { "linux", _T("Linux") }, { "none", _T("Linux") },
+    { "nes", _T("NES") }, { "snes", _T("Super NES") }, { "n64", _T("Nintendo 64") }, { "gb", _T("Game Boy") },
+    { "gbc", _T("Game Boy Color") }, { "gba", _T("Game Boy Advance") }, { "nds", _T("Nintendo DS") },
+    { "gamecube", _T("GameCube") }, { "wii", _T("Wii") }, { "megadrive", _T("Sega Genesis") },
+    { "genesis", _T("Sega Genesis") }, { "mastersystem", _T("Sega Master System") }, { "gamegear", _T("Game Gear") },
+    { "saturn", _T("Sega Saturn") }, { "dreamcast", _T("Dreamcast") }, { "psx", _T("PlayStation") },
+    { "ps1", _T("PlayStation") }, { "ps2", _T("PlayStation 2") }, { "psp", _T("PlayStation Portable") },
+    { "arcade", _T("Arcade") }, { "mame", _T("Arcade") }, { "dos", _T("DOS") }, { "scummvm", _T("ScummVM") },
+};
+
+// The platform part of a Runtime value: up to its first '-' (windows-proton-ge-9 -> windows).
+static void RuntimePlatform(const CHAR* szRuntime, CHAR* szPlat, int cch)
+{
+    int i = 0;
+    for (; i < cch - 1 && szRuntime[i] != 0 && szRuntime[i] != '-'; i += 1)
+        szPlat[i] = szRuntime[i];
+    szPlat[i] = 0;
+}
+
+CStrObject* CGameCollection::GetGamePlatform(int nGame)
+{
+    if (nGame < 0 || nGame >= c_nGameCount)
+        return new CStrObject;
+    const GAMEINFO* pGame = &c_rgGames[nGame];
+    if (pGame->m_nKind != KIND_CARD || pGame->m_bXbox)
+        return new CStrObject(_T("Xbox"));
+    if (EndsWith(pGame->m_szCart, ".kzp"))
+        return new CStrObject(_T("Packaged cart"));
+    CHAR szPlat [32];
+    RuntimePlatform(pGame->m_szRuntime, szPlat, sizeof (szPlat));
+    if (szPlat[0] == 0)
+        return new CStrObject(_T("Linux"));      // Kazeta runs a cart with no Runtime on the none runtime
+    for (int i = 0; i < countof(c_rgPlatforms); i += 1)
+    {
+        if (_stricmp(szPlat, c_rgPlatforms[i].szRuntime) == 0)
+            return new CStrObject(c_rgPlatforms[i].szPlatform);
+    }
+    // an unlisted runtime: its name, capitalised
+    TCHAR sz [32];
+    _stprintf(sz, _T("%hs"), szPlat);
+    if (sz[0] >= 'a' && sz[0] <= 'z')
+        sz[0] = sz[0] - 'a' + 'A';
+    return new CStrObject(sz);
+}
+
+CStrObject* CGameCollection::GetGameRuntime(int nGame)
+{
+    if (nGame < 0 || nGame >= c_nGameCount)
+        return new CStrObject;
+    const GAMEINFO* pGame = &c_rgGames[nGame];
+    if (pGame->m_nKind != KIND_CARD || pGame->m_bXbox)
+        return new CStrObject(_T("xbcompat"));
+    if (EndsWith(pGame->m_szCart, ".kzp"))
+        return new CStrObject(_T("inside the cart"));
+    if (pGame->m_szRuntime[0] == 0)
+        return new CStrObject(_T("none"));
+
+    // the runtime image on the card: <runtime>.kzr, then <runtime>-*.kzr
+    CHAR szPattern [96];
+    WIN32_FIND_DATAA fd;
+    for (int nTry = 0; nTry < 2; nTry += 1)
+    {
+        sprintf(szPattern, nTry == 0 ? "CARD0:\\%s.kzr" : "CARD0:\\%s-*.kzr", pGame->m_szRuntime);
+        HANDLE hFind = FindFirstFileA(szPattern, &fd);
+        if (hFind != INVALID_HANDLE_VALUE)
+        {
+            FindClose(hFind);
+            CHAR* pchDot = strrchr(fd.cFileName, '.');
+            if (pchDot != NULL)
+                *pchDot = 0;
+            TCHAR sz [80];
+            _stprintf(sz, _T("%hs (on the card)"), fd.cFileName);
+            return new CStrObject(sz);
+        }
+    }
+    TCHAR sz [48];
+    _stprintf(sz, _T("%hs"), pGame->m_szRuntime);
     return new CStrObject(sz);
 }
 

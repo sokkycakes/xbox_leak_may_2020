@@ -878,7 +878,10 @@ function FillGamePage()
     }
     thePage.SetText("labGameTitle", theGameCollection.GetGameName(nGame));
     thePage.SetImage("imgGameIcon", theGameCollection.GetGameImage(nGame));
-    thePage.SetText("labRecentAchievementsText", "Title ID " + theGameCollection.GetGameTitleID(nGame));
+    thePage.SetText("labRecentAchievementsText", "Platform");
+    thePage.SetText("labRecentAchievementsNum", theGameCollection.GetGamePlatform(nGame));
+    thePage.SetText("labRuntimeText", "Runtime");
+    thePage.SetText("labRuntimeNum", theGameCollection.GetGameRuntime(nGame));
     thePage.SetText("labAchievementsNum", "" + theGameCollection.GetSavedGameCount(nGame));
     thePage.SetText("labGamerPointsNum", where);
     thePage.SetVisible("btnBrowseDownloads", bInstall);

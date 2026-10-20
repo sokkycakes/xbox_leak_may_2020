@@ -209,8 +209,12 @@ unchanged, and only the script and two small nodes are Frolick's:
   Memory, B climbs back out through its parents) and, for a disc or card
   game not on the hard disk, Install Game (`GameCollection.StartInstall`,
   the header shows the copy's progress, a notice when it is done and the
-  belt rescans).  The meta pane carries the title image, title ID, saved
-  game count and where the game is.
+  belt rescans).  The meta pane carries the title image, the platform
+  and runtime as a Kazeta cart names them (`GetGamePlatform`,
+  `GetGameRuntime`: an Xbox game is Xbox on xbcompat; a cart's `Runtime`
+  key names the platform, and its `.kzr` image on the card, found the way
+  Kazeta looks for it, the runtime), the saved game count and where the
+  game is.
 - Settings > Memory are the dashboard's Memory screen on the Blades pages:
   `nodes/Storage.cpp` hands script the engine's `CTitleArray` (the titles
   under a device's UDATA/TDATA with their saves, downloads and installed
