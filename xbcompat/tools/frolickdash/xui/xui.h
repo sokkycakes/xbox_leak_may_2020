@@ -241,6 +241,7 @@ private:
 // ---- helpers -------------------------------------------------------------
 
 float propF(Object& o, const char* k, float def);
+float propN(Object& o, const char* k, float def);
 unsigned int propU(Object& o, const char* k, unsigned int def);
 bool propB(Object& o, const char* k, bool def);
 Color propC(Object& o, const char* k, Color def);
