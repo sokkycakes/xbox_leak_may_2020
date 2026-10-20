@@ -741,6 +741,12 @@ void CXuiPanel::Reload()
 //                                   ring toward the camera (a cover sliding
 //                                   in or out follows, by its angle from
 //                                   the slot)
+//       focusSpread 1.9             the neighbour slots swung this many
+//                                   times their angle out from the focused
+//                                   one, around the ring, so the pulled-in
+//                                   cover does not hide them; the slots
+//                                   beyond close up to fit (1 = GameTap's
+//                                   spacing)
 //       count 9                     games on the belt
 //       function OnStep() { ... }   a step finished; GetSelected() tells which
 //   }
@@ -768,6 +774,7 @@ public:
     float m_radius;         // the regular covers' ring radius in the world
     float m_coverScale;     // every cover grown about its own centre
     float m_focusPull;      // the focused slot pulled this far toward the camera
+    float m_focusSpread;    // the neighbour slots' angle, as a multiple of GameTap's
     float m_stepDuration;   // 20 frames at 30 fps, speed 2.5
     float m_fadeDuration;   // the covers fade with Frolick's camera flight
     int m_count;
@@ -839,6 +846,7 @@ START_NODE_PROPS(CBelt, CNode)
     NODE_PROP(pt_number, CBelt, radius)
     NODE_PROP(pt_number, CBelt, coverScale)
     NODE_PROP(pt_number, CBelt, focusPull)
+    NODE_PROP(pt_number, CBelt, focusSpread)
     NODE_PROP(pt_number, CBelt, stepDuration)
     NODE_PROP(pt_number, CBelt, fadeDuration)
     NODE_PROP(pt_integer, CBelt, count)
@@ -855,7 +863,7 @@ END_NODE_FUN()
 
 CBelt::CBelt() :
     m_url(NULL), m_card(NULL), m_focus(NULL), m_skin(NULL), m_font(NULL), m_icon(NULL), m_icons(NULL), m_start(0),
-    m_centre(0.0f, 0.0f, 0.0f), m_radius(1.0f), m_coverScale(1.0f), m_focusPull(0.0f),
+    m_centre(0.0f, 0.0f, 0.0f), m_radius(1.0f), m_coverScale(1.0f), m_focusPull(0.0f), m_focusSpread(1.0f),
     m_stepDuration(20.0f / 30.0f / 2.5f), m_fadeDuration(0.75f), m_count(0),
     m_circleX(0.0f), m_circleZ(0.0f), m_circleR(1.0f), m_coverY(0.0f), m_slotAngle(0.5f),
     m_verts(NULL), m_indices(NULL), m_poses(NULL), m_bDirty(true),
@@ -1142,14 +1150,34 @@ void CBelt::CoverGrid(int node, float frame, D3DXVECTOR3 grid[6][7])
         c += D3DXVECTOR3(v[i].x, v[i].y, v[i].z);
     c /= 42.0f;
 
+    // the cover's angle around the ring from the focused slot (GameTap's
+    // -x side), signed
+    D3DXVECTOR3 qc;
+    D3DXVec3TransformCoord(&qc, &c, &m);
+    float sang = (float)atan2(qc.z - m_circleZ, -(qc.x - m_circleX));
+    float ang = (float)fabs(sang);
+
+    // the spread: the slots within a neighbour's angle of the focus swung
+    // out by focusSpread, the rest closed up so the far side of the ring
+    // stays put; the cover turns with its slot (a rotation about the axis),
+    // so it keeps facing the centre
+    float sinD = 0.0f, cosD = 1.0f;
+    if (m_focusSpread != 1.0f)
+    {
+        float t = m_slotAngle * m_focusSpread;
+        if (t > 3.0f) t = 3.0f;
+        float a = ang <= m_slotAngle ? ang * (t / m_slotAngle)
+                                     : t + (ang - m_slotAngle) * ((D3DX_PI - t) / (D3DX_PI - m_slotAngle));
+        float d = sang < 0.0f ? -(a - ang) : a - ang;
+        sinD = (float)sin(d);
+        cosD = (float)cos(d);
+    }
+
     // the pull off the ring toward the camera: full in the focused slot,
     // fading to nothing at the neighbour slots
     D3DXVECTOR3 pull(0.0f, 0.0f, 0.0f);
     if (m_focusPull != 0.0f)
     {
-        D3DXVECTOR3 qc;
-        D3DXVec3TransformCoord(&qc, &c, &m);
-        float ang = (float)fabs(atan2(qc.z - m_circleZ, -(qc.x - m_circleX)));
         float w = 1.0f - ang / m_slotAngle;
         if (w > 0.0f)
         {
@@ -1166,6 +1194,14 @@ void CBelt::CoverGrid(int node, float frame, D3DXVECTOR3 grid[6][7])
             const BELTVERTEX& l = v[col * 6 + row];
             D3DXVECTOR3 p = c + (D3DXVECTOR3(l.x, l.y, l.z) - c) * m_coverScale, q;
             D3DXVec3TransformCoord(&q, &p, &m);
+            if (sinD != 0.0f)
+            {
+                // swing about the ring's axis, in GameTap's frame (u toward
+                // the focus, w to its right)
+                float u = -(q.x - m_circleX), w = q.z - m_circleZ;
+                q.x = m_circleX - (u * cosD - w * sinD);
+                q.z = m_circleZ + (u * sinD + w * cosD);
+            }
             grid[5 - row][col] = D3DXVECTOR3(
                 m_centre.x - (q.z - m_circleZ) * scale,
                 m_centre.y + (q.y - m_coverY) * scale,
