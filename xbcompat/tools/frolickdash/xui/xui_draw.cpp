@@ -736,8 +736,10 @@ Texture Renderer::lineTex(Font* font, const char* line, float px, int* w, int* h
 // image (Abutton_Normal.png, A-Button.png ...).  The skins place the
 // letter's box for the Convection font; with any other font the letter
 // lands off the circle's centre, so it is centred on the circle instead:
-// returns the circle's centre in the text's own coordinates.
-static bool glyphTarget(Node* n, float* tx, float* ty)
+// returns the circle's centre and diameter in the text's own coordinates.
+// The skins also size each letter differently (B at 1.1, A at 0.9 ...), so
+// every glyph is drawn at the same size for its circle, on whole pixels.
+static bool glyphTarget(Node* n, float* tx, float* ty, float* dia)
 {
     Node* p = n->parent;
     if (!p) return false;
@@ -755,6 +757,8 @@ static bool glyphTarget(Node* n, float* tx, float* ty)
         if (ts.x == 0 || ts.y == 0) return false;
         *tx = (px - tp.x - tv.x) / ts.x + tv.x;
         *ty = (py - tp.y - tv.y) / ts.y + tv.y;
+        // the button art's disc fills the middle 3/4 of the image
+        *dia = c->width() * fabs(sc.x) * 0.75f / fabs(ts.x);
         return true;
     }
     return false;
@@ -775,6 +779,27 @@ void Renderer::text(Node* n, const Affine& m, float alpha, Blend blend)
     // Draw glyphs at the on-screen scale so text stays sharp.
     float scale = (float)sqrt(fabs(m.a * m.d - m.b * m.c));
     if (scale <= 0) return;
+    {
+        int glen, gcp = utf8decode(txt, &glen);
+        float gx, gy, dia; int x0, y0, x1, y1;
+        if (glen > 0 && !txt[glen] && glyphTarget(n, &gx, &gy, &dia) &&
+            stbtt_GetCodepointBox(&font->info, gcp, &x0, &y0, &x1, &y1) && y1 > y0) {
+            // the letter's ink half the circle's height, its ink centre on
+            // the circle's centre, the line texture on whole pixels
+            float cx, cy; apply(m, gx, gy, &cx, &cy);
+            float ink = (float)floor(dia * scale * 0.5f + 0.5f);
+            float gfs = ink / (y1 - y0);
+            float gpx = gfs / stbtt_ScaleForMappingEmToPixels(&font->info, 1);
+            int iw, ih, adv;
+            Texture tex = lineTex(font, txt, gpx, &iw, &ih, &adv);
+            float lfs = stbtt_ScaleForMappingEmToPixels(&font->info, gpx);
+            float qx = (float)floor(cx - (x0 + x1) / 2.0f * lfs - 1 + 0.5f);
+            float qy = (float)floor(cy + (y0 + y1) / 2.0f * lfs - (float)ceil(font->ascent * lfs) + 0.5f);
+            Color col = propC(n->props, "TextColor", defaultTextColor);
+            quad(tex, blend, aff(1, 0, 0, 1, qx, qy), 0, 0, (float)iw, (float)ih, 0, 0, 1, 1, col, alpha);
+            return;
+        }
+    }
     // PointSize is in points: the XUI engine sizes the em at 96 dpi (the
     // GFWL engine's legend and header glyphs and baselines, and sokky's
     // real-console capture of the legend, all measure 4/3 PointSize per em).
@@ -831,14 +856,6 @@ void Renderer::text(Node* n, const Affine& m, float alpha, Blend blend)
         // ascent below its top (the button glyphs' letters sat a pixel
         // right and low in their circles otherwise)
         float ox = x - 1 / scale, oy = y - ((float)ceil(font->ascent * fs) - font->ascent * fs) / scale;
-        int gcp, glen; gcp = utf8decode(lines[i], &glen);
-        float gx, gy; int x0, y0, x1, y1;
-        if (nl == 1 && glen > 0 && !lines[i][glen] && glyphTarget(n, &gx, &gy) && stbtt_GetCodepointBox(&font->info, gcp, &x0, &y0, &x1, &y1)) {
-            // pen and baseline that put the letter's ink centre on the circle's
-            float baseline = gy + (y0 + y1) / 2.0f * fs / scale;
-            ox = gx - (x0 + x1) / 2.0f * fs / scale - 1 / scale;
-            oy = baseline - (float)ceil(font->ascent * fs) / scale;
-        }
         Affine lm = mul(mul(m, aff(1, 0, 0, 1, ox, oy)), inv);
         if ((style & styleShadow) && (shadow >> 24) != 0) {
             Affine sm = mul(mul(m, aff(1, 0, 0, 1, ox + 1.5f, oy + 1.5f)), inv);

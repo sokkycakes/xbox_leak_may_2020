@@ -273,7 +273,21 @@ void rest(xui::Node* v) {
 
 void rest_visual(xui::Scene* s, const char* id) {
     xui::Node* n = s->find(id);
-    if (n && n->visual) rest(n->visual);
+    if (!n || !n->visual) return;
+    rest(n->visual);
+    // B and Y's lit frame adds coloured and dark glow rings (offset below
+    // the disc, so their circles look bigger and lower than A's) and a
+    // brighter shine; draw all three buttons alike, as A's plain visual
+    for (int i = 0; i < n->visual->children.n; i++) {
+        xui::Node* c = n->visual->children[i];
+        const char* cid = xui::propS(c->props, "Id");
+        size_t l = strlen(cid);
+        float op = -1;
+        if (l >= 3 && strcmp(cid + l - 3, "glo") == 0) op = 0;
+        else if (strcmp(cid, "shine") == 0) op = 0.4f;
+        if (op < 0) continue;
+        xui::Value& v = c->props.set("Opacity"); v.free(); v.type = xui::TFloat; v.f = op;
+    }
 }
 
 void set_image(xui::Scene* s, const char* id, const char* path) {
