@@ -8,7 +8,8 @@ INC = ";".join(B + "\\" + d for d in [r"private\ui\xapp", r"public\xdk\inc", r"p
 src = sys.argv[1]; extra = sys.argv[2:]
 cwd = os.environ["CC_DIR"]
 out = os.environ.get("CC_OUT", "Z:" + os.environ["WORK"].replace("/", "\\") + "\\obj\\")
-env = dict(os.environ, WINEDEBUG="-all", INCLUDE=os.environ.get("CC_INC", INC))
+# CC_INC_PRE: directories searched before the engine's (a patched header)
+env = dict(os.environ, WINEDEBUG="-all", INCLUDE=os.environ.get("CC_INC", os.environ.get("CC_INC_PRE", "") + INC))
 defs = "-D_X86_=1 -Di386=1 -DSTD_CALL -DCONDITION_HANDLING=1 -DNT_UP=1 -DNT_INST=0 -DWIN32=100 -D_NT1X_=100 -DWINNT=1 " \
        "-D_WIN32_WINNT=0x0400 -DWINVER=0x0400 -D_WIN32_IE=0x0400 -DDBG=0 -DDEVL=1 -DFPO=1 -D_XBOX -DXBOX=1 -DNDEBUG -D_MT " \
        "-DUNICODE -D_UNICODE".split()

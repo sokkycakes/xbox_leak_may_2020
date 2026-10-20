@@ -31,6 +31,8 @@ struct GAMEINFO
     CHAR m_szCart[64];          // the cart's .kzi or .kzp file on the card
     CHAR m_szRuntime[32];       // the cart's Kazeta runtime
     CHAR m_szId[64];            // the cart's Kazeta save Id
+    CHAR m_szPlatform[32];      // the cart's Platform key, when its .kzi names one
+    CHAR m_szPublisher[48];     // the cart's Publisher (or Developer) key, when its .kzi names one
     WCHAR m_szName[41];
     DWORD m_dwTitleID;
     DWORD m_dwTimeDate;         // XBE build time (seconds since 1970)
@@ -68,10 +70,16 @@ public:
     CStrObject* GetGameName(int nGame);
     CStrObject* GetGameFolder(int nGame);
     CStrObject* GetGameTitleID(int nGame);
+    CStrObject* GetGamePlatform(int nGame);
+    CStrObject* GetGamePublisher(int nGame);
+    int GetRecentCount();
+    int GetRecentGame(int n);
+    CStrObject* GetGameRuntime(int nGame);
     CStrObject* GetGameInfo(int nGame);
     CStrObject* GetSavedGames(int nGame);
     int GetSavedGameCount(int nGame);
     int SelectGameImage(int nGame);
+    CStrObject* GetGameImage(int nGame);
     void LaunchGame(int nGame);
 
     int IsInstalled(int nGame);
@@ -103,10 +111,16 @@ START_NODE_FUN(CGameCollection, CNode)
     NODE_FUN_SI(GetGameName)
     NODE_FUN_SI(GetGameFolder)
     NODE_FUN_SI(GetGameTitleID)
+    NODE_FUN_SI(GetGamePlatform)
+    NODE_FUN_SI(GetGamePublisher)
+    NODE_FUN_IV(GetRecentCount)
+    NODE_FUN_II(GetRecentGame)
+    NODE_FUN_SI(GetGameRuntime)
     NODE_FUN_SI(GetGameInfo)
     NODE_FUN_SI(GetSavedGames)
     NODE_FUN_II(GetSavedGameCount)
     NODE_FUN_II(SelectGameImage)
+    NODE_FUN_SI(GetGameImage)
     NODE_FUN_VI(LaunchGame)
     NODE_FUN_II(IsInstalled)
     NODE_FUN_II(StartInstall)
@@ -262,6 +276,12 @@ static void ReadCart(const CHAR* szKzi, GAMEINFO* pGame)
                 lstrcpynA(pGame->m_szId, pchValue, sizeof (pGame->m_szId));
             else if (_stricmp(pchLine, "Runtime") == 0)
                 lstrcpynA(pGame->m_szRuntime, pchValue, sizeof (pGame->m_szRuntime));
+            else if (_stricmp(pchLine, "Platform") == 0)
+                lstrcpynA(pGame->m_szPlatform, pchValue, sizeof (pGame->m_szPlatform));
+            else if (_stricmp(pchLine, "Publisher") == 0)
+                lstrcpynA(pGame->m_szPublisher, pchValue, sizeof (pGame->m_szPublisher));
+            else if (_stricmp(pchLine, "Developer") == 0 && pGame->m_szPublisher[0] == 0)
+                lstrcpynA(pGame->m_szPublisher, pchValue, sizeof (pGame->m_szPublisher));
             else if (_stricmp(pchLine, "Exec") == 0)
                 lstrcpynA(szExec, pchValue, sizeof (szExec));
         }
@@ -475,29 +495,182 @@ CStrObject* CGameCollection::GetGameTitleID(int nGame)
     return new CStrObject(sz);
 }
 
+// The platform a game is for and the runtime that runs it, the way a
+// Kazeta cart names them (the .kzi's Runtime key: a platform, such as
+// windows, xbox or megadrive, or one with a version, windows-proton-ge-9),
+// for the game's page.  An Xbox game, wherever it sits, is Xbox on
+// xbcompat.  A cart's runtime image is looked for on the card the way
+// Kazeta resolves it (<runtime>.kzr, <runtime>-*.kzr), and that file's
+// name is the runtime shown; a cart whose runtime lives on the console
+// only names it.
+static const struct { const CHAR* szRuntime; const TCHAR* szPlatform; } c_rgPlatforms [] =
+{
+    { "xbox", _T("Xbox") }, { "windows", _T("Windows") }, { "linux", _T("Linux") }, { "none", _T("Linux") },
+    { "nes", _T("NES") }, { "snes", _T("Super NES") }, { "n64", _T("Nintendo 64") }, { "gb", _T("Game Boy") },
+    { "gbc", _T("Game Boy Color") }, { "gba", _T("Game Boy Advance") }, { "nds", _T("Nintendo DS") },
+    { "gamecube", _T("GameCube") }, { "wii", _T("Wii") }, { "megadrive", _T("Sega Genesis") },
+    { "genesis", _T("Sega Genesis") }, { "mastersystem", _T("Sega Master System") }, { "gamegear", _T("Game Gear") },
+    { "saturn", _T("Sega Saturn") }, { "dreamcast", _T("Dreamcast") }, { "psx", _T("PlayStation") },
+    { "ps1", _T("PlayStation") }, { "ps2", _T("PlayStation 2") }, { "psp", _T("PlayStation Portable") },
+    { "arcade", _T("Arcade") }, { "mame", _T("Arcade") }, { "dos", _T("DOS") }, { "scummvm", _T("ScummVM") },
+};
+
+// The platform part of a Runtime value: up to its first '-' (windows-proton-ge-9 -> windows).
+static void RuntimePlatform(const CHAR* szRuntime, CHAR* szPlat, int cch)
+{
+    int i = 0;
+    for (; i < cch - 1 && szRuntime[i] != 0 && szRuntime[i] != '-'; i += 1)
+        szPlat[i] = szRuntime[i];
+    szPlat[i] = 0;
+}
+
+CStrObject* CGameCollection::GetGamePlatform(int nGame)
+{
+    if (nGame < 0 || nGame >= c_nGameCount)
+        return new CStrObject;
+    const GAMEINFO* pGame = &c_rgGames[nGame];
+    if (pGame->m_nKind != KIND_CARD || pGame->m_bXbox)
+        return new CStrObject(_T("Xbox"));
+    if (pGame->m_szPlatform[0] != 0)
+    {
+        // a Platform key in the .kzi says it outright
+        TCHAR szOwn [32];
+        _stprintf(szOwn, _T("%hs"), pGame->m_szPlatform);
+        return new CStrObject(szOwn);
+    }
+    if (EndsWith(pGame->m_szCart, ".kzp"))
+        return new CStrObject(_T("Packaged cart"));
+    CHAR szPlat [32];
+    RuntimePlatform(pGame->m_szRuntime, szPlat, sizeof (szPlat));
+    if (szPlat[0] == 0)
+        return new CStrObject(_T("Linux"));      // Kazeta runs a cart with no Runtime on the none runtime
+    for (int i = 0; i < countof(c_rgPlatforms); i += 1)
+    {
+        if (_stricmp(szPlat, c_rgPlatforms[i].szRuntime) == 0)
+            return new CStrObject(c_rgPlatforms[i].szPlatform);
+    }
+    // an unlisted runtime: its name, capitalised
+    TCHAR sz [32];
+    _stprintf(sz, _T("%hs"), szPlat);
+    if (sz[0] >= 'a' && sz[0] <= 'z')
+        sz[0] = sz[0] - 'a' + 'A';
+    return new CStrObject(sz);
+}
+
+CStrObject* CGameCollection::GetGameRuntime(int nGame)
+{
+    if (nGame < 0 || nGame >= c_nGameCount)
+        return new CStrObject;
+    const GAMEINFO* pGame = &c_rgGames[nGame];
+    if (pGame->m_nKind != KIND_CARD || pGame->m_bXbox)
+        return new CStrObject(_T("xbcompat"));
+    if (EndsWith(pGame->m_szCart, ".kzp"))
+        return new CStrObject(_T("inside the cart"));
+    if (pGame->m_szRuntime[0] == 0)
+        return new CStrObject(_T("none"));
+
+    // the runtime image on the card: <runtime>.kzr, then <runtime>-*.kzr
+    CHAR szPattern [96];
+    WIN32_FIND_DATAA fd;
+    for (int nTry = 0; nTry < 2; nTry += 1)
+    {
+        sprintf(szPattern, nTry == 0 ? "CARD0:\\%s.kzr" : "CARD0:\\%s-*.kzr", pGame->m_szRuntime);
+        HANDLE hFind = FindFirstFileA(szPattern, &fd);
+        if (hFind != INVALID_HANDLE_VALUE)
+        {
+            FindClose(hFind);
+            CHAR* pchDot = strrchr(fd.cFileName, '.');
+            if (pchDot != NULL)
+                *pchDot = 0;
+            TCHAR sz [80];
+            _stprintf(sz, _T("%hs (on the card)"), fd.cFileName);
+            return new CStrObject(sz);
+        }
+    }
+    TCHAR sz [48];
+    _stprintf(sz, _T("%hs"), pGame->m_szRuntime);
+    return new CStrObject(sz);
+}
+
 // The XBE's path, for reading it again.
 static void GetXbePath(int nGame, CHAR* szPath)
 {
     sprintf(szPath, "%s\\%s", c_rgGames[nGame].m_szDir, c_rgGames[nGame].m_szXbe);
 }
 
+// The publisher behind a title ID: its top two bytes are two ASCII letters
+// the publisher was assigned.  The names are the Title ID table of the
+// XboxDev wiki's Xbe page (https://xboxdevwiki.net/Xbe, read 2026-10-20);
+// a code not in it comes back as its two letters.
+static const struct { CHAR sz[3]; const TCHAR* szName; } c_rgPublishers [] =
+{
+    { "AC", _T("Acclaim Entertainment") }, { "AH", _T("ARUSH Entertainment") }, { "AP", _T("Aquaplus") },
+    { "AQ", _T("Aqua System") }, { "AS", _T("ASK") }, { "AT", _T("Atlus") }, { "AV", _T("Activision") },
+    { "AY", _T("Aspyr Media") }, { "BA", _T("Bandai") }, { "BL", _T("Black Box") },
+    { "BM", _T("BAM! Entertainment") }, { "BR", _T("Broccoli Co.") }, { "BS", _T("Bethesda Softworks") },
+    { "BU", _T("Bunkasha Co.") }, { "BV", _T("Buena Vista Games") }, { "BW", _T("BBC Multimedia") },
+    { "BZ", _T("Blizzard") }, { "CC", _T("Capcom") }, { "CK", _T("Kemco Corporation") },
+    { "CM", _T("Codemasters") }, { "CT", _T("CTO S.p.A.") }, { "CV", _T("Crave Entertainment") },
+    { "DC", _T("DreamCatcher Interactive") }, { "DX", _T("Davilex") }, { "EA", _T("Electronic Arts") },
+    { "EC", _T("Encore") }, { "EL", _T("Enlight Software") }, { "EM", _T("Empire Interactive") },
+    { "ES", _T("Eidos Interactive") }, { "FI", _T("Fox Interactive") }, { "FS", _T("From Software") },
+    { "GE", _T("Genki Co.") }, { "GV", _T("Groove Games") }, { "HE", _T("Tru Blu") }, { "HP", _T("Hip Games") },
+    { "HU", _T("Hudson Soft") }, { "HW", _T("Highwaystar") }, { "IA", _T("Mad Catz Interactive") },
+    { "IF", _T("Idea Factory") }, { "IG", _T("Infogrames") }, { "IL", _T("Interlex Corporation") },
+    { "IM", _T("Imagine Media") }, { "IO", _T("Ignition Entertainment") }, { "IP", _T("Interplay Entertainment") },
+    { "IX", _T("InXile Entertainment") }, { "JA", _T("Jaleco") }, { "JW", _T("JoWooD") }, { "KB", _T("Kemco") },
+    { "KI", _T("Kids Station Inc.") }, { "KK", _T("KiKi") }, { "KN", _T("Konami") }, { "KO", _T("KOEI") },
+    { "KT", _T("Konami Tokyo") }, { "KU", _T("Kobi / GAE") }, { "LA", _T("LucasArts") },
+    { "LS", _T("Black Bean Games") }, { "MD", _T("Metro3D") }, { "ME", _T("Medix") }, { "MI", _T("Microids") },
+    { "MJ", _T("Majesco Entertainment") }, { "MM", _T("Myelin Media") }, { "MP", _T("MediaQuest") },
+    { "MS", _T("Microsoft Game Studios") }, { "MW", _T("Midway Games") }, { "MX", _T("Empire Interactive") },
+    { "NK", _T("NewKidCo") }, { "NL", _T("NovaLogic") }, { "NM", _T("Namco") }, { "OX", _T("Oxygen Interactive") },
+    { "PC", _T("Playlogic Entertainment") }, { "PL", _T("Phantagram Co., Ltd.") }, { "RA", _T("Rage") },
+    { "SA", _T("Sammy") }, { "SC", _T("SCi Games") }, { "SE", _T("SEGA") }, { "SN", _T("SNK") },
+    { "SS", _T("Simon & Schuster") }, { "SU", _T("Success Corporation") }, { "SW", _T("Swing! Deutschland") },
+    { "TA", _T("Takara") }, { "TC", _T("Tecmo") }, { "TD", _T("The 3DO Company") }, { "TK", _T("Takuyo") },
+    { "TM", _T("TDK Mediactive") }, { "TQ", _T("THQ") }, { "TS", _T("Titus Interactive") },
+    { "TT", _T("Take-Two Interactive Software") }, { "US", _T("Ubisoft") }, { "VC", _T("Victor Interactive Software") },
+    { "VN", _T("Vivendi Universal") }, { "VU", _T("Vivendi Universal Games") }, { "VV", _T("Vivendi Universal Games") },
+    { "WE", _T("Wanadoo Edition") }, { "WR", _T("Warner Bros. Interactive Entertainment") },
+    { "XM", _T("Evolved Games") }, { "XP", _T("XPEC Entertainment") }, { "XR", _T("Panorama") },
+    { "YB", _T("YBM Sisa") }, { "ZD", _T("Zushi Games") },
+};
+
 static const TCHAR* GetPublisher(DWORD dwTitleID)
 {
-    static const struct { CHAR sz[3]; const TCHAR* szName; } rgPub [] =
-    {
-        { "MS", _T("Microsoft") }, { "EA", _T("Electronic Arts") }, { "AC", _T("Acclaim") },
-        { "AV", _T("Activision") }, { "CM", _T("Capcom") }, { "KN", _T("Konami") },
-        { "NM", _T("Namco") }, { "SE", _T("Sega") }, { "TC", _T("Tecmo") },
-        { "TQ", _T("THQ") }, { "UB", _T("Ubisoft") }, { "EM", _T("Eidos") },
-        { "IF", _T("Infogrames") }, { "MW", _T("Midway") }, { "SQ", _T("Square Enix") },
-    };
     CHAR sz[3] = { (CHAR)(dwTitleID >> 24), (CHAR)(dwTitleID >> 16), 0 };
-    for (int i = 0; i < countof(rgPub); i += 1)
+    for (int i = 0; i < countof(c_rgPublishers); i += 1)
     {
-        if (strcmp(sz, rgPub[i].sz) == 0)
-            return rgPub[i].szName;
+        if (strcmp(sz, c_rgPublishers[i].sz) == 0)
+            return c_rgPublishers[i].szName;
     }
     return NULL;
+}
+
+// The publisher as the library tile shows it: an Xbox game's from its
+// title ID (the two letters themselves when the table has no name for
+// them), a cart's from its .kzi Publisher (or Developer) key, else nothing.
+CStrObject* CGameCollection::GetGamePublisher(int nGame)
+{
+    if (nGame < 0 || nGame >= c_nGameCount)
+        return new CStrObject;
+    const GAMEINFO* pGame = &c_rgGames[nGame];
+    if (pGame->m_szPublisher[0] != 0)
+    {
+        TCHAR szOwn [48];
+        _stprintf(szOwn, _T("%hs"), pGame->m_szPublisher);
+        return new CStrObject(szOwn);
+    }
+    if (pGame->m_nKind != KIND_CARD || pGame->m_bXbox)
+    {
+        const TCHAR* szPub = GetPublisher(pGame->m_dwTitleID);
+        if (szPub != NULL)
+            return new CStrObject(szPub);
+        TCHAR szCode [3] = { (TCHAR)(BYTE)(pGame->m_dwTitleID >> 24), (TCHAR)(BYTE)(pGame->m_dwTitleID >> 16), 0 };
+        return new CStrObject(szCode);
+    }
+    return new CStrObject;
 }
 
 // Days since 1970-01-01 to a calendar date.
@@ -736,6 +909,22 @@ bool CacheXbeTitleImage(const CHAR* szXbe, CHAR* szCache /*[MAX_PATH]*/)
     return ReadXbeTitle(szXbe, &game) && CacheTitleImage(szXbe, &game, szCache);
 }
 
+// The game's title image as a file (T:\GameImages, cached out of the XBE),
+// for Frolick's belt covers; "" when the XBE has none.
+CStrObject* CGameCollection::GetGameImage(int nGame)
+{
+    if (nGame < 0 || nGame >= c_nGameCount || c_rgGames[nGame].m_dwImageSize == 0)
+        return new CStrObject;
+    CHAR szPath [MAX_PATH];
+    CHAR szCache [MAX_PATH];
+    GetXbePath(nGame, szPath);
+    if (!CacheTitleImage(szPath, &c_rgGames[nGame], szCache))
+        return new CStrObject;
+    TCHAR sz [MAX_PATH];
+    _stprintf(sz, _T("%hs"), szCache);
+    return new CStrObject(sz);
+}
+
 // Points the "SelectedIcon" material at the game's title image, or at the
 // Xbox logo when it has none.  Returns whether the game has its own image.
 int CGameCollection::SelectGameImage(int nGame)
@@ -757,6 +946,113 @@ int CGameCollection::SelectGameImage(int nGame)
     return 1;
 }
 
+// ---- recently played ------------------------------------------------------
+// The library pad's X: the games launched most recently, newest first.
+// Each launch writes its game's key to the front of T:\recent.txt (one key
+// a line, an XBE's title ID or a cart's Id, 20 at most); the list is the
+// scanned games those keys name, in that order.
+
+#define RECENT_MAX 20
+static const CHAR c_szRecentFile[] = "T:\\recent.txt";
+
+static void GameKey(const GAMEINFO* pGame, CHAR* sz, int cch)
+{
+    if (pGame->m_bXbox || pGame->m_szId[0] == 0)
+        _snprintf(sz, cch, "%08X", pGame->m_dwTitleID);
+    else
+        _snprintf(sz, cch, "%s", pGame->m_szId);
+    sz[cch - 1] = 0;
+}
+
+static int ReadRecent(CHAR rgsz[RECENT_MAX][64])
+{
+    int n = 0;
+    HANDLE hFile = CreateFileA(c_szRecentFile, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (hFile == INVALID_HANDLE_VALUE)
+        return 0;
+    CHAR szBuf [RECENT_MAX * 64 + 1];
+    DWORD cb = 0;
+    ReadFile(hFile, szBuf, sizeof (szBuf) - 1, &cb, NULL);
+    CloseHandle(hFile);
+    szBuf[cb] = 0;
+    CHAR* pch = szBuf;
+    while (*pch != 0 && n < RECENT_MAX)
+    {
+        CHAR* pchEnd = pch;
+        while (*pchEnd != 0 && *pchEnd != '\n' && *pchEnd != '\r')
+            pchEnd += 1;
+        int cch = pchEnd - pch;
+        if (cch > 0 && cch < 64)
+        {
+            memcpy(rgsz[n], pch, cch);
+            rgsz[n][cch] = 0;
+            n += 1;
+        }
+        while (*pchEnd == '\n' || *pchEnd == '\r')
+            pchEnd += 1;
+        pch = pchEnd;
+    }
+    return n;
+}
+
+static void RecordLaunch(const GAMEINFO* pGame)
+{
+    CHAR rgsz [RECENT_MAX][64];
+    CHAR szKey [64];
+    GameKey(pGame, szKey, sizeof (szKey));
+    int n = ReadRecent(rgsz);
+    HANDLE hFile = CreateFileA(c_szRecentFile, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+    if (hFile == INVALID_HANDLE_VALUE)
+        return;
+    DWORD cb;
+    WriteFile(hFile, szKey, strlen(szKey), &cb, NULL);
+    WriteFile(hFile, "\r\n", 2, &cb, NULL);
+    int kept = 1;
+    for (int i = 0; i < n && kept < RECENT_MAX; i += 1)
+    {
+        if (strcmp(rgsz[i], szKey) == 0)
+            continue;
+        WriteFile(hFile, rgsz[i], strlen(rgsz[i]), &cb, NULL);
+        WriteFile(hFile, "\r\n", 2, &cb, NULL);
+        kept += 1;
+    }
+    CloseHandle(hFile);
+}
+
+static int c_rgRecent [RECENT_MAX];
+static int c_nRecent;
+
+// The recently played games among those the last Scan found, newest first.
+int CGameCollection::GetRecentCount()
+{
+    CHAR rgsz [RECENT_MAX][64];
+    CHAR szKey [64];
+    int n = ReadRecent(rgsz);
+    c_nRecent = 0;
+    for (int i = 0; i < n; i += 1)
+    {
+        for (int g = 0; g < c_nGameCount; g += 1)
+        {
+            if (c_rgGames[g].m_szName[0] == 0)
+                continue;
+            GameKey(&c_rgGames[g], szKey, sizeof (szKey));
+            if (strcmp(szKey, rgsz[i]) == 0)
+            {
+                c_rgRecent[c_nRecent++] = g;
+                break;
+            }
+        }
+    }
+    return c_nRecent;
+}
+
+int CGameCollection::GetRecentGame(int n)
+{
+    if (n < 0 || n >= c_nRecent)
+        return -1;
+    return c_rgRecent[n];
+}
+
 void CGameCollection::LaunchGame(int nGame)
 {
     if (nGame < 0 || nGame >= c_nGameCount || !c_rgGames[nGame].m_bXbox)
@@ -765,6 +1061,7 @@ void CGameCollection::LaunchGame(int nGame)
     // D: is the game's directory (XLaunchNewImage keeps D:'s mapping across
     // the reboot): CDROM0:, CARD0: and E: as device paths.
     const GAMEINFO* pGame = &c_rgGames[nGame];
+    RecordLaunch(pGame);
     CHAR szTarget [MAX_PATH];
     if (pGame->m_nKind == KIND_DISC)
         strcpy(szTarget, "\\Device\\CdRom0");

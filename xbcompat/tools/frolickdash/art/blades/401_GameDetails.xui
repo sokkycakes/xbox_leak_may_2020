@@ -1,0 +1,287 @@
+<XuiCanvas>
+<Properties>
+ <Width>1120</Width>
+ <Height>770</Height>
+</Properties>
+<XuiScene>
+<Properties>
+ <Id>SceneMain</Id>
+ <Width>1120</Width>
+ <Height>770</Height>
+ <ClassOverride>CGameDetailsScene</ClassOverride>
+ <DefaultFocus>btnViewAchievements</DefaultFocus>
+ <TransFrom>FadeOut</TransFrom>
+ <TransTo>FadeIn</TransTo>
+ <TransBackFrom>FadeOut</TransBackFrom>
+ <TransBackTo>FadeIn</TransBackTo>
+</Properties>
+<XuiControl>
+<Properties>
+ <Id>img_frame1</Id>
+ <Width>70</Width>
+ <Height>71</Height>
+ <Position>603,322,0</Position>
+ <Visual>btn_Frame</Visual>
+</Properties>
+</XuiControl>
+<XuiControl>
+<Properties>
+ <Id>img_frame2</Id>
+ <Width>70</Width>
+ <Height>71</Height>
+ <Position>704,322,0</Position>
+ <Visual>btn_Frame</Visual>
+</Properties>
+</XuiControl>
+<XuiControl>
+<Properties>
+ <Id>img_frame3</Id>
+ <Width>70</Width>
+ <Height>71</Height>
+ <Position>805.111,322,0</Position>
+ <Visual>btn_Frame</Visual>
+</Properties>
+</XuiControl>
+<XuiControl>
+<Properties>
+ <Id>img_frame4</Id>
+ <Width>70</Width>
+ <Height>71</Height>
+ <Position>906.111,322,0</Position>
+ <Visual>btn_Frame</Visual>
+</Properties>
+</XuiControl>
+<XuiNavButton>
+<Properties>
+ <Id>btnViewAchievements</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>144,153,0</Position>
+ <NavDown>btnManageGameFiles</NavDown>
+ <Text>Achievements</Text>
+</Properties>
+</XuiNavButton>
+<XuiNavButton>
+<Properties>
+ <Id>btnManageGameFiles</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>144,198,0</Position>
+ <NavUp>btnViewAchievements</NavUp>
+ <NavDown>btnBrowseDownloads</NavDown>
+ <Text>Stored Game Items</Text>
+ <PressPath>DeviceSelector.xur</PressPath>
+</Properties>
+</XuiNavButton>
+<XuiNavButton>
+<Properties>
+ <Id>btnBrowseDownloads</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>144,243,0</Position>
+ <NavUp>btnManageGameFiles</NavUp>
+ <Text>Downloads</Text>
+</Properties>
+</XuiNavButton>
+<XuiLabel>
+<Properties>
+ <Id>labHeader</Id>
+ <Width>855</Width>
+ <Height>47</Height>
+ <Position>156,96,0</Position>
+ <Visual>Label_Head</Visual>
+ <Text>Game Summary</Text>
+</Properties>
+</XuiLabel>
+<XuiLabel>
+<Properties>
+ <Id>graphic_PanelBackgroundTop</Id>
+ <Width>420</Width>
+ <Height>92</Height>
+ <Position>579,151,0</Position>
+ <Visual>Metapane</Visual>
+</Properties>
+</XuiLabel>
+<XuiLabel>
+<Properties>
+ <Id>graphic_PanelBackground</Id>
+ <Width>420</Width>
+ <Height>359</Height>
+ <Position>579,244,0</Position>
+ <Visual>Metapane</Visual>
+</Properties>
+</XuiLabel>
+<XuiLabel>
+<Properties>
+ <Id>labGameTitle</Id>
+ <Width>313</Width>
+ <Height>78</Height>
+ <Position>666,157,0</Position>
+ <Visual>Label_MetaHead_VH</Visual>
+ <Text>&lt;game title&gt;</Text>
+</Properties>
+</XuiLabel>
+<XuiImage>
+<Properties>
+ <Id>imgGameIcon</Id>
+ <Width>64</Width>
+ <Height>64</Height>
+ <Position>592,163,0</Position>
+</Properties>
+</XuiImage>
+<XuiLabel>
+<Properties>
+ <Id>labRecentAchievementsText</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>581,286,0</Position>
+ <Text>Recent Achievements</Text>
+</Properties>
+</XuiLabel>
+<XuiImage>
+<Properties>
+ <Id>imgAchievements1</Id>
+ <Width>64</Width>
+ <Height>64</Height>
+ <Position>606,325,0</Position>
+</Properties>
+</XuiImage>
+<XuiImage>
+<Properties>
+ <Id>imgAchievements2</Id>
+ <Width>64</Width>
+ <Height>64</Height>
+ <Position>707,325,0</Position>
+</Properties>
+</XuiImage>
+<XuiImage>
+<Properties>
+ <Id>imgAchievements3</Id>
+ <Width>64</Width>
+ <Height>64</Height>
+ <Position>808,325,0</Position>
+</Properties>
+</XuiImage>
+<XuiImage>
+<Properties>
+ <Id>imgAchievements4</Id>
+ <Width>64</Width>
+ <Height>64</Height>
+ <Position>909,325,0</Position>
+</Properties>
+</XuiImage>
+<XuiLabel>
+<Properties>
+ <Id>labAchievementsText</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>581,424,0</Position>
+ <Text>Achievements</Text>
+</Properties>
+</XuiLabel>
+<XuiLabel>
+<Properties>
+ <Id>labAchievementsNum</Id>
+ <Width>207</Width>
+ <Height>47</Height>
+ <Position>782,424,0</Position>
+ <Visual>Label_BodyRight</Visual>
+ <Text>&lt;#&gt;</Text>
+</Properties>
+</XuiLabel>
+<XuiLabel>
+<Properties>
+ <Id>labGamerPointsText</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>603.72,464,0</Position>
+ <Text>amerscore</Text>
+</Properties>
+</XuiLabel>
+<XuiLabel>
+<Properties>
+ <Id>labGamerPointsNum</Id>
+ <Width>207</Width>
+ <Height>47</Height>
+ <Position>782,464,0</Position>
+ <Visual>Label_BodyRight</Visual>
+ <Text>&lt;#&gt;</Text>
+</Properties>
+</XuiLabel>
+<XuiNavButton>
+<Properties>
+ <Id>legend_Y</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>165,611,0</Position>
+ <Visual>legend_Y</Visual>
+ <Enabled>false</Enabled>
+ <PressKey>22531</PressKey>
+</Properties>
+</XuiNavButton>
+<XuiNavButton>
+<Properties>
+ <Id>legend_X</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>146,639,0</Position>
+ <Visual>legend_X</Visual>
+ <Enabled>false</Enabled>
+ <PressKey>22530</PressKey>
+</Properties>
+</XuiNavButton>
+<XuiNavButton>
+<Properties>
+ <Id>legend_A</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>573,639,0</Position>
+ <Visual>legend_A</Visual>
+ <Text>Select</Text>
+</Properties>
+</XuiNavButton>
+<XuiBackButton>
+<Properties>
+ <Id>legend_B</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>555,611,0</Position>
+ <Visual>legend_B</Visual>
+ <UnfocusedInput>true</UnfocusedInput>
+ <Text>Back</Text>
+ <PressKey>22593</PressKey>
+</Properties>
+</XuiBackButton>
+<XuiLabel>
+<Properties>
+ <Id>labGameSummaryTitle</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>581,246,0</Position>
+ <Visual>Label_MetaHead_1line</Visual>
+ <Text>Game Summary</Text>
+</Properties>
+</XuiLabel>
+<XuiImage>
+<Properties>
+ <Id>icoGamerScore</Id>
+ <Width>32</Width>
+ <Height>32</Height>
+ <Position>584.33,464,0</Position>
+ <ImagePath>GScore.png</ImagePath>
+</Properties>
+</XuiImage>
+<XuiFigure>
+<Properties>
+ <Width>416.926</Width>
+ <Height>39.9465</Height>
+ <Position>581.148,243.63,0</Position>
+ <Fill>
+  <FillColor>0x280f0f0f</FillColor>
+ </Fill>
+ <Closed>true</Closed>
+ <Points>416.926,39.9465;2.89712,2.37037,6.25456,-0.403372,8.62495,0.087791;8.62495,0.087791,8.62495,0.087791,408.061,0;408.061,0,408.061,0,411.831,0.139999;414.292,2.76543,416.753,5.39086,416.926,9.99993;416.926,9.99993,416.926,9.99993,416.926,39.9465;416.926,39.9465,416.926,39.9465,0,39.9465;0,39.9465,0,39.9465,0,9.34149;0,9.34149,0,9.34149,-0.460327,5.14411</Points>
+</Properties>
+</XuiFigure>
+</XuiScene>
+</XuiCanvas>
