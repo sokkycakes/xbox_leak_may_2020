@@ -296,6 +296,13 @@ def overlay_scene():
                    " <Stroke>\n  <StrokeWidth>3</StrokeWidth>\n  <StrokeColor>0xffffffff</StrokeColor>\n </Stroke>",
                    " <Fill>\n  <FillType>0</FillType>\n </Fill>", " <Closed>false</Closed>",
                    " <Points>22,12;0,0;11,12;22,0</Points>", "</Properties>", "</XuiFigure>"]),
+        # the game title of the belt view: screen space, facing the camera,
+        # centred above the focused cover (the cover's top is at about y 190
+        # in the 96-degree view), 1.25x the size it had on the cover
+        "\n".join(["<XuiText>", "<Properties>", " <Id>title</Id>", " <Width>%d</Width>" % w, " <Height>30</Height>",
+                   " <Position>0,152,0</Position>", " <Opacity>0</Opacity>", " <Text></Text>", " <TextColor>0xffffffff</TextColor>",
+                   " <DropShadowColor>0</DropShadowColor>", " <PointSize>22</PointSize>", " <TextStyle>1040</TextStyle>",
+                   "</Properties>", "</XuiText>"]),
         # B + return arrow of the belt view: screen space, centred between
         # the focused cover and the library label as in sokky's mockup (B at
         # 0.506 W, the arrow box 0.482-0.519 W; 52 px above the mockup's
@@ -492,7 +499,7 @@ DEF theHub Level
             radius %(belt_radius).5f
             fadeDuration %(zoom_duration)s
             count %(belt_count)d
-            function OnStep() { theBelt.SetTitle(GameName(theBelt.GetSelected())); }
+            function OnStep() { theOverlay.SetText("title", GameName(theBelt.GetSelected())); }
         }
 
         DEF xfSettings Transform
@@ -613,7 +620,7 @@ function OpenLibrary()
     bLibraryOpen = true;
     SetPadAlpha(1, 0);
     theZoomer.GoTo(vpCarousel);
-    theBelt.SetTitle(GameName(theBelt.GetSelected()));
+    theOverlay.SetText("title", GameName(theBelt.GetSelected()));
     theBelt.Open();
     ShowBeltHints(1);
 }
@@ -624,6 +631,7 @@ function ShowBeltHints(on)
 {
     theOverlay.SetOpacity("promptA", 1 - on);
     theOverlay.SetOpacity("chevron", 1 - on);
+    theOverlay.SetOpacity("title", on);
     theOverlay.SetOpacity("bGlyph", on);
     theOverlay.SetOpacity("backStem", on);
     theOverlay.SetOpacity("backHead", on);

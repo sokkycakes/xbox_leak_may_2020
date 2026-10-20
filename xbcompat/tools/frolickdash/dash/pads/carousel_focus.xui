@@ -91,20 +91,6 @@
  <SizeMode>4</SizeMode>
 </Properties>
 </XuiImage>
-<XuiText>
-<Properties>
- <Id>title</Id>
- <Width>1024</Width>
- <Height>60</Height>
- <Position>0,-50,0</Position>
- <Text>Game Title</Text>
- <TextColor>0xffffffff</TextColor>
- <DropShadowColor>0</DropShadowColor>
- <PointSize>44</PointSize>
- <Font>Convection</Font>
- <TextStyle>1040</TextStyle>
-</Properties>
-</XuiText>
 <Timelines>
 <NamedFrames>
 <NamedFrame><Name>Intro</Name><Time>0</Time><Command>play</Command><CommandParams></CommandParams></NamedFrame>
