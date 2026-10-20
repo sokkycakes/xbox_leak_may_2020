@@ -790,15 +790,15 @@ void CGameCollection::LaunchGame(int nGame)
 // with D: there.
 void CGameCollection::LaunchXOnlineDash()
 {
-    // The retail online dashboard returns straight to the dashboard unless
-    // it is launched from the dashboard: LDT_FROM_DASHBOARD with the
-    // dashboard's title ID, as config.cpp's BackToLauncher2 launches.
-    LD_FROM_DASHBOARD fd;
-    ZeroMemory(&fd, sizeof(fd));
-    fd.dwContext = 0;   // the controller port
+    // The retail online dashboard (5849) returns straight to the dashboard
+    // unless it gets LDT_LAUNCH_DASHBOARD with a reason of its own, 0xc to
+    // 0x13; the retail 5960 dashboard's Xbox Live item sends 0xc.
+    LD_LAUNCH_DASHBOARD ld;
+    ZeroMemory(&ld, sizeof(ld));
+    ld.dwReason = 0xc;
     XAppGetD3DDev()->PersistDisplay();
     XWriteTitleInfoAndReboot("xonlinedash.xbe", "\\Device\\Harddisk0\\Partition2\\xodash",
-        LDT_FROM_DASHBOARD, 0xfffe0000, (PLAUNCH_DATA)&fd);
+        LDT_LAUNCH_DASHBOARD, 0xfffe0000, (PLAUNCH_DATA)&ld);
 }
 
 ////////////////////////////////////////////////////////////////////////////

@@ -1,6 +1,6 @@
 ??_H@YGXPAXIHP6EPAX0@Z@Z 0x2f6c6
-?MagnitudeVector3@DirectSound@@YGMPBU_D3DVECTOR@@@Z 0x3b206
-_fabsf@4 0x40737
+?MagnitudeVector3@DirectSound@@YGMPBU_D3DVECTOR@@@Z 0x3b20a
+_fabsf@4 0x4073b
 _prvAdaptTrigToSubframeConfig_XDS@4 0x9d287
 _prvInverseQuantizeLowRate_XDS@12 0x9d41a
 _CreateFileA@28 0x9d7b8
@@ -1077,7 +1077,7 @@ _OHCD_PoolDebitBulkTDQuota@4 0x109fe5
 @OHCD_fQueueBulkTransfer@8 0x10a48f
 @OHCD_fQueueControlTransfer@8 0x10a4cb
 @OHCD_fQueueTransferRequest@8 0x10a507
-_main 0x54f67
+_main 0x54f6b
 @RtlFindFirstSetRightMember@4 0xa41f0
 _memmove 0xa4df0
 _wcslen 0xa5170
