@@ -226,6 +226,17 @@ def library():
     s += text("subtitle", 0, 238, gw, 29, "Developer", 24, GREY_TEXT, CENTRE)
     # 73:101 Xelu 360_Start, 87 square at 125,283
     s += image("glyphA", 125, 283, 87, 87, "glyph_a.png")
+    # The no-media variant (Figma 143:47 "Group 17", tile 143:55): the cover,
+    # title, developer and Start glyph give way to 143:58 "Insert a Game
+    # Disc / or Game Card." (32 px, two lines from y 144, centred) and the
+    # Material Symbols disc and card icons 143:72 / 143:130, 45 square at
+    # 121,237 and 170,237 (art/figma/nodisc_*.svg, rasterised by
+    # tools/svgicon.py).  The hub shows one set or the other (SetVisible)
+    # by whether a game disc or game card is in.
+    s += text("insertLine1", 33, 144, 270, 38, "Insert a Game Disc", 32, GREY_TEXT, CENTRE)
+    s += text("insertLine2", 33, 182, 270, 38, "or Game Card.", 32, GREY_TEXT, CENTRE)
+    s += image("icoDisc", 121, 237, 45, 45, "nodisc_album.png")
+    s += image("icoCard", 170, 237, 45, 45, "nodisc_sdcard.png")
     s.append("</XuiButton>")
     # 73:102 and 73:103, the game tile's overlays, above its contents
     s += figure("gameGloss", gx, gy, gw, gh, gpts,

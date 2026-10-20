@@ -584,6 +584,7 @@ DEF theGameCollection GameCollection
     // a disc or game card came or went: the belt's tiles change
     function OnMediaChanged()
     {
+        UpdateLibraryTile();
         if (bLibraryOpen)
             RefreshBelt();
     }
@@ -880,6 +881,47 @@ function OpenLibrary()
 // The belt's tiles: All games (the grid, not built yet), then the
 // console's games as GameCollection lists them (the disc tray or game
 // card slots first, then E:\Games), each cover with the game's title image.
+// The library pad's game tile: the disc or game card that is in (its
+// cover, name and platform, Start to launch), or sokky's no-media variant
+// of the panel (Figma 143:47: "Insert a Game Disc or Game Card." and the
+// disc and card icons) when neither is present.  Kept current by
+// OnMediaChanged.
+function UpdateLibraryTile()
+{
+    var n = theGameCollection.Scan();
+    var i;
+    var kind;
+    var found = -1;
+    for (i = 0; i < n; i = i + 1)
+    {
+        kind = theGameCollection.GetGameKind(i);
+        if (found < 0)
+        {
+            if (kind == 1)
+                found = i;
+            if (kind == 2)
+                found = i;
+        }
+    }
+    var on = 0;
+    if (found >= 0)
+    {
+        on = 1;
+        padLibrary.SetText("title", theGameCollection.GetGameName(found));
+        padLibrary.SetText("subtitle", theGameCollection.GetGamePlatform(found));
+        padLibrary.SetImage("cover", theGameCollection.GetGameImage(found));
+    }
+    padLibrary.SetVisible("coverFrame", on);
+    padLibrary.SetVisible("cover", on);
+    padLibrary.SetVisible("title", on);
+    padLibrary.SetVisible("subtitle", on);
+    padLibrary.SetVisible("glyphA", on);
+    padLibrary.SetVisible("insertLine1", 1 - on);
+    padLibrary.SetVisible("insertLine2", 1 - on);
+    padLibrary.SetVisible("icoDisc", 1 - on);
+    padLibrary.SetVisible("icoCard", 1 - on);
+}
+
 function RefreshBelt()
 {
     var n = theGameCollection.Scan();
@@ -1292,6 +1334,7 @@ function initialize()
     nLaunchWait = 0;
     // the A pin's idle pulse: a small dip every PIN_PULSE_PERIOD seconds
     theOverlay.Pulse("promptA", %(pin_pulse_dy)s, %(pin_pulse_period)s, %(pin_pulse_dur)s);
+    UpdateLibraryTile();
     EnableInput(true);
     theHub.GoTo();
     padLibrary.Play("", "Intro");

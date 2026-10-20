@@ -110,6 +110,9 @@ timeout 600 wine "$WORK/xb/public/mstools/vc70/link.exe" /nologo -subsystem:xbox
 rm -rf "$OUT/dash"; mkdir -p "$OUT/dash/pads" "$OUT/dash/obj"
 cp "$HERE"/dash/pads/*.xui "$OUT/dash/pads/"
 cp "$HERE"/art/blades/*.png "$OUT/dash/pads/"     # the Blades skin's button glyphs
+for i in nodisc_album nodisc_sdcard; do           # the library tile's no-media icons (Figma 143:55)
+    python3 "$HERE/tools/svgicon.py" "$HERE/art/figma/$i.svg" "$OUT/dash/pads/$i.png"
+done
 python3 "$HERE/tools/genhub.py" "$OUT/dash"
 python3 "$HERE/tools/genpage.py" "$OUT/dash"
 python3 "$HERE/tools/mkart.py" "$OUT/dash"

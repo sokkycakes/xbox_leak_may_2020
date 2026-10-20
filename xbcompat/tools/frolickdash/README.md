@@ -191,6 +191,13 @@ functionality added back into it", starting with game data management
 and launching games) comes from the dashboard's own code, compiled in
 unchanged, and only the script and two small nodes are Frolick's:
 
+  The library pad's own game tile shows the disc or game card that is
+  in (cover, name, platform, Start) and, when neither is present, sokky's
+  no-media variant of the panel (Figma 143:47: "Insert a Game Disc or
+  Game Card." with the Material Symbols disc and card icons,
+  art/figma/nodisc_*.svg rasterised by tools/svgicon.py); the hub's
+  UpdateLibraryTile switches the two sets of controls at start-up and on
+  OnMediaChanged.
 - The belt lists the console's games: `GameCollection` (dashbuild's
   node, the Games screen's list) scans the disc tray or game card slots
   and `E:\Games` when the belt opens (`RefreshBelt`, and again when a

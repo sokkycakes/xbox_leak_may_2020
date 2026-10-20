@@ -146,6 +146,54 @@
  <SizeMode>4</SizeMode>
 </Properties>
 </XuiImage>
+<XuiText>
+<Properties>
+ <Id>insertLine1</Id>
+ <Width>270</Width>
+ <Height>38</Height>
+ <Position>33,144,0</Position>
+ <Text>Insert a Game Disc</Text>
+ <TextColor>0xffd2d2d2</TextColor>
+ <DropShadowColor>0</DropShadowColor>
+ <PointSize>24</PointSize>
+ <Font>Fira Sans</Font>
+ <TextStyle>1024</TextStyle>
+</Properties>
+</XuiText>
+<XuiText>
+<Properties>
+ <Id>insertLine2</Id>
+ <Width>270</Width>
+ <Height>38</Height>
+ <Position>33,182,0</Position>
+ <Text>or Game Card.</Text>
+ <TextColor>0xffd2d2d2</TextColor>
+ <DropShadowColor>0</DropShadowColor>
+ <PointSize>24</PointSize>
+ <Font>Fira Sans</Font>
+ <TextStyle>1024</TextStyle>
+</Properties>
+</XuiText>
+<XuiImage>
+<Properties>
+ <Id>icoDisc</Id>
+ <Width>45</Width>
+ <Height>45</Height>
+ <Position>121,237,0</Position>
+ <ImagePath>nodisc_album.png</ImagePath>
+ <SizeMode>4</SizeMode>
+</Properties>
+</XuiImage>
+<XuiImage>
+<Properties>
+ <Id>icoCard</Id>
+ <Width>45</Width>
+ <Height>45</Height>
+ <Position>170,237,0</Position>
+ <ImagePath>nodisc_sdcard.png</ImagePath>
+ <SizeMode>4</SizeMode>
+</Properties>
+</XuiImage>
 </XuiButton>
 <XuiFigure>
 <Properties>
