@@ -24,8 +24,18 @@ case $1 in
 	fi
 	image=$1
 	shift
+	# An empty tray: with a game disc in, the retail Live dashboard goes back
+	# to the dashboard so the game can start, as on the console.
+	n=$#
+	while [ $n -gt 0 ]; do
+		case $1 in
+		--dvd|--dvd-drive) shift 2; n=$((n - 2)) ;;
+		*) set -- "$@" "$1"; shift; n=$((n - 1)) ;;
+		esac
+	done
+	mkdir -p /tmp/xbox-live-notray
 	export XBCOMPAT_DNS=127.0.0.1:5353 XBCOMPAT_RESET=1
-	exec "$L/bin/xbcompat" --hle "$L/xodash.hlemap" --net nat "$@" "$image"
+	exec "$L/bin/xbcompat" --hle "$L/xodash.hlemap" --net nat --dvd /tmp/xbox-live-notray "$@" "$image"
 	;;
 esac
 next=${XBOX_LIVE_NEXT_LAUNCHER:-$X/bin/python3 $X/tools/xbrun.py}
