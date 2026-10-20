@@ -36,6 +36,19 @@ dashboard (`tools/dashbuild`), as its own `xboxdash.xbe` with its own
   with its slowly scrolling light stripes).
 - `dash/` – the data: `pads/*.xui` are Frolick's own panels (`catalog`,
   `library`, the `frolick_skin` FrolickTile visual, the carousel scenes);
+  `pads/library.xui` is written by `tools/genlibrary.py` from sokky's
+  Figma frame of the library pad (file fL710Dg0cpzZzYe0OZSBVu, node
+  73:88): one XuiFigure per Figma fill layer, Figma's vertical gradients
+  as linear fills at Rotation -90, its affine radial fills as the brush's
+  Rotation, Scale and Translation (an ellipse is a rotated, axis-scaled
+  circle, whatever the matrix's skew; the script checks the brush against
+  the ellipse), text in Fira Sans at PointSize = Figma px * 0.75 with the
+  box top where Figma has it, and the tiles' focus visuals
+  (`FrolickFrameL/TR/BR`, FrolickTile cut to each tile's corners, written
+  into the skin) carrying only the halo, glow and shine, since the Figma
+  layers draw the borders and gloss.  A text element's `<Font>` name picks
+  `Name.ttf` (spaces dropped) from the XIP, `FiraSans.ttf` from
+  `art/fonts/` here; a name with no file draws in the default font;
   `tools/genhub.py` generates `default.xap` (the hub, from
   `frolick_assets/main.tscn`: the backdrop, dome and rail, the `nav` group's
   three pads with their bumpers, emblems and labels, the scene's cameras

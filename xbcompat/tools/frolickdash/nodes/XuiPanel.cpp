@@ -309,6 +309,10 @@ public:
         XAppSetTexture(0, t.p);
         if (t.p)
         {
+            // gradient brushes run past their box (a glow centred near a
+            // corner): clamp, so the ramp's last stop fills the rest
+            XAppSetTextureStageState(0, D3DTSS_ADDRESSU, D3DTADDRESS_CLAMP);
+            XAppSetTextureStageState(0, D3DTSS_ADDRESSV, D3DTADDRESS_CLAMP);
             XAppSetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_MODULATE);
             XAppSetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
             XAppSetTextureStageState(0, D3DTSS_COLORARG2, D3DTA_DIFFUSE);

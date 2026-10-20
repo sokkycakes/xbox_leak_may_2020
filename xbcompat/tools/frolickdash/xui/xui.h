@@ -205,12 +205,17 @@ struct Renderer {
     Renderer(Backend* b, Resources* r);
     ~Renderer();
     void draw(Scene* s, float x, float y, float scale);
-    void setFont(const char* path); // the TTF every text element uses
+    void setFont(const char* path); // the TTF text elements use unless their Font names another
 
 private:
     struct TexEntry { char* key; Texture tex; int w, h; };
     Vec<TexEntry> texes;
     Font* font;
+    // <Font>Name</Font> on a text element picks Name.ttf (spaces dropped)
+    // from the scene's files, the default font when there is no such file.
+    struct FontEntry { char* name; Font* f; };
+    Vec<FontEntry> fonts;
+    Font* fontFor(const char* name);
     bool clipping; float clipBuf[4];
 
     Texture lookup(const char* key, int* w = 0, int* h = 0);
@@ -222,7 +227,7 @@ private:
     void quad(Texture tex, Blend blend, const Affine& m, float x0, float y0, float x1, float y1,
               float u0, float v0, float u1, float v1, Color c, float alpha);
     void stroke(const float* poly, int n, bool closed, const Affine& m, float w, Color c, float alpha, Blend blend);
-    Texture lineTex(const char* line, float px, int* w, int* h, int* adv);
+    Texture lineTex(Font* f, const char* line, float px, int* w, int* h, int* adv);
     Texture gradient(Object* g, bool radial);
     Texture imageTex(const char* path, int* w, int* h);
 };

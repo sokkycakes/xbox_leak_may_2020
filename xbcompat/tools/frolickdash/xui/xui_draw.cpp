@@ -84,20 +84,47 @@ Renderer::Renderer(Backend* b, Resources* r) : be(b), res(r), font(0), clipping(
 Renderer::~Renderer()
 {
     for (int i = 0; i < texes.n; i++) delete [] texes[i].key;
+    for (int i = 0; i < fonts.n; i++) { delete [] fonts[i].name; delete fonts[i].f; }
     delete font;
+}
+
+static Font* loadFont(Resources* res, const char* path)
+{
+    unsigned char* data; int len;
+    if (!res->read(path, &data, &len)) return 0;
+    Font* f = new Font;
+    f->data = data;
+    if (stbtt_InitFont(&f->info, data, stbtt_GetFontOffsetForIndex(data, 0))) {
+        stbtt_GetFontVMetrics(&f->info, &f->ascent, &f->descent, &f->lineGap);
+        f->ok = true;
+    }
+    return f;
 }
 
 void Renderer::setFont(const char* path)
 {
-    delete font; font = 0;
-    unsigned char* data; int len;
-    if (!res->read(path, &data, &len)) return;
-    font = new Font;
-    font->data = data;
-    if (stbtt_InitFont(&font->info, data, stbtt_GetFontOffsetForIndex(data, 0))) {
-        stbtt_GetFontVMetrics(&font->info, &font->ascent, &font->descent, &font->lineGap);
-        font->ok = true;
-    }
+    delete font;
+    font = loadFont(res, path);
+}
+
+// fontFor maps a text element's Font name to a file: "Fira Sans" is
+// FiraSans.ttf beside the scene or at the root.  A name with no file (the
+// dashboard's Convection, say) draws in the default font, as before.
+Font* Renderer::fontFor(const char* name)
+{
+    if (!name || !name[0]) return font;
+    for (int i = 0; i < fonts.n; i++)
+        if (strcmp(fonts[i].name, name) == 0) return fonts[i].f ? fonts[i].f : font;
+    char file[256]; int n = 0;
+    for (const char* p = name; *p && n < (int)sizeof file - 8; p++)
+        if (*p != ' ') file[n++] = *p;
+    strcpy(file + n, ".ttf");
+    FontEntry e;
+    e.name = strdup2(name);
+    e.f = loadFont(res, file);
+    if (e.f && !e.f->ok) { delete e.f; e.f = 0; }
+    fonts.push(e);
+    return e.f ? e.f : font;
 }
 
 // ---- texture cache ---------------------------------------------------------
@@ -598,10 +625,10 @@ static int measure(Font* f, float scale, const char* s, int len)
 }
 
 // lineTex rasterises one line as white with alpha coverage (cached).
-Texture Renderer::lineTex(const char* line, float px, int* w, int* h, int* adv)
+Texture Renderer::lineTex(Font* font, const char* line, float px, int* w, int* h, int* adv)
 {
     char key[600];
-    _snprintf(key, sizeof key, "txt:%g:%s", px, line); key[sizeof key - 1] = 0;
+    _snprintf(key, sizeof key, "txt:%p:%g:%s", (void*)font, px, line); key[sizeof key - 1] = 0;
     Texture t = lookup(key, w, h);
     float scale = stbtt_ScaleForMappingEmToPixels(&font->info, px);
     int len = (int)strlen(line);
@@ -643,6 +670,7 @@ Texture Renderer::lineTex(const char* line, float px, int* w, int* h, int* adv)
 
 void Renderer::text(Node* n, const Affine& m, float alpha, Blend blend)
 {
+    Font* font = fontFor(propS(n->props, "Font"));
     if (!font || !font->ok) return;
     const char* src = propS(n->props, "Text");
     if (n->owner && n->cls && strcmp(n->cls->name, "XuiTextPresenter") == 0) src = dataSlot(n);
@@ -700,7 +728,7 @@ void Renderer::text(Node* n, const Affine& m, float alpha, Blend blend)
     Affine inv = aff(1 / scale, 0, 0, 1 / scale, 0, 0);
     for (int i = 0; i < nl; i++) {
         int iw, ih, adv;
-        Texture tex = lineTex(lines[i], px, &iw, &ih, &adv);
+        Texture tex = lineTex(font, lines[i], px, &iw, &ih, &adv);
         float lw = adv / scale;
         float x = 0;
         if (style & styleRight) x = w - lw;

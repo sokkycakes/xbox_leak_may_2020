@@ -116,6 +116,7 @@ if [ -n "$GLYPHS" ]; then cp "$GLYPHS"/glyph_*.png "$OUT/dash/pads/"; else
     for b in b x y; do cp "$X/360_${b^^}.png" "$OUT/dash/pads/glyph_$b.png"; done
 fi
 cp "${FONT:-/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf}" "$OUT/dash/font.ttf"
+cp "$HERE/art/fonts/FiraSans-Regular.ttf" "$OUT/dash/FiraSans.ttf"   # <Font>Fira Sans</Font> (the library panel)
 (
     cd "$OUT/dash"
     python3 "$HERE/tools/mkassets.py" default.xip "$OUT/dash"
