@@ -732,6 +732,34 @@ Texture Renderer::lineTex(Font* font, const char* line, float px, int* w, int* h
     return t;
 }
 
+// A button glyph is a one-letter XuiText laid over the button's circle
+// image (Abutton_Normal.png, A-Button.png ...).  The skins place the
+// letter's box for the Convection font; with any other font the letter
+// lands off the circle's centre, so it is centred on the circle instead:
+// returns the circle's centre in the text's own coordinates.
+static bool glyphTarget(Node* n, float* tx, float* ty)
+{
+    Node* p = n->parent;
+    if (!p) return false;
+    for (int i = 0; i < p->children.n; i++) {
+        Node* c = p->children[i];
+        if (!c->cls || strcmp(c->cls->name, "XuiImage") != 0) continue;
+        const char* path = propS(c->props, "ImagePath");
+        const char* f = strrchr(path, '/'); f = f ? f + 1 : path;
+        if (!f[0] || (f[1] != 'b' && f[1] != '-' ) || !strstr(f, "utton")) continue;
+        Vec3 zero = { 0, 0, 0 }, one = { 1, 1, 1 };
+        Vec3 pos = propV(c->props, "Position", zero), sc = propV(c->props, "Scale", one), pv = propV(c->props, "Pivot", zero);
+        float px = pos.x + pv.x + sc.x * (c->width() / 2 - pv.x), py = pos.y + pv.y + sc.y * (c->height() / 2 - pv.y);
+        // into the text's frame (its Position, Pivot and Scale)
+        Vec3 tp = propV(n->props, "Position", zero), ts = propV(n->props, "Scale", one), tv = propV(n->props, "Pivot", zero);
+        if (ts.x == 0 || ts.y == 0) return false;
+        *tx = (px - tp.x - tv.x) / ts.x + tv.x;
+        *ty = (py - tp.y - tv.y) / ts.y + tv.y;
+        return true;
+    }
+    return false;
+}
+
 void Renderer::text(Node* n, const Affine& m, float alpha, Blend blend)
 {
     Font* font = fontFor(propS(n->props, "Font"));
@@ -803,6 +831,14 @@ void Renderer::text(Node* n, const Affine& m, float alpha, Blend blend)
         // ascent below its top (the button glyphs' letters sat a pixel
         // right and low in their circles otherwise)
         float ox = x - 1 / scale, oy = y - ((float)ceil(font->ascent * fs) - font->ascent * fs) / scale;
+        int gcp, glen; gcp = utf8decode(lines[i], &glen);
+        float gx, gy; int x0, y0, x1, y1;
+        if (nl == 1 && glen > 0 && !lines[i][glen] && glyphTarget(n, &gx, &gy) && stbtt_GetCodepointBox(&font->info, gcp, &x0, &y0, &x1, &y1)) {
+            // pen and baseline that put the letter's ink centre on the circle's
+            float baseline = gy + (y0 + y1) / 2.0f * fs / scale;
+            ox = gx - (x0 + x1) / 2.0f * fs / scale - 1 / scale;
+            oy = baseline - (float)ceil(font->ascent * fs) / scale;
+        }
         Affine lm = mul(mul(m, aff(1, 0, 0, 1, ox, oy)), inv);
         if ((style & styleShadow) && (shadow >> 24) != 0) {
             Affine sm = mul(mul(m, aff(1, 0, 0, 1, ox + 1.5f, oy + 1.5f)), inv);
