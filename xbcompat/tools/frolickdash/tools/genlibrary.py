@@ -16,7 +16,7 @@ ordinary scene the XUI runtime (and the 360's XuiScene classes) understand:
   axis-scaled circle whatever the skew of the matrix Figma stores, so each
   one becomes the brush Fill of a radial gradient: Rotation, Scale and
   Translation, computed in radial() for the runtime's brush (xui_draw.cpp:
-  the figure box normalised to -0.5..0.5, rotated, translated, scaled; the
+  the figure box normalised to -0.5..0.5, rotated, scaled, translated; the
   ramp texture reaches its last stop at radius 0.5);
 * text is Fira Sans (the <Font> name picks FiraSans.ttf from the XIP) at
   PointSize = Figma px * 0.75 (the engine's em is 4/3 PointSize) with the
@@ -93,9 +93,9 @@ def radial(w, h, cx, cy, ax, ay, bx, by):
     The gradient value is t = |M^-1 (p - c)|, so its contours depend on
     (M M^T)^-1 only; in the brush's normalised box coordinates q = N p - 0.5
     (N = diag(1/w, 1/h)) that quadratic form is B = N^-1 (M M^T)^-1 N^-1,
-    and the brush's own contour is (R q + T)^T diag(4 sx^2, 4 sy^2) (R q + T)
-    = 1 (its ramp ends at radius 0.5).  So R and the scales come from the
-    eigenvectors and eigenvalues of B, and T = -R qc."""
+    and the brush's own contour is |2 (S R q + T)| = 1 with S = diag(sx, sy)
+    (its ramp ends at radius 0.5).  So R and the scales come from the
+    eigenvectors and eigenvalues of B, and T = -S R qc."""
     # M M^T
     m00 = ax * ax + bx * bx
     m01 = ax * ay + bx * by
@@ -121,7 +121,7 @@ def radial(w, h, cx, cy, ax, ay, bx, by):
     rot = math.degrees(math.atan2(r10, r00))
     sx, sy = math.sqrt(l1) / 2, math.sqrt(l2) / 2
     qx, qy = cx / w - 0.5, cy / h - 0.5
-    tx, ty = -(r00 * qx + r01 * qy), -(r10 * qx + r11 * qy)
+    tx, ty = -(r00 * qx + r01 * qy) * sx, -(r10 * qx + r11 * qy) * sy
     # self-check against the runtime's uv code: the image of the unit circle
     # must be the brush's t = 1 contour
     cs, sn = math.cos(math.radians(rot)), math.sin(math.radians(rot))
@@ -129,8 +129,8 @@ def radial(w, h, cx, cy, ax, ay, bx, by):
         th = k * math.pi / 6
         px, py = cx + ax * math.cos(th) + bx * math.sin(th), cy + ay * math.cos(th) + by * math.sin(th)
         a, b = px / w - 0.5, py / h - 0.5
-        a2, b2 = a * cs - b * sn + tx, a * sn + b * cs + ty
-        t = 2 * math.hypot(a2 * sx, b2 * sy)
+        a2, b2 = a * cs - b * sn, a * sn + b * cs
+        t = 2 * math.hypot(a2 * sx + tx, b2 * sy + ty)
         assert abs(t - 1) < 1e-6, (t, rot, sx, sy, tx, ty)
     return rot, sx, sy, tx, ty
 

@@ -123,9 +123,11 @@ dashboard (`tools/dashbuild`), as its own `xboxdash.xbe` with its own
   brush space (0.4 stretches a gradient over 2.5 boxes), as XuiTool
   writes them and the 360 draws them (checked against the Blades
   running in the GFWL XUI engine host, `/mnt/project-files/xui360`, which
-  renders the same scenes), the brush rotating first and translating in
-  the rotated frame (the Metapane's top corners are 90-degree-rotated
-  radial fills whose centres only land on the inner corner that way);
+  renders the same scenes), the brush rotating first, then scaling, then
+  translating in the rotated frame, the Translation itself unscaled (the
+  Metapane's top corners are 90-degree-rotated radial fills whose centres
+  only land on the inner corner that way, and the GFWL Guide's buttons
+  light their bottom edge with a fill translated 0,0.5 and scaled 1,-1);
   PointSize is in points, the em 4/3 PointSize pixels, with the baseline
   the font's ascent below the box's top (the engine's legend and header
   glyphs and sokky's real-console capture measure so; Frolick's own

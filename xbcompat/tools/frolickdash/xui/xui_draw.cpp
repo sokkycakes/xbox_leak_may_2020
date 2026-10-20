@@ -328,7 +328,11 @@ static void triangulate(const float* poly, int n, Vec<unsigned short>& out)
 // strips with a radial fill scaled 0.9,0.4, drawn by the 360 as a soft
 // line the strip's whole height), Rotation turns about the centre.  All
 // three checked against the GFWL XUI engine's rendering of the skin.
-// The order is rotate, then translate, in the rotated frame: the Blades'
+// The order is rotate, scale, then translate, so the Translation is not
+// scaled: the GFWL Guide's buttons light their bottom edge with a radial
+// fill translated 0,0.5 and scaled 1,-1, which the engine centres on the
+// bottom edge (a mirrored scale before the move would put it on the top
+// edge, a stray line inside the bar).  Rotation comes first: the Blades'
 // Metapane rounds its top corners with 20x20 radial fills rotated 90 and
 // translated 0.5,-0.5 (top left) and 0.5,0.5 (top right), whose centres
 // land on the inner corner only this way.  A linear gradient runs along
@@ -337,8 +341,8 @@ struct Brush {
     float tx, ty, sx, sy, cs, sn, pw, ph;
     void uv(float x, float y, float* u, float* v) const {
         float a = x / pw - 0.5f, b = y / ph - 0.5f;
-        float a2 = a * cs - b * sn + tx, b2 = a * sn + b * cs + ty;
-        *u = a2 * sx + 0.5f; *v = b2 * sy + 0.5f;
+        float a2 = a * cs - b * sn, b2 = a * sn + b * cs;
+        *u = a2 * sx + tx + 0.5f; *v = b2 * sy + ty + 0.5f;
     }
 };
 

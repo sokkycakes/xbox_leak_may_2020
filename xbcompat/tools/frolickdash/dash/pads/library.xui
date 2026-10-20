@@ -304,7 +304,7 @@
    <StopPos>0.875</StopPos>
    <Radial>true</Radial>
   </Gradient>
-  <Translation>0.598,-0.0876,0</Translation>
+  <Translation>0.2756,-0.0205,0</Translation>
   <Scale>0.4608,0.2336,1</Scale>
   <Rotation>38.1322</Rotation>
  </Fill>
@@ -475,7 +475,7 @@
    <StopPos>0.726</StopPos>
    <Radial>true</Radial>
   </Gradient>
-  <Translation>0.4837,0.1828,0</Translation>
+  <Translation>0.2478,0.0413,0</Translation>
   <Scale>0.5124,0.2257,1</Scale>
   <Rotation>-15.681</Rotation>
  </Fill>
