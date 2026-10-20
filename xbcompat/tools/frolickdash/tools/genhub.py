@@ -565,7 +565,13 @@ DEF theZoomer CameraMover
     {
         bMoving = false;
         if (bZoomed)
-            OpenPage();
+        {
+            if (sPendingPage == "")
+                OpenPage();
+            else
+                OpenPageAt(sPendingPage);
+            sPendingPage = "";
+        }
         else if (bLibraryOpen == false)
         {
             // back on the pad's view: the hub's A prompt returns
@@ -760,6 +766,7 @@ DEF theHub Level
         function OnMoveDown() { PadMove("down", 0); }
         function OnADown() { PadPress(); }
         function OnBDown() { PadBack(); }
+        function OnXDown() { PadX(); }
         function OnYDown() { PadY(); }
         function OnStartDown() { PadStart(); }
     }
@@ -886,7 +893,7 @@ function OpenLibrary()
 // of the panel (Figma 143:47: "Insert a Game Disc or Game Card." and the
 // disc and card icons) when neither is present.  Kept current by
 // OnMediaChanged.
-function UpdateLibraryTile()
+function FindMedia()
 {
     var n = theGameCollection.Scan();
     var i;
@@ -903,6 +910,12 @@ function UpdateLibraryTile()
                 found = i;
         }
     }
+    return found;
+}
+
+function UpdateLibraryTile()
+{
+    var found = FindMedia();
     var on = 0;
     if (found >= 0)
     {
@@ -967,11 +980,91 @@ function PadStart()
     if (bBusy)
         return;
     if (bLibraryOpen == false)
+    {
+        if (bZoomed)
+        {
+            // Start on a recent game plays it, as A does
+            if (bPageOpen)
+                if (PageKind(sPage) == "recent")
+                    PlayRecent();
+            return;
+        }
+        HubButton("start");
         return;
+    }
     if (bPageOpen)
         return;
     if (theBelt.IsBusy() == 0)
         LaunchSelected();
+}
+
+// The tiles' buttons on the hub (sokky 2026-10-20: the glyph on a tile is
+// the button that opens it, and a press first flies to the pad's focus
+// view, then opens the menu).  Library: Start launches the disc or game
+// card at once, X the recent games, Y the favorites.  Catalog: Start the
+// Marketplace, X (spotlight) its hot list, Y (downloads) its download
+// history.  Settings: Start the settings menu, X (quick panel) and Y
+// (video) the console settings, Display first; the Blades scenes stand in
+// until the real pages exist.
+function HubButton(btn)
+{
+    var m;
+    if (nPad == 1)
+    {
+        if (btn == "start")
+        {
+            m = FindMedia();
+            if (m >= 0)
+                LaunchGameWithLogo(m);
+        }
+        else if (btn == "x")
+            FocusPad("page_recent");
+        else
+            FocusPad("page_favorites");
+        return;
+    }
+    if (btn == "start")
+    {
+        PadPress();
+        return;
+    }
+    if (nPad == 0)
+    {
+        if (btn == "x")
+            FocusPad("page_store_hot");
+        else
+            FocusPad("page_store_history");
+    }
+    else
+        FocusPad("page_console");
+}
+
+function FocusPad(page)
+{
+    sPendingPage = page;
+    theOverlay.Fade("promptA", 0, %(pin_fade_out)s);
+    ZoomIn();
+}
+
+function PadX()
+{
+    if (bMoving)
+        return;
+    if (bBusy)
+        return;
+    if (bZoomed)
+        return;
+    if (bLibraryOpen)
+        return;
+    HubButton("x");
+}
+
+// A or Start on a recent game
+function PlayRecent()
+{
+    if (nListCount == 0)
+        return;
+    LaunchGameWithLogo(theGameCollection.GetRecentGame(nSel));
 }
 
 // A on a cover: the game's page (the Blades' Game Summary) over the
@@ -1108,6 +1201,8 @@ function ZoomIn()
     LabelFocus(1);
     if (nPad == 0)
         theZoomer.GoTo(vpCatalogFocus);
+    else if (nPad == 1)
+        theZoomer.GoTo(vpCarousel);
     else
         theZoomer.GoTo(vpSettingsFocus);
 }
@@ -1147,6 +1242,8 @@ function PadBack()
     LabelFocus(0);
     if (nPad == 0)
         theZoomer.GoTo(vpCatalog);
+    else if (nPad == 1)
+        theZoomer.GoTo(vpLibrary);
     else
         theZoomer.GoTo(vpSettings);
 }
@@ -1168,11 +1265,17 @@ function SetPadAlpha(pad, a)
 // open backwards) while the camera flies back up.  While a page is open
 // the hub's own A prompt gives way to the page's legend.
 var sPage;      // the page on thePage
+var sPendingPage; // the page a hub button opens once the focus flight lands
 
 function OpenPage()
 {
+    OpenPageAt(PageRoot(nPad));
+}
+
+function OpenPageAt(page)
+{
     bPageOpen = true;
-    ShowPage(PageRoot(nPad), "Open");
+    ShowPage(page, "Open");
     theOverlay.Fade("promptA", 0, %(pin_fade_out)s);
     PageChrome(0);
 }
@@ -1198,6 +1301,12 @@ function LabelFocus(on)
         label_catalog.offsetY = on * %(lofs_catalog_y)s;
         label_catalog.offsetZ = on * %(lofs_catalog_z)s;
     }
+    else if (nPad == 1)
+    {
+        // the library's focus view is the belt camera, where the label sits
+        // small and far off; its pages carry their own header instead
+        label_library.alpha = 1 - on;
+    }
     if (nPad == 2)
     {
         label_settings.offsetX = on * %(lofs_settings_x)s;
@@ -1209,6 +1318,7 @@ function LabelFocus(on)
 function PadLabel(a)
 {
     if (nPad == 0) label_catalog.alpha = a;
+    if (nPad == 1) label_library.alpha = a;
     if (nPad == 2) label_settings.alpha = a;
     PageChrome(a);
 }
@@ -1316,6 +1426,7 @@ function initialize()
     bPageOpen = false;
     bBusy = false;
     sPage = "";
+    sPendingPage = "";
     sConfirmBack = "";
     sAction = "";
     nRows = 0;
@@ -1438,6 +1549,8 @@ function ListCount()
         return theStorage.GetTitleCount();
     if (k == "saves")
         return theStorage.GetSaveCount(nTitle);
+    if (k == "recent")
+        return theGameCollection.GetRecentCount();
     return 0;
 }
 
@@ -1449,6 +1562,7 @@ function FillRow(r)
     var i = nScroll + r;
     var k = PageKind(sPage);
     var d;
+    var g;
     var img;
     if (i >= nListCount)
     {
@@ -1461,6 +1575,16 @@ function FillRow(r)
         thePage.SetText(id, theStorage.GetTitleName(i));
         thePage.SetData(id, 1, theStorage.GetTitleInfo(i));
         img = theStorage.GetTitleImage(i);
+        if (img == "")
+            img = "ico_64x_games.png";
+        thePage.SetImage(id + "_icon", img);
+    }
+    else if (k == "recent")
+    {
+        g = theGameCollection.GetRecentGame(i);
+        thePage.SetText(id, theGameCollection.GetGameName(g));
+        thePage.SetData(id, 1, theGameCollection.GetGamePlatform(g) + ", " + theGameCollection.GetGamePublisher(g));
+        img = theGameCollection.GetGameImage(g);
         if (img == "")
             img = "ico_64x_games.png";
         thePage.SetImage(id + "_icon", img);
@@ -1535,6 +1659,8 @@ function PageEnter()
         theStorage.device = nDev;
         theStorage.title = nTitle;
     }
+    if (k == "recent")
+        theGameCollection.Scan();
     nScroll = 0;
     nSel = 0;
     nListCount = ListCount();
@@ -1632,6 +1758,13 @@ function PageSpecial(id)
         ShowPage("page_memory_actions", "Fade");
         return 1;
     }
+    if (k == "recent")
+    {
+        PlayRecent();
+        return 1;
+    }
+    if (k == "favorites")
+        return 1;
     if (k == "dest")
     {
         nDest = DeviceAt(nSel, nDev);
@@ -1703,7 +1836,14 @@ function PadY()
     if (bBusy)
         return;
     if (bPageOpen == false)
+    {
+        if (bZoomed)
+            return;
+        if (bLibraryOpen)
+            return;
+        HubButton("y");
         return;
+    }
     if (PageKind(sPage) == "titles")
     {
         if (nListCount == 0)

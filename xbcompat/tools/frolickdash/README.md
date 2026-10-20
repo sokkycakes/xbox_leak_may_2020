@@ -191,6 +191,21 @@ functionality added back into it", starting with game data management
 and launching games) comes from the dashboard's own code, compiled in
 unchanged, and only the script and two small nodes are Frolick's:
 
+  The tiles' buttons work from the hub (sokky 2026-10-20: the glyph on a
+  tile is the button that opens it; the press first flies to the pad's
+  focus view, then opens the page; `HubButton` in genhub.py).  Library:
+  Start launches the disc or game card at once, X opens Recent Games
+  (`page_recent`, the games launched most recently: GameCollection
+  writes each launch's key to T:\recent.txt and `GetRecentCount` /
+  `GetRecentGame` list the scanned games those keys name, newest first;
+  A or Start plays one), Y opens Favorite Games (`page_favorites`, an
+  empty Blades list until favorites exist).  Catalog: Start the
+  Marketplace, X (spotlight) its hot list, Y (downloads) its download
+  history.  Settings: Start the settings menu, X (quick panel) and Y
+  (video) the console settings with Display first.  The Blades scenes
+  stand in until the real pages exist.  The library's label hides on
+  its pages (the belt camera leaves it small and far off), the pages'
+  own header serving as the title.
   The library pad's own game tile shows the disc or game card that is
   in (cover, name, publisher, Start; the publisher is the title ID's
   two-letter code named through the XboxDev wiki's table in

@@ -72,6 +72,8 @@ public:
     CStrObject* GetGameTitleID(int nGame);
     CStrObject* GetGamePlatform(int nGame);
     CStrObject* GetGamePublisher(int nGame);
+    int GetRecentCount();
+    int GetRecentGame(int n);
     CStrObject* GetGameRuntime(int nGame);
     CStrObject* GetGameInfo(int nGame);
     CStrObject* GetSavedGames(int nGame);
@@ -111,6 +113,8 @@ START_NODE_FUN(CGameCollection, CNode)
     NODE_FUN_SI(GetGameTitleID)
     NODE_FUN_SI(GetGamePlatform)
     NODE_FUN_SI(GetGamePublisher)
+    NODE_FUN_IV(GetRecentCount)
+    NODE_FUN_II(GetRecentGame)
     NODE_FUN_SI(GetGameRuntime)
     NODE_FUN_SI(GetGameInfo)
     NODE_FUN_SI(GetSavedGames)
@@ -942,6 +946,113 @@ int CGameCollection::SelectGameImage(int nGame)
     return 1;
 }
 
+// ---- recently played ------------------------------------------------------
+// The library pad's X: the games launched most recently, newest first.
+// Each launch writes its game's key to the front of T:\recent.txt (one key
+// a line, an XBE's title ID or a cart's Id, 20 at most); the list is the
+// scanned games those keys name, in that order.
+
+#define RECENT_MAX 20
+static const CHAR c_szRecentFile[] = "T:\\recent.txt";
+
+static void GameKey(const GAMEINFO* pGame, CHAR* sz, int cch)
+{
+    if (pGame->m_bXbox || pGame->m_szId[0] == 0)
+        _snprintf(sz, cch, "%08X", pGame->m_dwTitleID);
+    else
+        _snprintf(sz, cch, "%s", pGame->m_szId);
+    sz[cch - 1] = 0;
+}
+
+static int ReadRecent(CHAR rgsz[RECENT_MAX][64])
+{
+    int n = 0;
+    HANDLE hFile = CreateFileA(c_szRecentFile, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (hFile == INVALID_HANDLE_VALUE)
+        return 0;
+    CHAR szBuf [RECENT_MAX * 64 + 1];
+    DWORD cb = 0;
+    ReadFile(hFile, szBuf, sizeof (szBuf) - 1, &cb, NULL);
+    CloseHandle(hFile);
+    szBuf[cb] = 0;
+    CHAR* pch = szBuf;
+    while (*pch != 0 && n < RECENT_MAX)
+    {
+        CHAR* pchEnd = pch;
+        while (*pchEnd != 0 && *pchEnd != '\n' && *pchEnd != '\r')
+            pchEnd += 1;
+        int cch = pchEnd - pch;
+        if (cch > 0 && cch < 64)
+        {
+            memcpy(rgsz[n], pch, cch);
+            rgsz[n][cch] = 0;
+            n += 1;
+        }
+        while (*pchEnd == '\n' || *pchEnd == '\r')
+            pchEnd += 1;
+        pch = pchEnd;
+    }
+    return n;
+}
+
+static void RecordLaunch(const GAMEINFO* pGame)
+{
+    CHAR rgsz [RECENT_MAX][64];
+    CHAR szKey [64];
+    GameKey(pGame, szKey, sizeof (szKey));
+    int n = ReadRecent(rgsz);
+    HANDLE hFile = CreateFileA(c_szRecentFile, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+    if (hFile == INVALID_HANDLE_VALUE)
+        return;
+    DWORD cb;
+    WriteFile(hFile, szKey, strlen(szKey), &cb, NULL);
+    WriteFile(hFile, "\r\n", 2, &cb, NULL);
+    int kept = 1;
+    for (int i = 0; i < n && kept < RECENT_MAX; i += 1)
+    {
+        if (strcmp(rgsz[i], szKey) == 0)
+            continue;
+        WriteFile(hFile, rgsz[i], strlen(rgsz[i]), &cb, NULL);
+        WriteFile(hFile, "\r\n", 2, &cb, NULL);
+        kept += 1;
+    }
+    CloseHandle(hFile);
+}
+
+static int c_rgRecent [RECENT_MAX];
+static int c_nRecent;
+
+// The recently played games among those the last Scan found, newest first.
+int CGameCollection::GetRecentCount()
+{
+    CHAR rgsz [RECENT_MAX][64];
+    CHAR szKey [64];
+    int n = ReadRecent(rgsz);
+    c_nRecent = 0;
+    for (int i = 0; i < n; i += 1)
+    {
+        for (int g = 0; g < c_nGameCount; g += 1)
+        {
+            if (c_rgGames[g].m_szName[0] == 0)
+                continue;
+            GameKey(&c_rgGames[g], szKey, sizeof (szKey));
+            if (strcmp(szKey, rgsz[i]) == 0)
+            {
+                c_rgRecent[c_nRecent++] = g;
+                break;
+            }
+        }
+    }
+    return c_nRecent;
+}
+
+int CGameCollection::GetRecentGame(int n)
+{
+    if (n < 0 || n >= c_nRecent)
+        return -1;
+    return c_rgRecent[n];
+}
+
 void CGameCollection::LaunchGame(int nGame)
 {
     if (nGame < 0 || nGame >= c_nGameCount || !c_rgGames[nGame].m_bXbox)
@@ -950,6 +1061,7 @@ void CGameCollection::LaunchGame(int nGame)
     // D: is the game's directory (XLaunchNewImage keeps D:'s mapping across
     // the reboot): CDROM0:, CARD0: and E: as device paths.
     const GAMEINFO* pGame = &c_rgGames[nGame];
+    RecordLaunch(pGame);
     CHAR szTarget [MAX_PATH];
     if (pGame->m_nKind == KIND_DISC)
         strcpy(szTarget, "\\Device\\CdRom0");

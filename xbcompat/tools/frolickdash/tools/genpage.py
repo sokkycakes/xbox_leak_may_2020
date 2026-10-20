@@ -139,6 +139,16 @@ PAGES = [
     ("page_memory_saves", dict(scene="Items.xui", pad="settings", first="list_items_0", parent="page_memory_titles",
                                header="Saved Games", visual="list_twoline-icon", dynamic="saves",
                                labels={"legend_y": "Delete", "txt_EmptyList": "No saved games."})),
+    # The library pad's X and Y on the hub (sokky 2026-10-20): recent games
+    # = the games launched most recently (GameCollection records each
+    # launch in T:\recent.txt), favorites not built yet, so an empty Blades
+    # list stands in.  The hub fills them (kind "recent" / "favorites").
+    ("page_recent", dict(scene="Items.xui", pad="library", first="list_items_0", parent="",
+                         header="Recent Games", visual="list_twoline-icon", dynamic="recent",
+                         labels={"legend_y": "", "legend_a": "Play", "txt_EmptyList": "No games played yet."})),
+    ("page_favorites", dict(scene="Items.xui", pad="library", first="list_items_0", parent="",
+                            header="Favorite Games", visual="list_twoline-icon", dynamic="favorites",
+                            labels={"legend_y": "", "txt_EmptyList": "Favorites are not available yet."})),
     ("page_memory_actions", dict(scene=None, pad="settings", first="btnCopy", parent="page_memory_saves", header="Saved Game",
                                  items=[("btnCopy", "Copy", ""), ("btnMove", "Move", ""), ("btnDelete", "Delete", "")])),
     ("page_memory_dest", dict(scene="DeviceSelector.xui", pad="settings", first="list_devices_0", parent="page_memory_actions",
