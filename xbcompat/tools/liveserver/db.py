@@ -42,6 +42,18 @@ class Db:
     def sg_key(self):
         return self._key('sg')
 
+    def add_console(self, path):
+        """Know an xbcompat install's console by its <hdd>/console-id (serial
+        and online key): retail clients go to MACS as <serial>@MACS.XBOX.COM,
+        pre-authenticated with the console's own online key."""
+        ident = dict(line.split(None, 1) for line in open(path).read().split('\n') if ' ' in line)
+        serial, key = ident['serial'].strip(), ident['online-key'].strip()
+        with self.lock:
+            if self.d['consoles'].get(serial) != key:
+                self.d['consoles'][serial] = key
+                self.save()
+        return serial
+
     def online_key(self, serial):
         k = self.d['consoles'].get(serial)
         return bytes.fromhex(k) if k else None

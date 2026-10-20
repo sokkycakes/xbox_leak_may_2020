@@ -77,9 +77,16 @@ def main():
     ap.add_argument('--dns-port', type=int, default=5353)
     ap.add_argument('--upstream-dns', default='8.8.8.8')
     ap.add_argument('--db', default=os.path.expanduser('~/.xbcompat-live.json'))
+    ap.add_argument('--console-id', action='append', default=[], metavar='FILE',
+                    help="an xbcompat hdd's console-id, so that console can sign in (repeatable)")
     args = ap.parse_args()
 
     db = dbmod.Db(args.db)
+    for path in args.console_id:
+        try:
+            log(f'console {db.add_console(path)} from {path}')
+        except (OSError, KeyError) as e:
+            log(f'no console from {path}: {e!r}')
     site = socket.inet_aton(args.address)
     kdc = kdcmod.Kdc(db, site, sgmod.SERVICE_PORT, log)
     dns = Dns(site, (args.upstream_dns, 53))

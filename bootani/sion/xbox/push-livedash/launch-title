@@ -15,10 +15,18 @@ X=/opt/xbcompat
 
 case $1 in
 */xodash/xonlinedash.xbe)
+	# The server has to know this console (its serial and online key, in
+	# the hdd's console-id) for the retail dashboard to sign in.
+	hdd=/data/xbox/hdd
+	prev=
+	for a in "$@"; do
+		[ "$prev" = --hdd ] && hdd=$a
+		prev=$a
+	done
 	PID=/var/run/xbox-live-server.pid
 	if ! { [ -s $PID ] && kill -0 "$(cat $PID)" 2> /dev/null; }; then
 		PYTHONHOME=$X PYTHONDONTWRITEBYTECODE=1 setsid "$X/bin/python3" "$L/liveserver/liveserver.py" \
-			--db "$L/live.json" > /var/log/xbox-live-server.log 2>&1 < /dev/null &
+			--db "$L/live.json" --console-id "$hdd/console-id" > /var/log/xbox-live-server.log 2>&1 < /dev/null &
 		echo $! > $PID
 		sleep 1
 	fi
@@ -35,7 +43,7 @@ case $1 in
 	done
 	mkdir -p /tmp/xbox-live-notray
 	export XBCOMPAT_DNS=127.0.0.1:5353 XBCOMPAT_RESET=1
-	exec "$L/bin/xbcompat" --hle "$L/xodash.hlemap" --net nat --dvd /tmp/xbox-live-notray "$@" "$image"
+	exec "$L/bin/xbcompat" --log /var/log/xbox-live-trace.log --hle "$L/xodash.hlemap" --net nat --dvd /tmp/xbox-live-notray "$@" "$image"
 	;;
 esac
 next=${XBOX_LIVE_NEXT_LAUNCHER:-$X/bin/python3 $X/tools/xbrun.py}
