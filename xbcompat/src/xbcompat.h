@@ -223,6 +223,21 @@ bool reset_enabled(void);
 void reset_request(const char *why);
 void reset_check(void);
 void xinput_check_reset_combo(void);
+/* The Guide overlay (src/guide): xinput_guide_read() gives the pads' combined
+   state as GUIDE_* bits plus the port that pressed last; xinput_guide_mask()
+   hides the pads from the title while the Guide is open (and until every
+   button is let go after it closes). */
+#define GUIDE_A 0x100
+#define GUIDE_B 0x200
+#define GUIDE_X 0x400
+#define GUIDE_Y 0x800
+#define GUIDE_LT 0x1000
+#define GUIDE_RT 0x2000
+#define GUIDE_HOME 0x4000
+unsigned xinput_guide_read(int *port);
+void xinput_guide_mask(bool on);
+void ds_set_duck(float gain);
+void reset_request_always(const char *why);
 
 /* ---- loader ----------------------------------------------------------- */
 
@@ -235,6 +250,7 @@ typedef struct {
 
 void xbe_load(const char *path, xbe_image *img);
 ULONG xbe_title_id(void);
+const char *xbe_title_name(void);
 void xbe_reload_section(ULONG va, ULONG raw_offset, ULONG raw_size, ULONG virtual_size);
 void kernel_resolve_imports(xbe_image *img);
 void kernel_init(void);

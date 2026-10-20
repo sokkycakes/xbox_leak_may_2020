@@ -88,6 +88,26 @@ endif
 endif
 SRC      = src/main.c src/log.c src/prof.c src/loader.c src/memory.c src/thread.c $(KERNSRC) $(HLESRC)
 OBJ      = $(SRC:%.c=$(BUILD)/%.o)
+# The Guide overlay (src/guide, C++98 with no C++ library) on the frolickdash
+# XUI runtime; the native renderer builds leave it out (d3d8.c's hook is weak).
+XUIDIR   = tools/frolickdash/xui
+ifneq ($(RENDERER),native)
+GUIDESRC = src/guide/guide.cpp $(XUIDIR)/xui_parse.cpp $(XUIDIR)/xui_scene.cpp $(XUIDIR)/xui_draw.cpp $(XUIDIR)/xui_classes.cpp
+OBJ     += $(GUIDESRC:%.cpp=$(BUILD)/%.o)
+endif
+ifeq ($(TARGET),armhf)
+CXX      = $(CROSS)g++
+CXXARCH  = -fsigned-char -mfpu=vfpv4
+else
+CXX      = g++
+CXXARCH  = -m32 -mstackrealign
+endif
+CXXFLAGS = $(CXXARCH) -O2 -g -std=c++98 -fno-exceptions -fno-rtti -fno-pie -fno-omit-frame-pointer \
+           -D_snprintf=snprintf -Wno-misleading-indentation -I$(XUIDIR) -Isrc \
+           $(shell $(PKGCFG) --cflags sdl2 $(GL))
+$(BUILD)/%.o: %.cpp $(XUIDIR)/xui.h
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
 ifeq ($(RENDERER),native)
 ifeq ($(TARGET)$(CPU),armhfxlat)
 RBUILD = $(BUILD)/renderer

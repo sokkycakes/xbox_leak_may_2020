@@ -41,6 +41,15 @@ void reset_request(const char *why)
     __atomic_store_n(&requested, 1, __ATOMIC_SEQ_CST);
 }
 
+/* The Guide's Xbox Dashboard item: asked for by the user, so it works
+   whatever XBCOMPAT_RESET says. */
+void reset_request_always(const char *why)
+{
+    if (requested) return;
+    xlog("soft reset (%s): back to the dashboard", why);
+    __atomic_store_n(&requested, 1, __ATOMIC_SEQ_CST);
+}
+
 static void leave(void)
 {
     av_hand_over();

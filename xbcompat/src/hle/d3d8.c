@@ -1234,9 +1234,11 @@ static void swap_begin_frame(void)
 }
 
 /* The GPU's part: the frame goes to the screen. */
+static void guide_overlay(void);
+
 static void swap_present(void)
 {
-    TIMED_CPU(t_present, c_present, present_window_framebuffer(); cpu_block(); DETAIL_TIMED(t_swap, SDL_GL_SwapWindow(d3d.window));
+    TIMED_CPU(t_present, c_present, present_window_framebuffer(); guide_overlay(); cpu_block(); DETAIL_TIMED(t_swap, SDL_GL_SwapWindow(d3d.window));
           DETAIL_TIMED(t_restore, restore_window_framebuffer()));
     restore_overlay();
     pace_present();
@@ -6997,6 +6999,33 @@ static void present_window_framebuffer(void)
     p_glUseProgram(prev_prog);
     glPopAttrib();
     if (filter_start) t_filter += now_ns() - filter_start;
+}
+
+/* The Guide (src/guide) draws over the finished frame, in window pixels,
+   just before the swap.  Weak: builds without it (the native renderer
+   library) skip it. */
+__attribute__((weak)) bool guide_frame(int w, int h);
+__attribute__((weak)) void guide_draw(int w, int h);
+
+static void guide_overlay(void)
+{
+    if (!guide_frame || !guide_frame(window_fb.w, window_fb.h)) return;
+    glPushAttrib(GL_ALL_ATTRIB_BITS);
+    glPushClientAttrib(GL_CLIENT_ALL_ATTRIB_BITS);
+    window_fb.bind(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, window_fb.w, window_fb.h);
+    gc_bind_buffer(GL_ARRAY_BUFFER, 0);
+    gc_bind_buffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+    gc_disable_attrib_arrays();
+    p_glActiveTexture(GL_TEXTURE0);
+    GLuint samplers[2] = { bound_sampler[0], bound_sampler[1] };
+    if (separate_samplers) bind_stage_sampler(0, 0);
+    p_glUseProgram(0);
+    guide_draw(window_fb.w, window_fb.h);
+    if (separate_samplers) bind_stage_sampler(0, samplers[0]), bind_stage_sampler(1, samplers[1]);
+    glPopClientAttrib();
+    glPopAttrib();
+    p_glUseProgram(cur_program);
 }
 
 static void restore_window_framebuffer(void)

@@ -18,8 +18,10 @@ static const struct { const char *kind; ULONG ep, kt; } keys[] = {
 
 static char *xbe_path;
 static ULONG title_id;
+static char title_name[41];
 
 ULONG xbe_title_id(void) { return title_id; }
+const char *xbe_title_name(void) { return title_name; }
 
 /* XeLoadSection on a section nobody holds: the console reads it from disk
    again, so whatever the title changed in place since (fixed-up resource
@@ -91,6 +93,7 @@ void xbe_load(const char *path, xbe_image *img)
     char title[41];
     for (int i = 0; i < 40; i++) title[i] = (char)cert->TitleName[i];
     title[40] = 0;
+    memcpy(title_name, title, sizeof title_name);
     xlog("loaded \"%s\" (title %08X, %s key), entry %#x", title, cert->TitleID, kind,
          h->AddressOfEntryPoint);
     /* XBCOMPAT_TRACE=1 traces every title; =game every title but the

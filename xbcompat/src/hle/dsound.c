@@ -1141,6 +1141,33 @@ static void mix_voices(struct dsmix_job *job)
 
 /* Mix one block of n frames into out (zeroed here).  Called from the audio
    thread, the clock thread, or a test. */
+/* The Guide overlay turns the game down while it is open (ds_set_duck from
+   any thread; the mixer ramps to it across a block, so there is no click). */
+static uint32_t duck_bits = 0x3F800000u; /* 1.0f */
+static float duck_now = 1.0f;
+
+void ds_set_duck(float gain)
+{
+    uint32_t b;
+    memcpy(&b, &gain, 4);
+    __atomic_store_n(&duck_bits, b, __ATOMIC_RELAXED);
+}
+
+static void duck_block(float *out, int n)
+{
+    uint32_t b = __atomic_load_n(&duck_bits, __ATOMIC_RELAXED);
+    float target;
+    memcpy(&target, &b, 4);
+    if (target == 1.0f && duck_now == 1.0f) return;
+    float step = (target - duck_now) / (float)n;
+    for (int i = 0; i < n; i++) {
+        float k = duck_now + step * (float)(i + 1);
+        out[2 * i] *= k;
+        out[2 * i + 1] *= k;
+    }
+    duck_now = target;
+}
+
 void ds_mix_block(float *out, int n)
 {
     for (; n > MIX_FRAMES; n -= MIX_FRAMES, out += 2 * MIX_FRAMES) ds_mix_block(out, MIX_FRAMES);
@@ -1208,6 +1235,7 @@ void ds_mix_block(float *out, int n)
         struct ds_entry *e = &g.objs[i];
         if (e->kind == DS_BUFFER && ((struct ds_buffer *)e->obj)->sub) render_submix(e->obj, out, n);
     }
+    duck_block(out, n);
     float peak = 0;
     for (int i = 0; i < 2 * n; i++) {
         float a = fabsf(out[i]);
