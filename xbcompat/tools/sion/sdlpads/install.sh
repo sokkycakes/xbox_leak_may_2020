@@ -11,8 +11,15 @@ cd "$(dirname "$0")"
 for r in "" /data/overlay; do
 	L=$r/opt/xbcompat/lib
 	[ -d "$L" ] || continue
-	[ -f $L/libSDL2-2.0.so.0 ] && [ ! -f $L/libSDL2-2.0.so.0.pre-sdlpads ] &&
-		cp $L/libSDL2-2.0.so.0 $L/libSDL2-2.0.so.0.pre-sdlpads
+	# No SDL2 here before (the overlay often has none): remember that, so
+	# uninstall.sh removes ours instead of restoring a backup.
+	if [ ! -f $L/libSDL2-2.0.so.0.pre-sdlpads ] && [ ! -f $L/.sdlpads-added ]; then
+		if [ -f $L/libSDL2-2.0.so.0 ]; then
+			cp $L/libSDL2-2.0.so.0 $L/libSDL2-2.0.so.0.pre-sdlpads
+		else
+			touch $L/.sdlpads-added
+		fi
+	fi
 	for f in libSDL2-2.0.so.0 libusb-1.0.so.0; do
 		cp $f $L/$f.new && chmod 755 $L/$f.new && mv $L/$f.new $L/$f
 	done
