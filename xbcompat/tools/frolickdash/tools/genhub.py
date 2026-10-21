@@ -527,6 +527,15 @@ DEF sndClose AudioClip { url "blades_close.wav" volume 1 }
 DEF sndPageOpen AudioClip { url "blades_page_open.wav" volume 1 }
 DEF sndPageClose AudioClip { url "blades_page_close.wav" volume 1 }
 
+// The menu ambience (sokky 2026-10-21, menu_music.mp3, 11.5 minutes):
+// looped under the menus from start-up, at the track's own (quiet)
+// level.  It is an Xbox ADPCM WAV (tools/xbadpcm.c, 34 MB), which the
+// engine streams from the file (CFilePump, anything over 64 KB) and wraps
+// to the start at the end.  A launch fades it out over the hub's fade
+// (volume is attenuation in dB here: 1 - volume = hundreds of dB) and
+// stops it; Frolick comes back as a fresh start, music and all.
+DEF sndMusic AudioClip { url "menu_music.wav" loop true pause_on_moving false volume 1 }
+
 DEF theLaunchLevel Level
 {
     function OnActivate()
@@ -547,6 +556,17 @@ DEF theLaunchLevel Level
         // the launch waits for the sound to end as well, or for 10 s if
         // the sound never reports its end)
         sleep 0.05;
+        if (bMusicFade)
+        {
+            nMusicVol = nMusicVol - 0.07;
+            if (nMusicVol <= 0)
+            {
+                bMusicFade = false;
+                sndMusic.Stop();
+            }
+            else
+                sndMusic.volume = nMusicVol;
+        }
         if (bLaunching)
         {
             nLaunchWait = nLaunchWait + 1;
@@ -1019,6 +1039,8 @@ function LaunchGameWithLogo(n)
     nLaunchGame = n;
     bLaunchSoundDone = false;
     nLaunchWait = 0;
+    nMusicVol = 1;
+    bMusicFade = true;
     theLaunchSound.Play();
     if (theLaunchSound.transportMode != 1)   // no sound: don't wait for it
         bLaunchSoundDone = true;
@@ -1334,6 +1356,8 @@ function SetPadAlpha(pad, a)
 // the hub's own A prompt gives way to the page's legend.
 var sPage;      // the page on thePage
 var sPendingPage; // the page a hub button opens once the focus flight lands
+var bMusicFade;     // the menu music is fading out for a launch
+var nMusicVol;      // its volume while it fades
 
 function OpenPage()
 {
@@ -1519,6 +1543,9 @@ function initialize()
     nLaunchWait = 0;
     nDlTick = 0;
     nDlItem = 0;
+    bMusicFade = false;
+    nMusicVol = 1;
+    sndMusic.Play();
     // the A pin's idle pulse: a small dip every PIN_PULSE_PERIOD seconds
     theOverlay.Pulse("promptA", %(pin_pulse_dy)s, %(pin_pulse_period)s, %(pin_pulse_dur)s);
     UpdateLibraryTile();

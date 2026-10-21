@@ -2,14 +2,14 @@
 # Installs the Frolick dashboard (built on the leak's dashboard engine) in
 # place of the Xbox dashboard on this Sion, from the files copied to /tmp:
 # xboxdash.xbe, xboxdash.map (its HLE symbol map), default.xip and the
-# sounds (launch.wav, woosh.wav, blades_*.wav).  The
+# sounds (launch.wav, woosh.wav, blades_*.wav, menu_music.wav).  The
 # copies being replaced are kept as *.pre-frolick; revert-frolick.sh puts
 # them back.  xbcompat itself and the other .xip files are not touched.
 /etc/init.d/S98xbox stop >/dev/null
 sleep 2
 D=/opt/xbcompat/dash
 keep=""
-SOUNDS="launch.wav woosh.wav blades_focus.wav blades_select.wav blades_back.wav blades_open.wav blades_close.wav blades_page_open.wav blades_page_close.wav"
+SOUNDS="launch.wav woosh.wav blades_focus.wav blades_select.wav blades_back.wav blades_open.wav blades_close.wav blades_page_open.wav blades_page_close.wav menu_music.wav"
 for f in xboxdash.xbe xboxdash.map default.xip $SOUNDS; do
   [ -f "$D/$f" ] && [ ! -f "$D/$f.pre-frolick" ] && cp "$D/$f" "$D/$f.pre-frolick"
   keep="$keep $D/$f.pre-frolick"

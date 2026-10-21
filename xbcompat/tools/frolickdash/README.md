@@ -233,6 +233,13 @@ unchanged, and only the script and two small nodes are Frolick's:
   belt, 3rdLevelOpen/Close for a page over a page.  AudioClip nodes
   (`snd*` in genhub.py) read them as loose files beside the XBE, like
   launch.wav; the kits carry them.
+  The menu ambience (sokky's `menu_music.mp3`, 11 min 30 s) loops under
+  the menus from start-up at the track's own level and fades out over
+  the hub's fade when a game launches.  It is `art/sounds/menu_music.wav`,
+  Xbox ADPCM (format 0x69, 4:1, 34 MB at 44.1 kHz stereo) made by
+  `tools/xbadpcm.c`, an encoder that mirrors xbcompat's decoder
+  (47 dB SNR against the source); the engine streams any WAV over 64 KB
+  from its file (CFilePump) and wraps to the start at the end.
   The library pad's own game tile shows the disc or game card that is
   in (cover, name, publisher, Start; the publisher is the title ID's
   two-letter code named through the XboxDev wiki's table in
