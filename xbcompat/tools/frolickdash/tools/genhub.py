@@ -511,6 +511,22 @@ DEF theLaunchSound AudioClip
     function OnEndOfAudio() { bLaunchSoundDone = true; }
 }
 
+// The UI sounds (sokky 2026-10-21): Frolick's own woosh (frolick_assets
+// woosh111.ogg) for moving pad to pad, the Xbox 360 Blades dashboard's
+// sounds for everything else (xam shrdres btn_Focus / btn_Select /
+// btn_Back; dashmain's 2ndLevelOpen/Close for the pad focus and the belt,
+// 3rdLevelOpen/Close for a page over a page), decoded from XMA to WAV in
+// art/sounds/, loose files beside the XBE like launch.wav.  Stop() before
+// Play() so a sound retriggers from its start.
+DEF sndWoosh AudioClip { url "woosh.wav" volume 1 }
+DEF sndFocus AudioClip { url "blades_focus.wav" volume 1 }
+DEF sndSelect AudioClip { url "blades_select.wav" volume 1 }
+DEF sndBack AudioClip { url "blades_back.wav" volume 1 }
+DEF sndOpen AudioClip { url "blades_open.wav" volume 1 }
+DEF sndClose AudioClip { url "blades_close.wav" volume 1 }
+DEF sndPageOpen AudioClip { url "blades_page_open.wav" volume 1 }
+DEF sndPageClose AudioClip { url "blades_page_close.wav" volume 1 }
+
 DEF theLaunchLevel Level
 {
     function OnActivate()
@@ -789,6 +805,15 @@ DEF theHub Level
     }
 }
 
+function SndWoosh() { sndWoosh.Stop(); sndWoosh.Play(); }
+function SndFocus() { sndFocus.Stop(); sndFocus.Play(); }
+function SndSelect() { sndSelect.Stop(); sndSelect.Play(); }
+function SndBack() { sndBack.Stop(); sndBack.Play(); }
+function SndOpen() { sndOpen.Stop(); sndOpen.Play(); }
+function SndClose() { sndClose.Stop(); sndClose.Play(); }
+function SndPageOpen() { sndPageOpen.Stop(); sndPageOpen.Play(); }
+function SndPageClose() { sndPageClose.Stop(); sndPageClose.Play(); }
+
 // Left and right fly to the next pad; the tiles inside a panel are not
 // navigated (sokky: the pads are the choices, not the tiles), so up and
 // down do nothing on the hub.
@@ -806,6 +831,8 @@ function PadMove(dir, step)
         {
             if (thePage.Navigate(dir) == 0)
                 PageScroll(dir);
+            else
+                SndFocus();
         }
         return;
     }
@@ -817,6 +844,8 @@ function PadMove(dir, step)
                 return;
             if (thePage.Navigate(dir) == 0)
                 PageScroll(dir);
+            else
+                SndFocus();
             return;
         }
         // the belt: left scrolls it right (Belt_Right), right scrolls it left
@@ -824,6 +853,8 @@ function PadMove(dir, step)
             theBelt.Step(0 - 1);
         else if (step > 0)
             theBelt.Step(1);
+        if (step != 0)
+            SndFocus();
         return;
     }
 
@@ -847,7 +878,10 @@ function PadPress()
         if (bBusy)
             return;
         if (bPageOpen)
+        {
+            SndSelect();
             thePage.Press();
+        }
         return;
     }
     if (bLibraryOpen)
@@ -857,6 +891,7 @@ function PadPress()
         {
             if (bBusy)
                 return;
+            SndSelect();
             thePage.Press();
             return;
         }
@@ -1072,7 +1107,10 @@ function PadX()
     if (bPageOpen)
     {
         if (PageKind(sPage) == "downloads")
+        {
+            SndSelect();
             DlRemove();
+        }
         return;
     }
     if (bZoomed)
@@ -1101,6 +1139,8 @@ function OpenGamePage()
     if (theGameCollection.IsPlayable(sel - 1) == 0)
         return;
     nGame = sel - 1;
+    SndSelect();
+    SndPageOpen();
     bPageOpen = true;
     ShowBeltHints(0);
     theOverlay.Fade("promptA", 0, %(pin_fade_out)s);
@@ -1193,6 +1233,7 @@ function ShowBeltHints(on)
 function CloseLibrary()
 {
     bMoving = true;
+    SndClose();
     bLibraryOpen = false;
     SetPadAlpha(1, 1);
     theZoomer.GoTo(vpLibrary);
@@ -1220,6 +1261,7 @@ function ZoomIn()
 {
     bMoving = true;
     bZoomed = true;
+    SndOpen();
     SetPadAlpha(nPad, 0);
     LabelFocus(1);
     if (nPad == 0)
@@ -1243,6 +1285,8 @@ function PadBack()
             // the game's page, or a Memory page reached from it
             if (PageBack() == 1)
                 return;
+            SndBack();
+            SndPageClose();
             ClosePage();
             ShowBeltHints(1);
             return;
@@ -1261,6 +1305,7 @@ function PadBack()
     }
     bMoving = true;
     bZoomed = false;
+    SndClose();
     SetPadAlpha(nPad, 1);
     LabelFocus(0);
     if (nPad == 0)
@@ -1378,6 +1423,8 @@ function PageBack()
         parent = PageParent(sPage);
     if (parent == "")
         return 0;
+    SndBack();
+    SndPageClose();
     ShowPage(parent, "Fade");
     return 1;
 }
@@ -1409,6 +1456,7 @@ function PagePress(id)
     target = PageTarget(sPage, id);
     if (target == "")
         return;     // no page behind this item yet: the bar's Press frame plays and that is all
+    SndPageOpen();
     ShowPage(target, "Fade");
 }
 
@@ -1417,6 +1465,7 @@ function PagePress(id)
 function GoPad(n)
 {
     bMoving = true;
+    SndWoosh();
     theOverlay.Fade("promptA", 0, %(pin_fade_out)s);
     SetPadAlpha(nPad, 0);
     nPad = n;
@@ -1726,6 +1775,7 @@ function PageScroll(dir)
             nScroll = nScroll + 1;
             nSel = nSel + 1;
             FillPage();
+            SndFocus();
         }
     }
     else if (dir == "up")
@@ -1735,6 +1785,7 @@ function PageScroll(dir)
             nScroll = nScroll - 1;
             nSel = nSel - 1;
             FillPage();
+            SndFocus();
         }
     }
 }
@@ -1905,6 +1956,7 @@ function PadY()
             return;
         nTitle = nSel;
         sAction = "deleteall";
+        SndSelect();
         Confirm("Delete all data for " + theStorage.GetTitleName(nTitle) + "?", "page_memory_titles");
     }
     else if (PageKind(sPage) == "saves")
@@ -1913,6 +1965,7 @@ function PadY()
             return;
         nSave = nSel;
         sAction = "delete";
+        SndSelect();
         Confirm("Delete " + theStorage.GetSaveName(nSave) + "?", "page_memory_saves");
     }
 }

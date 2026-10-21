@@ -12,5 +12,5 @@ if [ "$1" = revert ]; then
 	exit
 fi
 echo "Copying to the Sion ($HOST)..."
-scp $OPT xboxdash.xbe xboxdash.map default.xip launch.wav install-frolick.sh "$HOST:/tmp/" || { echo 'Copy failed: is the Sion on and on the network?'; exit 1; }
+scp $OPT xboxdash.xbe xboxdash.map default.xip *.wav install-frolick.sh "$HOST:/tmp/" || { echo 'Copy failed: is the Sion on and on the network?'; exit 1; }
 ssh $OPT "$HOST" 'sh /tmp/install-frolick.sh; rm -f /tmp/install-frolick.sh'

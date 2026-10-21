@@ -224,6 +224,15 @@ unchanged, and only the script and two small nodes are Frolick's:
   it shows the active download and four pending items.  The library's label hides on
   its pages (the belt camera leaves it small and far off), the pages'
   own header serving as the title.
+  Sounds (sokky 2026-10-21): Frolick's own woosh (`woosh111.ogg`) when
+  the camera moves pad to pad; the Xbox 360 Blades dashboard's sounds
+  for everything else, decoded from the dump's XMA to PCM WAV in
+  `art/sounds/`: btn_Focus for a focus move (lists, pages, the belt),
+  btn_Select for A (and X/Y actions on a page), btn_Back for B on a
+  page, dashmain's 2ndLevelOpen/Close for the pad focus zoom and the
+  belt, 3rdLevelOpen/Close for a page over a page.  AudioClip nodes
+  (`snd*` in genhub.py) read them as loose files beside the XBE, like
+  launch.wav; the kits carry them.
   The library pad's own game tile shows the disc or game card that is
   in (cover, name, publisher, Start; the publisher is the title ID's
   two-letter code named through the XboxDev wiki's table in
