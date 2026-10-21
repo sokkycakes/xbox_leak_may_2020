@@ -14,3 +14,6 @@ check them against the Sion's exports (read-only):
     comm -23 erofs.undef sion.exports
 
 An empty result means it will load. Load with `insmod erofs.ko`.
+
+To keep it across reboots: copy erofs.ko to /data/overlay/lib/modules/6.18.7/extra/;
+push-fuse's S06fuse loads it at boot when present.
