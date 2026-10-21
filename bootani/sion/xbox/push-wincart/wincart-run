@@ -308,7 +308,10 @@ if [ "${WINCART_AV:-1}" != 0 ] && [ -S "${XBOX_AV_SOCKET:-/var/run/xbox-av.sock}
 	sleep 0.3
 fi
 
-chroot $R /usr/bin/env -i PATH=/usr/bin XDG_RUNTIME_DIR=/run /usr/bin/seatd -g root > "$state/logs/seatd.log" 2>&1 &
+# SEATD_VTBOUND=0: seatd leaves the VT alone. Bound to it, seatd puts it back
+# in text mode when the run ends, and the console takes the screen (the tty and
+# a mode change) before xbox-av gets the display back.
+chroot $R /usr/bin/env -i PATH=/usr/bin XDG_RUNTIME_DIR=/run SEATD_VTBOUND=${WINCART_SEATD_VTBOUND:-0} /usr/bin/seatd -g root > "$state/logs/seatd.log" 2>&1 &
 seatdpid=$!
 for _ in 1 2 3 4 5 6 7 8 9 10; do [ -S $R/run/seatd.sock ] && break; sleep 0.2; done
 
