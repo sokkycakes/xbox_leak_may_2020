@@ -1,0 +1,15 @@
+--- fs/erofs/xz_microlzma.c (new)
+// SPDX-License-Identifier: 0BSD
+/* Sion: private copy of the MicroLZMA decoder, for kernels built without
+ * CONFIG_XZ_DEC_MICROLZMA. Symbols are renamed via ccflags in the Makefile. */
+#define XZ_DEC_MICROLZMA
+#include "../../lib/xz/xz_dec_lzma2.c"
+
+--- fs/erofs/Makefile (appended)
+# Sion: bundle MicroLZMA into the module under private names
+erofs-$(CONFIG_EROFS_FS_ZIP_LZMA) += xz_microlzma.o
+ccflags-$(CONFIG_EROFS_FS_ZIP_LZMA) += -Dxz_dec_microlzma_alloc=erofs_xzml_alloc \
+	-Dxz_dec_microlzma_reset=erofs_xzml_reset -Dxz_dec_microlzma_run=erofs_xzml_run \
+	-Dxz_dec_microlzma_end=erofs_xzml_end -Dxz_dec_lzma2_create=erofs_xzl2_create \
+	-Dxz_dec_lzma2_reset=erofs_xzl2_reset -Dxz_dec_lzma2_run=erofs_xzl2_run \
+	-Dxz_dec_lzma2_end=erofs_xzl2_end

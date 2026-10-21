@@ -81,7 +81,17 @@ static bool has_cart(const char *dir)
 
 /* The mounted game card, the way Kazeta finds one (find /media -maxdepth 2
    -name '*.kzi'); desktop automounters add a /run/media/<user> level. */
+static bool find_card_raw(char *out, size_t outlen);
+void wincart_shim(const char *card, char *out, size_t outlen);
+
 static bool find_card(char *out, size_t outlen)
+{
+    if (!find_card_raw(out, outlen)) return false;
+    wincart_shim(out, out, outlen);   /* Windows carts as stub Xbox titles (wincart.c) */
+    return true;
+}
+
+static bool find_card_raw(char *out, size_t outlen)
 {
     if (card_dir[0]) {
         snprintf(out, outlen, "%s", card_dir);
