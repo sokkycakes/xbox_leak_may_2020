@@ -892,21 +892,9 @@ CObject* CXuiPanel::SetValue(CObject** rgparam, int nParam)
     v.free();
     v.type = xui::TFloat;
     v.f = rgparam[1]->Deref()->ToNum()->m_nValue;
-    // the bar's visual is held at the frame the value picks between
-    // Normal and EndNormal (the scene set it so when it loaded; a value
-    // set later moves it)
-    if (n->visual != NULL && n->visual->timeline)
-    {
-        xui::Node* vis = n->visual;
-        float lo = xui::propN(n->props, "RangeMin", 0), hi = xui::propN(n->props, "RangeMax", 100);
-        float f = hi > lo ? (v.f - lo) / (hi - lo) : 0;
-        if (f < 0) f = 0;
-        if (f > 1) f = 1;
-        double a = vis->frameTime("Normal", 0), b = vis->frameTime("EndNormal", vis->lastKey());
-        vis->time = a + (b - a) * f;
-        vis->playing = false;
-        vis->apply();
-    }
+    // the bar's visual is held where the value puts it (the scene set it
+    // so when it loaded; a value set later moves it)
+    n->setBarValue();
     return NULL;
 }
 
