@@ -1531,12 +1531,17 @@ function SpotTabWrap(t)
     return w;
 }
 
-// the tab strip: the previous tab, the current one, the ones after it
+// the tab row: one strip per category, laid out for it (genpage)
 function SpotFillTabs()
 {
     var k;
-    for (k = 0; k < %(spot_tab_slots)s; k = k + 1)
-        thePage.SetText("tab_" + k, SpotTab(SpotTabWrap(nTab + k - 1)));
+    for (k = 0; k < SpotTabs(); k = k + 1)
+    {
+        if (k == nTab)
+            thePage.SetVisible("tabs_" + k, 1);
+        else
+            thePage.SetVisible("tabs_" + k, 0);
+    }
 }
 
 function SpotMeta()
@@ -1805,8 +1810,9 @@ function FillRow(r)
     }
     else if (k == "spotlight")
     {
-        // btn_twoline_left's one presenter: the name over its kind
-        thePage.SetText(id, SpotName(nTab, i) + "\n" + SpotKind(nTab, i));
+        // btn_twoline_spot: the name, its kind under it (Data3)
+        thePage.SetText(id, SpotName(nTab, i));
+        thePage.SetData(id, 3, SpotKind(nTab, i));
         return;
     }
     else if (k == "saves")
@@ -2401,7 +2407,6 @@ def main():
     vals["pin_pulse_dur"] = "%g" % PIN_PULSE_DUR
     import genpage
     vals["page_tables"] = genpage.script()
-    vals["spot_tab_slots"] = genpage.SPOT_TAB_SLOTS
     open(os.path.join(out, "default.xap"), "w").write(HUB % vals)
     open(os.path.join(pads, "overlay.xui"), "w").write(overlay_scene())
     catalog = open(os.path.join(pads, "catalog.xui")).read()

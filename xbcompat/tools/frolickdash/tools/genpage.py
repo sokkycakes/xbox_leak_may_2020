@@ -205,7 +205,8 @@ PAGES = [
     # them, its highlight following the focused row.  Y is Marketplace
     # Home.  Filled by the hub (kind "spotlight") from SPOTLIGHT below.
     ("page_spotlight", dict(scene="spotlight", pad="catalog", first="lstSpot_0", parent="", header="Spotlight",
-                            dynamic="spotlight", list="lstSpot", rows=4, legend_y="Marketplace Home")),
+                            dynamic="spotlight", list="lstSpot", rows=4 if os.environ.get("FROLICK_SPOT_BANNER", "0") == "1" else 5,
+                            legend_y="Marketplace Home")),
     ("page_store_games", dict(scene="1412_GameListScene.xui", pad="catalog", first="lstGames_0", parent="page_market",
                               header="Game Downloads", lists={"lstGames": GAMES}, hide=["btnX"],
                               labels={"labItemCount": "%d items" % min(len(GAMES), 8)})),
@@ -230,7 +231,6 @@ SPOTLIGHT = [
     ("Themes", [("Frolick", "Theme", ""), ("Sion", "Theme", "")]),
     ("Free Stuff", [(g, "Gamer Picture", "") for g in SPOT_GAMES[1:4]]),
 ]
-SPOT_TAB_SLOTS = 6     # the previous tab, the current one and four after it (the strip wraps)
 
 
 def rect(w, h):
@@ -295,7 +295,7 @@ def track(id, prop, keys):
 
 # The visuals whose text follows focus: the buttons and list items.
 ITEM_VISUALS = ("XuiButton", "btn_oneline_icon", "btn_twoline-icon", "btn_twoline-status", "btn_3Line_Icon_prgbr",
-                "ListItem_Fullwidth_3Icon_4String", "btn_1line_icon", "btn_twoline_left")
+                "ListItem_Fullwidth_3Icon_4String", "btn_1line_icon", "btn_twoline_left", "btn_twoline_spot")
 REST_STATES = ("Normal", "EndNormal", "NormalDisable", "EndNormalDisable", "NormalSelDisable", "EndNormalSelDisable")
 
 
@@ -338,6 +338,7 @@ def skin():
     # pulled the same way out of the later dash.xex's skin)
     mp = open(os.path.join(BLADES, "skin_mp.xui")).read()
     mp = mp[mp.find("<XuiVisual>"):mp.rfind("</XuiScene>")]
+    mp += spot_row_visual(mp) + spot_meta_visual(mp)
     s = s.replace("</XuiScene></XuiCanvas>", mp + "</XuiScene></XuiCanvas>")
     def fix(m):
         if m.group(1) in ITEM_VISUALS:
@@ -346,6 +347,45 @@ def skin():
         return m.group(0).replace("<TextColor>%s</TextColor>" % TEXT, "<TextColor>%s</TextColor>" % ITEM_REST)
     s = re.sub(r"<XuiVisual>\n<Properties>\n <Id>([^<]*)</Id>.*?</XuiVisual>", fix, s, flags=re.S)
     return s.replace("</XuiScene></XuiCanvas>", status_visual(s) + bar_visual() + "</XuiScene></XuiCanvas>")
+
+
+# Spotlight's row and meta pane, after the reference (sokky 2026-10-21):
+# the title one line at the row's text inset, the item's kind under it at
+# half opacity (Data3, so the visual's right-hand Data1 slot stays empty);
+# the meta pane's description lower, below its title and image bands.
+SPOT_TEXT_X = 82        # the reference's title inset (0.074 of its width over the list's 0.382)
+
+
+def spot_row_visual(mp):
+    v = re.search(r"<XuiVisual>\n<Properties>\n <Id>btn_twoline_left</Id>.*?</XuiVisual>", mp, flags=re.S).group(0)
+    v = v.replace("<Id>btn_twoline_left</Id>", "<Id>btn_twoline_spot</Id>", 1)
+    dx = SPOT_TEXT_X - 11.4615
+    def shift(m, dy=0.0):
+        x, y, z = [float(c) for c in m.group(1).split(",")]
+        return "<Prop>%g,%g,%g</Prop>" % (x + dx, y + dy, z)
+    pres = re.search(r"<XuiTextPresenter>\n<Properties>\n <Id>txt_line3</Id>.*?</XuiTextPresenter>", v, flags=re.S).group(0)
+    title = pres.replace("<Width>310.538</Width>", "<Width>%g</Width>" % (410 - SPOT_TEXT_X)).replace("<Height>56</Height>", "<Height>30</Height>")
+    title = title.replace("<Position>11.4615,6,0</Position>", "<Position>%g,6,0</Position>" % SPOT_TEXT_X)
+    title = title.replace("<TextStyle>16385</TextStyle>", "<TextStyle>%d</TextStyle>" % (16385 | 0x10))
+    kind = title.replace("<Id>txt_line3</Id>", "<Id>txt_kind</Id>").replace("<Position>%g,6,0</Position>" % SPOT_TEXT_X,
+                                                                         "<Position>%g,34,0</Position>" % SPOT_TEXT_X)
+    kind = kind.replace("</Properties>", " <Opacity>0.5</Opacity>\n <DataAssociation>3</DataAssociation>\n</Properties>")
+    v = v.replace(pres, title + "\n" + kind)
+    tl = re.search(r"<Timeline>\s*<Id>txt_line3</Id>.*?</Timeline>", v, flags=re.S).group(0)
+    t1 = re.sub(r"<Prop>([-\d.]+,[-\d.]+,[-\d.]+)</Prop>", shift, tl)
+    # the kind's track: the same motion 28 rows lower, at half the opacity
+    t2 = re.sub(r"<Prop>([-\d.]+,[-\d.]+,[-\d.]+)</Prop>", lambda m: shift(m, 28), tl)
+    t2 = re.sub(r"(<KeyFrame>.*?\n  <Prop>)([-\d.]+)(</Prop>)", lambda m: m.group(1) + "%g" % (float(m.group(2)) * 0.5) + m.group(3), t2)
+    t2 = t2.replace("<Id>txt_line3</Id>", "<Id>txt_kind</Id>", 1)
+    return v.replace(tl, t1 + "\n" + t2)
+
+
+def spot_meta_visual(mp):
+    v = re.search(r"<XuiVisual>\n<Properties>\n <Id>metaScene_2lineFocus_Long</Id>.*?</XuiVisual>", mp, flags=re.S).group(0)
+    v = v.replace("<Id>metaScene_2lineFocus_Long</Id>", "<Id>metaScene_spot</Id>", 1)
+    v = re.sub(r"(<Id>Pane_txt1</Id>(?:\n[^\n]*){0,3}?\n <Position>)17.56,108,0", r"\g<1>17.56,138,0", v, count=1)
+    v = re.sub(r"(<Id>Pane_txt</Id>(?:\n[^\n]*){0,3}?\n <Position>)17.56,0,0", r"\g<1>17.56,8,0", v, count=1)
+    return v
 
 
 def status_visual(skin):
@@ -541,42 +581,99 @@ def market_page(spec):
         if i < len(items) - 1:
             nav["NavDown"] = items[i + 1][0]
         out.append(nav_button(it[0], LIST_X, 153 + 45 * i, 420, 47, it[1], "btn_1line_icon", nav))
-    out.append(label("metaMarket", META_X, 153, 420, 442, "metaScene_MarketPlace"))
+    meta = label("metaMarket", META_X, 153, 420, 442, "metaScene_MarketPlace")
+    out.append(clip_group("metaClip", 0, 137, CANVAS_W, BODY_END - 137, [moved(meta, 0, -137)]))
     out.append(text("txt_MetaTitle", META_X + 18, 165, 384, 40, 22, 0x4010, ITEM_REST, presenter=False, value="", shadow=SHADOW))
     out.append(text("txt_Meta", META_X + 18, 213, 384, 360, 18, 0x4001, ITEM_REST, presenter=False, value="", shadow=SHADOW))
     return out + legends(spec)
 
 
+def clip_group(id, x, y, w, h, children):
+    """A group that clips what it holds to its box (the meta panes' edge
+    strips run past the pane, the 360 clips them at the scene)."""
+    return "\n".join(["<XuiGroup>", "<Properties>", " <Id>%s</Id>" % id, " <Width>%g</Width>" % w, " <Height>%g</Height>" % h,
+                      " <Position>%g,%g,0</Position>" % (x, y), " <ClipChildren>true</ClipChildren>", "</Properties>"]
+                     + children + ["</XuiGroup>"])
+
+
+def moved(block, dx, dy):
+    """A control block shifted by dx, dy (into a group's coordinates)."""
+    x, y = [float(v) for v in prop(block, "Position").split(",")[:2]]
+    return set_prop(block, "Position", "%g,%g,0" % (x + dx, y + dy))
+
+
+# Spotlight's layout, from sokky's reference (1306x735) mapped into the
+# page at 0.842 (the reference list's width onto Frolick's 420), keeping
+# Frolick's sizes.  Two layouts while sokky picks: no banner (the tabs at
+# the top of the body, five rows) or the banner's own band (714x80, the
+# reference's 0.649 x 0.130 of the frame) with four rows under it.
+SPOT_BANNER = os.environ.get("FROLICK_SPOT_BANNER", "0") == "1"
+SPOT_TAB_GAP = 50       # between tab labels (the reference's 0.045)
+SPOT_TAB_PT = 20
+SPOT_RIGHT = 1004       # the body's right edge
+
+
+def tab_width(name):
+    """The label's width in DejaVu Sans (font.ttf) at SPOT_TAB_PT: the
+    engine sizes the em at 4/3 of the point size."""
+    from PIL import ImageFont
+    f = ImageFont.truetype(os.environ.get("FONT", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"), round(SPOT_TAB_PT * 4 / 3))
+    return f.getlength(name)
+
+
 def spotlight_page(spec):
-    """Spotlight: the banner slot, the category tabs, four btn_twoline_left
-    rows with the List_twoline counter under them, metaScene_2lineFocus_Long
-    beside them (its Pane_txt the item's name, Pane_txt1 its description)."""
+    """Spotlight: the banner band (optional), the category tabs, the
+    btn_twoline_spot rows with the List_twoline counter under them,
+    metaScene_spot beside them (its Pane_txt the item's name, Pane_txt1
+    its description).  The tab row is laid out per selection (one strip
+    per category, the script shows the current one), word widths and
+    gaps as the reference spaces them."""
     out = [header(spec)]
-    # the featured banner (the 360's XBOX LIVE art, 065
-    # DefaultFeaturedTitleBanner): an empty image slot until Frolick has art
-    out.append("\n".join(["<XuiImage>", "<Properties>", " <Id>imgBanner</Id>", " <Width>746</Width>", " <Height>66</Height>",
-                          " <Position>202,148,0</Position>", " <ImagePath></ImagePath>", "</Properties>", "</XuiImage>"]))
-    # the tabs: the previous one right-aligned at the left edge (the
-    # 360's cut-off word), the current one over the list's text, the rest
-    # on a 165 pitch, the last dimmed
-    for k in range(SPOT_TAB_SLOTS):
-        if k == 0:
-            out.append(text("tab_0", 0, 222, 136, 40, 20, 0x4010 | 0x200, "0x40ffffff", presenter=False, value="", shadow="0"))
-        else:
-            colour = "0xffffffff" if k == 1 else ("0x50ffffff" if k == SPOT_TAB_SLOTS - 1 else "0xa0ffffff")
-            out.append(text("tab_%d" % k, LIST_X + 16 + 165 * (k - 1), 222, 160, 40, 20, 0x4010, colour, presenter=False, value="",
-                            shadow=SHADOW if k == 1 else "0"))
-    rows = spec["rows"]
+    if SPOT_BANNER:
+        # the featured banner (the 360's XBOX LIVE art, 065
+        # DefaultFeaturedTitleBanner): an empty slot until Frolick has art
+        out.append("\n".join(["<XuiImage>", "<Properties>", " <Id>imgBanner</Id>", " <Width>714</Width>", " <Height>80</Height>",
+                              " <Position>218,146,0</Position>", " <ImagePath></ImagePath>", "</Properties>", "</XuiImage>"]))
+        tab_y, rows = 230, 4
+    else:
+        tab_y, rows = 144, 5
+    list_y = tab_y + 40
+    tabs = [t for t, _ in SPOTLIGHT]
+    for cur in range(len(tabs)):
+        texts = []
+        x = LIST_X + 11
+        # the previous tab ends a gap before the current one, cut by the
+        # screen edge like the reference's
+        prev = tabs[(cur - 1) % len(tabs)]
+        texts.append(text("tab_%d_prev" % cur, -400, 0, x - SPOT_TAB_GAP + 400, 36, SPOT_TAB_PT, 0x4010 | 0x200, "0x40ffffff",
+                          presenter=False, value=prev, shadow="0"))
+        k = 0
+        while x < SPOT_RIGHT - 40:
+            name = tabs[(cur + k) % len(tabs)]
+            w = tab_width(name)
+            last = x + w + SPOT_TAB_GAP >= SPOT_RIGHT - 40
+            colour = "0xffffffff" if k == 0 else ("0x40ffffff" if last else "0xa0ffffff")
+            texts.append(text("tab_%d_%d" % (cur, k), x - LIST_X, 0, w + 8, 36, SPOT_TAB_PT, 0x4010, colour, presenter=False,
+                              value=name, shadow=SHADOW if k == 0 else "0"))
+            x += w + SPOT_TAB_GAP
+            k += 1
+        texts = [texts[0]] + [moved(t, LIST_X, 0) for t in texts[1:]]
+        out.append(clip_group("tabs_%d" % cur, 0, tab_y, CANVAS_W, 36, texts).replace(
+            " <ClipChildren>true</ClipChildren>", " <ClipChildren>true</ClipChildren>\n <Show>%s</Show>" % ("true" if cur == 0 else "false")))
     for i in range(rows):
         nav = {}
         if i > 0:
             nav["NavUp"] = "lstSpot_%d" % (i - 1)
         if i < rows - 1:
             nav["NavDown"] = "lstSpot_%d" % (i + 1)
-        out.append(nav_button("lstSpot_%d" % i, LIST_X, 266 + 74 * i, 420, 72, "", "btn_twoline_left", nav))
-    out.append(text("labTotal", LIST_X + 13, 266 + 74 * rows, 112, 30, 16, 0x4010, ITEM_REST, presenter=False, value="", shadow=SHADOW))
-    out.append(label("metaSpot", META_X, 266, 420, 74 * rows - 2, "metaScene_2lineFocus_Long", "", " <Data1></Data1>"))
-    out.append(text("txt_EmptyList", LIST_X + 16, 280, 400, 40, 18, 0x4010, ITEM_REST, presenter=False, value="Nothing here yet.", shadow=SHADOW))
+        out.append(nav_button("lstSpot_%d" % i, LIST_X, list_y + 74 * i, 420, 72, "", "btn_twoline_spot", nav))
+    out.append(text("labTotal", LIST_X + 13, list_y + 74 * rows, 112, 26, 16, 0x4010, ITEM_REST, presenter=False, value="", shadow=SHADOW))
+    # the pane and its edge strips, clipped to the body (the strips run on
+    # past the pane's foot)
+    meta = label("metaSpot", META_X, list_y, 420, 74 * rows - 2, "metaScene_spot", "", " <Data1></Data1>")
+    out.append(clip_group("metaClip", 0, list_y - 16, CANVAS_W, BODY_END - (list_y - 16), [moved(meta, 0, -(list_y - 16))]))
+    out.append(text("txt_EmptyList", LIST_X + SPOT_TEXT_X, list_y + 14, 330, 40, 18, 0x4010, ITEM_REST, presenter=False,
+                    value="Nothing here yet.", shadow=SHADOW))
     return out + legends(spec)
 
 
