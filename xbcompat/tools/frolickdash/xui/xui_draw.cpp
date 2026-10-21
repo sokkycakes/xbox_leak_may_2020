@@ -79,7 +79,7 @@ struct Font {
     ~Font() { delete [] data; }
 };
 
-Renderer::Renderer(Backend* b, Resources* r) : be(b), res(r), defaultTextColor(0xffffffff), ascentEm(0), textZoom(1), textZoomFor(0), textColorFor(0), font(0), clipping(false) {}
+Renderer::Renderer(Backend* b, Resources* r) : be(b), res(r), defaultTextColor(0xffffffff), ascentEm(0), textZoom(1), textZoomFor(0), textColorFor(0), textShadowFor(0), font(0), clipping(false) {}
 
 Renderer::~Renderer()
 {
@@ -862,6 +862,7 @@ void Renderer::text(Node* n, const Affine& m, float alpha, Blend blend)
     Color col = propC(n->props, "TextColor", defaultTextColor);
     if (textColorFor) col = textColorFor(n, col);
     Color shadow = propC(n->props, "DropShadowColor", 0);
+    if (textShadowFor) shadow = textShadowFor(n, shadow);
     Affine inv = aff(1 / scale, 0, 0, 1 / scale, 0, 0);
     for (int i = 0; i < nl; i++) {
         int iw, ih, adv;
