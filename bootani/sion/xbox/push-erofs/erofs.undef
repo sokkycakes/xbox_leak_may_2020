@@ -16,6 +16,7 @@ __fs_parse
 __init_rwsem
 __init_swait_queue_head
 __kmalloc_cache_noprof
+__kmalloc_large_noprof
 __kmalloc_noprof
 __kmem_cache_create_args
 __kvmalloc_node_noprof

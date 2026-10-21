@@ -2,8 +2,10 @@
 
 `erofs.ko` for the Sion's 6.18.7 kernel, so Kazeta `.kzr` runtimes (EROFS images)
 can be mounted. Built from vanilla 6.18.7 with the Sion's kernel fragments plus
-`CONFIG_EROFS_FS=m` (lz4, zstd and deflate; no lzma, because the Sion's kernel has
-no MicroLZMA decoder). vermagic `6.18.7 SMP preempt mod_unload`.
+`CONFIG_EROFS_FS=m` (lz4, zstd, deflate and lzma). The Sion's kernel has no
+MicroLZMA decoder, so a private copy of lib/xz's decoder is linked into erofs.ko
+under renamed symbols (see `microlzma-bundle.txt`); `nm -u erofs.ko | grep xz_`
+is empty. vermagic `6.18.7 SMP preempt mod_unload`.
 
 `erofs.undef` lists every kernel symbol the module needs. Before loading it,
 check them against the Sion's exports (read-only):
