@@ -390,6 +390,9 @@ void load_sound(Sound& snd, const char* name);
 // tab's first row start at CARD_Y.
 const float FACE_X = 46, FACE_W = 616, TAB_Y = 46, CARD_Y = 150;
 const float STRIP_X = 144, STRIP_Y = 84, STRIP_W = 855;
+// The slant between the two tabs (tab_active_C, 533-632) and how far each
+// title's box keeps from it.
+const float SLANT_X = 583, SLANT_GAP = 40;
 
 const char* title_name() {
     const char* t = xbe_title_name();
@@ -1091,6 +1094,22 @@ void guide_draw(int w, int h) {
             float width = right - left;
             if (xui::Node* clip = g.tabs->find("tabClip")) {
                 xui::Value& v = clip->props.set("Width"); v.free(); v.type = xui::TFloat; v.f = width / k;
+            }
+            // The strip shows `width` of its 855 units: the slant moves to
+            // the middle so both tabs keep half (the bars run on past the
+            // edges), and each title is centred in its tab.
+            if (g.strip) {
+                float W = width / k, d = STRIP_X + W / 2 - SLANT_X, sx = SLANT_X + d;
+                for (int i = 0; i < g.strip->children.n; i++) {
+                    xui::Node* c = g.strip->children[i];
+                    const char* id = c->id();
+                    float x0 = 0, w = 0;
+                    if (!strcmp(id, "tab_1_header")) { x0 = STRIP_X; w = sx - SLANT_GAP - STRIP_X; }
+                    else if (!strcmp(id, "tab_2_header")) { x0 = sx + SLANT_GAP; w = STRIP_X + W - x0; }
+                    else { offset(c, 'x', d); continue; }
+                    offset(c, 'x', x0 - base_of(c, 'x'));
+                    xui::Value& v = c->props.set("Width"); v.free(); v.type = xui::TFloat; v.f = w;
+                }
             }
             xui::Value& to = g.tabs->root->props.set("Opacity"); to.free(); to.type = xui::TFloat; to.f = op;
             g.r->draw(g.tabs, fx + hx * s + (left - STRIP_X * k) * ms, fy + hy * s + (TAB_Y - STRIP_Y * k) * ms, ms * k);

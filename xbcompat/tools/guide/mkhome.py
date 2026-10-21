@@ -107,6 +107,10 @@ def tabs(blades, out, tmp):
     sc = el(sroot, 'XuiScene', Id='BladesTabSkin')
     for v in TAB_VISUALS:
         sc.append(found[v])
+    # sokky: the titles centred in their tabs (the Blades sets them left)
+    for tp in found['Label_TabTitle'].iter('XuiTextPresenter'):
+        st = tp.find('Properties/TextStyle')
+        st.text = str(int(st.text or 0) | 0x400)
     ET.ElementTree(sroot).write(os.path.join(out, 'GuideTabsSkin.xui'))
 
 
