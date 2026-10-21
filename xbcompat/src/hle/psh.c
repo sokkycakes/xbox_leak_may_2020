@@ -81,9 +81,12 @@ enum { FCS_CLAMP_SUM = 0x80, FCS_COMPLEMENT_V1 = 0x40, FCS_COMPLEMENT_R0 = 0x20 
 
 enum { CC_MUX_MSB = 0x1, CC_UNIQUE_C0 = 0x10, CC_UNIQUE_C1 = 0x100 };
 
-/* Screen-space z range of the common 24-bit depth buffer: the value the
-   DOT_ZW quotient is expressed in on the Xbox (D3DZ_MAX_D24S8). */
-#define ZW_DEPTH_SCALE "16777215.0"
+/* The DOT_ZW quotient is a raw depth buffer value, in the steps of the
+   target's depth format like the screen-space z the viewport scale gives:
+   0..2^24-1 for D24S8, 0..2^16-1 for D16.  zw_scale is that maximum (the
+   ATG NoSortAlphaBlend sample's depth-replace peel writes D16 steps into
+   D16 depth textures and then tests them with an EQUAL shadow compare, so
+   a fixed 24-bit scale put every layer 256 times too near). */
 
 /* ---- string builder ---------------------------------------------------- */
 typedef struct {
@@ -147,7 +150,7 @@ typedef struct {
     /* usage discovered while generating */
     int sampler[4];          /* 0 none, 2 = sampler2D, 3 = sampler3D, 4 = sampler2DShadow, 6 = samplerCube */
     int use_texscale, use_c0, use_c1, use_fc0, use_fc1, use_bumpenv, use_bumplum;
-    int use_fog, use_v1r0, use_efprod, use_frag_depth;
+    int use_fog, use_v1r0, use_efprod, use_frag_depth, use_zw_scale, use_shadow;
     int use_snorm8[3];       /* snorm8_d3d, snorm8_gl, snorm8 */
     int use_hilo16, use_snorm16[3], use_hemi;
     int use_dotmap[8];
@@ -336,8 +339,15 @@ static const char *dot_ref(psh_ctx *c, char *buf, size_t n, int stage)
 
 static void emit_dot(psh_ctx *c, int i)
 {
+    const char *f = dotmap_func(c, i);
+    int m = c->dotmap[i] & 7;
+    if (m >= 1 && m <= 3 && ((c->options.bump_biased >> c->inputtex[i]) & 1)) {
+        /* A biased signed upload already holds the signed value + 128. */
+        c->use_dotmap[1] = c->use_snorm8[0] = 1;
+        f = "dotmap_snorm_d3d";
+    }
     sb_fmt(&c->tex, "    float dot%d = dot(gl_TexCoord[%d].xyz, %s(t%d));\n",
-           i, i, dotmap_func(c, i), c->inputtex[i]);
+           i, i, f, c->inputtex[i]);
     c->dot_defined[i] = 1;
 }
 
@@ -392,8 +402,10 @@ static int emit_texture_stage(psh_ctx *c, int i)
         c->use_texscale = 1;
         if (psh_shadow_stages & (1u << i)) {
             /* PROJECT2D uses a zero reference; PROJECT3D supplies r/q. */
-            c->sampler[i] = 4;
-            sb_fmt(o, "    vec4 t%d = shadow2DProj(tex%d, vec4(gl_TexCoord[%d].xy * tex_scale[%d].xy, 0.0, gl_TexCoord[%d].w));\n", i, i, i, i, i);
+            c->sampler[i] = 2;
+            c->use_shadow = 1;
+            sb_fmt(o, "    vec4 t%d = shadow_lookup(tex%d, shadow_centre(gl_TexCoord[%d].xy * tex_scale[%d].xy / gl_TexCoord[%d].w), 0.0, shadow_func[%d], shadow_dim[%d]);\n",
+                   i, i, i, i, i, i, i);
             break;
         }
         c->sampler[i] = 2;
@@ -402,11 +414,12 @@ static int emit_texture_stage(psh_ctx *c, int i)
         break;
     case TM_PROJECT3D:
         if (psh_shadow_stages & (1u << i)) {
-            c->sampler[i] = 4;
+            /* r/q is in the texture's native depth steps. */
+            c->sampler[i] = 2;
             c->use_texscale = 1;
-            sb_fmt(o, "    vec3 shadow_coord%d = gl_TexCoord[%d].xyz * tex_scale[%d].xyz / gl_TexCoord[%d].w;\n", i, i, i, i);
-            sb_fmt(o, "    shadow_coord%d.z = clamp(shadow_coord%d.z, 0.0, 1.0);\n", i, i);
-            sb_fmt(o, "    vec4 t%d = shadow2D(tex%d, shadow_coord%d);\n", i, i, i);
+            c->use_shadow = 1;
+            sb_fmt(o, "    vec4 t%d = shadow_lookup(tex%d, shadow_centre(gl_TexCoord[%d].xy * tex_scale[%d].xy / gl_TexCoord[%d].w), gl_TexCoord[%d].z / gl_TexCoord[%d].w, shadow_func[%d], shadow_dim[%d]);\n",
+                   i, i, i, i, i, i, i, i, i);
             break;
         }
         c->sampler[i] = 3;
@@ -432,9 +445,16 @@ static int emit_texture_stage(psh_ctx *c, int i)
         /* s' = s + m00*du + m10*dv, t' = t + m01*du + m11*dv (the DX8
            convention); du/dv are the signed bytes in the input's r/g. */
         c->sampler[i] = 2;
-        c->use_texscale = c->use_bumpenv = c->use_snorm8[2] = 1;
-        sb_fmt(o, "    vec2 dsdt%d = vec2(snorm8(t%d.%c), snorm8(t%d.g));\n",
-               i, in, (c->options.bump_bgra & (1u << in)) ? 'b' : 'r', in);
+        c->use_texscale = c->use_bumpenv = 1;
+        {
+            /* A biased upload decodes as (x - 128) / 127 after filtering;
+               raw two's complement bytes as snorm8. */
+            int biased = (c->options.bump_biased >> in) & 1;
+            const char *dec = biased ? "snorm8_d3d" : "snorm8";
+            c->use_snorm8[biased ? 0 : 2] = 1;
+            sb_fmt(o, "    vec2 dsdt%d = vec2(%s(t%d.%c), %s(t%d.g));\n",
+                   i, dec, in, (c->options.bump_bgra & (1u << in)) ? 'b' : 'r', dec, in);
+        }
         sb_fmt(o, "    vec4 t%d = texture2D(tex%d, (gl_TexCoord[%d].xy + vec2(dot(bump_env[%d].xz, dsdt%d), dot(bump_env[%d].yw, dsdt%d))) * tex_scale[%d].xy);\n",
                i, i, i, i, i, i, i, i);
         if (mode == TM_BUMPENVMAP_LUM) {
@@ -471,8 +491,11 @@ static int emit_texture_stage(psh_ctx *c, int i)
         c->use_frag_depth = 1;
         sb_fmt(o, "    vec4 t%d = vec4(0.0);\n", i);
         sb_fmt(o, "    float zw%d = %s / dot%d;\n", i, dot_ref(c, d1, sizeof d1, i - 1), i);
-        sb_fmt(o, "    if (!(zw%d >= 0.0 && zw%d <= " ZW_DEPTH_SCALE ")) discard;\n", i, i);
-        sb_fmt(o, "    gl_FragDepth = zw%d / " ZW_DEPTH_SCALE ";\n", i);
+        c->use_zw_scale = 1;
+        sb_fmt(o, "    if (!(zw%d >= 0.0 && zw%d <= zw_scale)) discard;\n", i, i);
+        /* Stored as a whole depth step, as the hardware's integer buffer
+           holds it, so a shadow compare of the same quotient is exact. */
+        sb_fmt(o, "    gl_FragDepth = floor(zw%d + 0.5) / zw_scale;\n", i);
         break;
     case TM_DOT_RFLCT_DIFF:
         /* n = (dot[i-1], dot[i], dot computed with stage i+1's inputs) */
@@ -765,6 +788,48 @@ char *psh_translate_ex(const uint32_t *rs, const psh_options *options)
     if (c->use_key_color) sb_cat(&out, "uniform vec4 key_color[4];\n");
 
     if (c->use_fog) sb_cat(&out, "uniform float fog_vertex_mode;\n");
+    if (c->use_zw_scale) sb_cat(&out, "uniform float zw_scale;\n");
+    /* Shadow buffers: the NV2A compares integers, "stored SHADOWFUNC
+       reference" with the reference r/q in the texture's depth steps, and
+       returns the result in all four channels (alpha kill on a failed
+       compare is how depth peeling discards a layer).  A host compare of
+       floats made equal depths pass or fail at random, and the peel's
+       EQUAL compare almost never matched: both sides are brought to whole
+       depth steps here instead.  shadow_func is the function as a mask
+       (less, equal, greater: D3DCMP & 7) and the format's maximum depth,
+       shadow_dim the texture size and 1 for a linear filter, which blends
+       the four nearest compares as the hardware's filter does.
+
+       shadow_centre moves the texture coordinate to where the hardware's
+       pixel centre is.  We draw D3D screen position p at the GL pixel
+       centre (x + 0.5); the NV2A's centres are at whole D3D positions (the
+       library's 0.53125 viewport border).  A depth texture drawn by us
+       holds at texel x the depth at p = x + 0.5, and a title addressing it
+       from screen position (a depth peel's s = p + 0.5) lands exactly on
+       the edge between two texels: point sampling picked either one at
+       random, which made a peel's compares speckle.  Half a pixel back
+       along the screen puts it on the texel drawn at this very pixel.  The
+       reference r/q stays at our centre, where that texel's depth was
+       drawn.  flip_y is the vertex program's: -1 when D3D y runs up GL's
+       rows (a texture target), 1 on the window. */
+    if (c->use_shadow)
+        sb_cat(&out,
+               "uniform vec4 shadow_func[4];\n"
+               "uniform vec4 shadow_dim[4];\n"
+               "uniform float flip_y;\n"
+               "vec2 shadow_centre(vec2 uv) { return uv - 0.5 * dFdx(uv) + 0.5 * flip_y * dFdy(uv); }\n"
+               "float shadow_tap(sampler2D t, vec2 uv, float ref, vec4 f) {\n"
+               "    float s = floor(texture2D(t, uv).r * f.w + 0.5);\n"
+               "    return s < ref ? f.x : (s > ref ? f.z : f.y);\n"
+               "}\n"
+               "vec4 shadow_lookup(sampler2D t, vec2 uv, float ref, vec4 f, vec4 d) {\n"
+               "    ref = floor(clamp(ref, 0.0, f.w) + 0.5);\n"
+               "    if (d.z == 0.0) return vec4(shadow_tap(t, uv, ref, f));\n"
+               "    vec2 p = uv * d.xy - 0.5, b = floor(p), w = p - b;\n"
+               "    vec2 a0 = (b + 0.5) / d.xy, a1 = (b + 1.5) / d.xy;\n"
+               "    return vec4(mix(mix(shadow_tap(t, a0, ref, f), shadow_tap(t, vec2(a1.x, a0.y), ref, f), w.x),\n"
+               "                    mix(shadow_tap(t, vec2(a0.x, a1.y), ref, f), shadow_tap(t, a1, ref, f), w.x), w.y));\n"
+               "}\n");
 
     /* helpers: signed interpretations of unsigned-normalised texels */
     if (c->use_snorm8[0])

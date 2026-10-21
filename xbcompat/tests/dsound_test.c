@@ -1201,6 +1201,12 @@ static void test_effects(void)
 {
     uint32_t ds = 0;
     DirectSoundCreate(NULL, &ds, NULL);
+    {   /* Before any image (or with one whose effects are unknown) the data
+           calls succeed: there is no DSP to refuse them. */
+        DWORD v = 7, r = 1;
+        CHECK(DS_SetEffectData((void *)ds, 3, 0, &v, 4, 0) == DS_OK, "SetEffectData without an image");
+        CHECK(DS_GetEffectData((void *)ds, 3, 0, &r, 4) == DS_OK && r == 0, "GetEffectData without an image");
+    }
     /* image: 2048 bytes, command block {0, code 2, 0, state 1, 0, 0}, code, state, descriptor */
     size_t sz = 2048 + 24 + 8 + 4 + 8 + 32 * 2 + 16;
     uint8_t *img = calloc(1, sz);

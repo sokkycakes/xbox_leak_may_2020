@@ -1,0 +1,100 @@
+<XuiCanvas version="000c">
+<Properties>
+ <Id>canvas</Id>
+ <Width>1024</Width>
+ <Height>768</Height>
+</Properties>
+<XuiScene>
+<Properties>
+ <Id>CarouselFocus</Id>
+ <Width>1024</Width>
+ <Height>768</Height>
+ <Position>0,0,0</Position>
+ <Pivot>512,384,0</Pivot>
+</Properties>
+<XuiFigure>
+<Properties>
+ <Id>card</Id>
+ <Width>640</Width>
+ <Height>440</Height>
+ <Position>192,40,0</Position>
+ <Stroke>
+  <StrokeWidth>10</StrokeWidth>
+  <StrokeColor>0xff8e8e8e</StrokeColor>
+ </Stroke>
+ <Closed>true</Closed>
+ <Points>640,440;64,0;576,0,611.347,0,640,28.6528;640,64;640,376,640,411.347,611.347,440;576,440;64,440,28.6528,440,0,411.347;0,376;0,64,0,28.6528,28.6528,0</Points>
+</Properties>
+</XuiFigure>
+<XuiFigure>
+<Properties>
+ <Id>arrowL</Id>
+ <Width>34</Width>
+ <Height>60</Height>
+ <Position>220,230.0,0</Position>
+ <Fill>
+  <FillType>1</FillType>
+  <FillColor>0xffd8d8d8</FillColor>
+ </Fill>
+ <Closed>true</Closed>
+ <Points>34,60;34,0;34,60;0,30</Points>
+</Properties>
+</XuiFigure>
+<XuiFigure>
+<Properties>
+ <Id>arrowR</Id>
+ <Width>34</Width>
+ <Height>60</Height>
+ <Position>770,230.0,0</Position>
+ <Fill>
+  <FillType>1</FillType>
+  <FillColor>0xffd8d8d8</FillColor>
+ </Fill>
+ <Closed>true</Closed>
+ <Points>34,60;0,0;34,30;0,60</Points>
+</Properties>
+</XuiFigure>
+<XuiFigure>
+<Properties>
+ <Id>aPill</Id>
+ <Width>109.0</Width>
+ <Height>109.2</Height>
+ <Position>711.9,368.2,0</Position>
+ <Fill>
+  <FillType>1</FillType>
+  <FillColor>0xffc6f23a</FillColor>
+ </Fill>
+ <Closed>true</Closed>
+ <Points>109.0,109.2;97.5,40.7;103.1,47.8;107.0,56.0;109.0,64.8;108.9,73.8;106.9,82.6;102.9,90.7;97.3,97.8;90.2,103.4;82.0,107.2;73.2,109.2;64.2,109.2;55.4,107.1;47.3,103.2;40.3,97.5;11.5,68.5;5.9,61.4;2.0,53.2;0.0,44.4;0.0,35.4;2.1,26.6;6.0,18.5;11.7,11.5;18.8,5.9;26.9,2.0;35.7,0.0;44.8,0.0;53.6,2.1;61.7,6.0;68.7,11.7</Points>
+</Properties>
+</XuiFigure>
+<XuiImage>
+<Properties>
+ <Id>aGlyph</Id>
+ <Width>62.7</Width>
+ <Height>62.7</Height>
+ <Position>720.6,376.9,0</Position>
+ <ImagePath>glyph_a_button.png</ImagePath>
+ <SizeMode>4</SizeMode>
+</Properties>
+</XuiImage>
+<Timelines>
+<NamedFrames>
+<NamedFrame><Name>Intro</Name><Time>0</Time><Command>play</Command><CommandParams></CommandParams></NamedFrame>
+<NamedFrame><Name>Pulse</Name><Time>10</Time><Command>play</Command><CommandParams></CommandParams></NamedFrame>
+<NamedFrame><Name>EndPulse</Name><Time>40</Time><Command>gotoandplay</Command><CommandParams>Pulse</CommandParams></NamedFrame>
+</NamedFrames>
+<Timeline>
+<Id>aPill</Id>
+<TimelineProp>Opacity</TimelineProp>
+<KeyFrame><Time>0</Time><Interpolation>0</Interpolation><Prop>0</Prop></KeyFrame>
+<KeyFrame><Time>10</Time><Interpolation>2</Interpolation><Prop>1</Prop></KeyFrame>
+<KeyFrame><Time>25</Time><Interpolation>2</Interpolation><Prop>0.7</Prop></KeyFrame>
+<KeyFrame><Time>40</Time><Interpolation>0</Interpolation><Prop>1</Prop></KeyFrame>
+</Timeline>
+</Timelines>
+
+</XuiScene>
+</XuiCanvas>
+</cross-session-message>
+</system-reminder>

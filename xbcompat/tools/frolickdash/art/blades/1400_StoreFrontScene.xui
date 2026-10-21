@@ -1,0 +1,206 @@
+<XuiCanvas>
+<Properties>
+ <Width>1120</Width>
+ <Height>770</Height>
+</Properties>
+<XuiScene>
+<Properties>
+ <Id>scnScnStoreFront</Id>
+ <Width>1120</Width>
+ <Height>770</Height>
+ <Position>-2,-1,0</Position>
+ <ClassOverride>CStoreFrontScene</ClassOverride>
+ <DefaultFocus>btnGameDownloads</DefaultFocus>
+ <TransFrom>FadeOut</TransFrom>
+ <TransTo>FadeIn</TransTo>
+ <TransBackFrom>FadeOut</TransBackFrom>
+ <TransBackTo>FadeIn</TransBackTo>
+</Properties>
+<XuiControl>
+<Properties>
+ <Id>figBackground</Id>
+ <Width>855</Width>
+ <Height>570</Height>
+ <Position>144.198,153,0</Position>
+ <Visual>back panel</Visual>
+</Properties>
+</XuiControl>
+<XuiNavButton>
+<Properties>
+ <Id>btnY</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>165,611,0</Position>
+ <Visual>legend_Y</Visual>
+ <Enabled>false</Enabled>
+ <UnfocusedInput>true</UnfocusedInput>
+ <Text>
+</Text>
+ <PressKey>22531</PressKey>
+</Properties>
+</XuiNavButton>
+<XuiNavButton>
+<Properties>
+ <Id>btnX</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>146,639,0</Position>
+ <Visual>legend_X</Visual>
+ <UnfocusedInput>true</UnfocusedInput>
+ <Text>Add Microsoft Points</Text>
+ <PressKey>22530</PressKey>
+</Properties>
+</XuiNavButton>
+<XuiBackButton>
+<Properties>
+ <Id>btnB</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>555,611,0</Position>
+ <Visual>legend_B</Visual>
+ <UnfocusedInput>true</UnfocusedInput>
+ <Text>Back</Text>
+ <PressKey>22593</PressKey>
+</Properties>
+</XuiBackButton>
+<XuiButton>
+<Properties>
+ <Id>btnA</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>573,639,0</Position>
+ <Visual>legend_A</Visual>
+ <UnfocusedInput>true</UnfocusedInput>
+ <Text>Select</Text>
+</Properties>
+</XuiButton>
+<XuiScene>
+<Properties>
+ <Id>scnButtonNavGroup</Id>
+ <Width>420</Width>
+ <Height>360</Height>
+ <Position>144,226,0</Position>
+ <NavRight>scnBanner</NavRight>
+ <NavUp>btnGameDownloads</NavUp>
+ <DefaultFocus>btnLiveMemberships</DefaultFocus>
+ <IgnorePresses>true</IgnorePresses>
+</Properties>
+<XuiNavButton>
+<Properties>
+ <Id>btnUsePrepaidCard</Id>
+ <Width>420</Width>
+ <Height>72</Height>
+ <Position>0,278,0</Position>
+ <Visual>btn_oneline_icon</Visual>
+ <NavUp>btnDownloadStatusAndHistory</NavUp>
+ <Text>Redeem Prepaid Card
+or Promotional Code</Text>
+ <ImagePath>ico_64x_PrepaidCard.png</ImagePath>
+</Properties>
+</XuiNavButton>
+<XuiNavButton>
+<Properties>
+ <Id>btnDownloadStatusAndHistory</Id>
+ <Width>420</Width>
+ <Height>72</Height>
+ <Position>0,208,0</Position>
+ <Visual>btn_oneline_icon</Visual>
+ <NavUp>btnThemes</NavUp>
+ <NavDown>btnUsePrepaidCard</NavDown>
+ <Text>Download History</Text>
+ <ImagePath>ico_64x_DownloadHistory.png</ImagePath>
+ <PressPath>1414_DownloadHistoryScene.xur</PressPath>
+</Properties>
+</XuiNavButton>
+<XuiNavButton>
+<Properties>
+ <Id>btnThemes</Id>
+ <Width>420</Width>
+ <Height>72</Height>
+ <Position>0,138,0</Position>
+ <Visual>btn_oneline_icon</Visual>
+ <NavUp>btnDemosAndTrailers</NavUp>
+ <NavDown>btnDownloadStatusAndHistory</NavDown>
+ <Text>Themes and Gamer Pictures</Text>
+ <ImagePath>ico_64x_Themes.png</ImagePath>
+</Properties>
+</XuiNavButton>
+<XuiNavButton>
+<Properties>
+ <Id>btnDemosAndTrailers</Id>
+ <Width>420</Width>
+ <Height>72</Height>
+ <Position>0,68,0</Position>
+ <Visual>btn_oneline_icon</Visual>
+ <NavUp>btnLiveMemberships</NavUp>
+ <NavDown>btnThemes</NavDown>
+ <Text>Demos and Trailers</Text>
+ <ImagePath>ico_64x_DemosTrailers.png</ImagePath>
+ <PressPath>1403_DemosAndTrailersScene.xur</PressPath>
+</Properties>
+</XuiNavButton>
+<XuiNavButton>
+<Properties>
+ <Id>btnLiveMemberships</Id>
+ <Width>420</Width>
+ <Height>72</Height>
+ <Position>0,-2,0</Position>
+ <Visual>btn_oneline_icon</Visual>
+ <NavDown>btnDemosAndTrailers</NavDown>
+ <Text>Memberships</Text>
+ <ImagePath>ico_64x_Memberships.png</ImagePath>
+ <PressPath>1406_MembershipsTabScene.xur</PressPath>
+</Properties>
+</XuiNavButton>
+</XuiScene>
+<XuiNavButton>
+<Properties>
+ <Id>btnHotList</Id>
+ <Width>420</Width>
+ <Height>72</Height>
+ <Position>579,154,0</Position>
+ <Visual>btn_oneline_icon</Visual>
+ <NavLeft>btnGameDownloads</NavLeft>
+ <NavDown>scnBanner</NavDown>
+ <Text>Featured Downloads</Text>
+ <ImagePath>ico_64x_FeaturedDownloads.png</ImagePath>
+ <PressPath>1405_HotListScene.xur</PressPath>
+</Properties>
+</XuiNavButton>
+<XuiNavButton>
+<Properties>
+ <Id>btnGameDownloads</Id>
+ <Width>420</Width>
+ <Height>72</Height>
+ <Position>144,154,0</Position>
+ <Visual>btn_oneline_icon</Visual>
+ <NavRight>btnHotList</NavRight>
+ <NavDown>scnButtonNavGroup\btnLiveMemberships</NavDown>
+ <Text>Game Downloads</Text>
+ <ImagePath>ico_64x_GameDownloads.png</ImagePath>
+ <PressPath>1401_GameCatalogTabScene.xur</PressPath>
+</Properties>
+</XuiNavButton>
+<XuiLabel>
+<Properties>
+ <Id>labSceneTitle</Id>
+ <Width>855</Width>
+ <Height>47</Height>
+ <Position>156,96,0</Position>
+ <Visual>Label_Head</Visual>
+ <Text>Xbox Live Marketplace</Text>
+</Properties>
+</XuiLabel>
+<XuiScene>
+<Properties>
+ <Id>scnBanner</Id>
+ <Width>420</Width>
+ <Height>358</Height>
+ <Position>579,234,0</Position>
+ <Visual>XuiScene</Visual>
+ <NavLeft>scnButtonNavGroup</NavLeft>
+ <NavUp>btnHotList</NavUp>
+</Properties>
+</XuiScene>
+</XuiScene>
+</XuiCanvas>

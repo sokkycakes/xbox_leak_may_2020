@@ -167,13 +167,14 @@ static bool replaced_library_api(const char *name)
         /* d3d8 */
         "_D3DDevice_", "@D3DDevice_", "_D3DResource_", "_D3DVertexBuffer_", "_D3DIndexBuffer_",
         "_D3DTexture_", "_D3DSurface_", "_D3DBaseTexture_", "_D3DCubeTexture_", "_D3DVolumeTexture_",
-        "_D3DPalette_", "_D3DPushBuffer_", "_D3DFixup_", "_Direct3D", "_D3D_", "_D3DPERF_", "_XMETAL_",
+        "_D3DPalette_", "_D3DPushBuffer_", "_D3DFixup_", "_Direct3D", "_D3D_", "@D3D_", "_D3DPERF_", "_XMETAL_",
+        "_IDirect3DVertexBuffer8_",
         "_D3DRDI_", "_PerfGet", "_Get2DSurfaceDesc@", "_Lock2DSurface@", "_Lock3DSurface@",
         "?Get2DSurfaceDesc@PixelJar@D3D@@", "?Lock2DSurface@PixelJar@D3D@@",
         /* xapilib: the input device API sits on a USB stack we do not run */
         "_XInitDevices@", "_XGetDevices@", "_XGetDeviceChanges@", "_XInput",
-        "_USBD_Init@", "_XPeekDevices@", "_XMountMU", "_XUnmountMU@", "_XMUPortFromDriveLetterA@",
-        "_XMUSlotFromDriveLetterA@", "_XMUNameFromDriveLetter@", "_XReadMUMetaData@",
+        "_USBD_Init@", "_XPeekDevices@", "_XGetDeviceEnumerationStatus@", "_XMountMU", "_XUnmountMU@",
+        "_XMUPortFromDriveLetterA@", "_XMUSlotFromDriveLetterA@", "_XMUNameFromDriveLetter@", "_XReadMUMetaData@",
         /* dsound */
         "_DirectSound", "_IDirectSound", "_XAudio", "_XWaveFile", "_XFileCreateMediaObject",
         "_Ac97CreateMediaObject@",
@@ -181,16 +182,19 @@ static bool replaced_library_api(const char *name)
     for (unsigned i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); i++)
         if (!strncmp(name, prefixes[i], strlen(prefixes[i]))) return true;
     /* dsound: the public methods of the C++ classes behind the C thunks
-       ("?Method@Class@DirectSound@@QAG..." / "...@@UAG..."), since a thunk
-       findsigs could not tell apart still lands in its method. */
+       ("?Method@Class@DirectSound@@QAG..." / "...@@UAG...", static "...@@SG..."),
+       since a thunk findsigs could not tell apart still lands in its method,
+       and 5xxx XACT and LTCG titles call the methods themselves. */
     static const char *classes[] = {
         "@CDirectSound@DirectSound@@", "@CDirectSoundBuffer@DirectSound@@",
         "@CDirectSoundStream@DirectSound@@", "@CDirectSoundVoice@DirectSound@@",
+        "@CDirectSound3DCalculator@DirectSound@@",
     };
     const char *at = name[0] == '?' && name[1] != '?' ? strchr(name, '@') : NULL;
     for (unsigned i = 0; at && i < sizeof(classes) / sizeof(classes[0]); i++) {
         size_t n = strlen(classes[i]);
-        if (!strncmp(at, classes[i], n) && (!strncmp(at + n, "QAG", 3) || !strncmp(at + n, "UAG", 3)))
+        if (!strncmp(at, classes[i], n) && (!strncmp(at + n, "QAG", 3) || !strncmp(at + n, "UAG", 3) ||
+                                            !strncmp(at + n, "SG", 2)))
             return true;
     }
     return false;

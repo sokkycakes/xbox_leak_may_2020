@@ -1,0 +1,176 @@
+<XuiCanvas>
+<Properties>
+ <Width>1120</Width>
+ <Height>770</Height>
+</Properties>
+<XuiScene>
+<Properties>
+ <Id>scnDownload</Id>
+ <Width>1120</Width>
+ <Height>770</Height>
+ <Position>0,1,0</Position>
+ <ClassOverride>CDownloadScene</ClassOverride>
+ <DefaultFocus>btnContinue</DefaultFocus>
+ <TransFrom>trans_FadeOut</TransFrom>
+ <TransTo>trans_FadeIn</TransTo>
+ <TransBackFrom>trans_FadeOut</TransBackFrom>
+ <TransBackTo>trans_FadeIn</TransBackTo>
+</Properties>
+<XuiControl>
+<Properties>
+ <Id>figBackground</Id>
+ <Width>855</Width>
+ <Height>570</Height>
+ <Position>144,100,0</Position>
+ <Visual>back panel</Visual>
+</Properties>
+</XuiControl>
+<XuiButton>
+<Properties>
+ <Id>btnB</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>555,611,0</Position>
+ <Show>false</Show>
+ <Visual>legend_B</Visual>
+ <UnfocusedInput>true</UnfocusedInput>
+ <Text>Back</Text>
+ <PressKey>22593</PressKey>
+</Properties>
+</XuiButton>
+<XuiLabel>
+<Properties>
+ <Id>figGraphicMeta</Id>
+ <Width>420</Width>
+ <Height>503</Height>
+ <Position>579,100,0</Position>
+ <Visual>Metapane</Visual>
+</Properties>
+</XuiLabel>
+<XuiScene>
+<Properties>
+ <Id>scnContentMetaInfo</Id>
+ <Width>420</Width>
+ <Height>503</Height>
+ <Position>579,100,0</Position>
+</Properties>
+<XuiEdit>
+<Properties>
+ <Id>edtContentMetaText</Id>
+ <Width>414</Width>
+ <Height>292</Height>
+ <Position>3,205,0</Position>
+ <ClassOverride>CXuiEditAutoScroll</ClassOverride>
+ <Visual>edit_AutoScroll</Visual>
+ <Text>&lt;content download information&gt;</Text>
+ <ReadOnly>true</ReadOnly>
+ <Multiline>true</Multiline>
+ <SmoothScroll>true</SmoothScroll>
+</Properties>
+</XuiEdit>
+<XuiLabel>
+<Properties>
+ <Id>labContentSize</Id>
+ <Width>240</Width>
+ <Height>38</Height>
+ <Position>171,142,0</Position>
+ <Visual>Label_BodyRight</Visual>
+ <Text>&lt;content size&gt;</Text>
+</Properties>
+</XuiLabel>
+<XuiLabel>
+<Properties>
+ <Id>labContentSizeTag</Id>
+ <Width>222</Width>
+ <Height>38</Height>
+ <Position>8,142,0</Position>
+ <Text>Size:</Text>
+</Properties>
+</XuiLabel>
+<XuiLabel>
+<Properties>
+ <Id>labContentTitle</Id>
+ <Width>414</Width>
+ <Height>40</Height>
+ <Position>3,98,0</Position>
+ <Visual>Label_MetaHead_1line</Visual>
+ <Text>&lt;content title&gt;</Text>
+</Properties>
+</XuiLabel>
+<XuiImage>
+<Properties>
+ <Id>imgContentImage</Id>
+ <Width>420</Width>
+ <Height>94</Height>
+ <Position>0.5,0,0</Position>
+</Properties>
+</XuiImage>
+</XuiScene>
+<XuiButton>
+<Properties>
+ <Id>btnContinue</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>144,555,0</Position>
+ <NavUp>btnPlayNow</NavUp>
+ <Text>&lt;done/pause/cancel button&gt;</Text>
+</Properties>
+</XuiButton>
+<XuiButton>
+<Properties>
+ <Id>btnPlayNow</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>144,510,0</Position>
+ <Enabled>false</Enabled>
+ <NavDown>btnContinue</NavDown>
+ <Text>Play Now</Text>
+</Properties>
+</XuiButton>
+<XuiLabel>
+<Properties>
+ <Id>labDownloadWarning</Id>
+ <Width>420</Width>
+ <Height>202</Height>
+ <Position>145,333,0</Position>
+ <Text>Please don't turn off your console or remove your storage device.</Text>
+</Properties>
+</XuiLabel>
+<XuiProgressBar>
+<Properties>
+ <Id>prgDownloadBar</Id>
+ <Width>420</Width>
+ <Position>145,280,0</Position>
+ <Visual>prgbr_Marketplace</Visual>
+</Properties>
+</XuiProgressBar>
+<XuiLabel>
+<Properties>
+ <Id>labDownloadProgress</Id>
+ <Width>420</Width>
+ <Height>80</Height>
+ <Position>145,232,0</Position>
+ <Text>&lt;download progress&gt;</Text>
+</Properties>
+</XuiLabel>
+<XuiLabel>
+<Properties>
+ <Id>labDownloadText</Id>
+ <Width>420</Width>
+ <Height>119</Height>
+ <Position>145,100,0</Position>
+ <Text>You are currently downloading this item.</Text>
+</Properties>
+</XuiLabel>
+<XuiLabel>
+<Properties>
+ <Id>labSceneTitle</Id>
+ <Width>720</Width>
+ <Height>47</Height>
+ <Position>144,44,0</Position>
+ <Visual>Label_Head</Visual>
+ <Text>&lt;game title&gt;</Text>
+</Properties>
+</XuiLabel>
+</XuiScene>
+</XuiCanvas>

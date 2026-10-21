@@ -259,8 +259,8 @@ static void nv2a_depth(int bits)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_R_TO_TEXTURE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL);
+    /* The program compares the raw texel itself (shadow_lookup). */
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_NONE);
     glTexImage2D(GL_TEXTURE_2D, 0, bits == 16 ? GL_DEPTH_COMPONENT16 : GL_DEPTH_COMPONENT24,
                  1, 1, 0, GL_DEPTH_COMPONENT, GL_FLOAT, &depth);
 }
@@ -429,7 +429,9 @@ static void test_nv2a_state(void)
     expect_pixel("alpha kill observes zero luminance",20,20,0,255,0,255);
 
     /* Native D16/D24 references use z/q. PROJECT2D compares zero even
-       when incoming z is nonzero; PROJECT3D enables the depth reference. */
+       when incoming z is nonzero; PROJECT3D enables the depth reference.
+       The compare is "stored GEQUAL reference" (D3DCMP_GEQUAL & 7 = 6:
+       equal and greater pass), and its result fills all four channels. */
     memset(&options,0,sizeof options);
     for (int bits = 16; bits <= 24; bits += 8) {
         nv2a_depth(bits);
@@ -443,6 +445,11 @@ static void test_nv2a_state(void)
             float scale[16] = {1,1,1,1, 1,1,1,1, 1,1,1,1, 1,1,1,1};
             scale[2] = 1.0f / maximum;
             p_glUniform4fv(p_glGetUniformLocation(program,"tex_scale"),4,scale);
+            float func[16] = {0}, dim[16] = {0};
+            func[1] = func[2] = 1; func[3] = maximum;
+            dim[0] = dim[1] = 1;
+            p_glUniform4fv(p_glGetUniformLocation(program,"shadow_func"),4,func);
+            p_glUniform4fv(p_glGetUniformLocation(program,"shadow_dim"),4,dim);
             nv2a_coords[0][0] = nv2a_coords[0][1] = 1;
             nv2a_coords[0][2] = maximum * 1.5f;
             nv2a_coords[0][3] = 2;
@@ -450,11 +457,32 @@ static void test_nv2a_state(void)
             char label[80];
             snprintf(label,sizeof label,"D%d PROJECT%d high projected reference",bits,mode+1);
             int value = mode == 1 ? 255 : 0;
-            expect_pixel(label,20,20,value,value,value,255);
+            expect_pixel(label,20,20,value,value,value,value);
             nv2a_coords[0][2] = maximum * 0.5f;
             nv2a_draw(program,NULL);
             snprintf(label,sizeof label,"D%d PROJECT%d low projected reference",bits,mode+1);
             expect_pixel(label,20,20,255,255,255,255);
+            if (mode == 2) {
+                /* Whole depth steps: a reference equal to the stored step
+                   passes EQUAL, one step either side does not. */
+                float texel = 0;   /* 0.5 lands on a tie: ask which step GL stored */
+                glGetTexImage(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT, GL_FLOAT, &texel);
+                float stored = floorf(texel * maximum + 0.5f);
+                func[1] = 1; func[2] = 0;
+                p_glUniform4fv(p_glGetUniformLocation(program,"shadow_func"),4,func);
+                nv2a_coords[0][2] = stored * 2 + 0.6f;   /* r/q = stored + 0.3 */
+                nv2a_draw(program,NULL);
+                snprintf(label,sizeof label,"D%d EQUAL same depth step",bits);
+                expect_pixel(label,20,20,255,255,255,255);
+                /* A float sample of a D24 texel holds its step only to
+                   within one (2^24 - 1 steps in a 24-bit mantissa): there
+                   a step two away is the nearest certain miss. */
+                float step = bits == 16 ? 1 : 2;
+                nv2a_coords[0][2] = (stored + step) * 2;
+                nv2a_draw(program,NULL);
+                snprintf(label,sizeof label,"D%d EQUAL next depth step",bits);
+                expect_pixel(label,20,20,0,0,0,0);
+            }
         }
     }
     glDisable(GL_COLOR_SUM);

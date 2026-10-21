@@ -44,7 +44,7 @@ $(BUILD)/vsh_exec: tests/vsh_exec.c src/hle/vsh.c src/hle/vsh_interp.c $(SHADER_
 $(BUILD)/ff_lighting_test: tests/ff_lighting_test.c src/hle/ff_vsh.h | $(BUILD)
 	$(CC) $(TEST_CPPFLAGS) $(TEST_CFLAGS) $(LDFLAGS) $(filter %.c,$^) $(TEST_LIBS) -o $@
 
-$(BUILD)/psh_test: tests/psh_test.c src/hle/psh.c $(SHADER_HEADERS) | $(BUILD)
+$(BUILD)/psh_test: tests/psh_test.c src/hle/psh.c src/hle/ff_combiner.h $(SHADER_HEADERS) | $(BUILD)
 	$(CC) $(TEST_CPPFLAGS) $(TEST_CFLAGS) $(LDFLAGS) $(filter %.c,$^) $(TEST_LIBS) -o $@
 
 $(BUILD)/vsh_synth: tests/vsh_synth.c src/hle/vsh.c $(SHADER_HEADERS) | $(BUILD)

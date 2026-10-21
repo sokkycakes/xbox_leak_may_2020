@@ -5,11 +5,16 @@ without emulating the console. Xbox code is 32-bit x86, so the XBE is mapped at
 its native address (0x10000) inside a 32-bit Linux process and executed directly.
 What differs from a PC is replaced underneath it:
 
-- **Kernel**: all 375 `xboxkrnl.exe` exports, generated from the leak's
-  `private/ntos/init/ntoskrnl.src`. Threads, events, waits, timers/DPCs, virtual
-  and contiguous memory, the object manager, file I/O and Rtl are implemented on
+- **Kernel**: the 375 `xboxkrnl.exe` exports are listed from the leak's
+  `private/ntos/init/ntoskrnl.src`, and all of them are implemented. Threads,
+  events, waits, queues and I/O completion ports, timers/DPCs, virtual and
+  contiguous memory, the object manager, file I/O and Rtl are implemented on
   pthreads and the host filesystem (`src/kernel/`). Each guest thread gets a
-  KPCR at `fs:0` through an LDT entry.
+  KPCR at `fs:0` through an LDT entry. The driver model is there too: device
+  objects whose drivers are title code, IRPs with completion routines and
+  start-I/O queues, object directories, and the kernel's own CD-ROM and disk
+  devices answering IRPs from the host files. Port I/O reads all ones and the
+  debug/profiling exports do nothing.
 - **Direct3D 8**: the XDK statically links D3D8 into every title. `tools/mksigs.py`
   builds signatures from the leak's own `d3d8.lib`/`d3d8d.lib`, and
   `tools/findsigs.py` finds those functions in the XBE. `src/hle/` patches
@@ -23,7 +28,7 @@ or crash. The other seven are a Windows tool, three debug-monitor samples,
 and three whose media or DSP image is missing from the leak. What works:
 
 - **Direct3D 8**: fixed function with lighting, specular, fog and texture
-  stages (all texture ops but bump env mapping); texture coordinate generation and texture matrices; NV2A vertex
+  stages (all texture ops, bump env mapping through the combiner translator); texture coordinate generation and texture matrices; NV2A vertex
   programs and register combiners translated to GLSL; vertex state shaders run
   on the CPU; push buffers (recorded and BeginPush); point sprites; swizzled,
   linear, DXT, cube, volume and bump-map textures; render targets, including
@@ -34,7 +39,9 @@ and three whose media or DSP image is missing from the leak. What works:
   and multi-function envelopes and the DLS2 low-pass filter.
 - **Input**: XInput on SDL2 game controllers, with rumble, plus a keyboard pad
   when no controller is attached (see below).
-- **Kernel**: SHA-1, HMAC, RC4 and big-number crypto are real, so save
+- **Kernel**: all of the `Xc*` crypto is real (`src/kernel/xcrypt.c`): SHA-1,
+  HMAC, RC4, RSA on the Xbox's BSAFE key blobs with PKCS #1 signature
+  checks, DES/3DES in ECB and CBC, and the `XcUpdateCrypto` vector, so save
   signatures work. There is no Ethernet: the Xbox Live samples start and
   report that the console is offline.
 

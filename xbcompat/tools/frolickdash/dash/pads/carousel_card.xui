@@ -1,0 +1,44 @@
+<XuiCanvas version="000c">
+<Properties>
+ <Id>canvas</Id>
+ <Width>512</Width>
+ <Height>352</Height>
+</Properties>
+<XuiScene>
+<Properties>
+ <Id>CarouselCard</Id>
+ <Width>512</Width>
+ <Height>352</Height>
+ <Position>0,0,0</Position>
+ <Pivot>256,176,0</Pivot>
+</Properties>
+<XuiFigure>
+<Properties>
+ <Id>card</Id>
+ <Width>500</Width>
+ <Height>340</Height>
+ <Position>6,6,0</Position>
+ <Stroke>
+  <StrokeWidth>10</StrokeWidth>
+  <StrokeColor>0xff8e8e8e</StrokeColor>
+ </Stroke>
+ <Fill>
+  <FillType>2</FillType>
+  <Gradient>
+   <NumStops>3</NumStops>
+   <StopColor>0xff5c5a55</StopColor>
+   <StopColor>0xff53514c</StopColor>
+   <StopColor>0xff4b4945</StopColor>
+   <StopPos>0</StopPos>
+   <StopPos>0.6</StopPos>
+   <StopPos>1</StopPos>
+  </Gradient>
+  <Rotation>-90</Rotation>
+ </Fill>
+ <Closed>true</Closed>
+ <Points>500,340;52,0;448,0,476.72,0,500,23.2804;500,52;500,288,500,316.72,476.72,340;448,340;52,340,23.2804,340,0,316.72;0,288;0,52,0,23.2804,23.2804,0</Points>
+</Properties>
+</XuiFigure>
+</XuiScene>
+</XuiCanvas>
+

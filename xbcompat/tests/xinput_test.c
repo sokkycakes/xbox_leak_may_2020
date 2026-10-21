@@ -315,6 +315,14 @@ static void test_controller(void)
     CHECK(caps.SubType == XINPUT_DEVSUBTYPE_GC_GAMEPAD_ALT && caps.Reserved == 0);
     CHECK(caps.In.wButtons == 0xFFFF && caps.In.bAnalogButtons[7] == 0xFF && caps.In.sThumbRY == -1);
     CHECK(caps.Out.wLeftMotorSpeed == 0xFFFF && caps.Out.wRightMotorSpeed == 0xFFFF);
+    /* XDK 4831+ calls: device ids, light gun calibration, enumeration state. */
+    USHORT desc[3] = { 0 };
+    CHECK(XInputGetDeviceDescription(h, desc) == ERROR_SUCCESS && desc[0] == 0x045E && desc[1] != 0);
+    CHECK(XInputGetDeviceDescription(NULL, desc) == ERROR_INVALID_PARAMETER);
+    SHORT offsets[4] = { 0 };
+    CHECK(XInputSetLightgunCalibration(h, offsets) == ERROR_SUCCESS);
+    CHECK(XInputSetLightgunCalibration(h, NULL) == ERROR_INVALID_PARAMETER);
+    CHECK(XGetDeviceEnumerationStatus() == 0);
 
     static const int face_buttons[6] = {
         SDL_CONTROLLER_BUTTON_A, SDL_CONTROLLER_BUTTON_B,

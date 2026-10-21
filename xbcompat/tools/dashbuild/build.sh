@@ -51,7 +51,17 @@ patch_srcs() { # patch-file file...
     rm -rf "$WORK/patch/new"
 }
 # GuidDef.h defines `one`, which main.cpp uses as a variable name.
-patch_src main.cpp 's/\bone\b/fOne/g'
+# The 3D view is built for a 720-wide screen (aspect 720/480) even though the
+# back buffer is 640x480, so it shows 1/8 more scene sideways than a 4:3 view.
+# xbcompat's XBCOMPAT_DASH_VIEW=4:3 sets bit 31 of the raw video flags (no
+# Xbox flag uses it; XGetVideoFlags masks it off for games), and the dash then
+# builds its view for 640x480 instead (Layer.cpp builds the same view).
+patch_src main.cpp 's/\bone\b/fOne/g
+s|^D3DXMATRIX g_matProjection;|&\nfloat g_fViewAspect = 720.0f / 480.0f;|
+s|float aspect = 720.0f / 480.0f;|float aspect = g_fViewAspect;|
+s|^\(\s*\)m_bStretchWidescreen = (XGetVideoFlags() \& XC_VIDEO_FLAGS_WIDESCREEN) != 0;|&\n\1{\n\1    DWORD dwType, dwRaw;\n\1    if (XQueryValue(XC_VIDEO_FLAGS, \&dwType, \&dwRaw, 4, NULL) == ERROR_SUCCESS \&\& (dwRaw \& 0x80000000))\n\1        g_fViewAspect = 640.0f / 480.0f;\n\1}|'
+patch_src Layer.cpp 's|^extern D3DXMATRIX g_matIdentity;|&\nextern float g_fViewAspect;|
+s|float aspect = 720.0f/480.0f;|float aspect = g_fViewAspect;|'
 # A game disc in the tray at startup waits in the Games screen's top slot
 # instead of rebooting into the game (Microsoft's dashboard only ran with a
 # game disc in when a game had sent it there).
@@ -59,6 +69,10 @@ patch_src Disc.cpp 's/theApp.m_bHasLaunchData || g_nDiscType == DISC_VIDEO/theAp
 # A viewpoint a Level binds reads isBound true, as one bound from script does
 # (the screen saver asks whether the main menu's camera is the current one).
 patch_src Viewpoint.cpp 's/^\(\s*\)theApp.m_pViewpoint = this;/&\n\1m_isBound = true;/'
+# Start and Back reach the script as OnStartDown/OnBackDown (and the Up
+# pair) instead of being folded into A and B; a script without those
+# functions still gets OnADown/OnBDown, so the stock dashboard is unchanged.
+patch_src Joystick.cpp 's|#if 1 // Make Start/Back the same as A/B|#if 0 // Make Start/Back the same as A/B|; s|^\(\s*\)::CallFunction(this, szFunc);|\1if (!::CallFunction(this, szFunc)) {\n\1    const TCHAR* szAlt = NULL;\n\1    if (!_tcscmp(szFunc, _T("OnStartDown"))) szAlt = _T("OnADown");\n\1    else if (!_tcscmp(szFunc, _T("OnStartUp"))) szAlt = _T("OnAUp");\n\1    else if (!_tcscmp(szFunc, _T("OnBackDown"))) szAlt = _T("OnBDown");\n\1    else if (!_tcscmp(szFunc, _T("OnBackUp"))) szAlt = _T("OnBUp");\n\1    if (szAlt != NULL) ::CallFunction(this, szAlt);\n\1}|'
 # The Memory screen lists each title's downloads (Xbox Live Arcade games) and
 # the games installed from the Games screen next to its saves.  The patched
 # TitleCollection.h sits beside the two patched sources, the only ones built
@@ -145,8 +159,11 @@ for l in english:English japanese:Japanese german:German french:French spanish:S
     ins="$ins /INSERTFILE:$D\\${l%%:*}.txt,${l##*:}Xlate,N"
 done
 echo "imagebld xboxdash.xbe"
+# Version 0x185EAD00 is the retail 5960 dashboard's: the retail online
+# dashboard (C:\xodash) reads Y:\xboxdash.xbe's certificate and goes back to
+# the dashboard unless the version matches its own.
 timeout 300 wine "$WORK/xb/public/idw/imagebld.exe" /TESTID:0xFFFE0000 /TESTRATINGS:0xFFFFFFFF \
-  /TESTREGION:0x7FFFFFFF "/TESTNAME:Xbox Dashboard" /INITFLAGS:0x00000004 /LIMITMEM \
+  /TESTVERSION:0x185EAD00 /TESTREGION:0x7FFFFFFF "/TESTNAME:Xbox Dashboard" /INITFLAGS:0x00000004 /LIMITMEM \
   "/INSERTFILE:$D\\obj\\xipsums.bin,XIPS,R" $ins /TESTMEDIATYPES:1 /NOLIBWARN /NOSETUPHD \
   /INITFLAGS:0x00000000 /IN:xboxdash.exe /OUT:xboxdash.xbe | tr -d '\r'
 

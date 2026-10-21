@@ -1141,6 +1141,75 @@ static void mix_voices(struct dsmix_job *job)
 
 /* Mix one block of n frames into out (zeroed here).  Called from the audio
    thread, the clock thread, or a test. */
+/* The Guide overlay turns the game down while it is open (ds_set_duck from
+   any thread; the mixer ramps to it across a block, so there is no click). */
+static uint32_t duck_bits = 0x3F800000u, volume_bits = 0x3F800000u; /* 1.0f */
+static float duck_now = 1.0f;
+
+void ds_set_duck(float gain)
+{
+    uint32_t b;
+    memcpy(&b, &gain, 4);
+    __atomic_store_n(&duck_bits, b, __ATOMIC_RELAXED);
+}
+
+/* ... and sets the user's volume, kept across titles in its settings file. */
+void ds_set_volume(float gain)
+{
+    uint32_t b;
+    memcpy(&b, &gain, 4);
+    __atomic_store_n(&volume_bits, b, __ATOMIC_RELAXED);
+}
+
+/* ... and plays its own short sounds (48 kHz stereo float, loaded once and
+   never freed), mixed in after the duck so they aren't turned down with the
+   game; the newest replaces the one playing. */
+static const float *ui_next;
+static int ui_next_frames;
+static uint32_t ui_seq;
+
+void ds_play_ui(const float *pcm, int frames)
+{
+    ui_next = pcm;
+    ui_next_frames = frames;
+    __atomic_add_fetch(&ui_seq, 1, __ATOMIC_RELEASE);
+}
+
+static void ui_block(float *out, int n, float volume)
+{
+    static uint32_t seen;
+    static const float *pcm;
+    static int pos, frames;
+    uint32_t q = __atomic_load_n(&ui_seq, __ATOMIC_ACQUIRE);
+    if (q != seen) { seen = q; pcm = ui_next; frames = ui_next_frames; pos = 0; }
+    if (!pcm) return;
+    for (int i = 0; i < n && pos < frames; i++, pos++) {
+        out[2 * i] += pcm[2 * pos] * volume;
+        out[2 * i + 1] += pcm[2 * pos + 1] * volume;
+    }
+    if (pos >= frames) pcm = NULL;
+}
+
+static void duck_block(float *out, int n)
+{
+    uint32_t b = __atomic_load_n(&duck_bits, __ATOMIC_RELAXED);
+    uint32_t v = __atomic_load_n(&volume_bits, __ATOMIC_RELAXED);
+    float target, volume;
+    memcpy(&target, &b, 4);
+    memcpy(&volume, &v, 4);
+    target *= volume;
+    if (target != 1.0f || duck_now != 1.0f) {
+        float step = (target - duck_now) / (float)n;
+        for (int i = 0; i < n; i++) {
+            float k = duck_now + step * (float)(i + 1);
+            out[2 * i] *= k;
+            out[2 * i + 1] *= k;
+        }
+        duck_now = target;
+    }
+    ui_block(out, n, volume);
+}
+
 void ds_mix_block(float *out, int n)
 {
     for (; n > MIX_FRAMES; n -= MIX_FRAMES, out += 2 * MIX_FRAMES) ds_mix_block(out, MIX_FRAMES);
@@ -1208,6 +1277,7 @@ void ds_mix_block(float *out, int n)
         struct ds_entry *e = &g.objs[i];
         if (e->kind == DS_BUFFER && ((struct ds_buffer *)e->obj)->sub) render_submix(e->obj, out, n);
     }
+    duck_block(out, n);
     float peak = 0;
     for (int i = 0; i < 2 * n; i++) {
         float a = fabsf(out[i]);
@@ -1821,6 +1891,12 @@ static HRESULT NTAPI DS_DownloadEffectsImage(void *self, const void *pv, DWORD s
     return hr;
 }
 
+static void fx_note_unknown(DWORD index)
+{
+    static unsigned noted;
+    if (noted++ < 4) xlog("DSound: effect %u: no effects image describes it; its data is ignored", index);
+}
+
 static HRESULT NTAPI DS_GetEffectData(void *self, DWORD index, DWORD offset, void *pv, DWORD size)
 {
     LOCK();
@@ -1829,6 +1905,13 @@ static HRESULT NTAPI DS_GetEffectData(void *self, DWORD index, DWORD offset, voi
     if (d && pv && index < d->fx_count && offset <= d->fx_state_size[index] &&
         size <= d->fx_state_size[index] - offset) {
         memcpy(pv, d->fx_state[index] + offset, size);
+        hr = DS_OK;
+    } else if (d && pv && !d->fx_count) {
+        /* No image, or one whose descriptor was not found, so the effects
+           are unknown: the DSP is not emulated, and their state reads as
+           zeros rather than failing the title. */
+        fx_note_unknown(index);
+        memset(pv, 0, size);
         hr = DS_OK;
     }
     UNLOCK();
@@ -1844,6 +1927,9 @@ static HRESULT NTAPI DS_SetEffectData(void *self, DWORD index, DWORD offset, con
     if (d && pv && index < d->fx_count && offset <= d->fx_state_size[index] &&
         size <= d->fx_state_size[index] - offset) {
         memcpy(d->fx_state[index] + offset, pv, size);
+        hr = DS_OK;
+    } else if (d && pv && !d->fx_count) {
+        fx_note_unknown(index);   /* dropped: nothing runs the effect */
         hr = DS_OK;
     }
     UNLOCK();
@@ -3206,12 +3292,23 @@ const struct hle_func dsound_funcs[] = {
     F("_IDirectSoundStream_Use3DVoiceData@8", Voice_Use3DVoiceData),
     F("_IDirectSoundStream_Set3DVoiceData@8", Voice_Use3DVoiceData),
     F("_IDirectSoundStream_GetVoiceProperties@8", Voice_GetVoiceProperties),
+    /* ... and the C++ methods behind those thunks, which XACT and LTCG
+       titles call themselves */
+    VOICE_CPP("Use3DVoiceData", "JPAU_DS3DVOICEDATA@@@Z", Voice_Use3DVoiceData),
+    VOICE_CPP("Set3DVoiceData", "JPBU_DS3DVOICEDATA@@@Z", Voice_Use3DVoiceData),
+    VOICE_CPP("GetVoiceProperties", "JPAU_DSVOICEPROPS@@@Z", Voice_GetVoiceProperties),
     F("_IDirectSound3DCalculator_Calculate3D@8", Calc_Calculate3D),
     F("_IDirectSound_SynchPlayback@4", DS_SynchPlayback),
     F("_CDirectSound_SynchPlayback@4", DS_SynchPlayback),
+    F("?SynchPlayback@CDirectSound@DirectSound@@QAGJXZ", DS_SynchPlayback),
     F("_IDirectSound3DCalculator_GetVoiceData@20", Calc_GetVoiceData),
     F("_IDirectSound3DCalculator_GetMixBinVolumes@12", Calc_GetMixBinVolumes),
     F("_IDirectSound3DCalculator_GetPanData@16", Calc_GetPanData),
+    /* the calculator's static members, under their class name */
+    F("?Calculate3D@CDirectSound3DCalculator@DirectSound@@SGJKPAU_DS3DVOICEDATA@@@Z", Calc_Calculate3D),
+    F("?GetVoiceData@CDirectSound3DCalculator@DirectSound@@SGJKKPAX00@Z", Calc_GetVoiceData),
+    F("?GetMixBinVolumes@CDirectSound3DCalculator@DirectSound@@SGJKKPAX@Z", Calc_GetMixBinVolumes),
+    F("?GetPanData@CDirectSound3DCalculator@DirectSound@@SGJKKKPAX@Z", Calc_GetPanData),
     F("_IDirectSoundBuffer_Pause@8", Buf_Pause),
     F("?Pause@CDirectSoundBuffer@DirectSound@@QAGJK@Z", Buf_Pause),
     F("_IDirectSoundBuffer_PauseEx@16", Buf_PauseEx),

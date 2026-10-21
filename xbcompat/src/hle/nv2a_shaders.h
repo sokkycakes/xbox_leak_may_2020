@@ -112,6 +112,9 @@ typedef struct {
     uint32_t color_key[4];
     uint32_t color_key_ignore_alpha;
     uint32_t bump_bgra;
+    /* Stages whose upload stores signed components biased by 128 (V8U8,
+       L6V5U5), so that filtering interpolates the signed values. */
+    uint32_t bump_biased;
 } psh_options;
 char *psh_translate_ex(const uint32_t *rs, const psh_options *options);
 char *psh_translate(const uint32_t *rs);

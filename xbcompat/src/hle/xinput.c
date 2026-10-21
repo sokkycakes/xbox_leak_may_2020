@@ -1033,6 +1033,108 @@ void xinput_check_reset_combo(void)
     was_held = held;
 }
 
+/*
+ * The Guide overlay (src/guide) reads every pad itself, raw, once a frame,
+ * and asks for the pads to be hidden from the title while it is open.
+ * Hiding lasts until each pad has let go of everything, so the button that
+ * closed the Guide doesn't reach the game.
+ */
+static volatile int guide_masked, rumble_off;
+static bool guide_latch[XI_PORTS];
+
+unsigned xinput_guide_ports(void)
+{
+    unsigned m = 0;
+    pthread_mutex_lock(&xi.lock);
+    for (unsigned i = 0; i < XI_PORTS; i++) if (xi.port[i].connected) m |= 1u << i;
+    pthread_mutex_unlock(&xi.lock);
+    return m;
+}
+
+/* The Guide's Vibration setting. */
+void xinput_guide_vibration(bool on)
+{
+    rumble_off = !on;
+    if (on) return;
+    pthread_mutex_lock(&xi.lock);
+    for (unsigned i = 0; i < XI_PORTS; i++)
+        if (xi.port[i].gc) SDL_GameControllerRumble(xi.port[i].gc, 0, 0, 0);
+    pthread_mutex_unlock(&xi.lock);
+}
+
+static unsigned guide_bits(const XINPUT_GAMEPAD *g)
+{
+    unsigned b = g->wButtons & 0xff;
+    if (g->bAnalogButtons[XINPUT_GAMEPAD_A] > 30) b |= GUIDE_A;
+    if (g->bAnalogButtons[XINPUT_GAMEPAD_B] > 30) b |= GUIDE_B;
+    if (g->bAnalogButtons[XINPUT_GAMEPAD_X] > 30) b |= GUIDE_X;
+    if (g->bAnalogButtons[XINPUT_GAMEPAD_Y] > 30) b |= GUIDE_Y;
+    if (g->bAnalogButtons[XINPUT_GAMEPAD_LEFT_TRIGGER] > 30) b |= GUIDE_LT;
+    if (g->bAnalogButtons[XINPUT_GAMEPAD_RIGHT_TRIGGER] > 30) b |= GUIDE_RT;
+    if (g->sThumbLY > 16000) b |= XINPUT_GAMEPAD_DPAD_UP;
+    if (g->sThumbLY < -16000) b |= XINPUT_GAMEPAD_DPAD_DOWN;
+    if (g->sThumbLX < -16000) b |= XINPUT_GAMEPAD_DPAD_LEFT;
+    if (g->sThumbLX > 16000) b |= XINPUT_GAMEPAD_DPAD_RIGHT;
+    return b;
+}
+
+static bool pad_idle(const XINPUT_GAMEPAD *g)
+{
+    return !(guide_bits(g) & ~0u) && g->bAnalogButtons[XINPUT_GAMEPAD_BLACK] <= 30 &&
+           g->bAnalogButtons[XINPUT_GAMEPAD_WHITE] <= 30;
+}
+
+unsigned xinput_guide_read(int *port)
+{
+    static unsigned last[XI_PORTS];
+    unsigned all = 0;
+    if (!xi.inited || !xi.sdl_ready) return 0;
+    pthread_mutex_lock(&xi.lock);
+    sync_devices(false);
+    for (unsigned i = 0; i < XI_PORTS; i++) {
+        const xi_port *p = &xi.port[i];
+        unsigned b = 0;
+        if (p->connected) {
+            XINPUT_GAMEPAD g;
+            read_port(p, &g);
+            b = guide_bits(&g);
+            if (p->gc && SDL_GameControllerGetButton(p->gc, SDL_CONTROLLER_BUTTON_GUIDE)) b |= GUIDE_HOME;
+            if (p->kbd || (i == 0 && !getenv("XBCOMPAT_NO_KBD_PAD"))) {
+                const Uint8 *k = SDL_GetKeyboardState(NULL);
+                if (k && k[SDL_SCANCODE_F1]) b |= GUIDE_HOME;
+            }
+        }
+        if (port && (b & ~last[i])) *port = (int)i;
+        last[i] = b;
+        all |= b;
+    }
+    pthread_mutex_unlock(&xi.lock);
+    return all;
+}
+
+void xinput_guide_mask(bool on)
+{
+    pthread_mutex_lock(&xi.lock);
+    if (!on && guide_masked)
+        for (unsigned i = 0; i < XI_PORTS; i++) guide_latch[i] = true;
+    if (on)
+        for (unsigned i = 0; i < XI_PORTS; i++) {
+            xi_port *p = &xi.port[i];
+            if (p->gc) SDL_GameControllerRumble(p->gc, 0, 0, 0);
+        }
+    guide_masked = on;
+    pthread_mutex_unlock(&xi.lock);
+}
+
+/* The title's view of a pad: neutral while the Guide has it. */
+static void guest_view(xi_handle *d, XINPUT_GAMEPAD *out)
+{
+    unsigned port = d->port < XI_PORTS ? d->port : 0;
+    if (!guide_masked && guide_latch[port] && pad_idle(&d->last)) guide_latch[port] = false;
+    if (guide_masked || guide_latch[port]) memset(out, 0, sizeof(*out));
+    else memcpy(out, &d->last, sizeof(*out));
+}
+
 /* ---- handles ------------------------------------------------------------ */
 
 static xi_handle *check_handle(HANDLE h, const char *api)
@@ -1343,12 +1445,44 @@ static ULONG NTAPI XInputGetState(HANDLE hDevice, XINPUT_STATE *pState)
         else if (d->pp.flags & XINPUT_POLL_AUTO) sample(d, &xi.port[d->port], false);
         if (pState) {
             pState->dwPacketNumber = d->packet;
-            memcpy(&pState->Gamepad, &d->last, sizeof(XINPUT_GAMEPAD));
+            guest_view(d, &pState->Gamepad);
         }
     }
     pthread_mutex_unlock(&xi.lock);
     return err;
 }
+
+/* XDK 4831+: the device's USB ids (XINPUT_DEVICE_DESCRIPTION: vendor,
+   product, version), which light gun titles read to pick a calibration.
+   Every device here answers as a Microsoft controller. */
+static ULONG NTAPI XInputGetDeviceDescription(HANDLE hDevice, USHORT *pDescription)
+{
+    pthread_mutex_lock(&xi.lock);
+    sync_devices(false);
+    ULONG err = ERROR_SUCCESS;
+    xi_handle *d = check_handle(hDevice, "XInputGetDeviceDescription");
+    if (!d || !pDescription) err = ERROR_INVALID_PARAMETER;
+    else if (!handle_connected(d)) err = ERROR_DEVICE_NOT_CONNECTED;
+    else { pDescription[0] = 0x045E; pDescription[1] = 0x0289; pDescription[2] = 0x0100; }
+    pthread_mutex_unlock(&xi.lock);
+    return err;
+}
+
+/* Light gun calibration offsets: nothing here aims, so they are only checked. */
+static ULONG NTAPI XInputSetLightgunCalibration(HANDLE hDevice, PVOID pCalibrationOffsets)
+{
+    pthread_mutex_lock(&xi.lock);
+    ULONG err = ERROR_SUCCESS;
+    xi_handle *d = check_handle(hDevice, "XInputSetLightgunCalibration");
+    if (!d || !pCalibrationOffsets) err = ERROR_INVALID_PARAMETER;
+    else if (!handle_connected(d)) err = ERROR_DEVICE_NOT_CONNECTED;
+    pthread_mutex_unlock(&xi.lock);
+    return err;
+}
+
+/* Devices are enumerated when asked for here, so enumeration is never busy
+   (XDEVICE_ENUMERATION_IDLE). */
+static ULONG NTAPI XGetDeviceEnumerationStatus(void) { return 0; }
 
 static ULONG NTAPI XInputPoll(HANDLE hDevice)
 {
@@ -1376,7 +1510,7 @@ static ULONG NTAPI XInputSetState(HANDLE hDevice, XINPUT_FEEDBACK *pFeedback)
     } else {
         xi_port *p = &xi.port[d->port];
         USHORT l = pFeedback->Rumble.wLeftMotorSpeed, r = pFeedback->Rumble.wRightMotorSpeed;
-        if (p->gc) SDL_GameControllerRumble(p->gc, l, r, (l || r) ? XI_RUMBLE_MS : 0);
+        if (p->gc && !guide_masked && !rumble_off) SDL_GameControllerRumble(p->gc, l, r, (l || r) ? XI_RUMBLE_MS : 0);
         TRACE_ALL("XInput: XInputSetState port %u: rumble %u/%u", d->port, l, r);
 
         /* The driver references the completion event when the report is
@@ -1502,6 +1636,9 @@ const struct hle_func xinput_funcs[] = {
     F("_XInputGetState@8", XInputGetState),
     F("_XInputSetState@8", XInputSetState),
     F("_XInputPoll@4", XInputPoll),
+    F("_XInputGetDeviceDescription@8", XInputGetDeviceDescription),
+    F("_XInputSetLightgunCalibration@8", XInputSetLightgunCalibration),
+    F("_XGetDeviceEnumerationStatus@0", XGetDeviceEnumerationStatus),
     F("_XMountMUA@12", XMountMUA),
     F("_XMountMURootA@12", XMountMURootA),
     F("_XUnmountMU@8", XUnmountMU),

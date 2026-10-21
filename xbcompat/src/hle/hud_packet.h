@@ -118,7 +118,7 @@ struct xbr_draw_packet *d3d_draw_packet_capture(const struct xbr_draw_front *fro
            the cache itself belongs to the worker. */
         if (state.rs[D3DRS_FOGENABLE] || state.rs[118 /* VERTEXBLEND */] || state.rs[D3DRS_POINTSCALEENABLE]
             || state.rs[D3DRS_STENCILENABLE] || state.rs[D3DRS_SPECULARENABLE] || state.rs[D3DRS_POINTSPRITEENABLE]
-            || front->pixel_shader || (state.fvf & ~0x100u) != (D3DFVF_XYZRHW | D3DFVF_DIFFUSE) || (state.fvf == 0x144 && !front->shader_ready)) return NULL;
+            || front->pixel_shader || ff_combiner_needs_program(state.tss, 0) || (state.fvf & ~0x100u) != (D3DFVF_XYZRHW | D3DFVF_DIFFUSE) || (state.fvf == 0x144 && !front->shader_ready)) return NULL;
         for (int s = 0; s < 4; s++)
             if (state.tss[s * 32 + 21] || state.tss[s * 32 + D3DTSS_TEXCOORDINDEX] >> 16) return NULL;
         memset(ids, 0, sizeof(ids));

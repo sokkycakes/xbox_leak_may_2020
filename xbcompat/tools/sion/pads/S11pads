@@ -1,0 +1,7 @@
+#!/bin/sh
+# After udev, before the boot animation and dashboard (S11xbox-boot).
+case "$1" in
+start|stop) /usr/sbin/sion-pads "$1" ;;
+restart) /usr/sbin/sion-pads stop; /usr/sbin/sion-pads start ;;
+*) echo "usage: $0 start|stop|restart"; exit 1 ;;
+esac

@@ -1,0 +1,12 @@
+#!/bin/sh
+# Loads the FUSE module at boot (installed by push-fuse/install.sh), plus
+# erofs (push-erofs) for Kazeta .kzr runtimes when it is installed.
+case "$1" in
+  start)
+    grep -q '^fuse ' /proc/modules || insmod /lib/modules/6.18.7/extra/fuse.ko
+    for m in erofs squashfs uinput; do
+      [ -f /lib/modules/6.18.7/extra/$m.ko ] && { grep -q "^$m " /proc/modules || insmod /lib/modules/6.18.7/extra/$m.ko; }
+    done
+    ;;
+  *) ;;
+esac
