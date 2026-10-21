@@ -269,6 +269,8 @@ typedef struct {
 } xbe_image;
 
 void xbe_load(const char *path, xbe_image *img);
+void wincart_exec(const char *xbe);          /* kernel/wincart.c */
+ULONG wincart_title_id(const char *id);
 ULONG xbe_title_id(void);
 const char *xbe_title_name(void);
 void xbe_reload_section(ULONG va, ULONG raw_offset, ULONG raw_size, ULONG virtual_size);

@@ -245,6 +245,7 @@ int main(int argc, char **argv)
     }
     if (optind != argc - 1) usage();
     const char *xbe = argv[optind];
+    wincart_exec(xbe);   /* a Windows cart's stub: wincart-run takes over this process */
 
     char hddbuf[4096];
     if (!hdd) {
