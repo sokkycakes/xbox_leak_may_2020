@@ -30,6 +30,20 @@
 
 #include "../xbcompat.h"
 
+/* PNG only, for a cart's icon (stb_image, public domain / MIT). */
+#define STB_IMAGE_IMPLEMENTATION
+#define STB_IMAGE_STATIC
+#define STBI_ONLY_PNG
+#define STBI_NO_LINEAR
+#define STBI_NO_HDR
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wsign-compare"
+#pragma GCC diagnostic ignored "-Wunused-function"
+#pragma GCC diagnostic ignored "-Wunused-but-set-variable"
+#pragma GCC diagnostic ignored "-Wimplicit-fallthrough"
+#include "../third_party/stb_image.h"
+#pragma GCC diagnostic pop
+
 typedef struct {
     char kzi[NAME_MAX + 1];     /* the .kzi's file name */
     char dir[NAME_MAX + 1];     /* the cart's directory on the card */
@@ -103,23 +117,77 @@ static void utf16(WCHAR *out, int n, const char *s)
     while (i < n) out[i++] = 0;
 }
 
-/* A stub XBE: headers, a certificate and one empty section.  Nothing in it
-   ever runs; the dashboard reads the certificate and xbrun.py its (empty)
-   library list. */
-static bool write_stub_xbe(const char *path, const wincart *c)
+/* A cart's icon as the dashboard's title image (an XBE's $$XTIMAGE): an XPR0
+   texture, 128x128 swizzled A8R8G8B8, the picture scaled to fit, centred on
+   transparent.  NULL when there is no readable PNG. */
+enum { TI_SIDE = 128, TI_HDR = 0x800 };
+
+static uint8_t *title_image(const char *png, ULONG *size)
+{
+    int w, h, n;
+    uint8_t *rgba = png ? stbi_load(png, &w, &h, &n, 4) : NULL;
+    if (!rgba) {
+        if (png) xlog("wincart: icon %s: %s", png, stbi_failure_reason());
+        return NULL;
+    }
+    *size = TI_HDR + TI_SIDE * TI_SIDE * 4;
+    uint8_t *x = calloc(1, *size);
+    ULONG hd[9] = {
+        0x30525058, *size, TI_HDR,      /* XPR0, total and header sizes */
+        0x00040001, 0, 0,               /* a texture: Common, Data, Lock */
+        0x07710629, 0,                  /* Format: 2D, A8R8G8B8, 128x128, 1 level; Size */
+        0xFFFFFFFF,                     /* end of the resources */
+    };
+    memcpy(x, hd, sizeof hd);
+    memset(x + sizeof hd, 0xAD, TI_HDR - sizeof hd);
+    float s = (float)TI_SIDE / (w > h ? w : h);
+    float ox = (TI_SIDE - w * s) / 2, oy = (TI_SIDE - h * s) / 2;
+    for (int y = 0; y < TI_SIDE; y++)
+        for (int xx = 0; xx < TI_SIDE; xx++) {
+            /* 4x4 samples per texel: fine for shrinking and growing alike */
+            unsigned acc[4] = { 0 }, cnt = 0;
+            for (int sy = 0; sy < 4; sy++)
+                for (int sx = 0; sx < 4; sx++) {
+                    int px = (int)((xx + (sx + 0.5f) / 4 - ox) / s), py = (int)((y + (sy + 0.5f) / 4 - oy) / s);
+                    cnt++;
+                    if (px < 0 || py < 0 || px >= w || py >= h) continue;
+                    const uint8_t *p = rgba + ((size_t)py * w + px) * 4;
+                    acc[0] += p[2] * p[3]; acc[1] += p[1] * p[3]; acc[2] += p[0] * p[3]; acc[3] += p[3];
+                }
+            uint8_t *d = x + TI_HDR;
+            unsigned at = 0;
+            for (int b = 0; b < 7; b++) at |= ((xx >> b) & 1) << (2 * b) | ((y >> b) & 1) << (2 * b + 1);
+            d += at * 4;
+            if (acc[3]) for (int k = 0; k < 3; k++) d[k] = (uint8_t)(acc[k] / acc[3]);
+            d[3] = (uint8_t)(acc[3] / cnt);
+        }
+    stbi_image_free(rgba);
+    return x;
+}
+
+/* A stub XBE: headers, a certificate, one empty section and, given a cart
+   icon, its $$XTIMAGE.  Nothing in it ever runs; the dashboard reads the
+   certificate and title image and xbrun.py its (empty) library list. */
+static bool write_stub_xbe(const char *path, const wincart *c, const char *icon)
 {
     enum { HDR = 0x1000, TEXT_VA = XBE_BASE + 0x1000 };
-    static unsigned char img[HDR + 0x1000];
-    memset(img, 0, sizeof img);
+    ULONG tisize = 0;
+    uint8_t *ti = title_image(icon, &tisize);
+    ULONG tiraw = (tisize + 0xFFF) & ~0xFFFu;
+    size_t len = HDR + 0x1000 + tiraw;
+    unsigned char *img = calloc(1, len);
     XBE_HEADER *h = (XBE_HEADER *)img;
+    time_t stamp = c->mtime;
+    struct stat ib;
+    if (ti && stat(icon, &ib) == 0 && ib.st_mtime > stamp) stamp = ib.st_mtime;  /* new icon, new cache name */
     h->Signature = 0x48454258;      /* XBEH */
     h->BaseAddress = XBE_BASE;
     h->SizeOfHeaders = HDR;
-    h->SizeOfImage = sizeof img;
+    h->SizeOfImage = len;
     h->SizeOfImageHeader = sizeof *h;
-    h->TimeDateStamp = (ULONG)c->mtime;
+    h->TimeDateStamp = (ULONG)stamp;
     h->Certificate = XBE_BASE + sizeof *h;
-    h->NumberOfSections = 1;
+    h->NumberOfSections = ti ? 2 : 1;
     h->SectionHeaders = h->Certificate + sizeof(XBE_CERTIFICATE);
     h->AddressOfEntryPoint = (TEXT_VA + 0x10) ^ 0xA8FC57AB;     /* retail keys */
     h->XboxKernelThunkData = TEXT_VA ^ 0x5B6D40B6;
@@ -127,15 +195,15 @@ static bool write_stub_xbe(const char *path, const wincart *c)
     h->SizeOfHeapReserve = 0x100000;
     h->SizeOfHeapCommit = 0x1000;
     h->NtBaseOfDll = 0x10000;
-    h->NtSizeOfImage = sizeof img;
-    ULONG names = h->SectionHeaders + sizeof(XBE_SECTION);
-    h->DebugPathName = h->DebugFileName = h->DebugUnicodeFileName = names + 8;
+    h->NtSizeOfImage = len;
+    ULONG names = h->SectionHeaders + 2 * sizeof(XBE_SECTION);   /* ".text", "$$XTIMAGE", then an empty string */
+    h->DebugPathName = h->DebugFileName = h->DebugUnicodeFileName = names + 32;
     h->NumberOfLibraryVersions = 0;
-    h->LibraryVersions = names + 8;
+    h->LibraryVersions = names + 32;
 
     XBE_CERTIFICATE *cert = (XBE_CERTIFICATE *)(img + sizeof *h);
     cert->SizeOfCertificate = sizeof *cert;
-    cert->TimeDateStamp = (ULONG)c->mtime;
+    cert->TimeDateStamp = (ULONG)stamp;
     cert->TitleID = wincart_title_id(c->id);
     utf16(cert->TitleName, 40, c->name);
     cert->AllowedMediaTypes = 0x000000FF;
@@ -152,13 +220,23 @@ static bool write_stub_xbe(const char *path, const wincart *c)
     sec->SectionName = names;
     memcpy(img + (names - XBE_BASE), ".text", 6);
     img[HDR + 0x10] = 0xC3;         /* ret, never reached */
+    if (ti) {                       /* not preloaded: only the dashboards read it, from the file */
+        sec[1].VirtualAddress = TEXT_VA + 0x1000;
+        sec[1].VirtualSize = tisize;
+        sec[1].PointerToRawData = HDR + 0x1000;
+        sec[1].SizeOfRawData = tisize;
+        sec[1].SectionName = names + 16;
+        memcpy(img + (names + 16 - XBE_BASE), "$$XTIMAGE", 10);
+        memcpy(img + HDR + 0x1000, ti, tisize);
+        free(ti);
+    }
 
     char tmp[PATH_MAX];
     snprintf(tmp, sizeof tmp, "%s.tmp", path);
     FILE *f = fopen(tmp, "wb");
-    if (!f) return false;
-    bool ok = fwrite(img, 1, sizeof img, f) == sizeof img;
-    ok = fclose(f) == 0 && ok;
+    bool ok = f && fwrite(img, 1, len, f) == len;
+    if (f) ok = fclose(f) == 0 && ok;
+    free(img);
     if (ok && rename(tmp, path)) ok = false;
     if (!ok) unlink(tmp);
     return ok;
@@ -301,9 +379,12 @@ void wincart_shim(const char *card, char *out, size_t outlen)
         char stub[PATH_MAX];
         snprintf(stub, sizeof stub, "%s/%s", dir, c->dir);
         mkdir(stub, 0700);
-        write_shim_kzi(path, orig, c, link_icon(card, c, stub));
+        const char *icon = link_icon(card, c, stub);
+        write_shim_kzi(path, orig, c, icon);
+        char iconpath[PATH_MAX];
+        if (icon) snprintf(iconpath, sizeof iconpath, "%s/%s", stub, icon);
         snprintf(path, sizeof path, "%s/%s/default.xbe", dir, c->dir);
-        if (!write_stub_xbe(path, c)) xlog("wincart: cannot write %s: %s", path, strerror(errno));
+        if (!write_stub_xbe(path, c, icon ? iconpath : NULL)) xlog("wincart: cannot write %s: %s", path, strerror(errno));
         snprintf(path, sizeof path, "%s/%s/.wincart", dir, c->dir);
         snprintf(text, sizeof text, "kzi=%s\ntitle=%08x\nname=%s\nid=%s\nruntime=%s\nexec=%s\n",
                  orig, (unsigned)wincart_title_id(c->id), c->name, c->id, c->runtime, c->exec);
