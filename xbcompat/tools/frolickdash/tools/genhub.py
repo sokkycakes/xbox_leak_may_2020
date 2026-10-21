@@ -1105,7 +1105,10 @@ function HubButton(btn)
     if (nPad == 0)
     {
         if (btn == "x")
-            FocusPad("page_store_hot");
+        {
+            sSpotBack = "";
+            FocusPad("page_spotlight");
+        }
         else
             FocusPad("page_downloads");
     }
@@ -1419,6 +1422,7 @@ function ShowPage(page, how)
 {
     var first;
     sPage = page;
+    nMetaRow = 0 - 1;
     thePage.url = PageUrl(page);
     thePage.Play("page", how);
     first = PageFirst(page);
@@ -1443,6 +1447,8 @@ function PageBack()
         parent = sConfirmBack;
     else if (sPage == "page_notice")
         parent = sConfirmBack;
+    else if (sPage == "page_spotlight")
+        parent = sSpotBack;     // the Marketplace when it was opened from there
     else
         parent = PageParent(sPage);
     if (parent == "")
@@ -1462,6 +1468,7 @@ function PageFocus(id)
     s = PageMeta(sPage, id);
     thePage.SetData("metaPanelScene", 4, s);   // metaScene_1line's Pane_txtCurrentSetting
     thePage.SetText("txt_Meta", s);
+    thePage.SetText("txt_MetaTitle", PageItemName(sPage, id));
     r = RowOf(id);
     if (r >= 0)
     {
@@ -1469,7 +1476,93 @@ function PageFocus(id)
         UpdateTotal();
         if (PageKind(sPage) == "downloads")
             DlLegend();
+        if (PageKind(sPage) == "spotlight")
+            SpotMeta();
     }
+    else
+        r = PageItemRow(sPage, id);
+    MetaHighlight(r);
+}
+
+// The later dashboard's meta panes (metaScene_MarketPlace,
+// metaScene_2lineFocus_Long) carry a highlight that follows the focused
+// row out of the list: its named frames "1To2", "2To1"... slide it a row.
+var nMetaRow;   // the row the pane's highlight is on (-1: none yet)
+function MetaHighlight(r)
+{
+    var pane = PageMetaPane(sPage);
+    if (pane == "")
+        return;
+    if (r < 0)
+        return;
+    if (r == nMetaRow)
+        return;
+    if (nMetaRow < 0)
+    {
+        if (r == 0)
+            thePage.Play(pane, "Default");
+        else
+            thePage.Play(pane, r + "To" + (r + 1));
+    }
+    else if (r < nMetaRow)
+        thePage.Play(pane, (nMetaRow + 1) + "To" + (r + 1));
+    else
+        thePage.Play(pane, r + "To" + (r + 1));
+    nMetaRow = r;
+}
+
+// ---- Spotlight -----------------------------------------------------------
+
+var nTab;       // Spotlight's category
+var sSpotBack;  // the page B returns to from Spotlight ("": the hub)
+
+function SpotTabWrap(t)
+{
+    var n = SpotTabs();
+    var w = t;
+    // (the script has no while, and a parameter cannot be assigned: w is
+    // at most one strip away)
+    if (w < 0)
+        w = w + n;
+    if (w >= n)
+        w = w - n;
+    if (w >= n)
+        w = w - n;
+    return w;
+}
+
+// the tab strip: the previous tab, the current one, the ones after it
+function SpotFillTabs()
+{
+    var k;
+    for (k = 0; k < %(spot_tab_slots)s; k = k + 1)
+        thePage.SetText("tab_" + k, SpotTab(SpotTabWrap(nTab + k - 1)));
+}
+
+function SpotMeta()
+{
+    if (nListCount == 0)
+    {
+        thePage.SetText("metaSpot", "");
+        thePage.SetData("metaSpot", 1, "");
+        return;
+    }
+    thePage.SetText("metaSpot", SpotName(nTab, nSel));
+    thePage.SetData("metaSpot", 1, SpotDesc(nTab, nSel));
+}
+
+// left and right: the next category, its list from the top
+function SpotSwitch(step)
+{
+    nTab = SpotTabWrap(nTab + step);
+    SpotFillTabs();
+    nScroll = 0;
+    nSel = 0;
+    nListCount = ListCount();
+    FillPage();
+    thePage.SetFocus(RowId(0));
+    PageFocus(RowId(0));
+    SndFocus();
 }
 
 function PagePress(id)
@@ -1480,6 +1573,8 @@ function PagePress(id)
     target = PageTarget(sPage, id);
     if (target == "")
         return;     // no page behind this item yet: the bar's Press frame plays and that is all
+    if (target == "page_spotlight")
+        sSpotBack = sPage;
     SndPageOpen();
     ShowPage(target, "Fade");
 }
@@ -1658,6 +1753,8 @@ function ListCount()
         return theGameCollection.GetRecentCount();
     if (k == "downloads")
         return DlListCount();
+    if (k == "spotlight")
+        return SpotCount(nTab);
     return 0;
 }
 
@@ -1704,6 +1801,12 @@ function FillRow(r)
     else if (k == "downloads")
     {
         DlFillRow(id, i);
+        return;
+    }
+    else if (k == "spotlight")
+    {
+        // btn_twoline_left's one presenter: the name over its kind
+        thePage.SetText(id, SpotName(nTab, i) + "\n" + SpotKind(nTab, i));
         return;
     }
     else if (k == "saves")
@@ -1783,6 +1886,11 @@ function PageEnter()
     }
     if (k == "recent")
         theGameCollection.Scan();
+    if (k == "spotlight")
+    {
+        nTab = 0;
+        SpotFillTabs();
+    }
     nScroll = 0;
     nSel = 0;
     nListCount = ListCount();
@@ -1791,6 +1899,8 @@ function PageEnter()
         thePage.SetFocus(RowId(0));
     if (k == "downloads")
         DlEnter();
+    if (k == "spotlight")
+        SpotMeta();
 }
 
 // The focus ran off an end of the rows: the list moves one item.
@@ -1800,6 +1910,19 @@ function PageScroll(dir)
         return;
     if (PageKind(sPage) == "downloads")
         return;     // its sections are fixed to their rows (no scrolling yet)
+    if (PageKind(sPage) == "spotlight")
+    {
+        if (dir == "left")
+        {
+            SpotSwitch(0 - 1);
+            return;
+        }
+        if (dir == "right")
+        {
+            SpotSwitch(1);
+            return;
+        }
+    }
     if (dir == "down")
     {
         if (nScroll + nRows < nListCount)
@@ -1980,6 +2103,14 @@ function PadY()
         if (bLibraryOpen)
             return;
         HubButton("y");
+        return;
+    }
+    if (sPage == "page_spotlight")
+    {
+        // Marketplace Home
+        SndSelect();
+        SndPageOpen();
+        ShowPage("page_market", "Fade");
         return;
     }
     if (PageKind(sPage) == "titles")
@@ -2270,6 +2401,7 @@ def main():
     vals["pin_pulse_dur"] = "%g" % PIN_PULSE_DUR
     import genpage
     vals["page_tables"] = genpage.script()
+    vals["spot_tab_slots"] = genpage.SPOT_TAB_SLOTS
     open(os.path.join(out, "default.xap"), "w").write(HUB % vals)
     open(os.path.join(pads, "overlay.xui"), "w").write(overlay_scene())
     catalog = open(os.path.join(pads, "catalog.xui")).read()

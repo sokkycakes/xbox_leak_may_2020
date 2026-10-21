@@ -679,7 +679,10 @@ void CXuiPanel::Play(const TCHAR* szId, const TCHAR* szFrame)
         return;
     char sz[64];
     ToAnsi(sz, szFrame, sizeof sz);
-    n->play(sz);
+    // a control's own timelines first, else its skin visual's (the meta
+    // pane's highlight frames)
+    if (!n->play(sz) && n->visual != NULL)
+        n->visual->play(sz);
 }
 
 static void SetString(xui::Node* n, const char* szProp, const TCHAR* szValue)

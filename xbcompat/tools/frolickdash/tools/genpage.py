@@ -179,28 +179,58 @@ PAGES = [
     ("page_network", dict(scene="2000_NetworkConfigList.xui", pad="settings", first="list_items_0", parent="page_system",
                           lists={"list_items": [("Wireless Network", "Connected", 0, "ico_64x_Infrastructure.png")]},
                           meta={"list_items_0": "Wireless Network\nConnected\n\nIP address 192.168.1.247\nSubnet mask 255.255.255.0\nGateway 192.168.1.1"})),
-    ("page_store", dict(scene="1400_StoreFrontScene.xui", pad="catalog", first="btnGameDownloads", parent="", header="Marketplace",
-                        press={"btnGameDownloads": "page_store_games", "btnHotList": "page_store_hot",
-                               "btnDemosAndTrailers": "page_store_demos", "btnThemes": "page_store_themes",
-                               "btnDownloadStatusAndHistory": "page_downloads"},
-                        hide=["btnX"])),
-    ("page_store_games", dict(scene="1412_GameListScene.xui", pad="catalog", first="lstGames_0", parent="page_store",
+    # The catalog pad's focus view (A) is the later 360 dashboard's
+    # Marketplace blade (sokky 2026-10-21, from dash.xex's 202 RootScene and
+    # the skin's btn_1line_icon / metaScene_MarketPlace): a one-line list on
+    # the left, the meta pane on the right with a highlight that follows the
+    # focused row out of the list.  Built here (market_page).
+    ("page_market", dict(scene="market", pad="catalog", first="btnSpotlight", parent="", header="Marketplace",
+                         items=[("btnSpotlight", "Spotlight", "page_spotlight",
+                                 "New and featured games, demos and extras."),
+                                ("btnGameDownloads", "Game Downloads", "page_store_games",
+                                 "Full games to download to the hard drive."),
+                                ("btnDemosAndTrailers", "Demos and Trailers", "page_store_demos",
+                                 "Try a game before you get it."),
+                                ("btnThemes", "Themes and Gamer Pictures", "page_store_themes",
+                                 "Themes and pictures for the dashboard."),
+                                ("btnActiveDownloads", "Active Downloads", "page_downloads",
+                                 "What is downloading now and what is queued."),
+                                ("btnDownloadHistory", "Download History", "page_store_history",
+                                 "Everything downloaded so far.")])),
+    # Spotlight (catalog X, and the first item of the Marketplace): the
+    # later dashboard's Spotlight screen (sokky's screenshot): the featured
+    # banner, a row of category tabs (left and right switch, the list
+    # wrapping round), four two-line items (btn_twoline_left, the List_twoline
+    # counter under them) and the meta pane metaScene_2lineFocus_Long beside
+    # them, its highlight following the focused row.  Y is Marketplace
+    # Home.  Filled by the hub (kind "spotlight") from SPOTLIGHT below.
+    ("page_spotlight", dict(scene="spotlight", pad="catalog", first="lstSpot_0", parent="", header="Spotlight",
+                            dynamic="spotlight", list="lstSpot", rows=4, legend_y="Marketplace Home")),
+    ("page_store_games", dict(scene="1412_GameListScene.xui", pad="catalog", first="lstGames_0", parent="page_market",
                               header="Game Downloads", lists={"lstGames": GAMES}, hide=["btnX"],
                               labels={"labItemCount": "%d items" % min(len(GAMES), 8)})),
-    ("page_store_hot", dict(scene="1405_HotListScene.xui", pad="catalog", first="lstHot_0", parent="page_store",
-                            lists={"lstHot": GAMES[:7]},
-                            hide=["btnX", "labMembershipTitle", "labMembership", "labCurrentBalanceTitle", "labCurrentBalance"],
-                            labels={"labItemCount": "7 items"})),
-    ("page_store_demos", dict(scene="1412_GameListScene.xui", pad="catalog", first="lstGames_0", parent="page_store",
+    ("page_store_demos", dict(scene="1412_GameListScene.xui", pad="catalog", first="lstGames_0", parent="page_market",
                               header="Demos and Trailers", lists={"lstGames": GAMES[2:8]}, hide=["btnX"],
                               labels={"labItemCount": "6 items"})),
-    ("page_store_themes", dict(scene="1412_GameListScene.xui", pad="catalog", first="lstGames_0", parent="page_store",
+    ("page_store_themes", dict(scene="1412_GameListScene.xui", pad="catalog", first="lstGames_0", parent="page_market",
                                header="Themes and Gamer Pictures", lists={"lstGames": [("Frolick", "", 0), ("Sion", "", 0)]},
                                hide=["btnX"], labels={"labItemCount": "2 items"})),
-    ("page_store_history", dict(scene="1414_DownloadHistoryScene.xui", pad="catalog", first="lstDownloadHistory_0", parent="page_store",
+    ("page_store_history", dict(scene="1414_DownloadHistoryScene.xui", pad="catalog", first="lstDownloadHistory_0", parent="page_market",
                                 lists={"lstDownloadHistory": GAMES[:3]}, hide=["btnX"], labels={"labItemCount": "3 items"})),
 ]
-ROOT_PAGE = {"settings": "page_system", "catalog": "page_store"}
+ROOT_PAGE = {"settings": "page_system", "catalog": "page_market"}
+
+# Spotlight's tabs and items: placeholders (the belt's games) until
+# Frolick has a catalog.  (tab, [(name, kind, description), ...])
+SPOT_GAMES = CAROUSEL_GAMES[BELT_START:]
+SPOTLIGHT = [
+    ("Featured", [(g, k, "") for g, k in zip(SPOT_GAMES, ["Game", "Demo", "Game", "Theme", "Game", "Demo"])]),
+    ("Games", [(g, "Game", "") for g in SPOT_GAMES[:6]]),
+    ("Demos", [(g, "Demo", "") for g in SPOT_GAMES[2:6]]),
+    ("Themes", [("Frolick", "Theme", ""), ("Sion", "Theme", "")]),
+    ("Free Stuff", [(g, "Gamer Picture", "") for g in SPOT_GAMES[1:4]]),
+]
+SPOT_TAB_SLOTS = 6     # the previous tab, the current one and four after it (the strip wraps)
 
 
 def rect(w, h):
@@ -265,7 +295,7 @@ def track(id, prop, keys):
 
 # The visuals whose text follows focus: the buttons and list items.
 ITEM_VISUALS = ("XuiButton", "btn_oneline_icon", "btn_twoline-icon", "btn_twoline-status", "btn_3Line_Icon_prgbr",
-                "ListItem_Fullwidth_3Icon_4String")
+                "ListItem_Fullwidth_3Icon_4String", "btn_1line_icon", "btn_twoline_left")
 REST_STATES = ("Normal", "EndNormal", "NormalDisable", "EndNormalDisable", "NormalSelDisable", "EndNormalSelDisable")
 
 
@@ -304,6 +334,11 @@ def skin():
     """The Blades skin's visuals, as tools/skinsubset.py pulled them, the
     buttons' and list items' text keyed white at rest and dark on focus."""
     s = open(os.path.join(BLADES, "skin.xui")).read()
+    # the later dashboard's Marketplace widgets (art/blades/skin_mp.xui,
+    # pulled the same way out of the later dash.xex's skin)
+    mp = open(os.path.join(BLADES, "skin_mp.xui")).read()
+    mp = mp[mp.find("<XuiVisual>"):mp.rfind("</XuiScene>")]
+    s = s.replace("</XuiScene></XuiCanvas>", mp + "</XuiScene></XuiCanvas>")
     def fix(m):
         if m.group(1) in ITEM_VISUALS:
             return item_text_colours(m.group(0))
@@ -467,9 +502,92 @@ def list_items(block, items, visual=None, dynamic=False, sections=None, bar=Fals
     return out
 
 
+# ---- the later dashboard's Marketplace pages --------------------------------
+
+# The Blades' third-level layout: the list at 146, the meta pane 434 to its
+# right (the pane's highlight1 sits at -434, over the focused row).
+LIST_X, META_X = 146, 580
+
+
+def label(id, x, y, w, h, visual, text_="", extra=""):
+    return "\n".join(["<XuiLabel>", "<Properties>", " <Id>%s</Id>" % id, " <Width>%g</Width>" % w, " <Height>%g</Height>" % h,
+                      " <Position>%g,%g,0</Position>" % (x, y), " <Visual>%s</Visual>" % visual, " <Text>%s</Text>" % text_]
+                     + ([extra] if extra else []) + ["</Properties>", "</XuiLabel>"])
+
+
+def legends(spec):
+    out = [nav_button("legend_a", 573, 639, 420, 47, "Select", "legend_A"),
+           nav_button("legend_b", 555, 611, 420, 47, "Back", "legend_B").replace("XuiNavButton", "XuiBackButton")]
+    if spec.get("legend_y"):
+        out.append(nav_button("legend_y", 233, 611, 420, 47, spec["legend_y"], "legend_Y"))
+    return out
+
+
+def header(spec, y=96):
+    return label("labHeader", 156, y, 855, 47, "Label_Head", spec["header"])
+
+
+def market_page(spec):
+    """The Marketplace blade: btn_1line_icon rows on a 45 pitch (the
+    blade's nav buttons, 32x32 icon slot empty until Frolick's icons
+    exist), metaScene_MarketPlace beside them with the focused item's name
+    and what it holds."""
+    items = spec["items"]
+    out = [header(spec)]
+    for i, it in enumerate(items):
+        nav = {}
+        if i > 0:
+            nav["NavUp"] = items[i - 1][0]
+        if i < len(items) - 1:
+            nav["NavDown"] = items[i + 1][0]
+        out.append(nav_button(it[0], LIST_X, 153 + 45 * i, 420, 47, it[1], "btn_1line_icon", nav))
+    out.append(label("metaMarket", META_X, 153, 420, 442, "metaScene_MarketPlace"))
+    out.append(text("txt_MetaTitle", META_X + 18, 165, 384, 40, 22, 0x4010, ITEM_REST, presenter=False, value="", shadow=SHADOW))
+    out.append(text("txt_Meta", META_X + 18, 213, 384, 360, 18, 0x4001, ITEM_REST, presenter=False, value="", shadow=SHADOW))
+    return out + legends(spec)
+
+
+def spotlight_page(spec):
+    """Spotlight: the banner slot, the category tabs, four btn_twoline_left
+    rows with the List_twoline counter under them, metaScene_2lineFocus_Long
+    beside them (its Pane_txt the item's name, Pane_txt1 its description)."""
+    out = [header(spec)]
+    # the featured banner (the 360's XBOX LIVE art, 065
+    # DefaultFeaturedTitleBanner): an empty image slot until Frolick has art
+    out.append("\n".join(["<XuiImage>", "<Properties>", " <Id>imgBanner</Id>", " <Width>746</Width>", " <Height>66</Height>",
+                          " <Position>202,148,0</Position>", " <ImagePath></ImagePath>", "</Properties>", "</XuiImage>"]))
+    # the tabs: the previous one right-aligned at the left edge (the
+    # 360's cut-off word), the current one over the list's text, the rest
+    # on a 165 pitch, the last dimmed
+    for k in range(SPOT_TAB_SLOTS):
+        if k == 0:
+            out.append(text("tab_0", 0, 222, 136, 40, 20, 0x4010 | 0x200, "0x40ffffff", presenter=False, value="", shadow="0"))
+        else:
+            colour = "0xffffffff" if k == 1 else ("0x50ffffff" if k == SPOT_TAB_SLOTS - 1 else "0xa0ffffff")
+            out.append(text("tab_%d" % k, LIST_X + 16 + 165 * (k - 1), 222, 160, 40, 20, 0x4010, colour, presenter=False, value="",
+                            shadow=SHADOW if k == 1 else "0"))
+    rows = spec["rows"]
+    for i in range(rows):
+        nav = {}
+        if i > 0:
+            nav["NavUp"] = "lstSpot_%d" % (i - 1)
+        if i < rows - 1:
+            nav["NavDown"] = "lstSpot_%d" % (i + 1)
+        out.append(nav_button("lstSpot_%d" % i, LIST_X, 266 + 74 * i, 420, 72, "", "btn_twoline_left", nav))
+    out.append(text("labTotal", LIST_X + 13, 266 + 74 * rows, 112, 30, 16, 0x4010, ITEM_REST, presenter=False, value="", shadow=SHADOW))
+    out.append(label("metaSpot", META_X, 266, 420, 74 * rows - 2, "metaScene_2lineFocus_Long", "", " <Data1></Data1>"))
+    out.append(text("txt_EmptyList", LIST_X + 16, 280, 400, 40, 18, 0x4010, ITEM_REST, presenter=False, value="Nothing here yet.", shadow=SHADOW))
+    return out + legends(spec)
+
+
+BUILDERS = {"market": market_page, "spotlight": spotlight_page}
+
+
 def page(file, spec):
     pad, first = spec["pad"], spec["first"]
-    if spec["scene"] is None:
+    if spec["scene"] in BUILDERS:
+        kept = BUILDERS[spec["scene"]](spec)
+    elif spec["scene"] is None:
         # The System list in the Console Settings layout: the bars at
         # 146,153 on a 45 pitch, the header at 156,96.
         kept = []
@@ -577,6 +695,8 @@ def page(file, spec):
 
 def dynamic_info(spec):
     """A dynamic page's list id and its rows."""
+    if spec["scene"] in BUILDERS:
+        return spec["list"], spec["rows"]
     src = open(os.path.join(BLADES, spec["scene"])).read()
     for b in element_blocks(src)[1]:
         if b.startswith("<XuiList>") or b.startswith("<XuiCommonList>"):
@@ -613,14 +733,58 @@ def script():
         out += ["function %s(page, id)" % name, "{"]
         for file, spec in PAGES:
             table = dict(spec.get(key, {}))
-            if key == "press" and spec["scene"] is None:
-                table.update((id, target) for id, _, target in spec["items"])
+            if key == "press" and "items" in spec:
+                table.update((it[0], it[2]) for it in spec["items"])
+            if key == "meta" and "items" in spec:
+                table.update((it[0], it[3]) for it in spec["items"] if len(it) > 3)
             if not table:
                 continue
             out += ["    if (page == %s)" % q(file), "    {"]
             for id, v in table.items():
                 out.append("        if (id == %s)" % q(id))
                 out.append("            return %s;" % q(v))
+            out.append("    }")
+        out += ['    return "";', "}", ""]
+    # the meta pane whose highlight follows the focused row
+    out += ["function PageMetaPane(page)", "{"]
+    for file, spec in PAGES:
+        if spec["scene"] in BUILDERS:
+            out += ["    if (page == %s)" % q(file), "        return %s;" % q({"market": "metaMarket", "spotlight": "metaSpot"}[spec["scene"]])]
+    out += ['    return "";', "}", ""]
+    # a built page's rows, in order (the market list's row of an id)
+    out += ["function PageItemRow(page, id)", "{"]
+    for file, spec in PAGES:
+        if spec["scene"] == "market":
+            out += ["    if (page == %s)" % q(file), "    {"]
+            for i, it in enumerate(spec["items"]):
+                out += ["        if (id == %s)" % q(it[0]), "            return %d;" % i]
+            out.append("    }")
+    out += ["    return 0 - 1;", "}", ""]
+    out += ["function PageItemName(page, id)", "{"]
+    for file, spec in PAGES:
+        if spec["scene"] == "market":
+            out += ["    if (page == %s)" % q(file), "    {"]
+            for it in spec["items"]:
+                out += ["        if (id == %s)" % q(it[0]), "            return %s;" % q(it[1])]
+            out.append("    }")
+    out += ['    return "";', "}", ""]
+    # Spotlight's tabs and items
+    out += ["function SpotTabs()", "{", "    return %d;" % len(SPOTLIGHT), "}", ""]
+    out += ["function SpotTab(t)", "{"]
+    for t, (name, items) in enumerate(SPOTLIGHT):
+        out += ["    if (t == %d)" % t, "        return %s;" % q(name)]
+    out += ['    return "";', "}", ""]
+    out += ["function SpotCount(t)", "{"]
+    for t, (name, items) in enumerate(SPOTLIGHT):
+        out += ["    if (t == %d)" % t, "        return %d;" % len(items)]
+    out += ["    return 0;", "}", ""]
+    for fn, k in (("SpotName", 0), ("SpotKind", 1), ("SpotDesc", 2)):
+        out += ["function %s(t, i)" % fn, "{"]
+        for t, (name, items) in enumerate(SPOTLIGHT):
+            out += ["    if (t == %d)" % t, "    {"]
+            for i, it in enumerate(items):
+                v = it[k] or "%s, %s. A placeholder until Frolick has a catalog." % (it[0], it[1].lower())
+                out += ["        if (i == %d)" % i, "            return %s;" % q(v)]
             out.append("    }")
         out += ['    return "";', "}", ""]
     return "\n".join(out)
