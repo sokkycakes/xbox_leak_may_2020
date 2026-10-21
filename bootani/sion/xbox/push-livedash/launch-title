@@ -98,8 +98,10 @@ case $1 in
 	;;
 esac
 # Games get the network card too, with their DNS through the server above, so
-# the ones Insignia serves can go online.
-export XBCOMPAT_NET=${XBCOMPAT_NET:-nat} XBCOMPAT_DNS=${XBCOMPAT_DNS:-127.0.0.1:5353}
+# the ones Insignia serves can go online ("off" in $L/games-net stops that).
+if [ "$(cat $L/games-net 2> /dev/null)" != off ]; then
+	export XBCOMPAT_NET=${XBCOMPAT_NET:-nat} XBCOMPAT_DNS=${XBCOMPAT_DNS:-127.0.0.1:5353}
+fi
 next=${XBOX_LIVE_NEXT_LAUNCHER:-$X/bin/python3 $X/tools/xbrun.py}
 [ "$next" = "$0" ] && next="$X/bin/python3 $X/tools/xbrun.py"
 # shellcheck disable=SC2086
