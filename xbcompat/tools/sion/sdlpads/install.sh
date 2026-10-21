@@ -10,7 +10,10 @@ set -e
 cd "$(dirname "$0")"
 for r in "" /data/overlay; do
 	L=$r/opt/xbcompat/lib
-	[ -d "$L" ] || continue
+	# The overlay (copied over / at boot) may carry only part of
+	# /opt/xbcompat; give it a lib/ so the new SDL2 survives a reboot.
+	[ -d $r/opt/xbcompat ] || continue
+	mkdir -p "$L"
 	# No SDL2 here before (the overlay often has none): remember that, so
 	# uninstall.sh removes ours instead of restoring a backup.
 	if [ ! -f $L/libSDL2-2.0.so.0.pre-sdlpads ] && [ ! -f $L/.sdlpads-added ]; then
