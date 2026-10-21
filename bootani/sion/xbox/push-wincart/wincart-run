@@ -216,6 +216,9 @@ cleanup() {
 			pid=${t#/proc/}
 			pid=${pid%%/*}
 			[ "$pid" = "$$" ] && continue
+			# drmkeep's holder keeps gamescope's last frame on screen
+			# until xbox-av has the display back (below).
+			[ "$(cat "/proc/$pid/comm" 2>/dev/null)" = drmkeep-hold ] && continue
 			kill -9 "$pid" 2>/dev/null
 			kill -9 "${t##*/}" 2>/dev/null
 			left=1
@@ -229,6 +232,9 @@ cleanup() {
 	sync
 	# Give the display back to xbox-av (black), if we took it.
 	[ -n "$avpid" ] && kill "$avpid" 2>/dev/null && wait "$avpid" 2>/dev/null
+	for p in /proc/[0-9]*; do
+		[ "$(cat "$p/comm" 2>/dev/null)" = drmkeep-hold ] && kill "${p#/proc/}" 2>/dev/null
+	done
 	echo "$(date '+%F %T') done, status $status"
 	exit "$status"
 }

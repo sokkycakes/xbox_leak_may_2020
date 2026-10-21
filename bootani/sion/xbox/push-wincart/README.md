@@ -69,8 +69,14 @@ Display mode and Proton builds (2026-10-21 evening):
 - `drmkeep/drmkeep.so` (installed as /opt/xbcompat/tools/drmkeep.so, preloaded
   into gamescope only) hides the TV's other 720x480 timings, so gamescope
   takes over in xbox-av's 59.94 Hz mode instead of the 60.00 Hz one it would
-  pick (a full modeset: colour bars on the HDMI-to-AV box). WINCART_DRMKEEP=0
-  turns it off; WINCART_DRMKEEP_SO tests another build.
+  pick (a full modeset: colour bars on the HDMI-to-AV box). It also keeps the
+  connector's "content type" at No Data (gamescope's Game changed the AVI
+  infoframe, which i915 can't fastset), skips gamescope's commit that turns
+  the display off at exit, and leaves a holder process ("drmkeep-hold") with
+  gamescope's DRM file open so its last frame stays up until xbox-av takes
+  over; wincart-run stops the holder after that. WINCART_DRMKEEP=0 turns it
+  off (DRMKEEP_HOLD=0 only the exit part); WINCART_DRMKEEP_SO tests another
+  build.
 - `WINCART_PROTON=DIR` runs a Proton build's Wine (e.g. GE-Proton11-11,
   unpacked under /data/proton/) in its own prefix, pfx-<build>, copying the
   build's vkd3d DLLs into it as proton's script does. GE-Proton11-11 runs
