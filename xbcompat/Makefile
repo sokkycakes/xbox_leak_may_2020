@@ -86,7 +86,7 @@ override CFLAGS += -Isrc
 LDLIBS += -ldl
 endif
 endif
-SRC      = src/main.c src/log.c src/prof.c src/loader.c src/memory.c src/thread.c $(KERNSRC) $(HLESRC)
+SRC      = src/main.c src/log.c src/prof.c src/loader.c src/xbeimage.c src/memory.c src/thread.c $(KERNSRC) $(HLESRC)
 OBJ      = $(SRC:%.c=$(BUILD)/%.o)
 # The Guide overlay (src/guide, C++98 with no C++ library) on the frolickdash
 # XUI runtime; the native renderer builds leave it out (d3d8.c's hook is weak).
@@ -192,7 +192,7 @@ $(BUILD)/glslcheck: tools/glslcheck.c
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $< $(LDLIBS)
 
 # Renders a Guide scene to a .ppm with xbcompat's own XUI code (tools/guide).
-$(BUILD)/guideview: tools/guide/guideview.cpp src/guide/guide.cpp $(filter-out $(BUILD)/src/guide/guide.o,$(GUIDESRC:%.cpp=$(BUILD)/%.o))
+$(BUILD)/guideview: tools/guide/guideview.cpp src/guide/guide.cpp $(filter-out $(BUILD)/src/guide/guide.o,$(GUIDESRC:%.cpp=$(BUILD)/%.o)) $(BUILD)/src/xbeimage.o
 	$(CXX) $(CXXFLAGS) -o $@ $< $(filter %.o,$^) $(LDLIBS)
 
 src/kernel/exports.gen.c: tools/gen_exports.py

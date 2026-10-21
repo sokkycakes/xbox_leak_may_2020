@@ -22,6 +22,7 @@ static char title_name[41];
 
 ULONG xbe_title_id(void) { return title_id; }
 const char *xbe_title_name(void) { return title_name; }
+const char *xbe_file_path(void) { return xbe_path; }
 
 /* XeLoadSection on a section nobody holds: the console reads it from disk
    again, so whatever the title changed in place since (fixed-up resource

@@ -5,6 +5,9 @@ lifted image, /mnt/project-files/xui360/build/GFWL-Guide.exe).
 
   mkguide.py GFWL-Guide.exe CLASSES.LOG OUT_DIR [FONT.ttf]
 
+Then mkhome.py adds the home's Blades tab strip and the game view, from the
+Blades packages in BLADES (default /mnt/project-files/xui360/blades-converted).
+
 CLASSES.LOG is GFWL-Guide.exe --dump-classes (xui360/classes.log); xurconv.py
 (xui360/tools) folds the Guide's own classes (HUDBkgndScene, ...) into the
 built-in ones.  xbcompat looks for OUT_DIR as "guide" beside its binary, or
@@ -86,6 +89,8 @@ def main():
         sys.exit('not found: ' + ', '.join(want))
     with open(font, 'rb') as f, open(os.path.join(out, 'font.ttf'), 'wb') as g:
         g.write(f.read())
+    blades = os.environ.get('BLADES', '/mnt/project-files/xui360/blades-converted')
+    subprocess.run([sys.executable, os.path.join(HERE, 'mkhome.py'), blades, out], check=True)
     print('%s: %d scenes, %d images' % (out, len(SCENES), images))
 
 

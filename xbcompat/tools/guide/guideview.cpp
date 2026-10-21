@@ -12,7 +12,8 @@
 //     --bg RRGGBB   clear colour (default 1a1c20, the GFWL host's)
 //     --focus ID    focus this control
 //     --guide       the whole Guide as xbcompat draws it (frame + main)
-//     --page P      ... with page P open: settings, volume, vibration
+//     --page P      ... with page P open: settings, volume, vibration, game
+//   GUIDEVIEW_XBE=default.xbe   the title image comes from this XBE
 //     --dump        print the frame's tree (id, class, size, position, scale, show)
 //
 // make build/guideview.  Builds against src/guide/guide.cpp (included) with
@@ -22,6 +23,7 @@
 
 extern "C" {
 ULONG xbe_title_id(void) { return 0x4d5300c8; }
+const char* xbe_file_path(void) { return getenv("GUIDEVIEW_XBE"); }
 const char* xbe_title_name(void) { return getenv("GUIDEVIEW_TITLE") ? getenv("GUIDEVIEW_TITLE") : "Marble Blast"; }
 unsigned xinput_guide_read(int* port) { *port = 0; return 0; }
 void xinput_guide_mask(bool) {}
@@ -91,7 +93,8 @@ int main(int argc, char** argv) {
         setenv("XBCOMPAT_GUIDE_SETTINGS", "/dev/null", 1);
         guide_frame(W, H);          // loads
         open_guide();
-        if (page && !strcmp(page, "settings")) show_menu(g.settings, "btnOnlineStatus");
+        if (page && !strcmp(page, "settings")) show_tab(1, false);
+        if (page && !strcmp(page, "game")) show_menu(g.game, 0);
         if (page && !strcmp(page, "volume")) { settings_text(); show_menu(g.volume, "sliderVolume"); }
         if (page && !strcmp(page, "vibration")) { settings_text(); show_menu(g.vibration, "chkVibration"); }
         if (focus) g.menu->setFocus(g.menu->find(focus));
