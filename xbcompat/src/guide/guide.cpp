@@ -515,10 +515,12 @@ void game_page() {
     hide_drawn(g.game, "body");  // Frolick's slate band: the page sits on the Guide's panel (sokky)
     static const char* legends[] = { "legend_A", "legend_B", "legend_X", "legend_Y" };  // the frame has its own
     for (unsigned i = 0; i < sizeof legends / sizeof legends[0]; i++) set_show(g.game, legends[i], false);
+    // a host without an XBE (kazeta-guide) runs a Windows game card in Wine
+    bool windows = !xbe_file_path;
     set_text(g.game, "labRecentAchievementsText", "Platform");
-    set_text(g.game, "labRecentAchievementsNum", "Xbox");
+    set_text(g.game, "labRecentAchievementsNum", windows ? "Windows" : "Xbox");
     set_text(g.game, "labRuntimeText", "Runtime");
-    set_text(g.game, "labRuntimeNum", "xbcompat");
+    set_text(g.game, "labRuntimeNum", windows ? "Wine" : "xbcompat");
     char buf[16]; snprintf(buf, sizeof buf, "%d", saved_games());
     set_text(g.game, "labAchievementsNum", buf);
     // where the XBE is, both paths resolved (either may be relative)
@@ -526,7 +528,7 @@ void game_page() {
     char rx[PATH_MAX], rh[PATH_MAX];
     bool onHdd = xbe && fs_hdd_root() && realpath(xbe, rx) && realpath(fs_hdd_root(), rh) &&
                  !strncmp(rx, rh, strlen(rh)) && rx[strlen(rh)] == '/';
-    set_text(g.game, "labGamerPointsNum", onHdd ? "Hard drive" : "Disc");
+    set_text(g.game, "labGamerPointsNum", windows ? "Game card" : onHdd ? "Hard drive" : "Disc");
 }
 
 // The time this session, "h:mm", on the game box.
