@@ -34,6 +34,11 @@ Usage: sion COMMAND
   restart dashboard|xbox|theseus|net|ssh
   logs [sion|xbox|xbox-session|theseus|bootani|messages|dmesg]
   esp mount|umount       mount the boot stick's EFI partition on /boot
+  install-internal DISK --wipe [--no-backup] [--reboot]
+                         install this system on an internal disk (erases
+                         it; a copy is kept on the stick unless --no-backup)
+  install-internal DISK --restore-backup
+                         write that copy back to DISK
 
 A new image boots once on trial. It's kept when SSH (and the dashboard, if
 the image has one) has run for TRIAL_STABLE seconds; if it panics, hangs or
@@ -378,6 +383,7 @@ case "$cmd" in
 	restart) cmd_restart "$@" ;;
 	logs) cmd_logs "$@" ;;
 	esp) cmd_esp "$@" ;;
+	install-internal) exec /usr/sbin/sion-install-internal "$@" ;;
 	help|-h|--help|"") usage ;;
 	*) usage; exit 1 ;;
 esac
