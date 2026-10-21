@@ -10,6 +10,8 @@
 #
 #   bootani/sion/xbox/push-wincart/install.sh             (ssh host "sion")
 #   SION=root@192.168.1.247 bootani/sion/xbox/push-wincart/install.sh
+#   QUICK=1 bootani/sion/xbox/push-wincart/install.sh   (only the runner and
+#                       the Guide host; xbcompat and the dashboard are left alone)
 #
 # It also installs the Sion side: wincart-run and wincart-av (tools), the
 # kazeta-guide overlay host (bin), the carts' default overrides (share/wincart)
@@ -35,4 +37,4 @@ cp -r overrides boot "$K/"
 [ -f ../push-livedash/launch-title ] && cp ../push-livedash/launch-title "$K/"
 
 (cd "$T" && tar -cf - xbox-wincart) | gzip | ssh "$SION" \
-    'rm -rf /tmp/xbox-wincart && gunzip -c | tar -C /tmp -xf - && sh /tmp/xbox-wincart/sion-install.sh'
+    "rm -rf /tmp/xbox-wincart && gunzip -c | tar -C /tmp -xf - && QUICK=${QUICK:-0} sh /tmp/xbox-wincart/sion-install.sh"

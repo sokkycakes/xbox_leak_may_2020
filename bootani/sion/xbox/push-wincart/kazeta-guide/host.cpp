@@ -9,8 +9,9 @@
 //
 // Environment: DISPLAY (gamescope's Xwayland), XBCOMPAT_GUIDE_DIR (the Guide's
 // scenes), XBCOMPAT_HDD (for the shared <hdd>/.guide settings), KAZETA_TITLE_ID
-// (hex) and KAZETA_TITLE_NAME, KAZETA_VOLUME_CMD (run with a 0-100 level to set
-// the title's volume), KAZETA_NO_UINPUT=1 to leave the pads to the title.
+// (hex) and KAZETA_TITLE_NAME, KAZETA_VOLUME_CMD (run with a linear gain, 0 to
+// 1, to set the title's volume), KAZETA_SOUND_PCM (ALSA PCM for the Guide's
+// sounds), KAZETA_NO_UINPUT=1 to leave the pads to the title.
 #define SDL_VIDEO_DRIVER_X11 1
 #include <SDL.h>
 #include <SDL_syswm.h>
@@ -19,7 +20,9 @@
 #include <X11/Xatom.h>
 #include <X11/Xlib.h>
 #include <X11/extensions/Xrender.h>
+#include <dlfcn.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <linux/uinput.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -78,16 +81,24 @@ extern "C" void reset_request_always(const char *why)
 }
 
 // ---- sound -----------------------------------------------------------------
+// The Guide's own sounds go straight to ALSA (libasound, opened by name), not
+// through SDL: SDL may ignore AUDIODEV and open "default", which is the
+// title's path, turned down with it while the Guide is open.  They play at
+// the user's volume, not ducked, as xbcompat mixes them over a game.
+// KAZETA_SOUND_PCM names the PCM (default wincart_ui).
 
-static SDL_AudioDeviceID audio_;
-static float volume_ = 1, duck_ = 1;
+static volatile float volume_ = 1, duck_ = 1;
+static const float *volatile ui_next_;
+static volatile int ui_next_frames_;
+static volatile unsigned ui_seq_;
 
 static void apply_volume()
 {
     const char *cmd = getenv("KAZETA_VOLUME_CMD");
     if (!cmd || !*cmd) return;
+    // The command gets a linear gain, 0 to 1; it turns that into decibels.
     char buf[512];
-    snprintf(buf, sizeof buf, "%s %d >/dev/null 2>&1 &", cmd, (int)(volume_ * duck_ * 100 + 0.5f));
+    snprintf(buf, sizeof buf, "%s %.4f >/dev/null 2>&1 &", cmd, (double)(volume_ * duck_));
     if (system(buf)) {}
 }
 
@@ -96,9 +107,68 @@ extern "C" void ds_set_duck(float gain) { duck_ = gain; apply_volume(); }
 
 extern "C" void ds_play_ui(const float *pcm, int frames)
 {
-    if (!audio_) return;
-    SDL_ClearQueuedAudio(audio_);
-    SDL_QueueAudio(audio_, pcm, frames * 2 * sizeof(float));
+    ui_next_ = pcm;
+    ui_next_frames_ = frames;
+    __atomic_add_fetch(&ui_seq_, 1, __ATOMIC_RELEASE);
+}
+
+typedef struct _snd_pcm snd_pcm_t;
+static int (*pcm_open_)(snd_pcm_t **, const char *, int, int);
+static int (*pcm_set_params_)(snd_pcm_t *, int, int, unsigned, unsigned, int, unsigned);
+static long (*pcm_writei_)(snd_pcm_t *, const void *, unsigned long);
+static int (*pcm_recover_)(snd_pcm_t *, int, int);
+static const char *(*strerror_)(int);
+
+static void *sound_thread(void *arg)
+{
+    snd_pcm_t *pcm = (snd_pcm_t *)arg;
+    enum { N = 480 };  // 10 ms
+    static float out[N * 2];
+    unsigned seen = 0;
+    const float *cur = 0;
+    int pos = 0, frames = 0;
+    while (!quit_) {
+        unsigned q = __atomic_load_n(&ui_seq_, __ATOMIC_ACQUIRE);
+        if (q != seen) { seen = q; cur = ui_next_; frames = ui_next_frames_; pos = 0; }
+        float v = volume_;
+        for (int i = 0; i < N; i++) {
+            if (cur && pos < frames) {
+                out[2 * i] = cur[2 * pos] * v;
+                out[2 * i + 1] = cur[2 * pos + 1] * v;
+                pos++;
+            } else out[2 * i] = out[2 * i + 1] = 0;
+        }
+        if (cur && pos >= frames) cur = 0;
+        long w = pcm_writei_(pcm, out, N);
+        if (w < 0 && pcm_recover_(pcm, (int)w, 1) < 0) {
+            xlog("Guide sound: %s", strerror_((int)w));
+            usleep(100000);
+        }
+    }
+    return 0;
+}
+
+static void sound_open()
+{
+    void *a = dlopen("libasound.so.2", RTLD_NOW);
+    if (!a) { xlog("no Guide sounds: %s", dlerror()); return; }
+    pcm_open_ = (int (*)(snd_pcm_t **, const char *, int, int))dlsym(a, "snd_pcm_open");
+    pcm_set_params_ = (int (*)(snd_pcm_t *, int, int, unsigned, unsigned, int, unsigned))dlsym(a, "snd_pcm_set_params");
+    pcm_writei_ = (long (*)(snd_pcm_t *, const void *, unsigned long))dlsym(a, "snd_pcm_writei");
+    pcm_recover_ = (int (*)(snd_pcm_t *, int, int))dlsym(a, "snd_pcm_recover");
+    strerror_ = (const char *(*)(int))dlsym(a, "snd_strerror");
+    if (!pcm_open_ || !pcm_set_params_ || !pcm_writei_ || !pcm_recover_ || !strerror_) { xlog("no Guide sounds: old libasound"); return; }
+    const char *name = getenv("KAZETA_SOUND_PCM");
+    if (!name || !*name) name = "wincart_ui";
+    snd_pcm_t *pcm = 0;
+    // SND_PCM_STREAM_PLAYBACK 0, SND_PCM_FORMAT_FLOAT_LE 14, SND_PCM_ACCESS_RW_INTERLEAVED 3
+    int e = pcm_open_(&pcm, name, 0, 0);
+    if (e >= 0) e = pcm_set_params_(pcm, 14, 3, 2, 48000, 1, 40000);
+    if (e < 0) { xlog("no Guide sounds: %s: %s", name, strerror_(e)); return; }
+    pthread_t t;
+    pthread_create(&t, 0, sound_thread, pcm);
+    pthread_detach(t);
+    xlog("Guide sounds on %s", name);
 }
 
 // ---- pads --------------------------------------------------------------------
@@ -176,6 +246,27 @@ static unsigned bits(SDL_GameController *c)
     return b;
 }
 
+// KAZETA_GUIDE_SCRIPT="SECONDS:MASK,...": Guide buttons pressed as if on a
+// pad, MASK (hex, the GUIDE_* bits) from SECONDS after start, for tests.
+static unsigned script_buttons()
+{
+    static const char *s = getenv("KAZETA_GUIDE_SCRIPT");
+    static Uint32 t0 = SDL_GetTicks();
+    if (!s || !*s) return 0;
+    double t = (SDL_GetTicks() - t0) / 1000.0;
+    unsigned m = 0;
+    for (const char *p = s; p && *p;) {
+        char *e;
+        double at = strtod(p, &e);
+        if (*e != ':') break;
+        unsigned v = (unsigned)strtoul(e + 1, &e, 16);
+        if (at > t) break;
+        m = v;
+        p = *e == ',' ? e + 1 : 0;
+    }
+    return m;
+}
+
 extern "C" unsigned xinput_guide_read(int *port)
 {
     static unsigned last[PORTS];
@@ -188,7 +279,7 @@ extern "C" unsigned xinput_guide_read(int *port)
     }
     const Uint8 *k = SDL_GetKeyboardState(NULL);
     if (k && k[SDL_SCANCODE_F1]) all |= GUIDE_HOME;
-    return all;
+    return all | script_buttons();
 }
 
 extern "C" unsigned xinput_guide_ports(void)
@@ -415,7 +506,7 @@ int main(int argc, char **argv)
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
     SDL_SetHint(SDL_HINT_VIDEO_X11_NET_WM_BYPASS_COMPOSITOR, "0");
     pick_argb_visual();
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER | SDL_INIT_AUDIO) != 0) {
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) != 0) {
         xlog("SDL_Init: %s", SDL_GetError());
         return 1;
     }
@@ -423,16 +514,7 @@ int main(int argc, char **argv)
     if (db) SDL_GameControllerAddMappingsFromFile(db);
     ui_open();
 
-    SDL_AudioSpec want, have;
-    memset(&want, 0, sizeof want);
-    want.freq = 48000;
-    want.format = AUDIO_F32SYS;
-    want.channels = 2;
-    want.samples = 1024;
-    audio_ = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
-    if (audio_) SDL_PauseAudioDevice(audio_, 0);
-    else xlog("no Guide sounds: %s", SDL_GetError());
-
+    sound_open();
     SDL_GL_SetAttribute(SDL_GL_RED_SIZE, 8);
     SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE, 8);
     SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE, 8);
@@ -440,7 +522,7 @@ int main(int argc, char **argv)
     int W = 1024, H = 768;
     if (getenv("KAZETA_GUIDE_W")) W = atoi(getenv("KAZETA_GUIDE_W"));
     if (getenv("KAZETA_GUIDE_H")) H = atoi(getenv("KAZETA_GUIDE_H"));
-    SDL_Window *win = SDL_CreateWindow("Guide", 0, 0, W, H, SDL_WINDOW_OPENGL | SDL_WINDOW_BORDERLESS | SDL_WINDOW_SKIP_TASKBAR);
+    SDL_Window *win = SDL_CreateWindow("Guide", 0, 0, W, H, SDL_WINDOW_OPENGL | SDL_WINDOW_BORDERLESS | SDL_WINDOW_SKIP_TASKBAR | SDL_WINDOW_HIDDEN);
     if (!win) { xlog("window: %s", SDL_GetError()); return 1; }
     mark_overlay(win);
     SDL_GLContext ctx = SDL_GL_CreateContext(win);
@@ -448,7 +530,12 @@ int main(int argc, char **argv)
     SDL_GL_SetSwapInterval(1);
     xlog("up: %dx%d, title %08lX %s", W, H, xbe_title_id(), xbe_title_name());
 
-    bool shown = true;
+    // The overlay window is mapped only while the Guide is on screen, so the
+    // rest of the time gamescope shows the game as it would with no overlay
+    // (KAZETA_GUIDE_MAPPED=1 keeps it mapped, as the first version did).
+    bool always = getenv("KAZETA_GUIDE_MAPPED") && atoi(getenv("KAZETA_GUIDE_MAPPED"));
+    bool mapped = false, shown = false;
+    if (always) { SDL_ShowWindow(win); mapped = true; }
     while (!quit_ && !leave_) {
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
@@ -458,6 +545,12 @@ int main(int argc, char **argv)
         if (ui_ >= 0) ui_service();
         bool draw = guide_frame(W, H);
         ui_forward();
+        if (draw && !mapped) { SDL_ShowWindow(win); mapped = true; }
+        if (!draw && mapped && !always) {
+            SDL_HideWindow(win);
+            mapped = shown = false;
+        }
+        if (!mapped) { SDL_Delay(16); continue; }
         int fw, fh;
         SDL_GL_GetDrawableSize(win, &fw, &fh);
         glViewport(0, 0, fw, fh);

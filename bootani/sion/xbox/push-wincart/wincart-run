@@ -236,7 +236,10 @@ bindm -o ro $X $R/opt
 bindm $HDD $R/mnt
 
 # Sound: the output xbox-env picked, mixed (dmix) so the Guide's sounds play
-# over the game, with a volume control (Wincart) the Guide's slider sets.
+# over the game.  The title plays through a volume control (Wincart: the
+# Guide's slider, and its ducking while open), the Guide through wincart_ui.
+# dmix's own buffer is set small (40 ms): left unset it is half a second,
+# which the game's sound lags by.
 dev=${AUDIODEV:-hdmi:CARD=PCH,DEV=0}
 case $dev in
 hdmi:CARD=PCH,DEV=0) dev=hw:PCH,3 ;;
@@ -244,16 +247,25 @@ hdmi:CARD=PCH,DEV=1) dev=hw:PCH,7 ;;
 hdmi:CARD=PCH,DEV=2) dev=hw:PCH,8 ;;
 esac
 cat > $R/root/.asoundrc << EOF
-pcm.wincart_out { type dmix ipc_key 50503 ipc_perm 0666 slave { pcm "$dev" rate 48000 } }
-pcm.wincart_vol { type softvol slave.pcm "wincart_out" control { name "Wincart" card 0 } }
+pcm.wincart_out { type dmix ipc_key 50503 ipc_perm 0666 slave { pcm "$dev" rate 48000 period_size ${WINCART_PERIOD:-480} buffer_size ${WINCART_BUFFER:-1920} } }
+pcm.wincart_vol { type softvol slave.pcm "wincart_out" control { name "Wincart" card 0 } min_dB -51.0 max_dB 0.0 resolution 256 }
+pcm.wincart_ui { type plug slave.pcm "wincart_out" }
 pcm.!default { type plug slave.pcm "wincart_vol" }
 ctl.!default { type hw card 0 }
 EOF
+# volume GAIN: the title's volume, a linear gain from 0 to 1, set in decibels
+# (Wincart's steps are linear in dB: a percentage would put 0.3 at -36 dB).
 cat > $R/root/volume << 'EOF'
 #!/bin/sh
-exec amixer -q -c 0 sset Wincart "$1%"
+db=$(awk -v g="$1" 'BEGIN { if (g + 0 <= 0.0029) print "mute"; else if (g + 0 >= 1) print "0"; else printf "%.1f", 20 * log(g) / log(10) }')
+if [ "$db" = mute ]; then exec amixer -q -c 0 sset Wincart 0
+else exec amixer -q -c 0 sset Wincart -- "${db}dB"; fi
 EOF
 chmod 755 $R/root/volume
+# softvol makes its control when the PCM is first opened; open it once now
+# so the Guide's volume applies from the start.
+chroot $R /usr/bin/env -i PATH=/usr/bin:/bin HOME=/root /bin/sh -c \
+	'head -c 7680 /dev/zero | aplay -q -D wincart_vol -t raw -f S16_LE -r 48000 -c 2' 2>/dev/null || echo "could not open wincart_vol"
 
 # ---- the display -----------------------------------------------------------
 # xbox-av holds DRM between titles; 'T' makes it let go.
@@ -299,7 +311,7 @@ esac
 
 # shellcheck disable=SC2086
 chroot $R /usr/bin/env -i $wenv LIBSEAT_BACKEND=seatd WLR_LIBINPUT_NO_DEVICES=1 \
-	WINEDLLOVERRIDES="$wdll" $padenv \
+	WINEDLLOVERRIDES="$wdll" $padenv ${WINCART_GAME_ENV:-} \
 	/bin/sh -c "cd /srv/game && exec gamescope --backend drm -W $ow -H $oh -w 1024 -h 768 -S stretch -f -- $cmd" \
 	> "$state/logs/game.log" 2>&1 &
 gspid=$!
@@ -322,15 +334,23 @@ start_guide() {
 	(
 		chroot $R /usr/bin/env -i PATH=/usr/bin:/bin HOME=/root XDG_RUNTIME_DIR=/run LC_ALL=C DISPLAY="$display" \
 			XBCOMPAT_GUIDE_DIR=/opt/bin/guide XBCOMPAT_HDD=/mnt SDL_GAMECONTROLLERCONFIG_FILE=/opt/share/gamecontrollerdb.txt \
-			SDL_AUDIODRIVER=alsa AUDIODEV=wincart_out KAZETA_VOLUME_CMD=/root/volume \
+			KAZETA_SOUND_PCM=wincart_ui KAZETA_VOLUME_CMD=/root/volume ${WINCART_GUIDE_ENV:-} \
 			KAZETA_TITLE_ID="$tid" KAZETA_TITLE_NAME="$name" KAZETA_GUIDE_W="$ow" KAZETA_GUIDE_H="$oh" \
-			/opt/bin/kazeta-guide >> "$state/logs/guide.log" 2>&1
+			"$guide_in" >> "$state/logs/guide.log" 2>&1
 		echo $? > "$RUN/guide.status"
 	) &
 	gdpid=$!
 }
 guide_starts=0
-if [ -n "$display" ] && [ -x $X/bin/kazeta-guide ]; then
+# KAZETA_GUIDE_BIN: another Guide host to test, under /opt/xbcompat or the
+# cart's state folder (the chroot sees those as /opt and /srv).
+guide_bin=${KAZETA_GUIDE_BIN:-$X/bin/kazeta-guide}
+case $guide_bin in
+"$X"/*) guide_in=/opt${guide_bin#"$X"} ;;
+"$state"/*) guide_in=/srv${guide_bin#"$state"} ;;
+*) guide_in=/opt/bin/kazeta-guide; guide_bin=$X/bin/kazeta-guide ;;
+esac
+if [ -n "$display" ] && [ -x "$guide_bin" ]; then
 	: > "$state/logs/guide.log"
 	start_guide
 	guide_starts=1

@@ -21,7 +21,9 @@ for p in $(pidof xbcompat); do
 	esac
 done
 
-/etc/init.d/S98xbox stop > /dev/null 2>&1
+# QUICK=1: only the Windows-cart runner, its helper, the Guide host and the
+# overrides (no xbcompat, no modules, the dashboard keeps running).
+[ "${QUICK:-0}" = 1 ] || /etc/init.d/S98xbox stop > /dev/null 2>&1
 
 # The Windows-cart runner, its xbox-av helper, the Guide host and the carts'
 # default overrides (the card itself is never written).
@@ -34,6 +36,11 @@ rm -rf $X/share/wincart/overrides
 cp -r $K/overrides $X/share/wincart/overrides
 chmod -R a+rX $X/share/wincart
 sion persist $X/tools/wincart-run $X/tools/wincart-av $B/kazeta-guide $X/share/wincart > /dev/null
+if [ "${QUICK:-0}" = 1 ]; then
+	rm -rf $K
+	md5sum $X/tools/wincart-run $X/tools/wincart-av $B/kazeta-guide
+	exit 0
+fi
 
 # The extra modules (push-fuse, push-erofs, push-uinput) at boot: init.d
 # scripts the overlay adds come too late for rcS, so S11modules loads them
