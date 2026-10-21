@@ -4,7 +4,9 @@
 case "$1" in
   start)
     grep -q '^fuse ' /proc/modules || insmod /lib/modules/6.18.7/extra/fuse.ko
-    [ -f /lib/modules/6.18.7/extra/erofs.ko ] && { grep -q '^erofs ' /proc/modules || insmod /lib/modules/6.18.7/extra/erofs.ko; }
+    for m in erofs squashfs uinput; do
+      [ -f /lib/modules/6.18.7/extra/$m.ko ] && { grep -q "^$m " /proc/modules || insmod /lib/modules/6.18.7/extra/$m.ko; }
+    done
     ;;
   *) ;;
 esac
