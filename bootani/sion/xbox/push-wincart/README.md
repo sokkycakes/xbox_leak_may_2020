@@ -83,7 +83,7 @@ Display mode and Proton builds (2026-10-21 evening):
   Silent Hill 4 this way; the card's GE-Proton10-32 does not.
 
 Guide redesign (2026-10-21 21:00): kazeta-guide is now built from the
-redesigned Guide (claude/project-thread-xujlbp 335a8544: Game/Settings tabs,
+redesigned Guide (claude/project-thread-xujlbp c5668dc3: Game/Settings tabs,
 Now Playing; scenes in push-guide guide.tar.gz bc0b4120) with
 `XB=<that tree>/xbcompat kazeta-guide/build.sh`. It needs those scenes in
 /opt/xbcompat/bin/guide, so install it together with or after the Guide kit.
