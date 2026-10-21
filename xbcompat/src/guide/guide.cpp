@@ -486,12 +486,14 @@ int saved_games() {
 
 void game_page() {
     const char* name = title_name();
-    set_text(g.game, "labHeader", name);
+    set_text(g.game, "labHeader", "Now Playing");
     set_text(g.game, "labGameTitle", name);
     set_image(g.game, "imgGameIcon", g.res.tile ? "titleimage.png" : "");
     set_text(g.game, "btnViewAchievements", "Resume Game");
     set_show(g.game, "btnBrowseDownloads", false);       // Install Game: the game is running
+    set_text(g.game, "btnManageGameFiles", "Controller Configuration");  // sokky
     set_str(g.game, "btnManageGameFiles", "NavDown", "");
+    hide_drawn(g.game, "body");  // Frolick's slate band: the page sits on the Guide's panel (sokky)
     static const char* legends[] = { "legend_A", "legend_B", "legend_X", "legend_Y" };  // the frame has its own
     for (unsigned i = 0; i < sizeof legends / sizeof legends[0]; i++) set_show(g.game, legends[i], false);
     set_text(g.game, "labRecentAchievementsText", "Platform");
@@ -823,7 +825,7 @@ bool press(const char* id) {
         if (xui::Node* pg = g.game->find("page")) pg->play("Open");
     }
     else if (!strcmp(id, "btnViewAchievements")) close_guide();  // Resume Game
-    else if (!strcmp(id, "btnManageGameFiles")) return false;  // Game Storage: not here yet
+    else if (!strcmp(id, "btnManageGameFiles")) return false;  // Controller Configuration: not here yet
     else if (!strcmp(id, "btnOptions")) leave();  // Exit Game
     else if (!strcmp(id, "btnBlank1") || !strcmp(id, "btnQuickChat")) return false;  // Quick Launch, Downloads
     else if (!strcmp(id, "btnOnlineStatus")) { settings_text(); show_menu(g.volume, "sliderVolume"); }
@@ -1160,18 +1162,6 @@ void guide_draw(int w, int h) {
         hs *= sc.x;
         shown = shown && xui::propB(p->props, "Show", true);
         op *= xui::propF(p->props, "Opacity", 1);
-    }
-    // Frolick's page runs edge to edge on its screen; here its slate body
-    // spans the panel's face.
-    if (g.menu == g.game) {
-        float pl, pr;
-        if (xui::Node* body = g.game->find("body"))
-            if (panel_span(hx, hs, &pl, &pr)) {
-                xui::Vec3 z = {0, 0, 0};
-                xui::Vec3 p = xui::propV(body->props, "Position", z); p.x = pl;
-                set_vec(body, "Position", p);
-                xui::Value& v = body->props.set("Width"); v.free(); v.type = xui::TFloat; v.f = pr - pl;
-            }
     }
     if (host && shown && op > 0.001f) {
         xui::Value& o = g.menu->root->props.set("Opacity"); o.free(); o.type = xui::TFloat; o.f = op;
