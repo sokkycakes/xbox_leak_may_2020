@@ -1,7 +1,8 @@
 #!/bin/bash
 #
 # Points XBOX LIVE on the Sion at Insignia (insignia.live) instead of the local
-# test server, and registers the Sion's console with Insignia. Needs
+# test server, gives games the network card (so the ones Insignia serves go
+# online) and registers the Sion's console with Insignia. Needs
 # push-livedash, push-liveaccounts and push-liveguide already installed. Run on
 # the PC from a checkout of this branch:
 #

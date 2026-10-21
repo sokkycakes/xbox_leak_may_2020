@@ -4,8 +4,9 @@
 #
 #   /data/xbox-live/liveserver/    with --insignia, a DNS server pointing the
 #                                  console at Insignia (insignia.py)
-#   /data/xbox-live/launch-title   starts the server for $L/service and swaps
+#   /data/xbox-live/launch-title   starts the server for $L/service, swaps
 #                                  the hard disk's Live accounts per service
+#                                  and gives games the network card
 #   /data/xbox-live/service        "insignia"
 #
 # The test server's accounts move to /data/xbox/hdd/live-accounts/local the
