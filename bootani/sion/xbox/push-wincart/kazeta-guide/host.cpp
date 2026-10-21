@@ -547,6 +547,14 @@ int main(int argc, char **argv)
         ui_forward();
         if (draw && !mapped) { SDL_ShowWindow(win); mapped = true; }
         if (!draw && mapped && !always) {
+            // Leave a transparent frame behind before unmapping: gamescope
+            // can keep showing an overlay's last buffer after it goes away.
+            for (int i = 0; i < 3; i++) {
+                glClearColor(0, 0, 0, 0);
+                glClear(GL_COLOR_BUFFER_BIT);
+                SDL_GL_SwapWindow(win);
+            }
+            glFinish();
             SDL_HideWindow(win);
             mapped = shown = false;
         }
