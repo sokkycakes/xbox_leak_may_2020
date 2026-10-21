@@ -81,3 +81,11 @@ Display mode and Proton builds (2026-10-21 evening):
   unpacked under /data/proton/) in its own prefix, pfx-<build>, copying the
   build's vkd3d DLLs into it as proton's script does. GE-Proton11-11 runs
   Silent Hill 4 this way; the card's GE-Proton10-32 does not.
+
+Guide redesign (2026-10-21 21:00): kazeta-guide is now built from the
+redesigned Guide (claude/project-thread-xujlbp 335a8544: Game/Settings tabs,
+Now Playing; scenes in push-guide guide.tar.gz bc0b4120) with
+`XB=<that tree>/xbcompat kazeta-guide/build.sh`. It needs those scenes in
+/opt/xbcompat/bin/guide, so install it together with or after the Guide kit.
+The game box shows no picture for a Windows cart yet (xbe_file_path is a weak
+hook the host doesn't provide).

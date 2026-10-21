@@ -11,7 +11,7 @@
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 TOP=$(cd "$HERE/../../../../.." && pwd)
-XB=$TOP/xbcompat
+XB=${XB:-$TOP/xbcompat}  # XB=DIR: another xbcompat tree (e.g. a newer Guide)
 OUT=${1:-$HERE/kazeta-guide}
 W=$(mktemp -d)
 trap 'rm -rf "$W"' EXIT
