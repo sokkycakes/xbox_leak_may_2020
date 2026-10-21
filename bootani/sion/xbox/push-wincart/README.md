@@ -87,5 +87,11 @@ redesigned Guide (claude/project-thread-xujlbp c5668dc3: Game/Settings tabs,
 Now Playing; scenes in push-guide guide.tar.gz bc0b4120) with
 `XB=<that tree>/xbcompat kazeta-guide/build.sh`. It needs those scenes in
 /opt/xbcompat/bin/guide, so install it together with or after the Guide kit.
-The game box shows no picture for a Windows cart yet (xbe_file_path is a weak
-hook the host doesn't provide).
+Cart icons (2026-10-21 22:40): wincart-run passes the cart's Icon= (beside
+the .kzi, else in the cart's folder, as /media/... in the chroot) as
+KAZETA_TITLE_ICON, and host.cpp's kazeta_title_image() decodes it (stb_image
+from xbcompat/src/third_party) for the game box and Now Playing, through a
+weak hook guide-overlay-alpha.patch adds to load_title_image(). xbcompat's
+stub XBE carries the same icon as $$XTIMAGE for the stock dashboard (gudfcx
+push-liveguide ff23b324); install this kit with QUICK=1 so its older xbcompat
+stays out.

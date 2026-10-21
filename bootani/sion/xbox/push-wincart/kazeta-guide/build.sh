@@ -27,7 +27,7 @@ for f in "$W/guide.cpp" "$XB"/tools/frolickdash/xui/xui_parse.cpp "$XB"/tools/fr
          "$XB"/tools/frolickdash/xui/xui_draw.cpp "$XB"/tools/frolickdash/xui/xui_classes.cpp; do
 	g++ $F -std=c++98 -fno-threadsafe-statics -c -o "$W/obj/$(basename "$f" .cpp).o" "$f"
 done
-g++ $F -std=c++11 -c -o "$W/obj/host.o" "$HERE/host.cpp"
+g++ $F -std=c++11 -I"$TOP/xbcompat/src/third_party" -c -o "$W/obj/host.o" "$HERE/host.cpp"
 g++ -o "$OUT" "$W"/obj/*.o -L"$W/lib" -lSDL2 -lGL -lX11 -lXrender -lm -ldl
 strip "$OUT"
 md5sum "$OUT"

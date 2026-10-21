@@ -9,7 +9,8 @@
 //
 // Environment: DISPLAY (gamescope's Xwayland), XBCOMPAT_GUIDE_DIR (the Guide's
 // scenes), XBCOMPAT_HDD (for the shared <hdd>/.guide settings), KAZETA_TITLE_ID
-// (hex) and KAZETA_TITLE_NAME, KAZETA_VOLUME_CMD (run with a linear gain, 0 to
+// (hex), KAZETA_TITLE_NAME and KAZETA_TITLE_ICON (the cart's PNG icon, for the
+// game box and Now Playing), KAZETA_VOLUME_CMD (run with a linear gain, 0 to
 // 1, to set the title's volume), KAZETA_SOUND_PCM (ALSA PCM for the Guide's
 // sounds), KAZETA_NO_UINPUT=1 to leave the pads to the title.
 #define SDL_VIDEO_DRIVER_X11 1
@@ -32,6 +33,17 @@
 #include <sys/ioctl.h>
 #include <time.h>
 #include <unistd.h>
+
+// PNG only, for the cart's icon (stb_image, public domain / MIT).
+#define STB_IMAGE_IMPLEMENTATION
+#define STB_IMAGE_STATIC
+#define STBI_ONLY_PNG
+#define STBI_NO_LINEAR
+#define STBI_NO_HDR
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+#include "stb_image.h"
+#pragma GCC diagnostic pop
 
 extern "C" {
 typedef unsigned long ULONG;
@@ -66,6 +78,40 @@ extern "C" const char *xbe_title_name(void)
 {
     const char *e = getenv("KAZETA_TITLE_NAME");
     return e ? e : "";
+}
+
+// The cart's icon, 128x128 BGRA as an Xbox title image: scaled to fit,
+// centred on transparent (the same picture xbcompat puts in the stub XBE).
+extern "C" bool kazeta_title_image(unsigned char **bgra, int *w, int *h)
+{
+    const char *png = getenv("KAZETA_TITLE_ICON");
+    int iw, ih, n;
+    unsigned char *rgba = png && *png ? stbi_load(png, &iw, &ih, &n, 4) : 0;
+    if (!rgba) {
+        if (png && *png) xlog("icon %s: %s", png, stbi_failure_reason());
+        return false;
+    }
+    enum { S = 128 };
+    unsigned char *out = (unsigned char *)calloc(S * S, 4);
+    float s = (float)S / (iw > ih ? iw : ih);
+    float ox = (S - iw * s) / 2, oy = (S - ih * s) / 2;
+    for (int y = 0; y < S; y++)
+        for (int x = 0; x < S; x++) {
+            unsigned acc[4] = { 0, 0, 0, 0 };
+            for (int sy = 0; sy < 4; sy++)
+                for (int sx = 0; sx < 4; sx++) {
+                    int px = (int)((x + (sx + 0.5f) / 4 - ox) / s), py = (int)((y + (sy + 0.5f) / 4 - oy) / s);
+                    if (px < 0 || py < 0 || px >= iw || py >= ih) continue;
+                    const unsigned char *p = rgba + ((size_t)py * iw + px) * 4;
+                    acc[0] += p[2] * p[3]; acc[1] += p[1] * p[3]; acc[2] += p[0] * p[3]; acc[3] += p[3];
+                }
+            unsigned char *d = out + (y * S + x) * 4;
+            if (acc[3]) for (int k = 0; k < 3; k++) d[k] = (unsigned char)(acc[k] / acc[3]);
+            d[3] = (unsigned char)(acc[3] / 16);
+        }
+    stbi_image_free(rgba);
+    *bgra = out; *w = S; *h = S;
+    return true;
 }
 
 extern "C" const char *fs_hdd_root(void)

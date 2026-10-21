@@ -81,6 +81,16 @@ card=$(cd "$(dirname "$kzi")" && pwd)
 cartdir=$card/$base
 [ -d "$cartdir" ] || cartdir=$card
 tid=$(echo "${tid:-4B5A0000}" | tr 'A-F' 'a-f')
+# The cart's icon (Icon=, beside the .kzi as Kazeta has it, else in the
+# cart's folder) as the chroot sees the card (/media), for the Guide.
+icon=$(key Icon)
+icon_in=
+case $icon in
+''|*..*) ;;
+*)	if [ -f "$card/$icon" ]; then icon_in=/media/$icon
+	elif [ -f "$cartdir/$icon" ]; then icon_in=/media${cartdir#"$card"}/$icon
+	fi ;;
+esac
 
 # One run at a time: a second one would take the display and, on its way
 # out, kill the first one's game.
@@ -404,7 +414,7 @@ start_guide() {
 		chroot $R /usr/bin/env -i PATH=/usr/bin:/bin HOME=/root XDG_RUNTIME_DIR=/run LC_ALL=C DISPLAY="$display" \
 			XBCOMPAT_GUIDE_DIR=/opt/bin/guide XBCOMPAT_HDD=/mnt SDL_GAMECONTROLLERCONFIG_FILE=/opt/share/gamecontrollerdb.txt \
 			KAZETA_SOUND_PCM=wincart_ui KAZETA_VOLUME_CMD=/root/volume ${WINCART_GUIDE_ENV:-} \
-			KAZETA_TITLE_ID="$tid" KAZETA_TITLE_NAME="$name" KAZETA_GUIDE_W="$ow" KAZETA_GUIDE_H="$oh" \
+			KAZETA_TITLE_ID="$tid" KAZETA_TITLE_NAME="$name" KAZETA_TITLE_ICON="$icon_in" KAZETA_GUIDE_W="$ow" KAZETA_GUIDE_H="$oh" \
 			"$guide_in" >> "$state/logs/guide.log" 2>&1
 		echo $? > "$RUN/guide.status"
 	) &
