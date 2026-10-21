@@ -11,6 +11,10 @@
 #   bootani/sion/xbox/push-wincart/install.sh             (ssh host "sion")
 #   SION=root@192.168.1.247 bootani/sion/xbox/push-wincart/install.sh
 #
+# It also installs the Sion side: wincart-run and wincart-av (tools), the
+# kazeta-guide overlay host (bin), the carts' default overrides (share/wincart)
+# and the boot loading of the fuse/erofs/squashfs/uinput modules; see README.
+#
 # Undo: /opt/xbcompat/bin/xbcompat.pre-wincart is the build it replaced.
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -25,7 +29,9 @@ T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 K=$T/xbox-wincart
 mkdir -p "$K"
-cp xbcompat sion-install.sh "$K/"
+cp xbcompat sion-install.sh wincart-run wincart-av "$K/"
+cp kazeta-guide/kazeta-guide "$K/"
+cp -r overrides boot "$K/"
 [ -f ../push-livedash/launch-title ] && cp ../push-livedash/launch-title "$K/"
 
 (cd "$T" && tar -cf - xbox-wincart) | gzip | ssh "$SION" \

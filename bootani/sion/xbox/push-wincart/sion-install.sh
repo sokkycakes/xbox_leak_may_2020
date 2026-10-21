@@ -20,9 +20,33 @@ for p in $(pidof xbcompat); do
 	*) echo "a game or the Live dashboard is running: go back to the dashboard and run this again"; exit 1 ;;
 	esac
 done
-[ -x $X/tools/wincart-run ] || echo "note: $X/tools/wincart-run is missing; Windows carts will fail to start until it is installed"
 
 /etc/init.d/S98xbox stop > /dev/null 2>&1
+
+# The Windows-cart runner, its xbox-av helper, the Guide host and the carts'
+# default overrides (the card itself is never written).
+for f in wincart-run wincart-av; do
+	cp $K/$f $X/tools/$f.new && chmod 755 $X/tools/$f.new && mv $X/tools/$f.new $X/tools/$f
+done
+cp $K/kazeta-guide $B/kazeta-guide.new && chmod 755 $B/kazeta-guide.new && mv $B/kazeta-guide.new $B/kazeta-guide
+mkdir -p $X/share/wincart
+rm -rf $X/share/wincart/overrides
+cp -r $K/overrides $X/share/wincart/overrides
+chmod -R a+rX $X/share/wincart
+sion persist $X/tools/wincart-run $X/tools/wincart-av $B/kazeta-guide $X/share/wincart > /dev/null
+
+# The extra modules (push-fuse, push-erofs, push-uinput) at boot: init.d
+# scripts the overlay adds come too late for rcS, so S11modules loads them
+# by name; the Sion has no depmod, so modules.dep gets their entries.
+D=/lib/modules/$(uname -r)
+for m in fuse erofs squashfs uinput; do
+	[ -f $D/extra/$m.ko ] && ! grep -q "^extra/$m.ko:" $D/modules.dep && echo "extra/$m.ko:" >> $D/modules.dep
+done
+mkdir -p /etc/modules-load.d
+cp $K/boot/sion-extra.conf /etc/modules-load.d/sion-extra.conf
+sion persist $D/modules.dep /etc/modules-load.d/sion-extra.conf > /dev/null
+for m in fuse erofs squashfs uinput; do grep -q "^extra/$m.ko:" $D/modules.dep && modprobe -q $m; done
+
 grep -q XBCOMPAT_WINCART_RUN $B/xbcompat || cp $B/xbcompat $B/xbcompat.pre-wincart
 cp $K/xbcompat $B/xbcompat.new && chmod 755 $B/xbcompat.new && mv $B/xbcompat.new $B/xbcompat
 sion persist $B/xbcompat $B/xbcompat.pre-wincart > /dev/null
@@ -52,5 +76,5 @@ if ! pidof xbcompat > /dev/null && [ -f $B/xbcompat.pre-wincart ]; then
 	sleep 10
 fi
 rm -rf $K
-md5sum $B/xbcompat
+md5sum $B/xbcompat $X/tools/wincart-run $X/tools/wincart-av $B/kazeta-guide
 pidof xbcompat > /dev/null && echo "the Xbox dashboard is running" || echo "the dashboard is not running"
