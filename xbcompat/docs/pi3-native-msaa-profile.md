@@ -1,0 +1,191 @@
+# Pi 3 native renderer: remaining MSAA bottleneck
+
+Measured 2026-10-10 UTC on the 109-draw dashboard main menu. This follows
+commit 7ce8302 on codex/native-arm-renderer. Same Pi, native client, patched
+Box86, 640x480 backbuffer and 720x480 composite output as the earlier test.
+
+## Findings
+
+Follow-up testing found a missing mipmap implementation. Uploading the title's
+authored levels and honoring MIPFILTER raised this menu from 25.6 to about
+32.8 FPS with 4x MSAA, normal filtering and swap interval 1 retained. See the
+texture investigation below. The earlier 32.2 ms GPU measurement describes
+the old implementation, not an unavoidable hardware minimum.
+
+Before the mipmap correction, at 4x MSAA the VC4 render queue took roughly
+the entire 33.33 ms budget for 30 FPS.
+CPU work, GPU binning, presentation and scheduling leave additional gaps.
+The render engine was busy about 82% of the corrected-hash capture; that does
+not mean the remaining 18% is freely recoverable CPU time, since it can also
+be waiting for binning and dependencies.
+
+A real CPU/cache defect was found and fixed: conv_find masked its hash down
+to ten bits without first mixing the pointer's high bits. Buffers separated
+by aligned address strides collide in the same eight-slot probe window.
+The menu evicted 30 entries and uploaded 437,040 bytes each frame. Mixing
+all address bits eliminated steady-state evictions and uploads in this scene.
+No buffer validation or invalidation rule was relaxed.
+
+## Same-library hash comparison
+
+Diagnostic build; only the experimental hash toggle differed. Both retain
+4x MSAA, the original fullscreen filter and swap interval 1. Initial startup
+intervals excluded; five-second averages. The old hash had seven measured
+intervals, the corrected hash eleven. Counters add a little measurement cost.
+
+| Measurement | Old hash | Corrected hash |
+|---|---:|---:|
+| FPS | 24.43 | 25.60 |
+| Frame wall time, ms | 40.96 | 39.10 |
+| Draw wall time, ms | 15.30 | 11.26 |
+| Presentation wall time, ms | 17.11 | 19.37 |
+| Other wall time, ms | 8.50 | 8.49 |
+| Cache hits/frame | 410 | 440 |
+| Cache misses/evictions/frame | 30 | 0 |
+| Cache uploads/frame | 30 | 0 |
+| Cache bytes uploaded/frame | 437040 | 0 |
+
+The saved draw time partly reappears as a longer swap wait: the CPU reaches
+presentation earlier while the GPU is still busy. Wall-clock GL calls do not
+measure GPU execution. Likewise, 'other' is a residual bucket, not a precise
+measurement of bridge cost.
+
+## Hardware GPU trace
+
+Five-second isolated tracefs captures of vc4_submit_cl, vc4_bcl_end_irq and
+vc4_rcl_end_irq. Durations pair command-list execution start and completion
+interrupt by seqno. Initial/last incomplete jobs are excluded. Job roles are
+inferred from command-list order and the filter-off / MSAA-off comparisons.
+
+| Render-queue stage | 4x MSAA, corrected hash | MSAA off, corrected hash |
+|---|---:|---:|
+| Main scene | 26.07 ms | 20.64 ms |
+| MSAA resolve | 2.13 ms | absent |
+| Fullscreen filter/output | 4.00 ms | 3.95 ms |
+| Total render work/frame | 32.20 ms | 24.59 ms |
+
+The separate binning engine averaged 16.26 ms per scene at 4x and 13.43 ms
+without MSAA. It overlaps rendering, so it must **not** be added to the table
+as if it were another serial pass. The render queue's remaining roughly
+6.9 ms per 39.1 ms frame consists of gaps between jobs; this experiment does
+not assign all of those gaps to a single cause.
+
+MSAA increases measured render work by roughly 7.6 ms per frame (including
+resolve), not merely a few additional CPU wrapper calls. Mesa documents VC4's
+32x32 MSAA tiles versus 64x64 non-MSAA tiles and the associated binning work:
+https://docs.mesa3d.org/drivers/vc4.html
+
+## Other isolated experiments
+
+- Original hash, filter disabled, MSAA retained: 25.58 FPS versus about 24.4.
+  The final GPU pass fell from about 4.0 to 1.98 ms. It still needs an output
+  blit, so disabling the filter does not save its full 4 ms. This changes the
+  image and was only a diagnostic; the filter is enabled in the final run.
+- Corrected hash, MSAA off: 30.0 FPS. Main scene render work falls to 20.64 ms.
+- Corrected hash, 4x MSAA, swap interval 0: 26.89 FPS. This may permit tearing;
+  it does not reach 30 and is not the final setting. VC4_DEBUG=perf reported no
+  explanatory performance warning during this run.
+- Final build, short performance-governor test: two fully measured intervals
+  at 26.4 and 26.5 FPS versus 25.6 with ondemand. CPU draw time fell from about
+  10.4 to 8.5 ms, but swap wait grew. The original ondemand governor was restored.
+  Temperature remained around 77–78 C; V3D was observed at 300 MHz. These spot
+  observations do not constitute a long thermal soak or throttling analysis.
+
+## Texture investigation and mipmap correction
+
+Moving the renderer to ARM removes CPU instruction translation for renderer
+code. GPU shaders were already executing on the VC4; the port does not by
+itself reduce the OpenGL workload or texture traffic generated by xbcompat.
+
+GL_AMD_performance_monitor exposed a texture-fetch bottleneck. A temporary
+point-sampling build retained 4x MSAA, the fullscreen output filter and swap
+interval 1. Compared with normal filtering, it raised the same 109-draw menu
+from 25.6 to 29.0–29.1 FPS. The point-sampling change was diagnostic only and
+has been removed; it changes image quality.
+
+| Main-scene counter | Normal filtering | Diagnostic point sampling |
+|---|---:|---:|
+| QPU cycles executing valid instructions | 22,004,208 | 22,009,816 |
+| QPU cycles waiting for texture units | 42,320,888 | 26,060,768 |
+| QPU fragment-shading cycles | 58,437,056 | 41,423,166 |
+| Texture-cache misses | 610,522 | 396,319 |
+| L2-cache misses | 578,311 | 374,086 |
+
+Texture waits fell 38.4% while instruction counts barely changed. These are
+aggregate hardware counters, not percentages of GPU wall time. Each counter
+batch covered one main scene after warmup (frames 300 and 330); the two batches
+are different animation frames. The monitor can perturb submission, and its
+API calls completed without GL errors. Sustained FPS was read after the probe.
+The paired runs support a sampling-cost diagnosis, not an exact breakdown of
+every GPU cycle. Extension semantics:
+https://registry.khronos.org/OpenGL/extensions/AMD/AMD_performance_monitor.txt
+
+Source inspection then found that texture_for uploaded only level 0 and
+apply_sampler ignored D3DTSS_MIPFILTER. In the measured menu, the title supplies
+a 256x256 DXT3 texture with nine levels and requests linear mip filtering.
+Four other observed textures have only one level. Sampling only the largest
+image wastes cache locality when that image is minified.
+
+The fix uploads the supplied mip chain, selects the requested none/point/linear
+mip filtering, and sets GL_TEXTURE_MAX_LEVEL so partial and single-level chains
+remain complete. Cube faces retain their 128-byte chain alignment; volume
+levels shrink in three dimensions. Standalone render-target textures explicitly
+remain level 0. No mipmaps are synthesized and MSAA is unchanged.
+
+| Same menu, 4x MSAA | FPS | Frame time |
+|---|---:|---:|
+| Corrected buffer hash, old texture path | about 25.6 | about 39.1 ms |
+| Authored mipmaps and mip filtering | 32.82 average | 30.48 ms average |
+
+The new result averages nine five-second intervals after excluding the initial
+startup interval: 32.3–33.1 FPS. The immediately preceding baseline's last six
+intervals were 25.5–25.6 FPS. Both use the native ARM renderer, ondemand CPU
+governor, normal texture filtering, the fullscreen output filter and swap
+interval 1. No point-sampling override remains. Temperature was about 77 C.
+These are renderer frame/presentation-call rates, not a display frame-time
+capture or proof that every frame meets 33.33 ms. The menu screenshot was
+visually inspected; this does not establish pixel identity or all-title safety.
+
+A separate GL capability mismatch was observed: VC4 advertises eight generic
+vertex attributes, while setup code addresses sixteen. A diagnostic caught
+GL_INVALID_VALUE in first-draw attribute setup. State caching suppresses the
+repeated calls, and this was not shown to account for the frame-rate deficit.
+It remains a compatibility follow-up, separate from the measured mipmap win.
+
+## Next optimization target
+
+The mipmap correction meets the 30 FPS average target in this menu. The next
+useful validation is frame-time distribution and other dashboard screens,
+followed by longer thermal and title coverage. If more GPU headroom is needed,
+profile the corrected scene again; do not reuse the old 26 ms main-scene cost
+as the new baseline. The nine-sample output filter and generic attribute
+mapping remain concrete areas to examine.
+
+## Subsequent audio validation
+
+The earlier runs requested ALSA but actually fell back to SDL dummy audio:
+the headphone driver was disabled and HDMI playback failed. With real 48 kHz
+stereo headphone playback enabled and a 1024-frame host period, the same
+4x-MSAA menu measures about 30.4–31.0 FPS. See [the audio investigation](pi3-audio.md)
+for the output-routing, underrun and Dashboard-volume corrections.
+
+## Final state and validation
+
+The running candidate includes the corrected buffer hash and authored mipmap
+support. It preserves 4x MSAA, normal texture filtering, the fullscreen output
+filter, swap interval 1 and ondemand. It runs from
+/tmp/xbcompat-native-test.if8zCJ/mip; installed binaries and boot settings are
+untouched. Reboot returns to the installed runtime. No hardware-counter probe
+or forced point-sampling code is included in the candidate. The isolated
+tracing instance was removed and tracefs returned to its original read-only
+mount state during the earlier investigation.
+
+The default i386 runtime and ARM shared renderer build successfully. The i386
+entry ABI test (60,000 calls), renderer service/callback integration, and
+llvmpipe triangle/presentation test passed. A rendered-pixel regression test
+also passed: a two-level 64x64 texture with red base and green lower level stays
+red with mip filtering disabled and becomes green with point or linear mip
+filtering during minification. Its partial chain also verifies MAX_LEVEL.
+The real dashboard's DXT3 chain was tested on the Pi with the normal image
+visually confirmed. Cube/volume mip sampling and all-title compatibility have
+not received equivalent runtime coverage.

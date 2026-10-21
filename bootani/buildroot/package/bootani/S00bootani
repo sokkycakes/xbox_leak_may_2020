@@ -1,0 +1,71 @@
+#!/bin/sh
+#
+# Start the Xbox boot animation before anything else, in the background, so
+# the rest of the boot carries on while it plays.
+#
+
+DAEMON="bootani"
+PIDFILE="/var/run/$DAEMON.pid"
+LOGFILE="/var/log/$DAEMON.log"
+BOOTANI_ARGS="--kms"
+
+# shellcheck source=/dev/null
+[ -r "/etc/default/$DAEMON" ] && . "/etc/default/$DAEMON"
+# shellcheck source=/dev/null
+[ -r /etc/default/kms ] && . /etc/default/kms
+export KMS_MODE
+
+# The Xbox's own boot animation under xbcompat (package/xbcompat), when
+# the image has it, unless BOOT_ANIMATION=bootani. It falls back to bootani.
+CMD="/usr/bin/$DAEMON $BOOTANI_ARGS"
+if [ -x /usr/libexec/xbox-boot ] && [ "$BOOT_ANIMATION" != bootani ]; then
+	CMD=/usr/libexec/xbox-boot
+fi
+
+start() {
+	# The Xbox's display keeper (xbox-av, see package/xbcompat) before
+	# anything else: black in the session's mode, and the console never
+	# drawn again. Only for the Xbox animation: bootani needs the display
+	# to itself.
+	if [ "$CMD" = /usr/libexec/xbox-boot ]; then
+		# shellcheck source=/dev/null
+		. /usr/lib/xbox/xbox-env
+		xbox_av_start
+	fi
+	printf 'Starting %s: ' "$DAEMON"
+	# Through a shell so its messages land in $LOGFILE; exec keeps the pid.
+	start-stop-daemon -S -q -b -m -p "$PIDFILE" -x /bin/sh \
+		-- -c "exec $CMD >$LOGFILE 2>&1"
+	status=$?
+	if [ "$status" -eq 0 ]; then
+		echo "OK"
+	else
+		echo "FAIL"
+	fi
+	return "$status"
+}
+
+stop() {
+	printf 'Stopping %s: ' "$DAEMON"
+	# bootani hands the display back to the console on SIGTERM.
+	start-stop-daemon -K -q -p "$PIDFILE"
+	status=$?
+	rm -f "$PIDFILE"
+	if [ "$status" -eq 0 ]; then
+		echo "OK"
+	else
+		echo "FAIL"
+	fi
+	return "$status"
+}
+
+case "$1" in
+	start|stop)
+		"$1";;
+	restart|reload)
+		stop
+		start;;
+	*)
+		echo "Usage: $0 {start|stop|restart}"
+		exit 1
+esac

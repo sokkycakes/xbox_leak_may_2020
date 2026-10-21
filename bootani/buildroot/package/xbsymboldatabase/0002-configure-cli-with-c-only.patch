@@ -1,0 +1,22 @@
+From: Codex <codex@openai.com>
+Subject: [PATCH] Configure the C library and scanner without a C++ toolchain
+
+The packaged library and CLI are C. Unit tests are disabled for the target.
+Do not require an unused C++ compiler in a minimal Buildroot image.
+
+Upstream: not submitted
+Signed-off-by: Codex <codex@openai.com>
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 9633d1a..9491bdf 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -2,7 +2,7 @@
+ #
+ cmake_minimum_required(VERSION 3.10.2)
+ 
+-project(XbSymbolDatabase)
++project(XbSymbolDatabase LANGUAGES C)
+ 
+ # Enforce warnings as errors to verify projects are in sync and doesn't have hidden warnings.
+ if(${CMAKE_VERSION} VERSION_LESS "3.24.0")

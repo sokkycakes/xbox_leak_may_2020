@@ -1,0 +1,1469 @@
+/*
+ * Ke*: dispatcher objects, waits, timers, DPCs, IRQL and time.
+ *
+ * Dispatcher objects live in guest memory (a KEVENT inside a critical
+ * section, a KTIMER inside a title's struct), so waits work on the
+ * DISPATCHER_HEADER directly.  One global lock and condition variable guard
+ * every SignalState; that is coarse, but correct and plenty for a proof of
+ * concept.
+ */
+#define _GNU_SOURCE
+#include <dirent.h>
+#include <elf.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <sched.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/auxv.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <sys/prctl.h>
+#include <time.h>
+#include <unistd.h>
+
+#include "../xbcompat.h"
+#include "../cpu.h"
+
+pthread_mutex_t g_disp_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* Threads blocked in wait_objects, each on its own condition variable, so
+   signaling an object wakes only the threads waiting on it (one shared
+   broadcast woke every waiting thread on every event, timer and semaphore:
+   thousands of wakeups a second, which a Raspberry Pi feels). */
+struct disp_waiter {
+    pthread_cond_t cv XBC_COND_ALIGN;
+    ULONG count;
+    PVOID *objects;
+    struct disp_waiter *next;
+};
+static struct disp_waiter *disp_waiters;
+
+void disp_signal(void *object)
+{
+    for (struct disp_waiter *w = disp_waiters; w; w = w->next)
+        for (ULONG i = 0; i < w->count; i++)
+            if (w->objects[i] == object) {
+                pthread_cond_signal(&w->cv);
+                break;
+            }
+}
+
+/* XBCOMPAT_LATCH_TICKS=1: a periodic event (set or pulsed from the DPC
+   thread: vblank and timer callbacks) is remembered per waiting thread, and
+   a thread that waits on one after it fired again since the thread's last
+   wait on it returns at once instead of waiting for the next tick.  A title
+   that keeps time on the Xbox's 30 or 60 Hz ticks but overran (a 150 ms
+   frame on a Raspberry Pi) otherwise spends a part-tick asleep every frame
+   that its own clock already counted.  Titles that finish within a tick
+   never see the difference.  Guarded by g_disp_lock. */
+#define LATCH_SIGNALS 16
+#define LATCH_SEEN 8
+static int latch_on = -1;
+static __thread bool in_dpc_thread;
+static struct { const void *obj; unsigned serial; } latch_signals[LATCH_SIGNALS];
+static unsigned latch_next;
+static __thread struct { const void *obj; unsigned serial; } latch_seen[LATCH_SEEN];
+static __thread unsigned latch_seen_next;
+
+static bool latch_enabled(void)
+{
+    if (latch_on < 0) {
+        const char *e = getenv("XBCOMPAT_LATCH_TICKS");
+        latch_on = e && *e && *e != '0';
+    }
+    return latch_on;
+}
+
+/* A DPC-thread signal of obj.  g_disp_lock held. */
+static void latch_note_signal(const void *obj)
+{
+    if (!in_dpc_thread || !latch_enabled()) return;
+    for (unsigned i = 0; i < LATCH_SIGNALS; i++)
+        if (latch_signals[i].obj == obj) { latch_signals[i].serial++; return; }
+    unsigned i = latch_next++ % LATCH_SIGNALS;
+    latch_signals[i].obj = obj;
+    latch_signals[i].serial = 1;
+}
+
+/* obj's DPC signal count, 0 if it has none.  g_disp_lock held. */
+static unsigned latch_serial(const void *obj)
+{
+    for (unsigned i = 0; i < LATCH_SIGNALS; i++)
+        if (latch_signals[i].obj == obj) return latch_signals[i].serial;
+    return 0;
+}
+
+/* Whether obj fired since this thread's last wait on it ended; with
+   `record`, remember the count now as seen.  g_disp_lock held. */
+static bool latch_missed(const void *obj, bool record)
+{
+    unsigned serial = latch_serial(obj);
+    if (!serial) return false;
+    for (unsigned i = 0; i < LATCH_SEEN; i++)
+        if (latch_seen[i].obj == obj) {
+            bool missed = latch_seen[i].serial != serial;
+            if (record) latch_seen[i].serial = serial;
+            return missed;
+        }
+    if (record) {
+        unsigned i = latch_seen_next++ % LATCH_SEEN;
+        latch_seen[i].obj = obj;
+        latch_seen[i].serial = serial;
+    }
+    return false;
+}
+
+void disp_signal_all(void)
+{
+    for (struct disp_waiter *w = disp_waiters; w; w = w->next) pthread_cond_signal(&w->cv);
+}
+
+/* A thread waits for the GL context (hle/d3d8.c): one blocked here may hold
+   it, and lets it go when it looks again. */
+void ke_wake_waiters(void)
+{
+    pthread_mutex_lock(&g_disp_lock);
+    disp_signal_all();
+    pthread_mutex_unlock(&g_disp_lock);
+}
+
+/* ---- time ------------------------------------------------------------- */
+
+#define EPOCH_DIFF_100NS 116444736000000000ULL   /* 1601 -> 1970 */
+
+ULONGLONG system_time_now(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return EPOCH_DIFF_100NS + (ULONGLONG)ts.tv_sec * 10000000ULL + ts.tv_nsec / 100;
+}
+
+/* XBCOMPAT_FIXED_FPS=N: the guest clock stops following the wall clock and
+   advances 1/N s per presented frame instead, so frame K of a title that
+   animates by time always shows the moment K/N s.  Used to compare frames
+   with a reference renderer; audio still mixes in real time. */
+static ULONGLONG fixed_step, fixed_now;
+
+static ULONGLONG mono_100ns(void)
+{
+    if (fixed_step) return __atomic_load_n(&fixed_now, __ATOMIC_ACQUIRE);
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (ULONGLONG)ts.tv_sec * 10000000ULL + ts.tv_nsec / 100;
+}
+
+volatile ULONG KeTickCount;
+static ULONGLONG boot_mono;
+
+/* KeSystemTime and KeInterruptTime: KSYSTEM_TIMEs titles may read directly,
+   kept current by the DPC thread every millisecond.  The writer stores
+   High2Time, then LowPart, then High1Time; a reader takes High1Time,
+   LowPart and High2Time and retries until the two high parts agree. */
+volatile KSYSTEM_TIME KeSystemTime, KeInterruptTime;
+
+static void ksystem_time_store(volatile KSYSTEM_TIME *t, ULONGLONG v)
+{
+    __atomic_store_n(&t->High2Time, (LONG)(v >> 32), __ATOMIC_RELEASE);
+    __atomic_store_n(&t->LowPart, (ULONG)v, __ATOMIC_RELEASE);
+    __atomic_store_n(&t->High1Time, (LONG)(v >> 32), __ATOMIC_RELEASE);
+}
+
+static void ke_update_clocks(ULONGLONG mono)
+{
+    ksystem_time_store(&KeSystemTime, system_time_now());
+    ksystem_time_store(&KeInterruptTime, mono - boot_mono);
+}
+
+void NTAPI KeQuerySystemTime(LARGE_INTEGER *t)
+{
+    t->QuadPart = system_time_now();
+}
+
+ULONGLONG NTAPI KeQueryInterruptTime(void)
+{
+    return mono_100ns() - boot_mono;
+}
+
+/* The ACPI timer the Xbox kernel uses for the performance counter. */
+#define XBOX_PERF_FREQ 3375000ULL
+
+ULONGLONG NTAPI KeQueryPerformanceCounter(void)
+{
+    if (fixed_step) return mono_100ns() * XBOX_PERF_FREQ / 10000000ULL;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (ULONGLONG)ts.tv_sec * XBOX_PERF_FREQ + (ULONGLONG)ts.tv_nsec * XBOX_PERF_FREQ / 1000000000ULL;
+}
+
+ULONGLONG NTAPI KeQueryPerformanceFrequency(void)
+{
+    return XBOX_PERF_FREQ;
+}
+
+/* ---- the CPU's time stamp counter -------------------------------------
+
+   Titles time frames with rdtsc and take it to tick at the Xbox CPU's
+   733 MHz: XAPI's QueryPerformanceCounter is a bare rdtsc and its
+   QueryPerformanceFrequency returns 733333333.  On the host it ticks at the
+   host's rate (2.1 GHz here), so frame timers saw time pass up to several
+   times too fast: the ATG samples showed 28 fps while running at 60, and
+   games that move by elapsed time ran that much faster.
+
+   So guest threads run with the time stamp counter disabled
+   (PR_SET_TSC), and the fault handler answers each rdtsc with the guest
+   clock at 733 MHz, counted from when xbcompat started as an Xbox counts
+   from power-on.  glibc's clock_gettime and gettimeofday read the counter
+   inside the vDSO, which would fault too (and in SDL's handlers while SDL
+   holds them), so those vDSO entries are pointed at the plain system calls
+   first.  If any of that is refused, the counter stays the host's.
+   XBCOMPAT_HOST_TSC=1 keeps the host's counter on purpose. */
+
+#define XBOX_TSC_FREQ 733333333ULL
+
+static bool tsc_trapped;
+
+#ifdef XBC_NATIVE
+
+static void __attribute__((naked, used)) sys_clock_gettime(void)
+{
+    __asm__("push %ebx\n\tmov 8(%esp), %ebx\n\tmov 12(%esp), %ecx\n\t"
+            "mov $265, %eax\n\tint $0x80\n\tpop %ebx\n\tret");
+}
+
+static void __attribute__((naked, used)) sys_clock_gettime64(void)
+{
+    __asm__("push %ebx\n\tmov 8(%esp), %ebx\n\tmov 12(%esp), %ecx\n\t"
+            "mov $403, %eax\n\tint $0x80\n\tpop %ebx\n\tret");
+}
+
+static void __attribute__((naked, used)) sys_gettimeofday(void)
+{
+    __asm__("push %ebx\n\tmov 8(%esp), %ebx\n\tmov 12(%esp), %ecx\n\t"
+            "mov $78, %eax\n\tint $0x80\n\tpop %ebx\n\tret");
+}
+
+/* Point the vDSO's clock functions at system calls that don't read the
+   counter.  Returns false if the vDSO can't be found or written. */
+static bool vdso_use_syscalls(void)
+{
+    uint8_t *base = (uint8_t *)getauxval(AT_SYSINFO_EHDR);
+    if (!base) return true;   /* no vDSO: glibc already makes system calls */
+    Elf32_Ehdr *eh = (Elf32_Ehdr *)base;
+    /* Under box86 (x86 on ARM) this is the ARM kernel's vDSO, which the
+       ARM C library calls: never write x86 jumps into it. */
+    if (eh->e_machine != EM_386) return false;
+    Elf32_Phdr *ph = (Elf32_Phdr *)(base + eh->e_phoff);
+    Elf32_Addr bias = 0, lo = ~0u, hi = 0;
+    for (int i = 0; i < eh->e_phnum; i++)
+        if (ph[i].p_type == PT_LOAD) {
+            if (ph[i].p_vaddr < lo) lo = ph[i].p_vaddr;
+            if (ph[i].p_vaddr + ph[i].p_memsz > hi) hi = ph[i].p_vaddr + ph[i].p_memsz;
+        }
+    if (lo == ~0u) return false;
+    bias = (Elf32_Addr)base - lo;
+    Elf32_Shdr *sh = (Elf32_Shdr *)(base + eh->e_shoff);
+    Elf32_Sym *syms = NULL;
+    const char *strs = NULL;
+    unsigned nsyms = 0;
+    for (int i = 0; i < eh->e_shnum; i++)
+        if (sh[i].sh_type == SHT_DYNSYM) {
+            syms = (Elf32_Sym *)(base + sh[i].sh_offset);
+            nsyms = sh[i].sh_size / sizeof(Elf32_Sym);
+            strs = (const char *)(base + sh[sh[i].sh_link].sh_offset);
+        }
+    if (!syms) return false;
+
+    static const struct { const char *name; void (*to)(void); } redirects[] = {
+        { "__vdso_clock_gettime", sys_clock_gettime },
+        { "__vdso_clock_gettime64", sys_clock_gettime64 },
+        { "__vdso_gettimeofday", sys_gettimeofday },
+    };
+    uintptr_t page = sysconf(_SC_PAGESIZE);
+    uintptr_t start = (bias + lo) & ~(page - 1), end = (bias + hi + page - 1) & ~(page - 1);
+    if (mprotect((void *)start, end - start, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) return false;
+    for (unsigned i = 0; i < nsyms; i++) {
+        if (ELF32_ST_TYPE(syms[i].st_info) != STT_FUNC || !syms[i].st_value) continue;
+        for (size_t j = 0; j < sizeof redirects / sizeof redirects[0]; j++) {
+            if (strcmp(strs + syms[i].st_name, redirects[j].name)) continue;
+            uint8_t *at = (uint8_t *)(bias + syms[i].st_value);
+            int32_t rel = (int32_t)((uintptr_t)redirects[j].to - (uintptr_t)(at + 5));
+            at[0] = 0xE9;   /* jmp rel32 */
+            memcpy(at + 1, &rel, 4);
+        }
+    }
+    mprotect((void *)start, end - start, PROT_READ | PROT_EXEC);
+    return true;
+}
+
+static void tsc_init(void)
+{
+    const char *e = getenv("XBCOMPAT_HOST_TSC");
+    if (e && *e && *e != '0') return;
+    if (!vdso_use_syscalls()) { xlog("rdtsc: the vDSO can't be patched; titles see the host's counter"); return; }
+    /* Try it on this thread; guest threads turn it on in thread_trap_tsc. */
+    if (prctl(PR_SET_TSC, PR_TSC_SIGSEGV, 0, 0, 0) != 0) { xlog("rdtsc: PR_SET_TSC refused; titles see the host's counter"); return; }
+    prctl(PR_SET_TSC, PR_TSC_ENABLE, 0, 0, 0);
+    tsc_trapped = true;
+}
+
+#else
+/* Translated guest code: the CPU emulator answers every rdtsc with
+   ke_guest_tsc() (cpu_unicorn.c), so there is nothing to set up. */
+static void tsc_init(void) {}
+#endif
+
+void thread_trap_tsc(void)
+{
+    if (tsc_trapped) prctl(PR_SET_TSC, PR_TSC_SIGSEGV, 0, 0, 0);
+}
+
+void thread_untrap_tsc(void)
+{
+    if (tsc_trapped) prctl(PR_SET_TSC, PR_TSC_ENABLE, 0, 0, 0);
+}
+
+/* The counter a guest rdtsc reads: 733 MHz since xbcompat started. */
+ULONGLONG ke_guest_tsc(void)
+{
+    ULONGLONG t = mono_100ns() - boot_mono;   /* 100 ns units */
+    return t / 10000000ULL * XBOX_TSC_FREQ + t % 10000000ULL * XBOX_TSC_FREQ / 10000000ULL;
+}
+
+/* Absolute deadline (CLOCK_REALTIME based timespec) for a Ke timeout. */
+static bool deadline_from(LARGE_INTEGER *timeout, struct timespec *out)
+{
+    if (!timeout) return false;
+    LONGLONG t = timeout->QuadPart;
+    ULONGLONG now = system_time_now();
+    ULONGLONG due = t < 0 ? now + (ULONGLONG)(-t) : (ULONGLONG)t;
+    if (due < now) due = now;
+    ULONGLONG unix100 = due - EPOCH_DIFF_100NS;
+    out->tv_sec = unix100 / 10000000ULL;
+    out->tv_nsec = (unix100 % 10000000ULL) * 100;
+    return true;
+}
+
+/* ---- waiting ---------------------------------------------------------- */
+
+static bool object_signaled(DISPATCHER_HEADER *h, KTHREAD *self)
+{
+    if (h->Type == MutantObject) {
+        KMUTANT *m = (KMUTANT *)h;
+        return h->SignalState > 0 || m->OwnerThread == self;
+    }
+    return h->SignalState > 0;
+}
+
+static NTSTATUS consume(DISPATCHER_HEADER *h, KTHREAD *self)
+{
+    switch (h->Type) {
+    case EventSynchronizationObject:
+    case TimerSynchronizationObject:
+        h->SignalState = 0;
+        break;
+    case SemaphoreObject:
+        h->SignalState--;
+        break;
+    case MutantObject: {
+        KMUTANT *m = (KMUTANT *)h;
+        h->SignalState--;
+        m->OwnerThread = self;
+        if (m->Abandoned) {
+            m->Abandoned = 0;
+            return STATUS_ABANDONED;
+        }
+        break;
+    }
+    default:
+        break;
+    }
+    return STATUS_SUCCESS;
+}
+
+/* ---- APCs ---------------------------------------------------------------
+   Each guest thread has one queue.  User-mode APCs (I/O completion routines,
+   QueueUserAPC) run when the thread enters a user-mode alertable wait, which
+   then returns STATUS_USER_APC (ke/wait.c TestForAlertPending).  Kernel-mode
+   APCs run at once on their own thread, or at the target's next wait. */
+
+typedef struct xapc {
+    struct xapc *next;
+    PVOID routine, ctx, arg1, arg2;
+    KAPC *kapc;
+    bool user;
+} xapc;
+
+typedef void (NTAPI *normal_routine)(PVOID, PVOID, PVOID);
+typedef void (NTAPI *kernel_routine)(KAPC *, PVOID *, PVOID *, PVOID *, PVOID *);
+
+static void apc_run(xapc *a)
+{
+    PVOID routine = a->routine, ctx = a->ctx, a1 = a->arg1, a2 = a->arg2;
+    if (a->kapc) {
+        KAPC *k = a->kapc;
+        k->Inserted = 0;
+        /* The kernel routine may free the KAPC and may change what runs next. */
+#ifdef XBC_TRANSLATED
+        if (k->KernelRoutine)
+            CPU_CALL(k->KernelRoutine, CONV_STD, (uint32_t)k, (uint32_t)&routine, (uint32_t)&ctx,
+                     (uint32_t)&a1, (uint32_t)&a2);
+#else
+        if (k->KernelRoutine) ((kernel_routine)k->KernelRoutine)(k, &routine, &ctx, &a1, &a2);
+#endif
+    }
+#ifdef XBC_TRANSLATED
+    if (routine) CPU_CALL(routine, CONV_STD, (uint32_t)ctx, (uint32_t)a1, (uint32_t)a2);
+#else
+    if (routine) ((normal_routine)routine)(ctx, a1, a2);
+#endif
+    free(a);
+}
+
+static bool apc_pending(xthread *t, bool user)
+{
+    for (xapc *a = t->apc_head; a; a = a->next)
+        if (a->user == user) return true;
+    return false;
+}
+
+/* Run t's queued APCs of one mode; called on t with g_disp_lock held, which
+   is dropped while each routine runs. */
+static void apc_drain(xthread *t, bool user)
+{
+    for (;;) {
+        xapc **pp = &t->apc_head, *a;
+        while ((a = *pp) && a->user != user) pp = &a->next;
+        if (!a) return;
+        *pp = a->next;
+        if (t->apc_tail == a) {
+            t->apc_tail = NULL;
+            for (xapc *p = t->apc_head; p; p = p->next) t->apc_tail = p;
+        }
+        pthread_mutex_unlock(&g_disp_lock);
+        apc_run(a);
+        /* The routine took the guest CPU (translated builds); a wait that
+           goes on blocking must not keep it. */
+        cpu_block();
+        pthread_mutex_lock(&g_disp_lock);
+    }
+}
+
+void apc_queue(xthread *t, PVOID routine, PVOID ctx, PVOID arg1, PVOID arg2, KAPC *kapc)
+{
+    xapc *a = calloc(1, sizeof(*a));
+    a->routine = routine; a->ctx = ctx; a->arg1 = arg1; a->arg2 = arg2; a->kapc = kapc;
+    a->user = kapc ? kapc->ApcMode == 1 : true;
+    if (!a->user && t == thread_current()) {
+        apc_run(a);
+        return;
+    }
+    pthread_mutex_lock(&g_disp_lock);
+    if (t->apc_tail) t->apc_tail->next = a; else t->apc_head = a;
+    t->apc_tail = a;
+    disp_signal_all();
+    pthread_mutex_unlock(&g_disp_lock);
+}
+
+NTSTATUS wait_objects(ULONG count, PVOID objects[], int wait_any, KPROCESSOR_MODE mode,
+                      BOOLEAN alertable, LARGE_INTEGER *timeout)
+{
+    bool user_apcs = alertable && mode == 1;
+    xthread *xt = thread_current();
+    KTHREAD *self = xt ? &xt->ethread.Tcb : NULL;
+    struct timespec dl;
+    bool has_dl = deadline_from(timeout, &dl);
+    bool poll = timeout && timeout->QuadPart == 0;
+    NTSTATUS st;
+    uint64_t prof_start = prof_wait_begin();
+
+    if (xt) __atomic_store_n(&xt->in_wait, 1, __ATOMIC_SEQ_CST);
+    static __thread struct disp_waiter me;
+    static __thread bool me_init;
+    if (!me_init) {
+        pthread_cond_init(&me.cv, NULL);   /* CLOCK_REALTIME, as deadline_from */
+        me_init = true;
+    }
+    me.count = count;
+    me.objects = objects;
+    bool listed = false;
+    /* A loop that waits on a manual-reset event nobody resets never blocks.
+       The dashboard's audio stream thread does that while its stream is
+       stopped: on the Xbox it is a low-priority thread that only gets idle
+       time, here it took a whole core (and the dispatcher lock) from the
+       render thread, ~250000 waits a second. Past 64 such waits in a row,
+       each one first gives up the CPU for a while. */
+    static __thread unsigned spins;
+    bool spin_hit = false;
+
+    bool latch = latch_enabled() && count == 1 && objects[0]
+                 && (((DISPATCHER_HEADER *)objects[0])->Type == EventNotificationObject
+                     || ((DISPATCHER_HEADER *)objects[0])->Type == EventSynchronizationObject);
+    pthread_mutex_lock(&g_disp_lock);
+    if (latch && !poll && latch_missed(objects[0], false)) {
+        /* The tick this wait is for already came while the thread was busy. */
+        DISPATCHER_HEADER *h = objects[0];
+        if (h->Type == EventSynchronizationObject) h->SignalState = 0;
+        st = STATUS_SUCCESS;
+        goto done;
+    }
+    for (;;) {
+        if (xbc_gl_yield_due && xbc_gl_yield_due()) {
+            pthread_mutex_unlock(&g_disp_lock);
+            xbc_gl_yield();
+            pthread_mutex_lock(&g_disp_lock);
+        }
+        if (xt && xt->apc_head) apc_drain(xt, false);
+        if (wait_any) {
+            for (ULONG i = 0; i < count; i++) {
+                DISPATCHER_HEADER *h = objects[i];
+                if (object_signaled(h, self)) {
+                    if (h->Type == EventNotificationObject) spin_hit = true;
+                    st = consume(h, self);
+                    st = st == STATUS_ABANDONED ? (NTSTATUS)(STATUS_ABANDONED + i) : (NTSTATUS)i;
+                    goto done;
+                }
+            }
+        } else {
+            ULONG ready = 0;
+            for (ULONG i = 0; i < count; i++)
+                ready += object_signaled(objects[i], self);
+            if (ready == count) {
+                for (ULONG i = 0; i < count; i++)
+                    consume(objects[i], self);
+                st = STATUS_SUCCESS;
+                goto done;
+            }
+        }
+        if (user_apcs && xt && apc_pending(xt, true)) {
+            apc_drain(xt, true);
+            st = STATUS_USER_APC;
+            goto done;
+        }
+        if (poll) { st = STATUS_TIMEOUT; goto done; }
+        if (!listed) {
+            cpu_block();
+            me.next = disp_waiters;
+            disp_waiters = &me;
+            listed = true;
+        }
+        /* A second at most between looks, in case something changed a
+           SignalState without disp_signal. */
+        struct timespec cap;
+        clock_gettime(CLOCK_REALTIME, &cap);
+        cap.tv_sec += 1;
+        bool capped = !has_dl || cap.tv_sec < dl.tv_sec || (cap.tv_sec == dl.tv_sec && cap.tv_nsec < dl.tv_nsec);
+        int rc = pthread_cond_timedwait(&me.cv, &g_disp_lock, capped ? &cap : &dl);
+        if (rc == ETIMEDOUT && !capped) {
+            /* One last look: the signal may have raced the timeout. */
+            poll = true;
+        }
+    }
+done:
+    if (latch) latch_missed(objects[0], true);
+    if (listed)
+        for (struct disp_waiter **w = &disp_waiters; *w; w = &(*w)->next)
+            if (*w == &me) {
+                *w = me.next;
+                break;
+            }
+    pthread_mutex_unlock(&g_disp_lock);
+    if (listed) spins = 0;
+    else if (spin_hit && !poll && ++spins > 64) {
+        /* The dashboard runs dozens of these threads, one per sound
+           stream: after a while, back off to 10 ms. */
+        cpu_block();
+        usleep(spins > 256 ? 10000 : 1000);
+    }
+    thread_wait_end(xt);
+    prof_wait_end(prof_start, count ? ((DISPATCHER_HEADER *)objects[0])->Type : -1, count ? objects[0] : NULL);
+    return st;
+}
+
+NTSTATUS NTAPI KeWaitForSingleObject(PVOID Object, ULONG WaitReason, KPROCESSOR_MODE WaitMode,
+                                     BOOLEAN Alertable, LARGE_INTEGER *Timeout)
+{
+    (void)WaitReason;
+    bool held = !(Timeout && Timeout->QuadPart == 0) && ke_dispatch_release_for_wait();
+    NTSTATUS st = wait_objects(1, &Object, 1, WaitMode, Alertable, Timeout);
+    ke_dispatch_reacquire(held);
+    return st;
+}
+
+NTSTATUS NTAPI KeWaitForMultipleObjects(ULONG Count, PVOID Object[], ULONG WaitType,
+                                        ULONG WaitReason, KPROCESSOR_MODE WaitMode,
+                                        BOOLEAN Alertable, LARGE_INTEGER *Timeout,
+                                        KWAIT_BLOCK *WaitBlockArray)
+{
+    (void)WaitReason; (void)WaitBlockArray;
+    bool held = !(Timeout && Timeout->QuadPart == 0) && ke_dispatch_release_for_wait();
+    NTSTATUS st = wait_objects(Count, Object, WaitType == 1 /* WaitAny */, WaitMode, Alertable, Timeout);
+    ke_dispatch_reacquire(held);
+    return st;
+}
+
+NTSTATUS NTAPI KeDelayExecutionThread(KPROCESSOR_MODE WaitMode, BOOLEAN Alertable,
+                                      LARGE_INTEGER *Interval)
+{
+    xthread *xt = thread_current();
+    if ((Alertable && WaitMode == 1) || (xt && xt->apc_head)) {
+        /* A wait on nothing: it ends at the interval or at an APC. */
+        NTSTATUS st = wait_objects(0, NULL, 1, WaitMode, Alertable, Interval);
+        return st == STATUS_TIMEOUT ? STATUS_SUCCESS : st;
+    }
+    gl_yield_point();
+    LONGLONG t = Interval->QuadPart;
+    ULONGLONG rel = t < 0 ? (ULONGLONG)-t : (t > (LONGLONG)system_time_now() ? t - system_time_now() : 0);
+    uint64_t prof_start = prof_wait_begin();
+    cpu_block();
+    if (rel == 0) {
+        if (xt) __atomic_store_n(&xt->in_wait, 1, __ATOMIC_SEQ_CST);
+        sched_yield();
+        thread_wait_end(xt);
+    } else {
+        struct timespec ts = { rel / 10000000ULL, (rel % 10000000ULL) * 100 };
+        if (xt) __atomic_store_n(&xt->in_wait, 1, __ATOMIC_SEQ_CST);
+        while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {}
+        thread_wait_end(xt);
+    }
+    prof_wait_end(prof_start, -1, NULL);
+    return STATUS_SUCCESS;
+}
+
+/* ---- events, semaphores, mutants ------------------------------------- */
+
+static void init_header(DISPATCHER_HEADER *h, UCHAR type, UCHAR size, LONG state)
+{
+    h->Type = type;
+    h->Size = size;
+    h->Absolute = 0;
+    h->Inserted = 0;
+    h->SignalState = state;
+    h->WaitListHead.Flink = h->WaitListHead.Blink = &h->WaitListHead;
+}
+
+void NTAPI KeInitializeEvent(KEVENT *Event, ULONG Type, BOOLEAN State)
+{
+    init_header(&Event->Header, (UCHAR)Type, sizeof(KEVENT) / 4, State);
+}
+
+LONG NTAPI KeSetEvent(KEVENT *Event, LONG Increment, BOOLEAN Wait)
+{
+    prof_signal(Event);
+    (void)Increment; (void)Wait;
+    pthread_mutex_lock(&g_disp_lock);
+    LONG old = Event->Header.SignalState;
+    Event->Header.SignalState = 1;
+    latch_note_signal(Event);
+    disp_signal(Event);
+    pthread_mutex_unlock(&g_disp_lock);
+    return old;
+}
+
+LONG NTAPI KeResetEvent(KEVENT *Event)
+{
+    pthread_mutex_lock(&g_disp_lock);
+    LONG old = Event->Header.SignalState;
+    Event->Header.SignalState = 0;
+    pthread_mutex_unlock(&g_disp_lock);
+    return old;
+}
+
+LONG NTAPI KePulseEvent(KEVENT *Event, LONG Increment, BOOLEAN Wait)
+{
+    prof_signal(Event);
+    (void)Increment; (void)Wait;
+    /* Waking only current waiters needs wait lists; approximate by signalling
+       and letting the next waiter consume it. */
+    pthread_mutex_lock(&g_disp_lock);
+    LONG old = Event->Header.SignalState;
+    Event->Header.SignalState = 1;
+    latch_note_signal(Event);
+    disp_signal(Event);
+    pthread_mutex_unlock(&g_disp_lock);
+    if (Event->Header.Type == EventNotificationObject) {
+        sched_yield();
+        KeResetEvent(Event);
+    }
+    return old;
+}
+
+void NTAPI KeInitializeSemaphore(KSEMAPHORE *Semaphore, LONG Count, LONG Limit)
+{
+    init_header(&Semaphore->Header, SemaphoreObject, sizeof(KSEMAPHORE) / 4, Count);
+    Semaphore->Limit = Limit;
+}
+
+LONG NTAPI KeReleaseSemaphore(KSEMAPHORE *Semaphore, LONG Increment, LONG Adjustment, BOOLEAN Wait)
+{
+    prof_signal(Semaphore);
+    (void)Increment; (void)Wait;
+    pthread_mutex_lock(&g_disp_lock);
+    LONG old = Semaphore->Header.SignalState;
+    Semaphore->Header.SignalState += Adjustment;
+    disp_signal(Semaphore);
+    pthread_mutex_unlock(&g_disp_lock);
+    return old;
+}
+
+void NTAPI KeInitializeMutant(KMUTANT *Mutant, BOOLEAN InitialOwner)
+{
+    init_header(&Mutant->Header, MutantObject, sizeof(KMUTANT) / 4, InitialOwner ? 0 : 1);
+    xthread *t = thread_current();
+    Mutant->OwnerThread = InitialOwner && t ? &t->ethread.Tcb : NULL;
+    Mutant->Abandoned = 0;
+}
+
+LONG NTAPI KeReleaseMutant(KMUTANT *Mutant, LONG Increment, BOOLEAN Abandoned, BOOLEAN Wait)
+{
+    (void)Increment; (void)Wait;
+    pthread_mutex_lock(&g_disp_lock);
+    LONG old = Mutant->Header.SignalState;
+    if (Abandoned) {
+        Mutant->Header.SignalState = 1;
+        Mutant->Abandoned = 1;
+    } else {
+        Mutant->Header.SignalState++;
+    }
+    if (Mutant->Header.SignalState > 0)
+        Mutant->OwnerThread = NULL;
+    disp_signal(Mutant);
+    pthread_mutex_unlock(&g_disp_lock);
+    return old;
+}
+
+/* ---- queues (ke/queueobj.c) ------------------------------------------
+   SignalState counts the queued entries.  A remover takes the head entry
+   under the dispatcher lock, so a wake that loses the race to another
+   remover just waits again.  The concurrency limit (MaximumCount) is kept
+   but not enforced: threads here are not scheduled by the kernel. */
+
+void NTAPI KeInitializeQueue(KQUEUE *Queue, ULONG Count)
+{
+    init_header(&Queue->Header, QueueObject, sizeof(KQUEUE) / 4, 0);
+    Queue->EntryListHead.Flink = Queue->EntryListHead.Blink = &Queue->EntryListHead;
+    Queue->ThreadListHead.Flink = Queue->ThreadListHead.Blink = &Queue->ThreadListHead;
+    Queue->CurrentCount = 0;
+    Queue->MaximumCount = Count ? Count : 1;
+}
+
+static LONG queue_insert(KQUEUE *q, LIST_ENTRY *e, bool head)
+{
+    pthread_mutex_lock(&g_disp_lock);
+    LONG old = q->Header.SignalState;
+    LIST_ENTRY *h = &q->EntryListHead;
+    if (head) {
+        e->Flink = h->Flink; e->Blink = h;
+        h->Flink->Blink = e; h->Flink = e;
+    } else {
+        e->Flink = h; e->Blink = h->Blink;
+        h->Blink->Flink = e; h->Blink = e;
+    }
+    q->Header.SignalState++;
+    disp_signal(q);
+    pthread_mutex_unlock(&g_disp_lock);
+    return old;
+}
+
+LONG NTAPI KeInsertQueue(KQUEUE *Queue, LIST_ENTRY *Entry) { return queue_insert(Queue, Entry, false); }
+LONG NTAPI KeInsertHeadQueue(KQUEUE *Queue, LIST_ENTRY *Entry) { return queue_insert(Queue, Entry, true); }
+
+/* The head entry, or STATUS_TIMEOUT / STATUS_USER_APC cast to a pointer. */
+LIST_ENTRY *NTAPI KeRemoveQueue(KQUEUE *Queue, KPROCESSOR_MODE WaitMode, LARGE_INTEGER *Timeout)
+{
+    /* A relative timeout counts from the first call, not from each retry. */
+    LARGE_INTEGER abs, *to = Timeout;
+    if (Timeout && Timeout->QuadPart < 0) {
+        abs.QuadPart = (LONGLONG)(system_time_now() - (ULONGLONG)Timeout->QuadPart);
+        to = &abs;
+    }
+    xthread *xt = thread_current();
+    if (xt) xt->ethread.Tcb.Queue = Queue;
+    for (;;) {
+        pthread_mutex_lock(&g_disp_lock);
+        LIST_ENTRY *h = &Queue->EntryListHead, *e = h->Flink;
+        if (Queue->Header.SignalState > 0 && e != h) {
+            h->Flink = e->Flink;
+            e->Flink->Blink = h;
+            Queue->Header.SignalState--;
+            pthread_mutex_unlock(&g_disp_lock);
+            return e;
+        }
+        pthread_mutex_unlock(&g_disp_lock);
+        PVOID obj = Queue;
+        NTSTATUS st = wait_objects(1, &obj, 1, WaitMode, WaitMode == 1, to);
+        if (st == STATUS_TIMEOUT || st == STATUS_USER_APC)
+            return (LIST_ENTRY *)(ULONG_PTR)st;
+    }
+}
+
+/* Empties the queue: its first entry, the rest still linked to it as a
+   ring, or NULL when it was empty. */
+LIST_ENTRY *NTAPI KeRundownQueue(KQUEUE *Queue)
+{
+    pthread_mutex_lock(&g_disp_lock);
+    LIST_ENTRY *h = &Queue->EntryListHead, *first = h->Flink;
+    if (first == h) first = NULL;
+    else {
+        /* Unlink the head, leaving the entries as a ring. */
+        first->Blink = h->Blink;
+        h->Blink->Flink = first;
+        h->Flink = h->Blink = h;
+    }
+    Queue->Header.SignalState = 0;
+    pthread_mutex_unlock(&g_disp_lock);
+    return first;
+}
+
+/* ---- IRQL ------------------------------------------------------------- */
+
+#ifdef XBC_NATIVE
+static inline KIRQL get_irql(void)
+{
+    KIRQL v;
+    __asm__ volatile("movb %%fs:0x24, %0" : "=q"(v));
+    return v;
+}
+
+static inline void set_irql(KIRQL v)
+{
+    __asm__ volatile("movb %0, %%fs:0x24" : : "q"(v));
+}
+#else
+static inline KIRQL get_irql(void)
+{
+    xthread *t = thread_current();
+    return t ? t->pcr->Irql : 0;
+}
+
+static inline void set_irql(KIRQL v)
+{
+    xthread *t = thread_current();
+    if (t) t->pcr->Irql = v;
+}
+#endif
+
+KIRQL NTAPI KeGetCurrentIrql(void) { return get_irql(); }
+/* On the console one processor runs everything, so code at DISPATCH_LEVEL
+   excludes DPCs and other raised code.  The network stack depends on that
+   (its state is touched from title threads at raised IRQL, from its DPC and
+   from the NIC's ISR), so once a NIC driver connects its interrupt, raising
+   to DISPATCH_LEVEL takes a lock that DPCs and the ISR also run under.
+   Titles without networking keep the lock-free behavior. */
+static pthread_mutex_t dispatch_lock = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
+static bool dispatch_exclusive;
+static __thread bool dispatch_held;
+
+void ke_dispatch_exclusive(void) { __atomic_store_n(&dispatch_exclusive, true, __ATOMIC_RELEASE); }
+
+static inline void irql_changed(KIRQL from, KIRQL to)
+{
+    if (!__atomic_load_n(&dispatch_exclusive, __ATOMIC_ACQUIRE)) return;
+    if (from < 2 && to >= 2 && !dispatch_held) {
+        pthread_mutex_lock(&dispatch_lock);
+        dispatch_held = true;
+    } else if (to < 2 && dispatch_held) {
+        dispatch_held = false;
+        pthread_mutex_unlock(&dispatch_lock);
+    }
+}
+
+/* Run a DPC or an ISR as the only raised code (a no-op until exclusive). */
+void ke_dispatch_enter(KIRQL irql)
+{
+    (void)irql;
+    if (__atomic_load_n(&dispatch_exclusive, __ATOMIC_ACQUIRE)) pthread_mutex_lock(&dispatch_lock);
+}
+
+void ke_dispatch_leave(void)
+{
+    if (__atomic_load_n(&dispatch_exclusive, __ATOMIC_ACQUIRE)) pthread_mutex_unlock(&dispatch_lock);
+}
+
+/* A thread blocking at raised IRQL (which the console forbids) must not keep
+   DPCs out while it sleeps. */
+bool ke_dispatch_release_for_wait(void)
+{
+    if (!dispatch_held) return false;
+    dispatch_held = false;
+    pthread_mutex_unlock(&dispatch_lock);
+    return true;
+}
+
+void ke_dispatch_reacquire(bool was_held)
+{
+    if (!was_held) return;
+    pthread_mutex_lock(&dispatch_lock);
+    dispatch_held = true;
+}
+
+KIRQL FASTCALL KfRaiseIrql(KIRQL NewIrql) { KIRQL o = get_irql(); irql_changed(o, NewIrql); set_irql(NewIrql); return o; }
+void FASTCALL KfLowerIrql(KIRQL NewIrql) { KIRQL o = get_irql(); set_irql(NewIrql); irql_changed(o, NewIrql); }
+/* KiLockDispatcherDatabase is KeRaiseIrqlToDpcLevel in guest code; with
+   no context switch to make here, unlocking is lowering the IRQL. */
+void FASTCALL KiUnlockDispatcherDatabase(KIRQL OldIrql) { KfLowerIrql(OldIrql); }
+KIRQL NTAPI KeRaiseIrqlToDpcLevel(void) { return KfRaiseIrql(2); }
+KIRQL NTAPI KeRaiseIrqlToSynchLevel(void) { return KfRaiseIrql(2); }
+
+KTHREAD *NTAPI KeGetCurrentThread(void)
+{
+    xthread *t = thread_current();
+    return t ? &t->ethread.Tcb : NULL;
+}
+
+/* Spin locks: the guest uses raise/lower IRQL around a single ULONG.  Guest
+   code on real hardware is uniprocessor, but our threads are truly parallel,
+   so take a real lock. */
+static pthread_mutex_t spin_lock = PTHREAD_MUTEX_INITIALIZER;
+KIRQL FASTCALL KfAcquireSpinLock(ULONG *SpinLock) { (void)SpinLock; KIRQL o = KfRaiseIrql(2); pthread_mutex_lock(&spin_lock); return o; }
+void FASTCALL KfReleaseSpinLock(ULONG *SpinLock, KIRQL OldIrql) { (void)SpinLock; pthread_mutex_unlock(&spin_lock); KfLowerIrql(OldIrql); }
+void FASTCALL KefAcquireSpinLockAtDpcLevel(ULONG *SpinLock) { (void)SpinLock; pthread_mutex_lock(&spin_lock); }
+void FASTCALL KefReleaseSpinLockFromDpcLevel(ULONG *SpinLock) { (void)SpinLock; pthread_mutex_unlock(&spin_lock); }
+
+/* ---- DPCs and timers -------------------------------------------------- */
+
+typedef struct timer_node {
+    KTIMER *timer;
+    ULONGLONG due;   /* monotonic 100 ns */
+    struct timer_node *next;
+} timer_node;
+
+static pthread_mutex_t dpc_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t dpc_cond XBC_COND_ALIGN;
+static KDPC *dpc_queue[256];
+static unsigned dpc_head, dpc_tail;
+static timer_node *timers;
+
+void NTAPI KeInitializeDpc(KDPC *Dpc, PVOID DeferredRoutine, PVOID DeferredContext)
+{
+    memset(Dpc, 0, sizeof(*Dpc));
+    Dpc->Type = DpcObject;
+    Dpc->DeferredRoutine = DeferredRoutine;
+    Dpc->DeferredContext = DeferredContext;
+}
+
+BOOLEAN NTAPI KeInsertQueueDpc(KDPC *Dpc, PVOID Arg1, PVOID Arg2)
+{
+    pthread_mutex_lock(&dpc_lock);
+    if (Dpc->Inserted) {
+        pthread_mutex_unlock(&dpc_lock);
+        return 0;
+    }
+    Dpc->Inserted = 1;
+    Dpc->SystemArgument1 = Arg1;
+    Dpc->SystemArgument2 = Arg2;
+    dpc_queue[dpc_tail++ % 256] = Dpc;
+    pthread_cond_broadcast(&dpc_cond);
+    pthread_mutex_unlock(&dpc_lock);
+    return 1;
+}
+
+BOOLEAN NTAPI KeRemoveQueueDpc(KDPC *Dpc)
+{
+    pthread_mutex_lock(&dpc_lock);
+    BOOLEAN was = Dpc->Inserted;
+    if (was) {
+        for (unsigned i = dpc_head; i != dpc_tail; i++)
+            if (dpc_queue[i % 256] == Dpc) dpc_queue[i % 256] = NULL;
+        Dpc->Inserted = 0;
+    }
+    pthread_mutex_unlock(&dpc_lock);
+    return was;
+}
+
+void NTAPI KeInitializeTimerEx(KTIMER *Timer, ULONG Type)
+{
+    init_header(&Timer->Header, (UCHAR)(TimerNotificationObject + Type), sizeof(KTIMER) / 4, 0);
+    Timer->DueTime.QuadPart = 0;
+    Timer->Period = 0;
+    Timer->Dpc = NULL;
+}
+
+static bool timer_unlink(KTIMER *t)
+{
+    for (timer_node **pp = &timers; *pp; pp = &(*pp)->next) {
+        if ((*pp)->timer == t) {
+            timer_node *n = *pp;
+            *pp = n->next;
+            free(n);
+            return true;
+        }
+    }
+    return false;
+}
+
+/* DueTime is a LARGE_INTEGER passed by value; take it as two stack slots so
+   GCC's i386 ABI cannot disagree with MSVC about its alignment. */
+BOOLEAN NTAPI KeSetTimerEx(KTIMER *Timer, ULONG DueLow, LONG DueHigh, LONG Period, KDPC *Dpc)
+{
+    LARGE_INTEGER DueTime;
+    DueTime.LowPart = DueLow;
+    DueTime.HighPart = DueHigh;
+    ULONGLONG now = mono_100ns();
+    ULONGLONG due = DueTime.QuadPart < 0 ? now + (ULONGLONG)(-DueTime.QuadPart)
+                  : now + (DueTime.QuadPart > (LONGLONG)system_time_now()
+                           ? DueTime.QuadPart - system_time_now() : 0);
+    pthread_mutex_lock(&dpc_lock);
+    bool was = timer_unlink(Timer);
+    pthread_mutex_lock(&g_disp_lock);
+    Timer->Header.SignalState = 0;
+    Timer->Header.Inserted = 1;
+    pthread_mutex_unlock(&g_disp_lock);
+    Timer->Period = Period;
+    Timer->Dpc = Dpc;
+    Timer->DueTime.QuadPart = due;
+    timer_node *n = malloc(sizeof(*n));
+    n->timer = Timer;
+    n->due = due;
+    n->next = timers;
+    timers = n;
+    pthread_cond_broadcast(&dpc_cond);
+    pthread_mutex_unlock(&dpc_lock);
+    return was;
+}
+
+BOOLEAN NTAPI KeSetTimer(KTIMER *Timer, ULONG DueLow, LONG DueHigh, KDPC *Dpc)
+{
+    return KeSetTimerEx(Timer, DueLow, DueHigh, 0, Dpc);
+}
+
+BOOLEAN NTAPI KeCancelTimer(KTIMER *Timer)
+{
+    pthread_mutex_lock(&dpc_lock);
+    bool was = timer_unlink(Timer);
+    Timer->Header.Inserted = 0;
+    pthread_mutex_unlock(&dpc_lock);
+    return was;
+}
+
+typedef void (NTAPI *dpc_fn)(KDPC *, PVOID, PVOID, PVOID);
+
+void (*g_vblank_hook)(void);
+
+/* The display's own vertical blanks, read from the DRM device. The Xbox's
+   vblank ran off the TV's: a free 60.000 Hz timer drifts against a real
+   59.94 Hz display, and a title that waits for a blank and then presents
+   (which waits for the display's flip) loses whole frames as the two slide
+   in and out of phase. DRM_IOCTL_WAIT_VBLANK with a relative count of 0
+   returns the last blank's number and CLOCK_MONOTONIC time without waiting;
+   the layout is the same on i386 and armhf (Box86 passes it through).
+   XBCOMPAT_VBLANK=timer keeps the free timer. */
+struct drm_vblank_query {
+    uint32_t type, sequence;
+    int32_t tv_sec, tv_usec;   /* reply; the request's third word is `signal` */
+};
+#define DRM_IOCTL_WAIT_VBLANK_ _IOWR('d', 0x3a, struct drm_vblank_query)
+#define DRM_VBLANK_RELATIVE_ 0x1
+#define DRM_VBLANK_HIGH_CRTC_SHIFT_ 1
+#define DRM_IOCTL_DROP_MASTER_ _IO('d', 0x1f)
+
+static int vbl_fd = -1;
+static uint32_t vbl_type;
+static ULONGLONG vbl_period = 166833;   /* 100 ns units; 59.94 Hz until measured */
+/* Display blanks per Xbox vblank. Interlaced modes (the Pi's 480i composite)
+   blank once per field, ~119.9 Hz; the Xbox's vblank came once per frame. */
+static unsigned vbl_step = 1;
+
+static bool vbl_query(uint32_t type, uint32_t *seq, ULONGLONG *when)
+{
+    struct drm_vblank_query q = { .type = type };
+    if (ioctl(vbl_fd, DRM_IOCTL_WAIT_VBLANK_, &q) != 0) return false;
+    *seq = q.sequence;
+    *when = (ULONGLONG)q.tv_sec * 10000000ULL + (ULONGLONG)q.tv_usec * 10;
+    return true;
+}
+
+/* Whether SDL (or anything else in this process) has a DRM card open. */
+static bool display_open(void)
+{
+    DIR *d = opendir("/proc/self/fd");
+    struct dirent *e;
+    bool found = false;
+    while (d && !found && (e = readdir(d))) {
+        char link[64], target[64];
+        snprintf(link, sizeof link, "/proc/self/fd/%s", e->d_name);
+        ssize_t n = readlink(link, target, sizeof target - 1);
+        if (n <= 0) continue;
+        target[n] = 0;
+        found = !strncmp(target, "/dev/dri/card", 13) && atoi(e->d_name) != vbl_fd;
+    }
+    if (d) closedir(d);
+    return found;
+}
+
+/* Find a CRTC whose blanks are counting: the display that's lit. Returns
+   false to be asked again later: the display isn't SDL's yet.
+   The first process to open a DRM card while no one holds DRM master
+   becomes master. Between a title telling the display keeper (xbox-av) it
+   is starting and SDL opening the card, no one does: a descriptor opened
+   here then took master and SDL couldn't set the mode (the arcade
+   launcher's start crashed). So this waits until SDL has the card, and
+   hands master straight back if it got it anyway. */
+static bool vbl_open(void)
+{
+    const char *e = getenv("XBCOMPAT_VBLANK");
+    if (fixed_step || (e && !strcmp(e, "timer"))) return true;
+    if (!display_open()) return false;
+    for (int card = 0; card < 4 && vbl_fd < 0; card++) {
+        char path[32];
+        snprintf(path, sizeof path, "/dev/dri/card%d", card);
+        int fd = open(path, O_RDWR | O_CLOEXEC);
+        if (fd < 0) continue;
+        if (ioctl(fd, DRM_IOCTL_DROP_MASTER_, 0) == 0) xlog("vblank: handed back DRM master on %s", path);
+        vbl_fd = fd;
+        for (uint32_t crtc = 0; crtc < 4; crtc++) {
+            uint32_t type = DRM_VBLANK_RELATIVE_ | (crtc << DRM_VBLANK_HIGH_CRTC_SHIFT_);
+            uint32_t s0, s1;
+            ULONGLONG t0, t1;
+            if (!vbl_query(type, &s0, &t0)) continue;
+            struct timespec ts = { 0, 50000000 };
+            nanosleep(&ts, NULL);
+            if (!vbl_query(type, &s1, &t1) || s1 == s0) continue;
+            vbl_type = type;
+            ULONGLONG blank = (t1 - t0) / (s1 - s0);
+            while (blank * vbl_step < 111111) vbl_step++;   /* faster than 90 Hz: fields */
+            vbl_period = blank * vbl_step;
+            xlog("vblank: following the display on %s (CRTC %u, %.2f Hz blanks, every %u)", path, crtc,
+                 1e7 / blank, vbl_step);
+            return true;
+        }
+        close(fd);
+        vbl_fd = -1;
+    }
+    xlog("vblank: no display blanks to follow, using a 60 Hz timer");
+    return true;
+}
+
+/* When to raise the next Xbox vblank after `now`: just after the display's
+   next blank, or 0 to use the timer. "Just after" (1 ms, then up to 1 ms of
+   this thread's polling) lets a present that waited for that blank's flip
+   return first, so a title that presents and then waits for a blank sees
+   this one, as it would on an Xbox, and doesn't sit out a whole frame. */
+#define VBL_LAG 10000   /* 1 ms in 100 ns units */
+static ULONGLONG vbl_next(ULONGLONG now)
+{
+    static uint32_t first_seq;
+    static ULONGLONG first_time;
+    uint32_t seq;
+    ULONGLONG last;
+    if (vbl_fd < 0 || !vbl_query(vbl_type, &seq, &last)) return 0;
+    /* Refine the period over a long run of blanks (a mode change resets it). */
+    if (!first_time || seq < first_seq || seq - first_seq > 36000) first_seq = seq, first_time = last;
+    else if (seq - first_seq >= 60 && last > first_time) vbl_period = (last - first_time) * vbl_step / (seq - first_seq);
+    /* With fields, keep to the same one of each pair (the frame's first). */
+    last -= (ULONGLONG)((seq - first_seq) % vbl_step) * (vbl_period / vbl_step);
+    ULONGLONG next = last + VBL_LAG;
+    while (next <= now) next += vbl_period;
+    return next;
+}
+
+/* The DPC thread: fires timers, runs DPCs and keeps KeTickCount moving. */
+static void *dpc_thread(void *arg)
+{
+    pthread_setname_np(pthread_self(), "dpc");
+    in_dpc_thread = true;
+    prof_thread_start();
+    (void)arg;
+    thread_adopt_host("dpc");
+    set_irql(2);
+    ULONGLONG next_vblank = 0;
+    bool vbl_done = false;
+    ULONGLONG vbl_retry = 0;
+    int vbl_waits = 0;
+    pthread_mutex_lock(&dpc_lock);
+    for (;;) {
+        ULONGLONG now = mono_100ns();
+        KeTickCount = (ULONG)((now - boot_mono) / 10000);
+        ke_update_clocks(now);
+        if (g_apu_sample_counter) *g_apu_sample_counter = (ULONG)((now - boot_mono) * 48 / 10000);
+
+        /* Expire timers. */
+        for (timer_node **pp = &timers; *pp;) {
+            timer_node *n = *pp;
+            if (n->due > now) { pp = &n->next; continue; }
+            KTIMER *t = n->timer;
+            pthread_mutex_lock(&g_disp_lock);
+            t->Header.SignalState = 1;
+            disp_signal(t);
+            pthread_mutex_unlock(&g_disp_lock);
+            if (t->Dpc) {
+                KDPC *d = t->Dpc;
+                if (!d->Inserted) {
+                    d->Inserted = 1;
+                    d->SystemArgument1 = (PVOID)(ULONG)now;
+                    d->SystemArgument2 = 0;
+                    dpc_queue[dpc_tail++ % 256] = d;
+                }
+            }
+            if (t->Period > 0) {
+                /* Keep the period's phase, as the kernel's clock interrupt
+                   does: rescheduling from `now` would add this thread's
+                   wake-up latency to every period (a 5 ms music timer ran
+                   about 20% slow).  Far behind (a stall), skip ahead. */
+                ULONGLONG period = (ULONGLONG)t->Period * 10000;
+                n->due += period;
+                if (!fixed_step && n->due + 100 * 10000ULL < now) n->due = now + period;
+                pp = &n->next;
+            } else {
+                t->Header.Inserted = 0;
+                *pp = n->next;
+                free(n);
+            }
+        }
+
+        /* Vertical blanks, 60 a second. */
+        void (*vblank_hook)(void) = __atomic_load_n(&g_vblank_hook, __ATOMIC_ACQUIRE);
+        if (vblank_hook) {
+            /* Look for the display once a second until SDL has it (a
+               minute at most: a desktop SDL never opens a card). */
+            if (!vbl_done && now >= vbl_retry) {
+                pthread_mutex_unlock(&dpc_lock);
+                vbl_done = vbl_open();
+                if (!vbl_done && ++vbl_waits >= 60) {
+                    vbl_done = true;
+                    xlog("vblank: no display opened, using a 60 Hz timer");
+                }
+                pthread_mutex_lock(&dpc_lock);
+                now = mono_100ns();
+                vbl_retry = now + 10000000;
+            }
+            if (!next_vblank) next_vblank = now;
+            if (now >= next_vblank) {
+                ULONGLONG display = vbl_next(now);
+                if (display) next_vblank = display;
+                else {
+                    next_vblank += 166667;
+                    if (next_vblank + 100 * 10000ULL < now) next_vblank = now + 166667;
+                }
+                pthread_mutex_unlock(&dpc_lock);
+                vblank_hook();
+                pthread_mutex_lock(&dpc_lock);
+            }
+        }
+
+        /* Run DPCs with the lock dropped: they may queue more. */
+        while (dpc_head != dpc_tail) {
+            KDPC *d = dpc_queue[dpc_head++ % 256];
+            if (!d) continue;
+            d->Inserted = 0;
+            pthread_mutex_unlock(&dpc_lock);
+#ifdef XBC_TRANSLATED
+            CPU_CALL(d->DeferredRoutine, CONV_STD, (uint32_t)d, (uint32_t)d->DeferredContext,
+                     (uint32_t)d->SystemArgument1, (uint32_t)d->SystemArgument2);
+#else
+            ke_dispatch_enter(2);
+            ((dpc_fn)d->DeferredRoutine)(d, d->DeferredContext, d->SystemArgument1, d->SystemArgument2);
+            ke_dispatch_leave();
+#endif
+            pthread_mutex_lock(&dpc_lock);
+        }
+
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        ts.tv_nsec += 1000000;
+        if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
+        pthread_cond_timedwait(&dpc_cond, &dpc_lock, &ts);
+    }
+    return NULL;
+}
+
+/* Called once per presented frame. */
+void ke_frame_presented(void)
+{
+    if (!fixed_step) return;
+    __atomic_add_fetch(&fixed_now, fixed_step, __ATOMIC_RELEASE);
+    pthread_mutex_lock(&dpc_lock);
+    pthread_cond_broadcast(&dpc_cond);
+    pthread_mutex_unlock(&dpc_lock);
+}
+
+void timers_init(void)
+{
+    const char *fps = getenv("XBCOMPAT_FIXED_FPS");
+    if (fps && atoi(fps) > 0) {
+        fixed_step = 10000000ULL / (ULONGLONG)atoi(fps);
+        fixed_now = 1;   /* boot_mono below: nonzero so differences stay positive */
+    }
+    pthread_condattr_t ca;
+    pthread_condattr_init(&ca);
+    pthread_condattr_setclock(&ca, CLOCK_MONOTONIC);
+    pthread_cond_init(&dpc_cond, &ca);
+    pthread_condattr_destroy(&ca);
+    boot_mono = mono_100ns();
+    ke_update_clocks(boot_mono);
+    tsc_init();
+    pthread_t t;
+    pthread_create(&t, NULL, dpc_thread, NULL);
+    pthread_detach(t);
+}
+
+/* ---- interrupts (no hardware to deliver them) ------------------------ */
+
+ULONG NTAPI HalGetInterruptVector(ULONG BusInterruptLevel, KIRQL *Irql)
+{
+    *Irql = (KIRQL)(26 - BusInterruptLevel);
+    return 0x30 + BusInterruptLevel;
+}
+
+void NTAPI KeInitializeInterrupt(PVOID Interrupt, PVOID ServiceRoutine, PVOID ServiceContext,
+                                 ULONG Vector, KIRQL Irql, ULONG InterruptMode, BOOLEAN ShareVector)
+{
+    (void)Irql; (void)InterruptMode; (void)ShareVector;
+    nic_interrupt_init(Interrupt, ServiceRoutine, ServiceContext, Vector);   /* the only device delivered */
+}
+
+BOOLEAN NTAPI KeConnectInterrupt(PVOID Interrupt) { nic_interrupt_connect(Interrupt, true); return 1; }
+BOOLEAN NTAPI KeDisconnectInterrupt(PVOID Interrupt) { nic_interrupt_connect(Interrupt, false); return 1; }
+
+BOOLEAN NTAPI KeSynchronizeExecution(PVOID Interrupt, BOOLEAN (NTAPI *Routine)(PVOID), PVOID Context)
+{
+    (void)Interrupt;
+#ifdef XBC_TRANSLATED
+    return (BOOLEAN)CPU_CALL(Routine, CONV_STD, (uint32_t)Context);
+#else
+    ke_dispatch_enter(26);
+    BOOLEAN r = Routine(Context);
+    ke_dispatch_leave();
+    return r;
+#endif
+}
+
+/* ---- threads: priority and APC bits the guest pokes at -------------- */
+
+LONG NTAPI KeSetBasePriorityThread(KTHREAD *Thread, LONG Increment)
+{
+    LONG old = Thread->BasePriority;
+    TRACE_ALL("KeSetBasePriorityThread(%p, %d)", (void *)Thread, (int)Increment);
+    Thread->BasePriority = (SCHAR)(8 + Increment);
+    /* The thread runs at its new base priority (no boosts here). Increments
+       of +-16 saturate (THREAD_PRIORITY_TIME_CRITICAL, _IDLE). */
+    LONG p = 8 + Increment;
+    Thread->Priority = (SCHAR)(p < 1 ? 1 : p > 31 ? 31 : p);
+    return old - 8;
+}
+
+LONG NTAPI KeQueryBasePriorityThread(KTHREAD *Thread) { return Thread->BasePriority - 8; }
+
+LONG NTAPI KeSetPriorityThread(KTHREAD *Thread, LONG Priority)
+{
+    LONG old = Thread->Priority;
+    TRACE("KeSetPriorityThread(%p, %d)", (void *)Thread, (int)Priority);
+    Thread->Priority = (SCHAR)Priority;
+    return old;
+}
+
+BOOLEAN NTAPI KeSetDisableBoostThread(KTHREAD *Thread, BOOLEAN Disable)
+{
+    BOOLEAN old = Thread->DisableBoost;
+    Thread->DisableBoost = Disable;
+    return old;
+}
+
+void NTAPI KeEnterCriticalRegion(void) {}
+void NTAPI KeLeaveCriticalRegion(void) {}
+
+BOOLEAN NTAPI KeAlertThread(KTHREAD *Thread, KPROCESSOR_MODE Mode) { (void)Thread; (void)Mode; return 0; }
+BOOLEAN NTAPI KeTestAlertThread(KPROCESSOR_MODE Mode) { (void)Mode; return 0; }
+
+void NTAPI KeInitializeApc(KAPC *Apc, KTHREAD *Thread, PVOID KernelRoutine, PVOID RundownRoutine,
+                           PVOID NormalRoutine, KPROCESSOR_MODE ApcMode, PVOID NormalContext)
+{
+    memset(Apc, 0, sizeof(*Apc));
+    Apc->Type = ApcObject;
+    Apc->Thread = Thread;
+    Apc->KernelRoutine = KernelRoutine;
+    Apc->RundownRoutine = RundownRoutine;
+    Apc->NormalRoutine = NormalRoutine;
+    Apc->ApcMode = ApcMode;
+    Apc->NormalContext = NormalContext;
+}
+
+BOOLEAN NTAPI KeInsertQueueApc(KAPC *Apc, PVOID Arg1, PVOID Arg2, LONG Increment)
+{
+    (void)Increment;
+    if (Apc->Inserted || !Apc->Thread) return 0;
+    Apc->SystemArgument1 = Arg1;
+    Apc->SystemArgument2 = Arg2;
+    Apc->Inserted = 1;
+    xthread *t = (xthread *)((char *)Apc->Thread - offsetof(xthread, ethread.Tcb));
+    apc_queue(t, Apc->NormalRoutine, Apc->NormalContext, Arg1, Arg2, Apc);
+    return 1;
+}
+
+void NTAPI KeBugCheck(ULONG BugCheckCode)
+{
+    fatal("KeBugCheck(%#x)", BugCheckCode);
+}
+
+void NTAPI KeBugCheckEx(ULONG Code, ULONG_PTR P1, ULONG_PTR P2, ULONG_PTR P3, ULONG_PTR P4)
+{
+    fatal("KeBugCheckEx(%#x, %#x, %#x, %#x, %#x)", Code, P1, P2, P3, P4);
+}
+
+void NTAPI KeStallExecutionProcessor(ULONG MicroSeconds)
+{
+    struct timespec ts = { MicroSeconds / 1000000, (MicroSeconds % 1000000) * 1000 };
+    cpu_block();
+    nanosleep(&ts, NULL);
+}
+
+/* Time left on a timer, for NtQueryTimer: negative once it is due. */
+LONGLONG ke_timer_remaining(KTIMER *t)
+{
+    return (LONGLONG)(t->DueTime.QuadPart - mono_100ns());
+}
+
+/* ---- more thread and process controls ------------------------------- */
+
+extern void thread_resume(xthread *t);
+
+static xthread *xthread_of(KTHREAD *t)
+{
+    return (xthread *)((char *)t - offsetof(xthread, ethread.Tcb));
+}
+
+ULONG NTAPI KeSuspendThread(KTHREAD *Thread)
+{
+    return thread_suspend(xthread_of(Thread));
+}
+
+ULONG NTAPI KeResumeThread(KTHREAD *Thread)
+{
+    ULONG prev = (UCHAR)Thread->SuspendCount;
+    thread_resume(xthread_of(Thread));
+    return prev;
+}
+
+/* Alerts and resumes; there is no alerted state to set here, so a resume. */
+ULONG NTAPI KeAlertResumeThread(KTHREAD *Thread)
+{
+    return KeResumeThread(Thread);
+}
+
+/* Priority boosts don't exist on the host's scheduler. */
+void NTAPI KeBoostPriorityThread(KTHREAD *Thread, LONG Increment)
+{
+    (void)Thread; (void)Increment;
+}
+
+/* Sets a synchronization event (fast mutex release).  The waiter it wakes
+   isn't known here, so *Thread is left as it is when no one waits. */
+void NTAPI KeSetEventBoostPriority(KEVENT *Event, KTHREAD **Thread)
+{
+    (void)Thread;
+    KeSetEvent(Event, 0, 0);
+}
+
+/* The process's base priority (8 for a title); threads keep their own. */
+static LONG process_base_priority = 8;
+
+LONG NTAPI KeSetPriorityProcess(PVOID Process, LONG BasePriority)
+{
+    (void)Process;
+    return __atomic_exchange_n(&process_base_priority, BasePriority, __ATOMIC_SEQ_CST);
+}
+
+ULONG NTAPI KeIsExecutingDpc(void)
+{
+    return in_dpc_thread;
+}

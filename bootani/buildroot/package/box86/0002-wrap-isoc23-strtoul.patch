@@ -1,0 +1,17 @@
+From: Claude <noreply@anthropic.com>
+Subject: [PATCH] Wrap __isoc23_strtoul
+
+glibc 2.38+ builds call __isoc23_strtoul for strtoul; box86 had the
+strtol, strtoll and strtoull variants but not this one, so the call
+failed to resolve and xbcompat hung at the dashboard.
+---
+--- a/src/wrapped/wrappedlibc_private.h
++++ b/src/wrapped/wrappedlibc_private.h
+@@ -1764,6 +1764,7 @@
+ GO2(__isoc23_strtoll_l, IFppip, strtoll_l)
+ GOW(strtoq, IFppi)  // is that ok?
+ GO(strtoul, LFppi)
++GO2(__isoc23_strtoul, LFppi, strtoul)
+ GO(__strtoul_internal, LFppii)
+ GO(strtoull, UFppi)
+ GO2(__isoc23_strtoull, UFppi, strtoull)

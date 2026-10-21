@@ -1,0 +1,25 @@
+#!/bin/sh
+#
+# Mount game cards (other USB sticks and SD cards) on /media; see sion-cards.
+#
+
+case "$1" in
+start)
+	printf 'Starting sion-cards: '
+	/usr/sbin/sion-cards --daemon && echo OK || echo FAIL
+	;;
+stop)
+	printf 'Stopping sion-cards: '
+	[ -r /var/run/sion-cards.pid ] && kill "$(cat /var/run/sion-cards.pid)" 2>/dev/null
+	rm -f /var/run/sion-cards.pid
+	echo OK
+	;;
+restart)
+	"$0" stop
+	"$0" start
+	;;
+*)
+	echo "Usage: $0 {start|stop|restart}"
+	exit 1
+	;;
+esac

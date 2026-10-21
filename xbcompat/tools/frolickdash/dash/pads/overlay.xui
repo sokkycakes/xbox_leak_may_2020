@@ -1,0 +1,88 @@
+<XuiCanvas version="000c">
+<Properties>
+ <Id>canvas</Id>
+ <Width>720</Width>
+ <Height>480</Height>
+</Properties>
+<XuiScene>
+<Properties>
+ <Id>Overlay</Id>
+ <Width>720</Width>
+ <Height>480</Height>
+</Properties>
+<XuiText>
+<Properties>
+ <Id>word</Id>
+ <Width>640</Width>
+ <Height>120</Height>
+ <Position>-4,-26,0</Position>
+ <Text>discover</Text>
+ <TextColor>0x37ffffff</TextColor>
+ <PointSize>47.68</PointSize>
+ <TextStyle>16</TextStyle>
+</Properties>
+</XuiText>
+<XuiImage>
+<Properties>
+ <Id>promptA</Id>
+ <Width>26</Width>
+ <Height>26</Height>
+ <Position>347,336,0</Position>
+ <ImagePath>glyph_a.png</ImagePath>
+ <SizeMode>4</SizeMode>
+</Properties>
+</XuiImage>
+<XuiFigure>
+<Properties>
+ <Id>chevron</Id>
+ <Width>22</Width>
+ <Height>12</Height>
+ <Position>349,366,0</Position>
+ <Stroke>
+  <StrokeWidth>3</StrokeWidth>
+  <StrokeColor>0xffffffff</StrokeColor>
+ </Stroke>
+ <Fill>
+  <FillType>0</FillType>
+ </Fill>
+ <Closed>false</Closed>
+ <Points>22,12;0,0;11,12;22,0</Points>
+</Properties>
+</XuiFigure>
+<XuiFigure>
+<Properties>
+ <Id>footer</Id>
+ <Width>720</Width>
+ <Height>33.3333</Height>
+ <Position>0,446.667,0</Position>
+ <Fill>
+  <FillType>2</FillType>
+  <Gradient>
+   <NumStops>3</NumStops>
+   <StopColor>0x00adaa92</StopColor>
+   <StopColor>0x62adaa92</StopColor>
+   <StopColor>0x97adaa92</StopColor>
+   <StopPos>0</StopPos>
+   <StopPos>0.387409</StopPos>
+   <StopPos>0.939467</StopPos>
+  </Gradient>
+  <Rotation>-90</Rotation>
+ </Fill>
+ <Closed>true</Closed>
+ <Points>720,33.3333;0,0;720,0;720,33.3333;0,33.3333</Points>
+</Properties>
+</XuiFigure>
+<XuiText>
+<Properties>
+ <Id>frolick</Id>
+ <Width>90.6667</Width>
+ <Height>28</Height>
+ <Position>629.333,452,0</Position>
+ <Text>frolick</Text>
+ <TextColor>0xffc9c5a9</TextColor>
+ <PointSize>16.11</PointSize>
+ <TextStyle>5136</TextStyle>
+</Properties>
+</XuiText>
+</XuiScene>
+</XuiCanvas>

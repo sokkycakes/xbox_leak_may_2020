@@ -1,0 +1,35 @@
+#!/bin/sh
+# Runs the Xbox code with box86 (an x86-to-ARM recompiler, running the i386
+# xbcompat) when it is installed, else with the Unicorn build. XBOX_CPU in
+# /etc/default/xbox picks one: box86 or unicorn. XBOX_RENDERER=native
+# (default) uses the matching ARM renderer; builtin keeps D3D in the x86 ELF.
+[ -r /etc/default/xbox ] && . /etc/default/xbox
+D=${0%/*}
+if [ "${XBOX_CPU:-box86}" = box86 ] && [ -x /usr/bin/box86 ] && [ -x "$D/xbcompat.x86" ]; then
+	# The guest owns 0x10000000-0x50000000; box86 keeps its own memory
+	# above it. rdtsc ticks at the Xbox's 733 MHz. The Pi's desktop GL is
+	# glvnd's libOpenGL (no GLX).
+	export BOX86_LOWEST=50000000 BOX86_TSC_HZ=733333333 BOX86_LIBGL=libOpenGL.so.0
+	export BOX86_NOBANNER=1 BOX86_LOG=${BOX86_LOG:-0}
+	# Faster recompiled code: bigger blocks, direct call/ret, no flags kept
+	# across calls. The dashboard draws the same frames with them (checked
+	# against the defaults); /etc/default/xbox can set any of them back.
+	export BOX86_DYNAREC_BIGBLOCK=${BOX86_DYNAREC_BIGBLOCK:-2}
+	export BOX86_DYNAREC_CALLRET=${BOX86_DYNAREC_CALLRET:-1}
+	export BOX86_DYNAREC_SAFEFLAGS=${BOX86_DYNAREC_SAFEFLAGS:-0}
+	export BOX86_DYNAREC_FORWARD=${BOX86_DYNAREC_FORWARD:-1024}
+	native_lib="$D/../native/lib"
+	if [ "${XBOX_RENDERER:-native}" = native ] && [ -x "$D/xbcompat-native.x86" ] && \
+	   [ -r "$native_lib/libxbcompat_renderer.so.1" ]; then
+		case :${LD_LIBRARY_PATH:-}: in
+		*":$native_lib:"*) ;;
+		*) export LD_LIBRARY_PATH="$native_lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ;;
+		esac
+		export XBCOMPAT_HLE_BINARY="$D/xbcompat-native.x86"
+		exec /usr/bin/box86 "$D/xbcompat-native.x86" "$@"
+	fi
+	export XBCOMPAT_HLE_BINARY="$D/xbcompat.x86"
+	exec /usr/bin/box86 "$D/xbcompat.x86" "$@"
+fi
+export XBCOMPAT_HLE_BINARY="$D/xbcompat.arm"
+exec "$D/xbcompat.arm" "$@"

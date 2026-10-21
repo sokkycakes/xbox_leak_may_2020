@@ -1,0 +1,43 @@
+#!/bin/sh
+# /data (the Xbox hard disk) starts as the image's 512 MB partition. Grow it
+# to the end of the card: the partition's MBR entry first, then the kernel's
+# view of it (resizepart), then the ext4 file system, online. Runs at every
+# boot and does nothing once /data fills the card.
+[ "$1" = start ] || exit 0
+DISK=/dev/mmcblk0
+SYS=/sys/block/mmcblk0
+[ -b ${DISK}p3 ] && [ -r $SYS/mmcblk0p3/start ] || exit 0
+total=$(cat $SYS/size)
+start=$(cat $SYS/mmcblk0p3/start)
+size=$(cat $SYS/mmcblk0p3/size)
+
+# 4 little-endian bytes of the MBR at OFFSET, as a number.
+le32() { od -A n -t u4 -j "$1" -N 4 $DISK | tr -d ' '; }
+
+new=$((total - start))
+if [ $((new - size)) -gt 8192 ]; then
+	# The third primary entry is at 446 + 2 * 16: its first sector at +8 and
+	# its sector count at +12. Only touch it if it is the partition we see.
+	if [ "$(od -A n -t x1 -j 510 -N 2 $DISK | tr -d ' ')" = 55aa ] &&
+	   [ "$(le32 486)" = "$start" ] && [ "$(le32 490)" = "$size" ]; then
+		o() { printf '\\%03o' $(($1 & 255)); }
+		bytes="$(o $new)$(o $((new >> 8)))$(o $((new >> 16)))$(o $((new >> 24)))"
+		printf "$bytes" | dd of=$DISK bs=1 seek=490 count=4 conv=notrunc 2>/dev/null
+		sync
+		echo "growdata: /data's partition now runs to the end of the card ($((new / 2048)) MB)"
+		resizepart $DISK 3 $new 2>/dev/null || partx -u $DISK 2>/dev/null
+		size=$(cat $SYS/mmcblk0p3/size)
+	else
+		echo "growdata: the card's partition table isn't the image's; leaving /data alone"
+	fi
+fi
+
+# The file system to the partition's size (the kernel's view; after a
+# reboot if resizepart couldn't update it live).
+blocks=$(dumpe2fs -h ${DISK}p3 2>/dev/null | awk -F: '/^Block count/ { print $2 }')
+bsize=$(dumpe2fs -h ${DISK}p3 2>/dev/null | awk -F: '/^Block size/ { print $2 }')
+if [ -n "$blocks" ] && [ -n "$bsize" ] && [ $((blocks * bsize / 512 + 8192)) -lt "$size" ]; then
+	echo "growdata: growing /data to $((size / 2048)) MB"
+	resize2fs ${DISK}p3 > /dev/null 2>&1 && echo "growdata: done"
+fi
+exit 0

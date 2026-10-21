@@ -1,0 +1,46 @@
+; g_slash_interior_xvu  (magic 0x2078, 15 microcode instructions)
+; each line = one NV2A instruction; '+' marks a co-issued op (MAC and ILU pair,
+; or MAC writing both a temp and an output). r12 reads = oPos (read-only alias).
+; [vp] = D3D screen-space postfix (c-38 = viewport scale, c-37 = viewport offset)
+xvs.1.1
+    dp4 oPos.x, v0, c0                               ; #00  00ec001b 0836186c 20708800
+    dp4 oPos.y, v0, c1                               ; #01  00ec201b 0836186c 20704800
+    dp4 oPos.z, v0, c2                               ; #02  00ec401b 0836186c 20702800
+    dp4 oPos.w, v0, c3                               ; #03  00ec601b 0836186c 20701800
+    mov r2.xyz, c5.xyz                               ; #04  002ca01a 0c36106c 2e200ff8
+    add r3.xyz, c4.xyz, -r2.xyz                      ; #05  006c801a 0c361468 9e300ff8
+    mov r5.xyz, c7.xyz                               ; #06  002ce01a 0c36106c 2e500ff8
+    mad r4.xyz, r3.xyz, v1.y, c5.xyz                 ; #07  008ca21a 34aa1068 3e400ff8
+    add r6.xyz, c6.xyz, -r5.xyz                      ; #08  006cc01a 0c361469 5e600ff8
+    mul oPos.xyz, r12, c-38   ; [vp]                 ; #09  0647401b c4361bff 1078e800
+  + rcc r1.x, r12.w   ; [vp]                         ; 
+    mad r7.xyz, r6.xyz, v1.y, c7.xyz                 ; #10  008ce21a 64aa1068 3e700ff8
+    mad r8.xyz, r4.xyz, c8.xyz, r7.xyz               ; #11  008d001a 44341869 de800ff8
+    mul r9.xyz, r7.xyz, c8.xyz                       ; #12  004d001a 7434186c 2e900ff8
+    add oD0.xyz, r8.xyz, -r9.xyz                     ; #13  0060001a 8436146a 5070e818
+    mad oPos.xyz, r12, r1.x, c-37   ; [vp]           ; #14  0087601b c400286c 3070e801
+    ; end
+
+;------------------------------------------------------------------------------
+; Reconstructed (de-optimised) source, equivalent to the microcode above
+; minus the D3D screen-space postfix (#09 mul/rcc and #14 mad, marked [vp]):
+;
+;   v0 = position (FLOAT3, w defaults to 1), v1 = uv (FLOAT2)
+;   c0..c3 = transpose(world*view*proj), c4..c7 = colours, c8 = (w,w,w,1)
+;
+; xvs.1.1
+; dp4 oPos.x, v0, c0
+; dp4 oPos.y, v0, c1
+; dp4 oPos.z, v0, c2
+; dp4 oPos.w, v0, c3
+; sub r3.xyz, c4, c5                 ; (#04 mov r2,c5 + #05 add r3,c4,-r2)
+; mad r4.xyz, r3, v1.y, c5           ; gradA = lerp(c5, c4, v)
+; sub r6.xyz, c6, c7                 ; (#06 mov r5,c7 + #08 add r6,c6,-r5)
+; mad r7.xyz, r6, v1.y, c7           ; gradB = lerp(c7, c6, v)
+; mad r8.xyz, r4, c8, r7             ; gradA*w + gradB
+; mul r9.xyz, r7, c8                 ; gradB*w
+; sub oD0.xyz, r8, r9                ; = gradA*w + gradB*(1-w)
+;                                    ; oD0.w never written; oT*, oD1 never written
+;
+; i.e. oD0.rgb = mix( mix(c7,c6,v1.y), mix(c5,c4,v1.y), c8.x )
+;------------------------------------------------------------------------------

@@ -1,0 +1,122 @@
+<XuiCanvas>
+<Properties>
+ <Width>1120</Width>
+ <Height>770</Height>
+</Properties>
+<XuiScene>
+<Properties>
+ <Id>Scene_Main</Id>
+ <Width>1120</Width>
+ <Height>770</Height>
+ <ClassOverride>ItemsScene</ClassOverride>
+ <TransFrom>FadeOut</TransFrom>
+ <TransTo>FadeIn</TransTo>
+ <TransBackFrom>FadeOut</TransBackFrom>
+ <TransBackTo>FadeIn</TransBackTo>
+</Properties>
+<XuiLabel>
+<Properties>
+ <Id>txt_SelectProfile</Id>
+ <Width>23</Width>
+ <Height>23</Height>
+ <Position>435,117,0</Position>
+ <Visual>XuiLabel</Visual>
+</Properties>
+</XuiLabel>
+<XuiList>
+<Properties>
+ <Id>list_items</Id>
+ <Width>855</Width>
+ <Height>449</Height>
+ <Position>144,153,0</Position>
+ <ClassOverride>ItemsList</ClassOverride>
+</Properties>
+</XuiList>
+<XuiNavButton>
+<Properties>
+ <Id>legend_y</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>165,611,0</Position>
+ <Visual>legend_Y</Visual>
+ <Enabled>false</Enabled>
+ <UnfocusedInput>true</UnfocusedInput>
+ <PressKey>22531</PressKey>
+</Properties>
+</XuiNavButton>
+<XuiNavButton>
+<Properties>
+ <Id>legend_x</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>146,639,0</Position>
+ <Visual>legend_X</Visual>
+ <Enabled>false</Enabled>
+ <Text>
+</Text>
+ <PressKey>22530</PressKey>
+</Properties>
+</XuiNavButton>
+<XuiNavButton>
+<Properties>
+ <Id>legend_a</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>573,639,0</Position>
+ <Visual>legend_A</Visual>
+ <Text>Select</Text>
+</Properties>
+</XuiNavButton>
+<XuiBackButton>
+<Properties>
+ <Id>legend_b</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>555,611,0</Position>
+ <Visual>legend_B</Visual>
+ <UnfocusedInput>true</UnfocusedInput>
+ <Text>Back</Text>
+ <PressKey>22593</PressKey>
+</Properties>
+</XuiBackButton>
+<XuiLabel>
+<Properties>
+ <Id>txt_Header</Id>
+ <Width>855</Width>
+ <Height>47</Height>
+ <Position>156,96,0</Position>
+ <Visual>Label_Head</Visual>
+ <Text>Select Item</Text>
+</Properties>
+</XuiLabel>
+<XuiLabel>
+<Properties>
+ <Id>txt_EmptyList</Id>
+ <Width>360</Width>
+ <Height>100</Height>
+ <Position>390,311,0</Position>
+ <Visual>Label_BodyCentered</Visual>
+ <Text>No items found.</Text>
+</Properties>
+</XuiLabel>
+<XuiLabel>
+<Properties>
+ <Id>labTotal</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>155,573,0</Position>
+ <Visual>Label_Sub</Visual>
+ <Text>&lt;#&gt; of &lt;Total#&gt;</Text>
+</Properties>
+</XuiLabel>
+<XuiLabel>
+<Properties>
+ <Id>labDots</Id>
+ <Width>121</Width>
+ <Height>104</Height>
+ <Position>522,320,0</Position>
+ <Visual>Loading_Large</Visual>
+</Properties>
+</XuiLabel>
+</XuiScene>
+</XuiCanvas>

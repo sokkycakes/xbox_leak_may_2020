@@ -1,0 +1,32 @@
+#!/bin/sh
+#
+# Network for remote access (see sion-netd).
+#
+
+DAEMON=sion-netd
+PIDFILE=/var/run/$DAEMON.pid
+
+case "$1" in
+	start)
+		printf 'Starting %s: ' "$DAEMON"
+		start-stop-daemon -S -q -b -m -p "$PIDFILE" -x /usr/libexec/$DAEMON
+		[ $? = 0 ] && echo "OK" || echo "FAIL"
+		;;
+	stop)
+		printf 'Stopping %s: ' "$DAEMON"
+		start-stop-daemon -K -q -p "$PIDFILE"
+		rm -f "$PIDFILE"
+		for p in /var/run/sion/udhcpc.*.pid /var/run/sion/wpa.*.pid; do
+			[ -r "$p" ] && kill "$(cat "$p")" 2>/dev/null
+			rm -f "$p"
+		done
+		echo "OK"
+		;;
+	restart)
+		"$0" stop
+		"$0" start
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart}"
+		exit 1
+esac

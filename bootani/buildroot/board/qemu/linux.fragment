@@ -1,0 +1,8 @@
+# QEMU test machine: virtio-gpu for display (Mesa softpipe renders), Intel
+# HD Audio emulation for sound, serial console for logs.
+CONFIG_VIRTIO=y
+CONFIG_VIRTIO_PCI=y
+CONFIG_DRM_VIRTIO_GPU=y
+CONFIG_DRM_BOCHS=y
+CONFIG_CMDLINE_BOOL=y
+CONFIG_CMDLINE="console=ttyS0 console=tty1"

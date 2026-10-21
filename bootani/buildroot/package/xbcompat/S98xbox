@@ -1,0 +1,65 @@
+#!/bin/sh
+#
+# Start the Xbox dashboard after the boot animation (see xbox-session), when
+# it's the dashboard this boot runs (see /usr/libexec/dashboard).
+#
+
+DAEMON="xbox"
+PIDFILE="/var/run/$DAEMON.pid"
+LOGFILE="/var/log/xbox-session.log"
+
+start() {
+	printf 'Starting %s: ' "$DAEMON"
+	if [ "$(/usr/libexec/dashboard)" != xbox ]; then
+		echo "skipped (dashboard is $(/usr/libexec/dashboard))"
+		return 0
+	fi
+	start-stop-daemon -S -q -b -m -p "$PIDFILE" -x /bin/sh \
+		-- -c "exec /usr/libexec/xbox-session >>$LOGFILE 2>&1"
+	status=$?
+	if [ "$status" -eq 0 ]; then
+		echo "OK"
+	else
+		echo "FAIL"
+	fi
+	return "$status"
+}
+
+stop() {
+	printf 'Stopping %s: ' "$DAEMON"
+	# The session loop first, so it doesn't start the dashboard again.
+	start-stop-daemon -K -q -p "$PIDFILE"
+	status=$?
+	# SDL turns SIGTERM into a quit event that xbcompat sees at its next
+	# frame; one that isn't drawing frames gets SIGKILL. The display is free
+	# only once it's gone.
+	# Under box86 (Raspberry Pi) the process is named xbcompat.x86, or
+	# xbcompat-native.x86 with the native renderer.
+	killall -q xbcompat xbcompat.x86 xbcompat-native.x86
+	for _ in 1 2 3 4 5 6 7 8 9 10; do
+		pidof xbcompat xbcompat.x86 xbcompat-native.x86 > /dev/null || break
+		sleep 0.3
+	done
+	killall -q -9 xbcompat xbcompat.x86 xbcompat-native.x86
+	# The display keeper last: with it gone the console gets the display.
+	killall -q xbox-av
+	rm -f "$PIDFILE"
+	if [ "$status" -eq 0 ]; then
+		echo "OK"
+	else
+		echo "FAIL"
+	fi
+	return "$status"
+}
+
+case "$1" in
+	start|stop)
+		"$1";;
+	restart|reload)
+		stop
+		sleep 1
+		start;;
+	*)
+		echo "Usage: $0 {start|stop|restart}"
+		exit 1
+esac
