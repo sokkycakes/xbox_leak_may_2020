@@ -82,6 +82,12 @@ cartdir=$card/$base
 [ -d "$cartdir" ] || cartdir=$card
 tid=$(echo "${tid:-4B5A0000}" | tr 'A-F' 'a-f')
 
+# One run at a time: a second one would take the display and, on its way
+# out, kill the first one's game.
+if [ -s "$RUN/gamescope.pid" ] && kill -0 "$(cat "$RUN/gamescope.pid")" 2>/dev/null; then
+	echo "wincart-run: a Windows game is already running (gamescope $(cat "$RUN/gamescope.pid")): not starting" >&2
+	exit 75
+fi
 state=$CARTS/$id
 mkdir -p "$state/logs" "$state/overrides" "$RUN"
 [ -n "$prefix" ] || prefix=$state/pfx
