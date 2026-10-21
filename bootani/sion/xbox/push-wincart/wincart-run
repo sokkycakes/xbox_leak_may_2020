@@ -336,15 +336,43 @@ if [ ! -e "$prefix/.winebus" ]; then
 		wineserver -w' >> "$state/logs/game.log" 2>&1 && touch "$prefix/.winebus"
 fi
 
+# Proton builds load wined3d's vkd3d DLLs from the prefix (proton's own
+# script copies them in): do the same, every run (cheap, idempotent).
+if [ -n "$proton" ]; then
+	for a in x86_64-windows:system32 i386-windows:syswow64; do
+		src=$proton/files/lib/vkd3d/${a%%:*}
+		dst=$prefix/drive_c/windows/${a#*:}
+		[ -d "$src" ] && [ -d "$dst" ] && cp -f "$src"/*.dll "$dst"/ 2>/dev/null
+	done
+fi
+
 case $exec_ in
 *.bat|*.BAT|*.cmd|*.CMD) cmd="wine cmd /c \"$exec_\"" ;;
 *) cmd="wine \"$exec_\"" ;;
 esac
 
+# drmkeep.so (in gamescope only): hides the TV's other modes of the size
+# xbox-av is showing, so gamescope takes over the display in the mode already
+# on screen instead of modesetting (colour bars on the HDMI-to-AV box).
+# WINCART_DRMKEEP=0 turns it off.
+# WINCART_DRMKEEP_SO: another build to test, under /opt/xbcompat or the
+# cart's state folder.
+keep=
+so=${WINCART_DRMKEEP_SO:-$X/tools/drmkeep.so}
+case $so in
+"$X"/*) so_in=/opt${so#"$X"} ;;
+"$state"/*) so_in=/srv${so#"$state"} ;;
+*) so=$X/tools/drmkeep.so; so_in=/opt/tools/drmkeep.so ;;
+esac
+if [ "${WINCART_DRMKEEP:-1}" != 0 ] && [ -r "$so" ]; then
+	keep="env LD_PRELOAD=$so_in"
+	cmd="env -u LD_PRELOAD $cmd"
+fi
+
 # shellcheck disable=SC2086
 chroot $R /usr/bin/env -i $wenv LIBSEAT_BACKEND=seatd WLR_LIBINPUT_NO_DEVICES=1 \
 	WINEDLLOVERRIDES="$wdll" $padenv INTEL_DEBUG=${WINCART_INTEL_DEBUG-noccs} ${WINCART_GAME_ENV:-} \
-	/bin/sh -c "cd /srv/game && exec gamescope --backend drm -W $ow -H $oh -w 1024 -h 768 -S stretch -f ${WINCART_GAMESCOPE_ARGS:-} -- $cmd" \
+	/bin/sh -c "cd /srv/game && exec $keep gamescope --backend drm -W $ow -H $oh -w 1024 -h 768 -S stretch -f ${WINCART_GAMESCOPE_ARGS:-} -- $cmd" \
 	> "$state/logs/game.log" 2>&1 &
 gspid=$!
 echo "$gspid" > "$RUN/gamescope.pid"

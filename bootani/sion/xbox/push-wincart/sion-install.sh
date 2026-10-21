@@ -30,15 +30,16 @@ done
 for f in wincart-run wincart-av; do
 	cp $K/$f $X/tools/$f.new && chmod 755 $X/tools/$f.new && mv $X/tools/$f.new $X/tools/$f
 done
+cp $K/drmkeep.so $X/tools/drmkeep.so.new && chmod 644 $X/tools/drmkeep.so.new && mv $X/tools/drmkeep.so.new $X/tools/drmkeep.so
 cp $K/kazeta-guide $B/kazeta-guide.new && chmod 755 $B/kazeta-guide.new && mv $B/kazeta-guide.new $B/kazeta-guide
 mkdir -p $X/share/wincart
 rm -rf $X/share/wincart/overrides
 cp -r $K/overrides $X/share/wincart/overrides
 chmod -R a+rX $X/share/wincart
-sion persist $X/tools/wincart-run $X/tools/wincart-av $B/kazeta-guide $X/share/wincart > /dev/null
+sion persist $X/tools/wincart-run $X/tools/wincart-av $X/tools/drmkeep.so $B/kazeta-guide $X/share/wincart > /dev/null
 if [ "${QUICK:-0}" = 1 ]; then
 	rm -rf $K
-	md5sum $X/tools/wincart-run $X/tools/wincart-av $B/kazeta-guide
+	md5sum $X/tools/wincart-run $X/tools/wincart-av $X/tools/drmkeep.so $B/kazeta-guide
 	exit 0
 fi
 

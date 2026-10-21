@@ -32,7 +32,7 @@ trap 'rm -rf "$T"' EXIT
 K=$T/xbox-wincart
 mkdir -p "$K"
 cp xbcompat sion-install.sh wincart-run wincart-av "$K/"
-cp kazeta-guide/kazeta-guide "$K/"
+cp kazeta-guide/kazeta-guide drmkeep/drmkeep.so "$K/"
 cp -r overrides boot "$K/"
 [ -f ../push-livedash/launch-title ] && cp ../push-livedash/launch-title "$K/"
 

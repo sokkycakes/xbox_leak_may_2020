@@ -64,3 +64,14 @@ Sound and display (2026-10-21 evening, after sokky's first play):
 
 `QUICK=1 install.sh` installs only wincart-run, wincart-av, kazeta-guide and
 the overrides.
+
+Display mode and Proton builds (2026-10-21 evening):
+- `drmkeep/drmkeep.so` (installed as /opt/xbcompat/tools/drmkeep.so, preloaded
+  into gamescope only) hides the TV's other 720x480 timings, so gamescope
+  takes over in xbox-av's 59.94 Hz mode instead of the 60.00 Hz one it would
+  pick (a full modeset: colour bars on the HDMI-to-AV box). WINCART_DRMKEEP=0
+  turns it off; WINCART_DRMKEEP_SO tests another build.
+- `WINCART_PROTON=DIR` runs a Proton build's Wine (e.g. GE-Proton11-11,
+  unpacked under /data/proton/) in its own prefix, pfx-<build>, copying the
+  build's vkd3d DLLs into it as proton's script does. GE-Proton11-11 runs
+  Silent Hill 4 this way; the card's GE-Proton10-32 does not.
