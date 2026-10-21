@@ -42,8 +42,16 @@ case $1 in
 		esac
 	done
 	mkdir -p /tmp/xbox-live-notray
+	# The system xbcompat (games and the Guide) runs Live too when it has
+	# the network card; its map is xodash.hlemap. Otherwise the Live
+	# dashboard's own older xbcompat, with the map made for it.
+	bin=$X/bin/xbcompat map=$L/xodash.hlemap
+	if ! grep -q XBCOMPAT_DNS $bin || [ ! -s $map ]; then
+		bin=$L/bin/xbcompat map=$L/xodash.hlemap.own
+		[ -s $map ] || map=$L/xodash.hlemap
+	fi
 	export XBCOMPAT_DNS=127.0.0.1:5353 XBCOMPAT_RESET=1
-	exec "$L/bin/xbcompat" --log /var/log/xbox-live-trace.log --hle "$L/xodash.hlemap" --net nat --dvd /tmp/xbox-live-notray "$@" "$image"
+	exec "$bin" --log /var/log/xbox-live-trace.log --hle "$map" --net nat --dvd /tmp/xbox-live-notray "$@" "$image"
 	;;
 esac
 next=${XBOX_LIVE_NEXT_LAUNCHER:-$X/bin/python3 $X/tools/xbrun.py}
