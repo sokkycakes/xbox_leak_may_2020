@@ -6,9 +6,15 @@
 // open/close logic and the menu actions (xlive fills its texts from code,
 // so they are set here).
 //
+// Its home is two Blades tabs (tools/guide/mkhome.py): Game, the game being
+// played in a box like the gamer card (its title image, name and time this
+// session; A opens a fuller view) over Quick Launch, Downloads and Exit
+// Game, and Settings (Volume, Vibration).
+//
 // Hold Back + Start for half a second (or press the Guide button, or F1) to
 // open it.  While it is open the title keeps running, sees idle pads and is
-// turned down.  A resumes or picks, B closes, Y goes to the dashboard.
+// turned down.  LT / RT (or Left / Right) switch tabs, A picks, B goes back
+// or closes, Y goes to the dashboard.
 #include "xui.h"
 
 #include <SDL.h>
@@ -34,6 +40,10 @@ void xinput_guide_vibration(bool on);
 const char *fs_hdd_root(void);
 void reset_request_always(const char *why);
 void xlog(const char *fmt, ...);
+// The title's XBE and its image reader (src/xbeimage.c); weak, so a host
+// without them (kazeta-guide) shows the game box without the picture.
+__attribute__((weak)) const char *xbe_file_path(void);
+__attribute__((weak)) bool xbe_image_read(const char *xbe, const char *section, unsigned char **bgra, int *w, int *h);
 bool guide_frame(int w, int h);
 void guide_draw(int w, int h);
 }
@@ -56,8 +66,11 @@ namespace {
 
 // ---- assets: one directory of .xui scenes, .xtx images and font.ttf ------
 
+// titleimage.png is the title's own picture, decoded from its XBE.
 struct DirResources : xui::Resources {
     char dir[512];
+    unsigned char* tile; int tileLen;  // titleimage.png as .xtx bytes
+    DirResources() : tile(0), tileLen(0) {}
     bool read(const char* path, unsigned char** data, int* len) {
         const char* name = path;
         const char* s = strstr(name, "://");
@@ -68,6 +81,12 @@ struct DirResources : xui::Resources {
         char nm[256]; snprintf(nm, sizeof nm, "%s", name);
         int n = (int)strlen(nm);
         if (n > 4 && !strcasecmp(nm + n - 4, ".png")) strcpy(nm + n - 4, ".xtx");
+        if (!strcasecmp(nm, "titleimage.xtx")) {
+            if (!tile) return false;
+            *data = new unsigned char[tileLen];
+            memcpy(*data, tile, tileLen); *len = tileLen;
+            return true;
+        }
         char full[800]; snprintf(full, sizeof full, "%s/%s", dir, nm);
         FILE* f = fopen(full, "rb");
         if (!f) return false;
@@ -195,17 +214,27 @@ enum State { Off, Closed, Opening, Open, Closing, Leaving };
 
 // A Guide sound (the .wav files from xlive), as 48 kHz stereo float.
 struct Sound { float* pcm; int frames; Sound() : pcm(0), frames(0) {} };
-enum { SndOpen, SndClose, SndFocus, SndSelect, SndBack, SndCount };
-const char* const soundFiles[SndCount] = { "HUD_open.wav", "HUD_close.wav", "btn_Focus.wav", "btn_Select.wav", "btn_Back.wav" };
+enum { SndOpen, SndClose, SndFocus, SndSelect, SndBack, SndInactive, SndTab, SndCount };
+const char* const soundFiles[SndCount] = { "HUD_open.wav", "HUD_close.wav", "btn_Focus.wav", "btn_Select.wav", "btn_Back.wav",
+                                           "btn_InactiveSelect.wav", "tab_Switch.wav" };
 
 struct Guide {
     DirResources res;
     GLBackend be;
     xui::Renderer* r;
     xui::Element *frameEl, *mainEl, *settingsEl, *skinEl, *cardEl, *volumeEl, *vibrationEl;
-    // menu: the page showing; volume and vibration are Settings' own pages
-    xui::Scene *frame, *main, *settings, *volume, *vibration, *menu;
-    xui::Scene* card;  // the gamercard in the main menu's ctlGamerCard
+    xui::Element *tabsEl, *tabsSkinEl, *gameEl;
+    // menu: the page showing.  main and settings are the home's Game and
+    // Settings tabs; volume and vibration are Settings' own pages, game the
+    // Game tab's fuller view of the game.
+    xui::Scene *frame, *main, *settings, *volume, *vibration, *game, *menu;
+    xui::Scene* card;  // the game box, drawn in the main menu's ctlGamerCard
+    xui::Scene* tabs;  // the Blades tab strip over the home's pages
+    xui::Node* strip;  // ... its pieces and 1To2 / 2To1 timelines
+    int tab;           // 0 Game, 1 Settings
+    double started;    // when the title started (the Guide loads on its first frame)
+    char startedAt[16];
+    int shownMinutes;
     xui::Node* hud;  // HUDRootScene: owns the open/close timelines
     State state;
     unsigned prev;
@@ -215,7 +244,9 @@ struct Guide {
     int volumeLevel;  // 0..10
     bool vibrationOn;
     Sound sounds[SndCount];
-    Guide() : r(0), frameEl(0), mainEl(0), settingsEl(0), skinEl(0), cardEl(0), volumeEl(0), vibrationEl(0), frame(0), main(0), settings(0), volume(0), vibration(0), menu(0), card(0),
+    Guide() : r(0), frameEl(0), mainEl(0), settingsEl(0), skinEl(0), cardEl(0), volumeEl(0), vibrationEl(0),
+              tabsEl(0), tabsSkinEl(0), gameEl(0), frame(0), main(0), settings(0), volume(0), vibration(0), game(0), menu(0), card(0),
+              tabs(0), strip(0), tab(0), started(0), shownMinutes(-1),
               hud(0), state(Off), prev(0), holdStart(-1), lastTime(-1), repeatAt(0), leaveAt(0), port(0),
               armed(false), volumeLevel(10), vibrationOn(true) {}
 };
@@ -258,6 +289,9 @@ void set_pos(xui::Scene* s, const char* id, float x, float y) {
 // text, they'd run into each other.
 float text_zoom_for(xui::Node* n, float zoom) {
     xui::Node* o = n->owner;
+    // The tab strip is drawn at 0.72 (its 855 units to the panel's 616): its
+    // titles, 20 pt, then come out at the pages' heading size (18 pt).
+    if (o && !strncmp(o->id(), "tab_", 4)) return zoom * 1.25f;
     if (o && o->cls && !strcmp(o->cls->name, "XuiSlider")) {
         // its number has a box just three digits wide
         if (!strcmp(n->id(), "Text_Slider")) return 1;
@@ -348,6 +382,82 @@ void write_settings() {
 void settings_text();
 void load_sound(Sound& snd, const char* name);
 
+// ---- the home ------------------------------------------------------------
+// In the menus' units (the scenes' 1120x770, the panel's face x 46-662):
+// the tab strip's band (GuideTabs.xui's tabClip, 855 wide at 144,84) is
+// drawn scaled to the face's width with its top at TAB_Y, its bars then
+// filling about TAB_Y+30 to TAB_Y+91; the Game tab's box and the Settings
+// tab's first row start at CARD_Y.
+const float FACE_X = 46, FACE_W = 616, TAB_Y = 46, CARD_Y = 150;
+const float STRIP_X = 144, STRIP_Y = 84, STRIP_W = 855;
+
+const char* title_name() {
+    const char* t = xbe_title_name();
+    return t && t[0] ? t : "Xbox Game";
+}
+
+// The Game tab's rows keep GFWL's row visual (icon, then text) without
+// the icon: the text starts where the Settings rows' does.
+void no_icon(xui::Scene* s, const char* id) {
+    xui::Node* n = s->find(id);
+    if (!n || !n->visual) return;
+    for (int i = 0; i < n->visual->children.n; i++) {
+        xui::Node* c = n->visual->children[i];
+        const char* cid = c->id();
+        if (!strcmp(cid, "XuiImagePresenter1")) {
+            xui::Value& v = c->props.set("Opacity"); v.free(); v.type = xui::TFloat; v.f = 0;
+        } else if (!strcmp(cid, "text_Label") || !strcmp(cid, "text_Label1")) {
+            xui::Vec3 z = {0, 0, 0};
+            xui::Vec3 p = xui::propV(c->props, "Position", z); p.x = -17.07f;
+            xui::Value& v = c->props.set("Position"); v.free(); v.type = xui::TVector; v.v = p;
+            xui::Value& w = c->props.set("Width"); w.free(); w.type = xui::TFloat; w.f = 455;
+        }
+    }
+}
+
+// The title image ($$XTIMAGE) as an .xtx for titleimage.png.
+void load_title_image() {
+    unsigned char* px = 0; int w = 0, h = 0;
+    const char* xbe = xbe_file_path ? xbe_file_path() : 0;
+    if (!xbe || !xbe_image_read || !xbe_image_read(xbe, "$$XTIMAGE", &px, &w, &h)) {
+        xlog("Guide: no title image");
+        return;
+    }
+    g.res.tileLen = 12 + w * h * 4;
+    g.res.tile = new unsigned char[g.res.tileLen];
+    memcpy(g.res.tile, "XTX1", 4);
+    memcpy(g.res.tile + 4, &w, 4); memcpy(g.res.tile + 8, &h, 4);
+    memcpy(g.res.tile + 12, px, w * h * 4);
+    free(px);
+    xlog("Guide: title image %dx%d", w, h);
+}
+
+// The time this session, "h:mm", on the game box and the fuller view.
+void session_text() {
+    int m = (int)((now_s() - g.started) / 60);
+    if (m == g.shownMinutes) return;
+    g.shownMinutes = m;
+    char buf[16]; snprintf(buf, sizeof buf, "%d:%02d", m / 60, m % 60);
+    if (g.card) set_text(g.card, "credText", buf);
+    set_text(g.game, "txtValue0", buf);
+}
+
+void show_menu(xui::Scene* m, const char* focus);
+
+// Shows a home tab: the strip plays its switch, the tab's page comes up.
+void show_tab(int t, bool animate) {
+    if (g.strip) {
+        if (animate) g.strip->play(t ? "1To2" : "2To1");
+        else {
+            g.strip->time = g.strip->frameTime(t ? "1To2End" : "NormalToEndNormal", 0);
+            g.strip->playing = false;
+            g.strip->apply();
+        }
+    }
+    g.tab = t;
+    show_menu(t ? g.settings : g.main, t ? "btnOnlineStatus" : "ctlGamerCard");
+}
+
 // the menus' panel-wide rows, squeezed with the frame on a TV (below)
 static xui::Node* rows[64]; static int nrows;
 static void collect_rows(xui::Node* n, bool underRow);
@@ -376,8 +486,18 @@ bool load() {
     g.settingsEl = g.mainEl ? g.res.scene("GuideSettings.xui", err, sizeof err) : 0;
     g.volumeEl = g.settingsEl ? g.res.scene("GuideVolume.xui", err, sizeof err) : 0;
     g.vibrationEl = g.volumeEl ? g.res.scene("GuideVibration.xui", err, sizeof err) : 0;
-    if (!g.vibrationEl) { xlog("Guide: off, scene load failed: %s", err); return false; }
+    g.tabsSkinEl = g.vibrationEl ? g.res.scene("GuideTabsSkin.xui", err, sizeof err) : 0;
+    g.tabsEl = g.tabsSkinEl ? g.res.scene("GuideTabs.xui", err, sizeof err) : 0;
+    g.gameEl = g.tabsEl ? g.res.scene("GuideGame.xui", err, sizeof err) : 0;
+    if (!g.gameEl) { xlog("Guide: off, scene load failed: %s", err); return false; }
     g.cardEl = g.res.scene("GuideCard.xui", err, sizeof err);  // optional
+    g.started = now_s();
+    {
+        time_t t = time(0); struct tm lt; localtime_r(&t, &lt);
+        int h = lt.tm_hour % 12; if (!h) h = 12;
+        snprintf(g.startedAt, sizeof g.startedAt, "%d:%02d%s", h, lt.tm_min, lt.tm_hour < 12 ? "am" : "pm");
+    }
+    load_title_image();
     g.r = new xui::Renderer(&g.be, &g.res);
     g.r->setFont("font.ttf");
     g.r->defaultTextColor = 0xff000000;
@@ -395,6 +515,10 @@ bool load() {
     g.settings = new xui::Scene(g.settingsEl, g.skinEl);
     g.volume = new xui::Scene(g.volumeEl, g.skinEl);
     g.vibration = new xui::Scene(g.vibrationEl, g.skinEl);
+    g.game = new xui::Scene(g.gameEl, g.skinEl);
+    g.tabs = new xui::Scene(g.tabsEl, g.tabsSkinEl);
+    g.tabs->setFocus(0);
+    g.strip = g.tabs->find("tabStrip");
     nrows = 0;
     collect_rows(g.main->root, false); collect_rows(g.settings->root, false);
     collect_rows(g.volume->root, false); collect_rows(g.vibration->root, false);
@@ -409,45 +533,74 @@ bool load() {
     hide_drawn(g.frame, "CloseX");          // the PC Guide's mouse close box
     hide_drawn(g.frame, "EvaluationTextId");
     set_text(g.frame, "GamerTag", "Player");
-    // The signed-in main menu as GFWL shows it for a profile that is not on
-    // LIVE: the gamercard, "Not connected to LIVE", then the button rows
-    // (Resume Game, Xbox Dashboard, Settings) above the GFWL logo.
+    // The Game tab: GFWL's signed-in main menu with the gamer card (its
+    // default focus) as the game's box, then three rows without icons, set
+    // in from the tab strip.  The sign-in line and the community bar go.
     set_show(g.main, "scnCommunity", false);
+    set_show(g.main, "txtSignInLive", false);
     set_show(g.main, "btnBlank1", true);
-    set_text(g.main, "btnBlank1", "Resume Game");
-    set_image(g.main, "btnBlank1", "ico_32x_Controller.png");
-    set_text(g.main, "btnQuickChat", "Xbox Dashboard");
-    set_image(g.main, "btnQuickChat", "homekey.png");
-    set_text(g.main, "btnOptions", "Settings");
-    set_str(g.main, "btnBlank1", "NavUp", "");
-    set_str(g.main, "btnBlank1", "NavDown", "btnQuickChat");
-    set_str(g.main, "btnQuickChat", "NavUp", "btnBlank1");
-    set_str(g.main, "btnQuickChat", "NavDown", "btnOptions");
-    set_str(g.main, "btnOptions", "NavUp", "btnQuickChat");
-    set_str(g.main, "btnOptions", "NavDown", "");
+    if (xui::Node* b = g.main->find("btnBlank1")) {  // GFWL's spare row, off
+        xui::Value& v = b->props.set("Enabled"); v.free(); v.type = xui::TBool; v.b = true;
+        b->playState("Normal");
+    }
+    set_show(g.main, "xboxlive_logo_wide", false);
+    static const struct { const char* id; const char* text; float y; } rows[] = {
+        { "btnBlank1", "Quick Launch", CARD_Y + 138 }, { "btnQuickChat", "Downloads", CARD_Y + 183 },
+        { "btnOptions", "Exit Game", CARD_Y + 228 },
+    };
+    for (unsigned i = 0; i < sizeof rows / sizeof rows[0]; i++) {
+        set_text(g.main, rows[i].id, rows[i].text);
+        set_image(g.main, rows[i].id, "");
+        no_icon(g.main, rows[i].id);
+        set_pos(g.main, rows[i].id, 146, rows[i].y);
+        set_str(g.main, rows[i].id, "NavUp", i ? rows[i - 1].id : "ctlGamerCard");
+        set_str(g.main, rows[i].id, "NavDown", i + 1 < sizeof rows / sizeof rows[0] ? rows[i + 1].id : "");
+    }
+    set_pos(g.main, "ctlGamerCard", 146, CARD_Y);
+    set_str(g.main, "ctlGamerCard", "NavUp", "");
+    set_str(g.main, "ctlGamerCard", "NavDown", "btnBlank1");
     // xlive draws the card into ctlGamerCard from code: GamerCard.xur's
-    // offline pane, with the game being played on its first row.
+    // offline pane, here with the game: its picture in the tile, its name
+    // on the first row and the time this session on the second.
     if (g.cardEl) {
         g.card = new xui::Scene(g.cardEl, g.skinEl);
         g.card->setFocus(0);
         set_show(g.card, "extendedScene", false);
         set_show(g.card, "onlineBaseScene", false);
-        set_show(g.card, "baseMetaPane", false);
         set_show(g.card, "offlineBaseScene", true);
-        set_text(g.card, "gamerTagText", "Player");
-        set_image(g.card, "gamerTileImage", "ico_64x_DefaultPicture.png");
-        char title[64]; snprintf(title, sizeof title, "%s", xbe_title_name());
-        set_text(g.card, "titlesPlayedLabel", title[0] ? title : "Xbox Game");
+        set_text(g.card, "gamerTagText", "Now Playing");
+        set_image(g.card, "gamerTileImage", g.res.tile ? "titleimage.png" : "");
+        set_text(g.card, "titlesPlayedLabel", title_name());
         set_text(g.card, "titlesPlayedText", "");
-        set_text(g.card, "credText", "0");
-        set_text(g.card, "achievementsText", "0");
+        set_text(g.card, "GSText", "This Session");
+        hide_drawn(g.card, "GSIcon");
+        set_pos(g.card, "GSText", 82.8f, 67.33f);  // under the name, where the icon was
+        set_show(g.card, "achievementsLabel", false);
+        set_show(g.card, "achievementsText", false);
     }
+    // The fuller view: the picture large, the name, then the session.
+    set_text(g.game, "labelHeading", "Now Playing");
+    set_show(g.game, "imgTitle", g.res.tile != 0);
+    set_text(g.game, "txtName", title_name());
+    static const char* keys[] = { "This Session", "Started", "Title ID" };
+    for (int i = 0; i < 4; i++) {
+        char k[16], v[16]; snprintf(k, sizeof k, "txtKey%d", i); snprintf(v, sizeof v, "txtValue%d", i);
+        set_text(g.game, k, i < 3 ? keys[i] : "");
+        set_show(g.game, k, i < 3); set_show(g.game, v, i < 3);
+    }
+    { char id[16]; snprintf(id, sizeof id, "%08lX", (unsigned long)xbe_title_id()); set_text(g.game, "txtValue2", id); }
+    set_text(g.game, "txtValue1", g.startedAt);
+    session_text();
     // Settings: GFWL's Personal Settings page with two rows, each opening
     // a GFWL page: Volume (the Voice page's Playback Volume slider) and
     // Vibration (the controller page's Enable Vibration box).
-    set_text(g.settings, "labelHeading", "Settings");
+    // On the home's Settings tab its heading gives way to the tab strip and
+    // the rows sit where the Game tab's box starts.
+    set_show(g.settings, "labelHeading", false);
     set_text(g.settings, "btnOnlineStatus", "Volume");
     set_text(g.settings, "btnVoice", "Vibration");
+    set_pos(g.settings, "btnOnlineStatus", 144, CARD_Y);
+    set_pos(g.settings, "btnVoice", 144, CARD_Y + 45);
     const char* unused[] = { "btnController", "btnNotifications", "btnNetwork", "btnSQM", "btnAddLive", "btnUpgrade" };
     for (unsigned i = 0; i < sizeof unused / sizeof *unused; i++) set_show(g.settings, unused[i], false);
     set_str(g.settings, "btnVoice", "NavDown", "");
@@ -554,9 +707,9 @@ const char* page_legend(xui::Scene* m, const char* a, const char* b) {
 
 void show_menu(xui::Scene* m, const char* focus) {
     g.menu = m;
-    m->setFocus(m->find(focus));
-    // The Volume page has nothing to select.
-    set_legend("Legend_A", m == g.volume ? 0 : "Select");
+    m->setFocus(focus ? m->find(focus) : 0);
+    // The Volume page and the game's fuller view have nothing to select.
+    set_legend("Legend_A", m == g.volume || m == g.game ? 0 : "Select");
     const char* back = page_legend(m, "btnB", "btnB");
     set_legend("Legend_B", back && back[0] ? back : "Back");
 }
@@ -564,7 +717,8 @@ void show_menu(xui::Scene* m, const char* focus) {
 void open_guide() {
     g.state = Opening;
     g.hud->play("ClosedToHalf");
-    show_menu(g.main, "btnBlank1");
+    show_tab(0, false);
+    session_text();
     update_clock();
     show_port();
     { static const char* dbg = getenv("XBCOMPAT_GUIDE_DEBUG"); if (!dbg || !strstr(dbg, "nomask")) xinput_guide_mask(true); }
@@ -581,20 +735,25 @@ void close_guide() {
     ds_set_duck(1.0f);
 }
 
-void press(const char* id) {
-    if (!strcmp(id, "btnBlank1")) close_guide();
-    else if (!strcmp(id, "btnOptions")) show_menu(g.settings, "btnOnlineStatus");
+void leave() {
+    g.state = Leaving;
+    g.leaveAt = now_s() + 0.15;  // let the audio fade first
+    ds_set_duck(0.0f);
+}
+
+// A on a control; true when it did something (the select sound), false for
+// a row with nothing behind it yet (the inactive sound).
+bool press(const char* id) {
+    if (!strcmp(id, "ctlGamerCard")) { session_text(); show_menu(g.game, 0); }
+    else if (!strcmp(id, "btnOptions")) leave();  // Exit Game
+    else if (!strcmp(id, "btnBlank1") || !strcmp(id, "btnQuickChat")) return false;  // Quick Launch, Downloads
     else if (!strcmp(id, "btnOnlineStatus")) { settings_text(); show_menu(g.volume, "sliderVolume"); }
     else if (!strcmp(id, "btnVoice")) { settings_text(); show_menu(g.vibration, "chkVibration"); }
     else if (!strcmp(id, "chkVibration")) {
         g.vibrationOn = !g.vibrationOn;
         apply_settings(); write_settings(); settings_text();
     }
-    else if (!strcmp(id, "btnQuickChat")) {
-        g.state = Leaving;
-        g.leaveAt = now_s() + 0.15;  // let the audio fade first
-        ds_set_duck(0.0f);
-    }
+    return true;
 }
 
 void step(double t) {
@@ -614,11 +773,12 @@ void step(double t) {
         if (toggle) { g.port = port; open_guide(); }
         break;
     case Opening:
-    case Open:
+    case Open: {
         if (g.state == Opening && !g.hud->playing) g.state = Open;
-        if ((down & GUIDE_B) && g.menu != g.main && !toggle) {
+        bool home = g.menu == g.main || g.menu == g.settings;
+        if ((down & GUIDE_B) && !home && !toggle) {
             play(SndBack);
-            if (g.menu == g.settings) show_menu(g.main, "btnOptions");
+            if (g.menu == g.game) show_menu(g.main, "ctlGamerCard");
             else show_menu(g.settings, g.menu == g.volume ? "btnOnlineStatus" : "btnVoice");
             break;
         }
@@ -636,14 +796,17 @@ void step(double t) {
             }
             break;
         }
-        if (down & GUIDE_Y) { press("btnQuickChat"); break; }
+        if (home && (down & (GUIDE_LT | GUIDE_RT | GUIDE_LEFT | GUIDE_RIGHT))) {
+            int t = (down & (GUIDE_RT | GUIDE_RIGHT)) ? 1 : 0;
+            if (t != g.tab) { play(SndTab); show_tab(t, true); }
+            break;
+        }
+        if (down & GUIDE_Y) { leave(); break; }
         if (down & GUIDE_A) {
-            if (g.menu->focus) {
+            if (g.menu->focus && g.menu != g.volume) {
                 const char* id = g.menu->focus->id();
-                if (g.menu == g.volume) break;
-                if (strcmp(id, "btnBlank1")) play(SndSelect);  // Resume plays the close sound
                 g.menu->press();
-                press(id);
+                play(press(id) ? SndSelect : SndInactive);
             }
             break;
         }
@@ -654,6 +817,7 @@ void step(double t) {
             }
         }
         break;
+    }
     case Closing:
         if (!g.hud->playing) g.state = Closed;
         break;
@@ -665,6 +829,14 @@ void step(double t) {
     }
 }
 
+}  // namespace
+
+namespace {
+void advance_tree(xui::Node* n, double frames) {
+    if (n->timeline && n->playing) n->advance(frames);
+    if (n->visual) advance_tree(n->visual, frames);
+    for (int i = 0; i < n->children.n; i++) advance_tree(n->children[i], frames);
+}
 }  // namespace
 
 // Once a frame from swap_present: input and animation; true when there is
@@ -681,6 +853,18 @@ bool guide_frame(int w, int h) {
     { static const char* dbg = getenv("XBCOMPAT_GUIDE_DEBUG"); if (dbg && strstr(dbg, "nodraw")) return false; }
     g.frame->update(dt);
     g.menu->update(dt);
+    g.tabs->update(dt);
+    if (g.card) {
+        // The game box lights with GFWL's own card highlight (baseMetaPane,
+        // btn_GamercardHighlight) while the menu's ctlGamerCard has the focus.
+        xui::Node* f = g.menu == g.main ? g.main->focus : 0;
+        xui::Node* lit = f && !strcmp(f->id(), "ctlGamerCard") ? g.card->find("baseMetaPane") : 0;
+        if (lit != g.card->focus) g.card->setFocus(lit);
+        // Only the highlight runs: the card's own timelines (Normal, Macro,
+        // Mini) would move its lines.
+        if (xui::Node* b = g.card->find("baseMetaPane")) advance_tree(b, dt * 30);
+    }
+    session_text();
     (void)w; (void)h;
     return true;
 }
@@ -793,9 +977,8 @@ static void narrow_frame(float n) {
 // all of them to fit, so a stack (Back over Select) keeps its spacing;
 // their labels run inward from the disc.  (They don't follow the narrowed
 // panel's edges: GFWL sets them in from the edges by about as much as the
-// narrowing, and Back sits at the LIVE logo's corner as it is.)  Returns
-// how far the right-hand stack was lifted (0 or less).
-float fit_legends(float l, float t, float r, float b) {
+// narrowing.)
+void fit_legends(float l, float t, float r, float b) {
     // (X is never drawn.  A prompt a page hides still counts, so the
     // others don't jump between pages.)
     static const char* ids[] = { "Legend_A", "Legend_B", "Legend_Y" };
@@ -820,7 +1003,6 @@ float fit_legends(float l, float t, float r, float b) {
         offset(nd[i], 'x', dx[side[i]]);
         offset(nd[i], 'y', dy[side[i]]);
     }
-    return dy[1];
 }
 
 }  // namespace
@@ -855,7 +1037,7 @@ void guide_draw(int w, int h) {
     static float zoom = getenv("XBCOMPAT_GUIDE_TEXT") ? (float)atof(getenv("XBCOMPAT_GUIDE_TEXT")) : 1.2f;
     g.r->textZoom = h <= 576 && zoom > 0 ? zoom : 1;
     narrow_frame(n);
-    float lift = fit_legends(cw * 0.1f, ch * 0.1f, cw * 0.9f, ch * 0.9f);
+    fit_legends(cw * 0.1f, ch * 0.1f, cw * 0.9f, ch * 0.9f);
     float fx = 0, fy = 0;
     g.be.begin(w, h, kx);
     g.r->draw(g.frame, fx, fy, s);
@@ -874,17 +1056,6 @@ void guide_draw(int w, int h) {
         shown = shown && xui::propB(p->props, "Show", true);
         op *= xui::propF(p->props, "Opacity", 1);
     }
-    // Lifted into the safe box, the Back prompt would sit under the main
-    // menu's LIVE logo, whose corner GFWL puts over it as it is: the menu's
-    // block (sign-in line, items and logo) moves up with the prompts while
-    // the frame is half open; the full view, the prompts beside the logo,
-    // keeps its layout.
-    {
-        static const char* ids[] = { "txtSignInLive", "btnBlank1", "btnQuickChat", "btnOptions", "xboxlive_logo_wide" };
-        float d = hs > 0 ? lift * (1 - t) / hs : 0;
-        for (unsigned i = 0; i < sizeof ids / sizeof ids[0]; i++)
-            if (xui::Node* nd = g.main->find(ids[i])) offset(nd, 'y', d);
-    }
     if (host && shown && op > 0.001f) {
         xui::Value& o = g.menu->root->props.set("Opacity"); o.free(); o.type = xui::TFloat; o.f = op;
         g.r->draw(g.menu, fx + hx * s, fy + hy * s, s * hs);
@@ -898,6 +1069,31 @@ void guide_draw(int w, int h) {
             if (g.r->textZoom > 1.15f) g.r->textZoom = 1.15f;
             g.r->draw(g.card, fx + hx * s + v.x * ms, fy + hy * s + v.y * ms, ms);
             g.r->textZoom = tz;
+        }
+        // The home's tab strip over the page's top, spanning the rows (the
+        // panel's face, FACE_X to FACE_X + FACE_W, squeezed by the SD
+        // narrowing); the full view moves the menu's left past the panel's
+        // edge, and the strip starts at the edge.
+        if (g.menu == g.main || g.menu == g.settings) {
+            float k = FACE_W / STRIP_W, ms = s * hs;
+            float in = hs > 0 ? n / hs : 0;
+            float left = FACE_X + in, right = FACE_X + FACE_W - in;
+            if (xui::Node* bp = g.frame->find("backpanel")) {
+                float bx = 0;
+                for (xui::Node* p = bp; p; p = p->parent) {
+                    xui::Vec3 z = {0, 0, 0}, one = {1, 1, 1};
+                    xui::Vec3 v = xui::propV(p->props, "Position", z), sc = xui::propV(p->props, "Scale", one);
+                    xui::Vec3 pv = xui::propV(p->props, "Pivot", z);
+                    bx = v.x + pv.x + sc.x * (bx - pv.x);
+                }
+                if (hs > 0 && (bx - hx) / hs > left) left = (bx - hx) / hs;
+            }
+            float width = right - left;
+            if (xui::Node* clip = g.tabs->find("tabClip")) {
+                xui::Value& v = clip->props.set("Width"); v.free(); v.type = xui::TFloat; v.f = width / k;
+            }
+            xui::Value& to = g.tabs->root->props.set("Opacity"); to.free(); to.type = xui::TFloat; to.f = op;
+            g.r->draw(g.tabs, fx + hx * s + (left - STRIP_X * k) * ms, fy + hy * s + (TAB_Y - STRIP_Y * k) * ms, ms * k);
         }
     }
     g.be.end();
