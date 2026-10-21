@@ -14,9 +14,10 @@
 #   bin/xbox-av           holds the picture between titles (tools/sion/av)
 #   bin/xbrun             runs a title the way tools/xbrun.py does: builds its
 #                         library map first (so the dashboard can launch games)
-#   lib/                  glibc, SDL2 (KMSDRM, ALSA, udev; with the Sion's
-#                         patches/sdl2), Mesa (iris + softpipe, no LLVM),
-#                         glvnd, ALSA, libudev, and python3 for bin/xbrun
+#   lib/                  glibc, SDL2 (KMSDRM, ALSA, udev, libusb; with the
+#                         Sion's patches/sdl2 and tools/sion/patches/sdl2),
+#                         Mesa (iris + softpipe, no LLVM), glvnd, ALSA,
+#                         libudev, libusb, and python3 for bin/xbrun
 #   tools/                xbrun.py and the map tools, XbSymbolDatabaseCLI
 #   boot/Bootscreen.xbe   the boot animation, and its map
 #   dash/                 the dashboard's C: partition (xboxdash.xbe, XIPs,
@@ -27,7 +28,7 @@
 # the two title builds (see tools/dashbuild/build.sh):
 #   apt install gcc-multilib g++-multilib meson ninja-build python3-mako cmake \
 #     patchelf libgl-dev:i386 libegl-dev:i386 libopengl-dev:i386 libglvnd-dev:i386 \
-#     libdrm-dev:i386 libasound2-dev:i386 libudev-dev:i386 libexpat1-dev:i386 \
+#     libdrm-dev:i386 libasound2-dev:i386 libudev-dev:i386 libusb-1.0-0-dev:i386 libexpat1-dev:i386 \
 #     zlib1g-dev:i386 libzstd-dev:i386
 # NEWGAMES (the March 2001 Games scenes) is passed on to dashbuild.
 set -e
@@ -56,7 +57,7 @@ if [ ! -f "$STAGE/usr/lib/libSDL2-2.0.so.0" ]; then
     fetch "https://github.com/libsdl-org/SDL/releases/download/release-$SDL_VER/SDL2-$SDL_VER.tar.gz"
     rm -rf "$SRC/SDL2-$SDL_VER"
     tar -C "$SRC" -xf "$SRC/SDL2-$SDL_VER.tar.gz"
-    for p in "$REPO"/patches/sdl2/*.patch; do patch -d "$SRC/SDL2-$SDL_VER" -p1 -s < "$p"; done
+    for p in "$REPO"/patches/sdl2/*.patch "$HERE"/patches/sdl2/*.patch; do patch -d "$SRC/SDL2-$SDL_VER" -p1 -s < "$p"; done
     mkdir -p "$SRC/SDL2-$SDL_VER/b32"
     (
         cd "$SRC/SDL2-$SDL_VER/b32"
@@ -67,7 +68,7 @@ if [ ! -f "$STAGE/usr/lib/libSDL2-2.0.so.0" ]; then
             --enable-alsa --disable-pulseaudio --disable-pipewire --disable-jack --disable-sndio \
             --disable-esd --disable-arts --disable-nas --disable-libsamplerate \
             --enable-libudev --disable-dbus --disable-ime --disable-ibus --disable-fcitx \
-            --disable-hidapi-libusb
+            --enable-hidapi-libusb
         make -s -j"$J"
         make -s install DESTDIR="$STAGE"
     )
@@ -156,8 +157,10 @@ ln -s iris_dri.so "$OUT/lib/dri/swrast_dri.so"
 cp "$STAGE/usr/share/drirc.d/00-mesa-defaults.conf" "$OUT/share/"
 printf '{"file_format_version":"1.0.0","ICD":{"library_path":"libEGL_mesa.so.0"}}\n' \
     > "$OUT/share/glvnd/egl_vendor.d/50_mesa.json"
-# Loaded with dlopen (SDL: EGL, GBM, DRM, ALSA, udev; GL through glvnd).
-for l in libEGL.so.1 libOpenGL.so.0 libGLdispatch.so.0 libdrm.so.2 libasound.so.2 libudev.so.1; do
+# Loaded with dlopen (SDL: EGL, GBM, DRM, ALSA, udev, libusb for wired Xbox
+# pads; GL through glvnd).
+for l in libEGL.so.1 libOpenGL.so.0 libGLdispatch.so.0 libdrm.so.2 libasound.so.2 libudev.so.1 \
+         libusb-1.0.so.0; do
     cp -L "$ML/$l" "$OUT/lib/"
 done
 # python: the interpreter and the parts of the standard library xbrun uses.
