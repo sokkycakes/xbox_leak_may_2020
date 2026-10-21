@@ -198,10 +198,22 @@ cleanup() {
 		for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$gspid" 2>/dev/null || break; sleep 0.3; done
 	fi
 	# Whatever is still running from the chroot (wine, Xwayland, the Guide).
-	for p in /proc/[0-9]*; do
-		[ "$(readlink "$p/root" 2>/dev/null)" = "$R" ] || continue
-		pid=${p#/proc/}
-		[ "$pid" = "$$" ] || kill -9 "$pid" 2>/dev/null
+	# A process whose leader is already a zombie has no readable root, but
+	# its threads still do (and can hold the sound device): check every task
+	# and kill its whole thread group.
+	for _ in 1 2 3; do
+		left=
+		for t in /proc/[0-9]*/task/[0-9]*; do
+			[ "$(readlink "$t/root" 2>/dev/null)" = "$R" ] || continue
+			pid=${t#/proc/}
+			pid=${pid%%/*}
+			[ "$pid" = "$$" ] && continue
+			kill -9 "$pid" 2>/dev/null
+			kill -9 "${t##*/}" 2>/dev/null
+			left=1
+		done
+		[ -n "$left" ] || break
+		sleep 0.3
 	done
 	[ -n "$seatdpid" ] && kill "$seatdpid" 2>/dev/null
 	for m in $mounted; do umount -l "$m" 2>/dev/null; done
