@@ -418,6 +418,32 @@ void no_icon(xui::Scene* s, const char* id) {
     }
 }
 
+// The game box without the card's header strip (sokky: "less tall"): the
+// picture, name and session move up into it and the box and its highlight
+// shrink by as much, 141 to CARD_H.
+const float CARD_CUT = 46, CARD_H = 80;
+void compact_card() {
+    set_show(g.card, "gamerTagText", false);
+    hide_drawn(g.card, "graphic_memsilver");
+    hide_drawn(g.card, "DivideLine");
+    xui::Node* off = g.card->find("offlineBaseScene");
+    for (int i = 0; off && i < off->children.n; i++) {
+        xui::Node* c = off->children[i];
+        xui::Vec3 z = {0, 0, 0};
+        xui::Vec3 p = xui::propV(c->props, "Position", z);
+        if (p.y < 30) continue;  // the strip itself
+        p.y -= CARD_CUT;
+        // the two lines centred on the picture (they sat by the strip)
+        if (c->cls && !strcmp(c->cls->name, "XuiLabel")) p.y += 9;
+        xui::Value& v = c->props.set("Position"); v.free(); v.type = xui::TVector; v.v = p;
+    }
+    static const char* boxes[] = { "baseMetaPaneBack", "baseMetaPane", "offlineBaseScene" };
+    for (unsigned i = 0; i < sizeof boxes / sizeof boxes[0]; i++)
+        if (xui::Node* b = g.card->find(boxes[i])) {
+            xui::Value& v = b->props.set("Height"); v.free(); v.type = xui::TFloat; v.f = CARD_H;
+        }
+}
+
 // The title image ($$XTIMAGE) as an .xtx for titleimage.png.
 void load_title_image() {
     unsigned char* px = 0; int w = 0, h = 0;
@@ -548,8 +574,8 @@ bool load() {
     }
     set_show(g.main, "xboxlive_logo_wide", false);
     static const struct { const char* id; const char* text; float y; } rows[] = {
-        { "btnBlank1", "Quick Launch", CARD_Y + 138 }, { "btnQuickChat", "Downloads", CARD_Y + 183 },
-        { "btnOptions", "Exit Game", CARD_Y + 228 },
+        { "btnBlank1", "Quick Launch", CARD_Y + 77 }, { "btnQuickChat", "Downloads", CARD_Y + 122 },
+        { "btnOptions", "Exit Game", CARD_Y + 167 },
     };
     for (unsigned i = 0; i < sizeof rows / sizeof rows[0]; i++) {
         set_text(g.main, rows[i].id, rows[i].text);
@@ -578,6 +604,7 @@ bool load() {
         set_text(g.card, "GSText", "This Session");
         hide_drawn(g.card, "GSIcon");
         set_pos(g.card, "GSText", 82.8f, 67.33f);  // under the name, where the icon was
+        compact_card();
         set_show(g.card, "achievementsLabel", false);
         set_show(g.card, "achievementsText", false);
     }
