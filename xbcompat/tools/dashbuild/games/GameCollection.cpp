@@ -33,6 +33,8 @@ struct GAMEINFO
     CHAR m_szId[64];            // the cart's Kazeta save Id
     CHAR m_szPlatform[32];      // the cart's Platform key, when its .kzi names one
     CHAR m_szPublisher[48];     // the cart's Publisher (or Developer) key, when its .kzi names one
+    bool m_bOrder;              // the cart's .kzi has an Order key
+    int m_nOrder;               // its value: carts with one come first, lowest first
     WCHAR m_szName[41];
     DWORD m_dwTitleID;
     DWORD m_dwTimeDate;         // XBE build time (seconds since 1970)
@@ -203,6 +205,19 @@ static int __cdecl CompareGames(const void* p1, const void* p2)
     return lstrcmpiW(((const GAMEINFO*)p1)->m_szName, ((const GAMEINFO*)p2)->m_szName);
 }
 
+// The card's carts: those with an Order key first, by that number, then the
+// rest; equal ones by name.
+static int __cdecl CompareCarts(const void* p1, const void* p2)
+{
+    const GAMEINFO* pGame1 = (const GAMEINFO*)p1;
+    const GAMEINFO* pGame2 = (const GAMEINFO*)p2;
+    if (pGame1->m_bOrder != pGame2->m_bOrder)
+        return pGame1->m_bOrder ? -1 : 1;
+    if (pGame1->m_bOrder && pGame1->m_nOrder != pGame2->m_nOrder)
+        return pGame1->m_nOrder < pGame2->m_nOrder ? -1 : 1;
+    return CompareGames(p1, p2);
+}
+
 static bool EndsWith(const CHAR* sz, const CHAR* szEnd)
 {
     int cch = strlen(sz), cchEnd = strlen(szEnd);
@@ -282,6 +297,8 @@ static void ReadCart(const CHAR* szKzi, GAMEINFO* pGame)
                 lstrcpynA(pGame->m_szPublisher, pchValue, sizeof (pGame->m_szPublisher));
             else if (_stricmp(pchLine, "Developer") == 0 && pGame->m_szPublisher[0] == 0)
                 lstrcpynA(pGame->m_szPublisher, pchValue, sizeof (pGame->m_szPublisher));
+            else if (_stricmp(pchLine, "Order") == 0 && pchValue[0] != 0)
+                pGame->m_bOrder = true, pGame->m_nOrder = atoi(pchValue);
             else if (_stricmp(pchLine, "Exec") == 0)
                 lstrcpynA(szExec, pchValue, sizeof (szExec));
         }
@@ -341,7 +358,7 @@ int CGameCollection::Scan()
         c_nGameCount += 1;
     }
 
-    // The carts on the game card, by name.
+    // The carts on the game card, by their Order key, else by name.
     int nFirstCart = c_nGameCount;
     GetCardSignature(c_szCardSig, sizeof (c_szCardSig));
     WIN32_FIND_DATAA fd;
@@ -373,7 +390,7 @@ int CGameCollection::Scan()
         }
         while (c_nGameCount < 16 && FindNextFileA(hFind, &fd));
         FindClose(hFind);
-        qsort(c_rgGames + nFirstCart, c_nGameCount - nFirstCart, sizeof (GAMEINFO), CompareGames);
+        qsort(c_rgGames + nFirstCart, c_nGameCount - nFirstCart, sizeof (GAMEINFO), CompareCarts);
     }
 
     // Neither: one empty slot.
