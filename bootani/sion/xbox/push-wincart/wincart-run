@@ -306,6 +306,9 @@ ow=${mode%x*}
 oh=${mode#*x}
 case "$ow$oh" in *[!0-9]*|'') ow=720; oh=480 ;; esac
 
+# INTEL_DEBUG=noccs: no render compression (CCS) on the HD 610. With it,
+# buffers passed between Wine, Xwayland and gamescope showed blocky,
+# miscoloured tiles in motion. WINCART_INTEL_DEBUG= (empty) turns it back on.
 # Wine sees only the Guide's uinput pad (an Xbox 360 pad, over evdev).
 padenv="SDL_GAMECONTROLLERCONFIG_FILE=/opt/share/gamecontrollerdb.txt SDL_JOYSTICK_HIDAPI=0 SDL_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT=0x045e/0x028e ${WINCART_PAD_ENV:-}"
 wenv="PATH=/usr/bin:/bin HOME=/root XDG_RUNTIME_DIR=/run LC_ALL=C WINEPREFIX=/srv/pfx WINEDEBUG=err+all,fixme-all"
@@ -329,7 +332,7 @@ esac
 
 # shellcheck disable=SC2086
 chroot $R /usr/bin/env -i $wenv LIBSEAT_BACKEND=seatd WLR_LIBINPUT_NO_DEVICES=1 \
-	WINEDLLOVERRIDES="$wdll" $padenv ${WINCART_GAME_ENV:-} \
+	WINEDLLOVERRIDES="$wdll" $padenv INTEL_DEBUG=${WINCART_INTEL_DEBUG-noccs} ${WINCART_GAME_ENV:-} \
 	/bin/sh -c "cd /srv/game && exec gamescope --backend drm -W $ow -H $oh -w 1024 -h 768 -S stretch -f -- $cmd" \
 	> "$state/logs/game.log" 2>&1 &
 gspid=$!
