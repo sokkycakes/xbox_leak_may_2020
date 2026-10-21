@@ -18,7 +18,7 @@ with (root / "calls").open("a") as f:
     f.write(json.dumps([cmd] + args) + "\n")
 mounts = root / "mounts"
 if cmd == "mount":
-    assert args[:2] == ["-o", "ro,noatime"], args
+    assert args[:2] in (["-o", "ro,noatime"], ["-o", "ro,noatime,utf8"]), args
     dev, dest = args[2:]
     if (root / ("fail-" + Path(dev).name)).exists():
         sys.exit(1)
@@ -79,6 +79,10 @@ class CardsTest(unittest.TestCase):
         return [x for line in (self.root / "calls").read_text().splitlines()
                 if (x := json.loads(line))[0] == cmd]
 
+    def attempts(self):
+        # Each mount attempt tries utf8 first, then plain ro,noatime.
+        return [x for x in self.calls("mount") if x[2] == "ro,noatime,utf8"]
+
     def mounted(self):
         return [line.split()[0] for line in (self.root / "mounts").read_text().splitlines()]
 
@@ -102,7 +106,7 @@ class CardsTest(unittest.TestCase):
         self.assertEqual(self.mounted(), [])
         self.poll()
         self.assertEqual(self.mounted(), ["/dev/sda1"])
-        self.assertEqual(len(self.calls("mount")), 2)
+        self.assertEqual(len(self.attempts()), 2)
 
     def test_disconnected_usb_is_unmounted(self):
         self.disk()
@@ -158,7 +162,7 @@ class CardsTest(unittest.TestCase):
         fail.touch()
         self.poll()
         self.poll()
-        self.assertEqual(len(self.calls("mount")), 1)
+        self.assertEqual(len(self.attempts()), 1)
         fail.unlink()
         (disk / "diskseq").write_text("2")
         self.poll()
@@ -173,7 +177,7 @@ class CardsTest(unittest.TestCase):
         for _ in range(5):
             self.poll()
         self.assertEqual(self.mounted(), ["/dev/sda1"])
-        self.assertEqual(len(self.calls("mount")), 2)
+        self.assertEqual(len(self.attempts()), 2)
 
     def test_failed_reader_retries_after_empty_without_diskseq(self):
         disk = self.disk()

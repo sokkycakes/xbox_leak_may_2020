@@ -113,7 +113,10 @@ poll_cards() {
 			mkdir -p "$m"
 			# BusyBox blkid lacks -s/-o and may omit TYPE. Let mount probe
 			# installed filesystem drivers, always requesting read-only.
-			if mount -o ro,noatime "/dev/$v" "$m"; then
+			# FAT cards want utf8 names (.kzi files are UTF-8); other
+			# filesystems reject the option, so retry without it.
+			if mount -o ro,noatime,utf8 "/dev/$v" "$m" 2>/dev/null ||
+			   mount -o ro,noatime "/dev/$v" "$m"; then
 				printf '%s\n' "$id" > "$STATE/$v.mounted"
 				rm -f "$STATE/$v.failed"
 				log "card: mounted /dev/$v on $m (read-only)"
