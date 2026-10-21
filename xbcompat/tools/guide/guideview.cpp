@@ -94,7 +94,7 @@ int main(int argc, char** argv) {
         guide_frame(W, H);          // loads
         open_guide();
         if (page && !strcmp(page, "settings")) show_tab(1, false);
-        if (page && !strcmp(page, "game")) show_menu(g.game, 0);
+        if (page && !strcmp(page, "game")) { g.main->setFocus(g.main->find("ctlGamerCard")); press("ctlGamerCard"); }
         if (page && !strcmp(page, "volume")) { settings_text(); show_menu(g.volume, "sliderVolume"); }
         if (page && !strcmp(page, "vibration")) { settings_text(); show_menu(g.vibration, "chkVibration"); }
         if (focus) g.menu->setFocus(g.menu->find(focus));

@@ -2,10 +2,13 @@
 """Adds the Guide's home pieces to a guide asset directory (mkguide.py runs
 it when given the Blades packages):
 
-  mkhome.py BLADES_DIR OUT_DIR
+  mkhome.py BLADES_DIR OUT_DIR FROLICK_DIR
 
 BLADES_DIR holds the Xbox 360 Blades dashboard's converted packages
-(/mnt/project-files/xui360/blades-converted).  Writes
+(/mnt/project-files/xui360/blades-converted); FROLICK_DIR is a checkout's
+xbcompat/tools/frolickdash on the Frolick branch
+(claude/frolick-xap-dash-4fvafa), whose tools/genpage.py makes Frolick's
+pages.  Writes
 
   GuideTabs.xui      the Blades two-tab strip (Marketplace's Game Downloads
                      page, dash_dashmark.xzp#1401_GameCatalogTabScene.xur):
@@ -15,12 +18,13 @@ BLADES_DIR holds the Xbox 360 Blades dashboard's converted packages
                      Game and Settings.
   GuideTabsSkin.xui  the Blades skin visuals the strip draws (all figures),
                      byte for byte from dash_dashuisk.xzp#skin.xur.
-  GuideGame.xui      the Game tab's expanded view, laid out from the Guide's
-                     own skin visuals (Label_Head, Metapane, Label_Body_1line,
-                     Label_BodyRight_1line): the title image, the name and
-                     the session's facts.
+  GuideGame.xui      the Game tab's fuller view: Frolick's Game Summary
+                     page (genpage.py's page_game, the Blades'
+                     401_GameDetails in Frolick's dress) as it is, and
+  GuideGameSkin.xui  its skin (page_skin.xui) with the button images it
+                     names.
 """
-import os, subprocess, sys, tempfile
+import os, re, shutil, struct, subprocess, sys, tempfile
 import xml.etree.ElementTree as ET
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -114,37 +118,31 @@ def tabs(blades, out, tmp):
     ET.ElementTree(sroot).write(os.path.join(out, 'GuideTabsSkin.xui'))
 
 
-def game(out):
-    """The expanded view: the Guide's page heading, a meta pane with the
-    title image centred at its top, the name under it, then label / value
-    rows (the code fills the texts)."""
-    root = ET.Element('XuiCanvas')
-    p = ET.SubElement(root, 'Properties')
-    ET.SubElement(p, 'Width').text = '1120'
-    ET.SubElement(p, 'Height').text = '770'
-    s = el(root, 'XuiScene', Id='scnGame', Width=1120, Height=770)
-    el(s, 'XuiBackButton', Id='btnB', Width=420, Height=40, Position='119,613,0', Show='false',
-       Visual='legend_B', Text='Back')
-    el(s, 'XuiLabel', Id='labelHeading', Width=420, Height=47, Position='144,44,0', Visual='Label_Head')
-    el(s, 'XuiLabel', Id='graphicMetapane', Width=420, Height=330, Position='146,100,0', Visual='Metapane')
-    el(s, 'XuiImage', Id='imgTitle', Width=128, Height=128, Position='292,116,0',
-       ImagePath='titleimage.png', SizeMode=4)
-    el(s, 'XuiLabel', Id='txtName', Width=400, Height=35, Position='156,252,0', Visual='XuiLabelCenterJustify')
-    for i in range(4):
-        y = 296 + 32 * i
-        el(s, 'XuiLabel', Id='txtKey%d' % i, Width=200, Height=35, Position='160,%d,0' % y,
-           Visual='Label_Body_1line')
-        el(s, 'XuiLabel', Id='txtValue%d' % i, Width=200, Height=35, Position='352,%d,0' % y,
-           Visual='Label_BodyRight_1line')
-    ET.ElementTree(root).write(os.path.join(out, 'GuideGame.xui'))
+def game(frolick, out, tmp):
+    dash = os.path.join(tmp, 'dash')
+    os.makedirs(os.path.join(dash, 'pads'), exist_ok=True)
+    subprocess.run([sys.executable, os.path.join(frolick, 'tools', 'genpage.py'), dash], check=True,
+                   stdout=subprocess.DEVNULL)
+    pads = os.path.join(dash, 'pads')
+    shutil.copy(os.path.join(pads, 'page_game.xui'), os.path.join(out, 'GuideGame.xui'))
+    skin = open(os.path.join(pads, 'page_skin.xui')).read()
+    # its images, under names of their own (the Guide has GFWL's A-Button...)
+    from PIL import Image
+    for name in sorted(set(re.findall(r'<(?:TextureFileName|ImagePath)>([^<]+\.png)<', skin))):
+        png = os.path.join(frolick, 'art', 'blades', name)
+        im = Image.open(png).convert('RGBA')
+        with open(os.path.join(out, 'frolick_' + name[:-4] + '.xtx'), 'wb') as f:
+            f.write(b'XTX1' + struct.pack('<II', *im.size) + im.tobytes('raw', 'BGRA'))
+        skin = skin.replace('>%s<' % name, '>frolick_%s<' % name)
+    open(os.path.join(out, 'GuideGameSkin.xui'), 'w').write(skin)
 
 
 def main():
-    blades, out = sys.argv[1:3]
+    blades, out, frolick = sys.argv[1:4]
     tmp = tempfile.mkdtemp()
     tabs(blades, out, tmp)
-    game(out)
-    print('%s: GuideTabs.xui, GuideTabsSkin.xui, GuideGame.xui' % out)
+    game(frolick, out, tmp)
+    print('%s: GuideTabs.xui, GuideTabsSkin.xui, GuideGame.xui, GuideGameSkin.xui' % out)
 
 
 if __name__ == '__main__':

@@ -6,7 +6,9 @@ lifted image, /mnt/project-files/xui360/build/GFWL-Guide.exe).
   mkguide.py GFWL-Guide.exe CLASSES.LOG OUT_DIR [FONT.ttf]
 
 Then mkhome.py adds the home's Blades tab strip and the game view, from the
-Blades packages in BLADES (default /mnt/project-files/xui360/blades-converted).
+Blades packages in BLADES (default /mnt/project-files/xui360/blades-converted)
+and Frolick's pages in FROLICK (a checkout's xbcompat/tools/frolickdash on
+the Frolick branch).
 
 CLASSES.LOG is GFWL-Guide.exe --dump-classes (xui360/classes.log); xurconv.py
 (xui360/tools) folds the Guide's own classes (HUDBkgndScene, ...) into the
@@ -90,7 +92,10 @@ def main():
     with open(font, 'rb') as f, open(os.path.join(out, 'font.ttf'), 'wb') as g:
         g.write(f.read())
     blades = os.environ.get('BLADES', '/mnt/project-files/xui360/blades-converted')
-    subprocess.run([sys.executable, os.path.join(HERE, 'mkhome.py'), blades, out], check=True)
+    frolick = os.environ.get('FROLICK')
+    if not frolick:
+        sys.exit('FROLICK: the Frolick branch\'s xbcompat/tools/frolickdash, for the game view')
+    subprocess.run([sys.executable, os.path.join(HERE, 'mkhome.py'), blades, out, frolick], check=True)
     print('%s: %d scenes, %d images' % (out, len(SCENES), images))
 
 

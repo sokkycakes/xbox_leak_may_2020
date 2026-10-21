@@ -25,6 +25,8 @@
 #include <strings.h>
 #include <time.h>
 #include <unistd.h>
+#include <dirent.h>
+#include <limits.h>
 
 extern "C" {
 typedef unsigned long ULONG;
@@ -223,7 +225,7 @@ struct Guide {
     GLBackend be;
     xui::Renderer* r;
     xui::Element *frameEl, *mainEl, *settingsEl, *skinEl, *cardEl, *volumeEl, *vibrationEl;
-    xui::Element *tabsEl, *tabsSkinEl, *gameEl;
+    xui::Element *tabsEl, *tabsSkinEl, *gameEl, *gameSkinEl;
     // menu: the page showing.  main and settings are the home's Game and
     // Settings tabs; volume and vibration are Settings' own pages, game the
     // Game tab's fuller view of the game.
@@ -235,6 +237,7 @@ struct Guide {
     double started;    // when the title started (the Guide loads on its first frame)
     char startedAt[16];
     int shownMinutes;
+    bool full;         // the frame expanded (HalfToFull) for the game view
     xui::Node* hud;  // HUDRootScene: owns the open/close timelines
     State state;
     unsigned prev;
@@ -245,8 +248,8 @@ struct Guide {
     bool vibrationOn;
     Sound sounds[SndCount];
     Guide() : r(0), frameEl(0), mainEl(0), settingsEl(0), skinEl(0), cardEl(0), volumeEl(0), vibrationEl(0),
-              tabsEl(0), tabsSkinEl(0), gameEl(0), frame(0), main(0), settings(0), volume(0), vibration(0), game(0), menu(0), card(0),
-              tabs(0), strip(0), tab(0), started(0), shownMinutes(-1),
+              tabsEl(0), tabsSkinEl(0), gameEl(0), gameSkinEl(0), frame(0), main(0), settings(0), volume(0), vibration(0), game(0), menu(0), card(0),
+              tabs(0), strip(0), tab(0), started(0), shownMinutes(-1), full(false),
               hud(0), state(Off), prev(0), holdStart(-1), lastTime(-1), repeatAt(0), leaveAt(0), port(0),
               armed(false), volumeLevel(10), vibrationOn(true) {}
 };
@@ -461,14 +464,57 @@ void load_title_image() {
     xlog("Guide: title image %dx%d", w, h);
 }
 
-// The time this session, "h:mm", on the game box and the fuller view.
+// Saved games: the title's folders in <hdd>/partition1/UDATA/<title id>.
+int saved_games() {
+    const char* hdd = fs_hdd_root();
+    if (!hdd) return 0;
+    char dir[600]; int n = 0;
+    for (int i = 0; i < 2 && !n; i++) {
+        snprintf(dir, sizeof dir, i ? "%s/partition1/UDATA/%08lX" : "%s/partition1/UDATA/%08lx", hdd, (unsigned long)xbe_title_id());
+        DIR* d = opendir(dir);
+        if (!d) continue;
+        while (struct dirent* e = readdir(d)) {
+            if (e->d_name[0] == '.') continue;
+            char sub[900]; snprintf(sub, sizeof sub, "%s/%s", dir, e->d_name);
+            DIR* s2 = opendir(sub);
+            if (s2) { n++; closedir(s2); }
+        }
+        closedir(d);
+    }
+    return n;
+}
+
+void game_page() {
+    const char* name = title_name();
+    set_text(g.game, "labHeader", name);
+    set_text(g.game, "labGameTitle", name);
+    set_image(g.game, "imgGameIcon", g.res.tile ? "titleimage.png" : "");
+    set_text(g.game, "btnViewAchievements", "Resume Game");
+    set_show(g.game, "btnBrowseDownloads", false);       // Install Game: the game is running
+    set_str(g.game, "btnManageGameFiles", "NavDown", "");
+    static const char* legends[] = { "legend_A", "legend_B", "legend_X", "legend_Y" };  // the frame has its own
+    for (unsigned i = 0; i < sizeof legends / sizeof legends[0]; i++) set_show(g.game, legends[i], false);
+    set_text(g.game, "labRecentAchievementsText", "Platform");
+    set_text(g.game, "labRecentAchievementsNum", "Xbox");
+    set_text(g.game, "labRuntimeText", "Runtime");
+    set_text(g.game, "labRuntimeNum", "xbcompat");
+    char buf[16]; snprintf(buf, sizeof buf, "%d", saved_games());
+    set_text(g.game, "labAchievementsNum", buf);
+    // where the XBE is, both paths resolved (either may be relative)
+    const char* xbe = xbe_file_path ? xbe_file_path() : 0;
+    char rx[PATH_MAX], rh[PATH_MAX];
+    bool onHdd = xbe && fs_hdd_root() && realpath(xbe, rx) && realpath(fs_hdd_root(), rh) &&
+                 !strncmp(rx, rh, strlen(rh)) && rx[strlen(rh)] == '/';
+    set_text(g.game, "labGamerPointsNum", onHdd ? "Hard drive" : "Disc");
+}
+
+// The time this session, "h:mm", on the game box.
 void session_text() {
     int m = (int)((now_s() - g.started) / 60);
     if (m == g.shownMinutes) return;
     g.shownMinutes = m;
     char buf[16]; snprintf(buf, sizeof buf, "%d:%02d", m / 60, m % 60);
     if (g.card) set_text(g.card, "credText", buf);
-    set_text(g.game, "txtValue0", buf);
 }
 
 void show_menu(xui::Scene* m, const char* focus);
@@ -518,7 +564,8 @@ bool load() {
     g.tabsSkinEl = g.vibrationEl ? g.res.scene("GuideTabsSkin.xui", err, sizeof err) : 0;
     g.tabsEl = g.tabsSkinEl ? g.res.scene("GuideTabs.xui", err, sizeof err) : 0;
     g.gameEl = g.tabsEl ? g.res.scene("GuideGame.xui", err, sizeof err) : 0;
-    if (!g.gameEl) { xlog("Guide: off, scene load failed: %s", err); return false; }
+    g.gameSkinEl = g.gameEl ? g.res.scene("GuideGameSkin.xui", err, sizeof err) : 0;
+    if (!g.gameSkinEl) { xlog("Guide: off, scene load failed: %s", err); return false; }
     g.cardEl = g.res.scene("GuideCard.xui", err, sizeof err);  // optional
     g.started = now_s();
     {
@@ -544,7 +591,7 @@ bool load() {
     g.settings = new xui::Scene(g.settingsEl, g.skinEl);
     g.volume = new xui::Scene(g.volumeEl, g.skinEl);
     g.vibration = new xui::Scene(g.vibrationEl, g.skinEl);
-    g.game = new xui::Scene(g.gameEl, g.skinEl);
+    g.game = new xui::Scene(g.gameEl, g.gameSkinEl);
     g.tabs = new xui::Scene(g.tabsEl, g.tabsSkinEl);
     g.tabs->setFocus(0);
     g.strip = g.tabs->find("tabStrip");
@@ -608,18 +655,10 @@ bool load() {
         set_show(g.card, "achievementsLabel", false);
         set_show(g.card, "achievementsText", false);
     }
-    // The fuller view: the picture large, the name, then the session.
-    set_text(g.game, "labelHeading", "Now Playing");
-    set_show(g.game, "imgTitle", g.res.tile != 0);
-    set_text(g.game, "txtName", title_name());
-    static const char* keys[] = { "This Session", "Started", "Title ID" };
-    for (int i = 0; i < 4; i++) {
-        char k[16], v[16]; snprintf(k, sizeof k, "txtKey%d", i); snprintf(v, sizeof v, "txtValue%d", i);
-        set_text(g.game, k, i < 3 ? keys[i] : "");
-        set_show(g.game, k, i < 3); set_show(g.game, v, i < 3);
-    }
-    { char id[16]; snprintf(id, sizeof id, "%08lX", (unsigned long)xbe_title_id()); set_text(g.game, "txtValue2", id); }
-    set_text(g.game, "txtValue1", g.startedAt);
+    // The fuller view: Frolick's Game Summary page, filled as Frolick's hub
+    // fills it for a game on its belt (Platform, Runtime, Saved games,
+    // Location), Play Game resuming it here.
+    game_page();
     session_text();
     // Settings: GFWL's Personal Settings page with two rows, each opening
     // a GFWL page: Volume (the Voice page's Playback Volume slider) and
@@ -739,7 +778,7 @@ void show_menu(xui::Scene* m, const char* focus) {
     g.menu = m;
     m->setFocus(focus ? m->find(focus) : 0);
     // The Volume page and the game's fuller view have nothing to select.
-    set_legend("Legend_A", m == g.volume || m == g.game ? 0 : "Select");
+    set_legend("Legend_A", m == g.volume ? 0 : "Select");
     const char* back = page_legend(m, "btnB", "btnB");
     set_legend("Legend_B", back && back[0] ? back : "Back");
 }
@@ -759,7 +798,8 @@ void open_guide() {
 
 void close_guide() {
     g.state = Closing;
-    g.hud->play("HalfToClosed");
+    g.hud->play(g.full ? "FullToClosed" : "HalfToClosed");
+    g.full = false;
     play(SndClose);
     xinput_guide_mask(false);
     ds_set_duck(1.0f);
@@ -774,7 +814,16 @@ void leave() {
 // A on a control; true when it did something (the select sound), false for
 // a row with nothing behind it yet (the inactive sound).
 bool press(const char* id) {
-    if (!strcmp(id, "ctlGamerCard")) { session_text(); show_menu(g.game, 0); }
+    if (!strcmp(id, "ctlGamerCard")) {
+        // the page is the width of the Blades' screen: the frame opens out
+        game_page();
+        g.full = true;
+        g.hud->play("HalfToFull");
+        show_menu(g.game, "btnViewAchievements");
+        if (xui::Node* pg = g.game->find("page")) pg->play("Open");
+    }
+    else if (!strcmp(id, "btnViewAchievements")) close_guide();  // Resume Game
+    else if (!strcmp(id, "btnManageGameFiles")) return false;  // Game Storage: not here yet
     else if (!strcmp(id, "btnOptions")) leave();  // Exit Game
     else if (!strcmp(id, "btnBlank1") || !strcmp(id, "btnQuickChat")) return false;  // Quick Launch, Downloads
     else if (!strcmp(id, "btnOnlineStatus")) { settings_text(); show_menu(g.volume, "sliderVolume"); }
@@ -808,7 +857,11 @@ void step(double t) {
         bool home = g.menu == g.main || g.menu == g.settings;
         if ((down & GUIDE_B) && !home && !toggle) {
             play(SndBack);
-            if (g.menu == g.game) show_menu(g.main, "ctlGamerCard");
+            if (g.menu == g.game) {
+                g.full = false;
+                g.hud->play("FullToHalf");
+                show_menu(g.main, "ctlGamerCard");
+            }
             else show_menu(g.settings, g.menu == g.volume ? "btnOnlineStatus" : "btnVoice");
             break;
         }
@@ -836,7 +889,9 @@ void step(double t) {
             if (g.menu->focus && g.menu != g.volume) {
                 const char* id = g.menu->focus->id();
                 g.menu->press();
-                play(press(id) ? SndSelect : SndInactive);
+                bool resume = !strcmp(id, "btnViewAchievements");  // plays the close sound
+                bool did = press(id);
+                if (!resume) play(did ? SndSelect : SndInactive);
             }
             break;
         }
@@ -1037,6 +1092,23 @@ void fit_legends(float l, float t, float r, float b) {
 
 }  // namespace
 
+// The panel's face (the frame's backpanel) in the menus' units, given the
+// menu's origin and scale on the canvas.
+static bool panel_span(float hx, float hs, float* l, float* r) {
+    xui::Node* bp = g.frame->find("backpanel");
+    if (!bp || hs <= 0) return false;
+    float bx = 0, bs = 1;
+    for (xui::Node* p = bp; p; p = p->parent) {
+        xui::Vec3 z = {0, 0, 0}, one = {1, 1, 1};
+        xui::Vec3 v = xui::propV(p->props, "Position", z), sc = xui::propV(p->props, "Scale", one);
+        xui::Vec3 pv = xui::propV(p->props, "Pivot", z);
+        bx = v.x + pv.x + sc.x * (bx - pv.x);
+        bs *= sc.x;
+    }
+    *l = (bx - hx) / hs; *r = (bx + bp->width() * bs - hx) / hs;
+    return true;
+}
+
 void guide_draw(int w, int h) {
     // The frame is a 4:3 canvas (800x600); fit the height and stretch x to
     // the window the way the game image is stretched.
@@ -1066,6 +1138,9 @@ void guide_draw(int w, int h) {
     // XBCOMPAT_GUIDE_TEXT sets the factor (1 keeps the authored size).
     static float zoom = getenv("XBCOMPAT_GUIDE_TEXT") ? (float)atof(getenv("XBCOMPAT_GUIDE_TEXT")) : 1.2f;
     g.r->textZoom = h <= 576 && zoom > 0 ? zoom : 1;
+    // Frolick's page is sized for Frolick's screen already (its text at
+    // Frolick's size at this scale)
+    if (g.menu == g.game) g.r->textZoom = 1;
     narrow_frame(n);
     fit_legends(cw * 0.1f, ch * 0.1f, cw * 0.9f, ch * 0.9f);
     float fx = 0, fy = 0;
@@ -1085,6 +1160,18 @@ void guide_draw(int w, int h) {
         hs *= sc.x;
         shown = shown && xui::propB(p->props, "Show", true);
         op *= xui::propF(p->props, "Opacity", 1);
+    }
+    // Frolick's page runs edge to edge on its screen; here its slate body
+    // spans the panel's face.
+    if (g.menu == g.game) {
+        float pl, pr;
+        if (xui::Node* body = g.game->find("body"))
+            if (panel_span(hx, hs, &pl, &pr)) {
+                xui::Vec3 z = {0, 0, 0};
+                xui::Vec3 p = xui::propV(body->props, "Position", z); p.x = pl;
+                set_vec(body, "Position", p);
+                xui::Value& v = body->props.set("Width"); v.free(); v.type = xui::TFloat; v.f = pr - pl;
+            }
     }
     if (host && shown && op > 0.001f) {
         xui::Value& o = g.menu->root->props.set("Opacity"); o.free(); o.type = xui::TFloat; o.f = op;
@@ -1108,16 +1195,8 @@ void guide_draw(int w, int h) {
             float k = FACE_W / STRIP_W, ms = s * hs;
             float in = hs > 0 ? n / hs : 0;
             float left = FACE_X + in, right = FACE_X + FACE_W - in;
-            if (xui::Node* bp = g.frame->find("backpanel")) {
-                float bx = 0;
-                for (xui::Node* p = bp; p; p = p->parent) {
-                    xui::Vec3 z = {0, 0, 0}, one = {1, 1, 1};
-                    xui::Vec3 v = xui::propV(p->props, "Position", z), sc = xui::propV(p->props, "Scale", one);
-                    xui::Vec3 pv = xui::propV(p->props, "Pivot", z);
-                    bx = v.x + pv.x + sc.x * (bx - pv.x);
-                }
-                if (hs > 0 && (bx - hx) / hs > left) left = (bx - hx) / hs;
-            }
+            float pl, pr;
+            if (panel_span(hx, hs, &pl, &pr) && pl > left) left = pl;
             float width = right - left;
             if (xui::Node* clip = g.tabs->find("tabClip")) {
                 xui::Value& v = clip->props.set("Width"); v.free(); v.type = xui::TFloat; v.f = width / k;
