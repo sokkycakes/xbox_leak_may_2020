@@ -11,7 +11,9 @@
    "Power Button" on the Sion). With nothing else on the system listening
    to it, a tap did nothing before; holding it down still powers off in the
    firmware. The dashboard itself ignores both, so the console can't be
-   reset into itself. XBCOMPAT_RESET=0 turns both off. */
+   reset into itself. XBCOMPAT_RESET=0 turns both off; XBCOMPAT_RESET=1
+   keeps them on for a dashboard too (the Live dashboard, run on its own,
+   leaves this way). */
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -104,7 +106,7 @@ static void *power_thread(void *arg)
 void reset_init(ULONG title_id)
 {
     const char *e = getenv("XBCOMPAT_RESET");
-    if (title_id == DASHBOARD_TITLE_ID || (e && !strcmp(e, "0"))) return;
+    if ((title_id == DASHBOARD_TITLE_ID && !(e && !strcmp(e, "1"))) || (e && !strcmp(e, "0"))) return;
     enabled = true;
 
     static struct pollfd pf[MAX_BUTTONS + 1];

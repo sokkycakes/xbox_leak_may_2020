@@ -584,7 +584,10 @@ NTSTATUS NTAPI KeWaitForSingleObject(PVOID Object, ULONG WaitReason, KPROCESSOR_
                                      BOOLEAN Alertable, LARGE_INTEGER *Timeout)
 {
     (void)WaitReason;
-    return wait_objects(1, &Object, 1, WaitMode, Alertable, Timeout);
+    bool held = !(Timeout && Timeout->QuadPart == 0) && ke_dispatch_release_for_wait();
+    NTSTATUS st = wait_objects(1, &Object, 1, WaitMode, Alertable, Timeout);
+    ke_dispatch_reacquire(held);
+    return st;
 }
 
 NTSTATUS NTAPI KeWaitForMultipleObjects(ULONG Count, PVOID Object[], ULONG WaitType,
@@ -593,7 +596,10 @@ NTSTATUS NTAPI KeWaitForMultipleObjects(ULONG Count, PVOID Object[], ULONG WaitT
                                         KWAIT_BLOCK *WaitBlockArray)
 {
     (void)WaitReason; (void)WaitBlockArray;
-    return wait_objects(Count, Object, WaitType == 1 /* WaitAny */, WaitMode, Alertable, Timeout);
+    bool held = !(Timeout && Timeout->QuadPart == 0) && ke_dispatch_release_for_wait();
+    NTSTATUS st = wait_objects(Count, Object, WaitType == 1 /* WaitAny */, WaitMode, Alertable, Timeout);
+    ke_dispatch_reacquire(held);
+    return st;
 }
 
 NTSTATUS NTAPI KeDelayExecutionThread(KPROCESSOR_MODE WaitMode, BOOLEAN Alertable,
@@ -838,8 +844,61 @@ static inline void set_irql(KIRQL v)
 #endif
 
 KIRQL NTAPI KeGetCurrentIrql(void) { return get_irql(); }
-KIRQL FASTCALL KfRaiseIrql(KIRQL NewIrql) { KIRQL o = get_irql(); set_irql(NewIrql); return o; }
-void FASTCALL KfLowerIrql(KIRQL NewIrql) { set_irql(NewIrql); }
+/* On the console one processor runs everything, so code at DISPATCH_LEVEL
+   excludes DPCs and other raised code.  The network stack depends on that
+   (its state is touched from title threads at raised IRQL, from its DPC and
+   from the NIC's ISR), so once a NIC driver connects its interrupt, raising
+   to DISPATCH_LEVEL takes a lock that DPCs and the ISR also run under.
+   Titles without networking keep the lock-free behavior. */
+static pthread_mutex_t dispatch_lock = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
+static bool dispatch_exclusive;
+static __thread bool dispatch_held;
+
+void ke_dispatch_exclusive(void) { __atomic_store_n(&dispatch_exclusive, true, __ATOMIC_RELEASE); }
+
+static inline void irql_changed(KIRQL from, KIRQL to)
+{
+    if (!__atomic_load_n(&dispatch_exclusive, __ATOMIC_ACQUIRE)) return;
+    if (from < 2 && to >= 2 && !dispatch_held) {
+        pthread_mutex_lock(&dispatch_lock);
+        dispatch_held = true;
+    } else if (to < 2 && dispatch_held) {
+        dispatch_held = false;
+        pthread_mutex_unlock(&dispatch_lock);
+    }
+}
+
+/* Run a DPC or an ISR as the only raised code (a no-op until exclusive). */
+void ke_dispatch_enter(KIRQL irql)
+{
+    (void)irql;
+    if (__atomic_load_n(&dispatch_exclusive, __ATOMIC_ACQUIRE)) pthread_mutex_lock(&dispatch_lock);
+}
+
+void ke_dispatch_leave(void)
+{
+    if (__atomic_load_n(&dispatch_exclusive, __ATOMIC_ACQUIRE)) pthread_mutex_unlock(&dispatch_lock);
+}
+
+/* A thread blocking at raised IRQL (which the console forbids) must not keep
+   DPCs out while it sleeps. */
+bool ke_dispatch_release_for_wait(void)
+{
+    if (!dispatch_held) return false;
+    dispatch_held = false;
+    pthread_mutex_unlock(&dispatch_lock);
+    return true;
+}
+
+void ke_dispatch_reacquire(bool was_held)
+{
+    if (!was_held) return;
+    pthread_mutex_lock(&dispatch_lock);
+    dispatch_held = true;
+}
+
+KIRQL FASTCALL KfRaiseIrql(KIRQL NewIrql) { KIRQL o = get_irql(); irql_changed(o, NewIrql); set_irql(NewIrql); return o; }
+void FASTCALL KfLowerIrql(KIRQL NewIrql) { KIRQL o = get_irql(); set_irql(NewIrql); irql_changed(o, NewIrql); }
 /* KiLockDispatcherDatabase is KeRaiseIrqlToDpcLevel in guest code; with
    no context switch to make here, unlocking is lowering the IRQL. */
 void FASTCALL KiUnlockDispatcherDatabase(KIRQL OldIrql) { KfLowerIrql(OldIrql); }
@@ -856,8 +915,8 @@ KTHREAD *NTAPI KeGetCurrentThread(void)
    code on real hardware is uniprocessor, but our threads are truly parallel,
    so take a real lock. */
 static pthread_mutex_t spin_lock = PTHREAD_MUTEX_INITIALIZER;
-KIRQL FASTCALL KfAcquireSpinLock(ULONG *SpinLock) { (void)SpinLock; pthread_mutex_lock(&spin_lock); return KfRaiseIrql(2); }
-void FASTCALL KfReleaseSpinLock(ULONG *SpinLock, KIRQL OldIrql) { (void)SpinLock; KfLowerIrql(OldIrql); pthread_mutex_unlock(&spin_lock); }
+KIRQL FASTCALL KfAcquireSpinLock(ULONG *SpinLock) { (void)SpinLock; KIRQL o = KfRaiseIrql(2); pthread_mutex_lock(&spin_lock); return o; }
+void FASTCALL KfReleaseSpinLock(ULONG *SpinLock, KIRQL OldIrql) { (void)SpinLock; pthread_mutex_unlock(&spin_lock); KfLowerIrql(OldIrql); }
 void FASTCALL KefAcquireSpinLockAtDpcLevel(ULONG *SpinLock) { (void)SpinLock; pthread_mutex_lock(&spin_lock); }
 void FASTCALL KefReleaseSpinLockFromDpcLevel(ULONG *SpinLock) { (void)SpinLock; pthread_mutex_unlock(&spin_lock); }
 
@@ -1192,7 +1251,9 @@ static void *dpc_thread(void *arg)
             CPU_CALL(d->DeferredRoutine, CONV_STD, (uint32_t)d, (uint32_t)d->DeferredContext,
                      (uint32_t)d->SystemArgument1, (uint32_t)d->SystemArgument2);
 #else
+            ke_dispatch_enter(2);
             ((dpc_fn)d->DeferredRoutine)(d, d->DeferredContext, d->SystemArgument1, d->SystemArgument2);
+            ke_dispatch_leave();
 #endif
             pthread_mutex_lock(&dpc_lock);
         }
@@ -1247,12 +1308,12 @@ ULONG NTAPI HalGetInterruptVector(ULONG BusInterruptLevel, KIRQL *Irql)
 void NTAPI KeInitializeInterrupt(PVOID Interrupt, PVOID ServiceRoutine, PVOID ServiceContext,
                                  ULONG Vector, KIRQL Irql, ULONG InterruptMode, BOOLEAN ShareVector)
 {
-    (void)Interrupt; (void)ServiceRoutine; (void)ServiceContext; (void)Vector;
     (void)Irql; (void)InterruptMode; (void)ShareVector;
+    nic_interrupt_init(Interrupt, ServiceRoutine, ServiceContext, Vector);   /* the only device delivered */
 }
 
-BOOLEAN NTAPI KeConnectInterrupt(PVOID Interrupt) { (void)Interrupt; return 1; }
-BOOLEAN NTAPI KeDisconnectInterrupt(PVOID Interrupt) { (void)Interrupt; return 1; }
+BOOLEAN NTAPI KeConnectInterrupt(PVOID Interrupt) { nic_interrupt_connect(Interrupt, true); return 1; }
+BOOLEAN NTAPI KeDisconnectInterrupt(PVOID Interrupt) { nic_interrupt_connect(Interrupt, false); return 1; }
 
 BOOLEAN NTAPI KeSynchronizeExecution(PVOID Interrupt, BOOLEAN (NTAPI *Routine)(PVOID), PVOID Context)
 {
@@ -1260,7 +1321,10 @@ BOOLEAN NTAPI KeSynchronizeExecution(PVOID Interrupt, BOOLEAN (NTAPI *Routine)(P
 #ifdef XBC_TRANSLATED
     return (BOOLEAN)CPU_CALL(Routine, CONV_STD, (uint32_t)Context);
 #else
-    return Routine(Context);
+    ke_dispatch_enter(26);
+    BOOLEAN r = Routine(Context);
+    ke_dispatch_leave();
+    return r;
 #endif
 }
 

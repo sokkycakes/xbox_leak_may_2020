@@ -159,8 +159,11 @@ for l in english:English japanese:Japanese german:German french:French spanish:S
     ins="$ins /INSERTFILE:$D\\${l%%:*}.txt,${l##*:}Xlate,N"
 done
 echo "imagebld xboxdash.xbe"
+# Version 0x185EAD00 is the retail 5960 dashboard's: the retail online
+# dashboard (C:\xodash) reads Y:\xboxdash.xbe's certificate and goes back to
+# the dashboard unless the version matches its own.
 timeout 300 wine "$WORK/xb/public/idw/imagebld.exe" /TESTID:0xFFFE0000 /TESTRATINGS:0xFFFFFFFF \
-  /TESTREGION:0x7FFFFFFF "/TESTNAME:Xbox Dashboard" /INITFLAGS:0x00000004 /LIMITMEM \
+  /TESTVERSION:0x185EAD00 /TESTREGION:0x7FFFFFFF "/TESTNAME:Xbox Dashboard" /INITFLAGS:0x00000004 /LIMITMEM \
   "/INSERTFILE:$D\\obj\\xipsums.bin,XIPS,R" $ins /TESTMEDIATYPES:1 /NOLIBWARN /NOSETUPHD \
   /INITFLAGS:0x00000000 /IN:xboxdash.exe /OUT:xboxdash.xbe | tr -d '\r'
 

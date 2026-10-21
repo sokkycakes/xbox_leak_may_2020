@@ -81,6 +81,7 @@ public:
     int SelectGameImage(int nGame);
     CStrObject* GetGameImage(int nGame);
     void LaunchGame(int nGame);
+    void LaunchXOnlineDash();
 
     int IsInstalled(int nGame);
     int StartInstall(int nGame);
@@ -122,6 +123,7 @@ START_NODE_FUN(CGameCollection, CNode)
     NODE_FUN_II(SelectGameImage)
     NODE_FUN_SI(GetGameImage)
     NODE_FUN_VI(LaunchGame)
+    NODE_FUN_VV(LaunchXOnlineDash)
     NODE_FUN_II(IsInstalled)
     NODE_FUN_II(StartInstall)
     NODE_FUN_SV(GetInstallStatus)
@@ -1079,6 +1081,21 @@ void CGameCollection::LaunchGame(int nGame)
     sprintf(szImage, "D:\\%s", pGame->m_szXbe);
     XAppGetD3DDev()->PersistDisplay();
     XLaunchNewImage(szImage, NULL);
+}
+
+// The Live dashboard, where the retail dashboards keep it: C:\xodash, run
+// with D: there.
+void CGameCollection::LaunchXOnlineDash()
+{
+    // The retail online dashboard (5849) returns straight to the dashboard
+    // unless it gets LDT_LAUNCH_DASHBOARD with a reason of its own, 0xc to
+    // 0x13; the retail 5960 dashboard's Xbox Live item sends 0xc.
+    LD_LAUNCH_DASHBOARD ld;
+    ZeroMemory(&ld, sizeof(ld));
+    ld.dwReason = 0xc;
+    XAppGetD3DDev()->PersistDisplay();
+    XWriteTitleInfoAndReboot("xonlinedash.xbe", "\\Device\\Harddisk0\\Partition2\\xodash",
+        LDT_LAUNCH_DASHBOARD, 0xfffe0000, (PLAUNCH_DATA)&ld);
 }
 
 ////////////////////////////////////////////////////////////////////////////

@@ -66,7 +66,8 @@ LDLIBS  += $(shell $(PKGCFG) --libs sdl2 $(GL)) -lpthread -lm
 
 LEAK    ?= ../xbox_leak_may_2020/xbox trunk/xbox
 KERNSRC  = src/kernel/ke.c src/kernel/ob.c src/kernel/io.c src/kernel/rtl.c src/kernel/misc.c src/kernel/xcrypt.c src/kernel/dvd.c \
-           src/kernel/kernel.c src/kernel/av.c src/kernel/reset.c src/kernel/irp.c src/kernel/exports.gen.c
+           src/kernel/kernel.c src/kernel/av.c src/kernel/reset.c src/kernel/irp.c src/kernel/nic.c src/kernel/net.c \
+           src/kernel/exports.gen.c
 HLESRC   = src/hle/hle.c src/hle/d3d8.c src/hle/vsh.c src/hle/vsh_interp.c src/hle/psh.c src/hle/xinput.c src/hle/dsound.c
 ifeq ($(RENDERER),native)
 HLESRC := $(filter-out src/hle/d3d8.c src/hle/vsh.c src/hle/vsh_interp.c src/hle/psh.c,$(HLESRC)) src/renderer/client.c
@@ -86,7 +87,7 @@ override CFLAGS += -Isrc
 LDLIBS += -ldl
 endif
 endif
-SRC      = src/main.c src/log.c src/prof.c src/loader.c src/memory.c src/thread.c $(KERNSRC) $(HLESRC)
+SRC      = src/main.c src/probe.c src/log.c src/prof.c src/loader.c src/memory.c src/thread.c $(KERNSRC) $(HLESRC)
 OBJ      = $(SRC:%.c=$(BUILD)/%.o)
 # The Guide overlay (src/guide, C++98 with no C++ library) on the frolickdash
 # XUI runtime; the native renderer builds leave it out (d3d8.c's hook is weak).

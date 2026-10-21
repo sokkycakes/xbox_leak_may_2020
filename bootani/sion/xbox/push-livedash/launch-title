@@ -1,0 +1,52 @@
+#!/bin/sh
+#
+# XBCOMPAT_LAUNCHER on a Sion with the Live dashboard installed (see
+# sion-install.sh, which sets it in /etc/default/xbox). The dashboard's
+# XBOX LIVE item launches C:\xodash\xonlinedash.xbe, as the retail
+# dashboards did; that one runs under the Live dashboard's own xbcompat
+# (with the network card), next to the Live server. Every other title goes
+# on to the usual launcher. Leaving the Live dashboard (L + R + Back + Start)
+# brings the normal dashboard back.
+#
+# xbcompat runs this as: launch-title IMAGE [options...]
+#
+L=/data/xbox-live
+X=/opt/xbcompat
+
+case $1 in
+*/xodash/xonlinedash.xbe)
+	# The server has to know this console (its serial and online key, in
+	# the hdd's console-id) for the retail dashboard to sign in.
+	hdd=/data/xbox/hdd
+	prev=
+	for a in "$@"; do
+		[ "$prev" = --hdd ] && hdd=$a
+		prev=$a
+	done
+	PID=/var/run/xbox-live-server.pid
+	if ! { [ -s $PID ] && kill -0 "$(cat $PID)" 2> /dev/null; }; then
+		PYTHONHOME=$X PYTHONDONTWRITEBYTECODE=1 setsid "$X/bin/python3" "$L/liveserver/liveserver.py" \
+			--db "$L/live.json" --console-id "$hdd/console-id" > /var/log/xbox-live-server.log 2>&1 < /dev/null &
+		echo $! > $PID
+		sleep 1
+	fi
+	image=$1
+	shift
+	# An empty tray: with a game disc in, the retail Live dashboard goes back
+	# to the dashboard so the game can start, as on the console.
+	n=$#
+	while [ $n -gt 0 ]; do
+		case $1 in
+		--dvd|--dvd-drive) shift 2; n=$((n - 2)) ;;
+		*) set -- "$@" "$1"; shift; n=$((n - 1)) ;;
+		esac
+	done
+	mkdir -p /tmp/xbox-live-notray
+	export XBCOMPAT_DNS=127.0.0.1:5353 XBCOMPAT_RESET=1
+	exec "$L/bin/xbcompat" --log /var/log/xbox-live-trace.log --hle "$L/xodash.hlemap" --net nat --dvd /tmp/xbox-live-notray "$@" "$image"
+	;;
+esac
+next=${XBOX_LIVE_NEXT_LAUNCHER:-$X/bin/python3 $X/tools/xbrun.py}
+[ "$next" = "$0" ] && next="$X/bin/python3 $X/tools/xbrun.py"
+# shellcheck disable=SC2086
+exec $next "$@"

@@ -53,20 +53,29 @@ def block(s, start):
 # ---- main menu scene: a fourth pod ---------------------------------------
 mm = rd("MainMenu5/default.xap")
 start = mm.index("DEF Main_memory_ringpin_2 Transform")
-pod = block(mm, start)
-names = set(re.findall(r"DEF (\S+)", pod))
-for n in sorted(names, key=len, reverse=True):
-    pod = re.sub(r"\b(DEF|USE) " + re.escape(n) + r"(?=\s)", r"\1 " + n + "_g", pod)
-pod = sub1(pod, 'text "MEMORY"', 'text "GAMES"')
-# Same pod, one step (0.45 rad, the spacing of the existing three) further
-# round the ring: only its position turns, so its label stays level.
-old_t = "translation 56.830002 32.290001 101.900002"
-x, y = 56.830002, 32.290001
-cs, sn = math.cos(0.45), math.sin(0.45)
-pod = pod[:pod.rindex(old_t)] + "translation %f %f 101.900002" % (x * cs - y * sn, x * sn + y * cs) + \
-    pod[pod.rindex(old_t) + len(old_t):]
-games_pod = pod + "\n\t\t\t\t"
-mm = mm[:start] + games_pod + mm[start:]
+memory_pod = block(mm, start)
+
+
+def pod_copy(suffix, label, steps):
+    """The MEMORY pod with its names suffixed and its label changed, `steps`
+    places (0.45 rad, the spacing of the existing three) further round the
+    ring: only its position turns, so its label stays level."""
+    pod = memory_pod
+    names = set(re.findall(r"DEF (\S+)", pod))
+    for n in sorted(names, key=len, reverse=True):
+        pod = re.sub(r"\b(DEF|USE) " + re.escape(n) + r"(?=\s)", r"\1 " + n + suffix, pod)
+    pod = sub1(pod, 'text "MEMORY"', 'text "%s"' % label)
+    old_t = "translation 56.830002 32.290001 101.900002"
+    x, y = 56.830002, 32.290001
+    cs, sn = math.cos(0.45 * steps), math.sin(0.45 * steps)
+    pod = pod[:pod.rindex(old_t)] + "translation %f %f 101.900002" % (x * cs - y * sn, x * sn + y * cs) + \
+        pod[pod.rindex(old_t) + len(old_t):]
+    return pod + "\n\t\t\t\t"
+
+
+# GAMES above MEMORY; XBOX LIVE below SETTINGS (index 3), as the 2002
+# dashboards had an Xbox Live item, launching the Live dashboard.
+mm = mm[:start] + pod_copy("_g", "GAMES", 1) + pod_copy("_l", "XBOX LIVE", -3) + mm[start:]
 # The whole scene in one transform, so the screen saver can move it.
 first = mm.index("DEF ring Transform")
 mm = mm[:first] + "DEF theMainMenuLevel Transform\n{\n    children\n    [\n" + mm[first:].rstrip() + "\n    ]\n}\n"
@@ -100,20 +109,29 @@ d = d.replace(old, '''function UpdateMainMenu()
     c.game_select_pod_inner02.visible = (nCurMainMenuItem == 0);
     c.game_select_pod_inner.visible = (nCurMainMenuItem == 1);
     c.game_select_pod_inner03.visible = (nCurMainMenuItem == 2);
+    c.game_select_pod_inner02_l.visible = (nCurMainMenuItem == 3);
+
+    // Five pods don't fit round the ring: the end four places from the
+    // selection would sit on its neighbour, so it is left out.
+    c.Main_memory_ringpin_2_g.visible = (nCurMainMenuItem != 3);
+    c.Main_memory_ringpin_2_l.visible = (nCurMainMenuItem != -1);
 
     c.theMenuItems.SetRotation(0, 0, 1, a);
 
     c.theMusicItem_g.SetRotation(0, 1, 0, a);
+    c.theMusicItem_l.SetRotation(0, 1, 0, a);
     c.theMusicItem.SetRotation(0, 1, 0, a);
     c.theMemoryItem.SetRotation(0, 1, 0, a);
     c.theSettingsItem.SetRotation(0, 1, 0, a);
 
     c.MemoryPanelMaterial_g.name = "FlatSurfaces2sided";
+    c.MemoryPanelMaterial_l.name = "FlatSurfaces2sided";
     c.MemoryPanelMaterial.name = "FlatSurfaces2sided";
     c.MusicPanelMaterial.name = "FlatSurfaces2sided";
     c.SettingsPanelMaterial.name = "FlatSurfaces2sided";
 
     c.MemoryTextMaterial_g.name = "NavType";
+    c.MemoryTextMaterial_l.name = "NavType";
     c.MemoryTextMaterial.name = "NavType";
     c.MusicTextMaterial.name = "NavType";
     c.SettingsTextMaterial.name = "NavType";
@@ -133,10 +151,15 @@ d = d.replace(old, '''function UpdateMainMenu()
         c.MusicPanelMaterial.name = "GameHilite";
         c.MusicTextMaterial.name = "HilightedType";
     }
-    else
+    else if (nCurMainMenuItem == 2)
     {
         c.SettingsPanelMaterial.name = "GameHilite";
         c.SettingsTextMaterial.name = "HilightedType";
+    }
+    else
+    {
+        c.MemoryPanelMaterial_l.name = "GameHilite";
+        c.MemoryTextMaterial_l.name = "HilightedType";
     }
 }''')
 
@@ -152,21 +175,51 @@ d = sub1(d, '''            if (nCurMainMenuItem == 0)
             {
                 theGamesMenuIn.Play();
                 GoToMemory();''')
+d = sub1(d, '''            else if (nCurMainMenuItem == 2)
+            {
+                theSettingsMenuIn.Play();
+                GoToSettings();
+            }''', '''            else if (nCurMainMenuItem == 2)
+            {
+                theSettingsMenuIn.Play();
+                GoToSettings();
+            }
+            else if (nCurMainMenuItem == 3)
+            {
+                theSettingsMenuIn.Play();
+                GoToXOnlineDash();
+            }''')
 d = sub1(d, "            if (nCurMainMenuItem > 0)", "            if (nCurMainMenuItem > -1)")
+d = sub1(d, "            if (nCurMainMenuItem < 2)", "            if (nCurMainMenuItem < 3)")
 # Launching a game goes through theLauncherLevel, as a disc launch does: the
 # Xbox logo goes up, and after a moment the dashboard persists it and
 # reboots into the game, so the logo stays on screen until the game draws.
-d = sub1(d, "var g_bAboutToReboot;", "var g_bAboutToReboot;\nvar g_bLaunchGame;")
-d = sub1(d, "    g_bAboutToReboot = false;", "    g_bAboutToReboot = false;\n    g_bLaunchGame = false;")
+d = sub1(d, "var g_bAboutToReboot;", "var g_bAboutToReboot;\nvar g_bLaunchGame;\nvar g_bLaunchXOnlineDash;")
+d = sub1(d, "    g_bAboutToReboot = false;",
+         "    g_bAboutToReboot = false;\n    g_bLaunchGame = false;\n    g_bLaunchXOnlineDash = false;")
 d = sub1(d, '''            else
-                theDiscDrive.LaunchDisc();  // This will boot to title/dashboard or DVD player''', '''            else if (g_bLaunchGame)
+                theDiscDrive.LaunchDisc();  // This will boot to title/dashboard or DVD player''', '''            else if (g_bLaunchXOnlineDash)
+                theXOnlineDash.LaunchXOnlineDash();
+            else if (g_bLaunchGame)
                 theGamesInline.children[0].LaunchPendingGame();
             else
                 theDiscDrive.LaunchDisc();  // This will boot to title/dashboard or DVD player''')
+# XBOX LIVE reboots into the Live dashboard (C:\xodash\xonlinedash.xbe), as
+# the retail dashboard's theXOnlineLevel did; GameCollection does the launch.
 d = sub1(d, "DEF theLauncherLevel Level", '''function LaunchGameWithLogo()
 {
     g_bLaunchGame = true;
     theLauncherLevel.GoTo();
+}
+
+function GoToXOnlineDash()
+{
+    g_bLaunchXOnlineDash = true;
+    theLauncherLevel.GoTo();
+}
+
+DEF theXOnlineDash GameCollection
+{
 }
 
 DEF theLauncherLevel Level''')
