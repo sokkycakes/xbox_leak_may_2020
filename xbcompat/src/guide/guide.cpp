@@ -314,12 +314,12 @@ xui::Color text_color_for(xui::Node* n, xui::Color col) {
     return col;
 }
 
-// Its dark shadows, made for white text, become the light ones the Guide's
-// own black text has (hudskin's 0x7debebeb).
+// Its dark shadows, made for white text, become the light one its rows
+// have (0x5aebebeb: the header's 0xbe was much stronger, sokky).
 xui::Color text_shadow_for(xui::Node* n, xui::Color col) {
     if (!g.game || g.menu != g.game || (col & 0xff) >= 0x80) return col;
     for (xui::Node* p = n; p; p = p->parent)
-        if (p == g.game->root) return (col & 0xff000000) | 0xebebeb;
+        if (p == g.game->root) return 0x5aebebeb;
     return col;
 }
 
