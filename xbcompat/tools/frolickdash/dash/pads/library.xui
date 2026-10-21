@@ -119,7 +119,7 @@
  <DropShadowColor>0</DropShadowColor>
  <PointSize>24</PointSize>
  <Font>Fira Sans</Font>
- <TextStyle>1040</TextStyle>
+ <TextStyle>1049616</TextStyle>
 </Properties>
 </XuiText>
 <XuiText>
@@ -133,7 +133,7 @@
  <DropShadowColor>0</DropShadowColor>
  <PointSize>18</PointSize>
  <Font>Fira Sans</Font>
- <TextStyle>1040</TextStyle>
+ <TextStyle>1049616</TextStyle>
 </Properties>
 </XuiText>
 <XuiImage>

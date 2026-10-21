@@ -563,6 +563,10 @@ Texture Renderer::imageTex(const char* path, int* w, int* h)
         t = be->upload(*img);
         *w = img->w; *h = img->h;
         delete img;
+    } else if (strchr(path, ':')) {
+        // a file on a drive rather than in the scene's assets (a game
+        // card's icon PNG): the host decodes it too
+        t = be->native(path, w, h);
     }
     remember(key, t, *w, *h);
     return t;
@@ -670,7 +674,10 @@ void Renderer::quad(Texture tex, Blend blend, const Affine& m, float x0, float y
 
 // ---- text ------------------------------------------------------------------
 
-enum { styleOneLine = 0x10, styleRight = 0x200, styleCenterH = 0x400, styleCenterV = 0x1000, styleShadow = 0x4000 };
+// styleShrink is not the XUI engine's: Frolick's one-line titles (a game's
+// name on the library tile) shrink to fit their box instead of running out
+// of it.
+enum { styleOneLine = 0x10, styleRight = 0x200, styleCenterH = 0x400, styleCenterV = 0x1000, styleShadow = 0x4000, styleShrink = 0x100000 };
 
 // The XUI engine lays a line out with whole-pixel advances (each glyph's
 // advance rounded up) and no kerning: lines measured against the GFWL
@@ -823,6 +830,10 @@ void Renderer::text(Node* n, const Affine& m, float alpha, Blend blend)
     float px = size * (96.0f / 72.0f) * scale * zoom;
     float fs = stbtt_ScaleForMappingEmToPixels(&font->info, px);
     float w = n->width(), h = n->height();
+    if ((style & styleShrink) && w > 0) {
+        float tw = measure(font, fs, txt, tl);
+        if (tw > w * scale) { px *= w * scale / tw; fs = stbtt_ScaleForMappingEmToPixels(&font->info, px); }
+    }
 
     // wrap into lines (word wrap unless one-line style)
     char* lines[64]; int nl = 0;

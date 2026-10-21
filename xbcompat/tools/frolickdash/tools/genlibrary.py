@@ -191,6 +191,9 @@ CENTRE, LEFT_ONE_LINE = 1024, 16
 # single line); word wrap broke "Insert a Game Disc" in two over the line
 # under it, the renderer's Fira being a little wider than the 270 px box.
 CENTRE_ONE_LINE = CENTRE | LEFT_ONE_LINE
+# a game's name or publisher too long for the tile shrinks to fit
+# (styleShrink, Frolick's own TextStyle bit in xui/xui_draw.cpp)
+CENTRE_FIT = CENTRE_ONE_LINE | 0x100000
 GREY_TEXT, WHITE = "0xffd2d2d2", "0xffffffff"
 BORDER = (2, "0xff404040")
 
@@ -226,8 +229,8 @@ def library():
                 ("solid", "0xffd9d9d9"), (1, "0xff000000"))
     s += image("cover", 105, 63, 126, 126, "cover.png")
     # 73:99 "Game Title" 32 px and 73:100 "Developer" 24 px, centred on the tile
-    s += text("title", 0, 200, gw, 38, "Game Title", 32, GREY_TEXT, CENTRE_ONE_LINE)
-    s += text("subtitle", 0, 238, gw, 29, "Developer", 24, GREY_TEXT, CENTRE_ONE_LINE)
+    s += text("title", 0, 200, gw, 38, "Game Title", 32, GREY_TEXT, CENTRE_FIT)
+    s += text("subtitle", 0, 238, gw, 29, "Developer", 24, GREY_TEXT, CENTRE_FIT)
     # 73:101 Xelu 360_Start, 87 square at 125,283
     s += image("glyphA", 125, 283, 87, 87, "glyph_a.png")
     # The no-media variant (Figma 143:47 "Group 17", tile 143:55): the cover,

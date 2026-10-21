@@ -1185,7 +1185,7 @@ function FillGamePage()
         if (theGameCollection.IsInstalled(nGame) == 1)
             where = where + ", installed";
         else
-            bInstall = 1;
+            bInstall = theGameCollection.CanInstall(nGame);
     }
     thePage.SetText("labGameTitle", theGameCollection.GetGameName(nGame));
     thePage.SetImage("imgGameIcon", theGameCollection.GetGameImage(nGame));
@@ -1671,6 +1671,7 @@ function FillRow(r)
     var d;
     var g;
     var img;
+    var pub;
     if (i >= nListCount)
     {
         thePage.SetVisible(id, 0);
@@ -1690,7 +1691,11 @@ function FillRow(r)
     {
         g = theGameCollection.GetRecentGame(i);
         thePage.SetText(id, theGameCollection.GetGameName(g));
-        thePage.SetData(id, 1, theGameCollection.GetGamePlatform(g) + ", " + theGameCollection.GetGamePublisher(g));
+        pub = theGameCollection.GetGamePublisher(g);
+        if (pub == "")
+            thePage.SetData(id, 1, theGameCollection.GetGamePlatform(g));
+        else
+            thePage.SetData(id, 1, theGameCollection.GetGamePlatform(g) + ", " + pub);
         img = theGameCollection.GetGameImage(g);
         if (img == "")
             img = "ico_64x_games.png";
