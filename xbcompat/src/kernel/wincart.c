@@ -33,7 +33,7 @@
 typedef struct {
     char kzi[NAME_MAX + 1];     /* the .kzi's file name */
     char dir[NAME_MAX + 1];     /* the cart's directory on the card */
-    char name[128], id[NAME_MAX + 1], exec[256], runtime[64];
+    char name[128], id[NAME_MAX + 1], exec[256], runtime[64], icon[256];
     time_t mtime;
 } wincart;
 
@@ -64,6 +64,7 @@ static void kzi_read(const char *path, wincart *c)
         else if (!strcasecmp(p, "Id")) snprintf(c->id, sizeof c->id, "%s", v);
         else if (!strcasecmp(p, "Exec")) snprintf(c->exec, sizeof c->exec, "%s", v);
         else if (!strcasecmp(p, "Runtime")) snprintf(c->runtime, sizeof c->runtime, "%s", v);
+        else if (!strcasecmp(p, "Icon")) snprintf(c->icon, sizeof c->icon, "%s", v);
     }
     fclose(f);
 }
@@ -171,8 +172,9 @@ static bool write_text(const char *path, const char *text)
     return fclose(f) == 0;
 }
 
-/* The cart's .kzi as the dashboard sees it: an Xbox cart of the stub. */
-static bool write_shim_kzi(const char *path, const char *orig, const wincart *c)
+/* The cart's .kzi as the dashboard sees it: an Xbox cart of the stub
+   (icon: the cart's icon as linked into the stub's folder, or NULL). */
+static bool write_shim_kzi(const char *path, const char *orig, const wincart *c, const char *icon)
 {
     FILE *in = fopen(orig, "r"), *out = fopen(path, "w");
     if (!in || !out) { if (in) fclose(in); if (out) fclose(out); return false; }
@@ -184,12 +186,34 @@ static bool write_shim_kzi(const char *path, const char *orig, const wincart *c)
         size_t n = strspn(p, " \t");
         size_t k = strcspn(p + n, "= \t\r\n");
         snprintf(key, sizeof key, "%.*s", (int)(k < sizeof key ? k : sizeof key - 1), p + n);
-        if (!strcasecmp(key, "Runtime") || !strcasecmp(key, "Exec")) continue;
+        if (!strcasecmp(key, "Runtime") || !strcasecmp(key, "Exec") || (icon && !strcasecmp(key, "Icon"))) continue;
         fputs(line, out);
     }
     fprintf(out, "\nRuntime=xbox\nExec=%s/default.xbe\n", c->dir);
+    if (icon) fprintf(out, "Icon=%s/%s\n", c->dir, icon);
     fclose(in);
     return fclose(out) == 0;
+}
+
+/* The cart's Icon, resolved the way Kazeta does (beside the .kzi), else in
+   the cart's folder, linked into the stub's folder (which hides the real
+   one) so the dashboards can show it.  Returns its name there, or NULL. */
+static const char *link_icon(const char *card, const wincart *c, const char *stub)
+{
+    if (!c->icon[0] || strstr(c->icon, "..")) return NULL;
+    const char *base = strrchr(c->icon, '/');
+    base = base ? base + 1 : c->icon;
+    if (!*base || !strcmp(base, "default.xbe") || !strcmp(base, ".wincart")) return NULL;
+    char from[PATH_MAX], to[PATH_MAX];
+    struct stat sb;
+    snprintf(from, sizeof from, "%s/%s", card, c->icon);
+    if (stat(from, &sb) || !S_ISREG(sb.st_mode)) {
+        snprintf(from, sizeof from, "%s/%s/%s", card, c->dir, c->icon);
+        if (stat(from, &sb) || !S_ISREG(sb.st_mode)) return NULL;
+    }
+    snprintf(to, sizeof to, "%s/%s", stub, base);
+    if (symlink(from, to)) { xlog("wincart: cannot link %s: %s", to, strerror(errno)); return NULL; }
+    return base;
 }
 
 static int rm_entry(const char *path, const struct stat *sb, int type, struct FTW *ftw)
@@ -274,9 +298,10 @@ void wincart_shim(const char *card, char *out, size_t outlen)
         char orig[PATH_MAX], path[PATH_MAX], text[PATH_MAX + 256];
         snprintf(orig, sizeof orig, "%s/%s", card, c->kzi);
         snprintf(path, sizeof path, "%s/%s", dir, c->kzi);
-        write_shim_kzi(path, orig, c);
-        snprintf(path, sizeof path, "%s/%s", dir, c->dir);
-        mkdir(path, 0700);
+        char stub[PATH_MAX];
+        snprintf(stub, sizeof stub, "%s/%s", dir, c->dir);
+        mkdir(stub, 0700);
+        write_shim_kzi(path, orig, c, link_icon(card, c, stub));
         snprintf(path, sizeof path, "%s/%s/default.xbe", dir, c->dir);
         if (!write_stub_xbe(path, c)) xlog("wincart: cannot write %s: %s", path, strerror(errno));
         snprintf(path, sizeof path, "%s/%s/.wincart", dir, c->dir);
