@@ -10,6 +10,10 @@ Local use with xbcompat's NAT (the console sees this host as 10.0.2.2):
   tools/liveserver/liveserver.py &
   XBCOMPAT_DNS=127.0.0.1:5353 tools/xodashbuild/run.sh /tmp/xodash
 Start the server before xbcompat so it holds UDP 3074 on this host.
+
+With --insignia it is only a DNS server, as insigniaDNS is: the retail Live names
+Insignia serves point at Insignia (insignia.py), everything else is forwarded,
+and the console signs in to Insignia instead.
 """
 import argparse
 import os
@@ -31,11 +35,31 @@ def log(msg):
 
 
 class Dns:
-    def __init__(self, address, upstream):
+    def __init__(self, address, upstream, zones=None):
         self.address = address
         self.upstream = upstream
+        self.zones = zones      # Insignia's names -> (kind, value); None: every Live name is this server
+        self.resolved = {}      # zone name -> (address, when)
         self.pending = {}   # upstream id -> client address
         self.up = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    def live_address(self, name):
+        """The address a Live name gets, b'' for one with none yet, None for any other name."""
+        if self.zones is None:
+            return self.address if any(name == d or name.endswith('.' + d) for d in LIVE_NAMES) else None
+        if name not in self.zones:
+            return None
+        kind, value = self.zones[name]
+        if kind == 'a':
+            return socket.inet_aton(value)
+        address, when = self.resolved.get(name, (b'', 0))
+        if time.time() - when > 300:
+            try:
+                address = socket.inet_aton(socket.gethostbyname(value))
+                self.resolved[name] = (address, time.time())
+            except OSError as e:
+                log(f'dns: cannot resolve {value} for {name}: {e}')
+        return address
 
     def query(self, sock, data, peer):
         if len(data) < 12:
@@ -48,12 +72,13 @@ class Dns:
         name = '.'.join(labels).lower()
         qtype = int.from_bytes(data[p + 1:p + 3], 'big')
         question = data[12:p + 5]
-        if any(name == d or name.endswith('.' + d) for d in LIVE_NAMES):
-            log(f'dns: {name} -> {socket.inet_ntoa(self.address)}')
+        address = self.live_address(name)
+        if address is not None:
+            log(f'dns: {name} -> {socket.inet_ntoa(address) if address else "(none)"}')
             answer = b''
-            if qtype == 1:
+            if qtype == 1 and address:
                 answer = b'\xc0\x0c' + (1).to_bytes(2, 'big') + (1).to_bytes(2, 'big') + \
-                    (60).to_bytes(4, 'big') + (4).to_bytes(2, 'big') + self.address
+                    (60).to_bytes(4, 'big') + (4).to_bytes(2, 'big') + address
             hdr = data[:2] + b'\x85\x80' + (1).to_bytes(2, 'big') + (1 if answer else 0).to_bytes(2, 'big') + \
                 bytes(4)
             sock.sendto(hdr + question + answer, peer)
@@ -79,7 +104,24 @@ def main():
     ap.add_argument('--db', default=os.path.expanduser('~/.xbcompat-live.json'))
     ap.add_argument('--console-id', action='append', default=[], metavar='FILE',
                     help="an xbcompat hdd's console-id, so that console can sign in (repeatable)")
+    ap.add_argument('--insignia', action='store_true',
+                    help="only DNS, pointing the console at Insignia (insignia.live) instead of this server")
     args = ap.parse_args()
+
+    if args.insignia:
+        import insignia
+        zones = insignia.zones()
+        dns = Dns(None, (args.upstream_dns, 53), zones)
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.bind((args.bind, args.dns_port))
+        log(f'Insignia DNS on {args.bind}:{args.dns_port}: ' + ', '.join(f'{n} -> {v}' for n, (_, v) in zones.items()))
+        while True:
+            ready, _, _ = select.select([s, dns.up], [], [], 1.0)
+            if dns.up in ready:
+                dns.upstream_reply()
+            if s in ready:
+                data, peer = s.recvfrom(65536)
+                dns.query(s, data, peer)
 
     db = dbmod.Db(args.db)
     for path in args.console_id:
