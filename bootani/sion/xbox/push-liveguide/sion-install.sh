@@ -2,8 +2,9 @@
 #
 # Runs on the Sion (install.sh sends the kit, unpacked in /tmp/xbox-liveguide):
 #
-#   /opt/xbcompat/bin/xbcompat     the merged build; the one it replaces, if it
-#                                  had no network card, is kept as xbcompat.pre-live
+#   /opt/xbcompat/bin/xbcompat     the merged build; the one it replaces is kept as
+#                                  xbcompat.prev (and, if it had no network card,
+#                                  as xbcompat.pre-live)
 #   /opt/xbcompat/bin/guide        the Guide's assets
 #   /data/xbox-live/launch-title   runs the Live dashboard on /opt's xbcompat
 #   /data/xbox-live/xodash.hlemap  the Live dashboard's map, made for that
@@ -27,9 +28,13 @@ done
 
 /etc/init.d/S98xbox stop > /dev/null 2>&1
 grep -q XBCOMPAT_DNS $B/xbcompat || cp $B/xbcompat $B/xbcompat.pre-live
+cp $B/xbcompat $B/xbcompat.prev
 cp $K/xbcompat $B/xbcompat.new && chmod 755 $B/xbcompat.new && mv $B/xbcompat.new $B/xbcompat
+rm -rf $B/guide.prev && cp -a $B/guide $B/guide.prev 2> /dev/null
 rm -rf $B/guide.new && mv $K/guide $B/guide.new && rm -rf $B/guide && mv $B/guide.new $B/guide
-sion persist $B/xbcompat $B/xbcompat.pre-live $B/guide > /dev/null
+keep=
+for f in $B/xbcompat.pre-live $B/guide.prev; do [ -e $f ] && keep="$keep $f"; done
+sion persist $B/xbcompat $B/xbcompat.prev $B/guide $keep > /dev/null
 
 if [ -f $L/xodash/xonlinedash.xbe ]; then
 	[ -f $L/xodash.hlemap.own ] || cp $L/xodash.hlemap $L/xodash.hlemap.own
@@ -47,9 +52,9 @@ fi
 
 /etc/init.d/S98xbox start > /dev/null 2>&1
 sleep 10
-if ! pidof xbcompat > /dev/null && [ -f $B/xbcompat.pre-live ]; then
+if ! pidof xbcompat > /dev/null && [ -f $B/xbcompat.prev ]; then
 	echo "the dashboard didn't start on the new xbcompat: putting the old one back"
-	cp $B/xbcompat.pre-live $B/xbcompat && sion persist $B/xbcompat > /dev/null
+	cp $B/xbcompat.prev $B/xbcompat && sion persist $B/xbcompat > /dev/null
 	rm -f /var/run/xbox/dash-failed
 	/etc/init.d/S99theseus stop > /dev/null 2>&1
 	/etc/init.d/S98xbox start > /dev/null 2>&1
