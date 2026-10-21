@@ -333,7 +333,7 @@ esac
 # shellcheck disable=SC2086
 chroot $R /usr/bin/env -i $wenv LIBSEAT_BACKEND=seatd WLR_LIBINPUT_NO_DEVICES=1 \
 	WINEDLLOVERRIDES="$wdll" $padenv INTEL_DEBUG=${WINCART_INTEL_DEBUG-noccs} ${WINCART_GAME_ENV:-} \
-	/bin/sh -c "cd /srv/game && exec gamescope --backend drm -W $ow -H $oh -w 1024 -h 768 -S stretch -f -- $cmd" \
+	/bin/sh -c "cd /srv/game && exec gamescope --backend drm -W $ow -H $oh -w 1024 -h 768 -S stretch -f ${WINCART_GAMESCOPE_ARGS:-} -- $cmd" \
 	> "$state/logs/game.log" 2>&1 &
 gspid=$!
 echo "$gspid" > "$RUN/gamescope.pid"

@@ -522,20 +522,45 @@ int main(int argc, char **argv)
     int W = 1024, H = 768;
     if (getenv("KAZETA_GUIDE_W")) W = atoi(getenv("KAZETA_GUIDE_W"));
     if (getenv("KAZETA_GUIDE_H")) H = atoi(getenv("KAZETA_GUIDE_H"));
-    SDL_Window *win = SDL_CreateWindow("Guide", 0, 0, W, H, SDL_WINDOW_OPENGL | SDL_WINDOW_BORDERLESS | SDL_WINDOW_SKIP_TASKBAR | SDL_WINDOW_HIDDEN);
-    if (!win) { xlog("window: %s", SDL_GetError()); return 1; }
-    mark_overlay(win);
-    SDL_GLContext ctx = SDL_GL_CreateContext(win);
+    // The GL context lives on a window that is never mapped (gamescope never
+    // sees it).  The overlay window is created when the Guide opens and
+    // destroyed when it closes: gamescope keeps an unmapped overlay, and while
+    // it has one it composites the game, which shows blocky artifacts on the
+    // HD 610.  KAZETA_GUIDE_MAPPED=1 keeps one overlay mapped all the time,
+    // as the first version did.
+    const Uint32 wflags = SDL_WINDOW_OPENGL | SDL_WINDOW_BORDERLESS | SDL_WINDOW_SKIP_TASKBAR;
+    SDL_Window *home = SDL_CreateWindow("Guide GL", 0, 0, 16, 16, wflags | SDL_WINDOW_HIDDEN);
+    if (!home) { xlog("window: %s", SDL_GetError()); return 1; }
+    SDL_GLContext ctx = SDL_GL_CreateContext(home);
     if (!ctx) { xlog("GL: %s", SDL_GetError()); return 1; }
-    SDL_GL_SetSwapInterval(1);
     xlog("up: %dx%d, title %08lX %s", W, H, xbe_title_id(), xbe_title_name());
 
-    // The overlay window is mapped only while the Guide is on screen, so the
-    // rest of the time gamescope shows the game as it would with no overlay
-    // (KAZETA_GUIDE_MAPPED=1 keeps it mapped, as the first version did).
     bool always = getenv("KAZETA_GUIDE_MAPPED") && atoi(getenv("KAZETA_GUIDE_MAPPED"));
-    bool mapped = false, shown = false;
-    if (always) { SDL_ShowWindow(win); mapped = true; }
+    SDL_Window *win = 0;
+    bool shown = false;
+    auto open_overlay = [&]() -> bool {
+        win = SDL_CreateWindow("Guide", 0, 0, W, H, wflags | SDL_WINDOW_HIDDEN);
+        if (!win) { xlog("overlay window: %s", SDL_GetError()); return false; }
+        mark_overlay(win);
+        SDL_ShowWindow(win);
+        if (SDL_GL_MakeCurrent(win, ctx)) { xlog("overlay GL: %s", SDL_GetError()); SDL_DestroyWindow(win); win = 0; return false; }
+        SDL_GL_SetSwapInterval(1);
+        return true;
+    };
+    auto close_overlay = [&]() {
+        for (int i = 0; i < 2; i++) {
+            glClearColor(0, 0, 0, 0);
+            glClear(GL_COLOR_BUFFER_BIT);
+            SDL_GL_SwapWindow(win);
+        }
+        glFinish();
+        SDL_GL_MakeCurrent(home, ctx);
+        SDL_DestroyWindow(win);
+        win = 0;
+        shown = false;
+    };
+    if (always) open_overlay();
+    else SDL_GL_MakeCurrent(home, ctx);
     while (!quit_ && !leave_) {
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
@@ -545,20 +570,9 @@ int main(int argc, char **argv)
         if (ui_ >= 0) ui_service();
         bool draw = guide_frame(W, H);
         ui_forward();
-        if (draw && !mapped) { SDL_ShowWindow(win); mapped = true; }
-        if (!draw && mapped && !always) {
-            // Leave a transparent frame behind before unmapping: gamescope
-            // can keep showing an overlay's last buffer after it goes away.
-            for (int i = 0; i < 3; i++) {
-                glClearColor(0, 0, 0, 0);
-                glClear(GL_COLOR_BUFFER_BIT);
-                SDL_GL_SwapWindow(win);
-            }
-            glFinish();
-            SDL_HideWindow(win);
-            mapped = shown = false;
-        }
-        if (!mapped) { SDL_Delay(16); continue; }
+        if (draw && !win && !open_overlay()) { SDL_Delay(16); continue; }
+        if (!draw && win && !always) close_overlay();
+        if (!win) { SDL_Delay(16); continue; }
         int fw, fh;
         SDL_GL_GetDrawableSize(win, &fw, &fh);
         glViewport(0, 0, fw, fh);
