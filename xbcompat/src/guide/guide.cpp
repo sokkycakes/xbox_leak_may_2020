@@ -757,14 +757,16 @@ static void collect_rows(xui::Node* n, bool underRow) {
 }
 
 // Narrows the half-open frame by n canvas units each side: the blades,
-// the panel and its reflection, the clock, the close box and the gamer tag
-// move in, and the menus' rows are squeezed about their middle, so the
-// content column stays centred in the panel.
+// the panel and its reflection, the close box and the gamer tag move in,
+// and the menus' rows are squeezed about their middle, so the content
+// column stays centred in the panel.  The clock stays put: GFWL has it well
+// in from the edge, and narrowed it then sits by the blade as in the full
+// view (sokky: "too far in the center").
 static void narrow_frame(float n) {
     static const struct { const char* id; float dx, dw; } adj[] = {
         { "leftBlade", 1, 0 }, { "reflectLeft", 1, 0 },
         { "rightBlade", -1, 0 }, { "reflectRight", -1, 0 }, { "GamerTag", -1, 0 },
-        { "CloseX", -1, 0 }, { "DateTimeTextId", -1, 0 },
+        { "CloseX", -1, 0 },
         { "backpanel", 1, -2 }, { "reflectMid", 1, -2 },
     };
     for (unsigned i = 0; i < sizeof adj / sizeof adj[0]; i++) {
