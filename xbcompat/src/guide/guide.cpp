@@ -305,13 +305,21 @@ float text_zoom_for(xui::Node* n, float zoom) {
 
 // Frolick's page has white text for its slate band; on the Guide's grey
 // panel it takes the Guide's black (sokky), keeping each text's fade, and
-// so do the clock and prompts the full view would turn white.
+// so does the clock the full view would turn white (the prompts stay white).
 xui::Color text_color_for(xui::Node* n, xui::Color col) {
     if (!g.game || g.menu != g.game) return col;
-    if (!strcmp(n->id(), "DateTimeTextId") || (n->owner && !strncmp(n->owner->id(), "Legend_", 7)))
-        return col & 0xff000000;
+    if (!strcmp(n->id(), "DateTimeTextId")) return col & 0xff000000;
     for (xui::Node* p = n; p; p = p->parent)
         if (p == g.game->root) return col & 0xff000000;
+    return col;
+}
+
+// Its dark shadows, made for white text, become the light ones the Guide's
+// own black text has (hudskin's 0x7debebeb).
+xui::Color text_shadow_for(xui::Node* n, xui::Color col) {
+    if (!g.game || g.menu != g.game || (col & 0xff) >= 0x80) return col;
+    for (xui::Node* p = n; p; p = p->parent)
+        if (p == g.game->root) return (col & 0xff000000) | 0xebebeb;
     return col;
 }
 
@@ -597,6 +605,7 @@ bool load() {
     g.r->ascentEm = 1.12f;
     g.r->textZoomFor = text_zoom_for;
     g.r->textColorFor = text_color_for;
+    g.r->textShadowFor = text_shadow_for;
     g.frame = new xui::Scene(g.frameEl, g.skinEl);
     g.frame->setFocus(0);
     g.hud = g.frame->find("HUDRootScene");

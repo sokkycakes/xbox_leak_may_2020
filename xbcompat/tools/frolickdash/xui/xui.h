@@ -214,6 +214,7 @@ struct Renderer {
     float textZoom;          // text drawn this much larger than its PointSize, about its box (1: as authored)
     float (*textZoomFor)(Node* n, float zoom);  // optional per-text override of textZoom
     Color (*textColorFor)(Node* n, Color col);  // optional per-text override of its colour
+    Color (*textShadowFor)(Node* n, Color col); // and of its drop shadow's
 
 private:
     struct TexEntry { char* key; Texture tex; int w, h; };
