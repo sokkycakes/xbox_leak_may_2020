@@ -303,6 +303,18 @@ float text_zoom_for(xui::Node* n, float zoom) {
     return zoom;
 }
 
+// Frolick's page has white text for its slate band; on the Guide's grey
+// panel it takes the Guide's black (sokky), keeping each text's fade, and
+// so do the clock and prompts the full view would turn white.
+xui::Color text_color_for(xui::Node* n, xui::Color col) {
+    if (!g.game || g.menu != g.game) return col;
+    if (!strcmp(n->id(), "DateTimeTextId") || (n->owner && !strncmp(n->owner->id(), "Legend_", 7)))
+        return col & 0xff000000;
+    for (xui::Node* p = n; p; p = p->parent)
+        if (p == g.game->root) return col & 0xff000000;
+    return col;
+}
+
 void hide_drawn(xui::Scene* s, const char* id) {
     xui::Node* n = s->find(id);
     if (!n) return;
@@ -489,9 +501,8 @@ void game_page() {
     set_text(g.game, "labHeader", "Now Playing");
     set_text(g.game, "labGameTitle", name);
     set_image(g.game, "imgGameIcon", g.res.tile ? "titleimage.png" : "");
-    set_text(g.game, "btnViewAchievements", "Resume Game");
+    set_text(g.game, "btnViewAchievements", "Controller Configuration");  // sokky
     set_show(g.game, "btnBrowseDownloads", false);       // Install Game: the game is running
-    set_text(g.game, "btnManageGameFiles", "Controller Configuration");  // sokky
     set_str(g.game, "btnManageGameFiles", "NavDown", "");
     hide_drawn(g.game, "body");  // Frolick's slate band: the page sits on the Guide's panel (sokky)
     static const char* legends[] = { "legend_A", "legend_B", "legend_X", "legend_Y" };  // the frame has its own
@@ -585,6 +596,7 @@ bool load() {
     // the menu rows and the card's header strip.
     g.r->ascentEm = 1.12f;
     g.r->textZoomFor = text_zoom_for;
+    g.r->textColorFor = text_color_for;
     g.frame = new xui::Scene(g.frameEl, g.skinEl);
     g.frame->setFocus(0);
     g.hud = g.frame->find("HUDRootScene");
@@ -783,6 +795,8 @@ void show_menu(xui::Scene* m, const char* focus) {
     set_legend("Legend_A", m == g.volume ? 0 : "Select");
     const char* back = page_legend(m, "btnB", "btnB");
     set_legend("Legend_B", back && back[0] ? back : "Back");
+    // Y leaves for the Dashboard from the top screen only, not sub menus (sokky)
+    set_legend("Legend_Y", m == g.main || m == g.settings ? "Xbox Dashboard" : 0);
 }
 
 void open_guide() {
@@ -824,8 +838,8 @@ bool press(const char* id) {
         show_menu(g.game, "btnViewAchievements");
         if (xui::Node* pg = g.game->find("page")) pg->play("Open");
     }
-    else if (!strcmp(id, "btnViewAchievements")) close_guide();  // Resume Game
-    else if (!strcmp(id, "btnManageGameFiles")) return false;  // Controller Configuration: not here yet
+    else if (!strcmp(id, "btnViewAchievements")) return false;  // Controller Configuration: not here yet
+    else if (!strcmp(id, "btnManageGameFiles")) return false;  // Game Storage: not here yet
     else if (!strcmp(id, "btnOptions")) leave();  // Exit Game
     else if (!strcmp(id, "btnBlank1") || !strcmp(id, "btnQuickChat")) return false;  // Quick Launch, Downloads
     else if (!strcmp(id, "btnOnlineStatus")) { settings_text(); show_menu(g.volume, "sliderVolume"); }
@@ -886,14 +900,12 @@ void step(double t) {
             if (t != g.tab) { play(SndTab); show_tab(t, true); }
             break;
         }
-        if (down & GUIDE_Y) { leave(); break; }
+        if ((down & GUIDE_Y) && home) { leave(); break; }
         if (down & GUIDE_A) {
             if (g.menu->focus && g.menu != g.volume) {
                 const char* id = g.menu->focus->id();
                 g.menu->press();
-                bool resume = !strcmp(id, "btnViewAchievements");  // plays the close sound
-                bool did = press(id);
-                if (!resume) play(did ? SndSelect : SndInactive);
+                play(press(id) ? SndSelect : SndInactive);
             }
             break;
         }

@@ -213,6 +213,7 @@ struct Renderer {
     float ascentEm;          // baseline below a text box's top, in ems (0: the font's own ascent)
     float textZoom;          // text drawn this much larger than its PointSize, about its box (1: as authored)
     float (*textZoomFor)(Node* n, float zoom);  // optional per-text override of textZoom
+    Color (*textColorFor)(Node* n, Color col);  // optional per-text override of its colour
 
 private:
     struct TexEntry { char* key; Texture tex; int w, h; };

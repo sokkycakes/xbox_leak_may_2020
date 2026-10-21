@@ -79,7 +79,7 @@ struct Font {
     ~Font() { delete [] data; }
 };
 
-Renderer::Renderer(Backend* b, Resources* r) : be(b), res(r), defaultTextColor(0xffffffff), ascentEm(0), textZoom(1), textZoomFor(0), font(0), clipping(false) {}
+Renderer::Renderer(Backend* b, Resources* r) : be(b), res(r), defaultTextColor(0xffffffff), ascentEm(0), textZoom(1), textZoomFor(0), textColorFor(0), font(0), clipping(false) {}
 
 Renderer::~Renderer()
 {
@@ -812,6 +812,7 @@ void Renderer::text(Node* n, const Affine& m, float alpha, Blend blend)
             float qx = (float)floor(cx - inkx - 1 + 0.5f);
             float qy = (float)floor(cy + (y0 + y1) / 2.0f * lfs - (float)ceil(font->ascent * lfs) + 0.5f);
             Color col = propC(n->props, "TextColor", defaultTextColor);
+            if (textColorFor) col = textColorFor(n, col);
             quad(tex, blend, aff(1, 0, 0, 1, qx, qy), 0, 0, (float)iw, (float)ih, 0, 0, 1, 1, col, alpha);
             return;
         }
@@ -859,6 +860,7 @@ void Renderer::text(Node* n, const Affine& m, float alpha, Blend blend)
     if (style & styleCenterV) y = (h - total) / 2;
     else if (zoom != 1) y = total * (1 - 1 / zoom) / -2;  // grow about the authored lines' middle
     Color col = propC(n->props, "TextColor", defaultTextColor);
+    if (textColorFor) col = textColorFor(n, col);
     Color shadow = propC(n->props, "DropShadowColor", 0);
     Affine inv = aff(1 / scale, 0, 0, 1 / scale, 0, 0);
     for (int i = 0; i < nl; i++) {
