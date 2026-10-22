@@ -46,7 +46,18 @@ backgrounds and sprites, 3D, HBlank DMA effects, display capture with 3D on both
 blending. 2D and light 3D cost well under 2 KB a frame. Dense 3D models cost 42-45 KB a frame
 raw and 5-17 KB with zlib. Details are in the project files at `sionlink/mirror-test/`.
 
+## Options
+- `--half 1`: 30 fps. Every other frame is sent and the client shows each for two. A skipped
+  frame's 3D commands are parsed and only the state they leave behind (matrices, material,
+  lights, polygon/texture attributes, color, viewport) is sent; frames with display capture are
+  all sent.
+- `--gxdelta 1`: 3D commands that repeat from the previous bundle are sent as copies of it.
+- `--gamecode XXXX`: for prototypes whose game code melonDS's cart list gives to another game.
+
+Mario Kart DS (kiosk demo, menus and a race) with `--gxdelta 1`: every frame pixel-identical at
+60 and 30 fps, the race at about 40 KB/s with zlib.
+
 ## Not handled yet
 - Main-memory display mode (DISPCNT mode 3).
-- Compression, and caching 3D command lists that repeat from frame to frame.
-- Commercial games, real hardware, and a live link.
+- Compression on the client (the sizes above with zlib are what a link would carry).
+- Real hardware and a live link.

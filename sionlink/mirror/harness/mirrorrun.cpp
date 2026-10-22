@@ -8,6 +8,7 @@
 //     --stats FILE     per-frame bundle sizes as CSV
 //     --lang N         firmware language (0 Japanese, 1 English, ...)
 //     --half 1         30 fps: record every other frame, the client shows each for two
+//     --gxdelta 1      send 3D commands as copies from the previous bundle's where they repeat
 //     --gamecode XXXX  replace the header's game code, for prototypes whose code melonDS's
 //                      cart list gives to another game (wrong cart/save type)
 //
@@ -20,6 +21,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <unordered_map>
 #include <thread>
 #include <mutex>
 #include <condition_variable>
@@ -424,6 +426,66 @@ public:
         full = false;
     }
 
+    // ---- 3D commands as copies from the previous bundle's (format: MREC_GXDELTA)
+    bool gxDelta = false;
+    std::vector<u8> prevGX;
+
+    std::vector<u8> DeltaGX(const std::vector<u8>& curb)
+    {
+        const u32* P = (const u32*)prevGX.data();
+        const u32* N = (const u32*)curb.data();
+        u32 np = prevGX.size() / 4, nn = curb.size() / 4;
+        const u32 K = 4;  // shortest copy, in words
+        auto key = [](const u32* w) {
+            u64 h = 1469598103934665603ull;
+            for (u32 i = 0; i < 4; i++) h = (h ^ w[i]) * 1099511628211ull;
+            return h;
+        };
+        std::unordered_map<u64, u32> at;
+        at.reserve(np);
+        for (u32 i = 0; i + K <= np; i++)
+            at[key(P + i)] = i;  // keeps the last occurrence
+
+        std::vector<u32> out, lit;
+        out.push_back(nn);
+        auto flush = [&]() {
+            if (lit.empty()) return;
+            out.push_back((u32)lit.size());
+            out.insert(out.end(), lit.begin(), lit.end());
+            lit.clear();
+        };
+        u32 expect = ~0u;  // where the last copy ended: the usual place for the next one
+        for (u32 i = 0; i < nn;)
+        {
+            u32 src = ~0u, len = 0;
+            auto tryAt = [&](u32 s) {
+                u32 l = 0;
+                while (i + l < nn && s + l < np && N[i + l] == P[s + l] && l < 0x7FFFFFFF) l++;
+                if (l > len) { len = l; src = s; }
+            };
+            if (expect < np) tryAt(expect);
+            if (len < K && i + K <= nn)
+            {
+                auto it = at.find(key(N + i));
+                if (it != at.end()) tryAt(it->second);
+            }
+            if (len >= K)
+            {
+                flush();
+                out.push_back(0x80000000u | len);
+                out.push_back(src);
+                i += len;
+                expect = src + len;
+            }
+            else
+                lit.push_back(N[i++]);
+        }
+        flush();
+        std::vector<u8> b(out.size() * 4);
+        memcpy(b.data(), out.data(), b.size());
+        return b;
+    }
+
     u32 Rows(u16 type, const u8* cur, u8* prev)
     {
         std::vector<u8>& b = part2D;
@@ -494,9 +556,9 @@ public:
 
         if (!ready.empty())
         {
-            size_t at = BeginRec(buf, MREC_GX), s0 = buf.size(), cntAt = buf.size();
+            std::vector<u8> gx;
             u32 runs = 0;
-            Put(buf, runs);
+            Put(gx, runs);
             for (size_t i = 0; i < ready.size();)
             {
                 size_t j = i;
@@ -504,16 +566,33 @@ public:
                     j++;
                 u16 code = ready[i].size == 4 ? 0 : ready[i].size == 2 ? 1 : 2;
                 mirror_run r {ready[i].off, (u16)((j - i) | (code << 14))};
-                Put(buf, r);
-                for (size_t k = i; k < j; k++) Put(buf, ready[k].val);
+                Put(gx, r);
+                for (size_t k = i; k < j; k++) Put(gx, ready[k].val);
                 runs++;
                 i = j;
             }
-            memcpy(&buf[cntAt], &runs, 4);
-            EndRec(buf, at);
-            sz.gx = buf.size() - s0;
+            memcpy(&gx[0], &runs, 4);
             ready.clear();
+
+            std::vector<u8> delta;
+            if (gxDelta && !prevGX.empty() && (delta = DeltaGX(gx), delta.size() < gx.size()))
+            {
+                size_t at = BeginRec(buf, MREC_GXDELTA), s0 = buf.size();
+                PutBytes(buf, delta.data(), delta.size());
+                EndRec(buf, at);
+                sz.gx = buf.size() - s0;
+            }
+            else
+            {
+                size_t at = BeginRec(buf, MREC_GX), s0 = buf.size();
+                PutBytes(buf, gx.data(), gx.size());
+                EndRec(buf, at);
+                sz.gx = buf.size() - s0;
+            }
+            prevGX.swap(gx);
         }
+        else
+            prevGX.clear();
 
         PutBytes(buf, part2D.data(), part2D.size());
 
@@ -599,7 +678,7 @@ int main(int argc, char** argv)
 {
     if (argc < 3)
     {
-        fprintf(stderr, "usage: %s ROM FRAMES [--input F] [--record F] [--frames F] [--shots DIR] [--every N] [--stats F] [--boottype N] [--lang N] [--gamecode XXXX] [--half 1]\n", argv[0]);
+        fprintf(stderr, "usage: %s ROM FRAMES [--input F] [--record F] [--frames F] [--shots DIR] [--every N] [--stats F] [--boottype N] [--lang N] [--gamecode XXXX] [--half 1] [--gxdelta 1]\n", argv[0]);
         return 1;
     }
     const char* rompath = argv[1];
@@ -610,7 +689,7 @@ int main(int argc, char** argv)
     int lang = -1;
     const char* gamecode = nullptr;
     const char* clientIdx = nullptr;
-    bool half = false;
+    bool half = false, gxDelta = false;
     for (int i = 3; i + 1 < argc; i += 2)
     {
         std::string o = argv[i];
@@ -625,6 +704,7 @@ int main(int argc, char** argv)
         else if (o == "--gamecode") gamecode = argv[i + 1];
         else if (o == "--client-index") clientIdx = argv[i + 1];
         else if (o == "--half") half = atoi(argv[i + 1]) != 0;
+        else if (o == "--gxdelta") gxDelta = atoi(argv[i + 1]) != 0;
         else { fprintf(stderr, "unknown option %s\n", o.c_str()); return 1; }
     }
 
@@ -668,6 +748,7 @@ int main(int argc, char** argv)
     Recorder rec;
     rec.nds = nds.get();
     rec.half = half;
+    rec.gxDelta = gxDelta;
     if (record)
     {
         rec.out = fopen(record, "wb");
@@ -704,6 +785,24 @@ int main(int argc, char** argv)
         {
             fwrite(top, 4, 256 * 192, fo);
             fwrite(bot, 4, 256 * 192, fo);
+        }
+        if (const char* rd = getenv("MIRROR_REGDUMP"))
+        {
+            // display state at the end of frame N: MIRROR_REGDUMP=N
+            if (f == (u32)atoi(rd))
+            {
+                GPU& g = nds->GPU;
+                fprintf(stderr, "f%u VRAMCNT", f);
+                for (int b = 0; b < 9; b++) fprintf(stderr, " %02x", g.VRAMCNT[b]);
+                fprintf(stderr, " DISPCNT A %08x B %08x POWCNT %04x\n", g.GPU2D_A.DispCnt, g.GPU2D_B.DispCnt, nds->PowerControl9);
+                for (int b = 0; b < 9; b++)
+                {
+                    u32 sum = 0;
+                    for (u32 i = 0; i < BankSize[b]; i++) sum = sum * 31 + g.VRAM[b][i];
+                    fprintf(stderr, " bank%d %08x", b, sum);
+                }
+                fprintf(stderr, "\n");
+            }
         }
         if (getenv("MIRROR_3DDEBUG") && f % 50 == 25)
         {

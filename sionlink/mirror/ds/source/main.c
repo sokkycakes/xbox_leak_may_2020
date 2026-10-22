@@ -42,33 +42,79 @@ static const mirror_rec* nextRec(const mirror_rec* r)
     return (const mirror_rec*)((const u8*)(r + 1) + r->len);
 }
 
-static void pushGX(const mirror_hdr* h)
+// The 3D commands of the last bundle read, as an MREC_GX payload. A delta
+// record copies from the one before.
+static u32* gxPayload;
+static u32 gxWords;
+
+static void decodeGX(const mirror_hdr* h)
 {
-    const mirror_rec* r = (const mirror_rec*)(h + 1);
-    for (; r->type != MREC_END; r = nextRec(r))
+    u32* prev = gxPayload;
+    u32 prevWords = gxWords;
+    gxPayload = NULL;
+    gxWords = 0;
+    for (const mirror_rec* r = (const mirror_rec*)(h + 1); r->type != MREC_END; r = nextRec(r))
     {
-        if (r->type != MREC_GX)
-            continue;
         const u32* p = (const u32*)(r + 1);
-        u32 runs = *p++;
-        for (u32 i = 0; i < runs; i++)
+        if (r->type == MREC_GX)
         {
-            const mirror_run* run = (const mirror_run*)p++;
-            u32 addr = 0x04000000 + run->off;
-            u32 n = run->info & 0x3FFF, code = run->info >> 14;
-            if (run->off == 0x304)
-            {
-                // power control, in order with the 3D writes; screen swap stays as the 2D state set it
-                for (u32 k = 0; k < n; k++)
-                    REG_POWERCNT = (*p++ & 0x7FFF) | (REG_POWERCNT & 0x8000);
-            }
-            else if (code == 0)
-                for (u32 k = 0; k < n; k++) *(vu32*)addr = *p++;
-            else if (code == 1)
-                for (u32 k = 0; k < n; k++) *(vu16*)addr = *p++;
-            else
-                for (u32 k = 0; k < n; k++) *(vu8*)addr = *p++;
+            gxWords = r->len / 4;
+            gxPayload = malloc(r->len);
+            if (gxPayload)
+                memcpy(gxPayload, p, r->len);
         }
+        else if (r->type == MREC_GXDELTA)
+        {
+            u32 n = *p++, i = 0;
+            gxPayload = malloc(n * 4);
+            if (!gxPayload)
+                break;
+            gxWords = n;
+            while (i < n)
+            {
+                u32 op = *p++;
+                u32 len = op & 0x7FFFFFFF;
+                if (op & 0x80000000)
+                {
+                    u32 src = *p++;
+                    if (prev && src + len <= prevWords)
+                        memcpy(gxPayload + i, prev + src, len * 4);
+                }
+                else
+                {
+                    memcpy(gxPayload + i, p, len * 4);
+                    p += len;
+                }
+                i += len;
+            }
+        }
+    }
+    free(prev);
+}
+
+static void pushGX(void)
+{
+    if (!gxPayload)
+        return;
+    const u32* p = gxPayload;
+    u32 runs = *p++;
+    for (u32 i = 0; i < runs; i++)
+    {
+        const mirror_run* run = (const mirror_run*)p++;
+        u32 addr = 0x04000000 + run->off;
+        u32 n = run->info & 0x3FFF, code = run->info >> 14;
+        if (run->off == 0x304)
+        {
+            // power control, in order with the 3D writes; screen swap stays as the 2D state set it
+            for (u32 k = 0; k < n; k++)
+                REG_POWERCNT = (*p++ & 0x7FFF) | (REG_POWERCNT & 0x8000);
+        }
+        else if (code == 0)
+            for (u32 k = 0; k < n; k++) *(vu32*)addr = *p++;
+        else if (code == 1)
+            for (u32 k = 0; k < n; k++) *(vu16*)addr = *p++;
+        else
+            for (u32 k = 0; k < n; k++) *(vu8*)addr = *p++;
     }
 }
 
@@ -81,11 +127,22 @@ static void hblankHandler(void)
     u32 target = REG_VCOUNT + 1;
     if (target >= 192)
         return;
+    // lines already passed (this IRQ came late) are still written: later frames
+    // only send what changed from the end-of-frame values
     while (lineNext < lineCount && lineList[lineNext].line <= target)
     {
         const mirror_line* l = &lineList[lineNext++];
-        if (l->line == target)
-            *(vu16*)(0x04000000 + l->off) = l->val;
+        *(vu16*)(0x04000000 + l->off) = l->val;
+    }
+}
+
+// finish the current frame's line changes, so the registers hold its end-of-frame values
+static void flushLines(void)
+{
+    while (lineNext < lineCount)
+    {
+        const mirror_line* l = &lineList[lineNext++];
+        *(vu16*)(0x04000000 + l->off) = l->val;
     }
 }
 
@@ -209,6 +266,7 @@ static volatile u32 holdFrames;  // 30 fps mode: VBlanks left that keep showing 
 static void vblankHandler(void)
 {
     mirror_hdr* h = pending2D;
+    flushLines();
     if (holdFrames)
     {
         holdFrames--;
@@ -248,15 +306,19 @@ int main(int argc, char** argv)
     }
 
     mirror_hdr* cur = readBundle(f);
+    if (cur)
+        decodeGX(cur);
     mirror_hdr* old = NULL;
     while (cur)
     {
         // start early in the visible lines so the 3D engine reaches SWAP_BUFFERS before VBlank
         while (REG_VCOUNT >= 96)
             ;
-        pushGX(cur);
+        pushGX();
         pending2D = cur;
         mirror_hdr* next = readBundle(f);
+        if (next)
+            decodeGX(next);
         while (pending2D || holdFrames)
             ;
         free(old);

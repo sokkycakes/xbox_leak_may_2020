@@ -33,7 +33,14 @@ enum {
     MREC_OAM   = 5,  // same layout as MREC_PAL
     MREC_VRAM  = 6,  // u32 count, then count x (u32 bank<<16 | block, 512 bytes)
     MREC_LINES = 7,  // u32 count, then count x mirror_line, sorted by line
+    MREC_GXDELTA = 8, // an MREC_GX payload built from the previous bundle's (see below)
 };
+
+// MREC_GXDELTA: u32 payload length in words, then ops until it is complete:
+//   u32 n (bit 31 clear) followed by n literal words, or
+//   u32 0x80000000|n, u32 src: copy n words from word src of the previous
+//   bundle's GX payload (the one before this bundle, after its own delta was
+//   undone). A bundle without 3D commands leaves no previous payload.
 
 typedef struct {
     uint16_t type;
