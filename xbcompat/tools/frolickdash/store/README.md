@@ -10,7 +10,7 @@ on its hard disk, E:\FROLICK\STORE (/data/xbox/hdd/partition1/FROLICK/STORE):
 | catalog.txt | the helper | Spotlight's tabs and items: advancedsearch.php per tab, /metadata/{id} per item (title, description, the game's files and their size) |
 | img/*.png | the helper | each item's tile (/services/img/{id}, made a 96x72 PNG: the dashboard decodes PNG) |
 | queue.txt | the dashboard (nodes/Downloads.cpp) | the download queue, the active download first, paused or not |
-| status.txt | the helper, every second | whether the Archive answers, the active download's progress, what the others have on disk, which have finished |
+| status.txt | the helper, every second | whether the Archive answers, the active download's progress, what the others have on disk, which have finished, which history items' cards were deleted (gone) |
 | history.txt | the dashboard | what finished (Download History) |
 
 The dashboard side is nodes/Store.cpp (the catalog, `theStore`) and
@@ -70,3 +70,11 @@ holding gamescope on a blank screen. Once nothing but those services has
 run for 15 seconds, the helper kills Wine (its services ignore SIGTERM)
 and stops gamescope, and wincart-run returns to
 the dashboard.
+
+Deleting a store game from a Memory screen (its E:\Games stub) uninstalls
+it (uninstall.go): the helper then removes its cart folder, .kzi, Wine
+prefix (/data/wincarts/<cid>) and download record, and status.txt says
+"gone" for it so the dash drops it from its history and the store offers it
+again. The stub holds frolick-size.dat, a sparse file as long as the cart
+folder and prefix, so the Memory screens show the game's real size without
+it taking that space on E:.

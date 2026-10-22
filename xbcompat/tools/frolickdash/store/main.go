@@ -13,7 +13,8 @@
 //	             download queue, first line the active download
 //	status.txt   written here: whether the Archive answers, what the active
 //	             download is doing, what the others already have on disk,
-//	             and which queued items have finished
+//	             and which queued items have finished; "gone" for the
+//	             history's items whose card was deleted (uninstall.go)
 //
 // Downloads go to /data/frolick/downloads/<identifier>/: the item's game
 // files (pickFiles), fetched from /download/{id}/{file} with redirects
@@ -617,6 +618,21 @@ func writeStatus(queue []queued) {
 	if c.ID != "" {
 		fmt.Fprintf(&out, "active\t%s\t%s\t%d\t%d\t%s\n", c.ID, c.State, c.Done, c.Total, clean(c.Detail))
 	}
+	// downloads whose card was deleted from the dashboard: out of the
+	// dash's history, so the store offers them again
+	if st, err := os.Stat(*dlDir); err == nil && st.IsDir() {
+		queued := map[string]bool{}
+		for _, q := range queue {
+			queued[q.ID] = true
+		}
+		hist, _ := os.ReadFile(filepath.Join(*storeDir, "history.txt"))
+		for _, line := range strings.Split(string(hist), "\n") {
+			f := strings.Split(strings.TrimRight(line, "\r"), "\t")
+			if len(f) >= 2 && f[0] == "h" && !queued[f[1]] && !finished(f[1]) {
+				fmt.Fprintf(&out, "gone\t%s\n", f[1])
+			}
+		}
+	}
 	for _, q := range queue {
 		if finished(q.ID) {
 			fmt.Fprintf(&out, "done\t%s\n", q.ID)
@@ -887,6 +903,7 @@ func main() {
 			lastWatch = time.Now()
 			recheckInstallers()
 			watchInstalls()
+			syncCards()
 		}
 		watchSession()
 		select {

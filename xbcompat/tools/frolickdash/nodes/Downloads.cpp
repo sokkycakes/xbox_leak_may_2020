@@ -14,6 +14,8 @@
 //                  active <identifier> <state> <done> <total> <detail>
 //                  have <identifier> <bytes on disk>
 //                  done <identifier>
+//                  gone <identifier>   (its game was deleted: out of the
+//                                       history, so it can be had again)
 //   history.txt  written here: what finished (Download History)
 //                  h <identifier> <MB> <kind> <title>
 //
@@ -358,6 +360,18 @@ void CDownloads::ReadStatus()
             int i = Find(f[1]);
             if (i >= 0)
                 m_rg[i].nDoneMB = (float)(_atoi64(f[2]) / 1024) / 1024.0f;
+        }
+        else if (strcmp(f[0], "gone") == 0 && k >= 2)
+        {
+            for (int h = 0; h < m_nHist; h++)
+            {
+                if (strcmp(m_rgHist[h].szId, f[1]) != 0)
+                    continue;
+                memmove(&m_rgHist[h], &m_rgHist[h + 1], (m_nHist - h - 1) * sizeof(DLITEM));
+                m_nHist--;
+                SaveHistory();
+                break;
+            }
         }
         else if (strcmp(f[0], "done") == 0 && k >= 2)
         {
