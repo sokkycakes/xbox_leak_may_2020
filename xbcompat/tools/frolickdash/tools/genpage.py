@@ -383,8 +383,9 @@ def spot_row_visual(mp):
 def spot_meta_visual(mp):
     v = re.search(r"<XuiVisual>\n<Properties>\n <Id>metaScene_2lineFocus_Long</Id>.*?</XuiVisual>", mp, flags=re.S).group(0)
     v = v.replace("<Id>metaScene_2lineFocus_Long</Id>", "<Id>metaScene_spot</Id>", 1)
-    v = re.sub(r"(<Id>Pane_txt1</Id>(?:\n[^\n]*){0,3}?\n <Position>)17.56,108,0", r"\g<1>17.56,138,0", v, count=1)
-    v = re.sub(r"(<Id>Pane_txt</Id>(?:\n[^\n]*){0,3}?\n <Position>)17.56,0,0", r"\g<1>17.56,8,0", v, count=1)
+    v = re.sub(r"(<Id>Pane_txt1</Id>(?:\n[^\n]*){0,3}?\n <Position>)17.56,108,0", r"\g<1>%g,%g,0" % (17.56 + SPOT_BOX_INSET + 8, 2 * round((74 * 5 - 2) * SPOT_TITLE_BAND) + 8), v, count=1)
+    v = re.sub(r"(<Id>Pane_txt</Id>(?:\n[^\n]*){0,3}?\n <Position>)17.56,0,0", r"\g<1>%g,%g,0" % (17.56 + SPOT_BOX_INSET + 8, SPOT_BAND_Y + 6), v, count=1)
+    v = re.sub(r"(<Id>Pane_txt1?</Id>\n <Width>)383(</Width>)", r"\g<1>360\g<2>", v)
     return restep_pane(v, SPOT_PITCH)
 
 
@@ -396,6 +397,13 @@ def spot_meta_visual(mp):
 # own sizes, and the top strips (drawn upward from the row) grow by the
 # same amount so they still reach the pane's top.
 SPOT_PITCH = 74
+# The details box: Metapane inset from the pane's edge strip, the title
+# band the reference's 23% of the pane, the image band as tall again, the
+# description under them; bands in Frolick's slate (a darker wash).
+SPOT_BOX_INSET = 8
+SPOT_BAND_X, SPOT_BAND_Y = 12, 6
+SPOT_TITLE_BAND = 0.23
+SPOT_BAND_FILL = "0x38000000"
 
 
 def restep_pane(v, pitch):
@@ -731,8 +739,17 @@ def spotlight_page(spec):
     out.append(text("labTotal", LIST_X + 13, list_y + 74 * rows, 112, 26, 16, 0x4010, ITEM_REST, presenter=False, value="", shadow=SHADOW))
     # the pane and its edge strips, clipped to the body (the strips run on
     # past the pane's foot)
-    meta = label("metaSpot", META_X, list_y, 420, 74 * rows - 2, "metaScene_spot", "", " <Data1></Data1>")
-    out.append(clip_group("metaClip", 0, list_y - 16, CANVAS_W, BODY_END - (list_y - 16), [moved(meta, 0, -(list_y - 16))]))
+    # the details box (the later skin's Metapane) under the pane's text,
+    # with the reference's darker title band and the image band below it
+    ph = 74 * rows - 2
+    box = [label("metaBox", META_X + SPOT_BOX_INSET, list_y, 420 - SPOT_BOX_INSET, ph + 10, "Metapane")]   # (its foot sits 10 inside)
+    bx, bw = META_X + SPOT_BOX_INSET + SPOT_BAND_X, 420 - SPOT_BOX_INSET - 2 * SPOT_BAND_X
+    title_h = round(ph * SPOT_TITLE_BAND)
+    box.append(figure("metaTitleBand", bx, list_y + SPOT_BAND_Y, bw, title_h - SPOT_BAND_Y, solid(SPOT_BAND_FILL)))
+    box.append(figure("metaImageLine", bx, list_y + 2 * title_h, bw, 2, solid(SPOT_BAND_FILL)))
+    meta = label("metaSpot", META_X, list_y, 420, ph, "metaScene_spot", "", " <Data1></Data1>")
+    out.append(clip_group("metaClip", 0, list_y - 16, CANVAS_W, BODY_END - (list_y - 16),
+                          [moved(b, 0, -(list_y - 16)) for b in box + [meta]]))
     out.append(text("txt_EmptyList", LIST_X + SPOT_TEXT_X, list_y + 14, 330, 40, 18, 0x4010, ITEM_REST, presenter=False,
                     value="Nothing here yet.", shadow=SHADOW))
     return out + legends(spec)
