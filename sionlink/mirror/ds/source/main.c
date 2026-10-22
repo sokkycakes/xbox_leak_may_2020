@@ -204,10 +204,17 @@ volatile u32 mirrorStats[4] __attribute__((used)) = {0x5354524D, 0, 0, 0}; // "M
 // from the IRQ, so it lands in the same VBlank as its SWAP_BUFFERS however long
 // the main loop spends reading.
 static mirror_hdr* volatile pending2D;
+static volatile u32 holdFrames;  // 30 fps mode: VBlanks left that keep showing the current frame
 
 static void vblankHandler(void)
 {
     mirror_hdr* h = pending2D;
+    if (holdFrames)
+    {
+        holdFrames--;
+        lineNext = 0;
+        return;
+    }
     if (!h)
     {
         mirrorStats[2]++;
@@ -215,6 +222,8 @@ static void vblankHandler(void)
         return;
     }
     apply2D(h);
+    if (h->flags & MIRROR_FLAG_HOLD)
+        holdFrames = 1;
     mirrorStats[1]++;
     pending2D = NULL;
 }
@@ -248,7 +257,7 @@ int main(int argc, char** argv)
         pushGX(cur);
         pending2D = cur;
         mirror_hdr* next = readBundle(f);
-        while (pending2D)
+        while (pending2D || holdFrames)
             ;
         free(old);
         old = cur;   // still on screen (its line list) until the next one is applied

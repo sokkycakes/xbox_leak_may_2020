@@ -1,12 +1,13 @@
 """Compare the emulator's frames with the replay client's frames.
 
-usage: compare.py EMU.raw CLIENT.raw OUTDIR CLIENT.idx
+usage: compare.py EMU.raw CLIENT.raw OUTDIR CLIENT.idx [MIRROR.bin]
 Raw files hold 256x384 32-bit pixels per frame (top screen, then bottom).
 CLIENT.idx says how many bundles the client had applied by the end of each of
-its frames; bundle k (= emulator frame k) shows from the client frame after
-the one in which it was applied.
+its frames; bundle k shows from the client frame after the one in which it was
+applied. Bundle k is emulator frame k unless MIRROR.bin is given, whose bundle
+headers name the frame (30 fps recordings skip every other frame).
 """
-import sys, os
+import sys, os, struct
 import numpy as np
 from PIL import Image
 
@@ -19,11 +20,29 @@ def load(p):
 emu, cli, out = load(sys.argv[1]), load(sys.argv[2]), sys.argv[3]
 os.makedirs(out, exist_ok=True)
 applied = [int(l.split()[1]) for l in open(sys.argv[4])]
+
+bundleFrame = None
+if len(sys.argv) > 5:
+    bundleFrame = []
+    with open(sys.argv[5], "rb") as f:
+        while True:
+            h = f.read(16)
+            if len(h) < 16:
+                break
+            magic, frame, size, flags = struct.unpack("<IIII", h)
+            bundleFrame.append(frame)
+            f.seek(size - 16, 1)
+
 shown = {}  # emulator frame -> client frame showing it
 for j in range(len(applied) - 1):
     k = applied[j] - 1
-    if k >= 0 and k not in shown and (j == 0 or applied[j - 1] - 1 != k):
-        shown[k] = j + 1
+    if k >= 0 and (j == 0 or applied[j - 1] - 1 != k):
+        if bundleFrame is not None:
+            if k >= len(bundleFrame):
+                continue
+            k = bundleFrame[k]
+        if k not in shown:
+            shown[k] = j + 1
 
 def diff(i, j):
     d = emu[i] != cli[j]
@@ -36,14 +55,16 @@ for i in range(len(emu)):
     j = shown[i]
     t, b = diff(i, j)
     rows.append((i, t, b))
-gaps = [shown[i + 1] - shown[i] for i in range(len(emu) - 1) if i in shown and i + 1 in shown]
+order = sorted(shown)
+gaps = [shown[b] - shown[a] for a, b in zip(order, order[1:])]
 off = 0
 n = len(rows)
 exact = sum(1 for _, t, b in rows if t == 0 and b == 0)
 top_bad = sum(1 for _, t, _ in rows if t)
 bot_bad = sum(1 for _, _, b in rows if b)
 worst = max(rows, key=lambda r: r[1] + r[2])
-print(f"client showed {len(shown)} of {len(emu)} bundles, {sum(1 for g in gaps if g > 1)} held for more than one frame")
+nb = len(bundleFrame) if bundleFrame is not None else len(emu)
+print(f"client showed {len(shown)} of {nb} bundles, {sum(1 for g in gaps if g > 1)} held for more than one frame")
 print(f"{n} frames compared; {exact} pixel-identical ({100*exact/n:.1f}%)")
 print(f"top screen differs in {top_bad} frames, bottom in {bot_bad}")
 print(f"worst frame {worst[0]}: {worst[1]} top / {worst[2]} bottom pixels differ (of 49152 each)")

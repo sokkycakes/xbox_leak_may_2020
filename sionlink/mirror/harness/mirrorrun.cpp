@@ -7,6 +7,7 @@
 //     --shots DIR      write a PPM of both screens every --every frames (default 60)
 //     --stats FILE     per-frame bundle sizes as CSV
 //     --lang N         firmware language (0 Japanese, 1 English, ...)
+//     --half 1         30 fps: record every other frame, the client shows each for two
 //     --gamecode XXXX  replace the header's game code, for prototypes whose code melonDS's
 //                      cart list gives to another game (wrong cart/save type)
 //
@@ -35,6 +36,143 @@
 #include "../common/mirror_format.h"
 
 using namespace melonDS;
+
+
+// ---------------------------------------------------------------- 30 fps mode
+//
+// With --half the client gets every other frame and shows each for two. A frame
+// that isn't sent still has 3D commands that leave state behind for later frames
+// (matrix stacks, lights, materials, texture settings). GXFilter walks the
+// geometry command stream: for a frame that is sent, the writes pass through as
+// they are; for a skipped frame, only the state commands are kept, re-encoded as
+// direct command port writes, and geometry, tests and SWAP_BUFFERS are dropped.
+// Packets and commands that straddle the two are finished in the same form they
+// were started in, so the client's FIFO always sees whole commands.
+
+static u8 GXParamCount(u8 c)
+{
+    switch (c)
+    {
+    case 0x16: case 0x18: return 16;
+    case 0x17: case 0x19: return 12;
+    case 0x1A: return 9;
+    case 0x1B: case 0x1C: case 0x70: return 3;
+    case 0x23: case 0x71: return 2;
+    case 0x34: return 32;
+    case 0x11: case 0x15: case 0x41: return 0;
+    default: return c >= 0x10 ? 1 : 0;
+    }
+}
+
+static bool GXValid(u8 c)
+{
+    return (c >= 0x10 && c <= 0x1C) || (c >= 0x20 && c <= 0x2B) || (c >= 0x30 && c <= 0x34) ||
+           c == 0x40 || c == 0x41 || c == 0x50 || c == 0x60 || (c >= 0x70 && c <= 0x72);
+}
+
+// state a skipped frame must still apply: matrices, vertex color, polygon/texture
+// attributes, lighting and material, viewport
+static bool GXKeepWhenSkipped(u8 c)
+{
+    return (c >= 0x10 && c <= 0x1C) || c == 0x20 || (c >= 0x29 && c <= 0x2B) ||
+           (c >= 0x30 && c <= 0x34) || c == 0x60;
+}
+
+struct GXFilter
+{
+    struct IOW { u16 off; u8 size; u32 val; };
+
+    // FIFO packet in progress
+    u8 cmds[4]; int ncmds = 0, ci = 0;
+    std::vector<u32> params;
+    bool packetRaw = false;
+    // direct port command in progress
+    u8 dcmd = 0;
+    std::vector<u32> dparams;
+    bool dActive = false, dRaw = false;
+
+    u32 kept = 0, dropped = 0;  // skipped-frame commands kept / dropped, for stats
+    u32 badCmds = 0;            // unknown command bytes: the parse lost sync
+
+    static void Direct(std::vector<IOW>& out, u8 c, const std::vector<u32>& p)
+    {
+        u16 off = 0x400 + c * 4;
+        if (p.empty()) out.push_back({off, 4, 0});
+        for (u32 v : p) out.push_back({off, 4, v});
+    }
+
+    void Done(std::vector<IOW>& out, u8 c, const std::vector<u32>& p, bool sent)
+    {
+        if (sent || GXKeepWhenSkipped(c)) { Direct(out, c, p); if (!sent) kept++; }
+        else dropped++;
+    }
+
+    // finish zero-parameter commands at the head of the packet
+    void Advance(std::vector<IOW>& out, bool sent)
+    {
+        while (ci < ncmds && GXParamCount(cmds[ci]) == 0)
+        {
+            if (!packetRaw && GXValid(cmds[ci])) Done(out, cmds[ci], {}, sent);
+            ci++;
+        }
+        params.clear();
+    }
+
+    // sent: the write belongs to a frame the client gets
+    void Feed(const IOW& w, bool sent, std::vector<IOW>& out)
+    {
+        if (w.off >= 0x400 && w.off < 0x440)  // GXFIFO and its mirrors
+        {
+            if (ci < ncmds)
+            {
+                if (packetRaw) out.push_back(w);
+                params.push_back(w.val);
+                u8 c = cmds[ci];
+                if (params.size() >= GXParamCount(c))
+                {
+                    if (!packetRaw) Done(out, c, params, sent);
+                    ci++;
+                    Advance(out, sent);
+                }
+                return;
+            }
+            // packet header: up to four command bytes, the first zero byte ends the list
+            ncmds = ci = 0;
+            for (int i = 0; i < 4; i++)
+            {
+                u8 c = w.val >> (8 * i);
+                if (!c) break;
+                if (!GXValid(c)) badCmds++;
+                cmds[ncmds++] = c;
+            }
+            packetRaw = sent;
+            if (sent) out.push_back(w);
+            Advance(out, sent);
+            return;
+        }
+        if (w.off >= 0x440 && w.off < 0x600 && w.size == 4)
+        {
+            u8 c = (w.off - 0x400) / 4;
+            if (!dActive || c != dcmd)
+            {
+                dActive = true;
+                dcmd = c;
+                dparams.clear();
+                dRaw = sent;
+            }
+            if (dRaw) out.push_back(w);
+            if (GXParamCount(c)) dparams.push_back(w.val);
+            if (dparams.size() >= GXParamCount(c))
+            {
+                if (!dRaw && GXValid(c)) Done(out, c, dparams, sent);
+                dActive = false;
+            }
+            return;
+        }
+        // 3D registers outside the command FIFO (DISP3DCNT, tables, POWCNT) always go
+        out.push_back(w);
+    }
+};
 
 // ---------------------------------------------------------------- recorder
 
@@ -70,17 +208,21 @@ public:
     NDS* nds = nullptr;
     FILE* out = nullptr;
     FILE* stats = nullptr;
-    u32 frame = 0;
+    u32 frame = 0;      // bundles written
+    u32 emuFrame = 0;
     bool full = true;
+    bool half = false;  // 30 fps: every other frame, each shown twice
+    bool skipThis = false, holdNext = false, capPrev = false, capThis = false;
+    GXFilter filt;
 
-    struct IOW { u16 off; u8 size; u32 val; };
+    using IOW = GXFilter::IOW;
 
     u8 shadow[0x1070] {};      // last value the game wrote, per byte
     u8 sent[0x1070] {};        // what the client's registers hold
     u8 lineCur[0x1070] {};     // register state while the visible lines run
     bool written[0x1070 / 2] {};
     bool lineWritten[0x1070 / 2] {};
-    std::vector<IOW> pending, ready;
+    std::vector<IOW> pending, ready, carry;
     std::vector<mirror_line> lines;
     u8 prevPal[2048] {}, prevOAM[2048] {};
     std::vector<u8> prevVRAM[9];
@@ -127,8 +269,15 @@ public:
     {
         if (vcount == 0)
         {
-            Snapshot2D();
-            haveFrame = true;
+            capPrev = capThis;
+            capThis = (nds->GPU.CaptureCnt >> 31) & 1;
+            skipThis = holdNext;
+            holdNext = false;
+            if (!skipThis)
+            {
+                Snapshot2D();
+                haveFrame = true;
+            }
         }
         else if (vcount < 192 && haveFrame)
             TrackLine(vcount);
@@ -136,7 +285,14 @@ public:
         {
             if (haveFrame && out)
                 Emit();
+            else if (skipThis)
+            {
+                // not sent: keep the state its 3D commands leave behind for the next bundle
+                for (const IOW& w : ready) filt.Feed(w, false, carry);
+                ready.clear();
+            }
             haveFrame = false;
+            emuFrame++;
             ready.insert(ready.end(), pending.begin(), pending.end());
             pending.clear();
         }
@@ -322,8 +478,19 @@ public:
     void Emit()
     {
         buf.clear();
-        mirror_hdr h {MIRROR_MAGIC, frame, 0, frame == 0 ? (u32)MIRROR_FLAG_FULL : 0u};
+        // 30 fps: hold this frame for two unless the game is capturing (3D on both
+        // screens, one per frame), where every frame has to go
+        holdNext = half && !capThis && !capPrev;
+        u32 flags = (frame == 0 ? MIRROR_FLAG_FULL : 0) | (holdNext ? MIRROR_FLAG_HOLD : 0);
+        mirror_hdr h {MIRROR_MAGIC, emuFrame, 0, flags};
         Put(buf, h);
+        if (half)
+        {
+            std::vector<IOW> gx;
+            gx.swap(carry);
+            for (const IOW& w : ready) filt.Feed(w, true, gx);
+            ready.swap(gx);
+        }
 
         if (!ready.empty())
         {
@@ -373,7 +540,7 @@ public:
         totalRaw += buf.size();
         totalZ += zlen;
         if (stats)
-            fprintf(stats, "%u,%zu,%lu,%u,%u,%u,%u,%u,%u,%u\n", frame, buf.size(), (unsigned long)zlen,
+            fprintf(stats, "%u,%zu,%lu,%u,%u,%u,%u,%u,%u,%u\n", emuFrame, buf.size(), (unsigned long)zlen,
                     sz.gx, sz.regs, sz.pal, sz.oam, sz.vram, sz.vramBlocks, sz.lines);
         frame++;
     }
@@ -432,7 +599,7 @@ int main(int argc, char** argv)
 {
     if (argc < 3)
     {
-        fprintf(stderr, "usage: %s ROM FRAMES [--input F] [--record F] [--frames F] [--shots DIR] [--every N] [--stats F] [--boottype N] [--lang N] [--gamecode XXXX]\n", argv[0]);
+        fprintf(stderr, "usage: %s ROM FRAMES [--input F] [--record F] [--frames F] [--shots DIR] [--every N] [--stats F] [--boottype N] [--lang N] [--gamecode XXXX] [--half 1]\n", argv[0]);
         return 1;
     }
     const char* rompath = argv[1];
@@ -443,6 +610,7 @@ int main(int argc, char** argv)
     int lang = -1;
     const char* gamecode = nullptr;
     const char* clientIdx = nullptr;
+    bool half = false;
     for (int i = 3; i + 1 < argc; i += 2)
     {
         std::string o = argv[i];
@@ -456,6 +624,7 @@ int main(int argc, char** argv)
         else if (o == "--lang") lang = atoi(argv[i + 1]);
         else if (o == "--gamecode") gamecode = argv[i + 1];
         else if (o == "--client-index") clientIdx = argv[i + 1];
+        else if (o == "--half") half = atoi(argv[i + 1]) != 0;
         else { fprintf(stderr, "unknown option %s\n", o.c_str()); return 1; }
     }
 
@@ -498,6 +667,7 @@ int main(int argc, char** argv)
 
     Recorder rec;
     rec.nds = nds.get();
+    rec.half = half;
     if (record)
     {
         rec.out = fopen(record, "wb");
@@ -566,6 +736,8 @@ int main(int argc, char** argv)
         if (rec.stats) fclose(rec.stats);
         fprintf(stderr, "recorded %u bundles, %.1f KB/frame raw, %.1f KB/frame zlib\n", rec.frame,
                 rec.totalRaw / 1024.0 / rec.frame, rec.totalZ / 1024.0 / rec.frame);
+        if (half)
+            fprintf(stderr, "skipped frames' 3D commands: %u kept as state, %u dropped, %u unknown\n", rec.filt.kept, rec.filt.dropped, rec.filt.badCmds);
     }
     if (const char* dump = getenv("MIRROR_DUMPRAM"))
     {

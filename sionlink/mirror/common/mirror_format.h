@@ -22,6 +22,7 @@ typedef struct {
 } mirror_hdr;
 
 #define MIRROR_FLAG_FULL 1  // first bundle: everything is sent
+#define MIRROR_FLAG_HOLD 2  // show this frame for two VBlanks (30 fps mode)
 
 enum {
     MREC_END   = 0,
