@@ -279,6 +279,8 @@ static void showDiag(void)
             printf("done  ep %02X %-3u bytes  \n", e->x, e->a);
         else if (e->kind == 'Z')
             printf("status sent         \n");
+        else if (e->kind == 'N')
+            printf("lost data recovered \n");
         else
             printf("bus reset           \n");
     }
@@ -321,6 +323,7 @@ static void showStall(void)
     printf("usb events    %lu\n", usbDiag.events);
     printf("usb state     %-12s\n", usbDiag.deadReads ? "DSpico silent" : usbConfigured() ? "connected" : "lost");
     printf("silent reads  %lu\n", usbDiag.deadReads);
+    printf("nudges %lu, recovered %lu\n", usbDiag.nudges, usbDiag.recovered);
     printf("out done %lu, %lu KB %s\n", usbDiag.outDone, usbDiag.outBytes >> 10, usbDiag.outArmed ? "armed" : "idle ");
     printf("in done %lu of %lu %s\n", usbDiag.inDone, usbDiag.reports, usbDiag.inBusy ? "busy" : "idle");
     printf("%-30s\n", stallManual ? "hold L+R+SELECT: back to game" : "hold L+R+SELECT: keep this");
@@ -366,8 +369,10 @@ static void idle(void)
     {
         if (usbAvailable())
         {
-            // the first bundle sets every display register; start from cleared VRAM
+            // the first bundle sets every display register; start from cleared VRAM.
+            // The time spent waiting for the Sion is not a stalled picture.
             linkData = true;
+            lastAppliedAt = vblanks;
             clearHardware();
         }
         else
@@ -602,6 +607,7 @@ static void vblankHandler(void)
 {
     mirror_hdr* h = pending2D;
     vblanks++;
+    usbTick();
     flushLines();
     if (holdFrames)
     {

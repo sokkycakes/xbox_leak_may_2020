@@ -40,10 +40,18 @@ static void cardCmd(u64 cmd)
         ;
 }
 
+// Long gaps before the data (clock held) give the DSpico's firmware time to answer
+// a command while its USB interrupt is running. With only the documented minimum
+// latency, now and then an event read came back all ones: that event, which the
+// DSpico had already taken off its queue, was lost. Gap 2 is the latency retail
+// cards use (header ROMCTRL 0x00586000); gap 1 adds more where the DS honours it.
+#define READ_GAP  (CARD_DELAY1(0x180) | CARD_DELAY2(0x3F))
+#define WRITE_GAP (CARD_DELAY1(0x180) | CARD_DELAY2(0x3F))
+
 static u32 cardRead4(u64 cmd)
 {
     u32 v = 0;
-    cardStart(cmd, CARD_BLK_SIZE(7) | CARD_DELAY2(4));
+    cardStart(cmd, CARD_BLK_SIZE(7) | READ_GAP);
     while (REG_ROMCTRL & CARD_BUSY)
         if (REG_ROMCTRL & CARD_DATA_READY)
             v = REG_CARD_DATA_RD;
@@ -53,7 +61,7 @@ static u32 cardRead4(u64 cmd)
 static void cardRead512(u64 cmd, u32* dst)
 {
     u32 i = 0;
-    cardStart(cmd, CARD_BLK_SIZE(1) | CARD_DELAY2(4));
+    cardStart(cmd, CARD_BLK_SIZE(1) | READ_GAP);
     while (REG_ROMCTRL & CARD_BUSY)
     {
         if (REG_ROMCTRL & CARD_DATA_READY)
@@ -68,7 +76,7 @@ static void cardRead512(u64 cmd, u32* dst)
 static void cardWrite512(u64 cmd, const u32* src)
 {
     u32 i = 0;
-    cardStart(cmd, CARD_WR | CARD_BLK_SIZE(1) | CARD_DELAY2(8));
+    cardStart(cmd, CARD_WR | CARD_BLK_SIZE(1) | WRITE_GAP);
     while (REG_ROMCTRL & CARD_BUSY)
         if (REG_ROMCTRL & CARD_DATA_READY)
             REG_CARD_DATA_RD = i < 128 ? src[i++] : 0;
@@ -111,7 +119,7 @@ static const u8 cfgDesc[32] = {
     9, 2, 32, 0, 1, 1, 0, 0x80, 50,
     9, 4, 0, 0, 2, 0xFF, 0x00, 0x00, 0,
     7, 5, EP_OUT, 2, PACKET, 0, 0,
-    7, 5, EP_IN, 2, PACKET, 0, 0,
+    7, 5, EP_IN, 3, PACKET, 0, 1,   // interrupt, every frame
 };
 
 static const char* const strings[] = {NULL, "Sion", "Sion Link DS", "1"};
@@ -133,6 +141,13 @@ static u8 outBuf;       // the DSpico buffer it lands in
 static bool inBusy;
 static u8 inBuf;
 static u32 pollCount;
+static volatile u32 ticks;   // VBlanks (usbTick)
+static u32 lastOutAt;        // tick of the last OUT completion
+
+void usbTick(void)
+{
+    ticks++;
+}
 
 static u32 ringFree(void)
 {
@@ -200,6 +215,38 @@ static void armOut(void)
     outArmed = true;
 }
 
+// The Sion has had data waiting a quarter second and we took none. If our OUT transfer
+// has been armed all that time, it finished and its completion event was lost (the
+// endpoint would have taken the data otherwise): take its 512 bytes and go on.
+// Re-arming a transfer that is really still waiting would crash the DSpico's
+// firmware, so only after a quiet spell, and only for a full 512-byte block, which
+// is all the Sion sends.
+static void nudgeOut(void)
+{
+    usbDiag.nudges++;
+    if (!configured)
+        return;
+    if (!outArmed)
+    {
+        armOut();
+        return;
+    }
+    if (ticks - lastOutAt < 12)
+        return;
+    usbDiag.recovered++;
+    diagLog('N', EP_OUT, outBuf, 0);
+    u8 done = outBuf;
+    outArmed = false;
+    outBuf ^= 1;
+    cardRead512(USB_READ_DATA(done, EP_OUT), xfer);
+    const u8* s = (const u8*)xfer;
+    for (u32 i = 0; i < 512; i++)
+        ring[(ringHead + i) % RING] = s[i];
+    ringHead += 512;
+    lastOutAt = ticks;
+    armOut();
+}
+
 static void sendString(u32 index, u32 maxLen)
 {
     u8 d[64];
@@ -236,9 +283,15 @@ static void setup(u32 w0, u32 w1)
     u32 type = (w1 >> 24) & 0x7F;  // without the direction bit
     diagLog('S', request, value, length);
 
+    if ((type & 0x60) == 0x40 && request == SL_REQ_NUDGE)
+    {
+        nudgeOut();
+        ep0Status();
+        return;
+    }
     if (type & 0x60)
     {
-        ep0Stall();  // no class or vendor requests
+        ep0Stall();  // no class requests, no other vendor requests
         return;
     }
     switch (request)
@@ -279,7 +332,9 @@ static void setup(u32 w0, u32 w1)
         if (value == 1)
         {
             cardCmd(USB_EP_OPEN(EP_OUT, PACKET, 2));
-            cardCmd(USB_EP_OPEN(EP_IN, PACKET, 2));
+            // interrupt, not bulk: the DSpico's firmware queues an event every 1 ms
+            // while a bulk IN transfer waits (RP2040 errata E15), flooding its queue
+            cardCmd(USB_EP_OPEN(EP_IN, PACKET, 3));
             configured = true;
             usbDiag.configured++;
             outArmed = inBusy = false;
@@ -333,6 +388,7 @@ static void xferComplete(u32 ep, u32 bytes)
         ctrl = CTRL_IDLE;
     else if (ep == EP_OUT)
     {
+        lastOutAt = ticks;
         usbDiag.outDone++;
         usbDiag.outBytes += bytes;
         u8 done = outBuf;

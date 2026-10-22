@@ -93,7 +93,7 @@ class UsbLink : public HostLink
     std::mutex accLock;          // InDone runs on whichever thread handles events
     std::atomic<bool> closing {false}, inIdle {false};
     std::atomic<int> inStatus {0};
-    int inErrors = 0;
+    int inErrors = 0, nudges = 0;
     static const char* StatusName(int s)
     {
         static const char* const names[] = {"completed", "error", "timed out", "cancelled", "stalled", "device gone", "overflow"};
@@ -151,7 +151,7 @@ public:
         }
         if (libusb_claim_interface(h, 0)) { fprintf(stderr, "link: can't claim the DSpico\n"); libusb_close(h); h = nullptr; return; }
         inXfer = libusb_alloc_transfer(0);
-        libusb_fill_bulk_transfer(inXfer, h, 0x81, inBuf, sizeof inBuf, InDone, this, 0);
+        libusb_fill_interrupt_transfer(inXfer, h, 0x81, inBuf, sizeof inBuf, InDone, this, 0);
         libusb_submit_transfer(inXfer);
         fprintf(stderr, "link: DSpico connected\n");
     }
@@ -186,10 +186,18 @@ public:
         int waited = 0;
         while (!done)
         {
-            timeval tv {1, 0};
+            // no progress at all for a quarter second: the DS should have taken some
+            timeval tv {0, 250000};
             libusb_handle_events_timeout_completed(ctx, &tv, &done);
-            if (!done && ++waited == 5)
+            if (done) break;
+            if (++waited == 20)
                 fprintf(stderr, "link: the DS has taken no data for 5 s\n");
+            // The DS may have missed the event that says its last 512 bytes arrived, and
+            // then waits forever: tell it we're stuck (it checks that it is too)
+            int r = libusb_control_transfer(h, LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_DEVICE | LIBUSB_ENDPOINT_OUT,
+                                            1, 0, 0, nullptr, 0, 500);
+            if (++nudges <= 10)
+                fprintf(stderr, "link: nudged the DS (%s)\n", r < 0 ? libusb_error_name(r) : "ok");
         }
         bool ok = t->status == LIBUSB_TRANSFER_COMPLETED;
         if (!ok) fprintf(stderr, "link: transfer %s\n", StatusName(t->status));

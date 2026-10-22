@@ -60,6 +60,8 @@ private:
     std::vector<u8> fromHost;   // bytes read from the socket, not yet delivered
     std::string product;
     unsigned completes = 0;
+    bool progressed = false, kicking = false;
+    unsigned stuckFrames = 0, kicks = 0;
 
     void Event(u32 e);
     void Event64(u32 e0, u32 e1);

@@ -32,6 +32,7 @@
 #include <unordered_map>
 #include <thread>
 #include <mutex>
+#include <atomic>
 #include <condition_variable>
 #include <chrono>
 #include <zlib.h>
@@ -248,6 +249,7 @@ public:
     std::condition_variable sendWake;
     std::vector<std::vector<u8>> sendQueue;
     u32 sendBusy = 0;    // bundles queued or being sent
+    std::atomic<u32> fullPending {0};   // full bundles queued or being sent
     bool sendStop = false;
 
     void StartLink(HostLink* l)
@@ -265,6 +267,7 @@ public:
                     sendQueue.erase(sendQueue.begin());
                 }
                 bool ok = !linkLost && link->Send(b.data(), b.size());
+                if (((mirror_hdr*)b.data())->flags & MIRROR_FLAG_FULL) fullPending--;
                 std::lock_guard<std::mutex> g(sendLock);
                 sendBusy--;
                 if (!ok && !linkLost)
@@ -726,6 +729,7 @@ public:
             // while it looks for the next bundle's header.
             std::vector<u8> padded = buf;
             padded.resize((buf.size() + 511) & ~size_t(511), 0);
+            if (((mirror_hdr*)buf.data())->flags & MIRROR_FLAG_FULL) fullPending++;
             sendQueue.push_back(std::move(padded));
             sendBusy++;
             sendWake.notify_one();
@@ -956,7 +960,9 @@ int main(int argc, char** argv)
         }
         if (link && link->Poll(pad))
         {
-            if ((pad.applied & MIRROR_INPUT_NEED_FULL) && f - lastFullReq > 60)
+            // one full frame at a time: it can take seconds to get through, and the DS
+            // keeps asking until it has arrived
+            if ((pad.applied & MIRROR_INPUT_NEED_FULL) && f - lastFullReq > 60 && !rec.fullPending)
             {
                 lastFullReq = f;
                 rec.RequestFull();
@@ -974,7 +980,7 @@ int main(int argc, char** argv)
                 fprintf(stderr, "link: reports from the DS again at frame %u\n", f);
             }
         }
-        else if (link && f - lastReportAt > 120 && f - lastFullReq > 300)
+        else if (link && f - lastReportAt > 120 && f - lastFullReq > 300 && !rec.fullPending)
         {
             // Without reports the DS can't ask for a full frame after damage or a stall,
             // and would wait for one forever. Send one now and then until it talks again.

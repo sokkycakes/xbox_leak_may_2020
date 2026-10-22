@@ -135,7 +135,8 @@ void DSpicoSim::UsbCommand(u32 sub)
         if (!connected && usbInit)
         {
             connected = true;
-            attachDelay = 3;
+            // DSPICO_ATTACH=N: the cable goes in N frames after the DS connects (default 3)
+            attachDelay = getenv("DSPICO_ATTACH") ? atoi(getenv("DSPICO_ATTACH")) : 3;
         }
         break;
     case 5: connected = false; configured = false; break;
@@ -180,6 +181,14 @@ void DSpicoSim::DeviceSent(u32 ep, const u8* data, u32 len)
     if (ep == 0x80)
     {
         Event(EV_XFER_COMPLETE | 0x80 | (len << 8));
+        if (kicking && len == 0)
+        {
+            kicking = false;
+            kicks++;
+            fprintf(stderr, "dspico sim: nudged the DS after %u frames without OUT progress\n", stuckFrames);
+            stuckFrames = 0;
+            return;
+        }
         if (step < 0 || step >= ENUM_DONE) return;
         if (len > 0)
         {
@@ -265,12 +274,12 @@ void DSpicoSim::ControlDone(bool ok)
         {
             if (d[i + 1] == 4 && i + 5 < d.size() && d[i + 5] != 0xFF)
                 fprintf(stderr, "dspico sim: interface class %02x, expected vendor (ff)\n", d[i + 5]);
-            if (d[i + 1] == 5 && i + 3 < d.size() && (d[i + 3] & 3) == 2)
+            if (d[i + 1] == 5 && i + 3 < d.size() && (d[i + 3] & 3) >= 2)   // bulk or interrupt
                 (d[i + 2] & 0x80 ? inEp : outEp) = d[i + 2];
         }
         if (!inEp || !outEp)
         {
-            fprintf(stderr, "dspico sim: no bulk endpoints\n");
+            fprintf(stderr, "dspico sim: no data endpoints\n");
             step = ENUM_DONE;
             return;
         }
@@ -281,7 +290,7 @@ void DSpicoSim::ControlDone(bool ok)
         break;
     case ENUM_SET_CONFIG:
         configured = true;
-        fprintf(stderr, "dspico sim: \"%s\" configured, bulk OUT %02x IN %02x\n", product.c_str(), outEp, inEp);
+        fprintf(stderr, "dspico sim: \"%s\" configured, OUT %02x IN %02x\n", product.c_str(), outEp, inEp);
         break;
     }
     step++;
@@ -329,6 +338,16 @@ void DSpicoSim::PumpOut()
     {
         o.armed = false;
         completes++;
+        progressed = true;
+        // fault test: DSPICO_LOSE=N loses the Nth OUT completion event, and every Nth after
+        // it with DSPICO_LOSE_EVERY=1 (a real DSpico drops events when the DS misses a read)
+        static unsigned lose = getenv("DSPICO_LOSE") ? atoi(getenv("DSPICO_LOSE")) : 0;
+        static int every = getenv("DSPICO_LOSE_EVERY") ? 1 : 0;
+        if (lose && (completes == lose || (every && completes % lose == 0)))
+        {
+            fprintf(stderr, "dspico sim: lost the completion of OUT transfer %u\n", completes);
+            return;
+        }
         Event(EV_XFER_COMPLETE | outEp | (o.got << 8));
     }
 }
@@ -349,4 +368,18 @@ void DSpicoSim::Frame()
         NextSetup();
     }
     PumpOut();
+    // the Sion side nudges the DS (vendor request 1) when it has had data waiting for
+    // a quarter second without the DS taking any, as mirrorrun does over real USB
+    ReadSocket();
+    if (configured && step >= ENUM_DONE && !kicking)
+    {
+        if (progressed || fromHost.empty())
+            stuckFrames = 0;
+        else if (++stuckFrames >= 15)
+        {
+            kicking = true;
+            SendSetup(0x41, 1, 0, 0, 0);
+        }
+    }
+    progressed = false;
 }
