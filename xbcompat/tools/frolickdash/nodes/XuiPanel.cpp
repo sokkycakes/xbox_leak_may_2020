@@ -1638,14 +1638,17 @@ void CBelt::Render()
 #define MAX_GRID_GAMES 256
 #define GRID_BLUR_W 160
 #define GRID_BLUR_H 120
-#define GRID_STEP 24.0f
-#define GRID_K 1.2f             // PS2 screen units to world units at GRID_D
+// Layout measured from sokky's MBROWS screenshot (shares of the screen):
+// row centres 0.30 / 0.41 / 0.54 / 0.68 down from the top, columns 0.155 of
+// the width apart on the front row and 0.83 of that on the back, an icon
+// 0.6 of a column wide (the screenshot's cubes; the rows nearly touch). Depth shows as that per-row scale.
 #define GRID_D 10.0f
-#define GRID_DROP 0.6f         // the grid's centre below the eye line
-#define GRID_TILE 1.05f         // a tile's width, in screen steps (x/25 of 24 units)
-#define GRID_LOOK 0.444f        // MBROWS gp-0x7df8: the placement tilt, the view looking down on the floor
-#define GRID_ROW 1.6f           // a row's depth on the floor, in screen steps
-static const float c_rgGridRowScale[4] = { 0.65f, 0.68f, 0.71f, 0.74f };   // gp-0x7e24..0x7e18, back to front
+#define GRID_COLW 0.155f
+#define GRID_TILE 0.6f
+#define GRID_GLOW 64
+static const float c_rgGridRowY[4] = { 0.30f, 0.41f, 0.54f, 0.68f };
+static const float c_rgGridRowShot[4] = { 0.83f, 0.887f, 0.943f, 1.0f };
+#define GRID_LOOK 0.444f        // MBROWS gp-0x7df8: icons tipped toward the viewer, tops showing
 
 #define GRID_DEPTH 0.15f        // the slab's thickness, a share of its width
 
@@ -1658,6 +1661,8 @@ static const float c_rgGridLightCol[3] = { 0.4f, 0.2f, 0.0f };
 
 struct SCREENVERTEX { float x, y, z, rhw; float u, v; };
 struct SLABVERTEX { float x, y, z; DWORD color; };
+struct GLOWVERTEX { float x, y, z; DWORD color; float u, v; };
+#define GLOWVERTEX_FVF (D3DFVF_XYZ | D3DFVF_DIFFUSE | D3DFVF_TEX1)
 #define SLABVERTEX_FVF (D3DFVF_XYZ | D3DFVF_DIFFUSE)
 #define SCREENVERTEX_FVF (D3DFVF_XYZRHW | D3DFVF_TEX1)
 
@@ -1695,6 +1700,7 @@ protected:
     void Capture();
     void DrawBackground(float alpha);
     void DrawTiles(float alpha);
+    void DrawGlow(const D3DXVECTOR3& c, const D3DXVECTOR3& ax, const D3DXVECTOR3& ay, float a);
     void DrawSlab(const D3DXVECTOR3& c, const D3DXVECTOR3& ax, const D3DXVECTOR3& ay, const D3DXVECTOR3& az, float a);
 
     bool m_bDirty;
@@ -1714,6 +1720,7 @@ protected:
     float m_fade;
     bool m_bCapture;        // take the background on the next frame
     LPDIRECT3DTEXTURE8 m_pBlur;
+    LPDIRECT3DTEXTURE8 m_pGlow;
     float m_screenW, m_screenH;
 };
 
@@ -1741,7 +1748,7 @@ END_NODE_FUN()
 CGameGrid::CGameGrid() :
     m_tile(NULL), m_skin(NULL), m_font(NULL), m_cols(5), m_rowScale(1), m_count(0),
     m_bDirty(true), m_pRenderer(NULL), m_pTileRoot(NULL), m_pSkinRoot(NULL), m_pTile(NULL), m_bFontLoaded(false),
-    m_sel(0), m_top(0.0f), m_dir(0), m_fade(0.0f), m_bCapture(false), m_pBlur(NULL), m_screenW(640.0f), m_screenH(480.0f)
+    m_sel(0), m_top(0.0f), m_dir(0), m_fade(0.0f), m_bCapture(false), m_pBlur(NULL), m_pGlow(NULL), m_screenW(640.0f), m_screenH(480.0f)
 {
     ZeroMemory(m_rgImage, sizeof m_rgImage);
     for (int i = 0; i < MAX_GRID_GAMES; i++)
@@ -1754,6 +1761,8 @@ CGameGrid::~CGameGrid()
         delete [] m_rgImage[i];
     if (m_pBlur != NULL)
         m_pBlur->Release();
+    if (m_pGlow != NULL)
+        m_pGlow->Release();
     delete m_pTile;
     delete m_pTileRoot;
     delete m_pSkinRoot;
@@ -2092,6 +2101,62 @@ void CGameGrid::DrawSlab(const D3DXVECTOR3& c, const D3DXVECTOR3& ax, const D3DX
     XAppGetD3DDev()->DrawVerticesUP(D3DPT_TRIANGLELIST, n, v, sizeof (SLABVERTEX));
 }
 
+// The focused icon's soft white light: a radial falloff added over its face
+void CGameGrid::DrawGlow(const D3DXVECTOR3& c, const D3DXVECTOR3& ax, const D3DXVECTOR3& ay, float a)
+{
+    if (m_pGlow == NULL)
+    {
+        if (FAILED(XAppGetD3DDev()->CreateTexture(GRID_GLOW, GRID_GLOW, 1, 0, D3DFMT_LIN_A8R8G8B8, D3DPOOL_MANAGED, &m_pGlow)))
+        {
+            m_pGlow = NULL;
+            return;
+        }
+        D3DLOCKED_RECT lr;
+        if (SUCCEEDED(m_pGlow->LockRect(0, &lr, NULL, 0)))
+        {
+            for (int y = 0; y < GRID_GLOW; y++)
+                for (int x = 0; x < GRID_GLOW; x++)
+                {
+                    float dx = (x + 0.5f) / GRID_GLOW * 2.0f - 1.0f, dy = (y + 0.5f) / GRID_GLOW * 2.0f - 1.0f;
+                    float k = 1.0f - (float)sqrt(dx * dx + dy * dy);
+                    if (k < 0.0f) k = 0.0f;
+                    ((DWORD*)((BYTE*)lr.pBits + y * lr.Pitch))[x] = D3DCOLOR_ARGB((int)(k * k * 255.0f), 0xff, 0xff, 0xff);
+                }
+            m_pGlow->UnlockRect(0);
+        }
+    }
+    // centred a little above the face's middle, as on the PS2's lit icon
+    D3DXVECTOR3 o = c + ay * 0.25f, gx = ax * 1.3f, gy = ay * 1.3f;
+    DWORD col = D3DCOLOR_COLORVALUE(1.0f, 1.0f, 1.0f, 0.7f * a);
+    float t = (float)GRID_GLOW;     // a linear texture takes texel coordinates
+    GLOWVERTEX v[4] =
+    {
+        { 0, 0, 0, col, 0.0f, 0.0f }, { 0, 0, 0, col, t, 0.0f },
+        { 0, 0, 0, col, 0.0f, t }, { 0, 0, 0, col, t, t },
+    };
+    D3DXVECTOR3 p[4] = { o - gx + gy, o + gx + gy, o - gx - gy, o + gx - gy };
+    for (int k = 0; k < 4; k++)
+    {
+        v[k].x = p[k].x; v[k].y = p[k].y; v[k].z = p[k].z;
+    }
+    XAppSetTexture(0, m_pGlow);
+    XAppSetTextureStageState(0, D3DTSS_ADDRESSU, D3DTADDRESS_CLAMP);
+    XAppSetTextureStageState(0, D3DTSS_ADDRESSV, D3DTADDRESS_CLAMP);
+    XAppSetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_MODULATE);
+    XAppSetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+    XAppSetTextureStageState(0, D3DTSS_COLORARG2, D3DTA_DIFFUSE);
+    XAppSetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_MODULATE);
+    XAppSetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
+    XAppSetTextureStageState(0, D3DTSS_ALPHAARG2, D3DTA_DIFFUSE);
+    XAppSetTextureStageState(1, D3DTSS_COLOROP, D3DTOP_DISABLE);
+    XAppSetTextureStageState(1, D3DTSS_ALPHAOP, D3DTOP_DISABLE);
+    XAppSetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA);
+    XAppSetRenderState(D3DRS_DESTBLEND, D3DBLEND_ONE);
+    XAppGetD3DDev()->SetVertexShader(GLOWVERTEX_FVF);
+    XAppGetD3DDev()->DrawVerticesUP(D3DPT_TRIANGLESTRIP, 4, v, sizeof (GLOWVERTEX));
+    XAppSetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
+}
+
 void CGameGrid::DrawTiles(float alpha)
 {
     if (m_pTile == NULL || m_count <= 0)
@@ -2119,14 +2184,13 @@ void CGameGrid::DrawTiles(float alpha)
     XAppSetTextureStageState(0, D3DTSS_MINFILTER, D3DTEXF_LINEAR);
     XAppSetTextureStageState(0, D3DTSS_MAGFILTER, D3DTEXF_LINEAR);
 
-    float sxStep = GRID_STEP / 25.0f;
-    float syStep = GRID_STEP / 18.0f - GRID_STEP / 80.0f;
-    float sxMid = 0.5f * (cols - 1) * sxStep, syMid = 1.5f * syStep;
+    // the screen's half extents at the grid's distance (fov pi/4)
+    float halfH = GRID_D * (float)tan(D3DX_PI / 8.0f), halfW = halfH * m_screenW / m_screenH;
+    float colStep = GRID_COLW * 2.0f * halfW;
     float cw = m_pTile->root->width(), ch = m_pTile->root->height();
     if (cw <= 0) cw = 1.0f;
     if (ch <= 0) ch = 1.0f;
-    // the grid is a floor seen from above: in view space the floor runs
-    // back along (0, sin, cos) and an icon standing on it points up (0, cos, -sin)
+    // an icon's up tipped toward the viewer, its depth running back and up
     float cl = (float)cos(GRID_LOOK), sl = (float)sin(GRID_LOOK);
     D3DXVECTOR3 back(0.0f, sl, cl), up(0.0f, cl, -sl);
 
@@ -2148,26 +2212,20 @@ void CGameGrid::DrawTiles(float alpha)
                 if (r > 3.0f) a *= 4.0f - r;         // or off the front
                 if (a <= 0.01f)
                     continue;
+                // the row's height and scale, carried on past the ends while scrolling
+                int r0 = (int)floor(r);
+                if (r0 < 0) r0 = 0;
+                if (r0 > 2) r0 = 2;
+                float f = r - r0;
+                float sy = c_rgGridRowY[r0] + (c_rgGridRowY[r0 + 1] - c_rgGridRowY[r0]) * f;
                 float scale = 1.0f;
                 if (m_rowScale)
-                {
-                    float rc = r < 0.0f ? 0.0f : r > 3.0f ? 3.0f : r;
-                    int r0 = (int)rc;
-                    if (r0 > 2) r0 = 2;
-                    scale = c_rgGridRowScale[r0] + (c_rgGridRowScale[r0 + 1] - c_rgGridRowScale[r0]) * (rc - r0);
-                }
-                else
-                    scale = c_rgGridRowScale[3];
-                if (bSel)
-                    scale *= 1.15f;
-                else
-                    a *= 0.75f;
+                    scale = c_rgGridRowShot[r0] + (c_rgGridRowShot[r0 + 1] - c_rgGridRowShot[r0]) * f;
 
-                // the slot on the floor, the icon standing on it, its face to the viewer
-                float px = (col * sxStep - sxMid) * GRID_K;
-                float pz = (1.5f - r) * syStep * GRID_K * GRID_ROW;
-                float hw = 0.5f * GRID_TILE * sxStep * GRID_K * scale, hh = hw * ch / cw;
-                D3DXVECTOR3 c = D3DXVECTOR3(px, -GRID_DROP, GRID_D) + back * pz + up * hh;
+                float px = (col - 0.5f * (cols - 1)) * colStep * scale;
+                float py = (1.0f - 2.0f * sy) * halfH;
+                float hw = 0.5f * GRID_TILE * colStep * scale, hh = hw * ch / cw;
+                D3DXVECTOR3 c(px, py, GRID_D);
                 for (int gy = 0; gy < 6; gy++)
                     for (int gx = 0; gx < 7; gx++)
                     {
@@ -2185,6 +2243,8 @@ void CGameGrid::DrawTiles(float alpha)
                 m_be.m_alpha = a;
                 m_pRenderer->draw(m_pTile, 0, 0, 1);
                 m_be.m_gridMode = false;
+                if (bSel)
+                    DrawGlow(c, D3DXVECTOR3(hw, 0, 0), up * hh, a);
             }
 
     XAppSetTexture(0, NULL);

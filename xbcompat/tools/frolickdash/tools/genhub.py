@@ -384,6 +384,12 @@ def overlay_scene():
                    " <Position>0,122,0</Position>", " <Opacity>0</Opacity>", " <Text></Text>", " <TextColor>0xffffffff</TextColor>",
                    " <DropShadowColor>0</DropShadowColor>", " <PointSize>%.2f</PointSize>" % (22 * PT), " <TextStyle>1040</TextStyle>",
                    "</Properties>", "</XuiText>"]),
+        # the focused game's name on the All games page, top right on the
+        # header's line, where the PS2 browser puts its status line
+        "\n".join(["<XuiText>", "<Properties>", " <Id>gridTitle</Id>", " <Width>400</Width>", " <Height>30</Height>",
+                   " <Position>262,48,0</Position>", " <Opacity>0</Opacity>", " <Text></Text>", " <TextColor>0xffffffff</TextColor>",
+                   " <DropShadowColor>0</DropShadowColor>", " <PointSize>%.2f</PointSize>" % (22 * PT), " <TextStyle>528</TextStyle>",
+                   "</Properties>", "</XuiText>"]),
         # B + return arrow of the belt view: screen space, centred between
         # the focused cover and the library label as in sokky's mockup (B at
         # 0.506 W, the arrow box 0.482-0.519 W; 52 px above the mockup's
@@ -1257,14 +1263,14 @@ function OpenAllGames()
 function AllGamesShow()
 {
     var n = theGrid.count;
-    theOverlay.SetOpacity("title", 1);
+    theOverlay.SetOpacity("gridTitle", 1);
     if (n == 0)
     {
-        theOverlay.SetText("title", "No games");
+        theOverlay.SetText("gridTitle", "No games");
         thePage.SetText("labTotal", "");
         return;
     }
-    theOverlay.SetText("title", theGameCollection.GetGameName(theGrid.GetGame()));
+    theOverlay.SetText("gridTitle", theGameCollection.GetGameName(theGrid.GetGame()));
     thePage.SetText("labTotal", (theGrid.GetSelected() + 1) + " of " + n);
 }
 
@@ -1423,6 +1429,7 @@ function PadBack()
             if (sPage == "page_allgames")
             {
                 theGrid.Close();
+                theOverlay.SetOpacity("gridTitle", 0);
                 theOverlay.SetText("title", GameName(theBelt.GetSelected()));
             }
             ClosePage();

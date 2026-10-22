@@ -1,1120 +1,1120 @@
-??_H@YGXPAXIHP6EPAX0@Z@Z 0x30f7c
-?MagnitudeVector3@DirectSound@@YGMPBU_D3DVECTOR@@@Z 0x3d8bd
-_fabsf@4 0x42e66
-_prvAdaptTrigToSubframeConfig_XDS@4 0xb42a7
-_prvInverseQuantizeLowRate_XDS@12 0xb443a
-_CreateFileA@28 0xb47d8
-_CopyFileExA@24 0xb4963
-_CloseHandle@4 0xb4c45
-_ReadFile@20 0xb4c63
-_ReadFileScatter@20 0xb4c63
-_WriteFile@20 0xb4d50
-_WriteFileGather@20 0xb4d50
-_SetEndOfFile@4 0xb4e26
-_SetFilePointer@16 0xb4eaa
-_SetFilePointerEx@20 0xb4fa4
-_GetFileTime@16 0xb506c
-_SetFileTime@16 0xb50d2
-_FlushFileBuffers@4 0xb5144
-_GetFileSizeEx@8 0xb516b
-_DeviceIoControl@32 0xb51a9
-_GetFileSize@8 0xb52a7
-_VirtualAlloc@16 0xb52e2
-_VirtualFree@12 0xb5310
-_GlobalMemoryStatus@4 0xb534c
-_CreateEventA@16 0xb539b
-_SetEvent@4 0xb53fc
-_CreateSemaphoreA@16 0xb543a
-_ReleaseSemaphore@12 0xb5495
-_CreateMutexA@12 0xb54bb
-_WaitForSingleObjectEx@12 0xb5533
-_SignalObjectAndWait@16 0xb5577
-_WaitForMultipleObjectsEx@20 0xb55be
-_SleepEx@8 0xb563e
-_WaitForSingleObject@8 0xb5690
-_WaitForMultipleObjects@16 0xb56a2
-_Sleep@4 0xb56bc
-_XapiCallThreadNotifyRoutines@4 0xb56ca
-_UnhandledExceptionFilter@4 0xb5702
-_SetThreadPriority@8 0xb571f
-_GetThreadPriority@4 0xb5771
-_SuspendThread@4 0xb57c5
-_ResumeThread@4 0xb57c5
-_RaiseException@16 0xb57eb
-_SwitchToThread@0 0xb5841
-_ExitThread@4 0xb5854
-_SetUnhandledExceptionFilter@4 0xb5866
-_XRegisterThreadNotifyRoutine@8 0xb5878
-_XapiThreadStartup@8 0xb58c1
-_CreateThread@24 0xb5959
-_GetCurrentThreadId@0 0xb59c7
-_XapiReadFromStDb@12 0xb59d4
-_XapiOpenStDbAndReadHeader@8 0xb5a12
-_XapiGetNextSoundtrack@12 0xb5a78
-_XFindNextSoundtrack@8 0xb5af6
-_XFindFirstSoundtrack@4 0xb5b15
-_XGetSoundtrackSongInfo@24 0xb5bc4
-_XOpenSoundtrackSong@8 0xb5ded
-_XQueryValue@20 0xb5e7d
-_XGetVideoStandard@0 0xb5ea7
-_XGetVideoFlags@0 0xb5ed0
-_XGetAudioFlags@0 0xb5f1c
-_XGetParentalControlSetting@0 0xb5f60
-_XGetGameRegion@0 0xb5f85
-_XboxTimeZoneNameToWstr@8 0xb5fad
-_XboxTimeZoneDateToSystemTime@8 0xb5fce
-_XapipQueryTimeZoneInformation@8 0xb6006
-_GetSystemTime@4 0xb60b0
-_FileTimeToSystemTime@8 0xb611c
-_SystemTimeToFileTime@8 0xb6187
-_CompareFileTime@8 0xb61fc
-_RtlpCutoverTimeToSystemTime@16 0xb6233
-_GetTimeZoneInformation@4 0xb643d
-_XapipGetTimeZoneBias@4 0xb6599
-_GetLocalTime@4 0xb65ef
-_FileTimeToLocalFileTime@8 0xb666e
-_XWriteTitleInfoNoReboot@20 0xb6699
-_XWriteTitleInfoAndRebootA@20 0xb6773
-_XLaunchNewImageA@8 0xb67b8
-_CreateDirectoryA@8 0xb68cb
-_RemoveDirectoryA@4 0xb6937
-_SetFileAttributesA@8 0xb69c5
-_GetFileAttributesA@4 0xb6a6b
-_GetFileAttributesExA@12 0xb6ab6
-_DeleteFileA@4 0xb6b38
-_XSetFileCacheSize@4 0xb6bc6
-_MoveFileWithProgressA@20 0xb6bf2
-_MoveFileExA@12 0xb6ce2
-_XapiDirectoryInformationToFindData@8 0xb6cfa
-_FindFirstFileA@8 0xb6d66
-_FindNextFileA@8 0xb6e73
-_GetLastError@0 0xb6ec4
-_SetLastError@4 0xb6eec
-_XapiSetLastNTError@4 0xb6f1a
-_GetOverlappedResult@16 0xb6f31
-_lstrcmpiW@8 0xb6f96
-_lstrcpynW@12 0xb7013
-_lstrlenW@4 0xb70b7
-_lstrcpynA@12 0xb70f1
-_UTF8ToUnicode@16 0xb7156
-_UnicodeToUTF8@16 0xb72a8
-_MultiByteToWideChar@24 0xb7360
-_WideCharToMultiByte@32 0xb741b
-_GetDiskFreeSpaceExA@16 0xb74e0
-_XapiSelectCachePartition@12 0xb75d4
-_XMountUtilityDrive@4 0xb77d8
-_XUnmountAlternateTitleA@4 0xb78dd
-_XMUNameFromDriveLetter@12 0xb793a
-_CharUpperW@4 0xb7a15
-_CharLowerW@4 0xb7a15
-_XGetSectionHandleA@4 0xb7a57
-_XLoadSectionByHandle@4 0xb7abe
-_XFreeSectionByHandle@4 0xb7adf
-_XLoadSectionA@4 0xb7afd
-_XGetSectionSize@4 0xb7b18
-_HeapFree@12 0xb7b22
-_LocalFree@4 0xb7b3f
-_LocalAlloc@8 0xb7b5d
-_GlobalAlloc@8 0xb7b5d
-_XFindClose@4 0xb7b7a
-_XAutoPowerDownResetTimer@0 0xb7bc6
-_XapiAutoPowerDownTimeout@16 0xb7be1
-_XapiInitAutoPowerDown@0 0xb7bf3
-_XapiFormatFATVolumeEx@8 0xb7c5d
-_XapiFormatFATVolume@4 0xb7f73
-_XPhysicalAlloc@16 0xb7f84
-_mainXapiStartup@4 0xb7fcd
-_mainCRTStartup 0xb803c
-_OutputDebugStringA@4 0xb80ae
-_QueryPerformanceCounter@4 0xb80e0
-_QueryPerformanceFrequency@4 0xb80f1
-_wvsprintfW@12 0xb810b
-_wvsprintfA@12 0xb810b
-_wsprintfW 0xb8122
-_wsprintfA 0xb8122
-_TlsAlloc@0 0xb8135
-_TlsGetValue@4 0xb8189
-_TlsSetValue@8 0xb81a6
-_TlsFree@4 0xb81ca
-_XapiFormatObjectAttributes@12 0xb8259
-_XapiFormatTimeOut@8 0xb8281
-_xCompareStringW@20 0xb82b0
-_RtlpCreateUnCommittedRange@4 0xb8449
-_RtlpDestroyUnCommittedRange@8 0xb8569
-_RtlpInsertUnCommittedPages@12 0xb858a
-_RtlpFindAndCommitPages@16 0xb861d
-_RtlpCoalesceFreeBlocks@16 0xb87a8
-_RtlpInsertFreeBlock@12 0xb8a4d
-_RtlpGetExtraStuffPointer@4 0xb8b47
-_RtlpGrowBlockInPlace@20 0xb8b63
-_RtlSizeHeap@12 0xb8f61
-_RtlpInitializeHeapSegment@28 0xb8f90
-_RtlpExtendHeap@8 0xb90ae
-_RtlpDeCommitFreeBlock@12 0xb9235
-_RtlCreateHeap@24 0xb94df
-_RtlAllocateHeap@12 0xb9903
-_RtlFreeHeap@12 0xba085
-_RtlReAllocateHeap@16 0xba255
-_XapiValidateDiskPartitionEx@8 0xba92c
-_XapiCopySectionToFile@16 0xba9a4
-_XapiMapLetterToDirectory@24 0xbaa8b
-_XapiSetupPerTitleDriveLetters@8 0xbadbf
-_XapiBootToDash@12 0xbae14
-_XapiVerifyMediaInDrive@0 0xbae79
-_XapiValidateDiskPartition@4 0xbaf55
-_XapiInitProcess@0 0xbaf66
-_XapiNukeDirectoryFromHandle@8 0xbb087
-__cinit@0 0xbb214
-__rtinit@0 0xbb26c
-_IsBadReadPtr@8 0xc68d8
-_IsBadWritePtr@8 0xc693d
-_IsBadCodePtr@4 0xc69a6
-_D3DDevice_SetRenderState_MultiSampleMode@4 0xd05e0
-_D3DDevice_SetRenderState_MultiSampleRenderTargetMode@4 0xd0610
-_D3DDevice_SetRenderState_PSTextureModes@4 0xd0640
-@D3DDevice_SetRenderState_Simple@8 0xd0670
-_D3DDevice_SetRenderStateNotInline@8 0xd06a0
-?UpdateProjectionViewportTransform@D3D@@YGXXZ 0xd0700
-_D3DDevice_SetRenderState_EdgeAntiAlias@4 0xd0840
-_D3DDevice_SetRenderState_ShadowFunc@4 0xd0880
-_D3DDevice_SetRenderState_FogColor@4 0xd08c0
-_D3DDevice_SetRenderState_CullMode@4 0xd0910
-_D3DDevice_SetRenderState_FrontFace@4 0xd0980
-_D3DDevice_SetRenderState_NormalizeNormals@4 0xd09c0
-_D3DDevice_SetRenderState_TextureFactor@4 0xd0a00
-_D3DDevice_SetRenderState_LineWidth@4 0xd0a60
-_D3DDevice_SetRenderState_Dxt1NoiseEnable@4 0xd0ad0
-_D3DDevice_SetRenderState_ZBias@4 0xd0b50
-_D3DDevice_SetRenderState_LogicOp@4 0xd0bd0
-_D3DDevice_SetRenderState_FillMode@4 0xd0c30
-_D3DDevice_SetRenderState_BackFillMode@4 0xd0c80
-_D3DDevice_SetRenderState_TwoSidedLighting@4 0xd0ce0
-_D3DDevice_SetRenderState_VertexBlend@4 0xd0d50
-_D3DDevice_SetTextureState_TexCoordIndex@8 0xd0da0
-_D3DDevice_SetTextureState_BumpEnv@12 0xd0ec0
-_D3DDevice_SetTextureState_BorderColor@8 0xd0f30
-_D3DDevice_SetTextureState_ColorKeyColor@8 0xd0f70
-_D3DDevice_SetTextureStageStateNotInline@12 0xd0fb0
-?CommonSetTextureBumpEnv@D3D@@YIPCKPAVCDevice@1@PCK@Z 0xd10a0
-?CommonSetViewport@D3D@@YIPCKPAVCDevice@1@PCK@Z 0xd10f0
-?CommonSetControl0@D3D@@YIPCKPAVCDevice@1@PCK@Z 0xd12d0
-?CommonSetDebugRegisters@D3D@@YIXXZ 0xd1330
-_D3DDevice_SetRenderState_ZEnable@4 0xd1400
-_D3DDevice_SetRenderState_StencilEnable@4 0xd14a0
-_D3DDevice_SetRenderState_StencilFail@4 0xd1530
-_D3DDevice_SetRenderState_YuvEnable@4 0xd15a0
-_D3DDevice_SetRenderState_OcclusionCullEnable@4 0xd15d0
-_D3DDevice_SetRenderState_StencilCullEnable@4 0xd1640
-_D3DDevice_SetRenderState_RopZCmpAlwaysRead@4 0xd16b0
-_D3DDevice_SetRenderState_RopZRead@4 0xd16d0
-_D3DDevice_SetRenderState_DoNotCullUncompressed@4 0xd16f0
-_D3DDevice_SetRenderState_MultiSampleAntiAlias@4 0xd1710
-_D3DDevice_SetRenderState_MultiSampleMask@4 0xd1770
-_D3DDevice_CreateIndexBuffer@20 0xd17d0
-_D3DPalette_Lock@12 0xd1810
-_D3DDevice_CreateVertexBuffer@20 0xd1840
-_D3DVertexBuffer_Lock@20 0xd18a0
-_D3DDevice_CreatePalette@8 0xd1900
-_D3DDevice_GetDirect3D@4 0xd1970
-_D3DDevice_GetDeviceCaps@4 0xd1980
-_D3DDevice_SetGammaRamp@8 0xd19a0
-_D3DDevice_CreateTexture@28 0xd1a00
-_D3DDevice_SetTransform@8 0xd1a40
-_D3DDevice_GetTransform@8 0xd1b50
-_D3DDevice_SetMaterial@4 0xd1b80
-_D3DDevice_AddRef@0 0xd1bb0
-_D3DDevice_Release@0 0xd1bd0
-_D3DDevice_BlockUntilVerticalBlank@0 0xd1c10
-_D3DDevice_SetFlickerFilter@4 0xd1c40
-_D3DDevice_SetSoftDisplayFilter@4 0xd1c90
-?GetPitch@PixelJar@D3D@@YGKPAUD3DPixelContainer@@@Z 0xd1cf0
-?GetSlice@PixelJar@D3D@@YGKPAUD3DPixelContainer@@@Z 0xd1d50
-_D3DDevice_GetDisplayMode@4 0xd1dd0
-_D3DDevice_Reset@4 0xd1e70
-_D3DDevice_SetRenderTarget@8 0xd1f20
-_D3DDevice_GetBackBuffer@12 0xd2450
-_D3DDevice_GetRasterStatus@4 0xd2490
-?GPUCopyVideoRectangle@D3D@@YGXKKKKKKPAUtagRECT@@PAUtagPOINT@@@Z 0xd2500
-_D3DDevice_CopyRects@20 0xd25f0
-_D3DDevice_SetViewport@4 0xd28a0
-_D3DDevice_SetTexture@8 0xd2a00
-_D3DDevice_SetPalette@8 0xd2b80
-_D3DDevice_SetIndices@8 0xd2c10
-_D3DDevice_IsBusy@0 0xd2ca0
-_D3DDevice_GetDisplayFieldStatus@4 0xd2ce0
-_D3DDevice_SetTile@8 0xd2d20
-_D3DDevice_SetScissors@12 0xd2de0
-_D3DDevice_PersistDisplay@0 0xd2f80
-_D3DDevice_SetScreenSpaceOffset@8 0xd3110
-?FastCopyToWC@D3D@@YGXPCKPAKK@Z 0xd3190
-_D3DDevice_DrawVerticesUP@16 0xd3220
-_D3DDevice_DrawIndexedVerticesUP@20 0xd3380
-_D3DDevice_DrawVertices@12 0xd34c0
-_D3DDevice_DrawIndexedVertices@12 0xd3560
-?InitializeVertexShaderFromFvf@D3D@@YGXPAUVertexShader@1@K@Z 0xd37c0
-?ShadowVertexShaderState@D3D@@YGXPAUVertexShader@1@K@Z 0xd3900
-?ParseProgram@D3D@@YGPCKPCKPBKK@Z 0xd39b0
-?ParseDeclarationStream@D3D@@YGXPAUVertexShader@1@PBKH@Z 0xd3a20
-?ParseDeclarationConstants@D3D@@YGKPBKPCK@Z 0xd3bc0
-_D3DDevice_CreateVertexShader@16 0xd3cc0
-_D3DDevice_SetStreamSource@12 0xd3e00
-_D3DDevice_LoadVertexShader@8 0xd3e90
-_D3DDevice_SelectVertexShader@8 0xd3ef0
-_D3DDevice_SetShaderConstantMode@4 0xd3f70
-?RestoreVertexShaders@D3D@@YGXPBKK@Z 0xd4070
-?CommonSetPassthroughProgram@D3D@@YIXPAVCDevice@1@@Z 0xd40b0
-_D3DDevice_SetVertexShader@4 0xd41a0
-_D3DDevice_SetVertexShaderConstant@12 0xd4300
-?CleanPrivateData@D3D@@YGXPAX@Z 0xd43a0
-_D3DResource_GetType@4 0xd43f0
-?GetDataFromResource@D3D@@YGPAEPAUD3DResource@@@Z 0xd4480
-?DestroyResource@D3D@@YGXPAUD3DResource@@@Z 0xd4490
-?IsResourceSetInDevice@D3D@@YGHPAUD3DResource@@@Z 0xd4530
-?InternalAddRefSurface@D3D@@YGXPAUD3DResource@@@Z 0xd4570
-_D3DResource_AddRef@4 0xd45b0
-_D3DResource_Release@4 0xd45f0
-_D3DResource_IsBusy@4 0xd4640
-_D3DResource_Register@8 0xd46d0
-?InternalReleaseSurface@D3D@@YGXPAUD3DResource@@@Z 0xd4700
-_D3DTexture_GetSurfaceLevel@12 0xd4780
-_D3DTexture_LockRect@20 0xd47d0
-?CreateTexture@D3D@@YGJKKKKKW4_D3DFORMAT@@_N1PAPAUD3DBaseTexture@@@Z 0xd4800
-?GetMipmapLevelCount@PixelJar@D3D@@YGKPAUD3DPixelContainer@@@Z 0xd48c0
-_D3DBaseTexture_GetLevelCount@4 0xd48c0
-_D3D_AllocNoncontiguousMemory@4 0xd48d0
-_D3D_AllocContiguousMemory@8 0xd48e0
-_D3DSurface_GetDesc@8 0xd4900
-_D3DSurface_LockRect@16 0xd4920
-?CreateSurfaceOfTexture@D3D@@YGJKKPAUD3DBaseTexture@@PAXPAPAUD3DSurface@@@Z 0xd4940
-?InitializeSurface@D3D@@YGXPAUD3DSurface@@KKPAX@Z 0xd49a0
-?CreateStandAloneSurface@D3D@@YGJKKW4_D3DFORMAT@@PAPAUD3DSurface@@@Z 0xd49d0
-?CreateSurfaceWithContiguousHeader@D3D@@YGJKKW4_D3DFORMAT@@PAPAUD3DSurface@@@Z 0xd4a70
-_Direct3D_CreateDevice@24 0xd4b00
-?SwapSaveState@D3D@@YGXPAUSwapSavedState@1@@Z 0xd4bc0
-?SwapFirstFlip@D3D@@YGXPAVCDevice@1@@Z 0xd4d10
-?SwapSetState@D3D@@YGXPAUSwapSavedState@1@@Z 0xd4e20
-?SwapRestoreState@D3D@@YGXPAUSwapSavedState@1@@Z 0xd4ef0
-?SwapSaveSurfaces@D3D@@YGXPAVCDevice@1@@Z 0xd4ff0
-?SwapRestoreSurfaces@D3D@@YGXPAVCDevice@1@@Z 0xd5050
-?SwapCopyBlt@D3D@@YGXPAVCDevice@1@@Z 0xd50b0
-?SwapCopy@D3D@@YGXPAVCDevice@1@K@Z 0xd5280
-?SwapFlip@D3D@@YGXPAVCDevice@1@@Z 0xd5460
-?SwapFinish@D3D@@YGXPAVCDevice@1@@Z 0xd5570
-_D3DDevice_Swap@4 0xd55b0
-_D3DDevice_Clear@24 0xd5670
-_Direct3DCreate8@4 0xd5a60
-_D3DDevice_EnableCC@4 0xd5a70
-_D3DDevice_SendCC@12 0xd5a90
-_D3DDevice_GetCCStatus@8 0xd5ad0
-_D3DDevice_UpdateOverlay@20 0xd5b10
-_D3DDevice_EnableOverlay@4 0xd5c90
-?BusyLoop@D3D@@YGXXZ 0xd5d00
-?DumpMatrixTransposed@D3D@@YGXPCKKPBU_D3DMATRIX@@@Z 0xd5d20
-?InitializePushBuffer@CDevice@D3D@@QAEJXZ 0xd5d90
-?UninitializePushBuffer@CDevice@D3D@@QAEXXZ 0xd5e40
-?ComputeGap@D3D@@YIKPAVCDevice@1@PAUFence@1@@Z 0xd5e60
-?FindFence@D3D@@YGPAUFence@1@K@Z 0xd5ed0
-?FlushWCCache@D3D@@YGXXZ 0xd5ff0
-?KickOff@CDevice@D3D@@QAEXXZ 0xd6020
-?SetFence@D3D@@YGKK@Z 0xd6110
-?BlockOnTime@D3D@@YGXKH@Z 0xd61c0
-?MakeRequestedSpace@D3D@@YGPCKKK@Z 0xd62b0
-_XMETAL_StartPushCount@8 0xd6440
-?KickOffAndWaitForIdle@D3D@@YGXXZ 0xd6490
-?BlockOnResource@D3D@@YGXPAUD3DResource@@@Z 0xd64b0
-?BlockOnNonSurfaceResource@D3D@@YGXPAUD3DResource@@@Z 0xd6530
-?ScaleVector3@D3D@@YGXPAU_D3DVECTOR@@PBU2@M@Z 0xd6570
-?AddVectors3@D3D@@YGXPAU_D3DVECTOR@@PBU2@1@Z 0xd65a0
-?XformBy4x3@D3D@@YGXPAU_D3DVECTOR@@PBU2@MPBU_D3DMATRIX@@@Z 0xd65d0
-?MatrixProduct4x4@D3D@@YGXPAU_D3DMATRIX@@PBU2@1@Z 0xd6630
-?Explut@D3D@@YGXMPAM0@Z 0xd6730
-?JBInvSqrt@D3D@@YGMM@Z 0xd6810
-?NormalizeVector3@D3D@@YGXPAU_D3DVECTOR@@@Z 0xd6880
-?Inverse4x4@D3D@@YGHPAU_D3DMATRIX@@PBU2@H@Z 0xd68d0
-?FloatToLong@D3D@@YGJM@Z 0xd6e30
-?Exp@D3D@@YGMM@Z 0xd6e40
-?Log@D3D@@YGMM@Z 0xd6ea0
-?DacProgramVideoStart@CMiniport@D3D@@QAEXK@Z 0xd6eb0
-?DacProgramGammaRamp@CMiniport@D3D@@QAEXPAU_D3DGAMMARAMP@@@Z 0xd6f32
-?InitializeKelvin@D3D@@YGXXZ 0xd6f80
-?InitializeHardware@D3D@@YGXXZ 0xd7070
-?InitializeD3dState@D3D@@YGXXZ 0xd7150
-?FreeFrameBuffers@CDevice@D3D@@QAEXXZ 0xd7210
-?InitializeFrameBuffers@CDevice@D3D@@QAEJPAU_D3DPRESENT_PARAMETERS_@@@Z 0xd7330
-?Init@CDevice@D3D@@QAEJPAU_D3DPRESENT_PARAMETERS_@@@Z 0xd7870
-?UnInit@CDevice@D3D@@QAEXXZ 0xd7da0
-?Log2@D3D@@YIKK@Z 0xd7f40
-?MapToLinearD3DFORMAT@D3D@@YG?AW4_D3DFORMAT@@W42@@Z 0xd7f50
-?IsCompressedD3DFORMAT@D3D@@YG_NK@Z 0xd8010
-?VideoBitsPerPixelOfD3DFORMAT@D3D@@YGKK@Z 0xd8030
-?CalcTilePitch@D3D@@YGKKW4_D3DFORMAT@@@Z 0xd8060
-?GetSurfaceFormat@PixelJar@D3D@@YGKPAUD3DPixelContainer@@0@Z 0xd80a0
-?GetDepthBufferScale@PixelJar@D3D@@YGXPAUD3DPixelContainer@@PAM@Z 0xd81c0
-?GetSize@PixelJar@D3D@@YGXPAUD3DPixelContainer@@KPAK1111@Z 0xd8230
-?Get2DSurfaceDesc@PixelJar@D3D@@YGXPAUD3DPixelContainer@@IPAU_D3DSURFACE_DESC@@@Z 0xd8380
-?FindSurfaceWithinTexture@PixelJar@D3D@@YGXPAUD3DPixelContainer@@W4_D3DCUBEMAP_FACES@@IPAPAEPAK333@Z 0xd8440
-?Lock2DSurface@PixelJar@D3D@@YGXPAUD3DPixelContainer@@W4_D3DCUBEMAP_FACES@@IPAU_D3DLOCKED_RECT@@PBUtagRECT@@K@Z 0xd8670
-?EncodeFormat@PixelJar@D3D@@YGKKKKKW4_D3DFORMAT@@K_N1PAK2@Z 0xd8710
-?GetPresentFlagsFromAvInfo@CMiniport@D3D@@SGKK@Z 0xd8910
-?GetDisplayCapabilities@CMiniport@D3D@@SGKXZ 0xd8950
-?GetTableForCurrentAvInfo@D3D@@YGPBUDISPLAYMODE@1@XZ 0xd896f
-?SetVideoMode@CMiniport@D3D@@QAEXKKKKW4_D3DFORMAT@@KK@Z 0xd89e8
-?IsFlipPending@CMiniport@D3D@@QAEHXZ 0xd8bc0
-?Isr@CMiniport@D3D@@SGEPAU_KINTERRUPT@@PAX@Z 0xd8bf0
-?VBlankFlip@CMiniport@D3D@@AAEXKK@Z 0xd8d10
-?VBlank@CMiniport@D3D@@AAEKXZ 0xd8d90
-?FixupPushBuffer@CMiniport@D3D@@QAEXPAUPUSHBUFFERFIXUPINFO@12@K@Z 0xd8f30
-?SoftwareMethod@CMiniport@D3D@@AAEXKK@Z 0xd8fb0
-?ShutdownNotification@CMiniport@D3D@@SGXPAU_HAL_SHUTDOWN_REGISTRATION@@@Z 0xd9220
-?ServiceGrInterrupt@CMiniport@D3D@@AAEKXZ 0xd9260
-?ServiceFifoInterrupt@CMiniport@D3D@@AAEKXZ 0xd9350
-?Dpc@CMiniport@D3D@@SGXPAU_KDPC@@PAX11@Z 0xd94d0
-?ReserveInstMem@CMiniport@D3D@@AAEKK@Z 0xd9580
-?InitGammaRamp@CMiniport@D3D@@AAEXK@Z 0xd9593
-?InitDMAChannel@CMiniport@D3D@@QAEHKPAUOBJECTINFO@12@0KPAPAX@Z 0xd95d3
-?BindToChannel@CMiniport@D3D@@QAEHPAUOBJECTINFO@12@@Z 0xd9636
-?MapRegisters@CMiniport@D3D@@AAEHXZ 0xd966a
-?GetGeneralInfo@CMiniport@D3D@@AAEHXZ 0xd9695
-?InitEngines@CMiniport@D3D@@AAEHXZ 0xd96d6
-?LoadEngines@CMiniport@D3D@@AAEHXZ 0xd97e0
-?GetAddressInfo@CMiniport@D3D@@AAEXPAXPAPAXPAKH@Z 0xd9919
-?CreateCtxDmaObject@CMiniport@D3D@@QAEHKKPAXKPAUOBJECTINFO@12@@Z 0xd9973
-?CreateGrObject@CMiniport@D3D@@QAEHKKPAUOBJECTINFO@12@@Z 0xd9a42
-?TilingUpdateIdle@CMiniport@D3D@@QAEXPAK@Z 0xd9ad2
-?InitHardware@CMiniport@D3D@@QAEHXZ 0xd9b3d
-?CreateTile@CMiniport@D3D@@QAEHKKKKKKK@Z 0xd9c9f
-?DestroyTile@CMiniport@D3D@@QAEHKK@Z 0xd9e8d
-?ShutdownEngines@CMiniport@D3D@@QAEXXZ 0xd9f4f
-?GetColorMaterial@D3D@@YGKXZ 0xda100
-?LazySetPointParams@D3D@@YGXPAVCDevice@1@@Z 0xda1a0
-?LazySetShaderStageProgram@D3D@@YGXPAVCDevice@1@@Z 0xda310
-?LazySetTextureState@D3D@@YGXPAVCDevice@1@@Z 0xda480
-?LazySetSpecFogCombiner@D3D@@YGXPAVCDevice@1@@Z 0xda670
-?LazySetTextureTransform@D3D@@YGXPAVCDevice@1@@Z 0xda850
-?SetLightColors@D3D@@YGPCKPCKPBULight@1@KK@Z 0xdac10
-?SetSceneAmbientAndMaterialEmission@D3D@@YGPCKPCKK@Z 0xdad10
-?SetSpecularParameters@D3D@@YGPCKPCK@Z 0xdaeb0
-?LazySetLights@D3D@@YGXPAVCDevice@1@@Z 0xdaff0
-?LazySetTransform@D3D@@YGXPAVCDevice@1@@Z 0xdb330
-?SetState@D3D@@YGXXZ 0xdb530
-?SetStateVB@CDevice@D3D@@QAEXK@Z 0xdb5b0
-?SetStateUP@CDevice@D3D@@QAEXXZ 0xdb750
-_D3DDevice_SetPixelShader@4 0xdb890
-?HalMcControlInit@CMiniport@D3D@@AAEXXZ 0xdba60
-?HalFbControlInit@CMiniport@D3D@@AAEXXZ 0xdbbc7
-?HalDacControlInit@CMiniport@D3D@@AAEXXZ 0xdbcc5
-?HalVideoControlInit@CMiniport@D3D@@AAEXXZ 0xdbd94
-?HalGrControlInit@CMiniport@D3D@@AAEXXZ 0xdbdca
-?HalFifoControlInit@CMiniport@D3D@@AAEXXZ 0xdbdfa
-?HalGrIdle@CMiniport@D3D@@AAEXXZ 0xdbe6b
-?HalGrUnloadChannelContext@CMiniport@D3D@@AAEXK@Z 0xdbeaa
-?HalFifoContextSwitch@CMiniport@D3D@@AAEXK@Z 0xdbee3
-?HalDacLoad@CMiniport@D3D@@AAEXXZ 0xdc0e0
-?HalFifoAllocDMA@CMiniport@D3D@@AAEXKKKPAUOBJECTINFO@12@@Z 0xdc0f2
-?HalFifoHashAdd@CMiniport@D3D@@AAEXKKKKK@Z 0xdc27f
-?HalGrInitObjectContext@CMiniport@D3D@@AAEXKK@Z 0xdc2b8
-?HalGrInit3d@CMiniport@D3D@@AAEXXZ 0xdc32d
-?HalGrLoadChannelContext@CMiniport@D3D@@AAEXK@Z 0xdcd0c
-?HalFifoControlLoad@CMiniport@D3D@@AAEXXZ 0xdce2f
-?HalGrControlLoad@CMiniport@D3D@@AAEXXZ 0xdceb0
-?CombinerInput@D3D@@YGKKKK@Z 0xdd150
-?LazySetCombiners@D3D@@YGXPAVCDevice@1@@Z 0xdd1f0
-_ibstrmGetPacketHeader@4 0xf02ae
-?RemoveEntryList@@YGPAU_LIST_ENTRY@@PAU1@@Z 0x109120
-??2@YAPAXI@Z 0x10913f
-??_U@YAPAXI@Z 0x10913f
-?Save@CFpState@DirectSound@@QAEXXZ 0x109150
-?Restore@CFpState@DirectSound@@QAEXXZ 0x109175
-?Release@CRefCount@DirectSound@@UAGKXZ 0x1091a0
-?DirectSoundEnterCriticalSection@@YGHXZ 0x1091c7
-_IDirectSound_Release@4 0x1091e5
-_IDirectSoundBuffer_Release@4 0x109200
-_XAudioCalculatePitch@4 0x109216
-?SetEffectImageLocations@CDirectSoundSettings@DirectSound@@QAEXPBU_DSEFFECTIMAGELOC@@@Z 0x109261
-??0CDirectSound@DirectSound@@QAE@XZ 0x109283
-?AddRef@CDirectSound@DirectSound@@UAGKXZ 0x1092a0
-?AddRef@CDirectSoundBuffer@DirectSound@@UAGKXZ 0x1092a0
-??1CDirectSound@DirectSound@@UAE@XZ 0x1092e7
-?SetMixBinHeadroom@CDirectSound@DirectSound@@QAGJKK@Z 0x109321
-?DoWork@CDirectSound@DirectSound@@QAGXXZ 0x109380
-?SetMixBins@CDirectSoundVoiceSettings@DirectSound@@QAEXPBU_DSMIXBINS@@@Z 0x1093b1
-??1CDirectSoundVoice@DirectSound@@UAE@XZ 0x10942b
-?SetPitch@CDirectSoundVoice@DirectSound@@QAGJJ@Z 0x109478
-?SetVolume@CDirectSoundVoice@DirectSound@@QAGJJ@Z 0x109491
-?SetHeadroom@CDirectSoundVoice@DirectSound@@QAGJK@Z 0x1094ad
-?SetNotificationPositions@CDirectSoundBufferSettings@DirectSound@@QAEJKPBU_DSBPOSITIONNOTIFY@@@Z 0x1094d0
-??1CDirectSoundBuffer@DirectSound@@UAE@XZ 0x1095a5
-?Release@CDirectSoundBuffer@DirectSound@@UAGKXZ 0x1095d8
-?Play@CDirectSoundBuffer@DirectSound@@QAGJKKK@Z 0x109622
-?Stop@CDirectSoundBuffer@DirectSound@@QAGJXZ 0x109673
-?GetStatus@CDirectSoundBuffer@DirectSound@@QAGJPAK@Z 0x1096c2
-?GetCurrentPosition@CDirectSoundBuffer@DirectSound@@QAGJPAK0@Z 0x109713
-?Lock@CDirectSoundBuffer@DirectSound@@QAGJKKPAPAXPAK01K@Z 0x109768
-?SetCurrentPosition@CDirectSoundBuffer@DirectSound@@QAGJK@Z 0x10983e
-?SetNotificationPositions@CDirectSoundBuffer@DirectSound@@QAGJKPBU_DSBPOSITIONNOTIFY@@@Z 0x10988f
-?__AddRef@DirectSound@@YGPAVCWaveFileMediaObject@1@PAV21@@Z 0x1098f4
-?__AddRef@DirectSound@@YGPAVCFileMediaObject@1@PAV21@@Z 0x1098f4
-?__AddRef@DirectSound@@YGPAVCAc97MediaObject@1@PAV21@@Z 0x1098f4
-??_GCRefCount@DirectSound@@UAEPAXI@Z 0x109908
-??_GCImaAdpcmCodec@DirectSound@@UAEPAXI@Z 0x109908
-??_GCDirectSoundSettings@DirectSound@@UAEPAXI@Z 0x109908
-?SetVolume@CDirectSoundBuffer@DirectSound@@QAGJJ@Z 0x109924
-?SetHeadroom@CDirectSoundBuffer@DirectSound@@QAGJK@Z 0x109972
-_IDirectSound_SetMixBinHeadroom@12 0x1099c0
-_IDirectSoundBuffer_SetVolume@8 0x1099e0
-_IDirectSoundBuffer_SetHeadroom@8 0x1099fc
-_IDirectSoundBuffer_Play@16 0x109a18
-_IDirectSoundBuffer_Stop@4 0x109a3c
-_IDirectSoundBuffer_GetStatus@8 0x109a54
-_IDirectSoundBuffer_GetCurrentPosition@12 0x109a70
-_IDirectSoundBuffer_SetCurrentPosition@8 0x109a90
-_IDirectSoundBuffer_Lock@32 0x109aac
-_IDirectSoundBuffer_SetNotificationPositions@12 0x109adc
-_DirectSoundDoWork@0 0x109afc
-_Ac97CreateMediaObject@16 0x109b25
-??_GCDirectSound@DirectSound@@UAEPAXI@Z 0x109ba2
-?SetFormat@CDirectSoundVoiceSettings@DirectSound@@QAEHPBUtWAVEFORMATEX@@H@Z 0x109bbd
-?SetOutputBuffer@CDirectSoundVoiceSettings@DirectSound@@QAEXPAVCDirectSoundBuffer@2@@Z 0x109c39
-??0CDirectSoundVoice@DirectSound@@QAE@PAVCDirectSound@1@@Z 0x109c80
-??_GCDirectSoundVoice@DirectSound@@UAEPAXI@Z 0x109caa
-?Initialize@CDirectSoundVoice@DirectSound@@QAGXPAVCMcpxVoiceClient@2@PAVCDirectSoundVoiceSettings@2@@Z 0x109cc5
-?SetFrequency@CDirectSoundVoice@DirectSound@@QAGJK@Z 0x109d04
-?SetPlayRegion@CDirectSoundBufferSettings@DirectSound@@QAEXKK@Z 0x109d28
-??0CDirectSoundBuffer@DirectSound@@QAE@PAVCDirectSound@1@@Z 0x109d4c
-??_GCDirectSoundBuffer@DirectSound@@UAEPAXI@Z 0x109d64
-?SetFrequency@CDirectSoundBuffer@DirectSound@@QAGJK@Z 0x109d7f
-_IDirectSoundBuffer_SetFrequency@8 0x109dcd
-??0CDirectSoundSettings@DirectSound@@QAE@XZ 0x109de9
-?Release@CDirectSound@DirectSound@@UAGKXZ 0x109e59
-??1CDirectSoundVoiceSettings@DirectSound@@UAE@XZ 0x109f0f
-?Initialize@CDirectSoundVoiceSettings@DirectSound@@QAEJKPBUtWAVEFORMATEX@@PBU_DSMIXBINS@@@Z 0x109f47
-?SetBufferData@CDirectSoundBufferSettings@DirectSound@@QAEJPAXK@Z 0x10a001
-?SetBufferData@CDirectSoundBuffer@DirectSound@@QAGJPAXK@Z 0x10a08d
-_IDirectSoundBuffer_SetBufferData@12 0x10a13b
-??_GCDirectSoundVoiceSettings@DirectSound@@UAEPAXI@Z 0x10a15b
-??1CDirectSoundBufferSettings@DirectSound@@UAE@XZ 0x10a176
-?Initialize@CDirectSoundBufferSettings@DirectSound@@QAEJPBU_DSBUFFERDESC@@@Z 0x10a19b
-?Initialize@CDirectSoundBuffer@DirectSound@@QAGJPBU_DSBUFFERDESC@@@Z 0x10a200
-?CreateSoundBuffer@CDirectSound@DirectSound@@QAGJPBU_DSBUFFERDESC@@PAPAUIDirectSoundBuffer@@PAUIUnknown@@@Z 0x10a2e8
-??_GCDirectSoundBufferSettings@DirectSound@@UAEPAXI@Z 0x10a384
-_IDirectSound_CreateSoundBuffer@16 0x10a39f
-?Initialize@CDirectSound@DirectSound@@QAGJXZ 0x10a3c3
-?DirectSoundCreateInternal@@YGJPAPAVCDirectSound@DirectSound@@@Z 0x10a4ec
-_DirectSoundCreate@12 0x10a559
-_DirectSoundPoolAlloc@12 0x10a5a0
-_DirectSoundPoolFree@4 0x10a5e5
-_DirectSoundPhysicalAlloc@16 0x10a5fb
-_DirectSoundPhysicalFree@4 0x10a648
-_DirectSoundMemAlloc@12 0x10a65e
-_DirectSoundMemFree@4 0x10a6c6
-_FmtPcmToInternal@8 0x10a6fa
-_FmtAdpcmToInternal@8 0x10a723
-_FmtExtensibleToInternal@8 0x10a74a
-_FmtCreateInternal@8 0x10a793
-?LinearToVolume@DirectSound@@YGJM@Z 0x10a7df
-??0CHrtfListener@DirectSound@@QAE@ABU_DS3DLISTENER@@@Z 0x10a80e
-??1CHrtfListener@DirectSound@@QAE@XZ 0x10a849
-??0CHrtfSource@DirectSound@@QAE@ABVCHrtfListener@1@ABU_DS3DBUFFER@@@Z 0x10a85d
-?Calculate3d@CHrtfSource@DirectSound@@QAEXK@Z 0x10a893
-??0CMcpxGPDspManager@DirectSound@@QAE@XZ 0x10a8a9
-?Initialize@CMcpxGPDspManager@DirectSound@@QAEXXZ 0x10a8c8
-?AC3SetOutputBuffer@CMcpxGPDspManager@DirectSound@@QAEXPAUMCPX_ALLOC_CONTEXT@2@K@Z 0x10a93d
-?SetMultipassBuffer@CMcpxGPDspManager@DirectSound@@QAEXPAUMCPX_ALLOC_CONTEXT@2@K@Z 0x10a951
-??1CMcpxGPDspManager@DirectSound@@QAE@XZ 0x10a968
-?MoveEntryTailList@@YGPAU_LIST_ENTRY@@PAU1@0@Z 0x10a9a9
-?Raise@CIrql@DirectSound@@QAEXXZ 0x10a9d3
-?Lower@CIrql@DirectSound@@QAEXXZ 0x10aa06
-??0CMcpxAPU@DirectSound@@QAE@PAVCDirectSoundSettings@1@@Z 0x10aa1d
-?Terminate@CMcpxAPU@DirectSound@@IAEXXZ 0x10aac8
-?AllocateVoices@CMcpxAPU@DirectSound@@QAEJPAVCMcpxVoiceClient@2@@Z 0x10ab2b
-?FreeVoices@CMcpxAPU@DirectSound@@QAEXPAVCMcpxVoiceClient@2@@Z 0x10abc5
-?WaitForMagicWrite@CMcpxAPU@DirectSound@@IAEXXZ 0x10ac38
-?ServiceVoiceInterrupt@CMcpxAPU@DirectSound@@IAEXXZ 0x10ac9b
-?GetInterruptStatusCallback@CMcpxAPU@DirectSound@@CGEPAX@Z 0x10ad14
-?HandleDeltaPanic@CMcpxAPU@DirectSound@@IAEXXZ 0x10ad40
-?HandleIdleVoice@CMcpxAPU@DirectSound@@IAEXK@Z 0x10ad9e
-?ScheduleDeferredCommandLow@CMcpxAPU@DirectSound@@IAEHPAUMCPX_DEFERRED_COMMAND@2@@Z 0x10ae04
-?RemoveDeferredCommandHigh@CMcpxAPU@DirectSound@@IAEXPAUMCPX_DEFERRED_COMMAND@2@@Z 0x10ae29
-?ServiceDeferredCommandsHigh@CMcpxAPU@DirectSound@@IAEXXZ 0x10ae8b
-?ServiceDeferredCommandsLow@CMcpxAPU@DirectSound@@IAEXXZ 0x10af0d
-?SetHrtfHeadroom@CMcpxAPU@DirectSound@@QAEJK@Z 0x10afa2
-?SetMixBinHeadroom@CMcpxAPU@DirectSound@@QAEJK@Z 0x10afd9
-?DeferredCommandDpcRoutine@CMcpxAPU@DirectSound@@CGXPAU_KDPC@@PAX11@Z 0x10b01e
-?ApuShutdownNotifier@CMcpxAPU@DirectSound@@CGXPAU_HAL_SHUTDOWN_REGISTRATION@@@Z 0x10b02a
-??1CMcpxAPU@DirectSound@@UAE@XZ 0x10b046
-?ServiceApuInterruptDpc@CMcpxAPU@DirectSound@@IAEXXZ 0x10b0f2
-?HandleSoftwareMethod@CMcpxAPU@DirectSound@@IAEXKK@Z 0x10b134
-?RemoveDeferredCommand@CMcpxAPU@DirectSound@@QAEXPAUMCPX_DEFERRED_COMMAND@2@@Z 0x10b14a
-?ApuInterruptDpcRoutine@CMcpxAPU@DirectSound@@CGXPAU_KDPC@@PAX11@Z 0x10b18e
-??_GCMcpxAPU@DirectSound@@UAEPAXI@Z 0x10b19a
-?HandleFETrap@CMcpxAPU@DirectSound@@IAEXXZ 0x10b1b5
-?ScheduleDeferredCommandHigh@CMcpxAPU@DirectSound@@IAEHPAUMCPX_DEFERRED_COMMAND@2@@Z 0x10b1fc
-?ServiceApuInterrupt@CMcpxAPU@DirectSound@@IAEHXZ 0x10b2d2
-?ScheduleDeferredCommand@CMcpxAPU@DirectSound@@QAEHPAUMCPX_DEFERRED_COMMAND@2@@Z 0x10b327
-?ApuInterruptServiceRoutine@CMcpxAPU@DirectSound@@CGEPAU_KINTERRUPT@@PAX@Z 0x10b36e
-?Initialize@CMcpxAPU@DirectSound@@QAEJXZ 0x10b37a
-_alog@4 0x10b4a6
-_RatioToPitch@4 0x10b4e8
-?Reset@CMcpxNotifier@DirectSound@@QAEXXZ 0x10b506
-?SamplesToBytes@CMcpxVoiceClient@DirectSound@@IAEKK@Z 0x10b522
-?Initialize@CMcpxVoiceClient@DirectSound@@UAEJH@Z 0x10b543
-?SetFormat@CMcpxVoiceClient@DirectSound@@UAEJXZ 0x10b641
-?ReleaseVoiceResources@CMcpxVoiceClient@DirectSound@@IAEXXZ 0x10b754
-?ConvertMixBinValues@CMcpxVoiceClient@DirectSound@@IAEXPAK0@Z 0x10b7dc
-?ConvertVolumeValues@CMcpxVoiceClient@DirectSound@@IAEXPAUMCPX_VOICE_VOLUME@2@@Z 0x10b88d
-?ConvertPitchValue@CMcpxVoiceClient@DirectSound@@IAEXPAK@Z 0x10ba74
-?GetAntecedentVoice@CMcpxVoiceClient@DirectSound@@AAEXPAEPAPAV12@@Z 0x10baf6
-?RemoveIdleVoice@CMcpxVoiceClient@DirectSound@@AAEXH@Z 0x10bb59
-?RemoveStuckVoice@CMcpxVoiceClient@DirectSound@@AAEXXZ 0x10bd40
-?ReleaseVoice@CMcpxVoiceClient@DirectSound@@IAEXXZ 0x10bd97
-?CheckStuckVoice@CMcpxVoiceClient@DirectSound@@IAEXXZ 0x10be1b
-?LoadHrtfFilter@CMcpxVoiceClient@DirectSound@@IAEXXZ 0x10be75
-?SetFilter@CMcpxVoiceClient@DirectSound@@QAEJPBU_DSFILTERDESC@@@Z 0x10bf7a
-?DisconnectVoice@CMcpxVoiceClient@DirectSound@@QAEJXZ 0x10c0c7
-?GetSslPosition@CMcpxVoiceClient@DirectSound@@IAEKXZ 0x10c1bd
-?__AddRef@DirectSound@@YGPAVCDirectSoundSettings@1@PAV21@@Z 0x10c248
-?__AddRef@DirectSound@@YGPAVCMcpxSlopMemoryHeap@1@PAV21@@Z 0x10c248
-?__AddRef@DirectSound@@YGPAVCMcpxAPU@1@PAV21@@Z 0x10c248
-?__AddRef@DirectSound@@YGPAVCDirectSoundVoiceSettings@1@PAV21@@Z 0x10c248
-?__AddRef@DirectSound@@YGPAVCDirectSoundStreamSettings@1@PAV21@@Z 0x10c248
-?__AddRef@DirectSound@@YGPAVCDirectSoundBufferSettings@1@PAV21@@Z 0x10c248
-?__AddRef@DirectSound@@YGPAVCDirectSound@1@PAV21@@Z 0x10c248
-?__AddRef@DirectSound@@YGPAVCDirectSoundBuffer@1@PAV21@@Z 0x10c248
-?__AddRef@DirectSound@@YGPAVCMcpxVoiceClient@1@PAV21@@Z 0x10c248
-?Initialize@CMcpxNotifier@DirectSound@@QAEXKK@Z 0x10c25d
-?Initialize@CMcpxVoiceNotifier@DirectSound@@QAEXG@Z 0x10c27b
-??1CMcpxVoiceClient@DirectSound@@UAE@XZ 0x10c292
-?AllocateVoiceResources@CMcpxVoiceClient@DirectSound@@IAEJXZ 0x10c2ec
-?SetVolume@CMcpxVoiceClient@DirectSound@@QAEJXZ 0x10c468
-?SetPitch@CMcpxVoiceClient@DirectSound@@QAEJXZ 0x10c500
-?WaitForVoiceOff@CMcpxVoiceClient@DirectSound@@IAEXXZ 0x10c592
-?Apply3dSettings@CMcpxVoiceClient@DirectSound@@IAEXKKK@Z 0x10c5ae
-??0CMcpxVoiceClient@DirectSound@@QAE@PAVCMcpxAPU@1@PAVCDirectSoundVoiceSettings@1@@Z 0x10c5fb
-??_GCMcpxVoiceClient@DirectSound@@UAEPAXI@Z 0x10c663
-?DeactivateVoice@CMcpxVoiceClient@DirectSound@@IAEXH@Z 0x10c67e
-?Commit3dSettings@CMcpxVoiceClient@DirectSound@@QAEKXZ 0x10c7a2
-?ActivateVoice@CMcpxVoiceClient@DirectSound@@IAEXXZ 0x10c87a
-?GetStatus@CMcpxNotifier@DirectSound@@QAEHK@Z 0x10ca36
-?BytesToSamples@CMcpxVoiceClient@DirectSound@@IAEKK@Z 0x10ca54
-?MapBuffer@CMcpxBuffer@DirectSound@@IAEXK@Z 0x10ca6d
-?UnmapBuffer@CMcpxBuffer@DirectSound@@IAEXXZ 0x10cadf
-?PlayFromCurrent@CMcpxBuffer@DirectSound@@IAEXK@Z 0x10cb25
-?PlayFromPosition@CMcpxBuffer@DirectSound@@IAEXKK@Z 0x10cc66
-?GetStatus@CMcpxBuffer@DirectSound@@QAEJPAK@Z 0x10cde5
-?GetCurrentPosition@CMcpxBuffer@DirectSound@@QAEJPAK0@Z 0x10ce2e
-?ServiceVoiceInterrupt@CMcpxBuffer@DirectSound@@MAEHXZ 0x10cf07
-?SetNotificationPositions@CMcpxBuffer@DirectSound@@QAEJXZ 0x10cf4e
-?NotifyToPosition@CMcpxBuffer@DirectSound@@IAEXKH@Z 0x10cfa2
-?NotifyStop@CMcpxBuffer@DirectSound@@IAEXXZ 0x10d003
-?ScheduleDeferredCommand@CMcpxBuffer@DirectSound@@MAEHK_JK@Z 0x10d03d
-?RemoveDeferredCommand@CMcpxBuffer@DirectSound@@MAEXK@Z 0x10d06c
-??0CMcpxBuffer@DirectSound@@QAE@PAVCMcpxAPU@1@PAVCDirectSoundBufferSettings@1@@Z 0x10d086
-?MapInputBuffer@CMcpxBuffer@DirectSound@@IAEJXZ 0x10d0e1
-?MapEffectsBuffer@CMcpxBuffer@DirectSound@@IAEXXZ 0x10d149
-?OnPositionDelta@CMcpxBuffer@DirectSound@@IAEXXZ 0x10d19b
-?AllocateBufferResources@CMcpxBuffer@DirectSound@@IAEJXZ 0x10d23a
-?Play@CMcpxBuffer@DirectSound@@QAEJK@Z 0x10d288
-?Stop@CMcpxBuffer@DirectSound@@QAEJK@Z 0x10d304
-?SetCurrentPosition@CMcpxBuffer@DirectSound@@QAEJK@Z 0x10d394
-?Initialize@CMcpxBuffer@DirectSound@@QAEJXZ 0x10d488
-?SetBufferData@CMcpxBuffer@DirectSound@@QAEJXZ 0x10d4ac
-?ReleaseBufferResources@CMcpxBuffer@DirectSound@@IAEXXZ 0x10d4c6
-?OnDeferredTerminate@CMcpxBuffer@DirectSound@@IAEXXZ 0x10d513
-??1CMcpxBuffer@DirectSound@@UAE@XZ 0x10d52e
-?ReleaseBufferData@CMcpxBuffer@DirectSound@@QAEJH@Z 0x10d56b
-?ServiceDeferredCommand@CMcpxBuffer@DirectSound@@MAEXKK@Z 0x10d59c
-??_GCMcpxBuffer@DirectSound@@UAEPAXI@Z 0x10d5dd
-?XMOAcceptPacket@@YGXPBU_XMEDIAPACKET@@@Z 0x10d5f8
-?XMOCompletePacket@@YGXPBU_XMEDIAPACKET@@KP6GXPAX1K@Z1K@Z 0x10d616
-?MoveHeadTailList@@YGPAU_LIST_ENTRY@@PAU1@0@Z 0x10d65a
-?AttachPacket@CAc97Channel@DirectSound@@QAEXPBXK@Z 0x10d675
-?GetInfo@CAc97MediaObject@DirectSound@@UAGJPAU_XMEDIAINFO@@@Z 0x10d692
-?GetStatus@CAc97MediaObject@DirectSound@@UAGJPAK@Z 0x10d6eb
-?Process@CAc97MediaObject@DirectSound@@UAGJPBU_XMEDIAPACKET@@0@Z 0x10d733
-?CompletePacket@CAc97MediaObject@DirectSound@@IAEXPAUAC97PACKET@2@K@Z 0x10d80e
-?SetMode@CAc97MediaObject@DirectSound@@UAGJK@Z 0x10d847
-?GetCurrentPosition@CAc97MediaObject@DirectSound@@UAGJPAK@Z 0x10d8b4
-??1CAc97MediaObject@DirectSound@@UAE@XZ 0x10d903
-?AddRef@CDirectSoundStream@DirectSound@@UAGKXZ 0x10d97b
-?AddRef@CAc97MediaObject@DirectSound@@UAGKXZ 0x10d97b
-?Release@CDirectSoundStream@DirectSound@@UAGKXZ 0x10d9c2
-?Release@CAc97MediaObject@DirectSound@@UAGKXZ 0x10d9c2
-?Flush@CAc97MediaObject@DirectSound@@UAGJXZ 0x10da29
-?CompletePendingPackets@CAc97MediaObject@DirectSound@@IAEXXZ 0x10daa7
-?InterruptCallback@CAc97MediaObject@DirectSound@@CGXPAX@Z 0x10daef
-??0CAc97MediaObject@DirectSound@@QAE@XZ 0x10dafb
-??_GCAc97MediaObject@DirectSound@@UAEPAXI@Z 0x10db29
-?Initialize@CAc97MediaObject@DirectSound@@UAGJKP6GXPAX0K@Z0@Z 0x10db48
-?CreateMarker@CMcpxBufferSgeHeap@DirectSound@@IAEPAUSGEHEAPRUNMARKER@2@PAU32@GGPAU_LIST_ENTRY@@@Z 0x10dc5b
-?CreateMarker@CMcpxSlopMemoryHeap@DirectSound@@IAEPAUSLOPRUNMARKER@2@PAXKPAU_LIST_ENTRY@@@Z 0x10dc91
-??0CMcpxBufferSgeHeap@DirectSound@@QAE@XZ 0x10dcb8
-??1CMcpxBufferSgeHeap@DirectSound@@UAE@XZ 0x10dcd1
-?Initialize@CMcpxBufferSgeHeap@DirectSound@@QAEJG@Z 0x10dced
-?AllocRun@CMcpxBufferSgeHeap@DirectSound@@IAEPAUSGEHEAPRUNMARKER@2@PAXG@Z 0x10dd76
-?CoalesceRuns@CMcpxBufferSgeHeap@DirectSound@@IAEPAUSGEHEAPRUNMARKER@2@PAU32@0@Z 0x10de45
-?MapBuffer@CMcpxBufferSgeHeap@DirectSound@@KGXKPAXK@Z 0x10de66
-?UnmapBuffer@CMcpxBufferSgeHeap@DirectSound@@KGXPAXK@Z 0x10ded3
-??0CMcpxSlopMemoryHeap@DirectSound@@QAE@XZ 0x10deea
-??1CMcpxSlopMemoryHeap@DirectSound@@UAE@XZ 0x10df0f
-?AddRun@CMcpxSlopMemoryHeap@DirectSound@@QAEHPAXKK@Z 0x10df70
-?Alloc@CMcpxSlopMemoryHeap@DirectSound@@QAEPAXK@Z 0x10dff4
-?CoalesceRuns@CMcpxSlopMemoryHeap@DirectSound@@IAEPAUSLOPRUNMARKER@2@PAU32@0@Z 0x10e0cf
-??_GCMcpxBufferSgeHeap@DirectSound@@UAEPAXI@Z 0x10e0ea
-?Alloc@CMcpxBufferSgeHeap@DirectSound@@QAEPAUSGEHEAPRUNMARKER@2@PAXK@Z 0x10e105
-?FreeRun@CMcpxBufferSgeHeap@DirectSound@@IAEXPAUSGEHEAPRUNMARKER@2@@Z 0x10e194
-??_GCMcpxSlopMemoryHeap@DirectSound@@UAEPAXI@Z 0x10e1ee
-?Free@CMcpxSlopMemoryHeap@DirectSound@@QAEXPAX@Z 0x10e209
-?Free@CMcpxBufferSgeHeap@DirectSound@@QAEXPAUSGEHEAPRUNMARKER@2@@Z 0x10e2a2
-??0CMcpxDspScratchDma@DirectSound@@QAE@H@Z 0x10e303
-??1CMcpxDspScratchDma@DirectSound@@QAE@XZ 0x10e31d
-?Initialize@CMcpxDspScratchDma@DirectSound@@QAEXK@Z 0x10e34b
-?AddPages@CMcpxDspScratchDma@DirectSound@@QAEXPAUMCPX_ALLOC_CONTEXT@2@KPAK@Z 0x10e3fe
-?Copy@CMcpxDspScratchDma@DirectSound@@QAEXKPAXK@Z 0x10e450
-?VolumeToLinear@DirectSound@@YGMJ@Z 0x10e478
-??0CI3dl2Listener@DirectSound@@QAE@ABU_DSI3DL2LISTENER@@@Z 0x10e4aa
-??0CI3dl2Source@DirectSound@@QAE@ABVCI3dl2Listener@1@ABU_DSI3DL2BUFFER@@@Z 0x10e4b5
-?Get1PoleLoPass@CI3dl2Source@DirectSound@@AAEHJJMM@Z 0x10e4d8
-?CalculateI3dl2@CI3dl2Source@DirectSound@@QAEXM@Z 0x10e566
-?SetupVoiceProcessor@CMcpxCore@DirectSound@@IAEXXZ 0x10e6bb
-?SetupGlobalProcessor@CMcpxCore@DirectSound@@IAEXXZ 0x10e78c
-?SetupEncodeProcessor@CMcpxCore@DirectSound@@IAEXXZ 0x10e8b5
-?SetupAc97@CMcpxCore@DirectSound@@IAEJXZ 0x10ea38
-?SetInterruptState@CMcpxCore@DirectSound@@IAEXH@Z 0x10eaf1
-?SetPrivLockState@CMcpxCore@DirectSound@@IAEXH@Z 0x10eb28
-?SetFrontEndState@CMcpxCore@DirectSound@@IAEXW4MCPX_FE_STATE@2@@Z 0x10eb5f
-?SetSetupEngineState@CMcpxCore@DirectSound@@IAEXW4MCPX_SE_STATE@2@@Z 0x10ebba
-?GetPhysicalMemoryProperties@CMcpxCore@DirectSound@@SGKPAXKPAK1@Z 0x10ec1c
-?MapTransfer@CMcpxCore@DirectSound@@SGKPAPAXPAK1@Z 0x10ec93
-?AllocateContext@CMcpxCore@DirectSound@@SGJPAUMCPX_ALLOC_CONTEXT@2@KK@Z 0x10ecd0
-?ResetGlobalCounters@CMcpxCore@DirectSound@@IAEXXZ 0x10ed0f
-?SetupDSPs@CMcpxCore@DirectSound@@IAEXXZ 0x10ed89
-??0CMcpxCore@DirectSound@@QAE@PAVCDirectSoundSettings@1@@Z 0x10eda5
-??1CMcpxCore@DirectSound@@UAE@XZ 0x10edc8
-?SetupFrontEndProcessor@CMcpxCore@DirectSound@@IAEXXZ 0x10ee6d
-?AllocateApuMemory@CMcpxCore@DirectSound@@IAEJXZ 0x10ef38
-?IdleVoiceProcessor@CMcpxCore@DirectSound@@QAEHH@Z 0x10f0b8
-??_GCMcpxCore@DirectSound@@UAEPAXI@Z 0x10f199
-?Reset@CMcpxCore@DirectSound@@IAEXXZ 0x10f1b4
-?Initialize@CMcpxCore@DirectSound@@QAEJXZ 0x10f234
-?AcquireCodecSemaphore@CAc97Device@DirectSound@@KGHXZ 0x10f296
-?CodecReady@CAc97Device@DirectSound@@IAEHXZ 0x10f2c3
-?SynchronizeAciInterrupt@CAc97Device@DirectSound@@IAEXXZ 0x10f313
-?PokeAc97Register@CAc97Device@DirectSound@@KGHW4AC97REGISTER@@G@Z 0x10f327
-?PowerUp@CAc97Device@DirectSound@@IAEJXZ 0x10f344
-?Pause@CAc97Channel@DirectSound@@QAEXXZ 0x10f35c
-?SetPrdIndeces@CAc97Channel@DirectSound@@IAEXEEHH@Z 0x10f38b
-?SetMode@CAc97Channel@DirectSound@@QAEXK@Z 0x10f41b
-?GetPosition@CAc97Channel@DirectSound@@QAEKXZ 0x10f44c
-?SetPosition@CAc97Channel@DirectSound@@IAEXK@Z 0x10f4d8
-?AciSynchronizationRoutine@CAc97Device@DirectSound@@CGEPAX@Z 0x10f506
-?CreateChannel@CAc97Device@DirectSound@@QAEJW4AC97CHANNELTYPE@2@PAPAVCAc97Channel@2@@Z 0x10f514
-?AttachPacket@CAc97Channel@DirectSound@@QAEXKK@Z 0x10f57c
-?Reset@CAc97Channel@DirectSound@@QAEXXZ 0x10f60d
-?Flush@CAc97Channel@DirectSound@@QAEXH@Z 0x10f67f
-?Run@CAc97Channel@DirectSound@@QAEXK@Z 0x10f6cd
-?Initialize@CAc97Channel@DirectSound@@QAEJKP6GXPAX@Z0@Z 0x10f727
-?Terminate@CAc97Channel@DirectSound@@QAEXXZ 0x10f7c9
-?Discontinuity@CAc97Channel@DirectSound@@QAEXXZ 0x10f817
-?ServiceInterrupt@CAc97Channel@DirectSound@@IAEXXZ 0x10f84f
-?ServiceAciInterrupt@CAc97Device@DirectSound@@IAEKXZ 0x10f8a6
-?ServiceAciInterruptDpc@CAc97Device@DirectSound@@IAEXXZ 0x10f97a
-?AciInterruptServiceRoutine@CAc97Device@DirectSound@@CGEPAU_KINTERRUPT@@PAX@Z 0x10f9d3
-?AciInterruptDpcHandler@CAc97Device@DirectSound@@CGXPAU_KDPC@@PAX11@Z 0x10f9e4
-?ReleaseChannel@CAc97Device@DirectSound@@QAEXW4AC97CHANNELTYPE@2@@Z 0x10f9f0
-?Terminate@CAc97Device@DirectSound@@QAEXXZ 0x10fa2f
-?AciShutdownNotifier@CAc97Device@DirectSound@@CGXPAU_HAL_SHUTDOWN_REGISTRATION@@@Z 0x10fa9e
-?Initialize@CAc97Device@DirectSound@@QAEJK@Z 0x10faba
-?AC3GetProgram@CMcpxEPDspManager@DirectSound@@SGXKPAPAXPAK@Z 0x10fb9f
-??0CMcpxEPDspManager@DirectSound@@QAE@XZ 0x10fc3d
-?AC3StartGpInput@CMcpxEPDspManager@DirectSound@@AAEXK@Z 0x10fc4e
-?AC3SetAnalogOutput@CMcpxEPDspManager@DirectSound@@QAEXKK@Z 0x10fcc5
-?AC3SetDigitalOutput@CMcpxEPDspManager@DirectSound@@QAEXKK@Z 0x10fced
-??1CMcpxEPDspManager@DirectSound@@QAE@XZ 0x10fd32
-?Initialize@CMcpxEPDspManager@DirectSound@@QAEXPAVCMcpxGPDspManager@2@@Z 0x10fd4f
-?Reset@CWMAXMediaObject@@AAEXXZ 0x110cc0
-?Flush@CWMAXMediaObject@@UAGJXZ 0x110cd6
-?Decode@CWMAXMediaObject@@QAGJPBU_XMEDIAPACKET@@@Z 0x110ddf
-?GetData@CWMAXMediaObject@@QAEKKKPAPAX@Z 0x110ecd
-?ReadWmaDataFromFile@CWMAXMediaObject@@AAEJPAXKPAU_WMAXMO_ASYNC_CONTEXT@@@Z 0x110f31
-?GetInfo@CWMAXMediaObject@@UAGJPAU_XMEDIAINFO@@@Z 0x11100c
-?GetStatus@CWMAXMediaObject@@UAGJPAK@Z 0x111031
-?GetFileContentDescription@CWMAXMediaObject@@UAGJPAU_WMAXMOFileContDesc@@@Z 0x111075
-?Seek@CWMAXMediaObject@@UAGJJKPAK@Z 0x111091
-?GetLength@CWMAXMediaObject@@UAGJPAK@Z 0x1110a7
-?WMASampleRateToHz@CWMAXMediaObject@@AAEKW4tagWMAFileSampleRate@@@Z 0x1110ed
-??1CWMAXMediaObject@@QAE@XZ 0x11113e
-?AddRef@CWMAXMediaObject@@UAGKXZ 0x1111c8
-?GetFileHeader@CWMAXMediaObject@@UAGJPAU_WMAXMOFileHeader@@@Z 0x1111e6
-?ThreadProc@CWMAXMediaObject@@IAEXXZ 0x11121b
-?Process@CWMAXMediaObject@@UAGJPBU_XMEDIAPACKET@@0@Z 0x11128f
-_WMAFileCBGetData@20 0x11135f
-?GetFormat@CWMAXMediaObject@@AAGJPAUtWAVEFORMATEX@@@Z 0x111377
-?WmaXmoThreadProc@@YGKPAX@Z 0x1113be
-?Release@CWMAXMediaObject@@UAGKXZ 0x1113cc
-??0CWMAXMediaObject@@QAE@XZ 0x111409
-?Initialize@CWMAXMediaObject@@QAGJPBDPAXHKKKPAUtWAVEFORMATEX@@@Z 0x11148c
-_WmaCreateDecoder@32 0x111645
-_WMAF_UpdateNewPayload@4 0x1116c0
-_WMAFileDecodeClose@4 0x11187d
-_WMAFileDecodeCreate@8 0x111964
-_WMAFileDecodeInfo@8 0x1119b0
-_WMAFileContentDesc@8 0x111a8b
-_WMAFileDecodeData@4 0x111ce9
-_WMAFileGetPCM@16 0x111e66
-_WMARawDecCBGetData@16 0x111f2d
-_WMAFileDecodeInit@4 0x11225f
-_HnsQWORDtoMsDWORD@8 0x112333
-_WMA_GetBuffer@16 0x11236c
-_WMA_LoadObjectHeader@12 0x1123df
-_WMA_LoadHeaderObject@8 0x112496
-_WMA_LoadPropertiesObject@12 0x112587
-_WMA_LoadAudioObject@12 0x112640
-_WMA_LoadEncryptionObject@8 0x112937
-_WMA_LoadContentDescriptionObject@8 0x112b3d
-_WMA_LoadExtendedContentDescObject@8 0x112bdd
-_WMA_LoadLicenseStoreObject@8 0x112f2c
-_WMA_ParseAsfHeader@8 0x113005
-_WMA_ParsePacketHeader@4 0x11316e
-_WMA_ParsePayloadHeader@4 0x113576
-_WMARawDecInit@44 0x113870
-_WMARawDecClose@4 0x1138ea
-_WMARawDecReset@4 0x113916
-_WMARawDecStatus@4 0x113934
-_WMARawDecDecodeData@4 0x113952
-_WMARawDecGetPCM@16 0x113977
-_audecDelete_XDS@4 0x1139a1
-_audecNew_XDS@8 0x1139c5
-_auInitPcInfoDEC@4 0x113a7e
-_audecReset_XDS@4 0x113c5a
-_audecDecodeInfo_XDS@4 0x113c8e
-_audecDecodeData_XDS@8 0x113e68
-_audecGetPCM_XDS@16 0x114000
-_prvDecodeSubFrame_XDS@8 0x114031
-_prvUpdateSubFrameConfig_XDS@16 0x11429a
-_prvDecodeSubFrameHighRate_XDS@8 0x114357
-_prvWMAGetMoreData_XDS@16 0x1145d5
-_audecInit_XDS@48 0x114622
-_msaudioGetSamplePerFrame_XDS@16 0x11482a
-_freeAligned_XDS@4 0x11490b
-_auMalloc_XDS@4 0x114929
-_auFree_XDS@4 0x114936
-_PerfTimerFree@4 0x114936
-_auNew_XDS@0 0x114943
-_auDelete_XDS@4 0x114be3
-_prvSetBarkIndex_XDS@4 0x114cf9
-_auReconMono_XDS@20 0x115294
-_auAdaptToSubFrameConfig_XDS@4 0x1155a2
-_auUpdateMaxEsc_XDS@8 0x11580d
-_qstCalcQuantStep_XDS@4 0x115879
-_prvWeightedQuantization_XDS@12 0x1158ea
-_auReconCoefficentsHighRate_XDS@16 0x115924
-_prvInitDiscardSilence_XDS@4 0x115be4
-_prvDiscardSilence_XDS@16 0x115c64
-_SetActualPower_XDS@16 0x115cbd
-_SetActualPowerHighRate_XDS@16 0x115cfb
-_mallocAligned_XDS@8 0x115d38
-_prvAllocate_XDS@4 0x115d75
-_auPreGetPCM_XDS@8 0x115f19
-_auReconstruct_XDS@16 0x1161b2
-_auGetPCM_XDS@16 0x1161fe
-_auInit_XDS@36 0x116296
-_ibstrmInit@8 0x1165c0
-_ibstrmReset@4 0x1165fb
-_ibstrmGetMoreData@8 0x116614
-_ibstrmResetPacket@4 0x1167a0
-_ibstrmPeekBitsNonStop@12 0x1167ff
-_ibstrmPeekBits@12 0x116880
-_ibstrmLookForBits@8 0x116904
-_ibstrmFlushBits@8 0x116973
-_prvFinalLoad@16 0x1169e5
-_ibstrmGetBits@12 0x116a8b
-_g_SupportMMX_XDS@0 0x116b69
-_g_SupportKNI_XDS@0 0x116bc8
-_g_SupportSIMD_FP_XDS@0 0x116c8d
-_auSaveHistoryMono_XDS@12 0x116ce4
-_auReconMono_X86_XDS@20 0x117720
-_auReconStereo_MMX_XDS@16 0x1183a6
-_auReconStereo_SIMDFP_XDS@16 0x118b31
-_auReconstruct_X86_XDS@16 0x1194ac
-_prvGetNextRunDEC_XDS@12 0x119517
-_prvDecodeRunLevel_XDS@20 0x11966e
-_prvSetDetTable_XDS@8 0x1196eb
-_prvDecodeFrameHeaderLpc_XDS@8 0x1197ba
-_prvDecodeFrameHeaderNoiseSub_XDS@8 0x1198e8
-_prvGetBandWeightLowRate_XDS@4 0x119b08
-_prvDecodeFrameHeader_XDS@8 0x119c3b
-_prvDecodeCoefficientMono_XDS@12 0x11a1c1
-_prvDecodeCoefficientStereo_XDS@12 0x11a1e1
-_prvGetBandWeightMidRate_XDS@28 0x11a24b
-_prvInitNoiseSub_XDS@4 0x11a5a7
-_auResampleWeightFactorLPC_XDS@8 0x11a927
-_prvInverseQuantizeMidRate_XDS@12 0x11a9bb
-_prvFFT4DCT_XDS@8 0x11af99
-_auDctIV_XDS@16 0x11b26f
-_prvPq2lpc_XDS@20 0x11b4fb
-_prvConvolve_odd_XDS@28 0x11b553
-_prvConvolve_XDS@28 0x11b66a
-_prvLsp2pq_XDS@20 0x11b76d
-_auLsp2lpc_XDS@16 0x11b89f
-_prvInitInverseQuadRootTable_XDS@4 0x11b8d5
-_prvDoLpc4_XDS@24 0x11b930
-_prvLpcToSpectrum_XDS@12 0x11bb67
-_huffDecGet@20 0x11c273
-_MU_Init@4 0x11cf3c
-?Init@CDeviceTree@@QAEXKK@Z 0x11d044
-?GetMaxDeviceTypeCount@IUsbInit@@QAEKPAU_XPP_DEVICE_TYPE@@@Z 0x11d0e3
-?UseDefaultCount@IUsbInit@@QAEHXZ 0x11d11a
-?RegisterResources@IUsbInit@@QAEXPAU_USB_RESOURCE_REQUIREMENTS@@@Z 0x11d126
-?Process@IUsbInit@@QAEXXZ 0x11d328
-_XID_Init@4 0x11d44b
-_USBD_Init@8 0x11d5a2
-_USBD_NewHostController@8 0x11d630
-_USBHUB_Init@4 0x11d6a9
-@OHCD_RootHubInitialize@4 0x11d6ca
-_HCD_DriverEntry@4 0x11d77a
-_HCD_EnumHardware@0 0x11d786
-_HCD_NewHostController@12 0x11d7c8
-@OHCD_fPoolInit@4 0x11d8f2
-@OHCD_ScheduleInitialize@4 0x11dab7
-_OHCD_DevSysCheckHardware@4 0x11db18
-_OHCD_DevSysTakeControl@4 0x11db23
-?GetTypeInformation@@YIPAU_XID_TYPE_INFORMATION@@EPAE@Z 0x11dd86
-?GetTypeInformation@@YIPAU_XID_TYPE_INFORMATION@@PAU_XPP_DEVICE_TYPE@@@Z 0x11ddbd
-_XInputOpen@16 0x11dde8
-_XInputClose@4 0x11de3e
-_XInputGetState@8 0x11de4a
-_XdReportDeviceInsertionRemoval@12 0x11deb9
-_XGetDevices@4 0x11dee0
-_XGetDeviceChanges@12 0x11df02
-_XMountMURootA@12 0x11df6f
-_XUnmountMU@8 0x11e0db
-?MU_AcquireDeviceObject@@YGPAU_MU_DEVICE_EXTENSION@@XZ 0x11e1e9
-?MU_ReleaseDeviceObject@@YGXPAU_MU_DEVICE_EXTENSION@@@Z 0x11e204
-_MU_AddDevice@4 0x11e22c
-?MU_CloseEndpointCompletion@@YGXPAT_URB@@PAX@Z 0x11e2c2
-?MU_fCloseEndpoints@@YIXPAU_MU_DEVICE_EXTENSION@@@Z 0x11e394
-_MU_RemoveDevice@4 0x11e3ae
-_MU_CloseDeviceObject@8 0x11e3e3
-_MU_CreateDeviceObject@12 0x11e450
-??0IUsbDevice@@QAE@XZ 0x11e63c
-?AllocDevice@CDeviceTree@@QAEPAVIUsbDevice@@XZ 0x11e64e
-?FreeDevice@CDeviceTree@@QAEXPAVIUsbDevice@@@Z 0x11e69e
-?GetParent@IUsbDevice@@QBEPAV1@XZ 0x11e6d0
-?GetFirstChild@IUsbDevice@@QBEPAV1@XZ 0x11e6e7
-?GetSibling@IUsbDevice@@QBEPAV1@XZ 0x11e6fe
-?DeviceConnected@IUsbDevice@@QAEXEE@Z 0x11e715
-?USBD_SetEnumWatchDog@@YGXXZ 0x11e7dc
-?USBD_DeviceEnumStagePre1@@YGXJPAX@Z 0x11e7fe
-?USBD_DeviceEnumStagePre4@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x11e84f
-?USBD_AllocateUsbAddress@@YIEPAU_USBD_HOST_CONTROLLER@@@Z 0x11e87a
-?USBD_FreeUsbAddress@@YIXPAU_USBD_HOST_CONTROLLER@@E@Z 0x11e8ab
-_USBD_DeviceConnected@8 0x11e8df
-?USBD_DeviceEnumStage0@@YGXXZ 0x11e8f4
-?RemoveComplete@IUsbDevice@@QAEXXZ 0x11e95b
-?USBD_CompleteDeviceDisconnected@@YGXPAVIUsbDevice@@@Z 0x11e9d1
-?USBD_DeviceEnumNextPending@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x11ea23
-?DeviceDisconnected@IUsbDevice@@QAEXE@Z 0x11eac4
-?DeviceNotResponding@IUsbDevice@@QAEXXZ 0x11eb3b
-?USBD_fDeviceAbortEnum2@@YIXPAVIUsbDevice@@@Z 0x11eb80
-_USBD_DeviceDisconnected@8 0x11ec01
-?DisableComplete@IUsbDevice@@QAEXJPAX@Z 0x11ec14
-?USBD_DeviceAbortEnum@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x11ec47
-?USBD_DeviceEnumStage3@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x11ecb4
-?AddComplete@IUsbDevice@@QAEXJ@Z 0x11ed19
-?USBD_LoadClassDriver@@YIXPAVIUsbDevice@@T_PNP_CLASS_ID@@@Z 0x11ee4c
-?USBD_DeviceEnumStage2@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x11ee80
-?USBD_DeviceEnumStage6@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x11ef5b
-?USBD_fDeviceEnumStage1@@YIXPAVIUsbDevice@@@Z 0x11f098
-?USBD_DeviceEnumStage5@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x11f195
-?USBD_fDeviceEnumStage4@@YIXPAT_URB@@PAVIUsbDevice@@@Z 0x11f24e
-?USBD_DeviceEnumTimerProc@@YGXPAU_KDPC@@PAX11@Z 0x11f399
-?CancelRequest@IUsbDevice@@QAEJPAT_URB@@@Z 0x11f3ed
-?SetExtension@IUsbDevice@@QAEPAXPAX@Z 0x11f404
-?SetClassSpecificType@IUsbDevice@@QAEXE@Z 0x11f415
-?Win32FromUsbdStatus@IUsbDevice@@SGKJ@Z 0x11f41f
-?NtStatusFromUsbdStatus@IUsbDevice@@SGJJ@Z 0x11f48d
-?GetEndpointDescriptor@IUsbDevice@@QBEPBU_USB_ENDPOINT_DESCRIPTOR@@EEE@Z 0x11f4ff
-?OpenDefaultEndpoint@IUsbDevice@@AAEJPAT_URB@@@Z 0x11f579
-?CloseDefaultEndpoint@IUsbDevice@@AAEJPAT_URB@@@Z 0x11f5ff
-?FindChild@IUsbDevice@@QBEPAV1@E@Z 0x11f66b
-?InsertChild@IUsbDevice@@QAEXPAV1@@Z 0x11f69c
-?RemoveChild@IUsbDevice@@QAEEPAV1@@Z 0x11f6e4
-?SetExternalPortWithoutHub@IUsbDevice@@QAEXPAPAV1@I@Z 0x11f740
-?SubmitRequest@IUsbDevice@@QAEJPAT_URB@@@Z 0x11f7a7
-?SetExternalPortWithHub@IUsbDevice@@QAEXPAPAV1@I@Z 0x11f894
-?SetExternalPort@IUsbDevice@@QAEXXZ 0x11f8d6
-?XID_SetEnumWatchdog@@YGXXZ 0x11f921
-?XID_WatchdogTimerProc@@YGXPAU_KDPC@@PAX11@Z 0x11f93c
-?XID_fRemoveDeviceComplete@@YIXPAU_XID_DEVICE_NODE@@@Z 0x11f94d
-?XID_fFindNode@@YIPAU_XID_DEVICE_NODE@@PAU_XID_TYPE_INFORMATION@@K@Z 0x11f970
-?XID_fOpenEndpoints@@YIJPAU_XID_OPEN_DEVICE@@PAU_XINPUT_POLLING_PARAMETERS@@@Z 0x11f9da
-?XID_CloseEndpointStateMachine@@YGXPAU_URB_CLOSE_ENDPOINT@@PAU_XID_OPEN_DEVICE@@@Z 0x11fa85
-?XID_NewInterruptData@@YGXPAT_URB@@PAU_XID_OPEN_DEVICE@@@Z 0x11fb36
-?XID_ClearInputStallComplete@@YGXPAT_URB@@PAU_XID_OPEN_DEVICE@@@Z 0x11fbc7
-?XID_ProcessGamepadData@@YIXPAU_XID_OPEN_DEVICE@@@Z 0x11fc51
-?XID_ProcessIRRemoteData@@YIXPAU_XID_OPEN_DEVICE@@@Z 0x11fc92
-?XID_ProcessNewKeyboardData@@YIXPAU_XID_OPEN_DEVICE@@@Z 0x11fcb6
-?XID_SyncComplete@@YGXPAT_URB@@PAU_KEVENT@@@Z 0x11fcd9
-?USBD_SubmitSynchronousRequestComplete@@YGXPAT_URB@@PAU_KEVENT@@@Z 0x11fcd9
-?XID_EnumKeyboardComplete@@YGXPAT_URB@@PAU_XID_DEVICE_NODE@@@Z 0x11fcea
-?XID_fCloseEndpoints@@YIXPAU_XID_OPEN_DEVICE@@@Z 0x11fd5a
-?XID_EnumKeyboard@@YGXPAT_URB@@PAU_XID_DEVICE_NODE@@@Z 0x11fd78
-_XID_RemoveDevice@4 0x11fe03
-?XID_fCloseDevice@@YIXPAU_XID_OPEN_DEVICE@@@Z 0x11fe48
-?XID_EnumLegacy1@@YGXPAT_URB@@PAU_XID_DEVICE_NODE@@@Z 0x11fee9
-?XID_EnumStage1@@YGXPAT_URB@@PAU_XID_DEVICE_NODE@@@Z 0x11ffad
-?XID_fOpenDevice@@YIKPAU_XID_TYPE_INFORMATION@@KPAPAU_XID_OPEN_DEVICE@@PAU_XINPUT_POLLING_PARAMETERS@@@Z 0x12006d
-_XID_AddDevice@4 0x1202a1
-??0IUsbInit@@QAE@KPAU_XDEVICE_PREALLOC_TYPE@@@Z 0x1203f5
-_USBD_CompleteRequest@4 0x12044f
-_USBD_CalculateUsbBandwidth@12 0x120463
-?USBD_FindClassDriver@@YGPAU_USB_CLASS_DRIVER_DESCRIPTION@@T_PNP_CLASS_ID@@@Z 0x1204ac
-?ReverseEndian@@YGKK@Z 0x1204e1
-?MU_InternalIo@@YGJPAU_DEVICE_OBJECT@@PAU_IRP@@@Z 0x120501
-?MU_DiskIoComplete@@YGXPAU_MU_DEVICE_EXTENSION@@J@Z 0x12055b
-?MU_DiskWriteStartNextPartialRequest@@YGXXZ 0x12059b
-?MU_fMarkWriteBufferCorrupt@@YIXPAU_MU_REQUEST_BLOCK@@@Z 0x1205b7
-?IsPowerOf2@@YGHK@Z 0x1205de
-?WhichBit@@YGEK@Z 0x1205f8
-?MU_DiskReadCapacityCompletion@@YGXPAU_MU_DEVICE_EXTENSION@@J@Z 0x12060e
-?MU_fDiskVerify@@YIXPAU_MU_DEVICE_EXTENSION@@PAU_IRP@@@Z 0x1207f4
-?MU_DiskReadComplete@@YGXPAU_MU_DEVICE_EXTENSION@@J@Z 0x120875
-?MU_DiskWriteBuildPartialRequest@@YGXPAU_MU_DEVICE_EXTENSION@@J@Z 0x120943
-?MU_DiskWriteBuildMiddlePartialRequest@@YGXPAU_MU_DEVICE_EXTENSION@@J@Z 0x120b29
-?MU_fDiskReadDriveCapacity@@YIJPAU_MU_DEVICE_EXTENSION@@PAU_IRP@@@Z 0x120ca4
-?MU_DiskStartPartialWrite@@YGXPAU_MU_DEVICE_EXTENSION@@J@Z 0x120cfc
-?MU_fDiskDeviceControl@@YGXPAU_MU_DEVICE_EXTENSION@@PAU_IRP@@@Z 0x120d9e
-?MU_fDiskReadWrite@@YIXPAU_MU_DEVICE_EXTENSION@@PAU_IRP@@@Z 0x120e6e
-?MU_StartIo@@YGXPAU_DEVICE_OBJECT@@PAU_IRP@@@Z 0x120ffe
-?MU_MrbTimeout@@YGXPAU_KDPC@@PAX11@Z 0x12106f
-?MU_fMrbErrorHandler@@YIXPAU_MU_DEVICE_EXTENSION@@J@Z 0x1210aa
-?MU_CswCompletion@@YGXPAT_URB@@PAX@Z 0x1211b0
-?MU_fCswTransfer@@YIXPAU_MU_DEVICE_EXTENSION@@@Z 0x121234
-?MU_DataCompletion@@YGXPAT_URB@@PAX@Z 0x1212bd
-?MU_fDataTransfer@@YIXPAT_URB@@PAU_MU_DEVICE_EXTENSION@@@Z 0x1213ba
-?MU_CbwCompletion@@YGXPAT_URB@@PAX@Z 0x121480
-?MU_fCbwTransfer@@YIXPAU_MU_DEVICE_EXTENSION@@@Z 0x1214e8
-?MU_ResetDeviceCompletionRoutine@@YGXPAT_URB@@PAX@Z 0x121591
-?MU_fStartMrb@@YIXPAU_MU_DEVICE_EXTENSION@@@Z 0x121791
-?USBHUB_WatchdogTimerProc@@YGXPAU_KDPC@@PAX11@Z 0x1217bf
-?USBHUB_SetEnumWatchdog@@YGXK@Z 0x121813
-?USBHUB_RemoveHubComplete@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x121843
-?USBHUB_ResetComplete@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x121882
-?USBHUB_DisableComplete@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x1218ae
-?USBHUB_RelatchPortSpeed@@YGXPAVIUsbDevice@@@Z 0x1218d2
-?USBHUB_PortProcessChange@@YGXPAVIUsbDevice@@@Z 0x12192f
-?USBHUB_RemoveHubStage2@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x121a7d
-?USBHUB_DisableResetPort@@YGXPAVIUsbDevice@@EPAXE@Z 0x121a9f
-?USBHUB_RemoveHubStage1@@YGXPAVIUsbDevice@@@Z 0x121b86
-?USBHUB_ClearInterruptStallComplete@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x121bb8
-?USBHUB_PortStatusChange2@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x121c49
-?USBHUB_ClearHubFeatureComplete@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x121ca4
-_USBHUB_RemoveDevice@4 0x121cff
-?USBHUB_ChangeNotifyComplete@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x121d4f
-?USBHUB_HubStatusChange@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x121df6
-?USBHUB_PoweringPorts@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x121eb6
-?USBHUB_PortStatusChange1@@YGXPAVIUsbDevice@@@Z 0x121f21
-?USBHUB_ClearPortFeatureComplete@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x121fea
-?USBHUB_RelatchPortSpeedComplete@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x12201a
-?USBHUB_EnumHubComplete@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x12209a
-?USBHUB_EnumHubStage2@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x122130
-?USBHUB_EnumHubStage1@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x1221ac
-_USBHUB_AddDevice@4 0x122298
-@OHCD_RootHubProcessHotPlug@8 0x12237e
-_HCD_ResetRootHubPort@16 0x12240d
-_HCD_DisableRootHubPort@8 0x12245a
-_OHCD_RootHubResetDpc@16 0x122477
-@OHCD_RootHubProcessInterrupt@4 0x1224a2
-_OHCD_PoolAllocateEndpoint@0 0x122561
-@OHCD_fOpenEndpoint@8 0x122574
-@OHCD_fGetEndpointState@8 0x1226e8
-@OHCD_fSetEndpointState@8 0x122709
-@OHCD_fDequeueControlTransfer@8 0x122737
-@OHCD_fDequeueBulkTransfer@8 0x122770
-@OHCD_fDequeueInterruptTransfer@8 0x1227a9
-@OHCD_fCancelQueuedUrbs@8 0x1227d8
-@OHCD_fPauseEndpoint@8 0x12284e
-_OHCD_ShutDown@4 0x12288b
-_HCD_CancelRequest@8 0x1228c6
-@OHCD_fCloseEndpoint@8 0x12297d
-@OHCD_fAbortEndpoint@8 0x1229e4
-_HCD_SubmitRequest@8 0x122a37
-_OHCD_PoolFreeTD@4 0x122b4f
-@OHCD_ScheduleAddEndpointControlOrBulk@8 0x122b6c
-@OHCD_ScheduleRemoveEndpointControlOrBulk@8 0x122ba9
-@OHCD_ReverseBits@8 0x122bf9
-@OHCD_HookNewEndpointToChildren@12 0x122c0f
-@OHCD_ScheduleAddEndpointPeriodic@8 0x122c86
-@OHCD_ScheduleRemoveEndpointPeriodic@8 0x122e62
-_OHCD_InterruptService@8 0x122fdb
-@OHCD_Get32BitFrameNumber@4 0x123071
-@OHCD_fCompleteRequest@12 0x123095
-@OHCD_fCreditTDQuota@8 0x123111
-@OHCD_fProcessFailedTD@8 0x123143
-@OHCD_fProcessDoneTD@8 0x123237
-@OHCD_fProcessCancelPendingList@8 0x1232e3
-@OHCD_fCleanEndpointTDs@8 0x1233e5
-@OHCD_fProcessAbortPendingList@8 0x12343b
-@OHCD_fProcessClosePendingList@8 0x1234c2
-_OHCD_IsrDpc@16 0x12359c
-_OHCD_IsochPoolAllocateEndpoint@0 0x1236aa
-@OHCD_fIsochOpenEndpoint@8 0x1236bc
-@OHCD_fIsochCloseEndpoint@8 0x123869
-@OHCD_fIsochCompleteCloseEndpoint@8 0x1238ad
-@OHCD_fIsochAttachBuffer@8 0x123936
-@OHCD_fIsochStartTransfer@8 0x123a9d
-@OHCD_fIsochStopTransfer@8 0x123bbc
-@OHCD_fIsochProcessTD@8 0x123c16
-_OHCD_PoolAllocateTD@4 0x123d06
-_OHCD_PoolDebitControlTDQuota@4 0x123d26
-_OHCD_PoolDebitBulkTDQuota@4 0x123d45
-@OHCD_fGetTDsRequired@8 0x123d64
-@OHCD_fMapTransfer@12 0x123d97
-@OHCD_fProgramTransfer@12 0x123dd1
-@OHCD_fProgramInterruptTransfer@8 0x1240cf
-@OHCD_fProgramBulkTransfer@4 0x124122
-@OHCD_fProgramControlTransfer@4 0x12416f
-@OHCD_fQueueInterruptTransfer@12 0x1241bc
-@OHCD_fQueueBulkTransfer@8 0x1241ef
-@OHCD_fQueueControlTransfer@8 0x12422b
-@OHCD_fQueueTransferRequest@8 0x124267
-_main 0x637c7
-@RtlFindFirstSetRightMember@4 0xbb210
-_memmove 0xbbe10
-_wcslen 0xbc190
-??3@YAXPAX@Z 0xbc69d
-__wcsicmp 0xbcae2
-__snwprintf 0xbd09d
-__CIpow 0xbd114
-__snprintf 0xbd484
-_sprintf 0xbd6ec
-__chkstk 0xbd7b0
-_wcsncpy 0xbdc12
-_free 0xbe0c8
-_malloc 0xbe173
-__alldiv 0xbe600
-__allmul 0xbe6b0
-__SEH_prolog 0xbeadc
-__SEH_epilog 0xbeb15
-__aulldiv 0xbec50
-_vswprintf 0xbf715
-_vsprintf 0xbf715
-__allshr 0xbf770
-_DbgPrint 0xc68ae
-_ExQueryNonVolatileSetting@20 0xc68c6
-?MakeSpace@D3D@@YGPCKXZ 0xd6430
-?GetTime@CMiniport@D3D@@QAEKXZ 0xd8be0
-??0CAc97Device@DirectSound@@QAE@XZ 0x10f28e
-??1CAc97Device@DirectSound@@QAE@XZ 0x10faad
-?AC3GetTotalScratchSize@CMcpxEPDspManager@DirectSound@@SGKXZ 0x10fb99
-?GetDolbyConfigTable@CMcpxEPDspManager@DirectSound@@QAEPAUDOLBY_CONFIG_TABLE@2@XZ 0x10fc4a
-_auMallocGetCount_XDS@0 0x114923
-_auMallocSetState_XDS@12 0x114926
-?ResetComplete@IUsbDevice@@QAEXJPAX@Z 0x11e956
-?GetExtension@IUsbDevice@@QBEPAXXZ 0x11f400
-?GetInterfaceNumber@IUsbDevice@@QBEEXZ 0x11f411
-?GetInterfaceDescriptor@IUsbDevice@@QBEPBU_USB_INTERFACE_DESCRIPTOR@@XZ 0x11f4f9
-?GetPort@IUsbDevice@@QBEKXZ 0x11f575
+??_H@YGXPAXIHP6EPAX0@Z@Z 0x30f8c
+?MagnitudeVector3@DirectSound@@YGMPBU_D3DVECTOR@@@Z 0x3d8b1
+_fabsf@4 0x42e5a
+_prvAdaptTrigToSubframeConfig_XDS@4 0xb4627
+_prvInverseQuantizeLowRate_XDS@12 0xb47ba
+_CreateFileA@28 0xb4b58
+_CopyFileExA@24 0xb4ce3
+_CloseHandle@4 0xb4fc5
+_ReadFile@20 0xb4fe3
+_ReadFileScatter@20 0xb4fe3
+_WriteFile@20 0xb50d0
+_WriteFileGather@20 0xb50d0
+_SetEndOfFile@4 0xb51a6
+_SetFilePointer@16 0xb522a
+_SetFilePointerEx@20 0xb5324
+_GetFileTime@16 0xb53ec
+_SetFileTime@16 0xb5452
+_FlushFileBuffers@4 0xb54c4
+_GetFileSizeEx@8 0xb54eb
+_DeviceIoControl@32 0xb5529
+_GetFileSize@8 0xb5627
+_VirtualAlloc@16 0xb5662
+_VirtualFree@12 0xb5690
+_GlobalMemoryStatus@4 0xb56cc
+_CreateEventA@16 0xb571b
+_SetEvent@4 0xb577c
+_CreateSemaphoreA@16 0xb57ba
+_ReleaseSemaphore@12 0xb5815
+_CreateMutexA@12 0xb583b
+_WaitForSingleObjectEx@12 0xb58b3
+_SignalObjectAndWait@16 0xb58f7
+_WaitForMultipleObjectsEx@20 0xb593e
+_SleepEx@8 0xb59be
+_WaitForSingleObject@8 0xb5a10
+_WaitForMultipleObjects@16 0xb5a22
+_Sleep@4 0xb5a3c
+_XapiCallThreadNotifyRoutines@4 0xb5a4a
+_UnhandledExceptionFilter@4 0xb5a82
+_SetThreadPriority@8 0xb5a9f
+_GetThreadPriority@4 0xb5af1
+_SuspendThread@4 0xb5b45
+_ResumeThread@4 0xb5b45
+_RaiseException@16 0xb5b6b
+_SwitchToThread@0 0xb5bc1
+_ExitThread@4 0xb5bd4
+_SetUnhandledExceptionFilter@4 0xb5be6
+_XRegisterThreadNotifyRoutine@8 0xb5bf8
+_XapiThreadStartup@8 0xb5c41
+_CreateThread@24 0xb5cd9
+_GetCurrentThreadId@0 0xb5d47
+_XapiReadFromStDb@12 0xb5d54
+_XapiOpenStDbAndReadHeader@8 0xb5d92
+_XapiGetNextSoundtrack@12 0xb5df8
+_XFindNextSoundtrack@8 0xb5e76
+_XFindFirstSoundtrack@4 0xb5e95
+_XGetSoundtrackSongInfo@24 0xb5f44
+_XOpenSoundtrackSong@8 0xb616d
+_XQueryValue@20 0xb61fd
+_XGetVideoStandard@0 0xb6227
+_XGetVideoFlags@0 0xb6250
+_XGetAudioFlags@0 0xb629c
+_XGetParentalControlSetting@0 0xb62e0
+_XGetGameRegion@0 0xb6305
+_XboxTimeZoneNameToWstr@8 0xb632d
+_XboxTimeZoneDateToSystemTime@8 0xb634e
+_XapipQueryTimeZoneInformation@8 0xb6386
+_GetSystemTime@4 0xb6430
+_FileTimeToSystemTime@8 0xb649c
+_SystemTimeToFileTime@8 0xb6507
+_CompareFileTime@8 0xb657c
+_RtlpCutoverTimeToSystemTime@16 0xb65b3
+_GetTimeZoneInformation@4 0xb67bd
+_XapipGetTimeZoneBias@4 0xb6919
+_GetLocalTime@4 0xb696f
+_FileTimeToLocalFileTime@8 0xb69ee
+_XWriteTitleInfoNoReboot@20 0xb6a19
+_XWriteTitleInfoAndRebootA@20 0xb6af3
+_XLaunchNewImageA@8 0xb6b38
+_CreateDirectoryA@8 0xb6c4b
+_RemoveDirectoryA@4 0xb6cb7
+_SetFileAttributesA@8 0xb6d45
+_GetFileAttributesA@4 0xb6deb
+_GetFileAttributesExA@12 0xb6e36
+_DeleteFileA@4 0xb6eb8
+_XSetFileCacheSize@4 0xb6f46
+_MoveFileWithProgressA@20 0xb6f72
+_MoveFileExA@12 0xb7062
+_XapiDirectoryInformationToFindData@8 0xb707a
+_FindFirstFileA@8 0xb70e6
+_FindNextFileA@8 0xb71f3
+_GetLastError@0 0xb7244
+_SetLastError@4 0xb726c
+_XapiSetLastNTError@4 0xb729a
+_GetOverlappedResult@16 0xb72b1
+_lstrcmpiW@8 0xb7316
+_lstrcpynW@12 0xb7393
+_lstrlenW@4 0xb7437
+_lstrcpynA@12 0xb7471
+_UTF8ToUnicode@16 0xb74d6
+_UnicodeToUTF8@16 0xb7628
+_MultiByteToWideChar@24 0xb76e0
+_WideCharToMultiByte@32 0xb779b
+_GetDiskFreeSpaceExA@16 0xb7860
+_XapiSelectCachePartition@12 0xb7954
+_XMountUtilityDrive@4 0xb7b58
+_XUnmountAlternateTitleA@4 0xb7c5d
+_XMUNameFromDriveLetter@12 0xb7cba
+_CharUpperW@4 0xb7d95
+_CharLowerW@4 0xb7d95
+_XGetSectionHandleA@4 0xb7dd7
+_XLoadSectionByHandle@4 0xb7e3e
+_XFreeSectionByHandle@4 0xb7e5f
+_XLoadSectionA@4 0xb7e7d
+_XGetSectionSize@4 0xb7e98
+_HeapFree@12 0xb7ea2
+_LocalFree@4 0xb7ebf
+_LocalAlloc@8 0xb7edd
+_GlobalAlloc@8 0xb7edd
+_XFindClose@4 0xb7efa
+_XAutoPowerDownResetTimer@0 0xb7f46
+_XapiAutoPowerDownTimeout@16 0xb7f61
+_XapiInitAutoPowerDown@0 0xb7f73
+_XapiFormatFATVolumeEx@8 0xb7fdd
+_XapiFormatFATVolume@4 0xb82f3
+_XPhysicalAlloc@16 0xb8304
+_mainXapiStartup@4 0xb834d
+_mainCRTStartup 0xb83bc
+_OutputDebugStringA@4 0xb842e
+_QueryPerformanceCounter@4 0xb8460
+_QueryPerformanceFrequency@4 0xb8471
+_wvsprintfW@12 0xb848b
+_wvsprintfA@12 0xb848b
+_wsprintfW 0xb84a2
+_wsprintfA 0xb84a2
+_TlsAlloc@0 0xb84b5
+_TlsGetValue@4 0xb8509
+_TlsSetValue@8 0xb8526
+_TlsFree@4 0xb854a
+_XapiFormatObjectAttributes@12 0xb85d9
+_XapiFormatTimeOut@8 0xb8601
+_xCompareStringW@20 0xb8630
+_RtlpCreateUnCommittedRange@4 0xb87c9
+_RtlpDestroyUnCommittedRange@8 0xb88e9
+_RtlpInsertUnCommittedPages@12 0xb890a
+_RtlpFindAndCommitPages@16 0xb899d
+_RtlpCoalesceFreeBlocks@16 0xb8b28
+_RtlpInsertFreeBlock@12 0xb8dcd
+_RtlpGetExtraStuffPointer@4 0xb8ec7
+_RtlpGrowBlockInPlace@20 0xb8ee3
+_RtlSizeHeap@12 0xb92e1
+_RtlpInitializeHeapSegment@28 0xb9310
+_RtlpExtendHeap@8 0xb942e
+_RtlpDeCommitFreeBlock@12 0xb95b5
+_RtlCreateHeap@24 0xb985f
+_RtlAllocateHeap@12 0xb9c83
+_RtlFreeHeap@12 0xba405
+_RtlReAllocateHeap@16 0xba5d5
+_XapiValidateDiskPartitionEx@8 0xbacac
+_XapiCopySectionToFile@16 0xbad24
+_XapiMapLetterToDirectory@24 0xbae0b
+_XapiSetupPerTitleDriveLetters@8 0xbb13f
+_XapiBootToDash@12 0xbb194
+_XapiVerifyMediaInDrive@0 0xbb1f9
+_XapiValidateDiskPartition@4 0xbb2d5
+_XapiInitProcess@0 0xbb2e6
+_XapiNukeDirectoryFromHandle@8 0xbb407
+__cinit@0 0xbb594
+__rtinit@0 0xbb5ec
+_IsBadReadPtr@8 0xc6c58
+_IsBadWritePtr@8 0xc6cbd
+_IsBadCodePtr@4 0xc6d26
+_D3DDevice_SetRenderState_MultiSampleMode@4 0xd0960
+_D3DDevice_SetRenderState_MultiSampleRenderTargetMode@4 0xd0990
+_D3DDevice_SetRenderState_PSTextureModes@4 0xd09c0
+@D3DDevice_SetRenderState_Simple@8 0xd09f0
+_D3DDevice_SetRenderStateNotInline@8 0xd0a20
+?UpdateProjectionViewportTransform@D3D@@YGXXZ 0xd0a80
+_D3DDevice_SetRenderState_EdgeAntiAlias@4 0xd0bc0
+_D3DDevice_SetRenderState_ShadowFunc@4 0xd0c00
+_D3DDevice_SetRenderState_FogColor@4 0xd0c40
+_D3DDevice_SetRenderState_CullMode@4 0xd0c90
+_D3DDevice_SetRenderState_FrontFace@4 0xd0d00
+_D3DDevice_SetRenderState_NormalizeNormals@4 0xd0d40
+_D3DDevice_SetRenderState_TextureFactor@4 0xd0d80
+_D3DDevice_SetRenderState_LineWidth@4 0xd0de0
+_D3DDevice_SetRenderState_Dxt1NoiseEnable@4 0xd0e50
+_D3DDevice_SetRenderState_ZBias@4 0xd0ed0
+_D3DDevice_SetRenderState_LogicOp@4 0xd0f50
+_D3DDevice_SetRenderState_FillMode@4 0xd0fb0
+_D3DDevice_SetRenderState_BackFillMode@4 0xd1000
+_D3DDevice_SetRenderState_TwoSidedLighting@4 0xd1060
+_D3DDevice_SetRenderState_VertexBlend@4 0xd10d0
+_D3DDevice_SetTextureState_TexCoordIndex@8 0xd1120
+_D3DDevice_SetTextureState_BumpEnv@12 0xd1240
+_D3DDevice_SetTextureState_BorderColor@8 0xd12b0
+_D3DDevice_SetTextureState_ColorKeyColor@8 0xd12f0
+_D3DDevice_SetTextureStageStateNotInline@12 0xd1330
+?CommonSetTextureBumpEnv@D3D@@YIPCKPAVCDevice@1@PCK@Z 0xd1420
+?CommonSetViewport@D3D@@YIPCKPAVCDevice@1@PCK@Z 0xd1470
+?CommonSetControl0@D3D@@YIPCKPAVCDevice@1@PCK@Z 0xd1650
+?CommonSetDebugRegisters@D3D@@YIXXZ 0xd16b0
+_D3DDevice_SetRenderState_ZEnable@4 0xd1780
+_D3DDevice_SetRenderState_StencilEnable@4 0xd1820
+_D3DDevice_SetRenderState_StencilFail@4 0xd18b0
+_D3DDevice_SetRenderState_YuvEnable@4 0xd1920
+_D3DDevice_SetRenderState_OcclusionCullEnable@4 0xd1950
+_D3DDevice_SetRenderState_StencilCullEnable@4 0xd19c0
+_D3DDevice_SetRenderState_RopZCmpAlwaysRead@4 0xd1a30
+_D3DDevice_SetRenderState_RopZRead@4 0xd1a50
+_D3DDevice_SetRenderState_DoNotCullUncompressed@4 0xd1a70
+_D3DDevice_SetRenderState_MultiSampleAntiAlias@4 0xd1a90
+_D3DDevice_SetRenderState_MultiSampleMask@4 0xd1af0
+_D3DDevice_CreateIndexBuffer@20 0xd1b50
+_D3DPalette_Lock@12 0xd1b90
+_D3DDevice_CreateVertexBuffer@20 0xd1bc0
+_D3DVertexBuffer_Lock@20 0xd1c20
+_D3DDevice_CreatePalette@8 0xd1c80
+_D3DDevice_GetDirect3D@4 0xd1cf0
+_D3DDevice_GetDeviceCaps@4 0xd1d00
+_D3DDevice_SetGammaRamp@8 0xd1d20
+_D3DDevice_CreateTexture@28 0xd1d80
+_D3DDevice_SetTransform@8 0xd1dc0
+_D3DDevice_GetTransform@8 0xd1ed0
+_D3DDevice_SetMaterial@4 0xd1f00
+_D3DDevice_AddRef@0 0xd1f30
+_D3DDevice_Release@0 0xd1f50
+_D3DDevice_BlockUntilVerticalBlank@0 0xd1f90
+_D3DDevice_SetFlickerFilter@4 0xd1fc0
+_D3DDevice_SetSoftDisplayFilter@4 0xd2010
+?GetPitch@PixelJar@D3D@@YGKPAUD3DPixelContainer@@@Z 0xd2070
+?GetSlice@PixelJar@D3D@@YGKPAUD3DPixelContainer@@@Z 0xd20d0
+_D3DDevice_GetDisplayMode@4 0xd2150
+_D3DDevice_Reset@4 0xd21f0
+_D3DDevice_SetRenderTarget@8 0xd22a0
+_D3DDevice_GetBackBuffer@12 0xd27d0
+_D3DDevice_GetRasterStatus@4 0xd2810
+?GPUCopyVideoRectangle@D3D@@YGXKKKKKKPAUtagRECT@@PAUtagPOINT@@@Z 0xd2880
+_D3DDevice_CopyRects@20 0xd2970
+_D3DDevice_SetViewport@4 0xd2c20
+_D3DDevice_SetTexture@8 0xd2d80
+_D3DDevice_SetPalette@8 0xd2f00
+_D3DDevice_SetIndices@8 0xd2f90
+_D3DDevice_IsBusy@0 0xd3020
+_D3DDevice_GetDisplayFieldStatus@4 0xd3060
+_D3DDevice_SetTile@8 0xd30a0
+_D3DDevice_SetScissors@12 0xd3160
+_D3DDevice_PersistDisplay@0 0xd3300
+_D3DDevice_SetScreenSpaceOffset@8 0xd3490
+?FastCopyToWC@D3D@@YGXPCKPAKK@Z 0xd3510
+_D3DDevice_DrawVerticesUP@16 0xd35a0
+_D3DDevice_DrawIndexedVerticesUP@20 0xd3700
+_D3DDevice_DrawVertices@12 0xd3840
+_D3DDevice_DrawIndexedVertices@12 0xd38e0
+?InitializeVertexShaderFromFvf@D3D@@YGXPAUVertexShader@1@K@Z 0xd3b40
+?ShadowVertexShaderState@D3D@@YGXPAUVertexShader@1@K@Z 0xd3c80
+?ParseProgram@D3D@@YGPCKPCKPBKK@Z 0xd3d30
+?ParseDeclarationStream@D3D@@YGXPAUVertexShader@1@PBKH@Z 0xd3da0
+?ParseDeclarationConstants@D3D@@YGKPBKPCK@Z 0xd3f40
+_D3DDevice_CreateVertexShader@16 0xd4040
+_D3DDevice_SetStreamSource@12 0xd4180
+_D3DDevice_LoadVertexShader@8 0xd4210
+_D3DDevice_SelectVertexShader@8 0xd4270
+_D3DDevice_SetShaderConstantMode@4 0xd42f0
+?RestoreVertexShaders@D3D@@YGXPBKK@Z 0xd43f0
+?CommonSetPassthroughProgram@D3D@@YIXPAVCDevice@1@@Z 0xd4430
+_D3DDevice_SetVertexShader@4 0xd4520
+_D3DDevice_SetVertexShaderConstant@12 0xd4680
+?CleanPrivateData@D3D@@YGXPAX@Z 0xd4720
+_D3DResource_GetType@4 0xd4770
+?GetDataFromResource@D3D@@YGPAEPAUD3DResource@@@Z 0xd4800
+?DestroyResource@D3D@@YGXPAUD3DResource@@@Z 0xd4810
+?IsResourceSetInDevice@D3D@@YGHPAUD3DResource@@@Z 0xd48b0
+?InternalAddRefSurface@D3D@@YGXPAUD3DResource@@@Z 0xd48f0
+_D3DResource_AddRef@4 0xd4930
+_D3DResource_Release@4 0xd4970
+_D3DResource_IsBusy@4 0xd49c0
+_D3DResource_Register@8 0xd4a50
+?InternalReleaseSurface@D3D@@YGXPAUD3DResource@@@Z 0xd4a80
+_D3DTexture_GetSurfaceLevel@12 0xd4b00
+_D3DTexture_LockRect@20 0xd4b50
+?CreateTexture@D3D@@YGJKKKKKW4_D3DFORMAT@@_N1PAPAUD3DBaseTexture@@@Z 0xd4b80
+?GetMipmapLevelCount@PixelJar@D3D@@YGKPAUD3DPixelContainer@@@Z 0xd4c40
+_D3DBaseTexture_GetLevelCount@4 0xd4c40
+_D3D_AllocNoncontiguousMemory@4 0xd4c50
+_D3D_AllocContiguousMemory@8 0xd4c60
+_D3DSurface_GetDesc@8 0xd4c80
+_D3DSurface_LockRect@16 0xd4ca0
+?CreateSurfaceOfTexture@D3D@@YGJKKPAUD3DBaseTexture@@PAXPAPAUD3DSurface@@@Z 0xd4cc0
+?InitializeSurface@D3D@@YGXPAUD3DSurface@@KKPAX@Z 0xd4d20
+?CreateStandAloneSurface@D3D@@YGJKKW4_D3DFORMAT@@PAPAUD3DSurface@@@Z 0xd4d50
+?CreateSurfaceWithContiguousHeader@D3D@@YGJKKW4_D3DFORMAT@@PAPAUD3DSurface@@@Z 0xd4df0
+_Direct3D_CreateDevice@24 0xd4e80
+?SwapSaveState@D3D@@YGXPAUSwapSavedState@1@@Z 0xd4f40
+?SwapFirstFlip@D3D@@YGXPAVCDevice@1@@Z 0xd5090
+?SwapSetState@D3D@@YGXPAUSwapSavedState@1@@Z 0xd51a0
+?SwapRestoreState@D3D@@YGXPAUSwapSavedState@1@@Z 0xd5270
+?SwapSaveSurfaces@D3D@@YGXPAVCDevice@1@@Z 0xd5370
+?SwapRestoreSurfaces@D3D@@YGXPAVCDevice@1@@Z 0xd53d0
+?SwapCopyBlt@D3D@@YGXPAVCDevice@1@@Z 0xd5430
+?SwapCopy@D3D@@YGXPAVCDevice@1@K@Z 0xd5600
+?SwapFlip@D3D@@YGXPAVCDevice@1@@Z 0xd57e0
+?SwapFinish@D3D@@YGXPAVCDevice@1@@Z 0xd58f0
+_D3DDevice_Swap@4 0xd5930
+_D3DDevice_Clear@24 0xd59f0
+_Direct3DCreate8@4 0xd5de0
+_D3DDevice_EnableCC@4 0xd5df0
+_D3DDevice_SendCC@12 0xd5e10
+_D3DDevice_GetCCStatus@8 0xd5e50
+_D3DDevice_UpdateOverlay@20 0xd5e90
+_D3DDevice_EnableOverlay@4 0xd6010
+?BusyLoop@D3D@@YGXXZ 0xd6080
+?DumpMatrixTransposed@D3D@@YGXPCKKPBU_D3DMATRIX@@@Z 0xd60a0
+?InitializePushBuffer@CDevice@D3D@@QAEJXZ 0xd6110
+?UninitializePushBuffer@CDevice@D3D@@QAEXXZ 0xd61c0
+?ComputeGap@D3D@@YIKPAVCDevice@1@PAUFence@1@@Z 0xd61e0
+?FindFence@D3D@@YGPAUFence@1@K@Z 0xd6250
+?FlushWCCache@D3D@@YGXXZ 0xd6370
+?KickOff@CDevice@D3D@@QAEXXZ 0xd63a0
+?SetFence@D3D@@YGKK@Z 0xd6490
+?BlockOnTime@D3D@@YGXKH@Z 0xd6540
+?MakeRequestedSpace@D3D@@YGPCKKK@Z 0xd6630
+_XMETAL_StartPushCount@8 0xd67c0
+?KickOffAndWaitForIdle@D3D@@YGXXZ 0xd6810
+?BlockOnResource@D3D@@YGXPAUD3DResource@@@Z 0xd6830
+?BlockOnNonSurfaceResource@D3D@@YGXPAUD3DResource@@@Z 0xd68b0
+?ScaleVector3@D3D@@YGXPAU_D3DVECTOR@@PBU2@M@Z 0xd68f0
+?AddVectors3@D3D@@YGXPAU_D3DVECTOR@@PBU2@1@Z 0xd6920
+?XformBy4x3@D3D@@YGXPAU_D3DVECTOR@@PBU2@MPBU_D3DMATRIX@@@Z 0xd6950
+?MatrixProduct4x4@D3D@@YGXPAU_D3DMATRIX@@PBU2@1@Z 0xd69b0
+?Explut@D3D@@YGXMPAM0@Z 0xd6ab0
+?JBInvSqrt@D3D@@YGMM@Z 0xd6b90
+?NormalizeVector3@D3D@@YGXPAU_D3DVECTOR@@@Z 0xd6c00
+?Inverse4x4@D3D@@YGHPAU_D3DMATRIX@@PBU2@H@Z 0xd6c50
+?FloatToLong@D3D@@YGJM@Z 0xd71b0
+?Exp@D3D@@YGMM@Z 0xd71c0
+?Log@D3D@@YGMM@Z 0xd7220
+?DacProgramVideoStart@CMiniport@D3D@@QAEXK@Z 0xd7230
+?DacProgramGammaRamp@CMiniport@D3D@@QAEXPAU_D3DGAMMARAMP@@@Z 0xd72b2
+?InitializeKelvin@D3D@@YGXXZ 0xd7300
+?InitializeHardware@D3D@@YGXXZ 0xd73f0
+?InitializeD3dState@D3D@@YGXXZ 0xd74d0
+?FreeFrameBuffers@CDevice@D3D@@QAEXXZ 0xd7590
+?InitializeFrameBuffers@CDevice@D3D@@QAEJPAU_D3DPRESENT_PARAMETERS_@@@Z 0xd76b0
+?Init@CDevice@D3D@@QAEJPAU_D3DPRESENT_PARAMETERS_@@@Z 0xd7bf0
+?UnInit@CDevice@D3D@@QAEXXZ 0xd8120
+?Log2@D3D@@YIKK@Z 0xd82c0
+?MapToLinearD3DFORMAT@D3D@@YG?AW4_D3DFORMAT@@W42@@Z 0xd82d0
+?IsCompressedD3DFORMAT@D3D@@YG_NK@Z 0xd8390
+?VideoBitsPerPixelOfD3DFORMAT@D3D@@YGKK@Z 0xd83b0
+?CalcTilePitch@D3D@@YGKKW4_D3DFORMAT@@@Z 0xd83e0
+?GetSurfaceFormat@PixelJar@D3D@@YGKPAUD3DPixelContainer@@0@Z 0xd8420
+?GetDepthBufferScale@PixelJar@D3D@@YGXPAUD3DPixelContainer@@PAM@Z 0xd8540
+?GetSize@PixelJar@D3D@@YGXPAUD3DPixelContainer@@KPAK1111@Z 0xd85b0
+?Get2DSurfaceDesc@PixelJar@D3D@@YGXPAUD3DPixelContainer@@IPAU_D3DSURFACE_DESC@@@Z 0xd8700
+?FindSurfaceWithinTexture@PixelJar@D3D@@YGXPAUD3DPixelContainer@@W4_D3DCUBEMAP_FACES@@IPAPAEPAK333@Z 0xd87c0
+?Lock2DSurface@PixelJar@D3D@@YGXPAUD3DPixelContainer@@W4_D3DCUBEMAP_FACES@@IPAU_D3DLOCKED_RECT@@PBUtagRECT@@K@Z 0xd89f0
+?EncodeFormat@PixelJar@D3D@@YGKKKKKW4_D3DFORMAT@@K_N1PAK2@Z 0xd8a90
+?GetPresentFlagsFromAvInfo@CMiniport@D3D@@SGKK@Z 0xd8c90
+?GetDisplayCapabilities@CMiniport@D3D@@SGKXZ 0xd8cd0
+?GetTableForCurrentAvInfo@D3D@@YGPBUDISPLAYMODE@1@XZ 0xd8cef
+?SetVideoMode@CMiniport@D3D@@QAEXKKKKW4_D3DFORMAT@@KK@Z 0xd8d68
+?IsFlipPending@CMiniport@D3D@@QAEHXZ 0xd8f40
+?Isr@CMiniport@D3D@@SGEPAU_KINTERRUPT@@PAX@Z 0xd8f70
+?VBlankFlip@CMiniport@D3D@@AAEXKK@Z 0xd9090
+?VBlank@CMiniport@D3D@@AAEKXZ 0xd9110
+?FixupPushBuffer@CMiniport@D3D@@QAEXPAUPUSHBUFFERFIXUPINFO@12@K@Z 0xd92b0
+?SoftwareMethod@CMiniport@D3D@@AAEXKK@Z 0xd9330
+?ShutdownNotification@CMiniport@D3D@@SGXPAU_HAL_SHUTDOWN_REGISTRATION@@@Z 0xd95a0
+?ServiceGrInterrupt@CMiniport@D3D@@AAEKXZ 0xd95e0
+?ServiceFifoInterrupt@CMiniport@D3D@@AAEKXZ 0xd96d0
+?Dpc@CMiniport@D3D@@SGXPAU_KDPC@@PAX11@Z 0xd9850
+?ReserveInstMem@CMiniport@D3D@@AAEKK@Z 0xd9900
+?InitGammaRamp@CMiniport@D3D@@AAEXK@Z 0xd9913
+?InitDMAChannel@CMiniport@D3D@@QAEHKPAUOBJECTINFO@12@0KPAPAX@Z 0xd9953
+?BindToChannel@CMiniport@D3D@@QAEHPAUOBJECTINFO@12@@Z 0xd99b6
+?MapRegisters@CMiniport@D3D@@AAEHXZ 0xd99ea
+?GetGeneralInfo@CMiniport@D3D@@AAEHXZ 0xd9a15
+?InitEngines@CMiniport@D3D@@AAEHXZ 0xd9a56
+?LoadEngines@CMiniport@D3D@@AAEHXZ 0xd9b60
+?GetAddressInfo@CMiniport@D3D@@AAEXPAXPAPAXPAKH@Z 0xd9c99
+?CreateCtxDmaObject@CMiniport@D3D@@QAEHKKPAXKPAUOBJECTINFO@12@@Z 0xd9cf3
+?CreateGrObject@CMiniport@D3D@@QAEHKKPAUOBJECTINFO@12@@Z 0xd9dc2
+?TilingUpdateIdle@CMiniport@D3D@@QAEXPAK@Z 0xd9e52
+?InitHardware@CMiniport@D3D@@QAEHXZ 0xd9ebd
+?CreateTile@CMiniport@D3D@@QAEHKKKKKKK@Z 0xda01f
+?DestroyTile@CMiniport@D3D@@QAEHKK@Z 0xda20d
+?ShutdownEngines@CMiniport@D3D@@QAEXXZ 0xda2cf
+?GetColorMaterial@D3D@@YGKXZ 0xda480
+?LazySetPointParams@D3D@@YGXPAVCDevice@1@@Z 0xda520
+?LazySetShaderStageProgram@D3D@@YGXPAVCDevice@1@@Z 0xda690
+?LazySetTextureState@D3D@@YGXPAVCDevice@1@@Z 0xda800
+?LazySetSpecFogCombiner@D3D@@YGXPAVCDevice@1@@Z 0xda9f0
+?LazySetTextureTransform@D3D@@YGXPAVCDevice@1@@Z 0xdabd0
+?SetLightColors@D3D@@YGPCKPCKPBULight@1@KK@Z 0xdaf90
+?SetSceneAmbientAndMaterialEmission@D3D@@YGPCKPCKK@Z 0xdb090
+?SetSpecularParameters@D3D@@YGPCKPCK@Z 0xdb230
+?LazySetLights@D3D@@YGXPAVCDevice@1@@Z 0xdb370
+?LazySetTransform@D3D@@YGXPAVCDevice@1@@Z 0xdb6b0
+?SetState@D3D@@YGXXZ 0xdb8b0
+?SetStateVB@CDevice@D3D@@QAEXK@Z 0xdb930
+?SetStateUP@CDevice@D3D@@QAEXXZ 0xdbad0
+_D3DDevice_SetPixelShader@4 0xdbc10
+?HalMcControlInit@CMiniport@D3D@@AAEXXZ 0xdbde0
+?HalFbControlInit@CMiniport@D3D@@AAEXXZ 0xdbf47
+?HalDacControlInit@CMiniport@D3D@@AAEXXZ 0xdc045
+?HalVideoControlInit@CMiniport@D3D@@AAEXXZ 0xdc114
+?HalGrControlInit@CMiniport@D3D@@AAEXXZ 0xdc14a
+?HalFifoControlInit@CMiniport@D3D@@AAEXXZ 0xdc17a
+?HalGrIdle@CMiniport@D3D@@AAEXXZ 0xdc1eb
+?HalGrUnloadChannelContext@CMiniport@D3D@@AAEXK@Z 0xdc22a
+?HalFifoContextSwitch@CMiniport@D3D@@AAEXK@Z 0xdc263
+?HalDacLoad@CMiniport@D3D@@AAEXXZ 0xdc460
+?HalFifoAllocDMA@CMiniport@D3D@@AAEXKKKPAUOBJECTINFO@12@@Z 0xdc472
+?HalFifoHashAdd@CMiniport@D3D@@AAEXKKKKK@Z 0xdc5ff
+?HalGrInitObjectContext@CMiniport@D3D@@AAEXKK@Z 0xdc638
+?HalGrInit3d@CMiniport@D3D@@AAEXXZ 0xdc6ad
+?HalGrLoadChannelContext@CMiniport@D3D@@AAEXK@Z 0xdd08c
+?HalFifoControlLoad@CMiniport@D3D@@AAEXXZ 0xdd1af
+?HalGrControlLoad@CMiniport@D3D@@AAEXXZ 0xdd230
+?CombinerInput@D3D@@YGKKKK@Z 0xdd4d0
+?LazySetCombiners@D3D@@YGXPAVCDevice@1@@Z 0xdd570
+_ibstrmGetPacketHeader@4 0xf062e
+?RemoveEntryList@@YGPAU_LIST_ENTRY@@PAU1@@Z 0x1094a0
+??2@YAPAXI@Z 0x1094bf
+??_U@YAPAXI@Z 0x1094bf
+?Save@CFpState@DirectSound@@QAEXXZ 0x1094d0
+?Restore@CFpState@DirectSound@@QAEXXZ 0x1094f5
+?Release@CRefCount@DirectSound@@UAGKXZ 0x109520
+?DirectSoundEnterCriticalSection@@YGHXZ 0x109547
+_IDirectSound_Release@4 0x109565
+_IDirectSoundBuffer_Release@4 0x109580
+_XAudioCalculatePitch@4 0x109596
+?SetEffectImageLocations@CDirectSoundSettings@DirectSound@@QAEXPBU_DSEFFECTIMAGELOC@@@Z 0x1095e1
+??0CDirectSound@DirectSound@@QAE@XZ 0x109603
+?AddRef@CDirectSound@DirectSound@@UAGKXZ 0x109620
+?AddRef@CDirectSoundBuffer@DirectSound@@UAGKXZ 0x109620
+??1CDirectSound@DirectSound@@UAE@XZ 0x109667
+?SetMixBinHeadroom@CDirectSound@DirectSound@@QAGJKK@Z 0x1096a1
+?DoWork@CDirectSound@DirectSound@@QAGXXZ 0x109700
+?SetMixBins@CDirectSoundVoiceSettings@DirectSound@@QAEXPBU_DSMIXBINS@@@Z 0x109731
+??1CDirectSoundVoice@DirectSound@@UAE@XZ 0x1097ab
+?SetPitch@CDirectSoundVoice@DirectSound@@QAGJJ@Z 0x1097f8
+?SetVolume@CDirectSoundVoice@DirectSound@@QAGJJ@Z 0x109811
+?SetHeadroom@CDirectSoundVoice@DirectSound@@QAGJK@Z 0x10982d
+?SetNotificationPositions@CDirectSoundBufferSettings@DirectSound@@QAEJKPBU_DSBPOSITIONNOTIFY@@@Z 0x109850
+??1CDirectSoundBuffer@DirectSound@@UAE@XZ 0x109925
+?Release@CDirectSoundBuffer@DirectSound@@UAGKXZ 0x109958
+?Play@CDirectSoundBuffer@DirectSound@@QAGJKKK@Z 0x1099a2
+?Stop@CDirectSoundBuffer@DirectSound@@QAGJXZ 0x1099f3
+?GetStatus@CDirectSoundBuffer@DirectSound@@QAGJPAK@Z 0x109a42
+?GetCurrentPosition@CDirectSoundBuffer@DirectSound@@QAGJPAK0@Z 0x109a93
+?Lock@CDirectSoundBuffer@DirectSound@@QAGJKKPAPAXPAK01K@Z 0x109ae8
+?SetCurrentPosition@CDirectSoundBuffer@DirectSound@@QAGJK@Z 0x109bbe
+?SetNotificationPositions@CDirectSoundBuffer@DirectSound@@QAGJKPBU_DSBPOSITIONNOTIFY@@@Z 0x109c0f
+?__AddRef@DirectSound@@YGPAVCWaveFileMediaObject@1@PAV21@@Z 0x109c74
+?__AddRef@DirectSound@@YGPAVCFileMediaObject@1@PAV21@@Z 0x109c74
+?__AddRef@DirectSound@@YGPAVCAc97MediaObject@1@PAV21@@Z 0x109c74
+??_GCRefCount@DirectSound@@UAEPAXI@Z 0x109c88
+??_GCImaAdpcmCodec@DirectSound@@UAEPAXI@Z 0x109c88
+??_GCDirectSoundSettings@DirectSound@@UAEPAXI@Z 0x109c88
+?SetVolume@CDirectSoundBuffer@DirectSound@@QAGJJ@Z 0x109ca4
+?SetHeadroom@CDirectSoundBuffer@DirectSound@@QAGJK@Z 0x109cf2
+_IDirectSound_SetMixBinHeadroom@12 0x109d40
+_IDirectSoundBuffer_SetVolume@8 0x109d60
+_IDirectSoundBuffer_SetHeadroom@8 0x109d7c
+_IDirectSoundBuffer_Play@16 0x109d98
+_IDirectSoundBuffer_Stop@4 0x109dbc
+_IDirectSoundBuffer_GetStatus@8 0x109dd4
+_IDirectSoundBuffer_GetCurrentPosition@12 0x109df0
+_IDirectSoundBuffer_SetCurrentPosition@8 0x109e10
+_IDirectSoundBuffer_Lock@32 0x109e2c
+_IDirectSoundBuffer_SetNotificationPositions@12 0x109e5c
+_DirectSoundDoWork@0 0x109e7c
+_Ac97CreateMediaObject@16 0x109ea5
+??_GCDirectSound@DirectSound@@UAEPAXI@Z 0x109f22
+?SetFormat@CDirectSoundVoiceSettings@DirectSound@@QAEHPBUtWAVEFORMATEX@@H@Z 0x109f3d
+?SetOutputBuffer@CDirectSoundVoiceSettings@DirectSound@@QAEXPAVCDirectSoundBuffer@2@@Z 0x109fb9
+??0CDirectSoundVoice@DirectSound@@QAE@PAVCDirectSound@1@@Z 0x10a000
+??_GCDirectSoundVoice@DirectSound@@UAEPAXI@Z 0x10a02a
+?Initialize@CDirectSoundVoice@DirectSound@@QAGXPAVCMcpxVoiceClient@2@PAVCDirectSoundVoiceSettings@2@@Z 0x10a045
+?SetFrequency@CDirectSoundVoice@DirectSound@@QAGJK@Z 0x10a084
+?SetPlayRegion@CDirectSoundBufferSettings@DirectSound@@QAEXKK@Z 0x10a0a8
+??0CDirectSoundBuffer@DirectSound@@QAE@PAVCDirectSound@1@@Z 0x10a0cc
+??_GCDirectSoundBuffer@DirectSound@@UAEPAXI@Z 0x10a0e4
+?SetFrequency@CDirectSoundBuffer@DirectSound@@QAGJK@Z 0x10a0ff
+_IDirectSoundBuffer_SetFrequency@8 0x10a14d
+??0CDirectSoundSettings@DirectSound@@QAE@XZ 0x10a169
+?Release@CDirectSound@DirectSound@@UAGKXZ 0x10a1d9
+??1CDirectSoundVoiceSettings@DirectSound@@UAE@XZ 0x10a28f
+?Initialize@CDirectSoundVoiceSettings@DirectSound@@QAEJKPBUtWAVEFORMATEX@@PBU_DSMIXBINS@@@Z 0x10a2c7
+?SetBufferData@CDirectSoundBufferSettings@DirectSound@@QAEJPAXK@Z 0x10a381
+?SetBufferData@CDirectSoundBuffer@DirectSound@@QAGJPAXK@Z 0x10a40d
+_IDirectSoundBuffer_SetBufferData@12 0x10a4bb
+??_GCDirectSoundVoiceSettings@DirectSound@@UAEPAXI@Z 0x10a4db
+??1CDirectSoundBufferSettings@DirectSound@@UAE@XZ 0x10a4f6
+?Initialize@CDirectSoundBufferSettings@DirectSound@@QAEJPBU_DSBUFFERDESC@@@Z 0x10a51b
+?Initialize@CDirectSoundBuffer@DirectSound@@QAGJPBU_DSBUFFERDESC@@@Z 0x10a580
+?CreateSoundBuffer@CDirectSound@DirectSound@@QAGJPBU_DSBUFFERDESC@@PAPAUIDirectSoundBuffer@@PAUIUnknown@@@Z 0x10a668
+??_GCDirectSoundBufferSettings@DirectSound@@UAEPAXI@Z 0x10a704
+_IDirectSound_CreateSoundBuffer@16 0x10a71f
+?Initialize@CDirectSound@DirectSound@@QAGJXZ 0x10a743
+?DirectSoundCreateInternal@@YGJPAPAVCDirectSound@DirectSound@@@Z 0x10a86c
+_DirectSoundCreate@12 0x10a8d9
+_DirectSoundPoolAlloc@12 0x10a920
+_DirectSoundPoolFree@4 0x10a965
+_DirectSoundPhysicalAlloc@16 0x10a97b
+_DirectSoundPhysicalFree@4 0x10a9c8
+_DirectSoundMemAlloc@12 0x10a9de
+_DirectSoundMemFree@4 0x10aa46
+_FmtPcmToInternal@8 0x10aa7a
+_FmtAdpcmToInternal@8 0x10aaa3
+_FmtExtensibleToInternal@8 0x10aaca
+_FmtCreateInternal@8 0x10ab13
+?LinearToVolume@DirectSound@@YGJM@Z 0x10ab5f
+??0CHrtfListener@DirectSound@@QAE@ABU_DS3DLISTENER@@@Z 0x10ab8e
+??1CHrtfListener@DirectSound@@QAE@XZ 0x10abc9
+??0CHrtfSource@DirectSound@@QAE@ABVCHrtfListener@1@ABU_DS3DBUFFER@@@Z 0x10abdd
+?Calculate3d@CHrtfSource@DirectSound@@QAEXK@Z 0x10ac13
+??0CMcpxGPDspManager@DirectSound@@QAE@XZ 0x10ac29
+?Initialize@CMcpxGPDspManager@DirectSound@@QAEXXZ 0x10ac48
+?AC3SetOutputBuffer@CMcpxGPDspManager@DirectSound@@QAEXPAUMCPX_ALLOC_CONTEXT@2@K@Z 0x10acbd
+?SetMultipassBuffer@CMcpxGPDspManager@DirectSound@@QAEXPAUMCPX_ALLOC_CONTEXT@2@K@Z 0x10acd1
+??1CMcpxGPDspManager@DirectSound@@QAE@XZ 0x10ace8
+?MoveEntryTailList@@YGPAU_LIST_ENTRY@@PAU1@0@Z 0x10ad29
+?Raise@CIrql@DirectSound@@QAEXXZ 0x10ad53
+?Lower@CIrql@DirectSound@@QAEXXZ 0x10ad86
+??0CMcpxAPU@DirectSound@@QAE@PAVCDirectSoundSettings@1@@Z 0x10ad9d
+?Terminate@CMcpxAPU@DirectSound@@IAEXXZ 0x10ae48
+?AllocateVoices@CMcpxAPU@DirectSound@@QAEJPAVCMcpxVoiceClient@2@@Z 0x10aeab
+?FreeVoices@CMcpxAPU@DirectSound@@QAEXPAVCMcpxVoiceClient@2@@Z 0x10af45
+?WaitForMagicWrite@CMcpxAPU@DirectSound@@IAEXXZ 0x10afb8
+?ServiceVoiceInterrupt@CMcpxAPU@DirectSound@@IAEXXZ 0x10b01b
+?GetInterruptStatusCallback@CMcpxAPU@DirectSound@@CGEPAX@Z 0x10b094
+?HandleDeltaPanic@CMcpxAPU@DirectSound@@IAEXXZ 0x10b0c0
+?HandleIdleVoice@CMcpxAPU@DirectSound@@IAEXK@Z 0x10b11e
+?ScheduleDeferredCommandLow@CMcpxAPU@DirectSound@@IAEHPAUMCPX_DEFERRED_COMMAND@2@@Z 0x10b184
+?RemoveDeferredCommandHigh@CMcpxAPU@DirectSound@@IAEXPAUMCPX_DEFERRED_COMMAND@2@@Z 0x10b1a9
+?ServiceDeferredCommandsHigh@CMcpxAPU@DirectSound@@IAEXXZ 0x10b20b
+?ServiceDeferredCommandsLow@CMcpxAPU@DirectSound@@IAEXXZ 0x10b28d
+?SetHrtfHeadroom@CMcpxAPU@DirectSound@@QAEJK@Z 0x10b322
+?SetMixBinHeadroom@CMcpxAPU@DirectSound@@QAEJK@Z 0x10b359
+?DeferredCommandDpcRoutine@CMcpxAPU@DirectSound@@CGXPAU_KDPC@@PAX11@Z 0x10b39e
+?ApuShutdownNotifier@CMcpxAPU@DirectSound@@CGXPAU_HAL_SHUTDOWN_REGISTRATION@@@Z 0x10b3aa
+??1CMcpxAPU@DirectSound@@UAE@XZ 0x10b3c6
+?ServiceApuInterruptDpc@CMcpxAPU@DirectSound@@IAEXXZ 0x10b472
+?HandleSoftwareMethod@CMcpxAPU@DirectSound@@IAEXKK@Z 0x10b4b4
+?RemoveDeferredCommand@CMcpxAPU@DirectSound@@QAEXPAUMCPX_DEFERRED_COMMAND@2@@Z 0x10b4ca
+?ApuInterruptDpcRoutine@CMcpxAPU@DirectSound@@CGXPAU_KDPC@@PAX11@Z 0x10b50e
+??_GCMcpxAPU@DirectSound@@UAEPAXI@Z 0x10b51a
+?HandleFETrap@CMcpxAPU@DirectSound@@IAEXXZ 0x10b535
+?ScheduleDeferredCommandHigh@CMcpxAPU@DirectSound@@IAEHPAUMCPX_DEFERRED_COMMAND@2@@Z 0x10b57c
+?ServiceApuInterrupt@CMcpxAPU@DirectSound@@IAEHXZ 0x10b652
+?ScheduleDeferredCommand@CMcpxAPU@DirectSound@@QAEHPAUMCPX_DEFERRED_COMMAND@2@@Z 0x10b6a7
+?ApuInterruptServiceRoutine@CMcpxAPU@DirectSound@@CGEPAU_KINTERRUPT@@PAX@Z 0x10b6ee
+?Initialize@CMcpxAPU@DirectSound@@QAEJXZ 0x10b6fa
+_alog@4 0x10b826
+_RatioToPitch@4 0x10b868
+?Reset@CMcpxNotifier@DirectSound@@QAEXXZ 0x10b886
+?SamplesToBytes@CMcpxVoiceClient@DirectSound@@IAEKK@Z 0x10b8a2
+?Initialize@CMcpxVoiceClient@DirectSound@@UAEJH@Z 0x10b8c3
+?SetFormat@CMcpxVoiceClient@DirectSound@@UAEJXZ 0x10b9c1
+?ReleaseVoiceResources@CMcpxVoiceClient@DirectSound@@IAEXXZ 0x10bad4
+?ConvertMixBinValues@CMcpxVoiceClient@DirectSound@@IAEXPAK0@Z 0x10bb5c
+?ConvertVolumeValues@CMcpxVoiceClient@DirectSound@@IAEXPAUMCPX_VOICE_VOLUME@2@@Z 0x10bc0d
+?ConvertPitchValue@CMcpxVoiceClient@DirectSound@@IAEXPAK@Z 0x10bdf4
+?GetAntecedentVoice@CMcpxVoiceClient@DirectSound@@AAEXPAEPAPAV12@@Z 0x10be76
+?RemoveIdleVoice@CMcpxVoiceClient@DirectSound@@AAEXH@Z 0x10bed9
+?RemoveStuckVoice@CMcpxVoiceClient@DirectSound@@AAEXXZ 0x10c0c0
+?ReleaseVoice@CMcpxVoiceClient@DirectSound@@IAEXXZ 0x10c117
+?CheckStuckVoice@CMcpxVoiceClient@DirectSound@@IAEXXZ 0x10c19b
+?LoadHrtfFilter@CMcpxVoiceClient@DirectSound@@IAEXXZ 0x10c1f5
+?SetFilter@CMcpxVoiceClient@DirectSound@@QAEJPBU_DSFILTERDESC@@@Z 0x10c2fa
+?DisconnectVoice@CMcpxVoiceClient@DirectSound@@QAEJXZ 0x10c447
+?GetSslPosition@CMcpxVoiceClient@DirectSound@@IAEKXZ 0x10c53d
+?__AddRef@DirectSound@@YGPAVCDirectSoundSettings@1@PAV21@@Z 0x10c5c8
+?__AddRef@DirectSound@@YGPAVCMcpxSlopMemoryHeap@1@PAV21@@Z 0x10c5c8
+?__AddRef@DirectSound@@YGPAVCMcpxAPU@1@PAV21@@Z 0x10c5c8
+?__AddRef@DirectSound@@YGPAVCDirectSoundVoiceSettings@1@PAV21@@Z 0x10c5c8
+?__AddRef@DirectSound@@YGPAVCDirectSoundStreamSettings@1@PAV21@@Z 0x10c5c8
+?__AddRef@DirectSound@@YGPAVCDirectSoundBufferSettings@1@PAV21@@Z 0x10c5c8
+?__AddRef@DirectSound@@YGPAVCDirectSound@1@PAV21@@Z 0x10c5c8
+?__AddRef@DirectSound@@YGPAVCDirectSoundBuffer@1@PAV21@@Z 0x10c5c8
+?__AddRef@DirectSound@@YGPAVCMcpxVoiceClient@1@PAV21@@Z 0x10c5c8
+?Initialize@CMcpxNotifier@DirectSound@@QAEXKK@Z 0x10c5dd
+?Initialize@CMcpxVoiceNotifier@DirectSound@@QAEXG@Z 0x10c5fb
+??1CMcpxVoiceClient@DirectSound@@UAE@XZ 0x10c612
+?AllocateVoiceResources@CMcpxVoiceClient@DirectSound@@IAEJXZ 0x10c66c
+?SetVolume@CMcpxVoiceClient@DirectSound@@QAEJXZ 0x10c7e8
+?SetPitch@CMcpxVoiceClient@DirectSound@@QAEJXZ 0x10c880
+?WaitForVoiceOff@CMcpxVoiceClient@DirectSound@@IAEXXZ 0x10c912
+?Apply3dSettings@CMcpxVoiceClient@DirectSound@@IAEXKKK@Z 0x10c92e
+??0CMcpxVoiceClient@DirectSound@@QAE@PAVCMcpxAPU@1@PAVCDirectSoundVoiceSettings@1@@Z 0x10c97b
+??_GCMcpxVoiceClient@DirectSound@@UAEPAXI@Z 0x10c9e3
+?DeactivateVoice@CMcpxVoiceClient@DirectSound@@IAEXH@Z 0x10c9fe
+?Commit3dSettings@CMcpxVoiceClient@DirectSound@@QAEKXZ 0x10cb22
+?ActivateVoice@CMcpxVoiceClient@DirectSound@@IAEXXZ 0x10cbfa
+?GetStatus@CMcpxNotifier@DirectSound@@QAEHK@Z 0x10cdb6
+?BytesToSamples@CMcpxVoiceClient@DirectSound@@IAEKK@Z 0x10cdd4
+?MapBuffer@CMcpxBuffer@DirectSound@@IAEXK@Z 0x10cded
+?UnmapBuffer@CMcpxBuffer@DirectSound@@IAEXXZ 0x10ce5f
+?PlayFromCurrent@CMcpxBuffer@DirectSound@@IAEXK@Z 0x10cea5
+?PlayFromPosition@CMcpxBuffer@DirectSound@@IAEXKK@Z 0x10cfe6
+?GetStatus@CMcpxBuffer@DirectSound@@QAEJPAK@Z 0x10d165
+?GetCurrentPosition@CMcpxBuffer@DirectSound@@QAEJPAK0@Z 0x10d1ae
+?ServiceVoiceInterrupt@CMcpxBuffer@DirectSound@@MAEHXZ 0x10d287
+?SetNotificationPositions@CMcpxBuffer@DirectSound@@QAEJXZ 0x10d2ce
+?NotifyToPosition@CMcpxBuffer@DirectSound@@IAEXKH@Z 0x10d322
+?NotifyStop@CMcpxBuffer@DirectSound@@IAEXXZ 0x10d383
+?ScheduleDeferredCommand@CMcpxBuffer@DirectSound@@MAEHK_JK@Z 0x10d3bd
+?RemoveDeferredCommand@CMcpxBuffer@DirectSound@@MAEXK@Z 0x10d3ec
+??0CMcpxBuffer@DirectSound@@QAE@PAVCMcpxAPU@1@PAVCDirectSoundBufferSettings@1@@Z 0x10d406
+?MapInputBuffer@CMcpxBuffer@DirectSound@@IAEJXZ 0x10d461
+?MapEffectsBuffer@CMcpxBuffer@DirectSound@@IAEXXZ 0x10d4c9
+?OnPositionDelta@CMcpxBuffer@DirectSound@@IAEXXZ 0x10d51b
+?AllocateBufferResources@CMcpxBuffer@DirectSound@@IAEJXZ 0x10d5ba
+?Play@CMcpxBuffer@DirectSound@@QAEJK@Z 0x10d608
+?Stop@CMcpxBuffer@DirectSound@@QAEJK@Z 0x10d684
+?SetCurrentPosition@CMcpxBuffer@DirectSound@@QAEJK@Z 0x10d714
+?Initialize@CMcpxBuffer@DirectSound@@QAEJXZ 0x10d808
+?SetBufferData@CMcpxBuffer@DirectSound@@QAEJXZ 0x10d82c
+?ReleaseBufferResources@CMcpxBuffer@DirectSound@@IAEXXZ 0x10d846
+?OnDeferredTerminate@CMcpxBuffer@DirectSound@@IAEXXZ 0x10d893
+??1CMcpxBuffer@DirectSound@@UAE@XZ 0x10d8ae
+?ReleaseBufferData@CMcpxBuffer@DirectSound@@QAEJH@Z 0x10d8eb
+?ServiceDeferredCommand@CMcpxBuffer@DirectSound@@MAEXKK@Z 0x10d91c
+??_GCMcpxBuffer@DirectSound@@UAEPAXI@Z 0x10d95d
+?XMOAcceptPacket@@YGXPBU_XMEDIAPACKET@@@Z 0x10d978
+?XMOCompletePacket@@YGXPBU_XMEDIAPACKET@@KP6GXPAX1K@Z1K@Z 0x10d996
+?MoveHeadTailList@@YGPAU_LIST_ENTRY@@PAU1@0@Z 0x10d9da
+?AttachPacket@CAc97Channel@DirectSound@@QAEXPBXK@Z 0x10d9f5
+?GetInfo@CAc97MediaObject@DirectSound@@UAGJPAU_XMEDIAINFO@@@Z 0x10da12
+?GetStatus@CAc97MediaObject@DirectSound@@UAGJPAK@Z 0x10da6b
+?Process@CAc97MediaObject@DirectSound@@UAGJPBU_XMEDIAPACKET@@0@Z 0x10dab3
+?CompletePacket@CAc97MediaObject@DirectSound@@IAEXPAUAC97PACKET@2@K@Z 0x10db8e
+?SetMode@CAc97MediaObject@DirectSound@@UAGJK@Z 0x10dbc7
+?GetCurrentPosition@CAc97MediaObject@DirectSound@@UAGJPAK@Z 0x10dc34
+??1CAc97MediaObject@DirectSound@@UAE@XZ 0x10dc83
+?AddRef@CDirectSoundStream@DirectSound@@UAGKXZ 0x10dcfb
+?AddRef@CAc97MediaObject@DirectSound@@UAGKXZ 0x10dcfb
+?Release@CDirectSoundStream@DirectSound@@UAGKXZ 0x10dd42
+?Release@CAc97MediaObject@DirectSound@@UAGKXZ 0x10dd42
+?Flush@CAc97MediaObject@DirectSound@@UAGJXZ 0x10dda9
+?CompletePendingPackets@CAc97MediaObject@DirectSound@@IAEXXZ 0x10de27
+?InterruptCallback@CAc97MediaObject@DirectSound@@CGXPAX@Z 0x10de6f
+??0CAc97MediaObject@DirectSound@@QAE@XZ 0x10de7b
+??_GCAc97MediaObject@DirectSound@@UAEPAXI@Z 0x10dea9
+?Initialize@CAc97MediaObject@DirectSound@@UAGJKP6GXPAX0K@Z0@Z 0x10dec8
+?CreateMarker@CMcpxBufferSgeHeap@DirectSound@@IAEPAUSGEHEAPRUNMARKER@2@PAU32@GGPAU_LIST_ENTRY@@@Z 0x10dfdb
+?CreateMarker@CMcpxSlopMemoryHeap@DirectSound@@IAEPAUSLOPRUNMARKER@2@PAXKPAU_LIST_ENTRY@@@Z 0x10e011
+??0CMcpxBufferSgeHeap@DirectSound@@QAE@XZ 0x10e038
+??1CMcpxBufferSgeHeap@DirectSound@@UAE@XZ 0x10e051
+?Initialize@CMcpxBufferSgeHeap@DirectSound@@QAEJG@Z 0x10e06d
+?AllocRun@CMcpxBufferSgeHeap@DirectSound@@IAEPAUSGEHEAPRUNMARKER@2@PAXG@Z 0x10e0f6
+?CoalesceRuns@CMcpxBufferSgeHeap@DirectSound@@IAEPAUSGEHEAPRUNMARKER@2@PAU32@0@Z 0x10e1c5
+?MapBuffer@CMcpxBufferSgeHeap@DirectSound@@KGXKPAXK@Z 0x10e1e6
+?UnmapBuffer@CMcpxBufferSgeHeap@DirectSound@@KGXPAXK@Z 0x10e253
+??0CMcpxSlopMemoryHeap@DirectSound@@QAE@XZ 0x10e26a
+??1CMcpxSlopMemoryHeap@DirectSound@@UAE@XZ 0x10e28f
+?AddRun@CMcpxSlopMemoryHeap@DirectSound@@QAEHPAXKK@Z 0x10e2f0
+?Alloc@CMcpxSlopMemoryHeap@DirectSound@@QAEPAXK@Z 0x10e374
+?CoalesceRuns@CMcpxSlopMemoryHeap@DirectSound@@IAEPAUSLOPRUNMARKER@2@PAU32@0@Z 0x10e44f
+??_GCMcpxBufferSgeHeap@DirectSound@@UAEPAXI@Z 0x10e46a
+?Alloc@CMcpxBufferSgeHeap@DirectSound@@QAEPAUSGEHEAPRUNMARKER@2@PAXK@Z 0x10e485
+?FreeRun@CMcpxBufferSgeHeap@DirectSound@@IAEXPAUSGEHEAPRUNMARKER@2@@Z 0x10e514
+??_GCMcpxSlopMemoryHeap@DirectSound@@UAEPAXI@Z 0x10e56e
+?Free@CMcpxSlopMemoryHeap@DirectSound@@QAEXPAX@Z 0x10e589
+?Free@CMcpxBufferSgeHeap@DirectSound@@QAEXPAUSGEHEAPRUNMARKER@2@@Z 0x10e622
+??0CMcpxDspScratchDma@DirectSound@@QAE@H@Z 0x10e683
+??1CMcpxDspScratchDma@DirectSound@@QAE@XZ 0x10e69d
+?Initialize@CMcpxDspScratchDma@DirectSound@@QAEXK@Z 0x10e6cb
+?AddPages@CMcpxDspScratchDma@DirectSound@@QAEXPAUMCPX_ALLOC_CONTEXT@2@KPAK@Z 0x10e77e
+?Copy@CMcpxDspScratchDma@DirectSound@@QAEXKPAXK@Z 0x10e7d0
+?VolumeToLinear@DirectSound@@YGMJ@Z 0x10e7f8
+??0CI3dl2Listener@DirectSound@@QAE@ABU_DSI3DL2LISTENER@@@Z 0x10e82a
+??0CI3dl2Source@DirectSound@@QAE@ABVCI3dl2Listener@1@ABU_DSI3DL2BUFFER@@@Z 0x10e835
+?Get1PoleLoPass@CI3dl2Source@DirectSound@@AAEHJJMM@Z 0x10e858
+?CalculateI3dl2@CI3dl2Source@DirectSound@@QAEXM@Z 0x10e8e6
+?SetupVoiceProcessor@CMcpxCore@DirectSound@@IAEXXZ 0x10ea3b
+?SetupGlobalProcessor@CMcpxCore@DirectSound@@IAEXXZ 0x10eb0c
+?SetupEncodeProcessor@CMcpxCore@DirectSound@@IAEXXZ 0x10ec35
+?SetupAc97@CMcpxCore@DirectSound@@IAEJXZ 0x10edb8
+?SetInterruptState@CMcpxCore@DirectSound@@IAEXH@Z 0x10ee71
+?SetPrivLockState@CMcpxCore@DirectSound@@IAEXH@Z 0x10eea8
+?SetFrontEndState@CMcpxCore@DirectSound@@IAEXW4MCPX_FE_STATE@2@@Z 0x10eedf
+?SetSetupEngineState@CMcpxCore@DirectSound@@IAEXW4MCPX_SE_STATE@2@@Z 0x10ef3a
+?GetPhysicalMemoryProperties@CMcpxCore@DirectSound@@SGKPAXKPAK1@Z 0x10ef9c
+?MapTransfer@CMcpxCore@DirectSound@@SGKPAPAXPAK1@Z 0x10f013
+?AllocateContext@CMcpxCore@DirectSound@@SGJPAUMCPX_ALLOC_CONTEXT@2@KK@Z 0x10f050
+?ResetGlobalCounters@CMcpxCore@DirectSound@@IAEXXZ 0x10f08f
+?SetupDSPs@CMcpxCore@DirectSound@@IAEXXZ 0x10f109
+??0CMcpxCore@DirectSound@@QAE@PAVCDirectSoundSettings@1@@Z 0x10f125
+??1CMcpxCore@DirectSound@@UAE@XZ 0x10f148
+?SetupFrontEndProcessor@CMcpxCore@DirectSound@@IAEXXZ 0x10f1ed
+?AllocateApuMemory@CMcpxCore@DirectSound@@IAEJXZ 0x10f2b8
+?IdleVoiceProcessor@CMcpxCore@DirectSound@@QAEHH@Z 0x10f438
+??_GCMcpxCore@DirectSound@@UAEPAXI@Z 0x10f519
+?Reset@CMcpxCore@DirectSound@@IAEXXZ 0x10f534
+?Initialize@CMcpxCore@DirectSound@@QAEJXZ 0x10f5b4
+?AcquireCodecSemaphore@CAc97Device@DirectSound@@KGHXZ 0x10f616
+?CodecReady@CAc97Device@DirectSound@@IAEHXZ 0x10f643
+?SynchronizeAciInterrupt@CAc97Device@DirectSound@@IAEXXZ 0x10f693
+?PokeAc97Register@CAc97Device@DirectSound@@KGHW4AC97REGISTER@@G@Z 0x10f6a7
+?PowerUp@CAc97Device@DirectSound@@IAEJXZ 0x10f6c4
+?Pause@CAc97Channel@DirectSound@@QAEXXZ 0x10f6dc
+?SetPrdIndeces@CAc97Channel@DirectSound@@IAEXEEHH@Z 0x10f70b
+?SetMode@CAc97Channel@DirectSound@@QAEXK@Z 0x10f79b
+?GetPosition@CAc97Channel@DirectSound@@QAEKXZ 0x10f7cc
+?SetPosition@CAc97Channel@DirectSound@@IAEXK@Z 0x10f858
+?AciSynchronizationRoutine@CAc97Device@DirectSound@@CGEPAX@Z 0x10f886
+?CreateChannel@CAc97Device@DirectSound@@QAEJW4AC97CHANNELTYPE@2@PAPAVCAc97Channel@2@@Z 0x10f894
+?AttachPacket@CAc97Channel@DirectSound@@QAEXKK@Z 0x10f8fc
+?Reset@CAc97Channel@DirectSound@@QAEXXZ 0x10f98d
+?Flush@CAc97Channel@DirectSound@@QAEXH@Z 0x10f9ff
+?Run@CAc97Channel@DirectSound@@QAEXK@Z 0x10fa4d
+?Initialize@CAc97Channel@DirectSound@@QAEJKP6GXPAX@Z0@Z 0x10faa7
+?Terminate@CAc97Channel@DirectSound@@QAEXXZ 0x10fb49
+?Discontinuity@CAc97Channel@DirectSound@@QAEXXZ 0x10fb97
+?ServiceInterrupt@CAc97Channel@DirectSound@@IAEXXZ 0x10fbcf
+?ServiceAciInterrupt@CAc97Device@DirectSound@@IAEKXZ 0x10fc26
+?ServiceAciInterruptDpc@CAc97Device@DirectSound@@IAEXXZ 0x10fcfa
+?AciInterruptServiceRoutine@CAc97Device@DirectSound@@CGEPAU_KINTERRUPT@@PAX@Z 0x10fd53
+?AciInterruptDpcHandler@CAc97Device@DirectSound@@CGXPAU_KDPC@@PAX11@Z 0x10fd64
+?ReleaseChannel@CAc97Device@DirectSound@@QAEXW4AC97CHANNELTYPE@2@@Z 0x10fd70
+?Terminate@CAc97Device@DirectSound@@QAEXXZ 0x10fdaf
+?AciShutdownNotifier@CAc97Device@DirectSound@@CGXPAU_HAL_SHUTDOWN_REGISTRATION@@@Z 0x10fe1e
+?Initialize@CAc97Device@DirectSound@@QAEJK@Z 0x10fe3a
+?AC3GetProgram@CMcpxEPDspManager@DirectSound@@SGXKPAPAXPAK@Z 0x10ff1f
+??0CMcpxEPDspManager@DirectSound@@QAE@XZ 0x10ffbd
+?AC3StartGpInput@CMcpxEPDspManager@DirectSound@@AAEXK@Z 0x10ffce
+?AC3SetAnalogOutput@CMcpxEPDspManager@DirectSound@@QAEXKK@Z 0x110045
+?AC3SetDigitalOutput@CMcpxEPDspManager@DirectSound@@QAEXKK@Z 0x11006d
+??1CMcpxEPDspManager@DirectSound@@QAE@XZ 0x1100b2
+?Initialize@CMcpxEPDspManager@DirectSound@@QAEXPAVCMcpxGPDspManager@2@@Z 0x1100cf
+?Reset@CWMAXMediaObject@@AAEXXZ 0x111040
+?Flush@CWMAXMediaObject@@UAGJXZ 0x111056
+?Decode@CWMAXMediaObject@@QAGJPBU_XMEDIAPACKET@@@Z 0x11115f
+?GetData@CWMAXMediaObject@@QAEKKKPAPAX@Z 0x11124d
+?ReadWmaDataFromFile@CWMAXMediaObject@@AAEJPAXKPAU_WMAXMO_ASYNC_CONTEXT@@@Z 0x1112b1
+?GetInfo@CWMAXMediaObject@@UAGJPAU_XMEDIAINFO@@@Z 0x11138c
+?GetStatus@CWMAXMediaObject@@UAGJPAK@Z 0x1113b1
+?GetFileContentDescription@CWMAXMediaObject@@UAGJPAU_WMAXMOFileContDesc@@@Z 0x1113f5
+?Seek@CWMAXMediaObject@@UAGJJKPAK@Z 0x111411
+?GetLength@CWMAXMediaObject@@UAGJPAK@Z 0x111427
+?WMASampleRateToHz@CWMAXMediaObject@@AAEKW4tagWMAFileSampleRate@@@Z 0x11146d
+??1CWMAXMediaObject@@QAE@XZ 0x1114be
+?AddRef@CWMAXMediaObject@@UAGKXZ 0x111548
+?GetFileHeader@CWMAXMediaObject@@UAGJPAU_WMAXMOFileHeader@@@Z 0x111566
+?ThreadProc@CWMAXMediaObject@@IAEXXZ 0x11159b
+?Process@CWMAXMediaObject@@UAGJPBU_XMEDIAPACKET@@0@Z 0x11160f
+_WMAFileCBGetData@20 0x1116df
+?GetFormat@CWMAXMediaObject@@AAGJPAUtWAVEFORMATEX@@@Z 0x1116f7
+?WmaXmoThreadProc@@YGKPAX@Z 0x11173e
+?Release@CWMAXMediaObject@@UAGKXZ 0x11174c
+??0CWMAXMediaObject@@QAE@XZ 0x111789
+?Initialize@CWMAXMediaObject@@QAGJPBDPAXHKKKPAUtWAVEFORMATEX@@@Z 0x11180c
+_WmaCreateDecoder@32 0x1119c5
+_WMAF_UpdateNewPayload@4 0x111a40
+_WMAFileDecodeClose@4 0x111bfd
+_WMAFileDecodeCreate@8 0x111ce4
+_WMAFileDecodeInfo@8 0x111d30
+_WMAFileContentDesc@8 0x111e0b
+_WMAFileDecodeData@4 0x112069
+_WMAFileGetPCM@16 0x1121e6
+_WMARawDecCBGetData@16 0x1122ad
+_WMAFileDecodeInit@4 0x1125df
+_HnsQWORDtoMsDWORD@8 0x1126b3
+_WMA_GetBuffer@16 0x1126ec
+_WMA_LoadObjectHeader@12 0x11275f
+_WMA_LoadHeaderObject@8 0x112816
+_WMA_LoadPropertiesObject@12 0x112907
+_WMA_LoadAudioObject@12 0x1129c0
+_WMA_LoadEncryptionObject@8 0x112cb7
+_WMA_LoadContentDescriptionObject@8 0x112ebd
+_WMA_LoadExtendedContentDescObject@8 0x112f5d
+_WMA_LoadLicenseStoreObject@8 0x1132ac
+_WMA_ParseAsfHeader@8 0x113385
+_WMA_ParsePacketHeader@4 0x1134ee
+_WMA_ParsePayloadHeader@4 0x1138f6
+_WMARawDecInit@44 0x113bf0
+_WMARawDecClose@4 0x113c6a
+_WMARawDecReset@4 0x113c96
+_WMARawDecStatus@4 0x113cb4
+_WMARawDecDecodeData@4 0x113cd2
+_WMARawDecGetPCM@16 0x113cf7
+_audecDelete_XDS@4 0x113d21
+_audecNew_XDS@8 0x113d45
+_auInitPcInfoDEC@4 0x113dfe
+_audecReset_XDS@4 0x113fda
+_audecDecodeInfo_XDS@4 0x11400e
+_audecDecodeData_XDS@8 0x1141e8
+_audecGetPCM_XDS@16 0x114380
+_prvDecodeSubFrame_XDS@8 0x1143b1
+_prvUpdateSubFrameConfig_XDS@16 0x11461a
+_prvDecodeSubFrameHighRate_XDS@8 0x1146d7
+_prvWMAGetMoreData_XDS@16 0x114955
+_audecInit_XDS@48 0x1149a2
+_msaudioGetSamplePerFrame_XDS@16 0x114baa
+_freeAligned_XDS@4 0x114c8b
+_auMalloc_XDS@4 0x114ca9
+_auFree_XDS@4 0x114cb6
+_PerfTimerFree@4 0x114cb6
+_auNew_XDS@0 0x114cc3
+_auDelete_XDS@4 0x114f63
+_prvSetBarkIndex_XDS@4 0x115079
+_auReconMono_XDS@20 0x115614
+_auAdaptToSubFrameConfig_XDS@4 0x115922
+_auUpdateMaxEsc_XDS@8 0x115b8d
+_qstCalcQuantStep_XDS@4 0x115bf9
+_prvWeightedQuantization_XDS@12 0x115c6a
+_auReconCoefficentsHighRate_XDS@16 0x115ca4
+_prvInitDiscardSilence_XDS@4 0x115f64
+_prvDiscardSilence_XDS@16 0x115fe4
+_SetActualPower_XDS@16 0x11603d
+_SetActualPowerHighRate_XDS@16 0x11607b
+_mallocAligned_XDS@8 0x1160b8
+_prvAllocate_XDS@4 0x1160f5
+_auPreGetPCM_XDS@8 0x116299
+_auReconstruct_XDS@16 0x116532
+_auGetPCM_XDS@16 0x11657e
+_auInit_XDS@36 0x116616
+_ibstrmInit@8 0x116940
+_ibstrmReset@4 0x11697b
+_ibstrmGetMoreData@8 0x116994
+_ibstrmResetPacket@4 0x116b20
+_ibstrmPeekBitsNonStop@12 0x116b7f
+_ibstrmPeekBits@12 0x116c00
+_ibstrmLookForBits@8 0x116c84
+_ibstrmFlushBits@8 0x116cf3
+_prvFinalLoad@16 0x116d65
+_ibstrmGetBits@12 0x116e0b
+_g_SupportMMX_XDS@0 0x116ee9
+_g_SupportKNI_XDS@0 0x116f48
+_g_SupportSIMD_FP_XDS@0 0x11700d
+_auSaveHistoryMono_XDS@12 0x117064
+_auReconMono_X86_XDS@20 0x117aa0
+_auReconStereo_MMX_XDS@16 0x118726
+_auReconStereo_SIMDFP_XDS@16 0x118eb1
+_auReconstruct_X86_XDS@16 0x11982c
+_prvGetNextRunDEC_XDS@12 0x119897
+_prvDecodeRunLevel_XDS@20 0x1199ee
+_prvSetDetTable_XDS@8 0x119a6b
+_prvDecodeFrameHeaderLpc_XDS@8 0x119b3a
+_prvDecodeFrameHeaderNoiseSub_XDS@8 0x119c68
+_prvGetBandWeightLowRate_XDS@4 0x119e88
+_prvDecodeFrameHeader_XDS@8 0x119fbb
+_prvDecodeCoefficientMono_XDS@12 0x11a541
+_prvDecodeCoefficientStereo_XDS@12 0x11a561
+_prvGetBandWeightMidRate_XDS@28 0x11a5cb
+_prvInitNoiseSub_XDS@4 0x11a927
+_auResampleWeightFactorLPC_XDS@8 0x11aca7
+_prvInverseQuantizeMidRate_XDS@12 0x11ad3b
+_prvFFT4DCT_XDS@8 0x11b319
+_auDctIV_XDS@16 0x11b5ef
+_prvPq2lpc_XDS@20 0x11b87b
+_prvConvolve_odd_XDS@28 0x11b8d3
+_prvConvolve_XDS@28 0x11b9ea
+_prvLsp2pq_XDS@20 0x11baed
+_auLsp2lpc_XDS@16 0x11bc1f
+_prvInitInverseQuadRootTable_XDS@4 0x11bc55
+_prvDoLpc4_XDS@24 0x11bcb0
+_prvLpcToSpectrum_XDS@12 0x11bee7
+_huffDecGet@20 0x11c5f3
+_MU_Init@4 0x11d2bc
+?Init@CDeviceTree@@QAEXKK@Z 0x11d3c4
+?GetMaxDeviceTypeCount@IUsbInit@@QAEKPAU_XPP_DEVICE_TYPE@@@Z 0x11d463
+?UseDefaultCount@IUsbInit@@QAEHXZ 0x11d49a
+?RegisterResources@IUsbInit@@QAEXPAU_USB_RESOURCE_REQUIREMENTS@@@Z 0x11d4a6
+?Process@IUsbInit@@QAEXXZ 0x11d6a8
+_XID_Init@4 0x11d7cb
+_USBD_Init@8 0x11d922
+_USBD_NewHostController@8 0x11d9b0
+_USBHUB_Init@4 0x11da29
+@OHCD_RootHubInitialize@4 0x11da4a
+_HCD_DriverEntry@4 0x11dafa
+_HCD_EnumHardware@0 0x11db06
+_HCD_NewHostController@12 0x11db48
+@OHCD_fPoolInit@4 0x11dc72
+@OHCD_ScheduleInitialize@4 0x11de37
+_OHCD_DevSysCheckHardware@4 0x11de98
+_OHCD_DevSysTakeControl@4 0x11dea3
+?GetTypeInformation@@YIPAU_XID_TYPE_INFORMATION@@EPAE@Z 0x11e106
+?GetTypeInformation@@YIPAU_XID_TYPE_INFORMATION@@PAU_XPP_DEVICE_TYPE@@@Z 0x11e13d
+_XInputOpen@16 0x11e168
+_XInputClose@4 0x11e1be
+_XInputGetState@8 0x11e1ca
+_XdReportDeviceInsertionRemoval@12 0x11e239
+_XGetDevices@4 0x11e260
+_XGetDeviceChanges@12 0x11e282
+_XMountMURootA@12 0x11e2ef
+_XUnmountMU@8 0x11e45b
+?MU_AcquireDeviceObject@@YGPAU_MU_DEVICE_EXTENSION@@XZ 0x11e569
+?MU_ReleaseDeviceObject@@YGXPAU_MU_DEVICE_EXTENSION@@@Z 0x11e584
+_MU_AddDevice@4 0x11e5ac
+?MU_CloseEndpointCompletion@@YGXPAT_URB@@PAX@Z 0x11e642
+?MU_fCloseEndpoints@@YIXPAU_MU_DEVICE_EXTENSION@@@Z 0x11e714
+_MU_RemoveDevice@4 0x11e72e
+_MU_CloseDeviceObject@8 0x11e763
+_MU_CreateDeviceObject@12 0x11e7d0
+??0IUsbDevice@@QAE@XZ 0x11e9bc
+?AllocDevice@CDeviceTree@@QAEPAVIUsbDevice@@XZ 0x11e9ce
+?FreeDevice@CDeviceTree@@QAEXPAVIUsbDevice@@@Z 0x11ea1e
+?GetParent@IUsbDevice@@QBEPAV1@XZ 0x11ea50
+?GetFirstChild@IUsbDevice@@QBEPAV1@XZ 0x11ea67
+?GetSibling@IUsbDevice@@QBEPAV1@XZ 0x11ea7e
+?DeviceConnected@IUsbDevice@@QAEXEE@Z 0x11ea95
+?USBD_SetEnumWatchDog@@YGXXZ 0x11eb5c
+?USBD_DeviceEnumStagePre1@@YGXJPAX@Z 0x11eb7e
+?USBD_DeviceEnumStagePre4@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x11ebcf
+?USBD_AllocateUsbAddress@@YIEPAU_USBD_HOST_CONTROLLER@@@Z 0x11ebfa
+?USBD_FreeUsbAddress@@YIXPAU_USBD_HOST_CONTROLLER@@E@Z 0x11ec2b
+_USBD_DeviceConnected@8 0x11ec5f
+?USBD_DeviceEnumStage0@@YGXXZ 0x11ec74
+?RemoveComplete@IUsbDevice@@QAEXXZ 0x11ecdb
+?USBD_CompleteDeviceDisconnected@@YGXPAVIUsbDevice@@@Z 0x11ed51
+?USBD_DeviceEnumNextPending@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x11eda3
+?DeviceDisconnected@IUsbDevice@@QAEXE@Z 0x11ee44
+?DeviceNotResponding@IUsbDevice@@QAEXXZ 0x11eebb
+?USBD_fDeviceAbortEnum2@@YIXPAVIUsbDevice@@@Z 0x11ef00
+_USBD_DeviceDisconnected@8 0x11ef81
+?DisableComplete@IUsbDevice@@QAEXJPAX@Z 0x11ef94
+?USBD_DeviceAbortEnum@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x11efc7
+?USBD_DeviceEnumStage3@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x11f034
+?AddComplete@IUsbDevice@@QAEXJ@Z 0x11f099
+?USBD_LoadClassDriver@@YIXPAVIUsbDevice@@T_PNP_CLASS_ID@@@Z 0x11f1cc
+?USBD_DeviceEnumStage2@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x11f200
+?USBD_DeviceEnumStage6@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x11f2db
+?USBD_fDeviceEnumStage1@@YIXPAVIUsbDevice@@@Z 0x11f418
+?USBD_DeviceEnumStage5@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x11f515
+?USBD_fDeviceEnumStage4@@YIXPAT_URB@@PAVIUsbDevice@@@Z 0x11f5ce
+?USBD_DeviceEnumTimerProc@@YGXPAU_KDPC@@PAX11@Z 0x11f719
+?CancelRequest@IUsbDevice@@QAEJPAT_URB@@@Z 0x11f76d
+?SetExtension@IUsbDevice@@QAEPAXPAX@Z 0x11f784
+?SetClassSpecificType@IUsbDevice@@QAEXE@Z 0x11f795
+?Win32FromUsbdStatus@IUsbDevice@@SGKJ@Z 0x11f79f
+?NtStatusFromUsbdStatus@IUsbDevice@@SGJJ@Z 0x11f80d
+?GetEndpointDescriptor@IUsbDevice@@QBEPBU_USB_ENDPOINT_DESCRIPTOR@@EEE@Z 0x11f87f
+?OpenDefaultEndpoint@IUsbDevice@@AAEJPAT_URB@@@Z 0x11f8f9
+?CloseDefaultEndpoint@IUsbDevice@@AAEJPAT_URB@@@Z 0x11f97f
+?FindChild@IUsbDevice@@QBEPAV1@E@Z 0x11f9eb
+?InsertChild@IUsbDevice@@QAEXPAV1@@Z 0x11fa1c
+?RemoveChild@IUsbDevice@@QAEEPAV1@@Z 0x11fa64
+?SetExternalPortWithoutHub@IUsbDevice@@QAEXPAPAV1@I@Z 0x11fac0
+?SubmitRequest@IUsbDevice@@QAEJPAT_URB@@@Z 0x11fb27
+?SetExternalPortWithHub@IUsbDevice@@QAEXPAPAV1@I@Z 0x11fc14
+?SetExternalPort@IUsbDevice@@QAEXXZ 0x11fc56
+?XID_SetEnumWatchdog@@YGXXZ 0x11fca1
+?XID_WatchdogTimerProc@@YGXPAU_KDPC@@PAX11@Z 0x11fcbc
+?XID_fRemoveDeviceComplete@@YIXPAU_XID_DEVICE_NODE@@@Z 0x11fccd
+?XID_fFindNode@@YIPAU_XID_DEVICE_NODE@@PAU_XID_TYPE_INFORMATION@@K@Z 0x11fcf0
+?XID_fOpenEndpoints@@YIJPAU_XID_OPEN_DEVICE@@PAU_XINPUT_POLLING_PARAMETERS@@@Z 0x11fd5a
+?XID_CloseEndpointStateMachine@@YGXPAU_URB_CLOSE_ENDPOINT@@PAU_XID_OPEN_DEVICE@@@Z 0x11fe05
+?XID_NewInterruptData@@YGXPAT_URB@@PAU_XID_OPEN_DEVICE@@@Z 0x11feb6
+?XID_ClearInputStallComplete@@YGXPAT_URB@@PAU_XID_OPEN_DEVICE@@@Z 0x11ff47
+?XID_ProcessGamepadData@@YIXPAU_XID_OPEN_DEVICE@@@Z 0x11ffd1
+?XID_ProcessIRRemoteData@@YIXPAU_XID_OPEN_DEVICE@@@Z 0x120012
+?XID_ProcessNewKeyboardData@@YIXPAU_XID_OPEN_DEVICE@@@Z 0x120036
+?XID_SyncComplete@@YGXPAT_URB@@PAU_KEVENT@@@Z 0x120059
+?USBD_SubmitSynchronousRequestComplete@@YGXPAT_URB@@PAU_KEVENT@@@Z 0x120059
+?XID_EnumKeyboardComplete@@YGXPAT_URB@@PAU_XID_DEVICE_NODE@@@Z 0x12006a
+?XID_fCloseEndpoints@@YIXPAU_XID_OPEN_DEVICE@@@Z 0x1200da
+?XID_EnumKeyboard@@YGXPAT_URB@@PAU_XID_DEVICE_NODE@@@Z 0x1200f8
+_XID_RemoveDevice@4 0x120183
+?XID_fCloseDevice@@YIXPAU_XID_OPEN_DEVICE@@@Z 0x1201c8
+?XID_EnumLegacy1@@YGXPAT_URB@@PAU_XID_DEVICE_NODE@@@Z 0x120269
+?XID_EnumStage1@@YGXPAT_URB@@PAU_XID_DEVICE_NODE@@@Z 0x12032d
+?XID_fOpenDevice@@YIKPAU_XID_TYPE_INFORMATION@@KPAPAU_XID_OPEN_DEVICE@@PAU_XINPUT_POLLING_PARAMETERS@@@Z 0x1203ed
+_XID_AddDevice@4 0x120621
+??0IUsbInit@@QAE@KPAU_XDEVICE_PREALLOC_TYPE@@@Z 0x120775
+_USBD_CompleteRequest@4 0x1207cf
+_USBD_CalculateUsbBandwidth@12 0x1207e3
+?USBD_FindClassDriver@@YGPAU_USB_CLASS_DRIVER_DESCRIPTION@@T_PNP_CLASS_ID@@@Z 0x12082c
+?ReverseEndian@@YGKK@Z 0x120861
+?MU_InternalIo@@YGJPAU_DEVICE_OBJECT@@PAU_IRP@@@Z 0x120881
+?MU_DiskIoComplete@@YGXPAU_MU_DEVICE_EXTENSION@@J@Z 0x1208db
+?MU_DiskWriteStartNextPartialRequest@@YGXXZ 0x12091b
+?MU_fMarkWriteBufferCorrupt@@YIXPAU_MU_REQUEST_BLOCK@@@Z 0x120937
+?IsPowerOf2@@YGHK@Z 0x12095e
+?WhichBit@@YGEK@Z 0x120978
+?MU_DiskReadCapacityCompletion@@YGXPAU_MU_DEVICE_EXTENSION@@J@Z 0x12098e
+?MU_fDiskVerify@@YIXPAU_MU_DEVICE_EXTENSION@@PAU_IRP@@@Z 0x120b74
+?MU_DiskReadComplete@@YGXPAU_MU_DEVICE_EXTENSION@@J@Z 0x120bf5
+?MU_DiskWriteBuildPartialRequest@@YGXPAU_MU_DEVICE_EXTENSION@@J@Z 0x120cc3
+?MU_DiskWriteBuildMiddlePartialRequest@@YGXPAU_MU_DEVICE_EXTENSION@@J@Z 0x120ea9
+?MU_fDiskReadDriveCapacity@@YIJPAU_MU_DEVICE_EXTENSION@@PAU_IRP@@@Z 0x121024
+?MU_DiskStartPartialWrite@@YGXPAU_MU_DEVICE_EXTENSION@@J@Z 0x12107c
+?MU_fDiskDeviceControl@@YGXPAU_MU_DEVICE_EXTENSION@@PAU_IRP@@@Z 0x12111e
+?MU_fDiskReadWrite@@YIXPAU_MU_DEVICE_EXTENSION@@PAU_IRP@@@Z 0x1211ee
+?MU_StartIo@@YGXPAU_DEVICE_OBJECT@@PAU_IRP@@@Z 0x12137e
+?MU_MrbTimeout@@YGXPAU_KDPC@@PAX11@Z 0x1213ef
+?MU_fMrbErrorHandler@@YIXPAU_MU_DEVICE_EXTENSION@@J@Z 0x12142a
+?MU_CswCompletion@@YGXPAT_URB@@PAX@Z 0x121530
+?MU_fCswTransfer@@YIXPAU_MU_DEVICE_EXTENSION@@@Z 0x1215b4
+?MU_DataCompletion@@YGXPAT_URB@@PAX@Z 0x12163d
+?MU_fDataTransfer@@YIXPAT_URB@@PAU_MU_DEVICE_EXTENSION@@@Z 0x12173a
+?MU_CbwCompletion@@YGXPAT_URB@@PAX@Z 0x121800
+?MU_fCbwTransfer@@YIXPAU_MU_DEVICE_EXTENSION@@@Z 0x121868
+?MU_ResetDeviceCompletionRoutine@@YGXPAT_URB@@PAX@Z 0x121911
+?MU_fStartMrb@@YIXPAU_MU_DEVICE_EXTENSION@@@Z 0x121b11
+?USBHUB_WatchdogTimerProc@@YGXPAU_KDPC@@PAX11@Z 0x121b3f
+?USBHUB_SetEnumWatchdog@@YGXK@Z 0x121b93
+?USBHUB_RemoveHubComplete@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x121bc3
+?USBHUB_ResetComplete@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x121c02
+?USBHUB_DisableComplete@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x121c2e
+?USBHUB_RelatchPortSpeed@@YGXPAVIUsbDevice@@@Z 0x121c52
+?USBHUB_PortProcessChange@@YGXPAVIUsbDevice@@@Z 0x121caf
+?USBHUB_RemoveHubStage2@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x121dfd
+?USBHUB_DisableResetPort@@YGXPAVIUsbDevice@@EPAXE@Z 0x121e1f
+?USBHUB_RemoveHubStage1@@YGXPAVIUsbDevice@@@Z 0x121f06
+?USBHUB_ClearInterruptStallComplete@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x121f38
+?USBHUB_PortStatusChange2@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x121fc9
+?USBHUB_ClearHubFeatureComplete@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x122024
+_USBHUB_RemoveDevice@4 0x12207f
+?USBHUB_ChangeNotifyComplete@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x1220cf
+?USBHUB_HubStatusChange@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x122176
+?USBHUB_PoweringPorts@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x122236
+?USBHUB_PortStatusChange1@@YGXPAVIUsbDevice@@@Z 0x1222a1
+?USBHUB_ClearPortFeatureComplete@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x12236a
+?USBHUB_RelatchPortSpeedComplete@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x12239a
+?USBHUB_EnumHubComplete@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x12241a
+?USBHUB_EnumHubStage2@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x1224b0
+?USBHUB_EnumHubStage1@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x12252c
+_USBHUB_AddDevice@4 0x122618
+@OHCD_RootHubProcessHotPlug@8 0x1226fe
+_HCD_ResetRootHubPort@16 0x12278d
+_HCD_DisableRootHubPort@8 0x1227da
+_OHCD_RootHubResetDpc@16 0x1227f7
+@OHCD_RootHubProcessInterrupt@4 0x122822
+_OHCD_PoolAllocateEndpoint@0 0x1228e1
+@OHCD_fOpenEndpoint@8 0x1228f4
+@OHCD_fGetEndpointState@8 0x122a68
+@OHCD_fSetEndpointState@8 0x122a89
+@OHCD_fDequeueControlTransfer@8 0x122ab7
+@OHCD_fDequeueBulkTransfer@8 0x122af0
+@OHCD_fDequeueInterruptTransfer@8 0x122b29
+@OHCD_fCancelQueuedUrbs@8 0x122b58
+@OHCD_fPauseEndpoint@8 0x122bce
+_OHCD_ShutDown@4 0x122c0b
+_HCD_CancelRequest@8 0x122c46
+@OHCD_fCloseEndpoint@8 0x122cfd
+@OHCD_fAbortEndpoint@8 0x122d64
+_HCD_SubmitRequest@8 0x122db7
+_OHCD_PoolFreeTD@4 0x122ecf
+@OHCD_ScheduleAddEndpointControlOrBulk@8 0x122eec
+@OHCD_ScheduleRemoveEndpointControlOrBulk@8 0x122f29
+@OHCD_ReverseBits@8 0x122f79
+@OHCD_HookNewEndpointToChildren@12 0x122f8f
+@OHCD_ScheduleAddEndpointPeriodic@8 0x123006
+@OHCD_ScheduleRemoveEndpointPeriodic@8 0x1231e2
+_OHCD_InterruptService@8 0x12335b
+@OHCD_Get32BitFrameNumber@4 0x1233f1
+@OHCD_fCompleteRequest@12 0x123415
+@OHCD_fCreditTDQuota@8 0x123491
+@OHCD_fProcessFailedTD@8 0x1234c3
+@OHCD_fProcessDoneTD@8 0x1235b7
+@OHCD_fProcessCancelPendingList@8 0x123663
+@OHCD_fCleanEndpointTDs@8 0x123765
+@OHCD_fProcessAbortPendingList@8 0x1237bb
+@OHCD_fProcessClosePendingList@8 0x123842
+_OHCD_IsrDpc@16 0x12391c
+_OHCD_IsochPoolAllocateEndpoint@0 0x123a2a
+@OHCD_fIsochOpenEndpoint@8 0x123a3c
+@OHCD_fIsochCloseEndpoint@8 0x123be9
+@OHCD_fIsochCompleteCloseEndpoint@8 0x123c2d
+@OHCD_fIsochAttachBuffer@8 0x123cb6
+@OHCD_fIsochStartTransfer@8 0x123e1d
+@OHCD_fIsochStopTransfer@8 0x123f3c
+@OHCD_fIsochProcessTD@8 0x123f96
+_OHCD_PoolAllocateTD@4 0x124086
+_OHCD_PoolDebitControlTDQuota@4 0x1240a6
+_OHCD_PoolDebitBulkTDQuota@4 0x1240c5
+@OHCD_fGetTDsRequired@8 0x1240e4
+@OHCD_fMapTransfer@12 0x124117
+@OHCD_fProgramTransfer@12 0x124151
+@OHCD_fProgramInterruptTransfer@8 0x12444f
+@OHCD_fProgramBulkTransfer@4 0x1244a2
+@OHCD_fProgramControlTransfer@4 0x1244ef
+@OHCD_fQueueInterruptTransfer@12 0x12453c
+@OHCD_fQueueBulkTransfer@8 0x12456f
+@OHCD_fQueueControlTransfer@8 0x1245ab
+@OHCD_fQueueTransferRequest@8 0x1245e7
+_main 0x63b48
+@RtlFindFirstSetRightMember@4 0xbb590
+_memmove 0xbc190
+_wcslen 0xbc510
+??3@YAXPAX@Z 0xbca1d
+__wcsicmp 0xbce62
+__snwprintf 0xbd41d
+__CIpow 0xbd494
+__snprintf 0xbd804
+_sprintf 0xbda6c
+__chkstk 0xbdb30
+_wcsncpy 0xbdf92
+_free 0xbe448
+_malloc 0xbe4f3
+__alldiv 0xbe980
+__allmul 0xbea30
+__SEH_prolog 0xbee5c
+__SEH_epilog 0xbee95
+__aulldiv 0xbefd0
+_vswprintf 0xbfa95
+_vsprintf 0xbfa95
+__allshr 0xbfaf0
+_DbgPrint 0xc6c2e
+_ExQueryNonVolatileSetting@20 0xc6c46
+?MakeSpace@D3D@@YGPCKXZ 0xd67b0
+?GetTime@CMiniport@D3D@@QAEKXZ 0xd8f60
+??0CAc97Device@DirectSound@@QAE@XZ 0x10f60e
+??1CAc97Device@DirectSound@@QAE@XZ 0x10fe2d
+?AC3GetTotalScratchSize@CMcpxEPDspManager@DirectSound@@SGKXZ 0x10ff19
+?GetDolbyConfigTable@CMcpxEPDspManager@DirectSound@@QAEPAUDOLBY_CONFIG_TABLE@2@XZ 0x10ffca
+_auMallocGetCount_XDS@0 0x114ca3
+_auMallocSetState_XDS@12 0x114ca6
+?ResetComplete@IUsbDevice@@QAEXJPAX@Z 0x11ecd6
+?GetExtension@IUsbDevice@@QBEPAXXZ 0x11f780
+?GetInterfaceNumber@IUsbDevice@@QBEEXZ 0x11f791
+?GetInterfaceDescriptor@IUsbDevice@@QBEPBU_USB_INTERFACE_DESCRIPTOR@@XZ 0x11f879
+?GetPort@IUsbDevice@@QBEKXZ 0x11f8f5
 __tls_array 0x4 data
 _XboxHardwareInfo 0x11004 data
 __imp__HalReturnToFirmware@4 0x11008 data
@@ -1258,261 +1258,261 @@ __real@3e800000 0x13bb8 data
 __real@3f333333 0x14a48 data
 __real@3ecccccd 0x14a4c data
 __real@3f19999a 0x14a68 data
-__real@31000000 0x16344 data
-__real@3f266666 0x16430 data
-__real@3f5e939b 0x165a0 data
-__real@3ec41138 0x165a4 data
-__real@3e000000 0x165a8 data
-__real@3f947ae1 0x165ac data
-__real@3f3851ec 0x165b0 data
-__real@3fcccccd 0x165b4 data
-__real@3d800000 0x16be8 data
-__real@477fff00 0x207d4 data
-__real@3f200000 0x208b8 data
-__real@4002d97c7f3321d2 0x20930 data
-__real@3f1c28f6 0x20e24 data
-_g_rgiHuffDecTblMsk 0x20e80 data
-_g_rgiHuffDecTblNoisePower 0x21048 data
-_g_rgiHuffDecTbl16smOb 0x210e0 data
-_g_rgiHuffDecTbl44smOb 0x217b0 data
-_g_rgiHuffDecTbl16ssOb 0x22df0 data
-_g_rgiHuffDecTbl44ssOb 0x23490 data
-_g_rgiHuffDecTbl44smQb 0x24438 data
-_g_rgiHuffDecTbl44ssQb 0x24df0 data
-_g_SinTableForReconstruction 0x25690 data
-_rgSinCosTables 0x296c8 data
-_rgiMaskMinusPower10 0x29710 data
-_rgiMaskPlusPower10 0x29830 data
-_rgDBPower10 0x298f8 data
-_rgfltDBPowerExponentScale 0x29af8 data
-_g_rgiBarkFreq 0x29b44 data
-_gRun16smOb 0x29d60 data
-_gLevel16smOb 0x2a118 data
-_gRun16ssOb 0x2a4d0 data
-_gLevel16ssOb 0x2a838 data
-_gRun44smOb 0x2aba0 data
-_gLevel44smOb 0x2b610 data
-_gRun44ssOb 0x2c080 data
-_gLevel44ssOb 0x2c8e0 data
-_gRun44smQb 0x2d140 data
-_gLevel44smQb 0x2d670 data
-_gRun44ssQb 0x2dba0 data
-_gLevel44ssQb 0x2dff8 data
-__real@3f3504f3 0x2ea00 data
-__real@3f6c835e 0x2ea04 data
-__real@3ec3ef15 0x2ea08 data
-__real@3fb504f3 0x2ea0c data
-__real@46293e5939a08cea 0x2ebe0 data
-__real@407fff0000000000 0x2ebe8 data
-__real@4b7fffff 0x2ebf0 data
-__real@43800000 0x2ebf4 data
-__real@be596d0b 0x2ebf8 data
-__real@bdb8aa0a 0x2ebfc data
-??_7CRefCount@DirectSound@@6B@ 0x2ef50 data
-??_7CImaAdpcmCodec@DirectSound@@6B@ 0x2ef50 data
-__real@37aec33e 0x2ef5c data
-??_7CDirectSound@DirectSound@@6B@ 0x2ef60 data
-??_7CDirectSoundVoiceSettings@DirectSound@@6B@ 0x2ef6c data
-??_7CDirectSoundVoice@DirectSound@@6B@ 0x2ef78 data
-??_7CDirectSoundBuffer@DirectSound@@6B@ 0x2ef84 data
-??_7CDirectSoundSettings@DirectSound@@6B@ 0x2ef90 data
-??_7CDirectSoundBufferSettings@DirectSound@@6B@ 0x2ef9c data
-??_7CWMAXMediaObject@@6B@ 0x2efa8 data
-__real@c4fa0000 0x2efd4 data
-??_7CMcpxAPU@DirectSound@@6BCMcpxCore@1@@ 0x2efd8 data
-??_7CMcpxAPU@DirectSound@@6BCRefCount@1@@ 0x2efdc data
-??_7CMcpxVoiceClient@DirectSound@@6B@ 0x2efe8 data
-??_7CMcpxBuffer@DirectSound@@6B@ 0x2f00c data
-??_7CAc97MediaObject@DirectSound@@6BCRefCount@1@@ 0x2f030 data
-??_7CAc97MediaObject@DirectSound@@6BXAc97MediaObject@@@ 0x2f03c data
-??_7CMcpxBufferSgeHeap@DirectSound@@6B@ 0x2f064 data
-??_7CMcpxSlopMemoryHeap@DirectSound@@6B@ 0x2f068 data
-__real@3a03126f 0x2f074 data
-__real@47800000 0x2f078 data
-__real@473b8000 0x2f07c data
-??_7CMcpxCore@DirectSound@@6B@ 0x2f080 data
-__real@48d1b717 0x2f084 data
-__real@c00921fb54442d18 0x2f0e8 data
-__real@bfe921fb54442d18 0x2f0f0 data
-__real@3f0e39da 0x2f0f8 data
-__real@3f54db31 0x2f0fc data
-__real@3e47c5c2 0x2f100 data
-__real@3f7b14be 0x2f104 data
-_XapiStDbFile 0x2f114 data
-??_C@_0BA@FPAGLHCE@?$CFs?$CF04x?2?$CF08x?4WMA?$AA@ 0x2f154 data
-??_C@_0DD@BELLPOJP@?2Device?2Harddisk0?2partition1?2TDA@ 0x2f164 data
-_XapiHardDisk 0x2f198 data
-??_C@_05CLMJGDKL@?$CF08lx?$AA@ 0x2f340 data
-??_C@_07DGGEHABK@?2?$DP?$DP?2?$CFc?3?$AA@ 0x2f348 data
-??_C@_1CA@NCOAEKIF@?$AA?$CF?$AAl?$AAc?$AA?$CF?$AAl?$AAs?$AA?$CF?$AAl?$AAc?$AA?$CF?$AAl?$AAs?$AA?$CF?$AAl?$AAs?$AA?$AA@ 0x2f41c data
-__tls_used 0x2f44c data
-??_C@_09ECGHCENE@$$XSIMAGE?$AA@ 0x2f610 data
-??_C@_09IHMABKFK@$$XTIMAGE?$AA@ 0x2f61c data
-??_C@_08BBCMAOON@$$XTINFO?$AA@ 0x2f628 data
-?g_TextureFormat@D3D@@3QBEB 0xdd780 data
-?g_ComplexRenderStateFunctionTable@D3D@@3QBQ6GXK@ZB 0xdd7c8 data
-?g_PaletteSize@D3D@@3QBHB 0xdd840 data
-?g_TilePitches@D3D@@3QBKB 0xdd868 data
-?g_TransformDirtyTable@D3D@@3QBKB 0xdd8d0 data
-?g_LODBias2x@D3D@@3QBMB 0xdd8f8 data
-?g_IdentityMatrix@D3D@@3U_D3DMATRIX@@B 0xdd910 data
-?g_UnitsOfElement@D3D@@3QBEB 0xdd950 data
-?g_BytesPerUnit@D3D@@3QBEB 0xdd958 data
-?g_FixedFunctionPipelineConstants@D3D@@3QBKB 0xdd960 data
-?g_PassthruProgramWFog@D3D@@3QBKB 0xdd990 data
-?g_PassthruProgramZFog@D3D@@3QBKB 0xdda50 data
-?g_PassthruProgramSpecularFog@D3D@@3QBKB 0xddb00 data
-?g_TextureCount@D3D@@3QBKB 0xddbc0 data
-?g_AntiAliasedTextureStates@D3D@@3QBKB 0xddbd0 data
-?g_AntiAliasedRenderStates@D3D@@3QBKB 0xddc28 data
-?g_MinFilter@D3D@@3QAY02$$CBKA 0xddcb8 data
-?g_Mar@D3D@@3QBMB 0xddcd8 data
-?g_Lar@D3D@@3QBMB 0xddd58 data
-?g_InitialTextureStates@D3D@@3QBEB 0xdddd8 data
-?g_InitialRenderStates@D3D@@3QBKB 0xdddf8 data
-?g_DisplayModes@D3D@@3QBUDISPLAYMODE@1@B 0xddf60 data
-??_C@_0HG@FBJOLOBL@Graphics?5hardware?5error?5informat@ 0xde870 data
-??_C@_0EB@CBFHLLBF@Graphics?5Parse?5error?5information@ 0xde8e8 data
-?g_EyeDirection@D3D@@3U_D3DVECTOR@@B 0xde940 data
-_D3D__AvInfo 0xde950 data
-_D3D__GpuReg 0xde954 data
-?g_NullHardwareGetPut@@3PAKA 0xde958 data
-_D3D__NullHardware 0xde960 data
-_D3D__IndexData 0xde964 data
-_D3D__DirtyFlags 0xde968 data
-_D3D__TextureState 0xde970 data
-_D3D__RenderState 0xdeb70 data
-?g_SoftDisplayFilterValue@D3D@@3HA 0xdedbc data
-?g_FlickerFilterValue@D3D@@3KA 0xdedc0 data
-?g_SoftDisplayFilterSet@D3D@@3HA 0xdedc4 data
-?g_FlickerFilterSet@D3D@@3HA 0xdedc8 data
-?g_Stream@D3D@@3PAUStream@1@A 0xdedd0 data
-?g_DirectVertexShader@D3D@@3UVertexShader@1@A 0xdee90 data
-?g_FvfVertexShader@D3D@@3UVertexShader@1@A 0xdefa8 data
-?g_Device@D3D@@3VCDevice@1@A 0xdf0d0 data
-?g_pDevice@D3D@@3PAVCDevice@1@A 0xe1bb0 data
-_g_pPushBuffer 0xe1bb4 data
-?m_PushSegmentSize@CDevice@D3D@@2KA 0xe1bb8 data
-?m_PushBufferSize@CDevice@D3D@@2KA 0xe1bbc data
-?g_VideoOffset@D3D@@3KA 0xe1bc0 data
-?m_wfxMixDest@CDirectSoundBufferSettings@DirectSound@@2UtWAVEFORMATEX@@B 0x10fe78 data
-?m_vDefaultNormOrient@CHrtfListener@DirectSound@@1U_D3DVECTOR@@B 0x10ffd0 data
-?m_aDefaultSpeakers@CHrtfListener@DirectSound@@1QBUPAN3DSPEAKER@2@B 0x10ffe8 data
-?m_Default3dData@CHrtfSource@DirectSound@@0UHRTFSOURCE@2@B 0x11004c data
-?m_Default3dVoiceData@CHrtfSource@DirectSound@@0UHRTFVOICE@2@B 0x110068 data
-_KSDATAFORMAT_SUBTYPE_XBOX_ADPCM 0x110110 data
-_KSDATAFORMAT_SUBTYPE_PCM 0x110120 data
-_DirectSoundI3DL2ListenerPreset_Default 0x110130 data
-_DirectSoundDefault3DListener 0x110160 data
-_DirectSoundDefaultI3DL2Buffer 0x1101a0 data
-_DirectSoundDefault3DBuffer 0x1101c8 data
-_DirectSoundDefaultMixBins_3D 0x110214 data
-_DirectSoundRequiredMixBins_3D 0x11021c data
-?m_DefaultI3dl2Data@CI3dl2Source@DirectSound@@0UI3DL2SOURCE@2@B 0x1103fc data
-?m_adwEPOutputBufferSizes@CMcpxCore@DirectSound@@2QBKB 0x110418 data
-?m_wfxFormat@CAc97Device@DirectSound@@2UtWAVEFORMATEX@@B 0x11042c data
-?m_adwRegisterOffsets@CAc97Channel@DirectSound@@2QBKB 0x110440 data
-_g_dwDirectSoundOverrideSpeakerConfig 0x110458 data
-_g_fDirectSoundInFinalRelease 0x11045c data
-_g_DirectSoundCriticalSection 0x110460 data
-_g_dwDirectSoundPoolMemoryUsage 0x11047c data
-_g_dwDirectSoundPhysicalMemoryUsage 0x110480 data
-?m_dwRefCount@CFpState@DirectSound@@0KA 0x11048c data
-?m_pfnCalculate@CHrtfSource@DirectSound@@0P6GXKPAV12@@ZA 0x110490 data
-?m_pfnGetFilterPair@CHrtfSource@DirectSound@@0P6GXPAV12@@ZA 0x110494 data
-?m_dwDeltaPanicCount@CMcpxAPU@DirectSound@@0KA 0x110a70 data
-?m_dwStuckVoiceCount@CMcpxVoiceClient@DirectSound@@2KA 0x110a7c data
-?m_dwGlobalRefCount@CAc97MediaObject@DirectSound@@1KA 0x110a80 data
-?m_pDevice@CAc97MediaObject@DirectSound@@1PAVCAc97Device@2@A 0x110a84 data
-?g_pDirectSoundSlopMemoryHeap@DirectSound@@3PAVCMcpxSlopMemoryHeap@1@A 0x110a88 data
-?m_Interrupt@CAc97Device@DirectSound@@1U_KINTERRUPT@@A 0x110a98 data
-?m_pDirectSound@CDirectSound@DirectSound@@2PAV12@A 0x110b08 data
-?m_fps@CFpState@DirectSound@@0U_KFLOATING_SAVE@@A 0x110b0c data
-?m_Interrupt@CMcpxAPU@DirectSound@@1U_KINTERRUPT@@A 0x110b30 data
-?m_dwUsed@CMcpxSlopMemoryHeap@DirectSound@@2AAKA 0x110ba0 data
-?m_dwAvailable@CMcpxSlopMemoryHeap@DirectSound@@2AAKA 0x110ba4 data
-?m_ctxMemory@CMcpxCore@DirectSound@@2PAUMCPX_ALLOC_CONTEXT@2@A 0x110ba8 data
-_CLSID_CAsfHeaderObjectV0_XDS 0x11c3c0 data
-_CLSID_CAsfPropertiesObjectV2_XDS 0x11c3d0 data
-_CLSID_CAsfStreamPropertiesObjectV1_XDS 0x11c3e0 data
-_CLSID_CAsfContentDescriptionObjectV0_XDS 0x11c3f0 data
-_CLSID_AsfXAcmAudioErrorMaskingStrategy_XDS 0x11c420 data
-_CLSID_AsfXSignatureAudioErrorMaskingStrategy_XDS 0x11c430 data
-_CLSID_AsfXStreamTypeAcmAudio_XDS 0x11c440 data
-_CLSID_CAsfContentEncryptionObject_XDS 0x11c450 data
-_CLSID_CAsfExtendedContentDescObject_XDS 0x11c460 data
-_CLSID_CAsfLicenseStoreObject_XDS 0x11c480 data
-_CLSID_CAsfStreamPropertiesObjectV2_XDS 0x11c490 data
-_getMask 0x11c658 data
-_cDitherFactorMR 0x11c7e0 data
-_cfltInverseRand2Float_XDS 0x11c7e4 data
-_g_rgiLsfReconLevel_XDS 0x11c890 data
-?XID_BeginTypeDescriptionTable@@3KA 0x11cba0 data
-?XID_EndTypeDescriptionTable@@3KA 0x11cbb0 data
-_USBD_BeginClassDescriptionTable 0x11cbb4 data
-_USBD_EndClassDescriptionTable 0x11cbcc data
-_XDEVICE_TYPE_DEBUG_KEYBOARD_TABLE 0x11cd8c data
-_XapiMountMUCriticalSection 0x11ce0c data
-_XDEVICE_TYPE_MEMORY_UNIT_TABLE 0x11ce30 data
-?MU_gResourceRequirements@@3U_USB_RESOURCE_REQUIREMENTS@@A 0x11ce58 data
-?MU_DriverObject@@3U_DRIVER_OBJECT@@A 0x11ce68 data
-?XID_pKeyboardServices@@3PAU_XID_KEYBOARD_SERVICES@@A 0x11ceac data
-_XID_Description 0x11ceb0 data
-_XID_1Description 0x11cec8 data
-?XID_gResourceRequirements@@3U_USB_RESOURCE_REQUIREMENTS@@A 0x11cee0 data
-??_C@_0N@GCHKHDKC@?2Device?2MU_0?$AA@ 0x1242f0 data
-??_C@_0O@MFLBCKNC@?2Device?2MU_?$CFx?$AA@ 0x124300 data
-___xri_a 0x124340 data
-___xri_z 0x12434c data
-___xc_a 0x124350 data
-___xc_z 0x124524 data
-___xi_a 0x124528 data
-___xi_z 0x124540 data
-?g_SlotMapping@D3D@@3PAEA 0x1399e0 data
-?g_DeviceCaps@D3D@@3U_D3DCAPS8@@B 0x139a00 data
-_XapiProcessLock 0x145f2c data
-_XapiThreadNotifyRoutineList 0x145f48 data
-_XapiListLookaside 0x145f50 data
-_XapiStLookaside 0x146110 data
-_offsetsFromUTF8 0x1462b0 data
-_bytesFromUTF8 0x1462c8 data
-_kReplacementCharacter 0x1463c8 data
-_kMaximumSimpleUniChar 0x1463cc data
-_kMaximumUniChar 0x1463d0 data
-_halfShift 0x1463d4 data
-_halfBase 0x1463d8 data
-_halfMask 0x1463dc data
-_kSurrogateHighStart 0x1463e0 data
-_kSurrogateLowStart 0x1463e4 data
-_XapiTlsAllocBitmap 0x1463f8 data
-_g_rgdwLoc 0x146430 data
-_MmHeapSegmentReserve 0x146860 data
-_MmHeapSegmentCommit 0x146864 data
-_MmHeapDeCommitTotalFreeThreshold 0x146868 data
-_MmHeapDeCommitFreeBlockThreshold 0x14686c data
-_DDrive 0x146870 data
-_CdDevice 0x146878 data
-_MainVol 0x146880 data
-_TDrive 0x146888 data
-_TitleData 0x146890 data
-_UDrive 0x146898 data
-_UserData 0x1468a0 data
-__FPinit 0x1468f0 data
-_XapiMuInfo 0x17a384 data
-?MU_DriverExtension@@3UMU_DRIVER_EXTENSION@@A 0x17a390 data
-?g_DeviceTree@@3VCDeviceTree@@A 0x17d3a0 data
-__tls_index 0x17d488 data
-?XID_Globals@@3U_XID_GLOBALS@@A 0x17d490 data
-?GLOBAL_HostControllerCount@@3EA 0x17d530 data
-?GLOBAL_HubEnum@@3U_USBHUB_ENUM_BLOCK@@A 0x17d538 data
-?GLOBAL_HubInfo@@3U_USBHUB_INFO@@A 0x17d5e8 data
-_IsrEntryCount 0x17d770 data
-_g_InvQuadRootExponent 0x17d9a0 data
-_g_InvQuadRootMantissa 0x17dda0 data
-_OHCD_GlobalPool 0x181dc0 data
-_OHCD_InterruptObject 0x181e00 data
-_NtGlobalFlag 0x181e70 data
-_XapiAutoPowerDownGlobals 0x181e80 data
-_XapiProcessHeap 0x181ed0 data
-_XapiCurrentTopLevelFilter 0x181ed4 data
-_XapiTlsSize 0x181ed8 data
+__real@31000000 0x16354 data
+__real@3f266666 0x16440 data
+__real@3f5e939b 0x165b0 data
+__real@3ec41138 0x165b4 data
+__real@3e000000 0x165b8 data
+__real@3f947ae1 0x165bc data
+__real@3f3851ec 0x165c0 data
+__real@3fcccccd 0x165c4 data
+__real@3d800000 0x16bf8 data
+__real@477fff00 0x207e4 data
+__real@3f200000 0x208c8 data
+__real@4002d97c7f3321d2 0x20940 data
+__real@3f1c28f6 0x20e34 data
+_g_rgiHuffDecTblMsk 0x20e90 data
+_g_rgiHuffDecTblNoisePower 0x21058 data
+_g_rgiHuffDecTbl16smOb 0x210f0 data
+_g_rgiHuffDecTbl44smOb 0x217c0 data
+_g_rgiHuffDecTbl16ssOb 0x22e00 data
+_g_rgiHuffDecTbl44ssOb 0x234a0 data
+_g_rgiHuffDecTbl44smQb 0x24448 data
+_g_rgiHuffDecTbl44ssQb 0x24e00 data
+_g_SinTableForReconstruction 0x256a0 data
+_rgSinCosTables 0x296d8 data
+_rgiMaskMinusPower10 0x29720 data
+_rgiMaskPlusPower10 0x29840 data
+_rgDBPower10 0x29908 data
+_rgfltDBPowerExponentScale 0x29b08 data
+_g_rgiBarkFreq 0x29b54 data
+_gRun16smOb 0x29d70 data
+_gLevel16smOb 0x2a128 data
+_gRun16ssOb 0x2a4e0 data
+_gLevel16ssOb 0x2a848 data
+_gRun44smOb 0x2abb0 data
+_gLevel44smOb 0x2b620 data
+_gRun44ssOb 0x2c090 data
+_gLevel44ssOb 0x2c8f0 data
+_gRun44smQb 0x2d150 data
+_gLevel44smQb 0x2d680 data
+_gRun44ssQb 0x2dbb0 data
+_gLevel44ssQb 0x2e008 data
+__real@3f3504f3 0x2ea10 data
+__real@3f6c835e 0x2ea14 data
+__real@3ec3ef15 0x2ea18 data
+__real@3fb504f3 0x2ea1c data
+__real@46293e5939a08cea 0x2ebf0 data
+__real@407fff0000000000 0x2ebf8 data
+__real@4b7fffff 0x2ec00 data
+__real@43800000 0x2ec04 data
+__real@be596d0b 0x2ec08 data
+__real@bdb8aa0a 0x2ec0c data
+??_7CRefCount@DirectSound@@6B@ 0x2ef60 data
+??_7CImaAdpcmCodec@DirectSound@@6B@ 0x2ef60 data
+__real@37aec33e 0x2ef6c data
+??_7CDirectSound@DirectSound@@6B@ 0x2ef70 data
+??_7CDirectSoundVoiceSettings@DirectSound@@6B@ 0x2ef7c data
+??_7CDirectSoundVoice@DirectSound@@6B@ 0x2ef88 data
+??_7CDirectSoundBuffer@DirectSound@@6B@ 0x2ef94 data
+??_7CDirectSoundSettings@DirectSound@@6B@ 0x2efa0 data
+??_7CDirectSoundBufferSettings@DirectSound@@6B@ 0x2efac data
+??_7CWMAXMediaObject@@6B@ 0x2efb8 data
+__real@c4fa0000 0x2efe4 data
+??_7CMcpxAPU@DirectSound@@6BCMcpxCore@1@@ 0x2efe8 data
+??_7CMcpxAPU@DirectSound@@6BCRefCount@1@@ 0x2efec data
+??_7CMcpxVoiceClient@DirectSound@@6B@ 0x2eff8 data
+??_7CMcpxBuffer@DirectSound@@6B@ 0x2f01c data
+??_7CAc97MediaObject@DirectSound@@6BCRefCount@1@@ 0x2f040 data
+??_7CAc97MediaObject@DirectSound@@6BXAc97MediaObject@@@ 0x2f04c data
+??_7CMcpxBufferSgeHeap@DirectSound@@6B@ 0x2f074 data
+??_7CMcpxSlopMemoryHeap@DirectSound@@6B@ 0x2f078 data
+__real@3a03126f 0x2f084 data
+__real@47800000 0x2f088 data
+__real@473b8000 0x2f08c data
+??_7CMcpxCore@DirectSound@@6B@ 0x2f090 data
+__real@48d1b717 0x2f094 data
+__real@c00921fb54442d18 0x2f0f8 data
+__real@bfe921fb54442d18 0x2f100 data
+__real@3f0e39da 0x2f108 data
+__real@3f54db31 0x2f10c data
+__real@3e47c5c2 0x2f110 data
+__real@3f7b14be 0x2f114 data
+_XapiStDbFile 0x2f124 data
+??_C@_0BA@FPAGLHCE@?$CFs?$CF04x?2?$CF08x?4WMA?$AA@ 0x2f164 data
+??_C@_0DD@BELLPOJP@?2Device?2Harddisk0?2partition1?2TDA@ 0x2f174 data
+_XapiHardDisk 0x2f1a8 data
+??_C@_05CLMJGDKL@?$CF08lx?$AA@ 0x2f350 data
+??_C@_07DGGEHABK@?2?$DP?$DP?2?$CFc?3?$AA@ 0x2f358 data
+??_C@_1CA@NCOAEKIF@?$AA?$CF?$AAl?$AAc?$AA?$CF?$AAl?$AAs?$AA?$CF?$AAl?$AAc?$AA?$CF?$AAl?$AAs?$AA?$CF?$AAl?$AAs?$AA?$AA@ 0x2f42c data
+__tls_used 0x2f45c data
+??_C@_09ECGHCENE@$$XSIMAGE?$AA@ 0x2f620 data
+??_C@_09IHMABKFK@$$XTIMAGE?$AA@ 0x2f62c data
+??_C@_08BBCMAOON@$$XTINFO?$AA@ 0x2f638 data
+?g_TextureFormat@D3D@@3QBEB 0xddb00 data
+?g_ComplexRenderStateFunctionTable@D3D@@3QBQ6GXK@ZB 0xddb48 data
+?g_PaletteSize@D3D@@3QBHB 0xddbc0 data
+?g_TilePitches@D3D@@3QBKB 0xddbe8 data
+?g_TransformDirtyTable@D3D@@3QBKB 0xddc50 data
+?g_LODBias2x@D3D@@3QBMB 0xddc78 data
+?g_IdentityMatrix@D3D@@3U_D3DMATRIX@@B 0xddc90 data
+?g_UnitsOfElement@D3D@@3QBEB 0xddcd0 data
+?g_BytesPerUnit@D3D@@3QBEB 0xddcd8 data
+?g_FixedFunctionPipelineConstants@D3D@@3QBKB 0xddce0 data
+?g_PassthruProgramWFog@D3D@@3QBKB 0xddd10 data
+?g_PassthruProgramZFog@D3D@@3QBKB 0xdddd0 data
+?g_PassthruProgramSpecularFog@D3D@@3QBKB 0xdde80 data
+?g_TextureCount@D3D@@3QBKB 0xddf40 data
+?g_AntiAliasedTextureStates@D3D@@3QBKB 0xddf50 data
+?g_AntiAliasedRenderStates@D3D@@3QBKB 0xddfa8 data
+?g_MinFilter@D3D@@3QAY02$$CBKA 0xde038 data
+?g_Mar@D3D@@3QBMB 0xde058 data
+?g_Lar@D3D@@3QBMB 0xde0d8 data
+?g_InitialTextureStates@D3D@@3QBEB 0xde158 data
+?g_InitialRenderStates@D3D@@3QBKB 0xde178 data
+?g_DisplayModes@D3D@@3QBUDISPLAYMODE@1@B 0xde2e0 data
+??_C@_0HG@FBJOLOBL@Graphics?5hardware?5error?5informat@ 0xdebf0 data
+??_C@_0EB@CBFHLLBF@Graphics?5Parse?5error?5information@ 0xdec68 data
+?g_EyeDirection@D3D@@3U_D3DVECTOR@@B 0xdecc0 data
+_D3D__AvInfo 0xdecd0 data
+_D3D__GpuReg 0xdecd4 data
+?g_NullHardwareGetPut@@3PAKA 0xdecd8 data
+_D3D__NullHardware 0xdece0 data
+_D3D__IndexData 0xdece4 data
+_D3D__DirtyFlags 0xdece8 data
+_D3D__TextureState 0xdecf0 data
+_D3D__RenderState 0xdeef0 data
+?g_SoftDisplayFilterValue@D3D@@3HA 0xdf13c data
+?g_FlickerFilterValue@D3D@@3KA 0xdf140 data
+?g_SoftDisplayFilterSet@D3D@@3HA 0xdf144 data
+?g_FlickerFilterSet@D3D@@3HA 0xdf148 data
+?g_Stream@D3D@@3PAUStream@1@A 0xdf150 data
+?g_DirectVertexShader@D3D@@3UVertexShader@1@A 0xdf210 data
+?g_FvfVertexShader@D3D@@3UVertexShader@1@A 0xdf328 data
+?g_Device@D3D@@3VCDevice@1@A 0xdf450 data
+?g_pDevice@D3D@@3PAVCDevice@1@A 0xe1f30 data
+_g_pPushBuffer 0xe1f34 data
+?m_PushSegmentSize@CDevice@D3D@@2KA 0xe1f38 data
+?m_PushBufferSize@CDevice@D3D@@2KA 0xe1f3c data
+?g_VideoOffset@D3D@@3KA 0xe1f40 data
+?m_wfxMixDest@CDirectSoundBufferSettings@DirectSound@@2UtWAVEFORMATEX@@B 0x1101f8 data
+?m_vDefaultNormOrient@CHrtfListener@DirectSound@@1U_D3DVECTOR@@B 0x110350 data
+?m_aDefaultSpeakers@CHrtfListener@DirectSound@@1QBUPAN3DSPEAKER@2@B 0x110368 data
+?m_Default3dData@CHrtfSource@DirectSound@@0UHRTFSOURCE@2@B 0x1103cc data
+?m_Default3dVoiceData@CHrtfSource@DirectSound@@0UHRTFVOICE@2@B 0x1103e8 data
+_KSDATAFORMAT_SUBTYPE_XBOX_ADPCM 0x110490 data
+_KSDATAFORMAT_SUBTYPE_PCM 0x1104a0 data
+_DirectSoundI3DL2ListenerPreset_Default 0x1104b0 data
+_DirectSoundDefault3DListener 0x1104e0 data
+_DirectSoundDefaultI3DL2Buffer 0x110520 data
+_DirectSoundDefault3DBuffer 0x110548 data
+_DirectSoundDefaultMixBins_3D 0x110594 data
+_DirectSoundRequiredMixBins_3D 0x11059c data
+?m_DefaultI3dl2Data@CI3dl2Source@DirectSound@@0UI3DL2SOURCE@2@B 0x11077c data
+?m_adwEPOutputBufferSizes@CMcpxCore@DirectSound@@2QBKB 0x110798 data
+?m_wfxFormat@CAc97Device@DirectSound@@2UtWAVEFORMATEX@@B 0x1107ac data
+?m_adwRegisterOffsets@CAc97Channel@DirectSound@@2QBKB 0x1107c0 data
+_g_dwDirectSoundOverrideSpeakerConfig 0x1107d8 data
+_g_fDirectSoundInFinalRelease 0x1107dc data
+_g_DirectSoundCriticalSection 0x1107e0 data
+_g_dwDirectSoundPoolMemoryUsage 0x1107fc data
+_g_dwDirectSoundPhysicalMemoryUsage 0x110800 data
+?m_dwRefCount@CFpState@DirectSound@@0KA 0x11080c data
+?m_pfnCalculate@CHrtfSource@DirectSound@@0P6GXKPAV12@@ZA 0x110810 data
+?m_pfnGetFilterPair@CHrtfSource@DirectSound@@0P6GXPAV12@@ZA 0x110814 data
+?m_dwDeltaPanicCount@CMcpxAPU@DirectSound@@0KA 0x110df0 data
+?m_dwStuckVoiceCount@CMcpxVoiceClient@DirectSound@@2KA 0x110dfc data
+?m_dwGlobalRefCount@CAc97MediaObject@DirectSound@@1KA 0x110e00 data
+?m_pDevice@CAc97MediaObject@DirectSound@@1PAVCAc97Device@2@A 0x110e04 data
+?g_pDirectSoundSlopMemoryHeap@DirectSound@@3PAVCMcpxSlopMemoryHeap@1@A 0x110e08 data
+?m_Interrupt@CAc97Device@DirectSound@@1U_KINTERRUPT@@A 0x110e18 data
+?m_pDirectSound@CDirectSound@DirectSound@@2PAV12@A 0x110e88 data
+?m_fps@CFpState@DirectSound@@0U_KFLOATING_SAVE@@A 0x110e8c data
+?m_Interrupt@CMcpxAPU@DirectSound@@1U_KINTERRUPT@@A 0x110eb0 data
+?m_dwUsed@CMcpxSlopMemoryHeap@DirectSound@@2AAKA 0x110f20 data
+?m_dwAvailable@CMcpxSlopMemoryHeap@DirectSound@@2AAKA 0x110f24 data
+?m_ctxMemory@CMcpxCore@DirectSound@@2PAUMCPX_ALLOC_CONTEXT@2@A 0x110f28 data
+_CLSID_CAsfHeaderObjectV0_XDS 0x11c740 data
+_CLSID_CAsfPropertiesObjectV2_XDS 0x11c750 data
+_CLSID_CAsfStreamPropertiesObjectV1_XDS 0x11c760 data
+_CLSID_CAsfContentDescriptionObjectV0_XDS 0x11c770 data
+_CLSID_AsfXAcmAudioErrorMaskingStrategy_XDS 0x11c7a0 data
+_CLSID_AsfXSignatureAudioErrorMaskingStrategy_XDS 0x11c7b0 data
+_CLSID_AsfXStreamTypeAcmAudio_XDS 0x11c7c0 data
+_CLSID_CAsfContentEncryptionObject_XDS 0x11c7d0 data
+_CLSID_CAsfExtendedContentDescObject_XDS 0x11c7e0 data
+_CLSID_CAsfLicenseStoreObject_XDS 0x11c800 data
+_CLSID_CAsfStreamPropertiesObjectV2_XDS 0x11c810 data
+_getMask 0x11c9d8 data
+_cDitherFactorMR 0x11cb60 data
+_cfltInverseRand2Float_XDS 0x11cb64 data
+_g_rgiLsfReconLevel_XDS 0x11cc10 data
+?XID_BeginTypeDescriptionTable@@3KA 0x11cf20 data
+?XID_EndTypeDescriptionTable@@3KA 0x11cf30 data
+_USBD_BeginClassDescriptionTable 0x11cf34 data
+_USBD_EndClassDescriptionTable 0x11cf4c data
+_XDEVICE_TYPE_DEBUG_KEYBOARD_TABLE 0x11d10c data
+_XapiMountMUCriticalSection 0x11d18c data
+_XDEVICE_TYPE_MEMORY_UNIT_TABLE 0x11d1b0 data
+?MU_gResourceRequirements@@3U_USB_RESOURCE_REQUIREMENTS@@A 0x11d1d8 data
+?MU_DriverObject@@3U_DRIVER_OBJECT@@A 0x11d1e8 data
+?XID_pKeyboardServices@@3PAU_XID_KEYBOARD_SERVICES@@A 0x11d22c data
+_XID_Description 0x11d230 data
+_XID_1Description 0x11d248 data
+?XID_gResourceRequirements@@3U_USB_RESOURCE_REQUIREMENTS@@A 0x11d260 data
+??_C@_0N@GCHKHDKC@?2Device?2MU_0?$AA@ 0x124670 data
+??_C@_0O@MFLBCKNC@?2Device?2MU_?$CFx?$AA@ 0x124680 data
+___xri_a 0x1246c0 data
+___xri_z 0x1246cc data
+___xc_a 0x1246d0 data
+___xc_z 0x1248a4 data
+___xi_a 0x1248a8 data
+___xi_z 0x1248c0 data
+?g_SlotMapping@D3D@@3PAEA 0x139d60 data
+?g_DeviceCaps@D3D@@3U_D3DCAPS8@@B 0x139d80 data
+_XapiProcessLock 0x1462ac data
+_XapiThreadNotifyRoutineList 0x1462c8 data
+_XapiListLookaside 0x1462d0 data
+_XapiStLookaside 0x146490 data
+_offsetsFromUTF8 0x146630 data
+_bytesFromUTF8 0x146648 data
+_kReplacementCharacter 0x146748 data
+_kMaximumSimpleUniChar 0x14674c data
+_kMaximumUniChar 0x146750 data
+_halfShift 0x146754 data
+_halfBase 0x146758 data
+_halfMask 0x14675c data
+_kSurrogateHighStart 0x146760 data
+_kSurrogateLowStart 0x146764 data
+_XapiTlsAllocBitmap 0x146778 data
+_g_rgdwLoc 0x1467b0 data
+_MmHeapSegmentReserve 0x146be0 data
+_MmHeapSegmentCommit 0x146be4 data
+_MmHeapDeCommitTotalFreeThreshold 0x146be8 data
+_MmHeapDeCommitFreeBlockThreshold 0x146bec data
+_DDrive 0x146bf0 data
+_CdDevice 0x146bf8 data
+_MainVol 0x146c00 data
+_TDrive 0x146c08 data
+_TitleData 0x146c10 data
+_UDrive 0x146c18 data
+_UserData 0x146c20 data
+__FPinit 0x146c70 data
+_XapiMuInfo 0x17a704 data
+?MU_DriverExtension@@3UMU_DRIVER_EXTENSION@@A 0x17a710 data
+?g_DeviceTree@@3VCDeviceTree@@A 0x17d720 data
+__tls_index 0x17d808 data
+?XID_Globals@@3U_XID_GLOBALS@@A 0x17d810 data
+?GLOBAL_HostControllerCount@@3EA 0x17d8b0 data
+?GLOBAL_HubEnum@@3U_USBHUB_ENUM_BLOCK@@A 0x17d8b8 data
+?GLOBAL_HubInfo@@3U_USBHUB_INFO@@A 0x17d968 data
+_IsrEntryCount 0x17daf0 data
+_g_InvQuadRootExponent 0x17dd20 data
+_g_InvQuadRootMantissa 0x17e120 data
+_OHCD_GlobalPool 0x182140 data
+_OHCD_InterruptObject 0x182180 data
+_NtGlobalFlag 0x1821f0 data
+_XapiAutoPowerDownGlobals 0x182200 data
+_XapiProcessHeap 0x182250 data
+_XapiCurrentTopLevelFilter 0x182254 data
+_XapiTlsSize 0x182258 data
