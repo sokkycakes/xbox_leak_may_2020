@@ -9,6 +9,12 @@
 //     --lang N         firmware language (0 Japanese, 1 English, ...)
 //     --half 1         30 fps: record every other frame, the client shows each for two
 //     --gxdelta 1      send 3D commands as copies from the previous bundle's where they repeat
+//     --serve LINK     live: stream the bundles to the DS and play with its pad;
+//                      LINK is sim:PATH (a --dspico run) or usb (the DSpico on this machine)
+//     --dspico PATH    run a DS client with a simulated DSpico whose USB host is the
+//                      --serve run listening on PATH
+//     --usbrate N      simulated USB bytes per frame (default 12000, ~700 KB/s)
+//     --realtime 1     run at the DS's 59.83 frames a second instead of flat out
 //     --gamecode XXXX  replace the header's game code, for prototypes whose code melonDS's
 //                      cart list gives to another game (wrong cart/save type)
 //
@@ -36,6 +42,8 @@
 #include "Args.h"
 #include "SPI.h"
 #include "../common/mirror_format.h"
+#include "hostlink.h"
+#include "dspico_sim.h"
 
 using namespace melonDS;
 
@@ -209,6 +217,57 @@ class Recorder : public MirrorTap
 public:
     NDS* nds = nullptr;
     FILE* out = nullptr;
+    HostLink* link = nullptr;
+    bool linkLost = false;
+    u32 linkSkips = 0;   // frames left out because the link was still busy
+
+    // Live: a thread hands bundles to the link so the game never waits on USB.
+    // When bundles back up (a big VRAM upload), frames are left out the way
+    // --half leaves them out, so the DS stays close to live instead of falling behind.
+    std::thread sender;
+    std::mutex sendLock;
+    std::condition_variable sendWake;
+    std::vector<std::vector<u8>> sendQueue;
+    u32 sendBusy = 0;    // bundles queued or being sent
+    bool sendStop = false;
+
+    void StartLink(HostLink* l)
+    {
+        link = l;
+        sender = std::thread([this] {
+            for (;;)
+            {
+                std::vector<u8> b;
+                {
+                    std::unique_lock<std::mutex> g(sendLock);
+                    sendWake.wait(g, [this] { return sendStop || !sendQueue.empty(); });
+                    if (sendQueue.empty()) return;
+                    b.swap(sendQueue.front());
+                    sendQueue.erase(sendQueue.begin());
+                }
+                bool ok = !linkLost && link->Send(b.data(), b.size());
+                std::lock_guard<std::mutex> g(sendLock);
+                sendBusy--;
+                if (!ok && !linkLost)
+                {
+                    fprintf(stderr, "link: the DS went away at frame %u\n", emuFrame);
+                    linkLost = true;
+                }
+            }
+        });
+    }
+    void StopLink()
+    {
+        if (!link) return;
+        { std::lock_guard<std::mutex> g(sendLock); sendStop = true; }
+        sendWake.notify_one();
+        sender.join();
+    }
+    bool LinkBehind()
+    {
+        std::lock_guard<std::mutex> g(sendLock);
+        return sendBusy >= 2;
+    }
     FILE* stats = nullptr;
     u32 frame = 0;      // bundles written
     u32 emuFrame = 0;
@@ -275,6 +334,11 @@ public:
             capThis = (nds->GPU.CaptureCnt >> 31) & 1;
             skipThis = holdNext;
             holdNext = false;
+            if (link && !skipThis && frame > 0 && !capThis && !capPrev && LinkBehind())
+            {
+                skipThis = true;
+                linkSkips++;
+            }
             if (!skipThis)
             {
                 Snapshot2D();
@@ -285,7 +349,7 @@ public:
             TrackLine(vcount);
         else if (vcount == 192)
         {
-            if (haveFrame && out)
+            if (haveFrame && (out || link))
                 Emit();
             else if (skipThis)
             {
@@ -546,7 +610,7 @@ public:
         u32 flags = (frame == 0 ? MIRROR_FLAG_FULL : 0) | (holdNext ? MIRROR_FLAG_HOLD : 0);
         mirror_hdr h {MIRROR_MAGIC, emuFrame, 0, flags};
         Put(buf, h);
-        if (half)
+        if (half || link)
         {
             std::vector<IOW> gx;
             gx.swap(carry);
@@ -611,7 +675,14 @@ public:
         size_t at = BeginRec(buf, MREC_END);
         EndRec(buf, at);
         ((mirror_hdr*)buf.data())->size = buf.size();
-        fwrite(buf.data(), 1, buf.size(), out);
+        if (out) fwrite(buf.data(), 1, buf.size(), out);
+        if (link)
+        {
+            std::lock_guard<std::mutex> g(sendLock);
+            sendQueue.push_back(buf);
+            sendBusy++;
+            sendWake.notify_one();
+        }
 
         uLongf zlen = compressBound(buf.size());
         std::vector<u8> z(zlen);
@@ -678,7 +749,7 @@ int main(int argc, char** argv)
 {
     if (argc < 3)
     {
-        fprintf(stderr, "usage: %s ROM FRAMES [--input F] [--record F] [--frames F] [--shots DIR] [--every N] [--stats F] [--boottype N] [--lang N] [--gamecode XXXX] [--half 1] [--gxdelta 1]\n", argv[0]);
+        fprintf(stderr, "usage: %s ROM FRAMES [--input F] [--record F] [--frames F] [--shots DIR] [--every N] [--stats F] [--boottype N] [--lang N] [--gamecode XXXX] [--half 1] [--gxdelta 1] [--serve LINK] [--dspico PATH] [--usbrate N] [--realtime 1]\n", argv[0]);
         return 1;
     }
     const char* rompath = argv[1];
@@ -690,6 +761,9 @@ int main(int argc, char** argv)
     const char* gamecode = nullptr;
     const char* clientIdx = nullptr;
     bool half = false, gxDelta = false;
+    const char *serve = nullptr, *dspico = nullptr;
+    u32 usbRate = 12000;
+    bool realtime = false;
     for (int i = 3; i + 1 < argc; i += 2)
     {
         std::string o = argv[i];
@@ -705,6 +779,10 @@ int main(int argc, char** argv)
         else if (o == "--client-index") clientIdx = argv[i + 1];
         else if (o == "--half") half = atoi(argv[i + 1]) != 0;
         else if (o == "--gxdelta") gxDelta = atoi(argv[i + 1]) != 0;
+        else if (o == "--serve") serve = argv[i + 1];
+        else if (o == "--dspico") dspico = argv[i + 1];
+        else if (o == "--usbrate") usbRate = atoi(argv[i + 1]);
+        else if (o == "--realtime") realtime = atoi(argv[i + 1]) != 0;
         else { fprintf(stderr, "unknown option %s\n", o.c_str()); return 1; }
     }
 
@@ -758,7 +836,23 @@ int main(int argc, char** argv)
             fprintf(rec.stats, "frame,bytes,zlib,gx,regs,pal,oam,vram,vramblocks,lines\n");
         }
     }
-    gMirrorTap = &rec;
+    std::unique_ptr<HostLink> link;
+    if (serve)
+    {
+        link = OpenHostLink(serve);
+        if (!link) return 1;
+        rec.StartLink(link.get());
+    }
+    if (record || serve) gMirrorTap = &rec;
+
+    std::unique_ptr<DSpicoSim> pico;
+    if (dspico)
+    {
+        pico = std::make_unique<DSpicoSim>(nds.get(), dspico, usbRate);
+        gCardHook = pico.get();
+    }
+    u32 reports = 0, padFrames = 0;
+    mirror_input pad {};
 
     nds->Start();
 
@@ -769,8 +863,15 @@ int main(int argc, char** argv)
     FILE* fidx = clientIdx ? fopen(clientIdx, "w") : nullptr;
     s64 statsAt = -1;
 
+    auto tick = std::chrono::steady_clock::now();
+    const auto frameTime = std::chrono::nanoseconds(16715757);   // 560190 cycles at 33.51 MHz
     for (u32 f = 0; f < frames; f++)
     {
+        if (realtime)
+        {
+            tick += frameTime;
+            std::this_thread::sleep_until(tick);
+        }
         while (si < steps.size() && steps[si].frame <= f)
         {
             const InputStep& s = steps[si++];
@@ -778,6 +879,16 @@ int main(int argc, char** argv)
             if (s.touch) nds->TouchScreen(s.tx, s.ty);
             else nds->ReleaseScreen();
         }
+        if (link && link->Poll(pad))
+        {
+            // the DS's pad: libnds bit set = held, melonDS bit clear = pressed
+            nds->SetKeyMask(~pad.keys & 0xFFF);
+            if (pad.keys & (1 << 12)) nds->TouchScreen(pad.touchX, pad.touchY);
+            else nds->ReleaseScreen();
+            reports++;
+        }
+        if (link && (pad.keys & 0xFFF)) padFrames++;
+        if (pico) pico->Frame();
         nds->RunFrame();
         void *top = nullptr, *bot = nullptr;
         nds->GPU.GetFramebuffers(&top, &bot);
@@ -829,6 +940,12 @@ int main(int argc, char** argv)
     }
     if (fo) fclose(fo);
     if (fidx) fclose(fidx);
+    rec.StopLink();
+    if (link)
+        fprintf(stderr, "link: sent %u bundles, %u frames left out while the link was busy, %u pad reports from the DS, %u frames with buttons held\n",
+                rec.frame, rec.linkSkips, reports, padFrames);
+    if (pico)
+        fprintf(stderr, "dspico sim: %s\n", pico->Configured() ? "configured" : "never configured");
     if (rec.out)
     {
         fclose(rec.out);
@@ -847,12 +964,13 @@ int main(int argc, char** argv)
     for (u32 i = 0; i + 16 <= nds->MainRAMMask + 1; i += 4)
     {
         u32* w = (u32*)&nds->MainRAM[i];
-        if (w[0] == 0x5354524D && w[3] <= 3 && w[1] <= frames)
+        if (w[0] == 0x5354524D && w[3] <= 4 && w[1] <= frames)
         {
             fprintf(stderr, "client: %u frames applied, %u late, state %u\n", w[1], w[2], w[3]);
             break;
         }
     }
     gMirrorTap = nullptr;
+    gCardHook = nullptr;
     return 0;
 }

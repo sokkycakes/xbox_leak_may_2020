@@ -13,6 +13,7 @@
 #include <string.h>
 
 #include "mirror_format.h"
+#include "usblink.h"
 
 static const u32 bankLCDC[9] = {
     0x06800000, 0x06820000, 0x06840000, 0x06860000,
@@ -220,16 +221,58 @@ static void apply2D(const mirror_hdr* h)
         irqDisable(IRQ_HBLANK);
 }
 
-static mirror_hdr* readBundle(FILE* f)
+// Bundles come from a recording (file) or live from the Sion over the
+// DSpico's USB port (live link).
+extern volatile u32 mirrorStats[4];
+static FILE* recording;
+static bool liveLink;
+static u32 vblanks, lastReport;
+
+// live link: keep USB going and send the pad state once a frame
+static void idle(void)
+{
+    if (!liveLink)
+        return;
+    usbPoll();
+    if (vblanks != lastReport && usbConfigured())
+    {
+        scanKeys();
+        touchPosition t = {0};
+        u32 keys = keysHeld();
+        if (keys & KEY_TOUCH)
+            touchRead(&t);
+        mirror_input in = {MIRROR_INPUT_MAGIC, keys, t.px, t.py, mirrorStats[1]};
+        if (usbSendReport(&in, sizeof in))
+            lastReport = vblanks;
+    }
+}
+
+static bool readBytes(void* dst, u32 n)
+{
+    if (!liveLink)
+        return fread(dst, 1, n, recording) == n;
+    u8* d = dst;
+    while (n)
+    {
+        u32 got = usbRead(d, n);
+        d += got;
+        n -= got;
+        if (n)
+            idle();
+    }
+    return true;
+}
+
+static mirror_hdr* readBundle(void)
 {
     mirror_hdr h;
-    if (fread(&h, sizeof h, 1, f) != 1 || h.magic != MIRROR_MAGIC)
+    if (!readBytes(&h, sizeof h) || h.magic != MIRROR_MAGIC)
         return NULL;
     mirror_hdr* b = malloc(h.size);
     if (!b)
         return NULL;
     *b = h;
-    if (fread(b + 1, 1, h.size - sizeof h, f) != h.size - sizeof h)
+    if (!readBytes(b + 1, h.size - sizeof h))
     {
         free(b);
         return NULL;
@@ -267,6 +310,7 @@ static volatile u32 holdFrames;  // 30 fps mode: VBlanks left that keep showing 
 static void vblankHandler(void)
 {
     mirror_hdr* h = pending2D;
+    vblanks++;
     flushLines();
     if (holdFrames)
     {
@@ -287,35 +331,33 @@ static void vblankHandler(void)
     pending2D = NULL;
 }
 
-// On a real DS a failure would otherwise be a black screen: show a colour
-// (red: no file system, yellow: no recording found).
-static void fail(u32 state, u16 color)
+// Plain colour on both screens: blue while waiting for the Sion
+static void showColor(u16 color)
 {
-    mirrorStats[3] = state;
     REG_DISPCNT = MODE_0_2D;
     REG_DISPCNT_SUB = MODE_0_2D;
     BG_PALETTE[0] = color;
     BG_PALETTE_SUB[0] = color;
-    for (;;)
-        swiWaitForVBlank();
 }
 
-static FILE* openRecording(void)
+static void openSource(void)
 {
-    // inside this .nds (NitroFS), else next to it on the SD card
-    FILE* f = NULL;
-    bool nitro = nitroFSInit(NULL);
-    if (nitro)
-        f = fopen("nitro:/mirror.bin", "rb");
-    if (!f && fatInitDefault())
+    // a recording inside this .nds (NitroFS) or next to it on the SD card,
+    // else live from the Sion
+    if (nitroFSInit(NULL))
+        recording = fopen("nitro:/mirror.bin", "rb");
+    if (!recording && fatInitDefault())
     {
-        f = fopen("fat:/mirror.bin", "rb");
-        if (!f)
-            f = fopen("sd:/mirror.bin", "rb");
+        recording = fopen("fat:/mirror.bin", "rb");
+        if (!recording)
+            recording = fopen("sd:/mirror.bin", "rb");
     }
-    if (!f)
-        fail(nitro ? 2 : 1, nitro ? RGB15(31, 31, 0) : RGB15(31, 0, 0));
-    return f;
+    if (recording)
+        return;
+    liveLink = true;
+    mirrorStats[3] = 4;
+    showColor(RGB15(0, 8, 24));
+    usbStart();
 }
 
 int main(int argc, char** argv)
@@ -325,10 +367,10 @@ int main(int argc, char** argv)
     irqSet(IRQ_VBLANK, vblankHandler);
     irqSet(IRQ_HBLANK, hblankHandler);
 
-    FILE* f = openRecording();
+    openSource();
     for (;;)
     {
-        mirror_hdr* cur = readBundle(f);
+        mirror_hdr* cur = readBundle();
         if (cur)
             decodeGX(cur);
         mirror_hdr* old = NULL;
@@ -336,14 +378,14 @@ int main(int argc, char** argv)
         {
             // start early in the visible lines so the 3D engine reaches SWAP_BUFFERS before VBlank
             while (REG_VCOUNT >= 96)
-                ;
+                idle();
             pushGX();
             pending2D = cur;
-            mirror_hdr* next = readBundle(f);
+            mirror_hdr* next = readBundle();
             if (next)
                 decodeGX(next);
             while (pending2D || holdFrames)
-                ;
+                idle();
             free(old);
             old = cur;   // still on screen (its line list) until the next one is applied
             cur = next;
@@ -359,6 +401,6 @@ int main(int argc, char** argv)
         gxPayload = NULL;
         gxWords = 0;
         clearHardware();
-        rewind(f);
+        rewind(recording);
     }
 }

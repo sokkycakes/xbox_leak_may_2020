@@ -68,6 +68,15 @@ typedef struct {
     uint16_t val;
 } mirror_reg;
 
+// Live link, DS -> Sion, once a frame: the pad and touch screen.
+#define MIRROR_INPUT_MAGIC 0x4E494C53u  // "SLIN"
+typedef struct {
+    uint32_t magic;
+    uint32_t keys;      // libnds keysHeld(): bit set = held (KEY_A = bit 0 ... KEY_TOUCH = bit 12)
+    uint16_t touchX, touchY;
+    uint32_t applied;   // bundles applied so far
+} mirror_input;
+
 #define MIRROR_ROW   32   // palette/OAM granularity
 #define MIRROR_BLOCK 512  // VRAM granularity
 
