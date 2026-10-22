@@ -1641,10 +1641,10 @@ void CBelt::Render()
 #define GRID_STEP 24.0f
 #define GRID_K 1.2f             // PS2 screen units to world units at GRID_D
 #define GRID_D 10.0f
-#define GRID_DROP 0.35f         // the grid's centre below the eye line
+#define GRID_DROP 0.6f         // the grid's centre below the eye line
 #define GRID_TILE 1.05f         // a tile's width, in screen steps (x/25 of 24 units)
-#define GRID_PITCH 0.64f        // MBROWS gp-0x7e74: every icon pitched back
-#define GRID_PLACE 0.444f       // MBROWS gp-0x7df8: the placement transform
+#define GRID_LOOK 0.444f        // MBROWS gp-0x7df8: the placement tilt, the view looking down on the floor
+#define GRID_ROW 1.6f           // a row's depth on the floor, in screen steps
 static const float c_rgGridRowScale[4] = { 0.65f, 0.68f, 0.71f, 0.74f };   // gp-0x7e24..0x7e18, back to front
 
 #define GRID_DEPTH 0.15f        // the slab's thickness, a share of its width
@@ -2125,8 +2125,10 @@ void CGameGrid::DrawTiles(float alpha)
     float cw = m_pTile->root->width(), ch = m_pTile->root->height();
     if (cw <= 0) cw = 1.0f;
     if (ch <= 0) ch = 1.0f;
-    float cp = (float)cos(GRID_PITCH), sp = (float)sin(GRID_PITCH);
-    float cg = (float)cos(GRID_PLACE), sg = (float)sin(GRID_PLACE);
+    // the grid is a floor seen from above: in view space the floor runs
+    // back along (0, sin, cos) and an icon standing on it points up (0, cos, -sin)
+    float cl = (float)cos(GRID_LOOK), sl = (float)sin(GRID_LOOK);
+    D3DXVECTOR3 back(0.0f, sl, cl), up(0.0f, cl, -sl);
 
     // back rows first (the art is blended), the selected tile last
     int first = (int)floor(m_top) - 1, last = (int)ceil(m_top) + 4;
@@ -2161,24 +2163,21 @@ void CGameGrid::DrawTiles(float alpha)
                 else
                     a *= 0.75f;
 
-                // the slot on the grid's plane, the plane tipped back
+                // the slot on the floor, the icon standing on it, its face to the viewer
                 float px = (col * sxStep - sxMid) * GRID_K;
-                float py = -(r * syStep - syMid) * GRID_K;
-                D3DXVECTOR3 c(px, py * cg - GRID_DROP, GRID_D + py * sg);
-                // the tile, pitched back about its own horizontal axis
+                float pz = (1.5f - r) * syStep * GRID_K * GRID_ROW;
                 float hw = 0.5f * GRID_TILE * sxStep * GRID_K * scale, hh = hw * ch / cw;
+                D3DXVECTOR3 c = D3DXVECTOR3(px, -GRID_DROP, GRID_D) + back * pz + up * hh;
                 for (int gy = 0; gy < 6; gy++)
                     for (int gx = 0; gx < 7; gx++)
                     {
                         float lx = (gx / 6.0f * 2.0f - 1.0f) * hw;
                         float ly = (1.0f - gy / 5.0f * 2.0f) * hh;
-                        m_be.m_grid[gy][gx] = D3DXVECTOR3(c.x + lx, c.y + ly * cp, c.z + ly * sp);
+                        m_be.m_grid[gy][gx] = c + D3DXVECTOR3(lx, 0.0f, 0.0f) + up * ly;
                     }
-                // the slab behind the art: front half extents, then half its depth
-                // along the tile's normal away from the camera (0, -sin, cos)
-                float hd = 0.5f * GRID_DEPTH * 2.0f * hw;
-                DrawSlab(c, D3DXVECTOR3(hw, 0, 0), D3DXVECTOR3(0, hh * cp, hh * sp),
-                    D3DXVECTOR3(0, -hd * sp, hd * cp), a);
+                // the block behind the art: front half extents, then half its depth
+                float hd = GRID_DEPTH * hw;
+                DrawSlab(c, D3DXVECTOR3(hw, 0, 0), up * hh, back * hd, a);
                 SetString(m_pTile->find("image"), "ImagePath", m_rgImage[i] != NULL ? m_rgImage[i] : _T(""));
                 m_be.m_gridMode = true;
                 m_be.m_gx0 = 0.0f; m_be.m_gy0 = 0.0f;
