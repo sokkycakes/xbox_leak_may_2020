@@ -385,7 +385,67 @@ def spot_meta_visual(mp):
     v = v.replace("<Id>metaScene_2lineFocus_Long</Id>", "<Id>metaScene_spot</Id>", 1)
     v = re.sub(r"(<Id>Pane_txt1</Id>(?:\n[^\n]*){0,3}?\n <Position>)17.56,108,0", r"\g<1>17.56,138,0", v, count=1)
     v = re.sub(r"(<Id>Pane_txt</Id>(?:\n[^\n]*){0,3}?\n <Position>)17.56,0,0", r"\g<1>17.56,8,0", v, count=1)
-    return v
+    return restep_pane(v, SPOT_PITCH)
+
+
+# The pane's frames step its highlight and edge strips a row at a time on
+# the 360's pitch (List_2Line_Focus: one-line rows ~42 apart, the focused
+# one opening to two lines).  Spotlight's rows are all two-line, 74 apart,
+# so every row-following key moves down by the extra pitch for its row:
+# the row is read off highlight1 at the key's time, the pieces keep their
+# own sizes, and the top strips (drawn upward from the row) grow by the
+# same amount so they still reach the pane's top.
+SPOT_PITCH = 74
+
+
+def restep_pane(v, pitch):
+    tracks = list(re.finditer(r"<Timeline>\s*<Id>([^<]*)</Id>(.*?)</Timeline>", v, flags=re.S))
+    keyre = r"<KeyFrame><Time>(\d+)</Time>(.*?)</KeyFrame>"
+    def keys(body):
+        props = re.findall(r"<TimelineProp>([^<]*)</TimelineProp>", body)
+        return props, [(int(m.group(1)), re.findall(r"<Prop>([^<]*)</Prop>", m.group(2))) for m in re.finditer(keyre, body, flags=re.S)]
+    hl = [t for t in tracks if t.group(1) == "highlight1"][0]
+    props, ks = keys(hl.group(2))
+    hk = [(t, float(p[props.index("Position")].split(",")[1])) for t, p in ks]
+    rows = sorted(set(y for _, y in hk))                      # the row tops on the 360's pitch
+    def hy(t):
+        for (t0, y0), (t1, y1) in zip(hk, hk[1:]):
+            if t0 <= t <= t1:
+                return y0 if t1 == t0 else y0 + (y1 - y0) * (t - t0) / (t1 - t0)
+        return hk[-1][1]
+    def shift(t):
+        y = hy(t)
+        for i in range(len(rows) - 1):
+            if rows[i] - 0.01 <= y <= rows[i + 1] + 0.01:
+                k = i + (y - rows[i]) / (rows[i + 1] - rows[i])
+                return (rows[0] + k * pitch) - y
+        return (rows[0] + (len(rows) - 1) * pitch) - rows[-1]
+    out = v
+    for tr in tracks:
+        props, ks = keys(tr.group(2))
+        if "Position" not in props:
+            continue
+        pi = props.index("Position")
+        ys = set(p[pi].split(",")[1] for _, p in ks)
+        if len(ys) < 2:
+            continue        # a piece that stays put (the end caps)
+        body = tr.group(2)
+        def fix(m):
+            t = int(m.group(1))
+            vals = re.findall(r"<Prop>([^<]*)</Prop>", m.group(2))
+            d = shift(t)
+            x, y, z = vals[pi].split(",")
+            vals[pi] = "%s,%g,%s" % (x, float(y) + d, z)
+            if "Height" in props and "_top" in tr.group(1):
+                sy = 1.0
+                if "Scale" in props:
+                    sy = abs(float(vals[props.index("Scale")].split(",")[1])) or 1.0
+                hi = props.index("Height")
+                vals[hi] = "%g" % (float(vals[hi]) + d / sy)
+            it = iter(vals)
+            return "<KeyFrame><Time>%s</Time>%s</KeyFrame>" % (m.group(1), re.sub(r"<Prop>[^<]*</Prop>", lambda _: "<Prop>%s</Prop>" % next(it), m.group(2)))
+        out = out.replace(tr.group(2), re.sub(keyre, fix, body, flags=re.S), 1)
+    return out
 
 
 def status_visual(skin):
