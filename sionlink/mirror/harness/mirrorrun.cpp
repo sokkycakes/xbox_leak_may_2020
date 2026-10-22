@@ -49,6 +49,8 @@
 #include <utility>
 #include <zlib.h>
 #include <csignal>
+#include <dirent.h>
+#include <pthread.h>
 #include <unistd.h>
 
 #include "NDS.h"
@@ -108,6 +110,74 @@ static bool GXKeepWhenSkipped(u8 c)
     return (c >= 0x10 && c <= 0x1C) || c == 0x20 || (c >= 0x29 && c <= 0x2B) ||
            (c >= 0x30 && c <= 0x34) || c == 0x60;
 }
+
+// How busy each of mirrorrun's threads has been since the last call, in % of one core:
+// on the Sion's two cores the game, melonDS's 3D thread, the USB sender and the sound
+// share them.
+static std::string CpuUse(double seconds)
+{
+    static std::map<std::string, unsigned long long> before;
+    std::map<std::string, unsigned long long> now;
+    if (DIR* d = opendir("/proc/self/task"))
+    {
+        while (dirent* e = readdir(d))
+        {
+            if (e->d_name[0] == '.') continue;
+            char path[300], line[512];
+            snprintf(path, sizeof path, "/proc/self/task/%s/stat", e->d_name);
+            FILE* f = fopen(path, "r");
+            if (!f) continue;
+            size_t n = fread(line, 1, sizeof line - 1, f);
+            fclose(f);
+            line[n] = 0;
+            // pid (comm) state ... utime stime are fields 14 and 15
+            char* open = strchr(line, '('), *close = strrchr(line, ')');
+            if (!open || !close) continue;
+            std::string comm(open + 1, close);
+            unsigned long long ut = 0, st = 0;
+            if (sscanf(close + 2, "%*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %llu %llu", &ut, &st) == 2)
+                now[comm] += ut + st;
+        }
+        closedir(d);
+    }
+    static const long hz = sysconf(_SC_CLK_TCK);
+    std::string out;
+    for (auto& [name, ticks] : now)
+    {
+        unsigned long long was = before.count(name) ? before[name] : 0;
+        int pct = (int)((ticks - was) * 100.0 / hz / seconds + 0.5);
+        if (pct < 1) continue;
+        static const std::map<std::string, std::string> nice = {
+            {"mirrorrun", "game"}, {"mirror-3d", "3D"}, {"mirror-send", "USB"}, {"mirror-sound", "sound"}};
+        auto it = nice.find(name);
+        char part[300];
+        snprintf(part, sizeof part, "%s%s %d%%", out.empty() ? "" : ", ", it == nice.end() ? name.c_str() : it->second.c_str(), pct);
+        out += part;
+    }
+    before = now;
+    return out;
+}
+
+// MIRROR_PROF=FROM:TO (cloud tests): where the time goes in frames FROM..TO-1, per frame
+struct Prof
+{
+    enum { Snap, Lines, Emit, Skipped, Sync, Frame, Tv, N };
+    double ms[N] = {};
+    u32 from = 0, to = 0, frames = 0;
+    bool on = false;
+    Prof()
+    {
+        if (const char* p = getenv("MIRROR_PROF")) on = sscanf(p, "%u:%u", &from, &to) == 2;
+    }
+    struct Timer
+    {
+        Prof& p; int what; std::chrono::steady_clock::time_point t;
+        Timer(Prof& p, int what) : p(p), what(what) { if (p.on) t = std::chrono::steady_clock::now(); }
+        ~Timer() { if (p.on) p.ms[what] += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t).count(); }
+    };
+    bool Active(u32 f) { return on && f >= from && f < to; }
+} gProf;
+#define PROF(what) Prof::Timer profTimer_(gProf, Prof::what)
 
 struct GXFilter
 {
@@ -383,6 +453,7 @@ public:
     {
         link = l;
         sender = std::thread([this] {
+            pthread_setname_np(pthread_self(), "mirror-send");
             for (;;)
             {
                 std::vector<u8> b;
@@ -602,6 +673,7 @@ public:
             if (!skipThis)
             {
                 skipRun = 0;
+                PROF(Snap);
                 Snapshot2D();
                 haveFrame = true;
             }
@@ -617,13 +689,20 @@ public:
             }
         }
         else if (vcount < 192 && haveFrame)
+        {
+            PROF(Lines);
             TrackLine(vcount);
+        }
         else if (vcount == 192)
         {
             if (haveFrame && (out || link))
+            {
+                PROF(Emit);
                 Emit();
+            }
             else if (skipThis)
             {
+                PROF(Skipped);
                 // not sent: keep the state its 3D commands leave behind for the next bundle
                 for (const IOW& w : ready) filt.Feed(w, false, carry);
                 ready.clear();
@@ -637,7 +716,10 @@ public:
             if (geoCheck) melo.Take(nds->GPU.GPU3D);
         }
         else if (vcount == 193)
+        {
+            PROF(Sync);
             SyncCapture();
+        }
     }
 
     // MIRROR_GEOCHECK=1 (cloud tests): the geometry state worked out from the commands
@@ -1098,9 +1180,16 @@ public:
             if (unshown.size() > 600) unshown.pop_front();   // a DS that doesn't say what it shows
         }
 
-        uLongf zlen = compressBound(buf.size());
-        std::vector<u8> z(zlen);
-        compress2(z.data(), &zlen, buf.data(), buf.size(), 1);
+        // what zlib would make of it, for recordings' numbers: not live, where it cost the game
+        // a millisecond a frame in the course flyover
+        static const bool noZ = getenv("MIRROR_NOZ") != nullptr;
+        uLongf zlen = 0;
+        if ((out || stats) && !noZ)
+        {
+            zlen = compressBound(buf.size());
+            std::vector<u8> z(zlen);
+            compress2(z.data(), &zlen, buf.data(), buf.size(), 1);
+        }
         totalRaw += buf.size();
         totalZ += zlen;
         if (stats)
@@ -1352,12 +1441,15 @@ int main(int argc, char** argv)
 
     auto tick = std::chrono::steady_clock::now();
     const auto tvFrame = std::chrono::nanoseconds((s64)(1e9 / tv.Hz()));
+    const double tvFrameMs = 1000 / tv.Hz();
+    double heavyMs = 0;     // how long frames take here lately, one slow frame counting as one TV frame
+    bool caughtUp = false;  // the last frame wasn't shown
     u32 tvSkipped = 0, tvSkippedShown = 0;
     // 560190 cycles at 33.51 MHz; MIRROR_FRAMEHZ=60 runs at a TV's pace instead (cloud tests)
     const auto frameTime = std::chrono::nanoseconds(getenv("MIRROR_FRAMEHZ") ? (s64)(1e9 / atof(getenv("MIRROR_FRAMEHZ"))) : 16715757);
     auto speedFrom = std::chrono::steady_clock::now();
     u32 underrunsShown = 0, xrunsShown = 0;
-    double longestMs = 0;   // the longest a frame took here (game, bundle), since the last speed line
+    double longestMs = 0, workMs = 0;   // the longest a frame took here (game, bundle), all of them, since the last speed line
     for (u32 f = 0; f < frames; f++)
     {
         if (gMirrorQuit)
@@ -1399,11 +1491,12 @@ int main(int argc, char** argv)
             char behind[48] = "";
             if (behindMax)
                 snprintf(behind, sizeof behind, " (%u to %u frames behind)", behindMin, behindMax);
-            fprintf(stderr, "frame %u: %.1f fps (longest %.0f ms), %u bundles sent (%llu KB/s), %u frames left out, DS showed %u%s, %u reports, pad %03x%s\n",
-                    f, 600 / s, longestMs, rec.frame, (unsigned long long)((sent - sentShown) / 1024 / s), rec.linkSkips,
+            fprintf(stderr, "frame %u: %.1f fps (%.1f ms a frame, longest %.0f ms), %u bundles sent (%llu KB/s), %u frames left out, DS showed %u%s, %u reports, pad %03x%s\n",
+                    f, 600 / s, workMs / 600, longestMs, rec.frame, (unsigned long long)((sent - sentShown) / 1024 / s), rec.linkSkips,
                     shown - shownBefore, behind, reports - reportsShown, pad.keys & 0xFFF,
                     pad.applied & MIRROR_INPUT_NEED_FULL ? ", DS waiting for a full frame" : "");
-            longestMs = 0;
+            longestMs = workMs = 0;
+            fprintf(stderr, "  CPU: %s\n", CpuUse(s).c_str());
             if (tvSkipped != tvSkippedShown)
                 fprintf(stderr, "  TV: %u frames not shown, catching up after slow ones\n", tvSkipped - tvSkippedShown);
             tvSkippedShown = tvSkipped;
@@ -1439,10 +1532,12 @@ int main(int argc, char** argv)
             sentShown = sent;
             speedFrom = now;
         }
-        // On the TV each frame waits for the one before to be on screen. A frame here that
-        // takes longer than the TV's frame (a course loading, a big bundle) would leave the
-        // game behind for good, and its sound would run dry: the frames after it aren't
-        // shown until it has caught up again (the TV keeps showing the last one meanwhile).
+        // On the TV each frame waits for the one before to be on screen. One frame here that
+        // takes longer than the TV's (a course loading, a big bundle) would leave the game
+        // behind for good, and its sound would run dry: the frame after it isn't shown, so
+        // the game catches up (the TV keeps showing the last one meanwhile). Not in a scene
+        // too heavy for 60 frames a second, though: there run 12 left nearly every frame
+        // out and the TV stood still. There the game slows down instead, as in run 11.
         bool catchUp = false;
         if (realtime || tv.Paced())
         {
@@ -1454,8 +1549,11 @@ int main(int argc, char** argv)
                 std::this_thread::sleep_until(tick);
             else if (tick > now)
                 tick = now;   // the TV's pace: never ahead of it
+            else if (heavyMs > tvFrameMs * 0.85 || now - tick > tvFrame * 4)
+                tick = now;   // a heavy stretch: no catching up
             else
-                catchUp = now - tick > tvFrame;
+                catchUp = now - tick > tvFrame && !caughtUp;   // and never two frames in a row
+            caughtUp = catchUp;
         }
         auto frameStart = std::chrono::steady_clock::now();
         while (si < steps.size() && steps[si].frame <= f)
@@ -1516,7 +1614,19 @@ int main(int argc, char** argv)
         }
         if (link && (pad.keys & 0xFFF)) padFrames++;
         if (pico) pico->Frame();
-        nds->RunFrame();
+        if (gProf.on && f == gProf.from) memset(gProf.ms, 0, sizeof gProf.ms);
+        if (gProf.on && f == gProf.to)
+        {
+            u32 n = gProf.to - gProf.from;
+            fprintf(stderr, "prof frames %u-%u, ms a frame: game+tap %.2f (2D snapshot %.2f, lines %.2f, bundle %.2f, left-out 3D %.2f, capture sync %.2f), TV+sound %.2f\n",
+                    gProf.from, gProf.to, gProf.ms[Prof::Frame] / n, gProf.ms[Prof::Snap] / n, gProf.ms[Prof::Lines] / n,
+                    gProf.ms[Prof::Emit] / n, gProf.ms[Prof::Skipped] / n, gProf.ms[Prof::Sync] / n, gProf.ms[Prof::Tv] / n);
+            gProf.on = false;
+        }
+        {
+            PROF(Frame);
+            nds->RunFrame();
+        }
         if (const char* st = getenv("MIRROR_STALLTEST"))
         {
             // cloud tests: a slow frame (N:MS, MS ms every N frames), as a course loading is
@@ -1526,7 +1636,11 @@ int main(int argc, char** argv)
         }
         void *top = nullptr, *bot = nullptr;
         nds->GPU.GetFramebuffers(&top, &bot);
-        longestMs = std::max(longestMs, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - frameStart).count());
+        double frameMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - frameStart).count();
+        longestMs = std::max(longestMs, frameMs);
+        heavyMs = heavyMs * 0.9 + std::min(frameMs, tvFrameMs) * 0.1;
+        workMs += frameMs;
+        Prof::Timer tvTimer(gProf, Prof::Tv);
         if (soundSpec)
         {
             // the sound first: showing the picture can wait for the TV

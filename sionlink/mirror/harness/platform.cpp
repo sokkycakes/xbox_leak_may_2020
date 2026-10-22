@@ -9,6 +9,7 @@
 #include <condition_variable>
 #include <chrono>
 #include <functional>
+#include <pthread.h>
 
 #include "Platform.h"
 
@@ -70,7 +71,11 @@ void Log(LogLevel level, const char* fmt, ...)
 }
 
 struct Thread { std::thread t; };
-Thread* Thread_Create(std::function<void()> func) { return new Thread{std::thread(func)}; }
+// melonDS's threads (the 3D renderer's): named for mirrorrun's CPU line
+Thread* Thread_Create(std::function<void()> func)
+{
+    return new Thread{std::thread([func] { pthread_setname_np(pthread_self(), "mirror-3d"); func(); })};
+}
 void Thread_Free(Thread* t) { if (t->t.joinable()) t->t.detach(); delete t; }
 void Thread_Wait(Thread* t) { if (t->t.joinable()) t->t.join(); }
 

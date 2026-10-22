@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
+#include <pthread.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
 
@@ -257,6 +258,7 @@ double SoundOut::Skew()
 
 void SoundOut::Run()
 {
+    pthread_setname_np(pthread_self(), "mirror-sound");
     std::vector<int16_t> buf;
     bool started = false;
     while (!stop)

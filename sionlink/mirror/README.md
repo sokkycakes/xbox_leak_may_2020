@@ -97,8 +97,10 @@ for the one before to be on screen. `--sound alsa` plays the game at 48 kHz on t
 sound device (`$AUDIODEV`, the TV's HDMI) through the kernel's PCM calls, and steers melonDS's
 sample rate by how full its buffer is (60.00 Hz TV against the DS's 59.83). A frame that takes
 longer than the TV's (a course loading) would leave the game behind the TV for good and empty
-that buffer (run 11: about once a minute), so the frames after one aren't shown until the game
-has caught up; the speed line gives the longest frame and how many weren't shown. `tv.sh` stops the
+that buffer (run 11: about once a minute), so the frame after one isn't shown and the game
+catches up. Not in a scene too heavy for 60 frames a second (run 12 left nearly every frame out
+there and the TV stood still): there the game slows down. The speed line gives the average and
+longest frame, how many weren't shown, and how busy each thread is (`CPU:`). `tv.sh` stops the
 dashboard, runs the mirror with both, and starts the dashboard again when it stops
 (`sh tv.sh stop`). Cloud tests: `--tv dump:FILE` (every 60th picture), `--sound wav:FILE`,
 `MIRROR_TVPACE=1` paces the dump like a 60 Hz TV, `MIRROR_FRAMEHZ=60` paces without a TV,

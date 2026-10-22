@@ -302,7 +302,7 @@ void TVOut::Show(const uint32_t* top, const uint32_t* bottom)
                 std::this_thread::sleep_for(duration<double>(flipAt - now));
                 now = flipAt;
             }
-            flipAt = (floor(now / vblankPeriod) + 1) * vblankPeriod;
+            flipAt = (floor(now / vblankPeriod + 1e-6) + 1) * vblankPeriod;
         }
         if (frames++ % 60 == 0)
         {
