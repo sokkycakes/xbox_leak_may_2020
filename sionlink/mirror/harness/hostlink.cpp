@@ -136,6 +136,19 @@ public:
         while (!(h = libusb_open_device_with_vid_pid(ctx, 0x1209, 0x0001)))
             usleep(250000);
         libusb_set_auto_detach_kernel_driver(h, 1);
+        // The DS's first SET_CONFIGURATION after its client starts times out (Linux logs
+        // "can't set config #1, error -110") and leaves the DSpico unconfigured; asking
+        // again works. Do that here instead of needing a replug.
+        for (int tries = 0; tries < 5; tries++)
+        {
+            int cfg = -1;
+            if (libusb_get_configuration(h, &cfg) == 0 && cfg == 1) break;
+            fprintf(stderr, "link: the DSpico isn't set up (configuration %d), setting it up\n", cfg);
+            int r = libusb_set_configuration(h, 1);
+            if (r == 0) { fprintf(stderr, "link: DSpico set up\n"); break; }
+            fprintf(stderr, "link: setting up the DSpico failed (%s)\n", libusb_error_name(r));
+            usleep(500000);
+        }
         if (libusb_claim_interface(h, 0)) { fprintf(stderr, "link: can't claim the DSpico\n"); libusb_close(h); h = nullptr; return; }
         inXfer = libusb_alloc_transfer(0);
         libusb_fill_bulk_transfer(inXfer, h, 0x81, inBuf, sizeof inBuf, InDone, this, 0);
