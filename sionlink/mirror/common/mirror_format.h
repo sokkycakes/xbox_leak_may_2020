@@ -79,6 +79,14 @@ typedef struct {
     // what the DS has run into so far (wrapping counters), for the Sion's log
     uint16_t damaged, noMemory;   // bundles that came in damaged, bundles it had no memory for
     uint16_t fulls, stalls;       // full refreshes applied, times the picture stopped with no data coming
+    // how the DSpico link is doing (wrapping counters; times in 1/32768 s)
+    uint32_t silent;              // event reads the DSpico didn't answer
+    uint16_t irqReads, timedReads;  // event reads because it raised its IRQ line, because 1 ms went by
+    uint16_t recovered, restarted;  // lost OUT completions recovered, OUT transfers armed again
+    uint32_t blocks;              // 512-byte blocks taken
+    uint32_t armedTime;           // time those transfers waited for their data
+    uint16_t busyMax;             // longest the DS went without looking at USB since its last report
+    uint16_t reserved;
 } mirror_input;
 // the DS lost track of the stream (a damaged bundle, or it ran out of memory):
 // send a full bundle (MIRROR_FLAG_FULL) so it can start over from cleared hardware

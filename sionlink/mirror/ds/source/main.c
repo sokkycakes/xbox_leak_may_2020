@@ -45,15 +45,75 @@ static const mirror_rec* nextRec(const mirror_rec* r)
     return (const mirror_rec*)((const u8*)(r + 1) + r->len);
 }
 
+// The registers the Sion mirrors (harness/mirrorrun.cpp: Tracked2D, Tracked3D, and
+// POWCNT). Nothing in a bundle may write any other: one stray write to the card
+// registers can send the DSpico a command it doesn't know, and it stops answering
+// until the DS is switched off.
+static bool tracked2D(u32 o)
+{
+    if (o < 0x58)
+        return o >= 8 || o < 4;   // DISPCNT, BG, affine, window, blend; not DISPSTAT/VCOUNT
+    if (o >= 0x64 && o < 0x68)
+        return true;               // DISPCAPCNT
+    if (o == 0x6C || o == 0x6D)
+        return true;               // MASTER_BRIGHT
+    if (o >= 0x1000 && o < 0x1058)
+        return o >= 0x1008 || o < 0x1004;
+    return o == 0x106C || o == 0x106D;
+}
+
+static bool tracked3D(u32 o)
+{
+    if (o >= 0x60 && o < 0x64)
+        return true;               // DISP3DCNT
+    return o >= 0x320 && o < 0x6A4 && !(o >= 0x600 && o < 0x608);   // not GXSTAT
+}
+
+// a write of `size` bytes at 0x04000000 + off; 2D state may also write the 3D registers
+static bool ioOk(u32 off, u32 size, bool twoD)
+{
+    if (off & (size - 1))
+        return false;
+    for (u32 o = off; o < off + size; o++)
+        if (!(o == 0x304 || o == 0x305 || tracked3D(o) || (twoD && tracked2D(o))))
+            return false;
+    return true;
+}
+
 // The 3D commands of the last bundle read, as an MREC_GX payload. A delta
 // record copies from the one before.
 static u32* gxPayload;
 static u32 gxWords;
 
-static void decodeGX(const mirror_hdr* h)
+// every run of a payload goes to a 3D register and fits
+static bool gxRunsOk(const u32* p, u32 words)
+{
+    if (!words)
+        return true;
+    const u32* end = p + words;
+    u32 runs = *p++;
+    for (u32 i = 0; i < runs; i++)
+    {
+        if (p >= end)
+            return false;
+        const mirror_run* run = (const mirror_run*)p++;
+        u32 n = run->info & 0x3FFF, code = run->info >> 14;
+        if (code > 2 || n > (u32)(end - p) || !ioOk(run->off, code == 0 ? 4 : code == 1 ? 2 : 1, false))
+            return false;
+        p += n;
+    }
+    return true;
+}
+
+enum { GX_OK, GX_DAMAGED, GX_NO_MEMORY };
+
+// A damaged delta (or one whose base this DS never had) gives no 3D this frame, and
+// the caller asks for a full bundle: the next deltas would build on what's missing.
+static int decodeGX(const mirror_hdr* h)
 {
     u32* prev = gxPayload;
     u32 prevWords = gxWords;
+    int result = GX_OK;
     gxPayload = NULL;
     gxWords = 0;
     for (const mirror_rec* r = (const mirror_rec*)(h + 1); r->type != MREC_END; r = nextRec(r))
@@ -61,41 +121,57 @@ static void decodeGX(const mirror_hdr* h)
         const u32* p = (const u32*)(r + 1);
         if (r->type == MREC_GX)
         {
-            gxWords = r->len / 4;
             gxPayload = malloc(r->len);
-            if (gxPayload)
-                memcpy(gxPayload, p, r->len);
+            if (!gxPayload)
+            {
+                result = GX_NO_MEMORY;
+                break;
+            }
+            gxWords = r->len / 4;
+            memcpy(gxPayload, p, r->len);
         }
         else if (r->type == MREC_GXDELTA)
         {
             u32 n = *p++, i = 0;
+            if (n > 0x80000)
+            {
+                result = GX_DAMAGED;
+                break;
+            }
             gxPayload = malloc(n * 4);
             if (!gxPayload)
+            {
+                result = GX_NO_MEMORY;
                 break;
+            }
             gxWords = n;
             const u32* recEnd = (const u32*)((const u8*)p - 4 + r->len);
             while (i < n)
             {
-                if (p >= recEnd)
-                    break;
-                u32 op = *p++;
+                u32 op = p < recEnd ? *p++ : 0;
                 u32 len = op & 0x7FFFFFFF;
-                if (len > n - i || (!(op & 0x80000000) && p + len > recEnd))
+                if (!len || len > n - i)
                 {
-                    // damaged: no 3D this frame
-                    free(gxPayload);
-                    gxPayload = NULL;
-                    gxWords = 0;
+                    result = GX_DAMAGED;
                     break;
                 }
                 if (op & 0x80000000)
                 {
-                    u32 src = *p++;
-                    if (prev && src + len <= prevWords)
-                        memcpy(gxPayload + i, prev + src, len * 4);
+                    u32 src = p < recEnd ? *p++ : ~0u;
+                    if (!prev || src > prevWords || len > prevWords - src)
+                    {
+                        result = GX_DAMAGED;
+                        break;
+                    }
+                    memcpy(gxPayload + i, prev + src, len * 4);
                 }
                 else
                 {
+                    if (len > (u32)(recEnd - p))
+                    {
+                        result = GX_DAMAGED;
+                        break;
+                    }
                     memcpy(gxPayload + i, p, len * 4);
                     p += len;
                 }
@@ -103,8 +179,19 @@ static void decodeGX(const mirror_hdr* h)
             }
         }
     }
+    if (result == GX_OK && !gxRunsOk(gxPayload, gxWords))
+        result = GX_DAMAGED;
+    if (result != GX_OK)
+    {
+        free(gxPayload);
+        gxPayload = NULL;
+        gxWords = 0;
+    }
     free(prev);
+    return result;
 }
+
+static bool liveLink;
 
 static void pushGX(void)
 {
@@ -118,7 +205,7 @@ static void pushGX(void)
         const mirror_run* run = (const mirror_run*)p++;
         u32 addr = 0x04000000 + run->off;
         u32 n = run->info & 0x3FFF, code = run->info >> 14;
-        if (p + n > end || run->off >= 0x1070)
+        if (p + n > end)
             break;
         if (run->off == 0x304)
         {
@@ -127,7 +214,16 @@ static void pushGX(void)
                 REG_POWERCNT = (*p++ & 0x7FFF) | (REG_POWERCNT & 0x8000);
         }
         else if (code == 0)
-            for (u32 k = 0; k < n; k++) *(vu32*)addr = *p++;
+        {
+            // a dense frame can keep the geometry FIFO full for milliseconds:
+            // keep taking USB data meanwhile
+            for (u32 k = 0; k < n; k++)
+            {
+                *(vu32*)addr = *p++;
+                if (liveLink && (k & 255) == 255)
+                    usbPoll();
+            }
+        }
         else if (code == 1)
             for (u32 k = 0; k < n; k++) *(vu16*)addr = *p++;
         else
@@ -240,7 +336,6 @@ static void apply2D(const mirror_hdr* h)
 // DSpico's USB port (live link).
 extern volatile u32 mirrorStats[4];
 static FILE* recording;
-static bool liveLink;
 static u32 vblanks, lastScan, lastReport;
 static u32 lastKeys, lastTouch, lastFlags;   // what the last report said
 
@@ -318,18 +413,21 @@ static void showStall(void)
     if (vblanks - lastDiag < 15)
         return;
     lastDiag = vblanks;
-    if (stallManual)
-        printf("\x1b[0;0HSion Link: status            \n\n");
+    if (usbSilent())
+        printf("\x1b[0;0HThe DSpico stopped answering.\nSwitch the DS off and on and\nstart Sion Link again.\n");
+    else if (stallManual)
+        printf("\x1b[0;0HSion Link: status            \n%-30s\n%-30s\n", "", "");
     else
-        printf("\x1b[0;0HSion Link: picture stopped %4lu\n\n", (vblanks - lastAppliedAt) / 60);
+        printf("\x1b[0;0HSion Link: picture stopped %4lu\n%-30s\n%-30s\n", (vblanks - lastAppliedAt) / 60, "", "");
     printf("frames shown  %lu\n", mirrorStats[1]);
     printf("full refresh  %lu\n", fullBundles);
     printf("resyncs       %lu\n", resyncs);
     printf("out of memory %lu\n", allocFails);
     printf("data waiting  %lu\n", usbAvailable());
     printf("usb events    %lu\n", usbDiag.events);
-    printf("usb state     %-12s\n", usbDiag.deadReads ? "DSpico silent" : usbConfigured() ? "connected" : "lost");
+    printf("usb state     %-12s\n", usbSilent() ? "DSpico silent" : usbConfigured() ? "connected" : "lost");
     printf("silent reads  %lu\n", usbDiag.deadReads);
+    printf("irq reads %lu, timed %lu\n", usbDiag.irqs, usbDiag.timedPolls);
     printf("nudges %lu, recovered %lu\n", usbDiag.nudges, usbDiag.recovered);
     printf("restarted: data %lu, pad %lu\n", usbDiag.rearmed, usbDiag.inRearmed);
     printf("out done %lu, %lu KB %s\n", usbDiag.outDone, usbDiag.outBytes >> 10, usbDiag.outArmed ? "armed" : "idle ");
@@ -425,9 +523,13 @@ static void idle(void)
         if (keys != lastKeys || touch != lastTouch || flags != lastFlags || vblanks - lastReport >= 8)
         {
             mirror_input in = {MIRROR_INPUT_MAGIC, keys, t.px, t.py, mirrorStats[1] | flags,
-                               resyncs, allocFails, fullBundles, stalls};
+                               resyncs, allocFails, fullBundles, stalls,
+                               usbDiag.deadReads, usbDiag.irqs, usbDiag.timedPolls,
+                               usbDiag.recovered, usbDiag.rearmed, usbDiag.outDone, usbDiag.armTicks,
+                               usbDiag.busyMax, 0};
             if (usbSendReport(&in, sizeof in))
             {
+                usbDiag.busyMax = 0;
                 lastReport = vblanks;
                 lastKeys = keys;
                 lastTouch = touch;
@@ -453,10 +555,6 @@ static bool readBytes(void* dst, u32 n)
     return true;
 }
 
-static bool regOk(u32 off)
-{
-    return !(off & 1) && off + 2 <= 0x1070;
-}
 
 // A live bundle damaged on the way must not be applied: one bad VRAM block
 // number or record length writes somewhere it shouldn't. Checks every record.
@@ -500,7 +598,7 @@ static bool validBundle(const mirror_hdr* h)
             if (r->len != 4 + n * sizeof(mirror_reg)) return false;
             const mirror_reg* reg = (const mirror_reg*)(p + 1);
             for (u32 i = 0; i < n; i++)
-                if (!regOk(reg[i].off)) return false;
+                if (!ioOk(reg[i].off, 2, true)) return false;
             break;
         }
         case MREC_LINES:
@@ -508,7 +606,7 @@ static bool validBundle(const mirror_hdr* h)
             if (r->len != 4 + n * sizeof(mirror_line)) return false;
             const mirror_line* l = (const mirror_line*)(p + 1);
             for (u32 i = 0; i < n; i++)
-                if (!regOk(l[i].off) || l[i].line >= 263) return false;
+                if (!ioOk(l[i].off, 2, true) || l[i].line >= 263) return false;
             break;
         }
         case MREC_GX:
@@ -560,7 +658,7 @@ static mirror_hdr* unpackBundle(const mirror_hdr* p, bool* damaged)
     b->flags &= ~MIRROR_FLAG_LZ;
     u32 words = (rawSize - sizeof *b) / 4;
     if (!unpackLz((const u8*)(w + 3), packed, (u8*)(b + 1), rawSize - sizeof *b) ||
-        mirrorLzSum((const u32*)(b + 1), words) != w[1])
+        mirrorLzSeal(mirrorLzSum((const u32*)(b + 1), words), p->frame, p->flags) != w[1])
     {
         free(b);
         return NULL;
@@ -590,7 +688,25 @@ static mirror_hdr* readBundleLive(void)
             needFull = true;
             continue;
         }
-        u32 body = h.size - sizeof h;
+        // The Sion packs every bundle, with a checksum of what it packed, and the packed
+        // length must give the header's size. Otherwise this header was damaged, or the
+        // magic number turned up inside the data: look for the next one rather than read
+        // (up to 2 MB of) the stream as one bundle.
+        u32 head[3];   // rawSize, rawSum, packedLen
+        if (!(h.flags & MIRROR_FLAG_LZ) || h.size < sizeof h + sizeof head)
+        {
+            resyncs++;
+            needFull = true;
+            continue;
+        }
+        readBytes(head, sizeof head);
+        if (head[2] > 0x200000 || h.size != mirrorLzSize(sizeof h, head[2]) || head[0] > 0x200000)
+        {
+            resyncs++;
+            needFull = true;
+            continue;
+        }
+        u32 body = h.size - sizeof h - sizeof head;
         if ((needFull && !(h.flags & MIRROR_FLAG_FULL)) || stallManual)
         {
             skipBytes(body);
@@ -605,7 +721,8 @@ static mirror_hdr* readBundleLive(void)
             continue;
         }
         *b = h;
-        readBytes(b + 1, body);
+        memcpy(b + 1, head, sizeof head);
+        readBytes((u8*)(b + 1) + sizeof head, body);
         if (h.flags & MIRROR_FLAG_LZ)
         {
             bool damaged;
@@ -635,6 +752,21 @@ static mirror_hdr* readBundleLive(void)
             fullBundles++;
         }
         return b;
+    }
+}
+
+// a bundle's 3D commands, ready for pushGX; on the live link, a damaged delta
+// means everything after it builds on what's missing: start over with a full bundle
+static void readGX(const mirror_hdr* h)
+{
+    int r = decodeGX(h);
+    if (r != GX_OK && liveLink)
+    {
+        if (r == GX_DAMAGED)
+            resyncs++;
+        else
+            allocFails++;
+        needFull = true;
     }
 }
 
@@ -751,7 +883,7 @@ int main(int argc, char** argv)
     {
         mirror_hdr* cur = readBundle();
         if (cur)
-            decodeGX(cur);
+            readGX(cur);
         mirror_hdr* old = NULL;
         while (cur)
         {
@@ -773,7 +905,7 @@ int main(int argc, char** argv)
             pending2D = cur;
             mirror_hdr* next = readBundle();
             if (next)
-                decodeGX(next);
+                readGX(next);
             while (pending2D || holdFrames)
                 idle();
             free(old);

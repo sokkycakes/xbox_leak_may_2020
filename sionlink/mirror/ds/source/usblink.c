@@ -137,8 +137,12 @@ static bool outArmed;   // an OUT transfer is waiting for data
 static u8 outBuf;       // the DSpico buffer it lands in
 static bool inBusy;
 static u8 inBuf;
-static u32 pollCount;
 static volatile u32 ticks;   // VBlanks (usbTick)
+static u16 lastDrain;        // usbClock() of the last event read
+static u16 lastPoll;         // usbClock() of the last usbPoll
+static u16 armedAt;          // usbClock() when the OUT transfer was armed
+static u32 lastHeard;        // tick of the last event read the DSpico answered
+static u32 deadRun;          // event reads in a row that came back all ones
 static u32 outSince;         // tick the OUT transfer was armed or last finished
 static u32 inSince;          // tick the last report was started
 static u32 lastBlock[2][128];  // what we last read from each of the DSpico's OUT buffers
@@ -146,6 +150,17 @@ static u32 lastBlock[2][128];  // what we last read from each of the DSpico's OU
 void usbTick(void)
 {
     ticks++;
+}
+
+// free-running 16-bit clock in 1/32768 s (timer 3, started by usbStart)
+static inline u16 usbClock(void)
+{
+    return TIMER_DATA(3);
+}
+
+bool usbSilent(void)
+{
+    return deadRun >= 500 && ticks - lastHeard > 120;
 }
 
 static u32 ringFree(void)
@@ -163,9 +178,9 @@ u32 usbRead(void* dst, u32 n)
     u32 avail = usbAvailable();
     if (n > avail)
         n = avail;
-    u8* d = dst;
-    for (u32 i = 0; i < n; i++)
-        d[i] = ring[(ringTail + i) % RING];
+    u32 at = ringTail % RING, first = RING - at < n ? RING - at : n;
+    memcpy(dst, &ring[at], first);
+    memcpy((u8*)dst + first, ring, n - first);
     ringTail += n;
     return n;
 }
@@ -213,6 +228,7 @@ static void armOut(void)
     cardCmd(USB_BEGIN_TRANSFER(EP_OUT, outBuf, 512));
     outArmed = true;
     outSince = ticks;
+    armedAt = usbClock();
 }
 
 // The block in DSpico OUT buffer b, `bytes` of it into the ring
@@ -220,9 +236,11 @@ static void takeBlock(u8 b, u32 bytes)
 {
     cardRead512(USB_READ_DATA(b, EP_OUT), xfer);
     memcpy(lastBlock[b], xfer, sizeof xfer);
-    const u8* s = (const u8*)xfer;
-    for (u32 i = 0; i < bytes && i < 512; i++)
-        ring[(ringHead + i) % RING] = s[i];
+    if (bytes > 512)
+        bytes = 512;
+    u32 at = ringHead % RING, first = RING - at < bytes ? RING - at : bytes;
+    memcpy(&ring[at], xfer, first);
+    memcpy(ring, (const u8*)xfer + first, bytes - first);
     ringHead += bytes;
 }
 
@@ -423,6 +441,7 @@ static void xferComplete(u32 ep, u32 bytes)
     {
         outSince = ticks;
         usbDiag.outDone++;
+        usbDiag.armTicks += (u16)(usbClock() - armedAt);
         usbDiag.outBytes += bytes;
         u8 done = outBuf;
         outArmed = false;
@@ -445,10 +464,13 @@ static void drainEvents(void)
         u32 e = cardRead4(USB_GET_EVENT);
         if (e == 0xFFFFFFFF)
         {
-            // nothing drives the bus: the DSpico's firmware has stopped
+            // nothing drove the bus: the DSpico answered too late, or has stopped
             usbDiag.deadReads++;
+            deadRun++;
             break;
         }
+        lastHeard = ticks;
+        deadRun = 0;
         bool last = e & EV_LAST;
         e &= ~EV_LAST;
         if (e == 0)
@@ -492,14 +514,21 @@ static bool goodId(u32 id)
 void usbStart(void)
 {
     sysSetCardOwner(BUS_OWNER_ARM9);
+    TIMER_CR(3) = 0;
+    TIMER_DATA(3) = 0;
+    TIMER_CR(3) = TIMER_ENABLE | TIMER_DIV_1024;
     // the DSpico answers its USB commands only in unscrambled game mode, which
-    // its launcher leaves it in; read the card ID to see the bus is talking
+    // its launcher leaves it in; read the card ID to see the bus is talking.
+    // Only if that fails, try with KEY2: in unscrambled mode a scrambled command
+    // reads as one the DSpico doesn't know, and it stops answering for good.
     usbDiag.idPlain = cardRead4(CARD_READ_ID);
-    secFlags = KEY2_FLAGS;
-    usbDiag.idKey2 = cardRead4(CARD_READ_ID);
-    secFlags = 0;
-    if (!goodId(usbDiag.idPlain) && goodId(usbDiag.idKey2))
+    if (!goodId(usbDiag.idPlain))
+    {
         secFlags = KEY2_FLAGS;
+        usbDiag.idKey2 = cardRead4(CARD_READ_ID);
+        if (!goodId(usbDiag.idKey2))
+            secFlags = 0;
+    }
     usbDiag.secFlags = secFlags;
     cardCmd(USB_CLEAR_EVENT_QUEUE);
     cardCmd(USB_INIT);
@@ -507,14 +536,31 @@ void usbStart(void)
     cardCmd(USB_CONNECT);
 }
 
+// Every card command is a chance for a glitch to reach the DSpico as a command it
+// doesn't know, and then it ignores the card bus until the DS is switched off (run 8
+// died that way after 6 minutes, having read events 15,000 times a second). So read
+// events when the DSpico raises the card IRQ line (it does while it has some), and
+// otherwise only every millisecond, in case that edge was missed.
+#define POLL_TICKS 33   // 1 ms in usbClock() units
+
 void usbPoll(void)
 {
-    // the DSpico raises the card IRQ line while it has events; check now and then anyway
-    if ((REG_IF & IRQ_CARD_LINE) || (++pollCount & 63) == 0)
+    u16 now = usbClock();
+    u16 gap = now - lastPoll;
+    if (gap > usbDiag.busyMax)
+        usbDiag.busyMax = gap;
+    lastPoll = now;
+    if (REG_IF & IRQ_CARD_LINE)
     {
-        if (REG_IF & IRQ_CARD_LINE)
-            usbDiag.irqs++;
-        REG_IF = IRQ_CARD_LINE;
+        REG_IF = IRQ_CARD_LINE;   // before reading, so events from now on raise it again
+        usbDiag.irqs++;
+        lastDrain = now;
+        drainEvents();
+    }
+    else if ((u16)(now - lastDrain) >= POLL_TICKS)
+    {
+        usbDiag.timedPolls++;
+        lastDrain = now;
         drainEvents();
     }
     armOut();

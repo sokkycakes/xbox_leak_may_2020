@@ -21,13 +21,16 @@ void usbStart(void);
 typedef struct {
     u32 idPlain, idKey2;    // card ID read without and with KEY2 scrambling
     u32 secFlags;           // scrambling flags in use
-    u32 irqs, events, resets, setups, configured;
+    u32 irqs, timedPolls;   // event reads because the DSpico raised its IRQ line / because 1 ms went by
+    u32 events, resets, setups, configured;
     u32 lastEvent, lastSetup;
     u32 deadReads;          // event reads that came back all ones (DSpico not answering)
     u32 nudges;             // the Sion's nudges
     u32 recovered, rearmed; // OUT blocks whose completion was lost, OUT transfers armed again
     u32 inRearmed;          // reports started again
     u32 outDone, outBytes, inDone, reports;  // transfers completed, reports started
+    u32 armTicks;           // time OUT transfers spent armed, 1/32768 s
+    u16 busyMax;            // longest gap between usbPoll calls, 1/32768 s (the caller resets it)
     bool outArmed, inBusy;
     // recent link history: S setup (x = request, a = value, b = length),
     // C transfer complete (x = endpoint, a = bytes), R bus reset, Z status sent,
@@ -39,6 +42,9 @@ extern usb_diag usbDiag;
 void usbPoll(void);
 void usbTick(void);
 bool usbConfigured(void);
+// the DSpico has answered no event read for 2 s: it has stopped listening to the
+// card bus, and only switching the DS off and on brings it back
+bool usbSilent(void);
 
 // bytes received from the host that haven't been read yet
 u32 usbAvailable(void);

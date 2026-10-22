@@ -70,14 +70,15 @@ static std::vector<uint8_t> LzPackBundle(const std::vector<uint8_t>& b)
     LzPackBytes(b.data() + sizeof(mirror_hdr), body, out);
     uint32_t packed = (uint32_t)(out.size() - sizeof(mirror_hdr) - MIRROR_LZ_HEAD);
     out.resize((out.size() + 3) & ~size_t(3), 0);
-    if (out.size() >= b.size()) return b;
+    // packed even when that's no smaller: the DS takes only packed bundles on the
+    // live link, as their checksum is how it knows one arrived undamaged
     mirror_hdr* o = (mirror_hdr*)out.data();
     *o = *h;
     o->size = (uint32_t)out.size();
     o->flags |= MIRROR_FLAG_LZ;
     uint32_t* w = (uint32_t*)(o + 1);
     w[0] = (uint32_t)b.size();
-    w[1] = mirrorLzSum((const uint32_t*)(h + 1), (uint32_t)(body / 4));
+    w[1] = mirrorLzSeal(mirrorLzSum((const uint32_t*)(h + 1), (uint32_t)(body / 4)), o->frame, o->flags);
     w[2] = packed;
     return out;
 }

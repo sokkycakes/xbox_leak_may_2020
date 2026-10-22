@@ -370,6 +370,16 @@ void DSpicoSim::ReadSocket()
         r -= n;
         fprintf(stderr, "dspico sim: dropped %zu bytes of the stream at byte %lld\n", n, dropAt);
     }
+    // fault test: DSPICO_FLIP=N damages the byte at N and then one every 100 KB, 10 in all
+    static long long flipAt = getenv("DSPICO_FLIP") ? atoll(getenv("DSPICO_FLIP")) : -1;
+    static int flips = 0;
+    while (flipAt >= from && flipAt < seen && flips < 10)
+    {
+        tmp[flipAt - from] ^= 0x5A;
+        fprintf(stderr, "dspico sim: damaged the stream at byte %lld\n", flipAt);
+        flipAt += 100000;
+        flips++;
+    }
     fromHost.insert(fromHost.end(), tmp, tmp + r);
 }
 
@@ -393,6 +403,14 @@ void DSpicoSim::PumpOut()
         o.armed = false;
         completes++;
         progressed = true;
+        // DSPICO_HANG=N: after the Nth OUT transfer the DSpico stops answering the card
+        // bus for good, the way a real one does after a command it doesn't know (run 8)
+        if (Fault("DSPICO_HANG", completes))
+        {
+            fprintf(stderr, "dspico sim: stopped answering after OUT transfer %u\n", completes);
+            crashed = true;
+            return;
+        }
         // DSPICO_LOSE=N: the DS's read of the Nth completion event comes back all ones
         // (the firmware answered too late) and the event is gone
         if (Fault("DSPICO_LOSE", completes))

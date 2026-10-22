@@ -2,7 +2,8 @@
 // than the Sion makes it when a game loads textures, and VRAM and 3D commands pack
 // to a third or less. After the header, the body is:
 //   u32 rawSize     the unpacked bundle's size, header included
-//   u32 rawSum      sum of the unpacked body's words (after the header)
+//   u32 rawSum      mirrorLzSeal: sum of the unpacked body's words (after the header),
+//                   mixed with the header's frame and flags
 //   u32 packedLen   bytes of packed data that follow (then zeros to a multiple of 4)
 // The packed data is the LZ4 block format (lz4.org): sequences of a token (high
 // nibble literal count, low nibble match length - 4; 15 = more bytes follow, each
@@ -71,6 +72,19 @@ static inline uint32_t mirrorLzSum(const uint32_t* w, uint32_t words)
     for (uint32_t i = 0; i < words; i++)
         sum += w[i] ^ (sum >> 7);
     return sum;
+}
+
+// the checksum a packed bundle carries: its body and its header's frame and flags
+// (the header's size is checked against packedLen before the body is read)
+static inline uint32_t mirrorLzSeal(uint32_t bodySum, uint32_t frame, uint32_t flags)
+{
+    return bodySum ^ (frame * 0x9E3779B1u) ^ (flags * 0x85EBCA6Bu);
+}
+
+// the size a packed bundle's header must give
+static inline uint32_t mirrorLzSize(uint32_t hdrSize, uint32_t packedLen)
+{
+    return (hdrSize + MIRROR_LZ_HEAD + packedLen + 3) & ~3u;
 }
 
 #endif

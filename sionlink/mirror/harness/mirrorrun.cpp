@@ -11,7 +11,8 @@
 //     --gxdelta 1      send 3D commands as copies from the previous bundle's where they repeat
 //     --serve LINK     live: stream the bundles to the DS and play with its pad;
 //                      LINK is sim:PATH (a --dspico run) or usb (the DSpico on this machine)
-//     --lz 0           send bundles unpacked on the link (default: packed, mirror_lz.h)
+//     --reconnect 1    when the DS goes away (switched off), wait for it to come back
+//                      instead of stopping
 //     --dspico PATH    run a DS client with a simulated DSpico whose USB host is the
 //                      --serve run listening on PATH
 //     --usbrate N      simulated USB bytes per frame (default 12000, ~700 KB/s)
@@ -257,7 +258,6 @@ public:
     std::condition_variable sendDone;
     u32 capWaits = 0;
     bool sendStop = false;
-    bool lz = true;   // pack bundles on the link (MIRROR_FLAG_LZ)
 
     void StartLink(HostLink* l)
     {
@@ -275,7 +275,7 @@ public:
                 }
                 auto t0 = std::chrono::steady_clock::now();
                 size_t raw = b.size();
-                if (lz) b = LzPackBundle(b);
+                b = LzPackBundle(b);
                 // Whole 512-byte blocks only: the DS reads in 512-byte USB transfers, and a short
                 // packet that ends one early leaves the DSpico's (RP2040) second packet buffer
                 // armed, which loses data or hangs its firmware. The DS skips the zero padding
@@ -308,6 +308,18 @@ public:
         { std::lock_guard<std::mutex> g(sendLock); sendStop = true; }
         sendWake.notify_one();
         sender.join();
+        link = nullptr;
+    }
+    // the DS came back on a new link: start over with a full bundle
+    void RestartLink(HostLink* l)
+    {
+        sendQueue.clear();
+        sendBusy = 0;
+        fullPending = 0;
+        sendStop = false;
+        linkLost = false;
+        RequestFull();
+        StartLink(l);
     }
     // Frames with display capture can't be left out (the DS redoes the capture from the
     // frame before). When those pile up, the game waits for the DS instead.
@@ -830,7 +842,7 @@ int main(int argc, char** argv)
 {
     if (argc < 3)
     {
-        fprintf(stderr, "usage: %s ROM FRAMES [--input F] [--record F] [--frames F] [--shots DIR] [--every N] [--stats F] [--boottype N] [--lang N] [--gamecode XXXX] [--half 1] [--gxdelta 1] [--serve LINK] [--lz 0] [--dspico PATH] [--usbrate N] [--realtime 1] [--jit 1] [--threaded 1]\n", argv[0]);
+        fprintf(stderr, "usage: %s ROM FRAMES [--input F] [--record F] [--frames F] [--shots DIR] [--every N] [--stats F] [--boottype N] [--lang N] [--gamecode XXXX] [--half 1] [--gxdelta 1] [--serve LINK] [--reconnect 1] [--dspico PATH] [--usbrate N] [--realtime 1] [--jit 1] [--threaded 1]\n", argv[0]);
         return 1;
     }
     const char* rompath = argv[1];
@@ -842,7 +854,7 @@ int main(int argc, char** argv)
     int lang = -1;
     const char* gamecode = nullptr;
     const char* clientIdx = nullptr;
-    bool half = false, gxDelta = false, lz = true;
+    bool half = false, gxDelta = false, reconnect = false;
     const char *serve = nullptr, *dspico = nullptr;
     u32 usbRate = 12000;
     bool realtime = false, jit = false, threaded = false;
@@ -861,7 +873,7 @@ int main(int argc, char** argv)
         else if (o == "--client-index") clientIdx = argv[i + 1];
         else if (o == "--half") half = atoi(argv[i + 1]) != 0;
         else if (o == "--gxdelta") gxDelta = atoi(argv[i + 1]) != 0;
-        else if (o == "--lz") lz = atoi(argv[i + 1]) != 0;
+        else if (o == "--reconnect") reconnect = atoi(argv[i + 1]) != 0;
         else if (o == "--serve") serve = argv[i + 1];
         else if (o == "--dspico") dspico = argv[i + 1];
         else if (o == "--usbrate") usbRate = atoi(argv[i + 1]);
@@ -922,7 +934,6 @@ int main(int argc, char** argv)
     rec.nds = nds.get();
     rec.half = half;
     rec.gxDelta = gxDelta;
-    rec.lz = lz;
     if (record)
     {
         rec.out = fopen(record, "wb");
@@ -953,6 +964,8 @@ int main(int argc, char** argv)
     mirror_input dsSeen {};
     bool deaf = false;   // no reports for a while: the DS can't ask for a full frame
     mirror_input pad {};
+    mirror_input linkSeen {};   // the DS's link counters at the last speed line
+    u32 busyMax = 0;            // longest the DS went without looking at USB, since then
 
     nds->Start();
 
@@ -969,7 +982,26 @@ int main(int argc, char** argv)
     for (u32 f = 0; f < frames; f++)
     {
         if (link && rec.linkLost)
-            break;
+        {
+            if (!reconnect)
+                break;
+            // switched off, or its DSpico stopped answering and then it was switched off:
+            // keep the game going and wait for it to come back
+            rec.StopLink();
+            link.reset();
+            nds->SetKeyMask(0xFFF);
+            nds->ReleaseScreen();
+            pad = {};
+            linkSeen = {};
+            shownBefore = 0;   // a new DS counts from 0
+            fprintf(stderr, "link: waiting for the DS to come back (switch it on and start Sion Link)\n");
+            link = OpenHostLink(serve);
+            if (!link) return 1;
+            rec.RestartLink(link.get());
+            fprintf(stderr, "link: the DS is back at frame %u\n", f);
+            lastReportAt = lastFullReq = f;
+            deaf = false;
+        }
         if (link && f && f % 600 == 0)
         {
             // how fast the game runs here, and whether the link keeps up
@@ -985,6 +1017,20 @@ int main(int argc, char** argv)
                 fprintf(stderr, "  DS so far: %u damaged bundles, %u with no memory, %u full refreshes, %u stalls\n",
                         pad.damaged, pad.noMemory, pad.fulls, pad.stalls);
             dsSeen = pad;
+            if (pad.magic == MIRROR_INPUT_MAGIC)
+            {
+                // how the DS side of the link is doing: whether the DSpico's IRQ line works,
+                // how long a 512-byte block waits for its data, how long the DS is busy
+                u32 blocks = pad.blocks - linkSeen.blocks;
+                double waitMs = blocks ? (pad.armedTime - linkSeen.armedTime) / 32.768 / blocks : 0;
+                fprintf(stderr, "  DS link: %u blocks, %.2f ms each waiting for data, busy up to %.1f ms, "
+                        "events read %u on IRQ %u timed, %u silent, %u recovered, %u restarted\n",
+                        blocks, waitMs, busyMax / 32.768, (u16)(pad.irqReads - linkSeen.irqReads),
+                        (u16)(pad.timedReads - linkSeen.timedReads), pad.silent - linkSeen.silent,
+                        (u16)(pad.recovered - linkSeen.recovered), (u16)(pad.restarted - linkSeen.restarted));
+                linkSeen = pad;
+                busyMax = 0;
+            }
             shownBefore = shown;
             reportsShown = reports;
             sentShown = sent;
@@ -1023,6 +1069,7 @@ int main(int argc, char** argv)
             else nds->ReleaseScreen();
             reports++;
             lastReportAt = f;
+            if (pad.busyMax > busyMax) busyMax = pad.busyMax;
             if (deaf)
             {
                 deaf = false;
@@ -1036,6 +1083,10 @@ int main(int argc, char** argv)
             if (!deaf)
                 fprintf(stderr, "link: no reports from the DS since frame %u; sending a full frame every 5 s\n", lastReportAt);
             deaf = true;
+            // and let go of its buttons, or the game keeps them held
+            nds->SetKeyMask(0xFFF);
+            nds->ReleaseScreen();
+            pad.keys = 0;
             lastFullReq = f;
             rec.RequestFull();
         }
@@ -1094,8 +1145,14 @@ int main(int argc, char** argv)
     if (fidx) fclose(fidx);
     rec.StopLink();
     if (link)
+    {
         fprintf(stderr, "link: sent %u bundles, %u frames left out while the link was busy, %u pad reports from the DS, %u frames with buttons held\n",
                 rec.frame, rec.linkSkips, reports, padFrames);
+        if (pad.magic == MIRROR_INPUT_MAGIC)
+            fprintf(stderr, "link: the DS's last report: %u shown%s, %u damaged bundles, %u with no memory, %u full refreshes, %u stalls, %u silent reads\n",
+                    pad.applied & ~MIRROR_INPUT_NEED_FULL, pad.applied & MIRROR_INPUT_NEED_FULL ? " (waiting for a full frame)" : "",
+                    pad.damaged, pad.noMemory, pad.fulls, pad.stalls, pad.silent);
+    }
     if (pico)
         fprintf(stderr, "dspico sim: %s\n", pico->Configured() ? "configured" : "never configured");
     if (rec.out)
