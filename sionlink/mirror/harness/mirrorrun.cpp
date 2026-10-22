@@ -6,6 +6,9 @@
 //     --frames FILE    write every frame as raw 32-bit pixels, top then bottom screen
 //     --shots DIR      write a PPM of both screens every --every frames (default 60)
 //     --stats FILE     per-frame bundle sizes as CSV
+//     --lang N         firmware language (0 Japanese, 1 English, ...)
+//     --gamecode XXXX  replace the header's game code, for prototypes whose code melonDS's
+//                      cart list gives to another game (wrong cart/save type)
 //
 // melonDS is GPL; this runner links it and stays GPL with it.
 
@@ -28,6 +31,7 @@
 #include "Platform.h"
 #include "MirrorTap.h"
 #include "Args.h"
+#include "SPI.h"
 #include "../common/mirror_format.h"
 
 using namespace melonDS;
@@ -428,7 +432,7 @@ int main(int argc, char** argv)
 {
     if (argc < 3)
     {
-        fprintf(stderr, "usage: %s ROM FRAMES [--input F] [--record F] [--frames F] [--shots DIR] [--every N] [--stats F] [--boottype N]\n", argv[0]);
+        fprintf(stderr, "usage: %s ROM FRAMES [--input F] [--record F] [--frames F] [--shots DIR] [--every N] [--stats F] [--boottype N] [--lang N] [--gamecode XXXX]\n", argv[0]);
         return 1;
     }
     const char* rompath = argv[1];
@@ -436,6 +440,8 @@ int main(int argc, char** argv)
     const char *input = nullptr, *record = nullptr, *framesOut = nullptr, *shots = nullptr, *statsPath = nullptr;
     u32 every = 60;
     int bootType = -1;
+    int lang = -1;
+    const char* gamecode = nullptr;
     const char* clientIdx = nullptr;
     for (int i = 3; i + 1 < argc; i += 2)
     {
@@ -447,6 +453,8 @@ int main(int argc, char** argv)
         else if (o == "--every") every = atoi(argv[i + 1]);
         else if (o == "--stats") statsPath = argv[i + 1];
         else if (o == "--boottype") bootType = atoi(argv[i + 1]);
+        else if (o == "--lang") lang = atoi(argv[i + 1]);
+        else if (o == "--gamecode") gamecode = argv[i + 1];
         else if (o == "--client-index") clientIdx = argv[i + 1];
         else { fprintf(stderr, "unknown option %s\n", o.c_str()); return 1; }
     }
@@ -459,9 +467,26 @@ int main(int argc, char** argv)
     auto rom = std::make_unique<u8[]>(romlen);
     if (fread(rom.get(), 1, romlen, rf) != romlen) { fprintf(stderr, "short read\n"); return 1; }
     fclose(rf);
+    if (gamecode && strlen(gamecode) == 4 && romlen >= 0x200)
+    {
+        // melonDS looks the cart type and save type up by game code; prototypes can share a
+        // code with an unrelated retail game (Mario Kart DS kiosk A39E is listed as a NAND cart)
+        memcpy(&rom[0x0C], gamecode, 4);
+        u16 crc = CRC16(rom.get(), 0x15E, 0xFFFF);
+        memcpy(&rom[0x15E], &crc, 2);
+    }
 
     NDSArgs args {};
     args.JIT = std::nullopt;   // the tap needs every I/O write to go through the interpreter
+    if (lang >= 0)
+    {
+        // firmware language (0 Japanese, 1 English, ...); some builds only carry some languages' files
+        for (auto& u : args.Firmware.GetUserData())
+        {
+            u.Settings = (u.Settings & ~7) | lang;
+            u.UpdateChecksum();
+        }
+    }
     auto nds = std::make_unique<NDS>(std::move(args));
     nds->Reset();
     auto cart = NDSCart::ParseROM(std::move(rom), romlen);
@@ -541,6 +566,11 @@ int main(int argc, char** argv)
         if (rec.stats) fclose(rec.stats);
         fprintf(stderr, "recorded %u bundles, %.1f KB/frame raw, %.1f KB/frame zlib\n", rec.frame,
                 rec.totalRaw / 1024.0 / rec.frame, rec.totalZ / 1024.0 / rec.frame);
+    }
+    if (const char* dump = getenv("MIRROR_DUMPRAM"))
+    {
+        FILE* d = fopen(dump, "wb");
+        if (d) { fwrite(nds->MainRAM, 1, nds->MainRAMMask + 1, d); fclose(d); }
     }
     // replay client counters (ds/source/main.c mirrorStats)
     for (u32 i = 0; i + 16 <= nds->MainRAMMask + 1; i += 4)
