@@ -6,6 +6,7 @@
 #define MIRROR_TVOUT_H
 
 #include <cstdint>
+#include <chrono>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -19,6 +20,8 @@ public:
     // have reached the screen first, so the game runs at the TV's pace (Paced()).
     void Show(const uint32_t* top, const uint32_t* bottom);
     bool Paced() const { return paced; }
+    // the TV's frame rate (the mode's pixel clock over its frame size)
+    double Hz() const;
     void Close();
 
 private:
@@ -33,8 +36,9 @@ private:
     std::vector<uint32_t> xs, ys;      // per output column/row: source index << 9 | weight (of 256)
     std::vector<uint32_t> rowCache;    // horizontally scaled source rows
 
-    // dump:
+    // dump: (MIRROR_TVPACE=1: paced by a pretend 60 Hz TV, for cloud tests)
     FILE* dump = nullptr;
+    double vblankPeriod = 0, flipAt = 0;   // seconds on the steady clock
     uint32_t frames = 0;
     std::vector<uint32_t> dumpBuf;
 

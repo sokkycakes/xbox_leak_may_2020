@@ -17,9 +17,9 @@
 #include <unistd.h>
 
 static const uint32_t RingFrames = 16384;
-// frames in the buffer the rate control aims for (43 ms; MIRROR_SOUNDFILL): a slow frame
+// frames in the buffer the rate control aims for (53 ms; MIRROR_SOUNDFILL): a slow frame
 // (a course loading) mustn't empty it
-static const double TargetFill = getenv("MIRROR_SOUNDFILL") ? atof(getenv("MIRROR_SOUNDFILL")) : 2048;
+static const double TargetFill = getenv("MIRROR_SOUNDFILL") ? atof(getenv("MIRROR_SOUNDFILL")) : 2560;
 
 // ---- the PCM device
 
@@ -174,7 +174,7 @@ bool SoundOut::Write(const int16_t* data, uint32_t frames)
         if (errno == EPIPE)
         {
             // the card ran dry: start it again
-            underruns++;
+            xruns++;
             ioctl(pcm, SNDRV_PCM_IOCTL_PREPARE);
             continue;
         }
@@ -232,6 +232,7 @@ void SoundOut::Push(const int16_t* data, uint32_t frames)
         ring[at + 1] = data[i * 2 + 1];
         head++;
     }
+    more.notify_one();
 }
 
 double SoundOut::Skew()
@@ -263,10 +264,14 @@ void SoundOut::Run()
         buf.assign(period * 2, 0);
         uint32_t got = 0;
         {
-            std::lock_guard<std::mutex> g(lock);
-            size_t have = head - tail;
+            std::unique_lock<std::mutex> g(lock);
             // start once there's a buffer's worth, so it doesn't run dry straight away
-            if (!started && have >= TargetFill) started = true;
+            if (!started && head - tail >= TargetFill) started = true;
+            // Short of a period: the card still has most of its buffer to play (16 ms), so
+            // give a slow frame (a course loading, a big bundle) that long before silence.
+            if (started && head - tail < period)
+                more.wait_for(g, std::chrono::milliseconds(12), [&] { return head - tail >= period || stop; });
+            size_t have = head - tail;
             if (started)
             {
                 got = (uint32_t)std::min<size_t>(have, period);

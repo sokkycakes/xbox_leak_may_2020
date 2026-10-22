@@ -1307,6 +1307,7 @@ int main(int argc, char** argv)
     u32 reports = 0, padFrames = 0, lastFullReq = 0, lastReportAt = 0, reportsShown = 0;
     u64 sentShown = 0;
     u32 shownBefore = 0;
+    bool firstReport = true;   // the DS's counters run on from before this link (run 11: from the run before)
     mirror_input dsSeen {};
     bool deaf = false;   // no reports for a while: the DS can't ask for a full frame
     mirror_input pad {};
@@ -1316,6 +1317,8 @@ int main(int argc, char** argv)
     bool reportWaiting = false;   // pollReports took one while the game waited for the DS
     auto noteShown = [&] {
         if (!pad.shownFrame) return;
+        // still a frame from before this run (the DS stayed on through a restart)
+        if ((s32)(rec.emuFrame - pad.shownFrame) < 0) return;
         if (pad.shownFrame != rec.dsShown || !rec.dsShownValid)
         {
             rec.dsShown = pad.shownFrame;
@@ -1348,10 +1351,13 @@ int main(int argc, char** argv)
     s64 statsAt = -1;
 
     auto tick = std::chrono::steady_clock::now();
+    const auto tvFrame = std::chrono::nanoseconds((s64)(1e9 / tv.Hz()));
+    u32 tvSkipped = 0, tvSkippedShown = 0;
     // 560190 cycles at 33.51 MHz; MIRROR_FRAMEHZ=60 runs at a TV's pace instead (cloud tests)
     const auto frameTime = std::chrono::nanoseconds(getenv("MIRROR_FRAMEHZ") ? (s64)(1e9 / atof(getenv("MIRROR_FRAMEHZ"))) : 16715757);
     auto speedFrom = std::chrono::steady_clock::now();
-    u32 underrunsShown = 0;
+    u32 underrunsShown = 0, xrunsShown = 0;
+    double longestMs = 0;   // the longest a frame took here (game, bundle), since the last speed line
     for (u32 f = 0; f < frames; f++)
     {
         if (gMirrorQuit)
@@ -1370,8 +1376,7 @@ int main(int argc, char** argv)
             nds->SetKeyMask(0xFFF);
             nds->ReleaseScreen();
             pad = {};
-            linkSeen = {};
-            shownBefore = 0;   // a new DS counts from 0
+            firstReport = true;
             fprintf(stderr, "link: waiting for the DS to come back (switch it on and start Sion Link)\n");
             link = OpenHostLink(serve);
             if (!link)
@@ -1394,10 +1399,14 @@ int main(int argc, char** argv)
             char behind[48] = "";
             if (behindMax)
                 snprintf(behind, sizeof behind, " (%u to %u frames behind)", behindMin, behindMax);
-            fprintf(stderr, "frame %u: %.1f fps, %u bundles sent (%llu KB/s), %u frames left out, DS showed %u%s, %u reports, pad %03x%s\n",
-                    f, 600 / s, rec.frame, (unsigned long long)((sent - sentShown) / 1024 / s), rec.linkSkips,
+            fprintf(stderr, "frame %u: %.1f fps (longest %.0f ms), %u bundles sent (%llu KB/s), %u frames left out, DS showed %u%s, %u reports, pad %03x%s\n",
+                    f, 600 / s, longestMs, rec.frame, (unsigned long long)((sent - sentShown) / 1024 / s), rec.linkSkips,
                     shown - shownBefore, behind, reports - reportsShown, pad.keys & 0xFFF,
                     pad.applied & MIRROR_INPUT_NEED_FULL ? ", DS waiting for a full frame" : "");
+            longestMs = 0;
+            if (tvSkipped != tvSkippedShown)
+                fprintf(stderr, "  TV: %u frames not shown, catching up after slow ones\n", tvSkipped - tvSkippedShown);
+            tvSkippedShown = tvSkipped;
             behindMin = ~0u;
             behindMax = 0;
             if (memcmp(&pad.damaged, &dsSeen.damaged, 8))
@@ -1418,24 +1427,37 @@ int main(int argc, char** argv)
                 linkSeen = pad;
                 busyMax = 0;
             }
-            if (sound.Underruns() != underrunsShown)
+            if (sound.Underruns() != underrunsShown || sound.Xruns() != xrunsShown)
             {
-                fprintf(stderr, "  sound: ran dry %u times\n", sound.Underruns() - underrunsShown);
+                fprintf(stderr, "  sound: ran dry %u times, the card %u times\n", sound.Underruns() - underrunsShown,
+                        sound.Xruns() - xrunsShown);
                 underrunsShown = sound.Underruns();
+                xrunsShown = sound.Xruns();
             }
             shownBefore = shown;
             reportsShown = reports;
             sentShown = sent;
             speedFrom = now;
         }
-        if (realtime && !tv.Paced())
+        // On the TV each frame waits for the one before to be on screen. A frame here that
+        // takes longer than the TV's frame (a course loading, a big bundle) would leave the
+        // game behind for good, and its sound would run dry: the frames after it aren't
+        // shown until it has caught up again (the TV keeps showing the last one meanwhile).
+        bool catchUp = false;
+        if (realtime || tv.Paced())
         {
-            tick += frameTime;
+            tick += tv.Paced() ? tvFrame : frameTime;
             // after waiting for the DS, carry on from now instead of racing to catch up
             auto now = std::chrono::steady_clock::now();
             if (now - tick > std::chrono::milliseconds(250)) tick = now;
-            std::this_thread::sleep_until(tick);
+            if (!tv.Paced())
+                std::this_thread::sleep_until(tick);
+            else if (tick > now)
+                tick = now;   // the TV's pace: never ahead of it
+            else
+                catchUp = now - tick > tvFrame;
         }
+        auto frameStart = std::chrono::steady_clock::now();
         while (si < steps.size() && steps[si].frame <= f)
         {
             const InputStep& s = steps[si++];
@@ -1448,6 +1470,11 @@ int main(int argc, char** argv)
             gotReport = true;
         if (gotReport)
         {
+            if (std::exchange(firstReport, false))
+            {
+                shownBefore = pad.applied & ~MIRROR_INPUT_NEED_FULL;
+                linkSeen = dsSeen = pad;
+            }
             noteShown();
             // One full frame at a time: it can take seconds to get through, and the DS
             // keeps asking until it has arrived. Give it time to say so after one has gone
@@ -1490,8 +1517,16 @@ int main(int argc, char** argv)
         if (link && (pad.keys & 0xFFF)) padFrames++;
         if (pico) pico->Frame();
         nds->RunFrame();
+        if (const char* st = getenv("MIRROR_STALLTEST"))
+        {
+            // cloud tests: a slow frame (N:MS, MS ms every N frames), as a course loading is
+            unsigned every = 0, ms = 0;
+            if (sscanf(st, "%u:%u", &every, &ms) == 2 && every && f % every == every - 1)
+                std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+        }
         void *top = nullptr, *bot = nullptr;
         nds->GPU.GetFramebuffers(&top, &bot);
+        longestMs = std::max(longestMs, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - frameStart).count());
         if (soundSpec)
         {
             // the sound first: showing the picture can wait for the TV
@@ -1499,7 +1534,8 @@ int main(int argc, char** argv)
             if (n > 0) sound.Push(soundBuf.data(), n);
             nds->SPU.SetOutputSkew(sound.Skew());
         }
-        if (tvSpec) tv.Show((const u32*)top, (const u32*)bot);
+        if (catchUp) tvSkipped++;
+        else if (tvSpec) tv.Show((const u32*)top, (const u32*)bot);
         if (fo)
         {
             fwrite(top, 4, 256 * 192, fo);
@@ -1592,7 +1628,7 @@ int main(int argc, char** argv)
     if (soundSpec)
     {
         sound.Close();
-        fprintf(stderr, "sound: ran dry %u times in all\n", sound.Underruns());
+        fprintf(stderr, "sound: ran dry %u times in all, the card %u times\n", sound.Underruns(), sound.Xruns());
     }
     tv.Close();
     gMirrorTap = nullptr;

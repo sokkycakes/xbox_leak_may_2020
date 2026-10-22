@@ -17,6 +17,7 @@
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <thread>
 #include <unistd.h>
 
 static int Xioctl(int fd, unsigned long req, void* arg)
@@ -105,6 +106,11 @@ bool TVOut::Open(const std::string& spec)
         if (!dump) { perror(spec.c_str() + 5); return false; }
         dumpBuf.assign((size_t)w * h, 0);
         Layout();
+        if (getenv("MIRROR_TVPACE"))
+        {
+            vblankPeriod = 1.0 / 60;
+            paced = true;
+        }
         return true;
     }
     if (spec != "drm")
@@ -284,6 +290,20 @@ void TVOut::Show(const uint32_t* top, const uint32_t* bottom)
 {
     if (dump)
     {
+        if (vblankPeriod)
+        {
+            // as a page flip: wait for the frame before to be on screen, and this one goes
+            // up at the next vblank
+            using namespace std::chrono;
+            auto secs = [] { return duration<double>(steady_clock::now().time_since_epoch()).count(); };
+            double now = secs();
+            if (flipAt > now)
+            {
+                std::this_thread::sleep_for(duration<double>(flipAt - now));
+                now = flipAt;
+            }
+            flipAt = (floor(now / vblankPeriod) + 1) * vblankPeriod;
+        }
         if (frames++ % 60 == 0)
         {
             Compose(dumpBuf.data(), w * 4, top, bottom);
@@ -341,6 +361,17 @@ void TVOut::Show(const uint32_t* top, const uint32_t* bottom)
         static int errs;
         if (errs++ < 5) fprintf(stderr, "tv: PAGE_FLIP: %s\n", strerror(errno));
     }
+}
+
+double TVOut::Hz() const
+{
+    if (modeInfo.size() == sizeof(drm_mode_modeinfo))
+    {
+        const drm_mode_modeinfo* m = (const drm_mode_modeinfo*)modeInfo.data();
+        if (m->htotal && m->vtotal && m->clock)
+            return m->clock * 1000.0 / ((double)m->htotal * m->vtotal);
+    }
+    return 60;
 }
 
 void TVOut::Close()

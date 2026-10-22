@@ -95,10 +95,15 @@ takes the display from xbox-av the way a title does (`T`) and hands it back with
 picture (`S`), so the TV never resyncs. The game then runs at the TV's pace: each frame waits
 for the one before to be on screen. `--sound alsa` plays the game at 48 kHz on the dashboard's
 sound device (`$AUDIODEV`, the TV's HDMI) through the kernel's PCM calls, and steers melonDS's
-sample rate by how full its buffer is (60.00 Hz TV against the DS's 59.83). `tv.sh` stops the
+sample rate by how full its buffer is (60.00 Hz TV against the DS's 59.83). A frame that takes
+longer than the TV's (a course loading) would leave the game behind the TV for good and empty
+that buffer (run 11: about once a minute), so the frames after one aren't shown until the game
+has caught up; the speed line gives the longest frame and how many weren't shown. `tv.sh` stops the
 dashboard, runs the mirror with both, and starts the dashboard again when it stops
 (`sh tv.sh stop`). Cloud tests: `--tv dump:FILE` (every 60th picture), `--sound wav:FILE`,
-`MIRROR_FRAMEHZ=60` for a TV's pace, `MIRROR_SOUNDLOG=1`.
+`MIRROR_TVPACE=1` paces the dump like a 60 Hz TV, `MIRROR_FRAMEHZ=60` paces without a TV,
+`MIRROR_STALLTEST=N:MS` makes every Nth frame MS ms slower, `MIRROR_SOUNDLOG=1`,
+`MIRROR_SOUNDFILL=FRAMES` (default 2560, 53 ms).
 
 ## Not handled yet
 - Main-memory display mode (DISPCNT mode 3).

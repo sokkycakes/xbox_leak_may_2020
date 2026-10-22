@@ -10,6 +10,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <mutex>
@@ -28,7 +29,9 @@ public:
     // how fast the game should make samples, relative to normal: above 1 when the buffer runs full
     double Skew();
     void Close();
+    // times the buffer ran dry (the game was late), and times the card did (this thread was)
     uint32_t Underruns() const { return underruns; }
+    uint32_t Xruns() const { return xruns; }
 
 private:
     void Run();
@@ -45,7 +48,8 @@ private:
     std::mutex lock;
     std::thread thread;
     std::atomic<bool> stop {false};
-    std::atomic<uint32_t> underruns {0};
+    std::atomic<uint32_t> underruns {0}, xruns {0};
+    std::condition_variable more;    // the game pushed samples
     double fillAvg = -1, drift = 0;
 };
 
