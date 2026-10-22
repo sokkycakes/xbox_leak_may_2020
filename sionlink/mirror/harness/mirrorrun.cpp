@@ -700,7 +700,13 @@ public:
         if (link)
         {
             std::lock_guard<std::mutex> g(sendLock);
-            sendQueue.push_back(buf);
+            // Whole 512-byte blocks only: the DS reads in 512-byte USB transfers, and a short
+            // packet that ends one early leaves the DSpico's (RP2040) second packet buffer
+            // armed, which loses data or hangs its firmware. The DS skips the zero padding
+            // while it looks for the next bundle's header.
+            std::vector<u8> padded = buf;
+            padded.resize((buf.size() + 511) & ~size_t(511), 0);
+            sendQueue.push_back(std::move(padded));
             sendBusy++;
             sendWake.notify_one();
         }

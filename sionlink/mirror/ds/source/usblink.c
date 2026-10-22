@@ -355,6 +355,12 @@ static void drainEvents(void)
     for (;;)
     {
         u32 e = cardRead4(USB_GET_EVENT);
+        if (e == 0xFFFFFFFF)
+        {
+            // nothing drives the bus: the DSpico's firmware has stopped
+            usbDiag.deadReads++;
+            break;
+        }
         bool last = e & EV_LAST;
         e &= ~EV_LAST;
         if (e == 0)

@@ -294,7 +294,8 @@ static void showStall(void)
     printf("out of memory %lu\n", allocFails);
     printf("data waiting  %lu\n", usbAvailable());
     printf("usb events    %lu\n", usbDiag.events);
-    printf("usb state     %-12s\n", usbConfigured() ? "connected" : "lost");
+    printf("usb state     %-12s\n", usbDiag.deadReads ? "DSpico silent" : usbConfigured() ? "connected" : "lost");
+    printf("silent reads  %lu\n", usbDiag.deadReads);
     printf("waiting for a full frame: %s\n", needFull ? "yes" : "no ");
 }
 

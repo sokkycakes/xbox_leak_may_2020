@@ -138,12 +138,12 @@ public:
     static void OutDone(libusb_transfer* t) { *(int*)t->user_data = 1; }
     bool Send(const uint8_t* d, size_t n) override
     {
-        // one transfer per bundle; the zero-length packet ends the DS's 512-byte
-        // read when the bundle fills its last packet exactly
+        // one transfer per bundle (padded to whole 512-byte DS reads by the recorder);
+        // a zero-length packet would only be needed for a length that isn't
         int done = 0;
         libusb_transfer* t = libusb_alloc_transfer(0);
         libusb_fill_bulk_transfer(t, h, 0x01, (uint8_t*)d, (int)n, OutDone, &done, 0);
-        t->flags = LIBUSB_TRANSFER_ADD_ZERO_PACKET;
+        if (n % 512 && n % 64 == 0) t->flags = LIBUSB_TRANSFER_ADD_ZERO_PACKET;
         if (libusb_submit_transfer(t)) { libusb_free_transfer(t); return false; }
         int waited = 0;
         while (!done)

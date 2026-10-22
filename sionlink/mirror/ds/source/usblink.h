@@ -18,6 +18,7 @@ typedef struct {
     u32 secFlags;           // scrambling flags in use
     u32 irqs, events, resets, setups, configured;
     u32 lastEvent, lastSetup;
+    u32 deadReads;          // event reads that came back all ones (DSpico not answering)
     // recent link history: S setup (x = request, a = value, b = length),
     // C transfer complete (x = endpoint, a = bytes), R bus reset, Z status sent
     struct { char kind; u8 x; u16 a, b; } log[8];
