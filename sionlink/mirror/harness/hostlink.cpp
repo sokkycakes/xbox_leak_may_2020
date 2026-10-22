@@ -16,6 +16,8 @@
 #include <libusb-1.0/libusb.h>
 #endif
 
+std::atomic<bool> gMirrorQuit {false};
+
 // Reports arrive as whole 16-byte mirror_input structs; keep the newest valid one.
 static bool TakeReports(std::vector<uint8_t>& acc, mirror_input& in)
 {
@@ -170,7 +172,10 @@ public:
         if (libusb_init(&ctx)) return;
         fprintf(stderr, "link: waiting for the DSpico (1209:0001)\n");
         while (!(h = libusb_open_device_with_vid_pid(ctx, 0x1209, 0x0001)))
+        {
+            if (gMirrorQuit) return;
             usleep(250000);
+        }
         libusb_set_auto_detach_kernel_driver(h, 1);
         // The DS's first SET_CONFIGURATION after its client starts times out (Linux logs
         // "can't set config #1, error -110") and leaves the DSpico unconfigured; asking

@@ -457,8 +457,10 @@ static void xferComplete(u32 ep, u32 bytes)
     }
 }
 
-static void drainEvents(void)
+// true if there were any
+static bool drainEvents(void)
 {
+    bool any = false;
     for (;;)
     {
         u32 e = cardRead4(USB_GET_EVENT);
@@ -475,6 +477,7 @@ static void drainEvents(void)
         e &= ~EV_LAST;
         if (e == 0)
             break;
+        any = true;
         usbDiag.events++;
         usbDiag.lastEvent = e;
         if ((e >> 30) == 1)
@@ -501,6 +504,7 @@ static void drainEvents(void)
         if (last)
             break;
     }
+    return any;
 }
 
 #define CARD_READ_ID 0xB800000000000000ull
@@ -540,8 +544,12 @@ void usbStart(void)
 // doesn't know, and then it ignores the card bus until the DS is switched off (run 8
 // died that way after 6 minutes, having read events 15,000 times a second). So read
 // events when the DSpico raises the card IRQ line (it does while it has some), and
-// otherwise only every millisecond, in case that edge was missed.
-#define POLL_TICKS 33   // 1 ms in usbClock() units
+// otherwise now and then, in case that edge was missed: every 4 ms, or every 1 ms
+// while those reads find events. Run 10 read 1 ms apart, ~950 times a second against
+// ~200 on the IRQ line, and hung after 14 minutes.
+#define POLL_IDLE 131   // 4 ms in usbClock() units
+#define POLL_BUSY 33    // 1 ms
+static u16 pollGap = POLL_BUSY;
 
 void usbPoll(void)
 {
@@ -557,11 +565,17 @@ void usbPoll(void)
         lastDrain = now;
         drainEvents();
     }
-    else if ((u16)(now - lastDrain) >= POLL_TICKS)
+    else if ((u16)(now - lastDrain) >= pollGap)
     {
         usbDiag.timedPolls++;
         lastDrain = now;
-        drainEvents();
+        if (drainEvents())
+        {
+            usbDiag.timedHits++;
+            pollGap = POLL_BUSY;
+        }
+        else
+            pollGap = POLL_IDLE;
     }
     armOut();
     usbDiag.outArmed = outArmed;

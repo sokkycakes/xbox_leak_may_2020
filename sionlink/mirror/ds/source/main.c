@@ -540,7 +540,7 @@ static void idle(void)
                                resyncs, allocFails, fullBundles, stalls,
                                usbDiag.deadReads, usbDiag.irqs, usbDiag.timedPolls,
                                usbDiag.recovered, usbDiag.rearmed, usbDiag.outDone, usbDiag.armTicks,
-                               usbDiag.busyMax, 0, shown};
+                               usbDiag.busyMax, (u16)usbDiag.timedHits, shown};
             if (usbSendReport(&in, sizeof in))
             {
                 usbDiag.busyMax = 0;

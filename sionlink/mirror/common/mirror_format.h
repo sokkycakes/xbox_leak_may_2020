@@ -81,12 +81,12 @@ typedef struct {
     uint16_t fulls, stalls;       // full refreshes applied, times the picture stopped with no data coming
     // how the DSpico link is doing (wrapping counters; times in 1/32768 s)
     uint32_t silent;              // event reads the DSpico didn't answer
-    uint16_t irqReads, timedReads;  // event reads because it raised its IRQ line, because 1 ms went by
+    uint16_t irqReads, timedReads;  // event reads because it raised its IRQ line, because time went by
     uint16_t recovered, restarted;  // lost OUT completions recovered, OUT transfers armed again
     uint32_t blocks;              // 512-byte blocks taken
     uint32_t armedTime;           // time those transfers waited for their data
     uint16_t busyMax;             // longest the DS went without looking at USB since its last report
-    uint16_t reserved;
+    uint16_t timedHits;           // timed event reads that found events (the IRQ line didn't say)
     uint32_t shownFrame;          // the frame (mirror_hdr.frame) of the bundle on screen now, 0 before
                                   // the first; the DS reports each new one, so the Sion knows how far
                                   // behind the game the DS is

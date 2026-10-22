@@ -21,6 +21,13 @@
 //     --threaded 1     draw 3D on a second thread (faster on a multi-core host, same picture)
 //     --gamecode XXXX  replace the header's game code, for prototypes whose code melonDS's
 //                      cart list gives to another game (wrong cart/save type)
+//     --tv OUT         the game on a TV too, both screens stacked (see tvout.h): drm (the
+//                      Sion's display, taken over from xbox-av; the game then runs at the
+//                      TV's pace) or dump:FILE (every 60th picture, 720x480 raw, for tests)
+//     --sound OUT      the game's sound (see soundout.h): alsa ($AUDIODEV, the TV's HDMI
+//                      on the Sion) or wav:FILE
+//
+// SIGTERM or SIGINT stops it cleanly (the TV goes back to xbox-av); a second one at once.
 //
 // melonDS is GPL; this runner links it and stays GPL with it.
 
@@ -41,6 +48,8 @@
 #include <functional>
 #include <utility>
 #include <zlib.h>
+#include <csignal>
+#include <unistd.h>
 
 #include "NDS.h"
 #include "NDSCart.h"
@@ -53,6 +62,9 @@
 #include "hostlink.h"
 #include "dspico_sim.h"
 #include "lzpack.h"
+#include "geostate.h"
+#include "tvout.h"
+#include "soundout.h"
 
 using namespace melonDS;
 
@@ -113,6 +125,17 @@ struct GXFilter
     u32 kept = 0, dropped = 0;  // skipped-frame commands kept / dropped, for stats
     u32 badCmds = 0;            // unknown command bytes: the parse lost sync
 
+    // The geometry state the client's commands leave it in, so that what a run of
+    // left-out frames did can go as the few commands that rebuild its end state
+    // (GeoState::Rebuild) instead of every state command they had: after 40-60 left
+    // out in a row, those came to 600-860 KB a bundle and slowed the link down further.
+    GeoState geo;
+    GeoState geoBase;           // where the left-out frames' kept commands began
+    bool baseSet = false;       // geoBase holds that
+    size_t headLen = 0;         // writes in the carry before then: a packet the client was mid-way through
+    bool noRebuild = false;     // the carry has something a rebuild can't stand in for
+    u32 powcnt = 0;             // the last POWCNT write
+
     static void Direct(std::vector<IOW>& out, u8 c, const std::vector<u32>& p)
     {
         u16 off = 0x400 + c * 4;
@@ -120,10 +143,28 @@ struct GXFilter
         for (u32 v : p) out.push_back({off, 4, v});
     }
 
+    u32 keptBy[256] = {};
     void Done(std::vector<IOW>& out, u8 c, const std::vector<u32>& p, bool sent)
     {
-        if (sent || GXKeepWhenSkipped(c)) { Direct(out, c, p); if (!sent) kept++; }
+        if (sent || GXKeepWhenSkipped(c))
+        {
+            if (!sent && !baseSet)
+            {
+                geoBase = geo;
+                headLen = out.size();
+                baseSet = true;
+            }
+            Direct(out, c, p);
+            geo.Exec(c, p.data(), p.size());
+            if (!sent) { kept++; keptBy[c]++; }
+        }
         else dropped++;
+    }
+    // a command that goes to the client as it was written
+    void Raw(u8 c, const std::vector<u32>& p, bool sent)
+    {
+        if (!sent && baseSet) noRebuild = true;
+        if (GXValid(c)) geo.Exec(c, p.data(), p.size());
     }
 
     // finish zero-parameter commands at the head of the packet
@@ -131,7 +172,8 @@ struct GXFilter
     {
         while (ci < ncmds && GXParamCount(cmds[ci]) == 0)
         {
-            if (!packetRaw && GXValid(cmds[ci])) Done(out, cmds[ci], {}, sent);
+            if (packetRaw) Raw(cmds[ci], {}, sent);
+            else if (GXValid(cmds[ci])) Done(out, cmds[ci], {}, sent);
             ci++;
         }
         params.clear();
@@ -149,7 +191,8 @@ struct GXFilter
                 u8 c = cmds[ci];
                 if (params.size() >= GXParamCount(c))
                 {
-                    if (!packetRaw) Done(out, c, params, sent);
+                    if (packetRaw) Raw(c, params, sent);
+                    else Done(out, c, params, sent);
                     ci++;
                     Advance(out, sent);
                 }
@@ -183,13 +226,87 @@ struct GXFilter
             if (GXParamCount(c)) dparams.push_back(w.val);
             if (dparams.size() >= GXParamCount(c))
             {
-                if (!dRaw && GXValid(c)) Done(out, c, dparams, sent);
+                if (dRaw) Raw(c, dparams, sent);
+                else if (GXValid(c)) Done(out, c, dparams, sent);
                 dActive = false;
             }
             return;
         }
-        // 3D registers outside the command FIFO (DISP3DCNT, tables, POWCNT) always go
+        // 3D registers outside the command FIFO (DISP3DCNT, tables, POWCNT) always go.
+        // POWCNT switches the 3D engines on and off, so a write that does has to stay where
+        // it was among the commands (its other bits, like the screen swap that dual-screen
+        // 3D flips every frame, don't care)
+        if (w.off == 0x304)
+        {
+            if (!sent && baseSet && ((w.val ^ powcnt) & 0x000C)) noRebuild = true;
+            powcnt = w.val;
+        }
         out.push_back(w);
+    }
+
+    // The carry as the commands that rebuild the state its left-out frames ended in:
+    // the head (the rest of a packet the client already began), the 3D register writes,
+    // then for each part of the geometry state those frames changed, the commands that
+    // set it. Run through a copy of the state they began in, the result has to come out
+    // as that end state, or the carry goes as it was. False: send the carry as it is.
+    bool Rebuild(const std::vector<IOW>& carry, std::vector<IOW>& out)
+    {
+        static const bool off = getenv("MIRROR_NOREBUILD") != nullptr;
+        if (off || !baseSet || noRebuild || badCmds || geo.unknownOps != geoBase.unknownOps || headLen > carry.size())
+        {
+            static const bool why = getenv("MIRROR_REBUILDLOG") != nullptr;
+            if (why && carry.size() > 8192)
+                fprintf(stderr, "rebuild: carry of %zu writes as it is: base %d, raw/POWCNT %d, bad %u, unknown ops %u -> %u, head %zu\n",
+                        carry.size(), baseSet, noRebuild, badCmds, geoBase.unknownOps, geo.unknownOps, headLen);
+            return false;
+        }
+        out.assign(carry.begin(), carry.begin() + headLen);
+        for (size_t i = headLen; i < carry.size(); i++)
+            if (carry[i].off < 0x400 || carry[i].off >= 0x600) out.push_back(carry[i]);
+        GeoState sim = geoBase;
+        std::vector<GeoCmd> cmds;
+        geo.Rebuild(sim, cmds);
+        for (const GeoCmd& c : cmds)
+            Direct(out, c.cmd, c.params);
+        if (!sim.Same(geo))
+        {
+            rebuildMisses++;
+            return false;
+        }
+        if (out.size() >= carry.size()) return false;
+        rebuilds++;
+        rebuildSaved += carry.size() - out.size();
+        return true;
+    }
+    u32 rebuildMisses = 0;
+
+    // the client is part way through a command that goes as it was written
+    bool MidRaw() const { return (ci < ncmds && packetRaw) || (dActive && dRaw); }
+
+    // A full bundle: the DS may have missed everything so far (switched off and on
+    // again), so set every part of the geometry state that's known. The matrix stack
+    // pointer can only be moved, so it's taken to be where ours is.
+    void RebuildAll(std::vector<IOW>& out)
+    {
+        if (MidRaw()) return;
+        GeoState none;
+        none.projSP = geo.projSP;
+        none.posSP = geo.posSP;
+        none.texSP = geo.texSP;
+        std::vector<GeoCmd> cmds;
+        geo.Rebuild(none, cmds);
+        for (const GeoCmd& c : cmds) Direct(out, c.cmd, c.params);
+        fullRebuilds++;
+    }
+    u32 rebuilds = 0, fullRebuilds = 0;
+    u64 rebuildSaved = 0;   // writes the rebuilds saved
+
+    // after a bundle: the next run of left-out frames starts from here
+    void Sent()
+    {
+        baseSet = false;
+        noRebuild = false;
+        headLen = 0;
     }
 };
 
@@ -391,6 +508,10 @@ public:
     }
     bool half = false;  // 30 fps: every other frame, each shown twice
     bool skipThis = false, holdNext = false, capPrev = false, capThis = false;
+    u32 skipRun = 0;          // frames left out in a row
+    u32 dsCaptured[4] = {};   // emuFrame of the last capture the DS did itself, per bank (A-D)
+    u32 capStart = 0;         // emuFrame the current stretch of frames with capture began
+    u32 lastCapture = 0;      // emuFrame of the last frame with capture
     GXFilter filt;
 
     using IOW = GXFilter::IOW;
@@ -449,22 +570,50 @@ public:
         {
             capPrev = capThis;
             capThis = (nds->GPU.CaptureCnt >> 31) & 1;
+            if (capThis && !capPrev && emuFrame - lastCapture > 2) capStart = emuFrame;
+            if (capThis) lastCapture = emuFrame;
             skipThis = holdNext;
             holdNext = false;
-            if (link && !skipThis && frame > 0 && !capThis && !capPrev && (LinkBehind() || DSBehind()))
+            bool behind = link && !skipThis && frame > 0 && (LinkBehind() || DSBehind());
+            if (link && frame > 0 && (capThis || capPrev))
+            {
+                // Display capture: the game shows 3D on both screens by drawing one per frame
+                // and capturing it for the other, and the DS redoes each capture itself. Frames
+                // are left out two at a time (at 30 fps two of every four): the frames the DS
+                // gets then still take turns between the screens, and the screen it doesn't
+                // draw shows its own earlier capture of that same screen. Both stay right,
+                // each just changes less often, and the game never waits for the DS.
+                if (!skipThis && ((skipRun & 1) || behind || (half && ((emuFrame >> 1) & 1))))
+                {
+                    skipThis = true;
+                    if (behind) linkSkips++;
+                }
+            }
+            else if (behind)
             {
                 skipThis = true;
                 linkSkips++;
             }
-            else if (link && !skipThis && frame > 0)
+            if (link && !skipThis && frame > 0)
             {
                 WaitForLink();
                 WaitForDS();
             }
             if (!skipThis)
             {
+                skipRun = 0;
                 Snapshot2D();
                 haveFrame = true;
+            }
+            else
+            {
+                skipRun++;
+                // the pixels of a capture the DS doesn't redo aren't sent either: it keeps its
+                // own, of the same screen. Unless it has none of its own there yet in this
+                // stretch of capture: then they go as VRAM like any other change.
+                NoteCapture();
+                if (captureBank >= 0 && (s32)(dsCaptured[captureBank] - capStart) < 0)
+                    captureBank = -1;
             }
         }
         else if (vcount < 192 && haveFrame)
@@ -479,13 +628,114 @@ public:
                 for (const IOW& w : ready) filt.Feed(w, false, carry);
                 ready.clear();
             }
+            static const bool geoCheck = getenv("MIRROR_GEOCHECK") != nullptr;
+            if (geoCheck) CheckGeo();
             haveFrame = false;
             emuFrame++;
             ready.insert(ready.end(), pending.begin(), pending.end());
             pending.clear();
+            if (geoCheck) melo.Take(nds->GPU.GPU3D);
         }
         else if (vcount == 193)
             SyncCapture();
+    }
+
+    // MIRROR_GEOCHECK=1 (cloud tests): the geometry state worked out from the commands
+    // (filt.geo) against melonDS's own. The commands fed so far are the ones written up to
+    // the last line 192, so it's compared with melonDS as it was then, when its 3D engine
+    // had nothing left to do.
+    struct MeloGeo
+    {
+        bool valid = false;
+        u32 mode;
+        s32 proj[16], pos[16], vec[16], tex[16], projStack[16], texStack[16], posStack[32][16], vecStack[32][16];
+        s32 projSP, posSP, texSP;
+        s16 lightDir[4][3];
+        u8 lightColor[4][3], dif[3], amb[3], spe[3], emi[3], color[3], shin[128];
+        bool useShin;
+        u32 polyAttr, texParam, texPal, viewport[4];
+        void Take(const GPU3D& g)
+        {
+            valid = g.CmdFIFO.IsEmpty() && g.CmdPIPE.IsEmpty() && g.CmdStallQueue.IsEmpty() && !g.ExecParamCount;
+            if (!valid) return;
+            mode = g.MatrixMode;
+            memcpy(proj, g.ProjMatrix, 64); memcpy(pos, g.PosMatrix, 64); memcpy(vec, g.VecMatrix, 64); memcpy(tex, g.TexMatrix, 64);
+            memcpy(projStack, g.ProjMatrixStack, 64); memcpy(texStack, g.TexMatrixStack, 64);
+            memcpy(posStack, g.PosMatrixStack, sizeof posStack); memcpy(vecStack, g.VecMatrixStack, sizeof vecStack);
+            projSP = g.ProjMatrixStackPointer; posSP = g.PosMatrixStackPointer; texSP = g.TexMatrixStackPointer;
+            memcpy(lightDir, g.LightDirection, sizeof lightDir); memcpy(lightColor, g.LightColor, sizeof lightColor);
+            memcpy(dif, g.MatDiffuse, 3); memcpy(amb, g.MatAmbient, 3); memcpy(spe, g.MatSpecular, 3); memcpy(emi, g.MatEmission, 3);
+            memcpy(color, g.VertexColor, 3); memcpy(shin, g.ShininessTable, 128);
+            useShin = g.UseShininessTable;
+            polyAttr = g.PolygonAttr; texParam = g.TexParam; texPal = g.TexPalette;
+            for (int i = 0; i < 4; i++) viewport[i] = g.Viewport[i];
+        }
+    } melo;
+    u32 geoMismatches = 0, geoChecks = 0;
+    void CheckGeo()
+    {
+        if (!melo.valid) return;
+        const GeoState& s = filt.geo;
+        geoChecks++;
+        char what[160] = "";
+        auto mtx = [&](const GeoState::Mtx& m, const s32* g, const char* name) {
+            if (!what[0] && m.known && memcmp(m.m, g, 64)) snprintf(what, sizeof what, "%s", name);
+        };
+        auto rgb = [](const u8* c) { return (u32)c[0] | (u32)c[1] << 5 | (u32)c[2] << 10; };
+        auto val = [&](const GeoState::Val& v, u32 g, const char* name) {
+            if (!what[0] && v.known && v.v != g) snprintf(what, sizeof what, "%s %08x, melonDS %08x", name, v.v, g);
+        };
+        val(s.mode, melo.mode, "matrix mode");
+        mtx(s.proj, melo.proj, "projection matrix");
+        mtx(s.pos, melo.pos, "position matrix");
+        mtx(s.vec, melo.vec, "vector matrix");
+        mtx(s.tex, melo.tex, "texture matrix");
+        mtx(s.projStack, melo.projStack, "projection stack");
+        mtx(s.texStack, melo.texStack, "texture stack");
+        for (int i = 0; i < 32; i++)
+        {
+            char n[32];
+            snprintf(n, sizeof n, "position stack %d", i);
+            mtx(s.posStack[i], melo.posStack[i], n);
+            snprintf(n, sizeof n, "vector stack %d", i);
+            mtx(s.vecStack[i], melo.vecStack[i], n);
+        }
+        if (!what[0] && (s.projSP != melo.projSP || s.posSP != melo.posSP || s.texSP != melo.texSP))
+            snprintf(what, sizeof what, "stack pointers %d %d %d, melonDS %d %d %d", s.projSP, s.posSP, s.texSP,
+                     melo.projSP, melo.posSP, melo.texSP);
+        for (int l = 0; l < 4 && !what[0]; l++)
+        {
+            const GeoState::Light& L = s.light[l];
+            if (L.known)
+            {
+                // melonDS GPU3D.cpp, light direction
+                s16 d[3] = {(s16)((s16)((L.param & 0x3FF) << 6) >> 6), (s16)((s16)((L.param & 0xFFC00) >> 4) >> 6),
+                            (s16)((s16)((L.param & 0x3FF00000) >> 14) >> 6)};
+                const s32* v = L.vec.m;
+                for (int k = 0; k < 3; k++)
+                {
+                    s16 dir = (s16)((-((d[0] * v[k] + d[1] * v[4 + k] + d[2] * v[8 + k]) >> 12) << 21) >> 21);
+                    if (dir != melo.lightDir[l][k] && !what[0])
+                        snprintf(what, sizeof what, "light %d direction", l);
+                }
+            }
+            val(s.lightColor[l], rgb(melo.lightColor[l]), "light color");
+        }
+        val(s.difAmb, rgb(melo.dif) | rgb(melo.amb) << 16, "diffuse/ambient");
+        val(s.speEmi, rgb(melo.spe) | rgb(melo.emi) << 16 | (melo.useShin ? 0x8000 : 0), "specular/emission");
+        val(s.polyAttr, melo.polyAttr, "polygon attributes");
+        val(s.texParam, melo.texParam, "texture parameters");
+        val(s.texPal, melo.texPal, "texture palette");
+        // (not the vertex color: frames left out lose their NORMAL commands, which light it)
+        if (!what[0] && s.shininessKnown && memcmp(s.shininess, melo.shin, 128)) snprintf(what, sizeof what, "shininess table");
+        if (!what[0] && s.viewport.known)
+        {
+            u32 p = s.viewport.v;
+            u32 vp[4] = {p & 0xFF, (191 - ((p >> 8) & 0xFF)) & 0xFF, (p >> 16) & 0xFF, (191 - (p >> 24)) & 0xFF};
+            if (memcmp(vp, melo.viewport, sizeof vp)) snprintf(what, sizeof what, "viewport");
+        }
+        if (what[0] && geoMismatches++ < 30)
+            fprintf(stderr, "geocheck f%u: %s differs\n", emuFrame, what);
     }
 
     // ---- output helpers
@@ -607,16 +857,8 @@ public:
             b.resize(at);
 
         // a capture this frame is redone by the client's own hardware; don't send its pixels
-        captureBank = -1;
-        u32 cc = gpu.CaptureCnt;
-        u32 bank = (cc >> 16) & 3;
-        if ((cc & (1u << 31)) && (gpu.VRAMCNT[bank] & 0x87) == 0x80)
-        {
-            static const u32 lens[4] = {0x8000, 0x8000, 0x10000, 0x18000};
-            captureBank = bank;
-            captureOff = ((cc >> 18) & 3) * 0x8000;
-            captureLen = lens[(cc >> 20) & 3];
-        }
+        NoteCapture();
+        if (captureBank >= 0) dsCaptured[captureBank] = emuFrame;
         full = false;
     }
 
@@ -720,6 +962,22 @@ public:
         memset(lineWritten, 0, sizeof(lineWritten));
     }
 
+    // the VRAM a capture armed for this frame writes to
+    void NoteCapture()
+    {
+        GPU& gpu = nds->GPU;
+        captureBank = -1;
+        u32 cc = gpu.CaptureCnt;
+        u32 bank = (cc >> 16) & 3;
+        if ((cc & (1u << 31)) && (gpu.VRAMCNT[bank] & 0x87) == 0x80)
+        {
+            static const u32 lens[4] = {0x8000, 0x8000, 0x10000, 0x18000};
+            captureBank = bank;
+            captureOff = ((cc >> 18) & 3) * 0x8000;
+            captureLen = lens[(cc >> 20) & 3];
+        }
+    }
+
     void SyncCapture()
     {
         if (captureBank < 0) return;
@@ -747,8 +1005,23 @@ public:
         Put(buf, h);
         if (half || link)
         {
+            static const bool cstat = getenv("MIRROR_CARRYSTAT") != nullptr;
+            if (cstat && carry.size() > 8192)
+            {
+                fprintf(stderr, "carry f%u: %zu writes:", emuFrame, carry.size());
+                for (int c = 0; c < 256; c++)
+                    if (filt.keptBy[c]) fprintf(stderr, " %02x:%u", c, filt.keptBy[c]);
+                fprintf(stderr, "\n");
+            }
+            memset(filt.keptBy, 0, sizeof filt.keptBy);
             std::vector<IOW> gx;
-            gx.swap(carry);
+            if (filt.Rebuild(carry, gx))
+                carry.clear();
+            else
+                gx.swap(carry);
+            filt.Sent();
+            if (flags & MIRROR_FLAG_FULL)
+                filt.RebuildAll(gx);
             for (const IOW& w : ready) filt.Feed(w, true, gx);
             ready.swap(gx);
         }
@@ -890,7 +1163,7 @@ int main(int argc, char** argv)
 {
     if (argc < 3)
     {
-        fprintf(stderr, "usage: %s ROM FRAMES [--input F] [--record F] [--frames F] [--shots DIR] [--every N] [--stats F] [--boottype N] [--lang N] [--gamecode XXXX] [--half 1] [--gxdelta 1] [--serve LINK] [--reconnect 1] [--dspico PATH] [--usbrate N] [--realtime 1] [--jit 1] [--threaded 1]\n", argv[0]);
+        fprintf(stderr, "usage: %s ROM FRAMES [--input F] [--record F] [--frames F] [--shots DIR] [--every N] [--stats F] [--boottype N] [--lang N] [--gamecode XXXX] [--half 1] [--gxdelta 1] [--serve LINK] [--reconnect 1] [--dspico PATH] [--usbrate N] [--realtime 1] [--jit 1] [--threaded 1] [--tv drm|dump:F] [--sound alsa|wav:F]\n", argv[0]);
         return 1;
     }
     const char* rompath = argv[1];
@@ -906,6 +1179,7 @@ int main(int argc, char** argv)
     const char *serve = nullptr, *dspico = nullptr;
     u32 usbRate = 12000;
     bool realtime = false, jit = false, threaded = false;
+    const char *tvSpec = nullptr, *soundSpec = nullptr;
     for (int i = 3; i + 1 < argc; i += 2)
     {
         std::string o = argv[i];
@@ -928,6 +1202,8 @@ int main(int argc, char** argv)
         else if (o == "--realtime") realtime = atoi(argv[i + 1]) != 0;
         else if (o == "--jit") jit = atoi(argv[i + 1]) != 0;
         else if (o == "--threaded") threaded = atoi(argv[i + 1]) != 0;
+        else if (o == "--tv") tvSpec = argv[i + 1];
+        else if (o == "--sound") soundSpec = argv[i + 1];
         else { fprintf(stderr, "unknown option %s\n", o.c_str()); return 1; }
     }
 
@@ -991,11 +1267,33 @@ int main(int argc, char** argv)
             fprintf(rec.stats, "frame,bytes,zlib,gx,regs,pal,oam,vram,vramblocks,lines,capture\n");
         }
     }
+    // stop cleanly when told to, so the TV goes back to xbox-av; a second time, at once
+    struct sigaction sa {};
+    sa.sa_handler = [](int) {
+        if (gMirrorQuit.exchange(true)) _exit(1);
+    };
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGTERM, &sa, nullptr);   // no SA_RESTART: waiting for the DS stops
+    sigaction(SIGINT, &sa, nullptr);
+
+    // the TV and the sound first: the dashboard has gone by now, and the TV stays dark
+    // (not the dashboard's last picture) until the DS is there
+    TVOut tv;
+    SoundOut sound;
+    if (tvSpec)
+    {
+        if (!tv.Open(tvSpec)) return 1;
+        static const u32 black[256 * 192] = {};
+        tv.Show(black, black);
+    }
+    if (soundSpec && !sound.Open(soundSpec)) return 1;
+    std::vector<s16> soundBuf(4096 * 2);
+
     std::unique_ptr<HostLink> link;
     if (serve)
     {
         link = OpenHostLink(serve);
-        if (!link) return 1;
+        if (!link) return gMirrorQuit ? 0 : 1;
         rec.StartLink(link.get());
     }
     if (record || serve) gMirrorTap = &rec;
@@ -1050,10 +1348,17 @@ int main(int argc, char** argv)
     s64 statsAt = -1;
 
     auto tick = std::chrono::steady_clock::now();
-    const auto frameTime = std::chrono::nanoseconds(16715757);   // 560190 cycles at 33.51 MHz
+    // 560190 cycles at 33.51 MHz; MIRROR_FRAMEHZ=60 runs at a TV's pace instead (cloud tests)
+    const auto frameTime = std::chrono::nanoseconds(getenv("MIRROR_FRAMEHZ") ? (s64)(1e9 / atof(getenv("MIRROR_FRAMEHZ"))) : 16715757);
     auto speedFrom = std::chrono::steady_clock::now();
+    u32 underrunsShown = 0;
     for (u32 f = 0; f < frames; f++)
     {
+        if (gMirrorQuit)
+        {
+            fprintf(stderr, "stopping at frame %u\n", f);
+            break;
+        }
         if (link && rec.linkLost)
         {
             if (!reconnect)
@@ -1069,7 +1374,11 @@ int main(int argc, char** argv)
             shownBefore = 0;   // a new DS counts from 0
             fprintf(stderr, "link: waiting for the DS to come back (switch it on and start Sion Link)\n");
             link = OpenHostLink(serve);
-            if (!link) return 1;
+            if (!link)
+            {
+                if (gMirrorQuit) continue;   // stops at the top
+                return 1;
+            }
             rec.RestartLink(link.get());
             fprintf(stderr, "link: the DS is back at frame %u\n", f);
             lastReportAt = lastFullReq = f;
@@ -1102,19 +1411,24 @@ int main(int argc, char** argv)
                 u32 blocks = pad.blocks - linkSeen.blocks;
                 double waitMs = blocks ? (pad.armedTime - linkSeen.armedTime) / 32.768 / blocks : 0;
                 fprintf(stderr, "  DS link: %u blocks, %.2f ms each waiting for data, busy up to %.1f ms, "
-                        "events read %u on IRQ %u timed, %u silent, %u recovered, %u restarted\n",
+                        "events read %u on IRQ %u timed (%u found some), %u silent, %u recovered, %u restarted\n",
                         blocks, waitMs, busyMax / 32.768, (u16)(pad.irqReads - linkSeen.irqReads),
-                        (u16)(pad.timedReads - linkSeen.timedReads), pad.silent - linkSeen.silent,
+                        (u16)(pad.timedReads - linkSeen.timedReads), (u16)(pad.timedHits - linkSeen.timedHits), pad.silent - linkSeen.silent,
                         (u16)(pad.recovered - linkSeen.recovered), (u16)(pad.restarted - linkSeen.restarted));
                 linkSeen = pad;
                 busyMax = 0;
+            }
+            if (sound.Underruns() != underrunsShown)
+            {
+                fprintf(stderr, "  sound: ran dry %u times\n", sound.Underruns() - underrunsShown);
+                underrunsShown = sound.Underruns();
             }
             shownBefore = shown;
             reportsShown = reports;
             sentShown = sent;
             speedFrom = now;
         }
-        if (realtime)
+        if (realtime && !tv.Paced())
         {
             tick += frameTime;
             // after waiting for the DS, carry on from now instead of racing to catch up
@@ -1178,6 +1492,14 @@ int main(int argc, char** argv)
         nds->RunFrame();
         void *top = nullptr, *bot = nullptr;
         nds->GPU.GetFramebuffers(&top, &bot);
+        if (soundSpec)
+        {
+            // the sound first: showing the picture can wait for the TV
+            int n = nds->SPU.ReadOutput(soundBuf.data(), 4096);
+            if (n > 0) sound.Push(soundBuf.data(), n);
+            nds->SPU.SetOutputSkew(sound.Skew());
+        }
+        if (tvSpec) tv.Show((const u32*)top, (const u32*)bot);
         if (fo)
         {
             fwrite(top, 4, 256 * 192, fo);
@@ -1247,6 +1569,11 @@ int main(int argc, char** argv)
         if (half)
             fprintf(stderr, "skipped frames' 3D commands: %u kept as state, %u dropped, %u unknown\n", rec.filt.kept, rec.filt.dropped, rec.filt.badCmds);
     }
+    if (rec.filt.rebuilds || rec.filt.rebuildMisses)
+        fprintf(stderr, "left-out frames' 3D state: %u carries rebuilt (%llu writes saved), %u sent as they were\n",
+                rec.filt.rebuilds, (unsigned long long)rec.filt.rebuildSaved, rec.filt.rebuildMisses);
+    if (rec.geoChecks)
+        fprintf(stderr, "geocheck: %u checks, %u with a difference\n", rec.geoChecks, rec.geoMismatches);
     if (const char* dump = getenv("MIRROR_DUMPRAM"))
     {
         FILE* d = fopen(dump, "wb");
@@ -1262,6 +1589,12 @@ int main(int argc, char** argv)
             break;
         }
     }
+    if (soundSpec)
+    {
+        sound.Close();
+        fprintf(stderr, "sound: ran dry %u times in all\n", sound.Underruns());
+    }
+    tv.Close();
     gMirrorTap = nullptr;
     gCardHook = nullptr;
     return 0;

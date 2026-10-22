@@ -21,7 +21,8 @@ void usbStart(void);
 typedef struct {
     u32 idPlain, idKey2;    // card ID read without and with KEY2 scrambling
     u32 secFlags;           // scrambling flags in use
-    u32 irqs, timedPolls;   // event reads because the DSpico raised its IRQ line / because 1 ms went by
+    u32 irqs, timedPolls;   // event reads because the DSpico raised its IRQ line / because time went by
+    u32 timedHits;          // timed event reads that found events
     u32 events, resets, setups, configured;
     u32 lastEvent, lastSetup;
     u32 deadReads;          // event reads that came back all ones (DSpico not answering)

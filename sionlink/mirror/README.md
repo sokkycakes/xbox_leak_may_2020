@@ -80,10 +80,28 @@ It is a vendor-class device, VID 1209 PID 0001 (pid.codes test PID): bundles com
   `DSPICO_TRACE=1` prints the sim's traffic per frame, `DSPICO_PROF=1` where the DS's CPU is
   after frames in which it never looked at USB. `MIRROR_NOHOLD=1` turns off the hold above,
   `MIRROR_BEHINDLOG=1` prints how far behind the DS is twice a second.
+- Skipped frames' 3D commands at 30 fps and in catch-up bundles: the runner keeps a shadow of
+  the geometry engine (`harness/geostate.h`, melonDS's own rules) and, when it knows the whole
+  state, sends a short rebuild of it (matrices, stacks, lights, material) instead of the kept
+  commands. `MIRROR_GEOCHECK=1` compares the shadow with melonDS every frame.
+- The DS reads the DSpico's events when its IRQ line says there are some, and otherwise every
+  4 ms (every 1 ms while those reads find events): each card command is a chance of the hang
+  where the DSpico stops answering until the DS is switched off.
+
+## On the TV too (`kit/sion/tv.sh`)
+`--tv drm` puts both screens on the Sion's TV, stacked, as big as fits the title-safe area of
+the mode the TV is already in (720x480: 324x216 each), with the same KMS calls as xbox-av. It
+takes the display from xbox-av the way a title does (`T`) and hands it back with its last
+picture (`S`), so the TV never resyncs. The game then runs at the TV's pace: each frame waits
+for the one before to be on screen. `--sound alsa` plays the game at 48 kHz on the dashboard's
+sound device (`$AUDIODEV`, the TV's HDMI) through the kernel's PCM calls, and steers melonDS's
+sample rate by how full its buffer is (60.00 Hz TV against the DS's 59.83). `tv.sh` stops the
+dashboard, runs the mirror with both, and starts the dashboard again when it stops
+(`sh tv.sh stop`). Cloud tests: `--tv dump:FILE` (every 60th picture), `--sound wav:FILE`,
+`MIRROR_FRAMEHZ=60` for a TV's pace, `MIRROR_SOUNDLOG=1`.
 
 ## Not handled yet
 - Main-memory display mode (DISPCNT mode 3).
 - Compression on the client (the sizes above with zlib are what a link would carry).
-- Real hardware: the live link has only run against the simulated DSpico.
 - A bundle with a lot of VRAM (a scene change) can overrun the client's VBlank, so one frame
   shows part of the old VRAM.

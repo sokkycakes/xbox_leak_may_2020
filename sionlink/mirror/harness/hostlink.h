@@ -5,6 +5,7 @@
 #ifndef HOSTLINK_H
 #define HOSTLINK_H
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -21,6 +22,10 @@ public:
     virtual bool Poll(mirror_input& in) = 0;
 };
 
+// waits for the DS to be there; nullptr if it can't, or once gMirrorQuit is set
 std::unique_ptr<HostLink> OpenHostLink(const std::string& spec);
+
+// set when mirrorrun is told to stop (SIGTERM, SIGINT): waiting for the DS stops too
+extern std::atomic<bool> gMirrorQuit;
 
 #endif
