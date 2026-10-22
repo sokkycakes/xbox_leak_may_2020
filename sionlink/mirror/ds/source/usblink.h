@@ -18,6 +18,10 @@ typedef struct {
     u32 secFlags;           // scrambling flags in use
     u32 irqs, events, resets, setups, configured;
     u32 lastEvent, lastSetup;
+    // recent link history: S setup (x = request, a = value, b = length),
+    // C transfer complete (x = endpoint, a = bytes), R bus reset, Z status sent
+    struct { char kind; u8 x; u16 a, b; } log[8];
+    u32 logCount;
 } usb_diag;
 extern usb_diag usbDiag;
 void usbPoll(void);

@@ -13,6 +13,15 @@
 static u32 secFlags;
 usb_diag usbDiag;
 
+static void diagLog(char kind, u32 x, u32 a, u32 b)
+{
+    u32 i = usbDiag.logCount++ % 8;
+    usbDiag.log[i].kind = kind;
+    usbDiag.log[i].x = x;
+    usbDiag.log[i].a = a;
+    usbDiag.log[i].b = b;
+}
+
 static void cardStart(u64 cmd, u32 flags)
 {
     while (REG_ROMCTRL & CARD_BUSY)
@@ -161,6 +170,7 @@ static void ep0Send(const void* data, u32 len, u32 maxLen)
     if (len == 0)
     {
         cardCmd(USB_WRITE_DATA(0, 0x80, 1, 0));
+        diagLog('Z', 0x80, 0, 0);
         ctrl = CTRL_STATUS_IN;
         return;
     }
@@ -224,7 +234,7 @@ static void setup(u32 w0, u32 w1)
     u32 value = w1 & 0xFFFF;
     u32 request = (w1 >> 16) & 0xFF;
     u32 type = (w1 >> 24) & 0x7F;  // without the direction bit
-    (void)index;
+    diagLog('S', request, value, length);
 
     if (type & 0x60)
     {
@@ -299,6 +309,8 @@ static void setup(u32 w0, u32 w1)
 
 static void xferComplete(u32 ep, u32 bytes)
 {
+    if (ep != EP_OUT && ep != EP_IN)
+        diagLog('C', ep, bytes, 0);
     if (ep == 0x80)
     {
         if (ctrl == CTRL_DATA_IN)
@@ -363,6 +375,7 @@ static void drainEvents(void)
         else if (e == EV_BUS_RESET)
         {
             usbDiag.resets++;
+            diagLog('R', 0, 0, 0);
             configured = false;
             outArmed = inBusy = false;
             pendingAddr = 0;

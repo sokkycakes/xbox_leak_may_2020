@@ -15,6 +15,7 @@
 //                      --serve run listening on PATH
 //     --usbrate N      simulated USB bytes per frame (default 12000, ~700 KB/s)
 //     --realtime 1     run at the DS's 59.83 frames a second instead of flat out
+//     --jit 1          run the game with melonDS's JIT (faster)
 //     --gamecode XXXX  replace the header's game code, for prototypes whose code melonDS's
 //                      cart list gives to another game (wrong cart/save type)
 //
@@ -272,6 +273,15 @@ public:
     u32 frame = 0;      // bundles written
     u32 emuFrame = 0;
     bool full = true;
+    bool fullThis = false;   // the bundle being built is a full one
+    u32 fullRequests = 0;
+    // the DS lost track (MIRROR_INPUT_NEED_FULL): next bundle carries everything
+    void RequestFull()
+    {
+        full = true;
+        prevGX.clear();
+        fullRequests++;
+    }
     bool half = false;  // 30 fps: every other frame, each shown twice
     bool skipThis = false, holdNext = false, capPrev = false, capThis = false;
     GXFilter filt;
@@ -393,6 +403,15 @@ public:
         GPU& gpu = nds->GPU;
         std::vector<u8>& b = part2D;
         b.clear();
+        fullThis = full;
+        if (full && frame > 0)
+        {
+            // a full refresh mid-stream: the DS clears its VRAM first, so
+            // compare against cleared VRAM and send every register again
+            for (int bank = 0; bank < 9; bank++) std::fill(prevVRAM[bank].begin(), prevVRAM[bank].end(), 0);
+            memset(prevPal, 0, sizeof prevPal);
+            memset(prevOAM, 0, sizeof prevOAM);
+        }
         sz = {};
 
         if (full || memcmp(prevVRAMCNT, gpu.VRAMCNT, 9))
@@ -607,7 +626,9 @@ public:
         // 30 fps: hold this frame for two unless the game is capturing (3D on both
         // screens, one per frame), where every frame has to go
         holdNext = half && !capThis && !capPrev;
-        u32 flags = (frame == 0 ? MIRROR_FLAG_FULL : 0) | (holdNext ? MIRROR_FLAG_HOLD : 0);
+        u32 flags = (fullThis ? MIRROR_FLAG_FULL : 0) | (holdNext ? MIRROR_FLAG_HOLD : 0);
+        if (fullThis) prevGX.clear();   // its 3D commands go literally
+        fullThis = false;
         mirror_hdr h {MIRROR_MAGIC, emuFrame, 0, flags};
         Put(buf, h);
         if (half || link)
@@ -749,7 +770,7 @@ int main(int argc, char** argv)
 {
     if (argc < 3)
     {
-        fprintf(stderr, "usage: %s ROM FRAMES [--input F] [--record F] [--frames F] [--shots DIR] [--every N] [--stats F] [--boottype N] [--lang N] [--gamecode XXXX] [--half 1] [--gxdelta 1] [--serve LINK] [--dspico PATH] [--usbrate N] [--realtime 1]\n", argv[0]);
+        fprintf(stderr, "usage: %s ROM FRAMES [--input F] [--record F] [--frames F] [--shots DIR] [--every N] [--stats F] [--boottype N] [--lang N] [--gamecode XXXX] [--half 1] [--gxdelta 1] [--serve LINK] [--dspico PATH] [--usbrate N] [--realtime 1] [--jit 1]\n", argv[0]);
         return 1;
     }
     const char* rompath = argv[1];
@@ -764,7 +785,7 @@ int main(int argc, char** argv)
     bool half = false, gxDelta = false;
     const char *serve = nullptr, *dspico = nullptr;
     u32 usbRate = 12000;
-    bool realtime = false;
+    bool realtime = false, jit = false;
     for (int i = 3; i + 1 < argc; i += 2)
     {
         std::string o = argv[i];
@@ -784,6 +805,7 @@ int main(int argc, char** argv)
         else if (o == "--dspico") dspico = argv[i + 1];
         else if (o == "--usbrate") usbRate = atoi(argv[i + 1]);
         else if (o == "--realtime") realtime = atoi(argv[i + 1]) != 0;
+        else if (o == "--jit") jit = atoi(argv[i + 1]) != 0;
         else { fprintf(stderr, "unknown option %s\n", o.c_str()); return 1; }
     }
 
@@ -805,7 +827,9 @@ int main(int argc, char** argv)
     }
 
     NDSArgs args {};
-    args.JIT = std::nullopt;   // the tap needs every I/O write to go through the interpreter
+    // JIT: I/O writes from compiled code still go through ARM9IOWrite (no fastmem for I/O)
+    if (jit) args.JIT = JITArgs {};
+    else args.JIT = std::nullopt;
     if (lang >= 0)
     {
         // firmware language (0 Japanese, 1 English, ...); some builds only carry some languages' files
@@ -852,7 +876,7 @@ int main(int argc, char** argv)
         pico = std::make_unique<DSpicoSim>(nds.get(), dspico, usbRate);
         gCardHook = pico.get();
     }
-    u32 reports = 0, padFrames = 0;
+    u32 reports = 0, padFrames = 0, lastFullReq = 0;
     mirror_input pad {};
 
     nds->Start();
@@ -894,6 +918,12 @@ int main(int argc, char** argv)
         }
         if (link && link->Poll(pad))
         {
+            if ((pad.applied & MIRROR_INPUT_NEED_FULL) && f - lastFullReq > 60)
+            {
+                lastFullReq = f;
+                rec.RequestFull();
+                fprintf(stderr, "link: the DS asked for a full frame at frame %u\n", f);
+            }
             // the DS's pad: libnds bit set = held, melonDS bit clear = pressed
             nds->SetKeyMask(~pad.keys & 0xFFF);
             if (pad.keys & (1 << 12)) nds->TouchScreen(pad.touchX, pad.touchY);

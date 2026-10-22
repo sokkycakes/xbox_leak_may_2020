@@ -290,7 +290,20 @@ void DSpicoSim::ReadSocket()
     if (sock < 0 || fromHost.size() >= 1024) return;
     u8 tmp[1024];
     ssize_t r = read(sock, tmp, sizeof tmp);
-    if (r > 0) fromHost.insert(fromHost.end(), tmp, tmp + r);
+    if (r <= 0) return;
+    // fault test: DSPICO_DROP=N loses 100 bytes of the stream at byte N
+    static long long dropAt = getenv("DSPICO_DROP") ? atoll(getenv("DSPICO_DROP")) : -1;
+    static long long seen = 0;
+    long long from = seen;
+    seen += r;
+    if (dropAt >= from && dropAt < seen)
+    {
+        size_t k = dropAt - from, n = std::min<size_t>(100, r - k);
+        memmove(tmp + k, tmp + k + n, r - k - n);
+        r -= n;
+        fprintf(stderr, "dspico sim: dropped %zu bytes of the stream at byte %lld\n", n, dropAt);
+    }
+    fromHost.insert(fromHost.end(), tmp, tmp + r);
 }
 
 void DSpicoSim::PumpOut()

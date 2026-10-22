@@ -2,6 +2,7 @@
 #include <cstdio>
 #include <cstring>
 #include <vector>
+#include <mutex>
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -88,13 +89,19 @@ class UsbLink : public HostLink
     libusb_transfer* inXfer = nullptr;
     uint8_t inBuf[64];
     std::vector<uint8_t> acc;
+    std::mutex accLock;          // InDone runs on whichever thread handles events
+    bool closing = false, inIdle = false;
     static void InDone(libusb_transfer* t)
     {
         UsbLink* self = (UsbLink*)t->user_data;
         if (t->status == LIBUSB_TRANSFER_COMPLETED)
+        {
+            std::lock_guard<std::mutex> g(self->accLock);
             self->acc.insert(self->acc.end(), t->buffer, t->buffer + t->actual_length);
-        if (t->status != LIBUSB_TRANSFER_NO_DEVICE && t->status != LIBUSB_TRANSFER_CANCELLED)
-            libusb_submit_transfer(t);
+        }
+        bool again = !self->closing && (t->status == LIBUSB_TRANSFER_COMPLETED || t->status == LIBUSB_TRANSFER_TIMED_OUT);
+        if (!again || libusb_submit_transfer(t))
+            self->inIdle = true;
     }
 public:
     UsbLink()
@@ -112,7 +119,18 @@ public:
     }
     ~UsbLink()
     {
-        if (inXfer) { libusb_cancel_transfer(inXfer); timeval tv {0, 100000}; libusb_handle_events_timeout(ctx, &tv); libusb_free_transfer(inXfer); }
+        closing = true;
+        if (inXfer)
+        {
+            // the IN transfer may still be in flight: wait for its callback before freeing it
+            libusb_cancel_transfer(inXfer);
+            for (int i = 0; i < 50 && !inIdle; i++)
+            {
+                timeval tv {0, 20000};
+                libusb_handle_events_timeout(ctx, &tv);
+            }
+            if (inIdle) libusb_free_transfer(inXfer);
+        }
         if (h) { libusb_release_interface(h, 0); libusb_close(h); }
         if (ctx) libusb_exit(ctx);
     }
@@ -127,17 +145,30 @@ public:
         libusb_fill_bulk_transfer(t, h, 0x01, (uint8_t*)d, (int)n, OutDone, &done, 0);
         t->flags = LIBUSB_TRANSFER_ADD_ZERO_PACKET;
         if (libusb_submit_transfer(t)) { libusb_free_transfer(t); return false; }
+        int waited = 0;
         while (!done)
-            libusb_handle_events_completed(ctx, &done);
+        {
+            timeval tv {1, 0};
+            libusb_handle_events_timeout_completed(ctx, &tv, &done);
+            if (!done && ++waited == 5)
+                fprintf(stderr, "link: the DS has taken no data for 5 s\n");
+        }
         bool ok = t->status == LIBUSB_TRANSFER_COMPLETED;
-        if (!ok) fprintf(stderr, "link: transfer status %d\n", t->status);
+        static const char* const names[] = {"completed", "error", "timed out", "cancelled", "stalled", "device gone", "overflow"};
+        if (!ok) fprintf(stderr, "link: transfer %s\n", t->status <= 6 ? names[t->status] : "failed");
         libusb_free_transfer(t);
         return ok;
     }
     bool Poll(mirror_input& in) override
     {
-        timeval tv {0, 0};
-        libusb_handle_events_timeout(ctx, &tv);
+        // the sender thread handles events while it sends; when it is idle, do it here
+        if (libusb_try_lock_events(ctx) == 0)
+        {
+            timeval tv {0, 0};
+            if (libusb_event_handling_ok(ctx)) libusb_handle_events_locked(ctx, &tv);
+            libusb_unlock_events(ctx);
+        }
+        std::lock_guard<std::mutex> g(accLock);
         return TakeReports(acc, in);
     }
 };

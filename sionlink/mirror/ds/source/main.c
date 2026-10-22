@@ -72,10 +72,21 @@ static void decodeGX(const mirror_hdr* h)
             if (!gxPayload)
                 break;
             gxWords = n;
+            const u32* recEnd = (const u32*)((const u8*)p - 4 + r->len);
             while (i < n)
             {
+                if (p >= recEnd)
+                    break;
                 u32 op = *p++;
                 u32 len = op & 0x7FFFFFFF;
+                if (len > n - i || (!(op & 0x80000000) && p + len > recEnd))
+                {
+                    // damaged: no 3D this frame
+                    free(gxPayload);
+                    gxPayload = NULL;
+                    gxWords = 0;
+                    break;
+                }
                 if (op & 0x80000000)
                 {
                     u32 src = *p++;
@@ -96,15 +107,18 @@ static void decodeGX(const mirror_hdr* h)
 
 static void pushGX(void)
 {
-    if (!gxPayload)
+    if (!gxPayload || !gxWords)
         return;
     const u32* p = gxPayload;
+    const u32* end = gxPayload + gxWords;
     u32 runs = *p++;
-    for (u32 i = 0; i < runs; i++)
+    for (u32 i = 0; i < runs && p < end; i++)
     {
         const mirror_run* run = (const mirror_run*)p++;
         u32 addr = 0x04000000 + run->off;
         u32 n = run->info & 0x3FFF, code = run->info >> 14;
+        if (p + n > end || run->off >= 0x1070)
+            break;
         if (run->off == 0x304)
         {
             // power control, in order with the 3D writes; screen swap stays as the 2D state set it
@@ -230,6 +244,13 @@ static u32 vblanks, lastReport;
 
 static void clearHardware(void);
 static bool linkData;     // the Sion has started sending
+// Live: the screens no longer match the stream (a bundle was lost, or the
+// stall screen took over); bundles are dropped until the Sion sends a full one
+static bool needFull = true;
+static bool stallShown;
+static u32 lastApplied, lastAppliedAt;
+static u32 resyncs, allocFails, fullBundles;
+static void showStall(void);
 static u32 lastDiag = ~0u;
 
 // Before the Sion sends anything, the bottom screen shows what the link has seen
@@ -238,17 +259,43 @@ static void showDiag(void)
     if (vblanks - lastDiag < 15)
         return;
     lastDiag = vblanks;
-    printf("\x1b[0;0HSion Link: waiting for the Sion\n\n");
-    printf("card id   %08lX\n", usbDiag.idPlain);
-    printf("key2 id   %08lX\n", usbDiag.idKey2);
-    printf("scramble  %s\n\n", usbDiag.secFlags ? "on" : "off");
-    printf("card irqs %lu\n", usbDiag.irqs);
-    printf("events    %lu\n", usbDiag.events);
-    printf("resets    %lu\n", usbDiag.resets);
-    printf("setups    %lu\n", usbDiag.setups);
-    printf("last ev   %08lX\n", usbDiag.lastEvent);
-    printf("last req  %08lX\n", usbDiag.lastSetup);
-    printf("state     %-14s\n", usbConfigured() ? "connected" : usbDiag.setups ? "enumerating" : "no host yet");
+    printf("\x1b[0;0HSion Link: waiting  %5lu\n", vblanks / 60);
+    printf("card id %08lX key2 %08lX\n", usbDiag.idPlain, usbDiag.idKey2);
+    printf("irqs %lu  events %lu\n", usbDiag.irqs, usbDiag.events);
+    printf("resets %lu  setups %lu\n", usbDiag.resets, usbDiag.setups);
+    printf("state %-14s\n\n", usbConfigured() ? "connected" : usbDiag.setups ? "enumerating" : "no host yet");
+    u32 n = usbDiag.logCount;
+    for (u32 k = 0; k < 8; k++)
+    {
+        if (k >= n) { printf("%-20s\n", ""); continue; }
+        u32 i = (n - 1 - k) % 8;
+        const typeof(usbDiag.log[0])* e = &usbDiag.log[i];
+        if (e->kind == 'S')
+            printf("setup %02X %04X len %-4u\n", e->x, e->a, e->b);
+        else if (e->kind == 'C')
+            printf("done  ep %02X %-3u bytes  \n", e->x, e->a);
+        else if (e->kind == 'Z')
+            printf("status sent         \n");
+        else
+            printf("bus reset           \n");
+    }
+}
+
+// The picture stopped: what the link and the stream are doing
+static void showStall(void)
+{
+    if (vblanks - lastDiag < 15)
+        return;
+    lastDiag = vblanks;
+    printf("\x1b[0;0HSion Link: picture stopped %4lu\n\n", (vblanks - lastAppliedAt) / 60);
+    printf("frames shown  %lu\n", mirrorStats[1]);
+    printf("full refresh  %lu\n", fullBundles);
+    printf("resyncs       %lu\n", resyncs);
+    printf("out of memory %lu\n", allocFails);
+    printf("data waiting  %lu\n", usbAvailable());
+    printf("usb events    %lu\n", usbDiag.events);
+    printf("usb state     %-12s\n", usbConfigured() ? "connected" : "lost");
+    printf("waiting for a full frame: %s\n", needFull ? "yes" : "no ");
 }
 
 // live link: keep USB going and send the pad state once a frame
@@ -268,6 +315,22 @@ static void idle(void)
         else
             showDiag();
     }
+    else if (mirrorStats[1] != lastApplied)
+    {
+        lastApplied = mirrorStats[1];
+        lastAppliedAt = vblanks;
+    }
+    else if (vblanks - lastAppliedAt > 120)
+    {
+        // nothing new for two seconds: show what the link is doing
+        if (!stallShown)
+        {
+            stallShown = true;
+            needFull = true;
+            consoleDemoInit();
+        }
+        showStall();
+    }
     if (vblanks != lastReport && usbConfigured())
     {
         scanKeys();
@@ -275,7 +338,8 @@ static void idle(void)
         u32 keys = keysHeld();
         if (keys & KEY_TOUCH)
             touchRead(&t);
-        mirror_input in = {MIRROR_INPUT_MAGIC, keys, t.px, t.py, mirrorStats[1]};
+        mirror_input in = {MIRROR_INPUT_MAGIC, keys, t.px, t.py,
+                           mirrorStats[1] | (needFull ? MIRROR_INPUT_NEED_FULL : 0)};
         if (usbSendReport(&in, sizeof in))
             lastReport = vblanks;
     }
@@ -297,8 +361,143 @@ static bool readBytes(void* dst, u32 n)
     return true;
 }
 
+static bool regOk(u32 off)
+{
+    return !(off & 1) && off + 2 <= 0x1070;
+}
+
+// A live bundle damaged on the way must not be applied: one bad VRAM block
+// number or record length writes somewhere it shouldn't. Checks every record.
+static bool validBundle(const mirror_hdr* h)
+{
+    const u8* end = (const u8*)h + h->size;
+    const mirror_rec* r = (const mirror_rec*)(h + 1);
+    for (;;)
+    {
+        if ((const u8*)(r + 1) > end || (r->len & 3) || r->len > (u32)(end - (const u8*)(r + 1)))
+            return false;
+        const u32* p = (const u32*)(r + 1);
+        u32 n = r->len >= 4 ? p[0] : 0;
+        switch (r->type)
+        {
+        case MREC_END:
+            return true;
+        case MREC_VRAMCNT:
+            if (r->len != 12) return false;
+            break;
+        case MREC_VRAM:
+            if (r->len != 4 + n * (4 + MIRROR_BLOCK)) return false;
+            for (u32 i = 0; i < n; i++)
+            {
+                u32 id = p[1 + i * (1 + MIRROR_BLOCK / 4)];
+                u32 bank = id >> 16, blk = id & 0xFFFF;
+                if (bank >= 9 || (blk + 1) * MIRROR_BLOCK > bankSize[bank]) return false;
+            }
+            break;
+        case MREC_PAL:
+        case MREC_OAM:
+            if (r->len != 4 + n * (4 + MIRROR_ROW)) return false;
+            for (u32 i = 0; i < n; i++)
+            {
+                u32 off = p[1 + i * (1 + MIRROR_ROW / 4)];
+                if ((off & 3) || off + MIRROR_ROW > 0x800) return false;
+            }
+            break;
+        case MREC_REGS:
+        {
+            if (r->len != 4 + n * sizeof(mirror_reg)) return false;
+            const mirror_reg* reg = (const mirror_reg*)(p + 1);
+            for (u32 i = 0; i < n; i++)
+                if (!regOk(reg[i].off)) return false;
+            break;
+        }
+        case MREC_LINES:
+        {
+            if (r->len != 4 + n * sizeof(mirror_line)) return false;
+            const mirror_line* l = (const mirror_line*)(p + 1);
+            for (u32 i = 0; i < n; i++)
+                if (!regOk(l[i].off) || l[i].line >= 263) return false;
+            break;
+        }
+        case MREC_GX:
+        case MREC_GXDELTA:
+            break;   // checked as the payload is built (decodeGX, pushGX)
+        default:
+            return false;
+        }
+        r = nextRec(r);
+    }
+}
+
+static void skipBytes(u32 n)
+{
+    static u8 scratch[512];
+    while (n)
+    {
+        u32 k = n < sizeof scratch ? n : sizeof scratch;
+        readBytes(scratch, k);
+        n -= k;
+    }
+}
+
+// Live stream: never gives up. Finds the next bundle header (resyncing byte by
+// byte after a damaged one), and while a full refresh is wanted drops bundles
+// that aren't full ones.
+static mirror_hdr* readBundleLive(void)
+{
+    for (;;)
+    {
+        mirror_hdr h;
+        readBytes(&h.magic, 4);
+        while (h.magic != MIRROR_MAGIC)
+        {
+            u8 b;
+            readBytes(&b, 1);
+            h.magic = (h.magic >> 8) | ((u32)b << 24);
+        }
+        readBytes((u8*)&h + 4, sizeof h - 4);
+        if (h.size < sizeof h || h.size > 0x200000)
+        {
+            resyncs++;
+            needFull = true;
+            continue;
+        }
+        u32 body = h.size - sizeof h;
+        if (needFull && !(h.flags & MIRROR_FLAG_FULL))
+        {
+            skipBytes(body);
+            continue;
+        }
+        mirror_hdr* b = malloc(h.size);
+        if (!b)
+        {
+            allocFails++;
+            needFull = true;
+            skipBytes(body);
+            continue;
+        }
+        *b = h;
+        readBytes(b + 1, body);
+        if (!validBundle(b))
+        {
+            free(b);
+            resyncs++;
+            needFull = true;
+            continue;
+        }
+        if (h.flags & MIRROR_FLAG_FULL)
+        {
+            needFull = false;
+            fullBundles++;
+        }
+        return b;
+    }
+}
+
 static mirror_hdr* readBundle(void)
 {
+    if (liveLink)
+        return readBundleLive();
     mirror_hdr h;
     if (!readBytes(&h, sizeof h) || h.magic != MIRROR_MAGIC)
         return NULL;
@@ -412,6 +611,17 @@ int main(int argc, char** argv)
         while (cur)
         {
             // start early in the visible lines so the 3D engine reaches SWAP_BUFFERS before VBlank
+            if (liveLink && (cur->flags & MIRROR_FLAG_FULL) && fullBundles > 1)
+            {
+                // a full refresh: it assumes cleared hardware, like the first bundle
+                swiWaitForVBlank();
+                lineList = NULL;
+                lineCount = lineNext = 0;
+                clearHardware();
+                stallShown = false;
+            }
+            else if (stallShown && liveLink && (cur->flags & MIRROR_FLAG_FULL))
+                stallShown = false;
             while (REG_VCOUNT >= 96)
                 idle();
             pushGX();

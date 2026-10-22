@@ -1,3 +1,25 @@
+diff --git a/src/ARMJIT_Memory.cpp b/src/ARMJIT_Memory.cpp
+index c64bad1..675eceb 100644
+--- a/src/ARMJIT_Memory.cpp
++++ b/src/ARMJIT_Memory.cpp
+@@ -44,6 +44,7 @@
+ #include "DSi.h"
+ #include "GPU.h"
+ #include "GPU3D.h"
++#include "MirrorTap.h"
+ #include "Wifi.h"
+ #include "NDSCart.h"
+ #include "SPU.h"
+@@ -1519,7 +1520,8 @@ void* ARMJIT_Memory::GetFuncForAddr(ARM* cpu, u32 addr, bool store, int size) co
+ 
+                 though GPU3D registers are accessed much more intensive
+             */
+-            if (addr >= 0x04000320 && addr < 0x040006A4)
++            // with a mirror tap, 3D stores go through ARM9IOWrite so the tap sees them
++            if (addr >= 0x04000320 && addr < 0x040006A4 && !(store && gMirrorTap))
+             {
+                 switch (size | store)
+                 {
 diff --git a/src/GPU.cpp b/src/GPU.cpp
 index b695ee9..db46e01 100644
 --- a/src/GPU.cpp

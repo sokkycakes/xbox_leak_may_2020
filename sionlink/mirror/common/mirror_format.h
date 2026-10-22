@@ -74,8 +74,11 @@ typedef struct {
     uint32_t magic;
     uint32_t keys;      // libnds keysHeld(): bit set = held (KEY_A = bit 0 ... KEY_TOUCH = bit 12)
     uint16_t touchX, touchY;
-    uint32_t applied;   // bundles applied so far
+    uint32_t applied;   // bundles applied so far, | MIRROR_INPUT_NEED_FULL
 } mirror_input;
+// the DS lost track of the stream (a damaged bundle, or it ran out of memory):
+// send a full bundle (MIRROR_FLAG_FULL) so it can start over from cleared hardware
+#define MIRROR_INPUT_NEED_FULL 0x80000000u
 
 #define MIRROR_ROW   32   // palette/OAM granularity
 #define MIRROR_BLOCK 512  // VRAM granularity
