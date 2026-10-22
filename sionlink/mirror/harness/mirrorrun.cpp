@@ -100,6 +100,13 @@ public:
             pending.push_back({(u16)off, (u8)size, val});
             return;
         }
+        if (off == 0x304 && size >= 2)
+        {
+            // POWCNT1 gates the 3D engines, so it also goes in order with the 3D writes
+            // (the client keeps its own screen-swap bit there; the 2D state sets that)
+            pending.push_back({(u16)off, 2, val & 0xFFFF});
+            return;
+        }
         for (int i = 0; i < size; i++)
         {
             u32 o = off + i;
@@ -502,6 +509,13 @@ int main(int argc, char** argv)
         {
             fwrite(top, 4, 256 * 192, fo);
             fwrite(bot, 4, 256 * 192, fo);
+        }
+        if (getenv("MIRROR_3DDEBUG") && f % 50 == 25)
+        {
+            auto& g = nds->GPU.GPU3D;
+            fprintf(stderr, "f%u polys %u attr %08x mode %u proj %d %d %d %d pos %d %d %d %d\n", f, g.RenderNumPolygons,
+                    g.PolygonAttr, g.MatrixMode, g.ProjMatrix[0], g.ProjMatrix[5], g.ProjMatrix[10], g.ProjMatrix[14],
+                    g.PosMatrix[0], g.PosMatrix[5], g.PosMatrix[12], g.PosMatrix[14]);
         }
         if (fidx)
         {

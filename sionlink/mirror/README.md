@@ -16,6 +16,8 @@ melonDS instances are used, and there is no link yet:
 `harness/inputs/`.
 
 ## What a bundle carries
+A bundle is sent at the emulated VBlank start, and the client applies its 2D part in its own
+VBlank IRQ.
 - **3D:** every ARM9 write to DISP3DCNT and 0x04000320-0x040006A3 (geometry FIFO, command
   ports, 3D state tables), in order, up to the emulated VBlank start. The real DS's
   geometry engine re-runs them.
@@ -33,8 +35,19 @@ melonDS instances are used, and there is no link yet:
   (set MELONDS=path). The tap and runner are GPL with melonDS.
 - `ds/`: BlockSDS (`make`, BLOCKSDS set). The client and `common/` are our own code.
 
+- **Mid-frame changes:** 2D registers the game changes partway down the screen, replayed by the
+  client from an HBlank IRQ.
+- **Display captures** aren't sent as pixels. The client's own hardware redoes them.
+- **POWCNT1** goes in order with the 3D writes, because it gates the 3D engines, and also
+  with the 2D state, for the screen swap.
+
+## Results (2026-10-22)
+All 12 BlockSDS demos tried match pixel for pixel after the first boot frame. That covers 2D
+backgrounds and sprites, 3D, HBlank DMA effects, display capture with 3D on both screens, and
+blending. 2D and light 3D cost well under 2 KB a frame. Dense 3D models cost 42-45 KB a frame
+raw and 5-17 KB with zlib. Details are in the project files at `sionlink/mirror-test/`.
+
 ## Not handled yet
-- Registers changed mid-frame (HBlank DMA effects): only the start-of-frame value is sent.
 - Main-memory display mode (DISPCNT mode 3).
-- The bundle is uncompressed, with 8 bytes per 3D write. Packing GXFIFO runs and compressing
-  should cut it a lot.
+- Compression, and caching 3D command lists that repeat from frame to frame.
+- Commercial games, real hardware, and a live link.

@@ -56,7 +56,13 @@ static void pushGX(const mirror_hdr* h)
             const mirror_run* run = (const mirror_run*)p++;
             u32 addr = 0x04000000 + run->off;
             u32 n = run->info & 0x3FFF, code = run->info >> 14;
-            if (code == 0)
+            if (run->off == 0x304)
+            {
+                // power control, in order with the 3D writes; screen swap stays as the 2D state set it
+                for (u32 k = 0; k < n; k++)
+                    REG_POWERCNT = (*p++ & 0x7FFF) | (REG_POWERCNT & 0x8000);
+            }
+            else if (code == 0)
                 for (u32 k = 0; k < n; k++) *(vu32*)addr = *p++;
             else if (code == 1)
                 for (u32 k = 0; k < n; k++) *(vu16*)addr = *p++;
