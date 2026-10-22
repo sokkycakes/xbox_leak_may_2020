@@ -28,18 +28,17 @@ VBlank IRQ.
   - VRAMCNT
   - changed 32-byte palette and OAM rows
   - changed 512-byte VRAM blocks of every bank
+- **Mid-frame changes:** 2D registers the game changes partway down the screen, replayed by the
+  client from an HBlank IRQ.
+- **Display captures** aren't sent as pixels. The client's own hardware redoes them.
+- **POWCNT1** goes in order with the 3D writes, because it gates the 3D engines, and also
+  with the 2D state, for the screen swap.
 
 ## Building
 - melonDS at `melonds/BASE` with `melonds/mirror-tap.patch` applied, built with
   `cmake -B build -DBUILD_QT_SDL=OFF -DENABLE_OGLRENDERER=OFF`. Then run `harness/build.sh`
   (set MELONDS=path). The tap and runner are GPL with melonDS.
 - `ds/`: BlockSDS (`make`, BLOCKSDS set). The client and `common/` are our own code.
-
-- **Mid-frame changes:** 2D registers the game changes partway down the screen, replayed by the
-  client from an HBlank IRQ.
-- **Display captures** aren't sent as pixels. The client's own hardware redoes them.
-- **POWCNT1** goes in order with the 3D writes, because it gates the 3D engines, and also
-  with the 2D state, for the screen swap.
 
 ## Results (2026-10-22)
 All 12 BlockSDS demos tried match pixel for pixel after the first boot frame. That covers 2D
