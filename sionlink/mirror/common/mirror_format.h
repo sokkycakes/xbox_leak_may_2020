@@ -23,6 +23,7 @@ typedef struct {
 
 #define MIRROR_FLAG_FULL 1  // first bundle: everything is sent
 #define MIRROR_FLAG_HOLD 2  // show this frame for two VBlanks (30 fps mode)
+#define MIRROR_FLAG_LZ   4  // live link: the body is packed (mirror_lz.h)
 
 enum {
     MREC_END   = 0,
@@ -75,6 +76,9 @@ typedef struct {
     uint32_t keys;      // libnds keysHeld(): bit set = held (KEY_A = bit 0 ... KEY_TOUCH = bit 12)
     uint16_t touchX, touchY;
     uint32_t applied;   // bundles applied so far, | MIRROR_INPUT_NEED_FULL
+    // what the DS has run into so far (wrapping counters), for the Sion's log
+    uint16_t damaged, noMemory;   // bundles that came in damaged, bundles it had no memory for
+    uint16_t fulls, stalls;       // full refreshes applied, times the picture stopped with no data coming
 } mirror_input;
 // the DS lost track of the stream (a damaged bundle, or it ran out of memory):
 // send a full bundle (MIRROR_FLAG_FULL) so it can start over from cleared hardware

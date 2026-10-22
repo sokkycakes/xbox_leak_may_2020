@@ -65,7 +65,7 @@ build/mirrorplay/source/main.c.o: source/main.c \
  /opt/wonderful/thirdparty/blocksds/core/libs/libnds/include/nds/arm9/teak/tlf.h \
  /opt/wonderful/thirdparty/blocksds/core/libs/libnds/include/fat.h \
  /opt/wonderful/thirdparty/blocksds/core/libs/libnds/include/filesystem.h \
- ../common/mirror_format.h source/usblink.h
+ ../common/mirror_format.h ../common/mirror_lz.h source/usblink.h
 /opt/wonderful/thirdparty/blocksds/core/libs/libnds/include/nds.h:
 /opt/wonderful/thirdparty/blocksds/core/libs/libnds/include/nds/bios.h:
 /opt/wonderful/thirdparty/blocksds/core/libs/libnds/include/nds/ndstypes.h:
@@ -133,4 +133,5 @@ build/mirrorplay/source/main.c.o: source/main.c \
 /opt/wonderful/thirdparty/blocksds/core/libs/libnds/include/fat.h:
 /opt/wonderful/thirdparty/blocksds/core/libs/libnds/include/filesystem.h:
 ../common/mirror_format.h:
+../common/mirror_lz.h:
 source/usblink.h:

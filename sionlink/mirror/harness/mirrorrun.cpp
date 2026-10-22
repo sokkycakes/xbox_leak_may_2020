@@ -11,6 +11,7 @@
 //     --gxdelta 1      send 3D commands as copies from the previous bundle's where they repeat
 //     --serve LINK     live: stream the bundles to the DS and play with its pad;
 //                      LINK is sim:PATH (a --dspico run) or usb (the DSpico on this machine)
+//     --lz 0           send bundles unpacked on the link (default: packed, mirror_lz.h)
 //     --dspico PATH    run a DS client with a simulated DSpico whose USB host is the
 //                      --serve run listening on PATH
 //     --usbrate N      simulated USB bytes per frame (default 12000, ~700 KB/s)
@@ -47,6 +48,7 @@
 #include "../common/mirror_format.h"
 #include "hostlink.h"
 #include "dspico_sim.h"
+#include "lzpack.h"
 
 using namespace melonDS;
 
@@ -250,7 +252,12 @@ public:
     std::vector<std::vector<u8>> sendQueue;
     u32 sendBusy = 0;    // bundles queued or being sent
     std::atomic<u32> fullPending {0};   // full bundles queued or being sent
+    std::atomic<u64> sentBytes {0};
+    std::atomic<u32> fullSentAt {0};   // emulated frame when the last full bundle had gone out
+    std::condition_variable sendDone;
+    u32 capWaits = 0;
     bool sendStop = false;
+    bool lz = true;   // pack bundles on the link (MIRROR_FLAG_LZ)
 
     void StartLink(HostLink* l)
     {
@@ -266,10 +273,27 @@ public:
                     b.swap(sendQueue.front());
                     sendQueue.erase(sendQueue.begin());
                 }
+                auto t0 = std::chrono::steady_clock::now();
+                size_t raw = b.size();
+                if (lz) b = LzPackBundle(b);
+                // Whole 512-byte blocks only: the DS reads in 512-byte USB transfers, and a short
+                // packet that ends one early leaves the DSpico's (RP2040) second packet buffer
+                // armed, which loses data or hangs its firmware. The DS skips the zero padding
+                // while it looks for the next bundle's header.
+                b.resize((b.size() + 511) & ~size_t(511), 0);
                 bool ok = !linkLost && link->Send(b.data(), b.size());
-                if (((mirror_hdr*)b.data())->flags & MIRROR_FLAG_FULL) fullPending--;
+                if (ok) sentBytes += b.size();
+                if (((mirror_hdr*)b.data())->flags & MIRROR_FLAG_FULL)
+                {
+                    fullSentAt = emuFrame;
+                    fullPending--;
+                    if (ok && fullRequests)
+                        fprintf(stderr, "link: sent a full frame, %zu KB (%zu KB unpacked) in %.1f s\n", b.size() >> 10,
+                                raw >> 10, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+                }
                 std::lock_guard<std::mutex> g(sendLock);
                 sendBusy--;
+                sendDone.notify_all();
                 if (!ok && !linkLost)
                 {
                     fprintf(stderr, "link: the DS went away at frame %u\n", emuFrame);
@@ -284,6 +308,16 @@ public:
         { std::lock_guard<std::mutex> g(sendLock); sendStop = true; }
         sendWake.notify_one();
         sender.join();
+    }
+    // Frames with display capture can't be left out (the DS redoes the capture from the
+    // frame before). When those pile up, the game waits for the DS instead.
+    void WaitForLink()
+    {
+        std::unique_lock<std::mutex> g(sendLock);
+        if (sendBusy < 8) return;
+        if (capWaits++ < 10)
+            fprintf(stderr, "link: %u bundles waiting during display capture; the game waits for the DS\n", sendBusy);
+        sendDone.wait(g, [this] { return sendBusy < 4 || linkLost; });
     }
     bool LinkBehind()
     {
@@ -370,6 +404,8 @@ public:
                 skipThis = true;
                 linkSkips++;
             }
+            else if (link && !skipThis && frame > 0)
+                WaitForLink();
             if (!skipThis)
             {
                 Snapshot2D();
@@ -723,14 +759,8 @@ public:
         if (link)
         {
             std::lock_guard<std::mutex> g(sendLock);
-            // Whole 512-byte blocks only: the DS reads in 512-byte USB transfers, and a short
-            // packet that ends one early leaves the DSpico's (RP2040) second packet buffer
-            // armed, which loses data or hangs its firmware. The DS skips the zero padding
-            // while it looks for the next bundle's header.
-            std::vector<u8> padded = buf;
-            padded.resize((buf.size() + 511) & ~size_t(511), 0);
             if (((mirror_hdr*)buf.data())->flags & MIRROR_FLAG_FULL) fullPending++;
-            sendQueue.push_back(std::move(padded));
+            sendQueue.push_back(buf);   // packed and padded by the sender
             sendBusy++;
             sendWake.notify_one();
         }
@@ -741,8 +771,8 @@ public:
         totalRaw += buf.size();
         totalZ += zlen;
         if (stats)
-            fprintf(stats, "%u,%zu,%lu,%u,%u,%u,%u,%u,%u,%u\n", emuFrame, buf.size(), (unsigned long)zlen,
-                    sz.gx, sz.regs, sz.pal, sz.oam, sz.vram, sz.vramBlocks, sz.lines);
+            fprintf(stats, "%u,%zu,%lu,%u,%u,%u,%u,%u,%u,%u,%d\n", emuFrame, buf.size(), (unsigned long)zlen,
+                    sz.gx, sz.regs, sz.pal, sz.oam, sz.vram, sz.vramBlocks, sz.lines, capThis ? 1 : 0);
         frame++;
     }
 };
@@ -800,7 +830,7 @@ int main(int argc, char** argv)
 {
     if (argc < 3)
     {
-        fprintf(stderr, "usage: %s ROM FRAMES [--input F] [--record F] [--frames F] [--shots DIR] [--every N] [--stats F] [--boottype N] [--lang N] [--gamecode XXXX] [--half 1] [--gxdelta 1] [--serve LINK] [--dspico PATH] [--usbrate N] [--realtime 1] [--jit 1] [--threaded 1]\n", argv[0]);
+        fprintf(stderr, "usage: %s ROM FRAMES [--input F] [--record F] [--frames F] [--shots DIR] [--every N] [--stats F] [--boottype N] [--lang N] [--gamecode XXXX] [--half 1] [--gxdelta 1] [--serve LINK] [--lz 0] [--dspico PATH] [--usbrate N] [--realtime 1] [--jit 1] [--threaded 1]\n", argv[0]);
         return 1;
     }
     const char* rompath = argv[1];
@@ -812,7 +842,7 @@ int main(int argc, char** argv)
     int lang = -1;
     const char* gamecode = nullptr;
     const char* clientIdx = nullptr;
-    bool half = false, gxDelta = false;
+    bool half = false, gxDelta = false, lz = true;
     const char *serve = nullptr, *dspico = nullptr;
     u32 usbRate = 12000;
     bool realtime = false, jit = false, threaded = false;
@@ -831,6 +861,7 @@ int main(int argc, char** argv)
         else if (o == "--client-index") clientIdx = argv[i + 1];
         else if (o == "--half") half = atoi(argv[i + 1]) != 0;
         else if (o == "--gxdelta") gxDelta = atoi(argv[i + 1]) != 0;
+        else if (o == "--lz") lz = atoi(argv[i + 1]) != 0;
         else if (o == "--serve") serve = argv[i + 1];
         else if (o == "--dspico") dspico = argv[i + 1];
         else if (o == "--usbrate") usbRate = atoi(argv[i + 1]);
@@ -891,13 +922,14 @@ int main(int argc, char** argv)
     rec.nds = nds.get();
     rec.half = half;
     rec.gxDelta = gxDelta;
+    rec.lz = lz;
     if (record)
     {
         rec.out = fopen(record, "wb");
         if (statsPath)
         {
             rec.stats = fopen(statsPath, "w");
-            fprintf(rec.stats, "frame,bytes,zlib,gx,regs,pal,oam,vram,vramblocks,lines\n");
+            fprintf(rec.stats, "frame,bytes,zlib,gx,regs,pal,oam,vram,vramblocks,lines,capture\n");
         }
     }
     std::unique_ptr<HostLink> link;
@@ -916,6 +948,9 @@ int main(int argc, char** argv)
         gCardHook = pico.get();
     }
     u32 reports = 0, padFrames = 0, lastFullReq = 0, lastReportAt = 0, reportsShown = 0;
+    u64 sentShown = 0;
+    u32 shownBefore = 0;
+    mirror_input dsSeen {};
     bool deaf = false;   // no reports for a while: the DS can't ask for a full frame
     mirror_input pad {};
 
@@ -940,15 +975,27 @@ int main(int argc, char** argv)
             // how fast the game runs here, and whether the link keeps up
             auto now = std::chrono::steady_clock::now();
             double s = std::chrono::duration<double>(now - speedFrom).count();
-            fprintf(stderr, "frame %u: %.1f fps, %u bundles sent, %u frames left out, %u reports, pad %03x%s\n",
-                    f, 600 / s, rec.frame, rec.linkSkips, reports - reportsShown, pad.keys & 0xFFF,
+            u64 sent = rec.sentBytes;
+            u32 shown = pad.applied & ~MIRROR_INPUT_NEED_FULL;
+            fprintf(stderr, "frame %u: %.1f fps, %u bundles sent (%llu KB/s), %u frames left out, DS showed %u, %u reports, pad %03x%s\n",
+                    f, 600 / s, rec.frame, (unsigned long long)((sent - sentShown) / 1024 / s), rec.linkSkips,
+                    shown - shownBefore, reports - reportsShown, pad.keys & 0xFFF,
                     pad.applied & MIRROR_INPUT_NEED_FULL ? ", DS waiting for a full frame" : "");
+            if (memcmp(&pad.damaged, &dsSeen.damaged, 8))
+                fprintf(stderr, "  DS so far: %u damaged bundles, %u with no memory, %u full refreshes, %u stalls\n",
+                        pad.damaged, pad.noMemory, pad.fulls, pad.stalls);
+            dsSeen = pad;
+            shownBefore = shown;
             reportsShown = reports;
+            sentShown = sent;
             speedFrom = now;
         }
         if (realtime)
         {
             tick += frameTime;
+            // after waiting for the DS, carry on from now instead of racing to catch up
+            auto now = std::chrono::steady_clock::now();
+            if (now - tick > std::chrono::milliseconds(250)) tick = now;
             std::this_thread::sleep_until(tick);
         }
         while (si < steps.size() && steps[si].frame <= f)
@@ -960,9 +1007,11 @@ int main(int argc, char** argv)
         }
         if (link && link->Poll(pad))
         {
-            // one full frame at a time: it can take seconds to get through, and the DS
-            // keeps asking until it has arrived
-            if ((pad.applied & MIRROR_INPUT_NEED_FULL) && f - lastFullReq > 60 && !rec.fullPending)
+            // One full frame at a time: it can take seconds to get through, and the DS
+            // keeps asking until it has arrived. Give it time to say so after one has gone
+            // out, or each would bring another (run 7: minutes of nothing but full frames).
+            if ((pad.applied & MIRROR_INPUT_NEED_FULL) && f - lastFullReq > 60 && !rec.fullPending &&
+                f - rec.fullSentAt > 90)
             {
                 lastFullReq = f;
                 rec.RequestFull();

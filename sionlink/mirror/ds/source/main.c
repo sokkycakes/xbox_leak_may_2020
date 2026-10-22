@@ -13,6 +13,7 @@
 #include <string.h>
 
 #include "mirror_format.h"
+#include "mirror_lz.h"
 #include "usblink.h"
 
 static const u32 bankLCDC[9] = {
@@ -252,7 +253,8 @@ static bool stallShown, stallManual;
 static u32 comboSince;   // VBlank count when L+R+SELECT went down, 0 while it isn't held
 static bool comboDone;
 static u32 lastApplied, lastAppliedAt;
-static u32 resyncs, allocFails, fullBundles;
+static u32 lastOutBytes, lastDataAt;   // when data last arrived from the Sion
+static u32 resyncs, allocFails, fullBundles, stalls;
 static void showStall(void);
 static void showStallScreen(void);
 static u32 lastDiag = ~0u;
@@ -371,6 +373,11 @@ static void idle(void)
         comboSince = 0, comboDone = false;
     if (stallManual)
         showStall();
+    if (usbDiag.outBytes != lastOutBytes)
+    {
+        lastOutBytes = usbDiag.outBytes;
+        lastDataAt = vblanks;
+    }
     if (!linkData)
     {
         if (usbAvailable())
@@ -389,12 +396,15 @@ static void idle(void)
         lastApplied = mirrorStats[1];
         lastAppliedAt = vblanks;
     }
-    else if (vblanks - lastAppliedAt > 120)
+    else if (vblanks - lastAppliedAt > 120 && vblanks - lastDataAt > 60)
     {
-        // nothing new for two seconds: show what the link is doing
+        // nothing new for two seconds and no data for one: show what the link is doing.
+        // A big bundle can take seconds to come in; asking for a full frame then
+        // would only throw it away and bring a bigger one (run 7).
         if (!stallShown)
         {
             stallShown = true;
+            stalls++;
             needFull = true;
             showStallScreen();
         }
@@ -414,7 +424,8 @@ static void idle(void)
         // every card command is a chance for the DSpico to miss one
         if (keys != lastKeys || touch != lastTouch || flags != lastFlags || vblanks - lastReport >= 8)
         {
-            mirror_input in = {MIRROR_INPUT_MAGIC, keys, t.px, t.py, mirrorStats[1] | flags};
+            mirror_input in = {MIRROR_INPUT_MAGIC, keys, t.px, t.py, mirrorStats[1] | flags,
+                               resyncs, allocFails, fullBundles, stalls};
             if (usbSendReport(&in, sizeof in))
             {
                 lastReport = vblanks;
@@ -521,6 +532,42 @@ static void skipBytes(u32 n)
     }
 }
 
+// A packed bundle (MIRROR_FLAG_LZ) unpacked into a new buffer; NULL if there's no
+// memory for it (*damaged false) or the data is damaged (*damaged true)
+ARM_CODE ITCM_CODE static int unpackLz(const u8* s, u32 sn, u8* d, u32 dn)
+{
+    return mirrorLzUnpack(s, sn, d, dn);
+}
+
+static mirror_hdr* unpackBundle(const mirror_hdr* p, bool* damaged)
+{
+    const u32* w = (const u32*)(p + 1);
+    *damaged = true;
+    if (p->size < sizeof *p + MIRROR_LZ_HEAD)
+        return NULL;
+    u32 rawSize = w[0], packed = w[2];
+    if (rawSize < sizeof *p + sizeof(mirror_rec) || rawSize > 0x200000 || (rawSize & 3) ||
+        packed > p->size - sizeof *p - MIRROR_LZ_HEAD)
+        return NULL;
+    mirror_hdr* b = malloc(rawSize);
+    if (!b)
+    {
+        *damaged = false;
+        return NULL;
+    }
+    *b = *p;
+    b->size = rawSize;
+    b->flags &= ~MIRROR_FLAG_LZ;
+    u32 words = (rawSize - sizeof *b) / 4;
+    if (!unpackLz((const u8*)(w + 3), packed, (u8*)(b + 1), rawSize - sizeof *b) ||
+        mirrorLzSum((const u32*)(b + 1), words) != w[1])
+    {
+        free(b);
+        return NULL;
+    }
+    return b;
+}
+
 // Live stream: never gives up. Finds the next bundle header (resyncing byte by
 // byte after a damaged one), and while a full refresh is wanted drops bundles
 // that aren't full ones.
@@ -559,6 +606,22 @@ static mirror_hdr* readBundleLive(void)
         }
         *b = h;
         readBytes(b + 1, body);
+        if (h.flags & MIRROR_FLAG_LZ)
+        {
+            bool damaged;
+            mirror_hdr* raw = unpackBundle(b, &damaged);
+            free(b);
+            if (!raw)
+            {
+                if (damaged)
+                    resyncs++;
+                else
+                    allocFails++;
+                needFull = true;
+                continue;
+            }
+            b = raw;
+        }
         if (!validBundle(b))
         {
             free(b);
