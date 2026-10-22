@@ -401,7 +401,7 @@ SPOT_PITCH = 74
 # band the reference's 23% of the pane, the image band as tall again, the
 # description under them; bands in Frolick's slate (a darker wash).
 SPOT_BOX_INSET = 8
-SPOT_BAND_X, SPOT_BAND_Y = 12, 6
+SPOT_BAND_X, SPOT_BAND_Y = 4, 4
 SPOT_TITLE_BAND = 0.23
 SPOT_BAND_FILL = "0x38000000"
 
@@ -742,11 +742,14 @@ def spotlight_page(spec):
     # the details box (the later skin's Metapane) under the pane's text,
     # with the reference's darker title band and the image band below it
     ph = 74 * rows - 2
-    box = [label("metaBox", META_X + SPOT_BOX_INSET, list_y, 420 - SPOT_BOX_INSET, ph + 10, "Metapane")]   # (its foot sits 10 inside)
+    # The bands go under the box so its border draws over their ends:
+    # they span the box's inside edge to edge (Metapane's edge strips sit
+    # 2..6 in from each side).
     bx, bw = META_X + SPOT_BOX_INSET + SPOT_BAND_X, 420 - SPOT_BOX_INSET - 2 * SPOT_BAND_X
     title_h = round(ph * SPOT_TITLE_BAND)
-    box.append(figure("metaTitleBand", bx, list_y + SPOT_BAND_Y, bw, title_h - SPOT_BAND_Y, solid(SPOT_BAND_FILL)))
-    box.append(figure("metaImageLine", bx, list_y + 2 * title_h, bw, 2, solid(SPOT_BAND_FILL)))
+    box = [figure("metaTitleBand", bx, list_y + SPOT_BAND_Y, bw, title_h - SPOT_BAND_Y, solid(SPOT_BAND_FILL)),
+           figure("metaImageLine", bx, list_y + 2 * title_h, bw, 2, solid(SPOT_BAND_FILL)),
+           label("metaBox", META_X + SPOT_BOX_INSET, list_y, 420 - SPOT_BOX_INSET, ph + 10, "Metapane")]   # (its foot sits 10 inside)
     meta = label("metaSpot", META_X, list_y, 420, ph, "metaScene_spot", "", " <Data1></Data1>")
     out.append(clip_group("metaClip", 0, list_y - 16, CANVAS_W, BODY_END - (list_y - 16),
                           [moved(b, 0, -(list_y - 16)) for b in box + [meta]]))
