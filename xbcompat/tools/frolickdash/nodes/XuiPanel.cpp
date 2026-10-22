@@ -1647,7 +1647,18 @@ void CBelt::Render()
 #define GRID_PLACE 0.444f       // MBROWS gp-0x7df8: the placement transform
 static const float c_rgGridRowScale[4] = { 0.65f, 0.68f, 0.71f, 0.74f };   // gp-0x7e24..0x7e18, back to front
 
+#define GRID_DEPTH 0.15f        // the slab's thickness, a share of its width
+
+// The PS1 icon pass's light set (MBROWS 0x7e6f60 directions, 0x7e6fc0
+// colours): grey 0.4 and grey 0.2 from two front lights, black from the one
+// behind, 0.24 ambient. Icon space: +x right, +y down, +z out of the front.
+static const float c_rgGridLightDir[3][3] = { { 0.5f, 0.2f, 0.5f }, { 0.5f, -0.5f, 0.5f }, { 0.0f, 0.0f, -0.5f } };
+static const float c_rgGridLightCol[3] = { 0.4f, 0.2f, 0.0f };
+#define GRID_AMBIENT 0.24f
+
 struct SCREENVERTEX { float x, y, z, rhw; float u, v; };
+struct SLABVERTEX { float x, y, z; DWORD color; };
+#define SLABVERTEX_FVF (D3DFVF_XYZ | D3DFVF_DIFFUSE)
 #define SCREENVERTEX_FVF (D3DFVF_XYZRHW | D3DFVF_TEX1)
 
 class CGameGrid : public CNode
@@ -1684,6 +1695,7 @@ protected:
     void Capture();
     void DrawBackground(float alpha);
     void DrawTiles(float alpha);
+    void DrawSlab(const D3DXVECTOR3& c, const D3DXVECTOR3& ax, const D3DXVECTOR3& ay, const D3DXVECTOR3& az, float a);
 
     bool m_bDirty;
     CXuiResources m_res;
@@ -2013,6 +2025,73 @@ void CGameGrid::DrawBackground(float alpha)
     XAppSetRenderState(D3DRS_ZENABLE, D3DZB_TRUE);
 }
 
+// Light on an icon-space normal, the front face's light as 1 so the art
+// keeps its colours and the other faces shade relative to it
+static float GridLight(float nx, float ny, float nz)
+{
+    float l = GRID_AMBIENT;
+    for (int i = 0; i < 3; i++)
+    {
+        const float* d = c_rgGridLightDir[i];
+        float len = (float)sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+        float k = (d[0] * nx + d[1] * ny + d[2] * nz) / len;
+        if (k > 0.0f)
+            l += c_rgGridLightCol[i] * k;
+    }
+    return l;
+}
+
+// The icon as a slab: ax/ay are the front face's half extents (ay up on
+// screen), az the thickness pointing away from the camera. The faces that
+// face the camera are drawn lit; the art goes on the front afterwards.
+void CGameGrid::DrawSlab(const D3DXVECTOR3& c, const D3DXVECTOR3& ax, const D3DXVECTOR3& ay, const D3DXVECTOR3& az, float a)
+{
+    static const struct { float n[3]; } faces[6] =
+    {
+        { { 0, 0, 1 } }, { { 0, 0, -1 } }, { { 1, 0, 0 } }, { { -1, 0, 0 } }, { { 0, -1, 0 } }, { { 0, 1, 0 } },
+    };
+    float front = GridLight(0, 0, 1);
+    SLABVERTEX v[6 * 6];
+    int n = 0;
+    for (int f = 0; f < 6; f++)
+    {
+        // icon space +y is down, so its normal's y runs against ay
+        float nx = faces[f].n[0], ny = faces[f].n[1], nz = faces[f].n[2];
+        D3DXVECTOR3 nw = ax * nx - ay * ny - az * nz;     // outward, world
+        D3DXVECTOR3 fc = c + az + nw;                     // the face's centre (az: half depth)
+        if (D3DXVec3Dot(&nw, &fc) >= 0.0f)                // the eye is at the origin
+            continue;
+        D3DXVECTOR3 u, w;
+        if (nz != 0.0f) { u = ax; w = ay; }
+        else if (nx != 0.0f) { u = az; w = ay; }
+        else { u = ax; w = az; }
+        float l = GridLight(nx, ny, nz) / front;
+        if (l > 1.0f) l = 1.0f;
+        DWORD col = D3DCOLOR_COLORVALUE(l, l, l, a);
+        D3DXVECTOR3 p[4] = { fc - u - w, fc + u - w, fc + u + w, fc - u + w };
+        static const int tri[6] = { 0, 1, 2, 0, 2, 3 };
+        for (int k = 0; k < 6; k++)
+        {
+            v[n].x = p[tri[k]].x; v[n].y = p[tri[k]].y; v[n].z = p[tri[k]].z;
+            v[n].color = col;
+            n++;
+        }
+    }
+    if (n == 0)
+        return;
+    XAppSetTexture(0, NULL);
+    XAppSetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA);
+    XAppSetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
+    XAppSetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG2);
+    XAppSetTextureStageState(0, D3DTSS_COLORARG2, D3DTA_DIFFUSE);
+    XAppSetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG2);
+    XAppSetTextureStageState(0, D3DTSS_ALPHAARG2, D3DTA_DIFFUSE);
+    XAppSetTextureStageState(1, D3DTSS_COLOROP, D3DTOP_DISABLE);
+    XAppSetTextureStageState(1, D3DTSS_ALPHAOP, D3DTOP_DISABLE);
+    XAppGetD3DDev()->SetVertexShader(SLABVERTEX_FVF);
+    XAppGetD3DDev()->DrawVerticesUP(D3DPT_TRIANGLELIST, n, v, sizeof (SLABVERTEX));
+}
+
 void CGameGrid::DrawTiles(float alpha)
 {
     if (m_pTile == NULL || m_count <= 0)
@@ -2095,6 +2174,11 @@ void CGameGrid::DrawTiles(float alpha)
                         float ly = (1.0f - gy / 5.0f * 2.0f) * hh;
                         m_be.m_grid[gy][gx] = D3DXVECTOR3(c.x + lx, c.y + ly * cp, c.z + ly * sp);
                     }
+                // the slab behind the art: front half extents, then half its depth
+                // along the tile's normal away from the camera (0, -sin, cos)
+                float hd = 0.5f * GRID_DEPTH * 2.0f * hw;
+                DrawSlab(c, D3DXVECTOR3(hw, 0, 0), D3DXVECTOR3(0, hh * cp, hh * sp),
+                    D3DXVECTOR3(0, -hd * sp, hd * cp), a);
                 SetString(m_pTile->find("image"), "ImagePath", m_rgImage[i] != NULL ? m_rgImage[i] : _T(""));
                 m_be.m_gridMode = true;
                 m_be.m_gx0 = 0.0f; m_be.m_gy0 = 0.0f;
