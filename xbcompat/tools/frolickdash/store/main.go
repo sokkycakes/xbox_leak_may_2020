@@ -882,11 +882,13 @@ func main() {
 	}
 	tick := time.NewTicker(time.Second)
 	lastWatch := time.Time{}
+	recheckInstallers()
 	for {
 		if time.Since(lastWatch) > 15*time.Second {
 			lastWatch = time.Now()
 			watchInstalls()
 		}
+		watchSession()
 		select {
 		case err := <-catDone:
 			if err != nil {

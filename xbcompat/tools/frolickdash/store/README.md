@@ -56,7 +56,16 @@ game's own program when the files have one (frolick-run.bat starts it from
 its own folder); a disc or download that only has an installer gets
 frolick-install.bat, which runs it once (silently for Inno Setup, NSIS, Wise
 and MSI; InstallShield and others show their own windows and need a mouse
-or keyboard). After that run the helper finds the installed program in
+or keyboard; their .kzi says FrolickInput=mouse). A SETUP.EXE stub that
+only starts the disc's AUTORUN.INF program is passed over for that program
+(Diablo's Blizzard installer). After that run the helper finds the installed program in
 /data/wincarts/<cid>/pfx and points Exec at it, so the next launch plays.
 Checked in the cloud with Wine: Diamond Caves II (Wise) installed silently
 and started from its card.
+
+While one of the store's cards runs, the helper also watches its Wine
+session (session.go): wincart-run only ends a run after it has seen the
+game's processes, so a program that quits at once left Wine's services
+holding gamescope on a blank screen. Once nothing but those services has
+run for 15 seconds, the helper stops gamescope and wincart-run returns to
+the dashboard.

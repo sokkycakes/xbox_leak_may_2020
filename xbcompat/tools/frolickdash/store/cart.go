@@ -242,7 +242,53 @@ func bestGame(list []exeFile, title string) (exeFile, bool) {
 }
 
 // The installer at the top of the files (the shallowest, then the biggest).
-func bestInstaller(list []exeFile) (exeFile, bool) {
+// A disc's SETUP.EXE can be a little stub that only starts its AUTORUN.INF
+// program (Diablo's starts Blizzard's installer menu and quits), so the
+// program AUTORUN.INF names is taken instead when it's the bigger one.
+func bestInstaller(list []exeFile, folder string) (exeFile, bool) {
+	inst, ok := topInstaller(list)
+	if auto, aok := autorunExe(list, folder); aok && ok && inst.size < 64<<10 && auto.size > inst.size {
+		return auto, true
+	}
+	return inst, ok
+}
+
+// The program AUTORUN.INF at the top of the files opens, if it's there.
+func autorunExe(list []exeFile, folder string) (exeFile, bool) {
+	ents, _ := os.ReadDir(folder)
+	for _, e := range ents {
+		if !strings.EqualFold(e.Name(), "autorun.inf") {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(folder, e.Name()))
+		if err != nil {
+			break
+		}
+		for _, line := range strings.Split(string(b), "\n") {
+			k, v, ok := strings.Cut(strings.TrimSpace(line), "=")
+			if !ok || !strings.EqualFold(strings.TrimSpace(k), "open") {
+				continue
+			}
+			v = strings.TrimSpace(v)
+			if strings.HasPrefix(v, `"`) {
+				v = strings.SplitN(v[1:], `"`, 2)[0]
+			} else if f := strings.Fields(v); len(f) > 0 {
+				v = f[0]
+			}
+			v = strings.TrimPrefix(strings.ReplaceAll(v, `\`, "/"), "./")
+			for _, x := range list {
+				if strings.EqualFold(x.rel, v) {
+					return x, true
+				}
+			}
+		}
+		break
+	}
+	return exeFile{}, false
+}
+
+// The installers by name, shallowest then biggest first.
+func topInstaller(list []exeFile) (exeFile, bool) {
 	var ins []exeFile
 	for _, e := range list {
 		if isInstaller(e.rel) && !strings.HasPrefix(strings.ToLower(filepath.Base(e.rel)), "autorun") && !reNotGame.MatchString(filepath.Base(e.rel)) {
@@ -291,7 +337,8 @@ func winPath(rel string) string { return strings.ReplaceAll(rel, "/", `\`) }
 
 type cart struct {
 	CID, Name, Exec, Mode, Publisher string
-	Installed                        int64 // when the installer was set up (unix)
+	Input                            string // "mouse": its installer needs a mouse or keyboard
+	Installed                        int64  // when the installer was set up (unix)
 }
 
 func kziPath(cid string) string { return filepath.Join(*cartDir, cid+".kzi") }
@@ -304,6 +351,9 @@ func writeKzi(c cart) error {
 		fmt.Fprintf(&b, "Publisher=%s\n", c.Publisher)
 	}
 	fmt.Fprintf(&b, "FrolickMode=%s\nFrolickInstalled=%d\n", c.Mode, c.Installed)
+	if c.Input != "" && c.Mode == "install" {
+		fmt.Fprintf(&b, "FrolickInput=%s\n", c.Input)
+	}
 	return writeAtomic(kziPath(c.CID), []byte(b.String()))
 }
 
@@ -331,6 +381,8 @@ func readKzi(path string) (cart, bool) {
 			c.Mode = v
 		case "FrolickInstalled":
 			fmt.Sscan(v, &c.Installed)
+		case "FrolickInput":
+			c.Input = v
 		}
 	}
 	return c, c.CID != ""
@@ -367,19 +419,18 @@ func makeCart(q queued, title, publisher, dir string, files []iaFile) (string, e
 	list := exes(folder)
 	c := cart{CID: cid, Name: shortName(title), Publisher: publisher}
 	game, hasGame := bestGame(list, title)
-	inst, hasInst := bestInstaller(list)
+	inst, hasInst := bestInstaller(list, folder)
 	switch {
 	case hasInst && (!hasGame || inst.depth <= game.depth):
 		// a disc with an installer: the game has to be installed first
-		target := `C:\Games\` + cid
-		args := silentArgs(filepath.Join(folder, filepath.FromSlash(inst.rel)), target)
-		bat := "@echo off\r\n" +
-			"rem frolick-store: installs the game once, into its own Wine prefix\r\n" +
-			fmt.Sprintf("start /wait \"\" \"%s\" %s\r\n", winPath(inst.rel), args)
-		if err := os.WriteFile(filepath.Join(folder, "frolick-install.bat"), []byte(bat), 0644); err != nil {
+		quiet, err := installBat(folder, cid, inst)
+		if err != nil {
 			return "", err
 		}
 		c.Exec, c.Mode, c.Installed = "frolick-install.bat", "install", time.Now().Unix()
+		if !quiet {
+			c.Input = "mouse"
+		}
 	case hasGame:
 		c.Exec, c.Mode = runBat(folder, game.rel), "game"
 	default:
@@ -401,6 +452,49 @@ func makeCart(q queued, title, publisher, dir string, files []iaFile) (string, e
 	}
 	log.Printf("%s: game card %s, %s, Exec=%s", q.ID, cid, c.Mode, c.Exec)
 	return c.Mode, nil
+}
+
+// frolick-install.bat, which runs installer inst once.  Says whether it
+// runs by itself (silently); the rest need a mouse or keyboard.
+func installBat(folder, cid string, inst exeFile) (bool, error) {
+	args := silentArgs(filepath.Join(folder, filepath.FromSlash(inst.rel)), `C:\Games\`+cid)
+	bat := "@echo off\r\n" +
+		"rem frolick-store: installs the game once, into its own Wine prefix\r\n" +
+		fmt.Sprintf("start /wait \"\" \"%s\" %s\r\n", winPath(inst.rel), args)
+	return args != "", os.WriteFile(filepath.Join(folder, "frolick-install.bat"), []byte(bat), 0644)
+}
+
+// Cards made before bestInstaller knew about AUTORUN.INF stubs: their
+// installer chosen again (while not running and not yet installed).
+func recheckInstallers() {
+	kzis, _ := filepath.Glob(filepath.Join(*cartDir, "*.kzi"))
+	running, _ := os.ReadFile(*runningCar)
+	for _, k := range kzis {
+		c, ok := readKzi(k)
+		if !ok || c.Mode != "install" || strings.TrimSpace(string(running)) == k {
+			continue
+		}
+		folder := filepath.Join(*cartDir, c.CID)
+		inst, ok := bestInstaller(exes(folder), folder)
+		if !ok {
+			continue
+		}
+		old, _ := os.ReadFile(filepath.Join(folder, "frolick-install.bat"))
+		if bytes.Contains(old, []byte(`"`+winPath(inst.rel)+`"`)) {
+			continue
+		}
+		quiet, err := installBat(folder, c.CID, inst)
+		if err != nil {
+			continue
+		}
+		c.Input = ""
+		if !quiet {
+			c.Input = "mouse"
+		}
+		if writeKzi(c) == nil {
+			log.Printf("%s: installer is now %s", c.CID, inst.rel)
+		}
+	}
 }
 
 // Exec for a program: wincart-run starts it from the cart's folder, so a
