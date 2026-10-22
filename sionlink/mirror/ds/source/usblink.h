@@ -11,6 +11,15 @@
 #define SL_USB_PID 0x0001   // pid.codes test PID, until we register one
 
 void usbStart(void);
+
+// what the link has seen so far, shown on the DS while it waits for the Sion
+typedef struct {
+    u32 idPlain, idKey2;    // card ID read without and with KEY2 scrambling
+    u32 secFlags;           // scrambling flags in use
+    u32 irqs, events, resets, setups, configured;
+    u32 lastEvent, lastSetup;
+} usb_diag;
+extern usb_diag usbDiag;
 void usbPoll(void);
 bool usbConfigured(void);
 

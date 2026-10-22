@@ -8,6 +8,11 @@
 
 // ---- card bus
 
+// KEY2 flags added to every command: none in unscrambled game mode, or the
+// launcher's flags if it left the scrambler running (see usbStart)
+static u32 secFlags;
+usb_diag usbDiag;
+
 static void cardStart(u64 cmd, u32 flags)
 {
     while (REG_ROMCTRL & CARD_BUSY)
@@ -16,7 +21,7 @@ static void cardStart(u64 cmd, u32 flags)
     for (int i = 0; i < 8; i++)
         REG_CARD_COMMAND[i] = cmd >> (56 - 8 * i);
     // 6.7 MHz, no KEY2 scrambling (the DSpico is in unscrambled game mode)
-    REG_ROMCTRL = CARD_ACTIVATE | CARD_nRESET | flags;
+    REG_ROMCTRL = CARD_ACTIVATE | CARD_nRESET | secFlags | flags;
 }
 
 static void cardCmd(u64 cmd)
@@ -266,6 +271,7 @@ static void setup(u32 w0, u32 w1)
             cardCmd(USB_EP_OPEN(EP_OUT, PACKET, 2));
             cardCmd(USB_EP_OPEN(EP_IN, PACKET, 2));
             configured = true;
+            usbDiag.configured++;
             outArmed = inBusy = false;
             ep0Status();
             armOut();
@@ -341,17 +347,22 @@ static void drainEvents(void)
         e &= ~EV_LAST;
         if (e == 0)
             break;
+        usbDiag.events++;
+        usbDiag.lastEvent = e;
         if ((e >> 30) == 1)
         {
             // setup packet: a second word follows
             u32 e2 = cardRead4(USB_GET_EVENT);
             last = e2 & EV_LAST;
+            usbDiag.setups++;
+            usbDiag.lastSetup = e2 & ~EV_LAST;
             setup(e, e2 & ~EV_LAST);
         }
         else if ((e >> 28) == 3)
             xferComplete(e & 0xFF, (e >> 8) & 0x1FFF);
         else if (e == EV_BUS_RESET)
         {
+            usbDiag.resets++;
             configured = false;
             outArmed = inBusy = false;
             pendingAddr = 0;
@@ -363,9 +374,26 @@ static void drainEvents(void)
     }
 }
 
+#define CARD_READ_ID 0xB800000000000000ull
+#define KEY2_FLAGS (CARD_SEC_CMD | CARD_SEC_DAT | CARD_SEC_EN)
+
+static bool goodId(u32 id)
+{
+    return id != 0 && id != 0xFFFFFFFF;
+}
+
 void usbStart(void)
 {
     sysSetCardOwner(BUS_OWNER_ARM9);
+    // the DSpico answers its USB commands only in unscrambled game mode, which
+    // its launcher leaves it in; read the card ID to see the bus is talking
+    usbDiag.idPlain = cardRead4(CARD_READ_ID);
+    secFlags = KEY2_FLAGS;
+    usbDiag.idKey2 = cardRead4(CARD_READ_ID);
+    secFlags = 0;
+    if (!goodId(usbDiag.idPlain) && goodId(usbDiag.idKey2))
+        secFlags = KEY2_FLAGS;
+    usbDiag.secFlags = secFlags;
     cardCmd(USB_CLEAR_EVENT_QUEUE);
     cardCmd(USB_INIT);
     cardCmd(USB_INTERRUPT_ENABLE);
@@ -377,6 +405,8 @@ void usbPoll(void)
     // the DSpico raises the card IRQ line while it has events; check now and then anyway
     if ((REG_IF & IRQ_CARD_LINE) || (++pollCount & 63) == 0)
     {
+        if (REG_IF & IRQ_CARD_LINE)
+            usbDiag.irqs++;
         REG_IF = IRQ_CARD_LINE;
         drainEvents();
     }

@@ -228,12 +228,46 @@ static FILE* recording;
 static bool liveLink;
 static u32 vblanks, lastReport;
 
+static void clearHardware(void);
+static bool linkData;     // the Sion has started sending
+static u32 lastDiag = ~0u;
+
+// Before the Sion sends anything, the bottom screen shows what the link has seen
+static void showDiag(void)
+{
+    if (vblanks - lastDiag < 15)
+        return;
+    lastDiag = vblanks;
+    printf("\x1b[0;0HSion Link: waiting for the Sion\n\n");
+    printf("card id   %08lX\n", usbDiag.idPlain);
+    printf("key2 id   %08lX\n", usbDiag.idKey2);
+    printf("scramble  %s\n\n", usbDiag.secFlags ? "on" : "off");
+    printf("card irqs %lu\n", usbDiag.irqs);
+    printf("events    %lu\n", usbDiag.events);
+    printf("resets    %lu\n", usbDiag.resets);
+    printf("setups    %lu\n", usbDiag.setups);
+    printf("last ev   %08lX\n", usbDiag.lastEvent);
+    printf("last req  %08lX\n", usbDiag.lastSetup);
+    printf("state     %-14s\n", usbConfigured() ? "connected" : usbDiag.setups ? "enumerating" : "no host yet");
+}
+
 // live link: keep USB going and send the pad state once a frame
 static void idle(void)
 {
     if (!liveLink)
         return;
     usbPoll();
+    if (!linkData)
+    {
+        if (usbAvailable())
+        {
+            // the first bundle sets every display register; start from cleared VRAM
+            linkData = true;
+            clearHardware();
+        }
+        else
+            showDiag();
+    }
     if (vblanks != lastReport && usbConfigured())
     {
         scanKeys();
@@ -357,6 +391,7 @@ static void openSource(void)
     liveLink = true;
     mirrorStats[3] = 4;
     showColor(RGB15(0, 8, 24));
+    consoleDemoInit();
     usbStart();
 }
 
