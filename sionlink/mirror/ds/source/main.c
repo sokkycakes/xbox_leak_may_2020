@@ -6,6 +6,7 @@
 // VBlank apply its 2D state. Both show up together in the next frame.
 
 #include <nds.h>
+#include <fat.h>
 #include <filesystem.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -286,6 +287,37 @@ static void vblankHandler(void)
     pending2D = NULL;
 }
 
+// On a real DS a failure would otherwise be a black screen: show a colour
+// (red: no file system, yellow: no recording found).
+static void fail(u32 state, u16 color)
+{
+    mirrorStats[3] = state;
+    REG_DISPCNT = MODE_0_2D;
+    REG_DISPCNT_SUB = MODE_0_2D;
+    BG_PALETTE[0] = color;
+    BG_PALETTE_SUB[0] = color;
+    for (;;)
+        swiWaitForVBlank();
+}
+
+static FILE* openRecording(void)
+{
+    // inside this .nds (NitroFS), else next to it on the SD card
+    FILE* f = NULL;
+    bool nitro = nitroFSInit(NULL);
+    if (nitro)
+        f = fopen("nitro:/mirror.bin", "rb");
+    if (!f && fatInitDefault())
+    {
+        f = fopen("fat:/mirror.bin", "rb");
+        if (!f)
+            f = fopen("sd:/mirror.bin", "rb");
+    }
+    if (!f)
+        fail(nitro ? 2 : 1, nitro ? RGB15(31, 31, 0) : RGB15(31, 0, 0));
+    return f;
+}
+
 int main(int argc, char** argv)
 {
     powerOn(POWER_ALL);
@@ -293,39 +325,40 @@ int main(int argc, char** argv)
     irqSet(IRQ_VBLANK, vblankHandler);
     irqSet(IRQ_HBLANK, hblankHandler);
 
-    if (!nitroFSInit(NULL))
-    {
-        mirrorStats[3] = 1;
-        for (;;) swiWaitForVBlank();
-    }
-    FILE* f = fopen("nitro:/mirror.bin", "rb");
-    if (!f)
-    {
-        mirrorStats[3] = 2;
-        for (;;) swiWaitForVBlank();
-    }
-
-    mirror_hdr* cur = readBundle(f);
-    if (cur)
-        decodeGX(cur);
-    mirror_hdr* old = NULL;
-    while (cur)
-    {
-        // start early in the visible lines so the 3D engine reaches SWAP_BUFFERS before VBlank
-        while (REG_VCOUNT >= 96)
-            ;
-        pushGX();
-        pending2D = cur;
-        mirror_hdr* next = readBundle(f);
-        if (next)
-            decodeGX(next);
-        while (pending2D || holdFrames)
-            ;
-        free(old);
-        old = cur;   // still on screen (its line list) until the next one is applied
-        cur = next;
-    }
-    mirrorStats[3] = 3;
+    FILE* f = openRecording();
     for (;;)
+    {
+        mirror_hdr* cur = readBundle(f);
+        if (cur)
+            decodeGX(cur);
+        mirror_hdr* old = NULL;
+        while (cur)
+        {
+            // start early in the visible lines so the 3D engine reaches SWAP_BUFFERS before VBlank
+            while (REG_VCOUNT >= 96)
+                ;
+            pushGX();
+            pending2D = cur;
+            mirror_hdr* next = readBundle(f);
+            if (next)
+                decodeGX(next);
+            while (pending2D || holdFrames)
+                ;
+            free(old);
+            old = cur;   // still on screen (its line list) until the next one is applied
+            cur = next;
+        }
+        mirrorStats[3] = 3;
+        // play it again from the start: the first bundle assumes cleared hardware
         swiWaitForVBlank();
+        irqDisable(IRQ_HBLANK);
+        lineList = NULL;
+        lineCount = lineNext = 0;
+        free(old);
+        free(gxPayload);
+        gxPayload = NULL;
+        gxWords = 0;
+        clearHardware();
+        rewind(f);
+    }
 }
