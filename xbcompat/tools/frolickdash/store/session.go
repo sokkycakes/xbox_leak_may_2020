@@ -8,8 +8,9 @@ package main
 // never seen, and Wine's services (winedevice.exe and the rest) keep
 // gamescope up on a blank screen.  So, for the store's own cards only:
 // while gamescope runs and no Windows program but Wine's services has been
-// running for idleLimit, gamescope is stopped, and wincart-run takes the
-// rest down and goes back to the dashboard as when a game quits.
+// running for idleLimit, Wine is killed and gamescope stopped, and
+// wincart-run takes the rest down and goes back to the dashboard as when a
+// game quits.
 
 import (
 	"flag"
@@ -59,9 +60,47 @@ func watchSession() {
 	if time.Since(idleSince) < idleLimit {
 		return
 	}
-	log.Printf("%s: no Windows program left running for %s: closing the session", filepath.Base(kzi), idleLimit)
-	syscall.Kill(pid, syscall.SIGTERM)
+	// Wine's services ignore SIGTERM, and gamescope waits for them: they
+	// are killed, then gamescope is asked to stop if it's still up.
+	n := killWine()
+	for i := 0; i < 20 && syscall.Kill(pid, 0) == nil; i++ {
+		time.Sleep(250 * time.Millisecond)
+		if i == 8 {
+			syscall.Kill(pid, syscall.SIGTERM)
+		}
+	}
+	if syscall.Kill(pid, 0) == nil {
+		syscall.Kill(pid, syscall.SIGKILL)
+	}
+	log.Printf("%s: no Windows program left running for %s: closed the session (%d Wine processes)", filepath.Base(kzi), idleLimit, n)
 	idleSince = time.Time{}
+}
+
+// SIGKILLs Wine's processes in its root (the Windows programs and
+// wineserver), not gamescope, Xwayland or the Guide.  Returns how many.
+func killWine() int {
+	n := 0
+	procs, _ := filepath.Glob("/proc/[0-9]*")
+	for _, p := range procs {
+		if root, err := os.Readlink(p + "/root"); err != nil || root != *contyRoot {
+			continue
+		}
+		b, _ := os.ReadFile(p + "/cmdline")
+		arg0 := string(b)
+		if i := strings.IndexByte(arg0, 0); i >= 0 {
+			arg0 = arg0[:i]
+		}
+		comm, _ := os.ReadFile(p + "/comm")
+		c := strings.TrimSpace(string(comm))
+		windows := len(arg0) > 2 && arg0[1] == ':' && arg0[2] == '\\'
+		if !windows && c != "wineserver" && !strings.HasPrefix(c, "wine") {
+			continue
+		}
+		if pid, err := strconv.Atoi(filepath.Base(p)); err == nil && syscall.Kill(pid, syscall.SIGKILL) == nil {
+			n++
+		}
+	}
+	return n
 }
 
 // Whether any process in Wine's root is a Windows program other than Wine's

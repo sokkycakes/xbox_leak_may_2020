@@ -465,7 +465,8 @@ func installBat(folder, cid string, inst exeFile) (bool, error) {
 }
 
 // Cards made before bestInstaller knew about AUTORUN.INF stubs: their
-// installer chosen again (while not running and not yet installed).
+// installer chosen again (while not running and not yet installed; checked
+// with watchInstalls, so a card that was running gets it afterwards).
 func recheckInstallers() {
 	kzis, _ := filepath.Glob(filepath.Join(*cartDir, "*.kzi"))
 	running, _ := os.ReadFile(*runningCar)

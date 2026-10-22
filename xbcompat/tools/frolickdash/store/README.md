@@ -67,5 +67,6 @@ While one of the store's cards runs, the helper also watches its Wine
 session (session.go): wincart-run only ends a run after it has seen the
 game's processes, so a program that quits at once left Wine's services
 holding gamescope on a blank screen. Once nothing but those services has
-run for 15 seconds, the helper stops gamescope and wincart-run returns to
+run for 15 seconds, the helper kills Wine (its services ignore SIGTERM)
+and stops gamescope, and wincart-run returns to
 the dashboard.
