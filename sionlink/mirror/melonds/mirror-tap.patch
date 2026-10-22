@@ -1,0 +1,94 @@
+diff --git a/src/GPU.cpp b/src/GPU.cpp
+index b695ee9..db46e01 100644
+--- a/src/GPU.cpp
++++ b/src/GPU.cpp
+@@ -19,6 +19,7 @@
+ #include <string.h>
+ #include "NDS.h"
+ #include "GPU.h"
++#include "MirrorTap.h"
+ 
+ #include "ARMJIT.h"
+ 
+@@ -1248,6 +1249,8 @@ void GPU::StartScanline(u32 line) noexcept
+         VCount &= 0x1FF;
+     }
+ 
++    if (gMirrorTap) gMirrorTap->Scanline(VCount);
++
+     GPU2D_A.UpdateWindows(VCount);
+     GPU2D_B.UpdateWindows(VCount);
+ 
+diff --git a/src/MirrorTap.h b/src/MirrorTap.h
+new file mode 100644
+index 0000000..24475d8
+--- /dev/null
++++ b/src/MirrorTap.h
+@@ -0,0 +1,23 @@
++// Sion Link screen mirroring: lets an outside recorder see every ARM9 I/O
++// write and each scanline start. Null when nothing is recording.
++#ifndef MIRRORTAP_H
++#define MIRRORTAP_H
++
++#include "types.h"
++
++namespace melonDS
++{
++class NDS;
++
++class MirrorTap
++{
++public:
++    virtual ~MirrorTap() {}
++    virtual void IOWrite(u32 addr, u32 val, int size) = 0;
++    virtual void Scanline(u32 vcount) = 0;
++};
++
++extern MirrorTap* gMirrorTap;
++}
++
++#endif
+diff --git a/src/NDS.cpp b/src/NDS.cpp
+index c6dc85f..f017d37 100644
+--- a/src/NDS.cpp
++++ b/src/NDS.cpp
+@@ -21,6 +21,7 @@
+ #include <string.h>
+ #include <inttypes.h>
+ #include "NDS.h"
++#include "MirrorTap.h"
+ #include "ARM.h"
+ #include "NDSCart.h"
+ #include "GBACart.h"
+@@ -47,6 +48,7 @@
+ 
+ namespace melonDS
+ {
++MirrorTap* gMirrorTap = nullptr;
+ using namespace Platform;
+ 
+ const s32 kMaxIterationCycles = 64;
+@@ -3152,6 +3154,7 @@ u32 NDS::ARM9IORead32(u32 addr)
+ 
+ void NDS::ARM9IOWrite8(u32 addr, u8 val)
+ {
++    if (gMirrorTap) gMirrorTap->IOWrite(addr, val, 1);
+     switch (addr)
+     {
+     case 0x04000004: GPU.SetDispStat(0, val, 0x00FF); return;
+@@ -3271,6 +3274,7 @@ void NDS::ARM9IOWrite8(u32 addr, u8 val)
+ 
+ void NDS::ARM9IOWrite16(u32 addr, u16 val)
+ {
++    if (gMirrorTap) gMirrorTap->IOWrite(addr, val, 2);
+     switch (addr)
+     {
+     case 0x04000004: GPU.SetDispStat(0, val, 0xFFFF); return;
+@@ -3448,6 +3452,7 @@ void NDS::ARM9IOWrite16(u32 addr, u16 val)
+ 
+ void NDS::ARM9IOWrite32(u32 addr, u32 val)
+ {
++    if (gMirrorTap) gMirrorTap->IOWrite(addr, val, 4);
+     switch (addr)
+     {
+     case 0x04000004:

@@ -1,0 +1,543 @@
+// Headless melonDS runner for the screen-mirroring test.
+//
+//   mirrorrun ROM FRAMES [options]
+//     --input FILE     key script: lines "FRAME KEYS [TOUCH X Y]", KEYS like A+START or -
+//     --record FILE    write one mirror bundle per frame (see common/mirror_format.h)
+//     --frames FILE    write every frame as raw 32-bit pixels, top then bottom screen
+//     --shots DIR      write a PPM of both screens every --every frames (default 60)
+//     --stats FILE     per-frame bundle sizes as CSV
+//
+// melonDS is GPL; this runner links it and stays GPL with it.
+
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <cstdarg>
+#include <string>
+#include <vector>
+#include <map>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <chrono>
+#include <zlib.h>
+
+#include "NDS.h"
+#include "NDSCart.h"
+#include "GPU.h"
+#include "Platform.h"
+#include "MirrorTap.h"
+#include "Args.h"
+#include "../common/mirror_format.h"
+
+using namespace melonDS;
+
+// ---------------------------------------------------------------- recorder
+
+static bool Tracked2D(u32 off)
+{
+    if (off < 0x58) return off >= 8 || off < 4;      // DISPCNT, BG/affine/window/blend
+    if (off >= 0x64 && off < 0x68) return true;      // DISPCAPCNT
+    if (off == 0x6C || off == 0x6D) return true;     // MASTER_BRIGHT A
+    if (off >= 0x1000 && off < 0x1058) return off >= 0x1008 || off < 0x1004;
+    if (off == 0x106C || off == 0x106D) return true;
+    return false;
+}
+
+static bool Tracked3D(u32 off)
+{
+    if (off >= 0x60 && off < 0x64) return true;      // DISP3DCNT
+    if (off >= 0x320 && off < 0x6A4) return !(off >= 0x600 && off < 0x608); // skip GXSTAT
+    return false;
+}
+
+// registers whose write itself does something, so a rewrite of the same value matters
+static bool WriteTriggers(u32 off)
+{
+    u32 o = off & 0xFFF;
+    return (o >= 0x28 && o < 0x30) || (o >= 0x38 && o < 0x40) || (off >= 0x64 && off < 0x68);
+}
+
+static const u32 BankSize[9] = {0x20000,0x20000,0x20000,0x20000,0x10000,0x4000,0x4000,0x8000,0x4000};
+
+class Recorder : public MirrorTap
+{
+public:
+    NDS* nds = nullptr;
+    FILE* out = nullptr;
+    FILE* stats = nullptr;
+    u32 frame = 0;
+    bool full = true;
+
+    struct IOW { u16 off; u8 size; u32 val; };
+
+    u8 shadow[0x1070] {};      // last value the game wrote, per byte
+    u8 sent[0x1070] {};        // what the client's registers hold
+    u8 lineCur[0x1070] {};     // register state while the visible lines run
+    bool written[0x1070 / 2] {};
+    bool lineWritten[0x1070 / 2] {};
+    std::vector<IOW> pending, ready;
+    std::vector<mirror_line> lines;
+    u8 prevPal[2048] {}, prevOAM[2048] {};
+    std::vector<u8> prevVRAM[9];
+    u8 prevVRAMCNT[9] {};
+    u16 prevPow = 0;
+    bool haveFrame = false;
+    int captureBank = -1;
+    u32 captureOff = 0, captureLen = 0;
+
+    std::vector<u8> buf, part2D;
+    u64 totalRaw = 0, totalZ = 0;
+
+    Recorder() { for (int i = 0; i < 9; i++) prevVRAM[i].assign(BankSize[i], 0); }
+
+    void IOWrite(u32 addr, u32 val, int size) override
+    {
+        u32 off = addr - 0x04000000;
+        if (addr < 0x04000000 || off >= 0x1070) return;
+        if (Tracked3D(off))
+        {
+            pending.push_back({(u16)off, (u8)size, val});
+            return;
+        }
+        for (int i = 0; i < size; i++)
+        {
+            u32 o = off + i;
+            if (o < 0x1070 && Tracked2D(o))
+            {
+                shadow[o] = (val >> (8 * i)) & 0xFF;
+                written[o >> 1] = true;
+                lineWritten[o >> 1] = true;
+            }
+        }
+    }
+
+    void Scanline(u32 vcount) override
+    {
+        if (vcount == 0)
+        {
+            Snapshot2D();
+            haveFrame = true;
+        }
+        else if (vcount < 192 && haveFrame)
+            TrackLine(vcount);
+        else if (vcount == 192)
+        {
+            if (haveFrame && out)
+                Emit();
+            haveFrame = false;
+            ready.insert(ready.end(), pending.begin(), pending.end());
+            pending.clear();
+        }
+        else if (vcount == 193)
+            SyncCapture();
+    }
+
+    // ---- output helpers
+    template <typename T> static void Put(std::vector<u8>& b, const T& v)
+    {
+        const u8* p = (const u8*)&v;
+        b.insert(b.end(), p, p + sizeof(T));
+    }
+    static void PutBytes(std::vector<u8>& b, const void* p, size_t n) { b.insert(b.end(), (const u8*)p, (const u8*)p + n); }
+    static size_t BeginRec(std::vector<u8>& b, u16 type)
+    {
+        size_t at = b.size();
+        mirror_rec r {type, 0, 0};
+        Put(b, r);
+        return at;
+    }
+    static void EndRec(std::vector<u8>& b, size_t at)
+    {
+        ((mirror_rec*)&b[at])->len = b.size() - at - sizeof(mirror_rec);
+    }
+
+    struct Sizes { u32 gx, regs, pal, oam, vram, vramBlocks, lines; } sz {};
+
+    // ---- line 0: the 2D state this frame starts with
+    void Snapshot2D()
+    {
+        GPU& gpu = nds->GPU;
+        std::vector<u8>& b = part2D;
+        b.clear();
+        sz = {};
+
+        if (full || memcmp(prevVRAMCNT, gpu.VRAMCNT, 9))
+        {
+            size_t at = BeginRec(b, MREC_VRAMCNT);
+            PutBytes(b, gpu.VRAMCNT, 9);
+            u8 pad[3] {};
+            PutBytes(b, pad, 3);
+            EndRec(b, at);
+            memcpy(prevVRAMCNT, gpu.VRAMCNT, 9);
+        }
+
+        std::vector<mirror_reg> regs;
+        for (u32 o = 0; o < 0x1070; o += 2)
+        {
+            if (!Tracked2D(o) && !Tracked2D(o + 1)) continue;
+            u16 v = shadow[o] | (shadow[o + 1] << 8);
+            u16 s = sent[o] | (sent[o + 1] << 8);
+            if (full || v != s || (written[o >> 1] && WriteTriggers(o)))
+            {
+                regs.push_back({(u16)o, v});
+                sent[o] = shadow[o];
+                sent[o + 1] = shadow[o + 1];
+            }
+        }
+        if (full || nds->PowerControl9 != prevPow)
+        {
+            regs.push_back({0x304, nds->PowerControl9});
+            prevPow = nds->PowerControl9;
+        }
+        memset(written, 0, sizeof(written));
+        memset(lineWritten, 0, sizeof(lineWritten));
+        memcpy(lineCur, shadow, sizeof(lineCur));
+        lines.clear();
+        if (!regs.empty())
+        {
+            size_t at = BeginRec(b, MREC_REGS), s0 = b.size();
+            u32 n = regs.size();
+            Put(b, n);
+            PutBytes(b, regs.data(), n * sizeof(mirror_reg));
+            EndRec(b, at);
+            sz.regs = b.size() - s0;
+        }
+
+        sz.pal = Rows(MREC_PAL, gpu.Palette, prevPal);
+        sz.oam = Rows(MREC_OAM, gpu.OAM, prevOAM);
+
+        size_t at = BeginRec(b, MREC_VRAM), s0 = b.size(), cntAt = b.size();
+        u32 n = 0;
+        Put(b, n);
+        for (int bank = 0; bank < 9; bank++)
+        {
+            const u8* cur = gpu.VRAM[bank];
+            u8* prev = prevVRAM[bank].data();
+            for (u32 blk = 0; blk < BankSize[bank] / MIRROR_BLOCK; blk++)
+            {
+                const u8* c = cur + blk * MIRROR_BLOCK;
+                u8* p = prev + blk * MIRROR_BLOCK;
+                if (!full && !memcmp(c, p, MIRROR_BLOCK)) continue;
+                if (full)
+                {
+                    // client VRAM starts cleared; skip all-zero blocks
+                    bool zero = true;
+                    for (int i = 0; i < MIRROR_BLOCK && zero; i++) zero = !c[i];
+                    if (zero) continue;
+                }
+                u32 id = ((u32)bank << 16) | blk;
+                Put(b, id);
+                PutBytes(b, c, MIRROR_BLOCK);
+                memcpy(p, c, MIRROR_BLOCK);
+                n++;
+            }
+        }
+        if (n)
+        {
+            memcpy(&b[cntAt], &n, 4);
+            EndRec(b, at);
+            sz.vram = b.size() - s0;
+            sz.vramBlocks = n;
+        }
+        else
+            b.resize(at);
+
+        // a capture this frame is redone by the client's own hardware; don't send its pixels
+        captureBank = -1;
+        u32 cc = gpu.CaptureCnt;
+        u32 bank = (cc >> 16) & 3;
+        if ((cc & (1u << 31)) && (gpu.VRAMCNT[bank] & 0x87) == 0x80)
+        {
+            static const u32 lens[4] = {0x8000, 0x8000, 0x10000, 0x18000};
+            captureBank = bank;
+            captureOff = ((cc >> 18) & 3) * 0x8000;
+            captureLen = lens[(cc >> 20) & 3];
+        }
+        full = false;
+    }
+
+    u32 Rows(u16 type, const u8* cur, u8* prev)
+    {
+        std::vector<u8>& b = part2D;
+        size_t at = BeginRec(b, type), s0 = b.size(), cntAt = b.size();
+        u32 n = 0;
+        Put(b, n);
+        for (u32 o = 0; o < 2048; o += MIRROR_ROW)
+        {
+            if (!full && !memcmp(cur + o, prev + o, MIRROR_ROW)) continue;
+            Put(b, o);
+            PutBytes(b, cur + o, MIRROR_ROW);
+            memcpy(prev + o, cur + o, MIRROR_ROW);
+            n++;
+        }
+        if (!n) { b.resize(at); return 0; }
+        memcpy(&b[cntAt], &n, 4);
+        EndRec(b, at);
+        return b.size() - s0;
+    }
+
+    // ---- lines 1-191: registers the game changes partway down the screen
+    void TrackLine(u32 line)
+    {
+        for (u32 o = 0; o < 0x1070; o += 2)
+        {
+            if (!Tracked2D(o) && !Tracked2D(o + 1)) continue;
+            bool changed = shadow[o] != lineCur[o] || shadow[o + 1] != lineCur[o + 1];
+            if (changed || (lineWritten[o >> 1] && WriteTriggers(o)))
+            {
+                lines.push_back({(u16)line, (u16)o, (u16)(shadow[o] | (shadow[o + 1] << 8)), 0});
+                lineCur[o] = shadow[o];
+                lineCur[o + 1] = shadow[o + 1];
+            }
+        }
+        memset(lineWritten, 0, sizeof(lineWritten));
+    }
+
+    void SyncCapture()
+    {
+        if (captureBank < 0) return;
+        const u8* cur = nds->GPU.VRAM[captureBank];
+        u8* prev = prevVRAM[captureBank].data();
+        for (u32 i = 0; i < captureLen; i += MIRROR_BLOCK)
+        {
+            u32 o = (captureOff + i) & 0x1FFFF;
+            memcpy(prev + o, cur + o, MIRROR_BLOCK);
+        }
+        captureBank = -1;
+    }
+
+    // ---- line 192: send the frame
+    void Emit()
+    {
+        buf.clear();
+        mirror_hdr h {MIRROR_MAGIC, frame, 0, frame == 0 ? (u32)MIRROR_FLAG_FULL : 0u};
+        Put(buf, h);
+
+        if (!ready.empty())
+        {
+            size_t at = BeginRec(buf, MREC_GX), s0 = buf.size(), cntAt = buf.size();
+            u32 runs = 0;
+            Put(buf, runs);
+            for (size_t i = 0; i < ready.size();)
+            {
+                size_t j = i;
+                while (j < ready.size() && j - i < 0x3FFF && ready[j].off == ready[i].off && ready[j].size == ready[i].size)
+                    j++;
+                u16 code = ready[i].size == 4 ? 0 : ready[i].size == 2 ? 1 : 2;
+                mirror_run r {ready[i].off, (u16)((j - i) | (code << 14))};
+                Put(buf, r);
+                for (size_t k = i; k < j; k++) Put(buf, ready[k].val);
+                runs++;
+                i = j;
+            }
+            memcpy(&buf[cntAt], &runs, 4);
+            EndRec(buf, at);
+            sz.gx = buf.size() - s0;
+            ready.clear();
+        }
+
+        PutBytes(buf, part2D.data(), part2D.size());
+
+        if (!lines.empty())
+        {
+            size_t at = BeginRec(buf, MREC_LINES), s0 = buf.size();
+            u32 n = lines.size();
+            Put(buf, n);
+            PutBytes(buf, lines.data(), n * sizeof(mirror_line));
+            EndRec(buf, at);
+            sz.lines = buf.size() - s0;
+            // the client's registers now hold the end-of-frame values
+            memcpy(sent, lineCur, sizeof(sent));
+        }
+
+        size_t at = BeginRec(buf, MREC_END);
+        EndRec(buf, at);
+        ((mirror_hdr*)buf.data())->size = buf.size();
+        fwrite(buf.data(), 1, buf.size(), out);
+
+        uLongf zlen = compressBound(buf.size());
+        std::vector<u8> z(zlen);
+        compress2(z.data(), &zlen, buf.data(), buf.size(), 1);
+        totalRaw += buf.size();
+        totalZ += zlen;
+        if (stats)
+            fprintf(stats, "%u,%zu,%lu,%u,%u,%u,%u,%u,%u,%u\n", frame, buf.size(), (unsigned long)zlen,
+                    sz.gx, sz.regs, sz.pal, sz.oam, sz.vram, sz.vramBlocks, sz.lines);
+        frame++;
+    }
+};
+
+// ---------------------------------------------------------------- input script
+
+struct InputStep { u32 frame; u32 mask; bool touch; u16 tx, ty; };
+
+static std::vector<InputStep> LoadInput(const char* path)
+{
+    static const char* names[] = {"A","B","SELECT","START","RIGHT","LEFT","UP","DOWN","R","L","X","Y"};
+    std::vector<InputStep> steps;
+    FILE* f = fopen(path, "r");
+    if (!f) { perror(path); exit(1); }
+    char line[256];
+    while (fgets(line, sizeof line, f))
+    {
+        if (line[0] == '#' || line[0] == '\n') continue;
+        InputStep s {0, 0xFFF, false, 0, 0};
+        char keys[128] = "-";
+        int x = 0, y = 0;
+        char t[16] = "";
+        int n = sscanf(line, "%u %127s %15s %d %d", &s.frame, keys, t, &x, &y);
+        if (n < 1) continue;
+        if (strcmp(keys, "-"))
+        {
+            for (char* k = strtok(keys, "+"); k; k = strtok(nullptr, "+"))
+                for (int i = 0; i < 12; i++)
+                    if (!strcmp(k, names[i])) s.mask &= ~(1u << i);
+        }
+        if (n == 5 && !strcmp(t, "TOUCH")) { s.touch = true; s.tx = x; s.ty = y; }
+        steps.push_back(s);
+    }
+    fclose(f);
+    return steps;
+}
+
+// ---------------------------------------------------------------- main
+
+static void WritePPM(const std::string& path, const u32* top, const u32* bot)
+{
+    FILE* f = fopen(path.c_str(), "wb");
+    if (!f) return;
+    fprintf(f, "P6\n256 384\n255\n");
+    for (int i = 0; i < 256 * 384; i++)
+    {
+        u32 p = i < 256 * 192 ? top[i] : bot[i - 256 * 192];
+        u8 rgb[3] = {(u8)(p >> 16), (u8)(p >> 8), (u8)p};
+        fwrite(rgb, 1, 3, f);
+    }
+    fclose(f);
+}
+
+int main(int argc, char** argv)
+{
+    if (argc < 3)
+    {
+        fprintf(stderr, "usage: %s ROM FRAMES [--input F] [--record F] [--frames F] [--shots DIR] [--every N] [--stats F] [--boottype N]\n", argv[0]);
+        return 1;
+    }
+    const char* rompath = argv[1];
+    u32 frames = atoi(argv[2]);
+    const char *input = nullptr, *record = nullptr, *framesOut = nullptr, *shots = nullptr, *statsPath = nullptr;
+    u32 every = 60;
+    int bootType = -1;
+    const char* clientIdx = nullptr;
+    for (int i = 3; i + 1 < argc; i += 2)
+    {
+        std::string o = argv[i];
+        if (o == "--input") input = argv[i + 1];
+        else if (o == "--record") record = argv[i + 1];
+        else if (o == "--frames") framesOut = argv[i + 1];
+        else if (o == "--shots") shots = argv[i + 1];
+        else if (o == "--every") every = atoi(argv[i + 1]);
+        else if (o == "--stats") statsPath = argv[i + 1];
+        else if (o == "--boottype") bootType = atoi(argv[i + 1]);
+        else if (o == "--client-index") clientIdx = argv[i + 1];
+        else { fprintf(stderr, "unknown option %s\n", o.c_str()); return 1; }
+    }
+
+    FILE* rf = fopen(rompath, "rb");
+    if (!rf) { perror(rompath); return 1; }
+    fseek(rf, 0, SEEK_END);
+    u32 romlen = ftell(rf);
+    fseek(rf, 0, SEEK_SET);
+    auto rom = std::make_unique<u8[]>(romlen);
+    if (fread(rom.get(), 1, romlen, rf) != romlen) { fprintf(stderr, "short read\n"); return 1; }
+    fclose(rf);
+
+    NDSArgs args {};
+    args.JIT = std::nullopt;   // the tap needs every I/O write to go through the interpreter
+    auto nds = std::make_unique<NDS>(std::move(args));
+    nds->Reset();
+    auto cart = NDSCart::ParseROM(std::move(rom), romlen);
+    if (!cart) { fprintf(stderr, "bad ROM\n"); return 1; }
+    nds->SetNDSCart(std::move(cart));
+    nds->Reset();
+    nds->SetupDirectBoot(rompath);
+    if (bootType >= 0) nds->ARM9Write16(0x027FFC40, bootType); // 2 = Download Play child
+
+    Recorder rec;
+    rec.nds = nds.get();
+    if (record)
+    {
+        rec.out = fopen(record, "wb");
+        if (statsPath)
+        {
+            rec.stats = fopen(statsPath, "w");
+            fprintf(rec.stats, "frame,bytes,zlib,gx,regs,pal,oam,vram,vramblocks,lines\n");
+        }
+    }
+    gMirrorTap = &rec;
+
+    nds->Start();
+
+    std::vector<InputStep> steps;
+    if (input) steps = LoadInput(input);
+    size_t si = 0;
+    FILE* fo = framesOut ? fopen(framesOut, "wb") : nullptr;
+    FILE* fidx = clientIdx ? fopen(clientIdx, "w") : nullptr;
+    s64 statsAt = -1;
+
+    for (u32 f = 0; f < frames; f++)
+    {
+        while (si < steps.size() && steps[si].frame <= f)
+        {
+            const InputStep& s = steps[si++];
+            nds->SetKeyMask(s.mask);
+            if (s.touch) nds->TouchScreen(s.tx, s.ty);
+            else nds->ReleaseScreen();
+        }
+        nds->RunFrame();
+        void *top = nullptr, *bot = nullptr;
+        nds->GPU.GetFramebuffers(&top, &bot);
+        if (fo)
+        {
+            fwrite(top, 4, 256 * 192, fo);
+            fwrite(bot, 4, 256 * 192, fo);
+        }
+        if (fidx)
+        {
+            // which bundle the replay client has applied by the end of this frame
+            if (statsAt < 0)
+                for (u32 i = 0; i + 16 <= nds->MainRAMMask + 1; i += 4)
+                    if (*(u32*)&nds->MainRAM[i] == 0x5354524D) { statsAt = i; break; }
+            int applied = statsAt < 0 ? 0 : *(u32*)&nds->MainRAM[statsAt + 4];
+            fprintf(fidx, "%u %d\n", f, applied);
+        }
+        if (shots && (f % every) == 0)
+        {
+            char name[512];
+            snprintf(name, sizeof name, "%s/f%05u.ppm", shots, f);
+            WritePPM(name, (u32*)top, (u32*)bot);
+        }
+    }
+    if (fo) fclose(fo);
+    if (fidx) fclose(fidx);
+    if (rec.out)
+    {
+        fclose(rec.out);
+        if (rec.stats) fclose(rec.stats);
+        fprintf(stderr, "recorded %u bundles, %.1f KB/frame raw, %.1f KB/frame zlib\n", rec.frame,
+                rec.totalRaw / 1024.0 / rec.frame, rec.totalZ / 1024.0 / rec.frame);
+    }
+    // replay client counters (ds/source/main.c mirrorStats)
+    for (u32 i = 0; i + 16 <= nds->MainRAMMask + 1; i += 4)
+    {
+        u32* w = (u32*)&nds->MainRAM[i];
+        if (w[0] == 0x5354524D && w[3] <= 3 && w[1] <= frames)
+        {
+            fprintf(stderr, "client: %u frames applied, %u late, state %u\n", w[1], w[2], w[3]);
+            break;
+        }
+    }
+    gMirrorTap = nullptr;
+    return 0;
+}
