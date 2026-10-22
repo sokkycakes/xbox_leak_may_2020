@@ -754,6 +754,7 @@ int main(int argc, char** argv)
     }
     const char* rompath = argv[1];
     u32 frames = atoi(argv[2]);
+    if (frames == 0) frames = ~0u;   // 0: until stopped (or until the DS goes away, with --serve)
     const char *input = nullptr, *record = nullptr, *framesOut = nullptr, *shots = nullptr, *statsPath = nullptr;
     u32 every = 60;
     int bootType = -1;
@@ -865,8 +866,20 @@ int main(int argc, char** argv)
 
     auto tick = std::chrono::steady_clock::now();
     const auto frameTime = std::chrono::nanoseconds(16715757);   // 560190 cycles at 33.51 MHz
+    auto speedFrom = std::chrono::steady_clock::now();
     for (u32 f = 0; f < frames; f++)
     {
+        if (link && rec.linkLost)
+            break;
+        if (link && f && f % 600 == 0)
+        {
+            // how fast the game runs here, and whether the link keeps up
+            auto now = std::chrono::steady_clock::now();
+            double s = std::chrono::duration<double>(now - speedFrom).count();
+            fprintf(stderr, "frame %u: %.1f fps, %u bundles sent, %u frames left out, pad %03x\n",
+                    f, 600 / s, rec.frame, rec.linkSkips, pad.keys & 0xFFF);
+            speedFrom = now;
+        }
         if (realtime)
         {
             tick += frameTime;
