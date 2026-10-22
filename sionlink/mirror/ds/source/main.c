@@ -247,10 +247,13 @@ static bool linkData;     // the Sion has started sending
 // Live: the screens no longer match the stream (a bundle was lost, or the
 // stall screen took over); bundles are dropped until the Sion sends a full one
 static bool needFull = true;
-static bool stallShown;
+static bool stallShown, stallManual;
+static u32 comboSince;   // VBlank count when L+R+SELECT went down, 0 while it isn't held
+static bool comboDone;
 static u32 lastApplied, lastAppliedAt;
 static u32 resyncs, allocFails, fullBundles;
 static void showStall(void);
+static void showStallScreen(void);
 static u32 lastDiag = ~0u;
 
 // Before the Sion sends anything, the bottom screen shows what the link has seen
@@ -281,13 +284,35 @@ static void showDiag(void)
     }
 }
 
+// The mirrored game may have left the sub engine faded to white or black,
+// blended or forced blank: undo that so the status text can be read
+static void showStallScreen(void)
+{
+    irqDisable(IRQ_HBLANK);
+    lineList = NULL;
+    lineCount = lineNext = 0;
+    REG_POWERCNT |= POWER_2D_B | POWER_LCD;
+    REG_MASTER_BRIGHT = 0;
+    REG_MASTER_BRIGHT_SUB = 0;
+    REG_BLDCNT_SUB = 0;
+    REG_BLDY_SUB = 0;
+    consoleDemoInit();
+    REG_BG0HOFS_SUB = 0;
+    REG_BG0VOFS_SUB = 0;
+    BG_PALETTE_SUB[0] = RGB15(0, 0, 8);
+    BG_PALETTE_SUB[255] = RGB15(31, 31, 31);
+}
+
 // The picture stopped: what the link and the stream are doing
 static void showStall(void)
 {
     if (vblanks - lastDiag < 15)
         return;
     lastDiag = vblanks;
-    printf("\x1b[0;0HSion Link: picture stopped %4lu\n\n", (vblanks - lastAppliedAt) / 60);
+    if (stallManual)
+        printf("\x1b[0;0HSion Link: status            \n\n");
+    else
+        printf("\x1b[0;0HSion Link: picture stopped %4lu\n\n", (vblanks - lastAppliedAt) / 60);
     printf("frames shown  %lu\n", mirrorStats[1]);
     printf("full refresh  %lu\n", fullBundles);
     printf("resyncs       %lu\n", resyncs);
@@ -296,6 +321,9 @@ static void showStall(void)
     printf("usb events    %lu\n", usbDiag.events);
     printf("usb state     %-12s\n", usbDiag.deadReads ? "DSpico silent" : usbConfigured() ? "connected" : "lost");
     printf("silent reads  %lu\n", usbDiag.deadReads);
+    printf("out done %lu, %lu KB %s\n", usbDiag.outDone, usbDiag.outBytes >> 10, usbDiag.outArmed ? "armed" : "idle ");
+    printf("in done %lu of %lu %s\n", usbDiag.inDone, usbDiag.reports, usbDiag.inBusy ? "busy" : "idle");
+    printf("%-30s\n", stallManual ? "hold L+R+SELECT: back to game" : "hold L+R+SELECT: keep this");
     printf("waiting for a full frame: %s\n", needFull ? "yes" : "no ");
 }
 
@@ -305,6 +333,35 @@ static void idle(void)
     if (!liveLink)
         return;
     usbPoll();
+    // L+R+SELECT held for a second: show or hide the status page
+    if (linkData && (keysHeld() & (KEY_L | KEY_R | KEY_SELECT)) == (KEY_L | KEY_R | KEY_SELECT))
+    {
+        if (!comboSince)
+            comboSince = vblanks | 1;
+        if (!comboDone && vblanks - comboSince >= 60)
+        {
+            comboDone = true;
+            stallManual = !stallManual;
+            if (stallManual)
+            {
+                // the game's frames would draw over the page: drop them until it closes
+                stallShown = true;
+                needFull = true;
+                showStallScreen();
+            }
+            else
+            {
+                // back to the game: a full frame repaints everything
+                stallShown = false;
+                needFull = true;
+                lastAppliedAt = vblanks;   // not a stall: give the full frame time to come
+            }
+        }
+    }
+    else
+        comboSince = 0, comboDone = false;
+    if (stallManual)
+        showStall();
     if (!linkData)
     {
         if (usbAvailable())
@@ -328,7 +385,7 @@ static void idle(void)
         {
             stallShown = true;
             needFull = true;
-            consoleDemoInit();
+            showStallScreen();
         }
         showStall();
     }
@@ -340,7 +397,7 @@ static void idle(void)
         if (keys & KEY_TOUCH)
             touchRead(&t);
         mirror_input in = {MIRROR_INPUT_MAGIC, keys, t.px, t.py,
-                           mirrorStats[1] | (needFull ? MIRROR_INPUT_NEED_FULL : 0)};
+                           mirrorStats[1] | (needFull && !stallManual ? MIRROR_INPUT_NEED_FULL : 0)};
         if (usbSendReport(&in, sizeof in))
             lastReport = vblanks;
     }
@@ -464,7 +521,7 @@ static mirror_hdr* readBundleLive(void)
             continue;
         }
         u32 body = h.size - sizeof h;
-        if (needFull && !(h.flags & MIRROR_FLAG_FULL))
+        if ((needFull && !(h.flags & MIRROR_FLAG_FULL)) || stallManual)
         {
             skipBytes(body);
             continue;

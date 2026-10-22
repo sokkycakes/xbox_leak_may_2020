@@ -190,6 +190,10 @@ void DSpicoSim::DeviceSent(u32 ep, const u8* data, u32 len)
             ControlDone(true);  // zero-length status of a request without data
         return;
     }
+    // fault test: DSPICO_DEAF=1 never delivers the DS's reports (the Sion stopped reading them)
+    static int deaf = getenv("DSPICO_DEAF") ? 1 : 0;
+    if (ep == inEp && deaf)
+        return;
     if (ep == inEp && sock >= 0)
     {
         // bulk IN: hand it to the Sion side

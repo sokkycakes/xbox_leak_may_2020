@@ -333,6 +333,8 @@ static void xferComplete(u32 ep, u32 bytes)
         ctrl = CTRL_IDLE;
     else if (ep == EP_OUT)
     {
+        usbDiag.outDone++;
+        usbDiag.outBytes += bytes;
         u8 done = outBuf;
         outArmed = false;
         outBuf ^= 1;
@@ -347,7 +349,10 @@ static void xferComplete(u32 ep, u32 bytes)
         }
     }
     else if (ep == EP_IN)
+    {
+        usbDiag.inDone++;
         inBusy = false;
+    }
 }
 
 static void drainEvents(void)
@@ -430,6 +435,8 @@ void usbPoll(void)
         drainEvents();
     }
     armOut();
+    usbDiag.outArmed = outArmed;
+    usbDiag.inBusy = inBusy;
 }
 
 bool usbSendReport(const void* data, u32 len)
@@ -443,5 +450,6 @@ bool usbSendReport(const void* data, u32 len)
     cardWrite512(USB_WRITE_DATA(inBuf, EP_IN, 1, len), xfer);
     inBuf ^= 1;
     inBusy = true;
+    usbDiag.reports++;
     return true;
 }

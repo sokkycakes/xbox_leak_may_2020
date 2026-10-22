@@ -8,4 +8,4 @@ cd "$(dirname "$0")"
 chmod +x mirrorrun 2>/dev/null
 ROM=$1
 [ -n "$ROM" ] || { echo "usage: sh run.sh GAME.nds [GAMECODE]"; exit 1; }
-exec ./mirrorrun "$ROM" 0 --serve usb --realtime 1 --gxdelta 1 --jit 1 ${2:+--gamecode $2}
+exec ./mirrorrun "$ROM" 0 --serve usb --realtime 1 --gxdelta 1 --jit 1 --threaded 1 ${2:+--gamecode $2}

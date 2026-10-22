@@ -3,6 +3,7 @@
 #include <cstring>
 #include <vector>
 #include <mutex>
+#include <atomic>
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -90,7 +91,14 @@ class UsbLink : public HostLink
     uint8_t inBuf[64];
     std::vector<uint8_t> acc;
     std::mutex accLock;          // InDone runs on whichever thread handles events
-    bool closing = false, inIdle = false;
+    std::atomic<bool> closing {false}, inIdle {false};
+    std::atomic<int> inStatus {0};
+    int inErrors = 0;
+    static const char* StatusName(int s)
+    {
+        static const char* const names[] = {"completed", "error", "timed out", "cancelled", "stalled", "device gone", "overflow"};
+        return s >= 0 && s <= 6 ? names[s] : "failed";
+    }
     static void InDone(libusb_transfer* t)
     {
         UsbLink* self = (UsbLink*)t->user_data;
@@ -101,7 +109,24 @@ class UsbLink : public HostLink
         }
         bool again = !self->closing && (t->status == LIBUSB_TRANSFER_COMPLETED || t->status == LIBUSB_TRANSFER_TIMED_OUT);
         if (!again || libusb_submit_transfer(t))
+        {
+            // Poll restarts it (a stalled endpoint needs a clear-halt, which can't run in here)
+            self->inStatus = t->status;
             self->inIdle = true;
+        }
+    }
+    // A report transfer that ended in an error used to stop the DS's reports for good,
+    // and with them its requests for a full frame. Start it again.
+    void RestartIn()
+    {
+        if (!inIdle || closing) return;
+        if (inStatus == LIBUSB_TRANSFER_NO_DEVICE) return;
+        if (++inErrors <= 20)
+            fprintf(stderr, "link: reading the DS's reports %s, starting again\n", StatusName(inStatus));
+        if (inStatus == LIBUSB_TRANSFER_STALL) libusb_clear_halt(h, 0x81);
+        inIdle = false;
+        if (libusb_submit_transfer(inXfer))
+            inIdle = true;
     }
 public:
     UsbLink()
@@ -154,8 +179,7 @@ public:
                 fprintf(stderr, "link: the DS has taken no data for 5 s\n");
         }
         bool ok = t->status == LIBUSB_TRANSFER_COMPLETED;
-        static const char* const names[] = {"completed", "error", "timed out", "cancelled", "stalled", "device gone", "overflow"};
-        if (!ok) fprintf(stderr, "link: transfer %s\n", t->status <= 6 ? names[t->status] : "failed");
+        if (!ok) fprintf(stderr, "link: transfer %s\n", StatusName(t->status));
         libusb_free_transfer(t);
         return ok;
     }
@@ -168,6 +192,7 @@ public:
             if (libusb_event_handling_ok(ctx)) libusb_handle_events_locked(ctx, &tv);
             libusb_unlock_events(ctx);
         }
+        RestartIn();
         std::lock_guard<std::mutex> g(accLock);
         return TakeReports(acc, in);
     }

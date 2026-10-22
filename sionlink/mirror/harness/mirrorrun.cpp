@@ -16,6 +16,7 @@
 //     --usbrate N      simulated USB bytes per frame (default 12000, ~700 KB/s)
 //     --realtime 1     run at the DS's 59.83 frames a second instead of flat out
 //     --jit 1          run the game with melonDS's JIT (faster)
+//     --threaded 1     draw 3D on a second thread (faster on a multi-core host, same picture)
 //     --gamecode XXXX  replace the header's game code, for prototypes whose code melonDS's
 //                      cart list gives to another game (wrong cart/save type)
 //
@@ -187,7 +188,7 @@ struct GXFilter
 
 // ---------------------------------------------------------------- recorder
 
-static bool Tracked2D(u32 off)
+static bool Tracked2DCalc(u32 off)
 {
     if (off < 0x58) return off >= 8 || off < 4;      // DISPCNT, BG/affine/window/blend
     if (off >= 0x64 && off < 0x68) return true;      // DISPCAPCNT
@@ -196,6 +197,23 @@ static bool Tracked2D(u32 off)
     if (off == 0x106C || off == 0x106D) return true;
     return false;
 }
+
+// the registers above as a table, and the halfwords holding any of them: looked up
+// for every I/O write and walked on every visible line
+struct Tracked2DTable
+{
+    bool byte[0x1070] {};
+    std::vector<u16> halves;
+    Tracked2DTable()
+    {
+        for (u32 o = 0; o < 0x1070; o++) byte[o] = Tracked2DCalc(o);
+        for (u32 o = 0; o < 0x1070; o += 2)
+            if (byte[o] || byte[o + 1]) halves.push_back(o);
+    }
+};
+static const Tracked2DTable gTracked2D;
+
+static inline bool Tracked2D(u32 off) { return off < 0x1070 && gTracked2D.byte[off]; }
 
 static bool Tracked3D(u32 off)
 {
@@ -425,9 +443,8 @@ public:
         }
 
         std::vector<mirror_reg> regs;
-        for (u32 o = 0; o < 0x1070; o += 2)
+        for (u32 o : gTracked2D.halves)
         {
-            if (!Tracked2D(o) && !Tracked2D(o + 1)) continue;
             u16 v = shadow[o] | (shadow[o + 1] << 8);
             u16 s = sent[o] | (sent[o + 1] << 8);
             if (full || v != s || (written[o >> 1] && WriteTriggers(o)))
@@ -512,6 +529,7 @@ public:
     // ---- 3D commands as copies from the previous bundle's (format: MREC_GXDELTA)
     bool gxDelta = false;
     std::vector<u8> prevGX;
+    std::vector<u32> gxSeen;   // DeltaGX: hash of 4 words -> last position in prevGX (direct-mapped)
 
     std::vector<u8> DeltaGX(const std::vector<u8>& curb)
     {
@@ -524,10 +542,13 @@ public:
             for (u32 i = 0; i < 4; i++) h = (h ^ w[i]) * 1099511628211ull;
             return h;
         };
-        std::unordered_map<u64, u32> at;
-        at.reserve(np);
+        // a candidate only: tryAt compares the words, so a collision just finds no copy
+        u32 bits = 10;
+        while ((1u << bits) < np * 2 && bits < 22) bits++;
+        const u32 mask = (1u << bits) - 1;
+        gxSeen.assign(mask + 1, ~0u);
         for (u32 i = 0; i + K <= np; i++)
-            at[key(P + i)] = i;  // keeps the last occurrence
+            gxSeen[key(P + i) & mask] = i;  // keeps the last occurrence
 
         std::vector<u32> out, lit;
         out.push_back(nn);
@@ -549,8 +570,8 @@ public:
             if (expect < np) tryAt(expect);
             if (len < K && i + K <= nn)
             {
-                auto it = at.find(key(N + i));
-                if (it != at.end()) tryAt(it->second);
+                u32 s = gxSeen[key(N + i) & mask];
+                if (s != ~0u) tryAt(s);
             }
             if (len >= K)
             {
@@ -592,9 +613,8 @@ public:
     // ---- lines 1-191: registers the game changes partway down the screen
     void TrackLine(u32 line)
     {
-        for (u32 o = 0; o < 0x1070; o += 2)
+        for (u32 o : gTracked2D.halves)
         {
-            if (!Tracked2D(o) && !Tracked2D(o + 1)) continue;
             bool changed = shadow[o] != lineCur[o] || shadow[o + 1] != lineCur[o + 1];
             if (changed || (lineWritten[o >> 1] && WriteTriggers(o)))
             {
@@ -776,7 +796,7 @@ int main(int argc, char** argv)
 {
     if (argc < 3)
     {
-        fprintf(stderr, "usage: %s ROM FRAMES [--input F] [--record F] [--frames F] [--shots DIR] [--every N] [--stats F] [--boottype N] [--lang N] [--gamecode XXXX] [--half 1] [--gxdelta 1] [--serve LINK] [--dspico PATH] [--usbrate N] [--realtime 1] [--jit 1]\n", argv[0]);
+        fprintf(stderr, "usage: %s ROM FRAMES [--input F] [--record F] [--frames F] [--shots DIR] [--every N] [--stats F] [--boottype N] [--lang N] [--gamecode XXXX] [--half 1] [--gxdelta 1] [--serve LINK] [--dspico PATH] [--usbrate N] [--realtime 1] [--jit 1] [--threaded 1]\n", argv[0]);
         return 1;
     }
     const char* rompath = argv[1];
@@ -791,7 +811,7 @@ int main(int argc, char** argv)
     bool half = false, gxDelta = false;
     const char *serve = nullptr, *dspico = nullptr;
     u32 usbRate = 12000;
-    bool realtime = false, jit = false;
+    bool realtime = false, jit = false, threaded = false;
     for (int i = 3; i + 1 < argc; i += 2)
     {
         std::string o = argv[i];
@@ -812,6 +832,7 @@ int main(int argc, char** argv)
         else if (o == "--usbrate") usbRate = atoi(argv[i + 1]);
         else if (o == "--realtime") realtime = atoi(argv[i + 1]) != 0;
         else if (o == "--jit") jit = atoi(argv[i + 1]) != 0;
+        else if (o == "--threaded") threaded = atoi(argv[i + 1]) != 0;
         else { fprintf(stderr, "unknown option %s\n", o.c_str()); return 1; }
     }
 
@@ -846,6 +867,14 @@ int main(int argc, char** argv)
         }
     }
     auto nds = std::make_unique<NDS>(std::move(args));
+    if (threaded)
+    {
+        // 3D on its own thread; the picture is the same
+        RendererSettings rs {};
+        rs.ScaleFactor = 1;
+        rs.Threaded = true;
+        nds->GPU.GetRenderer().SetRenderSettings(rs);
+    }
     nds->Reset();
     auto cart = NDSCart::ParseROM(std::move(rom), romlen);
     if (!cart) { fprintf(stderr, "bad ROM\n"); return 1; }
@@ -882,7 +911,8 @@ int main(int argc, char** argv)
         pico = std::make_unique<DSpicoSim>(nds.get(), dspico, usbRate);
         gCardHook = pico.get();
     }
-    u32 reports = 0, padFrames = 0, lastFullReq = 0;
+    u32 reports = 0, padFrames = 0, lastFullReq = 0, lastReportAt = 0, reportsShown = 0;
+    bool deaf = false;   // no reports for a while: the DS can't ask for a full frame
     mirror_input pad {};
 
     nds->Start();
@@ -906,8 +936,10 @@ int main(int argc, char** argv)
             // how fast the game runs here, and whether the link keeps up
             auto now = std::chrono::steady_clock::now();
             double s = std::chrono::duration<double>(now - speedFrom).count();
-            fprintf(stderr, "frame %u: %.1f fps, %u bundles sent, %u frames left out, pad %03x\n",
-                    f, 600 / s, rec.frame, rec.linkSkips, pad.keys & 0xFFF);
+            fprintf(stderr, "frame %u: %.1f fps, %u bundles sent, %u frames left out, %u reports, pad %03x%s\n",
+                    f, 600 / s, rec.frame, rec.linkSkips, reports - reportsShown, pad.keys & 0xFFF,
+                    pad.applied & MIRROR_INPUT_NEED_FULL ? ", DS waiting for a full frame" : "");
+            reportsShown = reports;
             speedFrom = now;
         }
         if (realtime)
@@ -935,6 +967,22 @@ int main(int argc, char** argv)
             if (pad.keys & (1 << 12)) nds->TouchScreen(pad.touchX, pad.touchY);
             else nds->ReleaseScreen();
             reports++;
+            lastReportAt = f;
+            if (deaf)
+            {
+                deaf = false;
+                fprintf(stderr, "link: reports from the DS again at frame %u\n", f);
+            }
+        }
+        else if (link && f - lastReportAt > 120 && f - lastFullReq > 300)
+        {
+            // Without reports the DS can't ask for a full frame after damage or a stall,
+            // and would wait for one forever. Send one now and then until it talks again.
+            if (!deaf)
+                fprintf(stderr, "link: no reports from the DS since frame %u; sending a full frame every 5 s\n", lastReportAt);
+            deaf = true;
+            lastFullReq = f;
+            rec.RequestFull();
         }
         if (link && (pad.keys & 0xFFF)) padFrames++;
         if (pico) pico->Frame();
