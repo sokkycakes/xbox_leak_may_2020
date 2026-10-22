@@ -19,6 +19,7 @@ enum : u32
     EV_XFER_COMPLETE = 0x30000000,
     EV_SETUP = 0x40000000,
     EV_LAST = 1u << 31,
+    SILENT = 0xFFFFFFFF,   // fault test: a read that comes back all ones, losing its event
 };
 
 static u32 Slot(u32 ep) { return (ep & 0x7F) * 2 + (ep >> 7); }
@@ -84,6 +85,8 @@ bool DSpicoSim::Start(const u8* c, u32 len)
         {
             eventWord = events.front();
             events.pop_front();
+            if (eventWord == SILENT)
+                break;
             if (events.empty())
                 eventWord |= EV_LAST;
         }
@@ -345,7 +348,9 @@ void DSpicoSim::PumpOut()
         static int every = getenv("DSPICO_LOSE_EVERY") ? 1 : 0;
         if (lose && (completes == lose || (every && completes % lose == 0)))
         {
+            // the DS's read of it comes back all ones (the firmware answered too late)
             fprintf(stderr, "dspico sim: lost the completion of OUT transfer %u\n", completes);
+            Event(SILENT);
             return;
         }
         Event(EV_XFER_COMPLETE | outEp | (o.got << 8));

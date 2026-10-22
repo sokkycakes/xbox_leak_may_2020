@@ -40,13 +40,10 @@ static void cardCmd(u64 cmd)
         ;
 }
 
-// Long gaps before the data (clock held) give the DSpico's firmware time to answer
-// a command while its USB interrupt is running. With only the documented minimum
-// latency, now and then an event read came back all ones: that event, which the
-// DSpico had already taken off its queue, was lost. Gap 2 is the latency retail
-// cards use (header ROMCTRL 0x00586000); gap 1 adds more where the DS honours it.
-#define READ_GAP  (CARD_DELAY1(0x180) | CARD_DELAY2(0x3F))
-#define WRITE_GAP (CARD_DELAY1(0x180) | CARD_DELAY2(0x3F))
+// The documented latency (docs/commands.md: at least 4 cycles reading, 8 writing).
+// A longer gap 1 (0x180) garbled the data on a real DSpico: run 5 drew nothing.
+#define READ_GAP  CARD_DELAY2(4)
+#define WRITE_GAP CARD_DELAY2(8)
 
 static u32 cardRead4(u64 cmd)
 {
@@ -143,6 +140,7 @@ static u8 inBuf;
 static u32 pollCount;
 static volatile u32 ticks;   // VBlanks (usbTick)
 static u32 lastOutAt;        // tick of the last OUT completion
+static bool silentSinceOut;  // an event read came back all ones since the OUT transfer was armed
 
 void usbTick(void)
 {
@@ -213,14 +211,15 @@ static void armOut(void)
         return;
     cardCmd(USB_BEGIN_TRANSFER(EP_OUT, outBuf, 512));
     outArmed = true;
+    silentSinceOut = false;
 }
 
 // The Sion has had data waiting a quarter second and we took none. If our OUT transfer
-// has been armed all that time, it finished and its completion event was lost (the
-// endpoint would have taken the data otherwise): take its 512 bytes and go on.
-// Re-arming a transfer that is really still waiting would crash the DSpico's
-// firmware, so only after a quiet spell, and only for a full 512-byte block, which
-// is all the Sion sends.
+// has been armed all that time and an event read came back all ones since it was
+// armed, that read was its completion event, lost: the transfer finished, so take its
+// 512 bytes (all the Sion sends are whole blocks) and go on. Re-arming a transfer
+// that is really still waiting crashes the DSpico's firmware ("already available"),
+// so nothing else counts as proof.
 static void nudgeOut(void)
 {
     usbDiag.nudges++;
@@ -231,7 +230,7 @@ static void nudgeOut(void)
         armOut();
         return;
     }
-    if (ticks - lastOutAt < 12)
+    if (ticks - lastOutAt < 12 || !silentSinceOut)
         return;
     usbDiag.recovered++;
     diagLog('N', EP_OUT, outBuf, 0);
@@ -244,6 +243,7 @@ static void nudgeOut(void)
         ring[(ringHead + i) % RING] = s[i];
     ringHead += 512;
     lastOutAt = ticks;
+    silentSinceOut = false;
     armOut();
 }
 
@@ -389,6 +389,7 @@ static void xferComplete(u32 ep, u32 bytes)
     else if (ep == EP_OUT)
     {
         lastOutAt = ticks;
+        silentSinceOut = false;
         usbDiag.outDone++;
         usbDiag.outBytes += bytes;
         u8 done = outBuf;
@@ -420,6 +421,7 @@ static void drainEvents(void)
         {
             // nothing drives the bus: the DSpico's firmware has stopped
             usbDiag.deadReads++;
+            silentSinceOut = true;
             break;
         }
         bool last = e & EV_LAST;
