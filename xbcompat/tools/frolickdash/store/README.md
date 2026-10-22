@@ -45,6 +45,18 @@ has no CA store) and copies it with `sion/S97frolick-store` and
 -store DIR` builds a catalog into DIR and exits (how the cloud renders were
 made).
 
-Not done yet: a finished download is not a game card yet (it needs a cart
-folder Frolick's library can see, and an install step for discs whose game
-must be installed under Wine first).
+A finished download becomes a Windows game card (cart.go): a Kazeta cart in
+/data/frolick/carts (<cid>.kzi, Runtime=windows, and its folder: zips
+unpacked, disc images extracted, Joliet names kept) plus a stub title in
+E:\Games\<cid> (default.xbe, .wincart naming the .kzi, icon.png). The
+library and the Xbox dashboard list it with the installed games; launching
+it, xbcompat sees the .wincart and runs wincart-run on the cart (Wine in
+Conty, with the Guide), as for the game card's Windows carts. Exec is the
+game's own program when the files have one (frolick-run.bat starts it from
+its own folder); a disc or download that only has an installer gets
+frolick-install.bat, which runs it once (silently for Inno Setup, NSIS, Wise
+and MSI; InstallShield and others show their own windows and need a mouse
+or keyboard). After that run the helper finds the installed program in
+/data/wincarts/<cid>/pfx and points Exec at it, so the next launch plays.
+Checked in the cloud with Wine: Diamond Caves II (Wise) installed silently
+and started from its card.

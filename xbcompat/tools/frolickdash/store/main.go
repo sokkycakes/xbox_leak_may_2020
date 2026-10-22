@@ -17,8 +17,8 @@
 //
 // Downloads go to /data/frolick/downloads/<identifier>/: the item's game
 // files (pickFiles), fetched from /download/{id}/{file} with redirects
-// followed and resumed with Range from <file>.part.  A finished item has a
-// frolick-item.txt there (title, kind, its files).
+// followed and resumed with Range from <file>.part.  Then it becomes a
+// Windows game card (cart.go) and the item keeps only frolick-item.txt.
 //
 // Text files are UTF-8, tab-separated, and end with a line "end" so that a
 // reader never acts on a half-written file.  Not part of Microsoft's
@@ -693,8 +693,16 @@ func download(ctx context.Context, q queued, report func()) error {
 			return err
 		}
 	}
+	// the game card
+	setCur(func(c *status) { c.State, c.Detail = "installing", "" })
+	report()
+	mode, err := makeCart(q, clean(metaString(m.Metadata, "title")), clean(metaString(m.Metadata, "creator")), dir, files)
+	if err != nil {
+		log.Printf("%s: no game card: %v", q.ID, err)
+		mode = "none"
+	}
 	var rec strings.Builder
-	fmt.Fprintf(&rec, "identifier\t%s\ntitle\t%s\nkind\t%s\nsource\t%s/details/%s\n", q.ID, clean(metaString(m.Metadata, "title")), q.Kind, *base, q.ID)
+	fmt.Fprintf(&rec, "identifier\t%s\ntitle\t%s\nkind\t%s\nsource\t%s/details/%s\ncard\t%s\t%s\n", q.ID, clean(metaString(m.Metadata, "title")), q.Kind, *base, q.ID, cartID(q.ID), mode)
 	for _, f := range files {
 		fmt.Fprintf(&rec, "file\t%s\t%s\n", f.Name, f.Size)
 	}
@@ -873,7 +881,12 @@ func main() {
 		}
 	}
 	tick := time.NewTicker(time.Second)
+	lastWatch := time.Time{}
 	for {
+		if time.Since(lastWatch) > 15*time.Second {
+			lastWatch = time.Now()
+			watchInstalls()
+		}
 		select {
 		case err := <-catDone:
 			if err != nil {

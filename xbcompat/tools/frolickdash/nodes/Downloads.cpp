@@ -30,7 +30,8 @@
 //                     or paused), 0 when the queue only pends
 //   GetName(i)        the item's title
 //   GetKind(i)        what it is ("Demo", "Shareware", ...)
-//   GetStatus(i)      "Downloading", "Paused", "Pending", or why it waits
+//   GetStatus(i)      "Downloading", "Installing" (becoming a game card),
+//                     "Paused", "Pending", or why it waits
 //   GetDetail(i)      "288 MB of 412 MB" (active) or "412 MB" (pending)
 //   GetProgress(i)    0..1
 //   GetIcon(i)        the Blades' 64x icon for the kind
@@ -492,6 +493,8 @@ CStrObject* CDownloads::GetStatus(int i)
         return new CStrObject(_T("Not enough space"));
     if (strcmp(c_szActiveState, "error") == 0)
         return new CStrObject(_T("Retrying"));
+    if (strcmp(c_szActiveState, "installing") == 0)
+        return new CStrObject(_T("Installing"));
     return new CStrObject(_T("Downloading"));
 }
 

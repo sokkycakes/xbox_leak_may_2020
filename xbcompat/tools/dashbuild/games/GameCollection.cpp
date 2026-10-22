@@ -255,8 +255,17 @@ static void GetCardSignature(CHAR* szSig, int cchSig)
     FindClose(hFind);
 }
 
+// An Xbox title, as opposed to a cart for another runtime (a Windows cart's
+// stub XBE included, on the card or installed in E:\Games by Frolick's
+// store).
+static bool IsXboxTitle(const GAMEINFO* pGame)
+{
+    return !pGame->m_bWincart && (pGame->m_nKind != KIND_CARD || pGame->m_bXbox);
+}
+
 // xbcompat's .wincart beside a Windows cart's stub XBE (key=value lines):
-// its runtime= is the cart's own Runtime.
+// its runtime= is the cart's own Runtime; Frolick's store adds id= and
+// publisher= for the games it installs in E:\Games.
 static void ReadWincart(const CHAR* szPath, GAMEINFO* pGame)
 {
     CHAR rgch [1024];
@@ -279,6 +288,10 @@ static void ReadWincart(const CHAR* szPath, GAMEINFO* pGame)
         *pchEnd = 0;
         if (strncmp(pch, "runtime=", 8) == 0)
             lstrcpynA(pGame->m_szRuntime, pch + 8, sizeof (pGame->m_szRuntime));
+        else if (strncmp(pch, "publisher=", 10) == 0)
+            lstrcpynA(pGame->m_szPublisher, pch + 10, sizeof (pGame->m_szPublisher));
+        else if (strncmp(pch, "id=", 3) == 0 && pGame->m_szId[0] == 0)
+            lstrcpynA(pGame->m_szId, pch + 3, sizeof (pGame->m_szId));
         pch = pchEnd;
         if (chEnd != 0)
             pch += 1;
@@ -512,6 +525,18 @@ int CGameCollection::Scan()
         if (!ReadXbeTitle(szPath, pGame))
             continue;
 
+        // a Windows game installed by Frolick's store: a stub XBE with a
+        // .wincart beside it (xbcompat runs the cart instead), and the
+        // Archive's tile as its icon
+        sprintf(szPath, "%s\\.wincart", pGame->m_szDir);
+        if (GetFileAttributesA(szPath) != (DWORD)-1)
+        {
+            ReadWincart(szPath, pGame);
+            sprintf(szPath, "%s\\icon.png", pGame->m_szDir);
+            if (GetFileAttributesA(szPath) != (DWORD)-1 && strlen(szPath) < sizeof (pGame->m_szIcon))
+                strcpy(pGame->m_szIcon, szPath);
+        }
+
         if (pGame->m_szName[0] == 0)
         {
             for (int i = 0; i < 40 && fd.cFileName[i]; i += 1)
@@ -622,7 +647,7 @@ CStrObject* CGameCollection::GetGamePlatform(int nGame)
     if (nGame < 0 || nGame >= c_nGameCount)
         return new CStrObject;
     const GAMEINFO* pGame = &c_rgGames[nGame];
-    if (pGame->m_nKind != KIND_CARD || (pGame->m_bXbox && !pGame->m_bWincart))
+    if (IsXboxTitle(pGame))
         return new CStrObject(_T("Xbox"));
     if (pGame->m_szPlatform[0] != 0)
     {
@@ -655,7 +680,7 @@ CStrObject* CGameCollection::GetGameRuntime(int nGame)
     if (nGame < 0 || nGame >= c_nGameCount)
         return new CStrObject;
     const GAMEINFO* pGame = &c_rgGames[nGame];
-    if (pGame->m_nKind != KIND_CARD || (pGame->m_bXbox && !pGame->m_bWincart))
+    if (IsXboxTitle(pGame))
         return new CStrObject(_T("xbcompat"));
     if (EndsWith(pGame->m_szCart, ".kzp"))
         return new CStrObject(_T("inside the cart"));
@@ -755,7 +780,7 @@ CStrObject* CGameCollection::GetGamePublisher(int nGame)
         _stprintf(szOwn, _T("%hs"), pGame->m_szPublisher);
         return new CStrObject(szOwn);
     }
-    if (pGame->m_nKind != KIND_CARD || (pGame->m_bXbox && !pGame->m_bWincart))
+    if (IsXboxTitle(pGame))
     {
         const TCHAR* szPub = GetPublisher(pGame->m_dwTitleID);
         if (szPub != NULL)
@@ -798,6 +823,15 @@ CStrObject* CGameCollection::GetGameInfo(int nGame)
             pch += _stprintf(pch, _T("Cart Id: %hs\n"), pGame->m_szId);
         if (!pGame->m_bXbox)
             return new CStrObject(sz);
+    }
+    else if (pGame->m_bWincart)
+    {
+        pch += _stprintf(pch, _T("Windows game: E:\\Games\\%hs\n"), pGame->m_szFolder);
+        pch += _stprintf(pch, _T("Runtime: %hs (Wine)\n"), pGame->m_szRuntime);
+        if (pGame->m_szId[0] != 0)
+            pch += _stprintf(pch, _T("Cart Id: %hs\n"), pGame->m_szId);
+        pch += _stprintf(pch, _T("Saved games: %d"), GetSavedGameCount(nGame));
+        return new CStrObject(sz);
     }
 
     pch += _stprintf(pch, _T("Title ID: %08X\n"), pGame->m_dwTitleID);
