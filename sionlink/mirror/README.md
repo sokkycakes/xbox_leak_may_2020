@@ -66,14 +66,20 @@ It is a vendor-class device, VID 1209 PID 0001 (pid.codes test PID): bundles com
 - `mirrorrun ROM N --serve usb` is the Sion side. It streams each bundle to the DSpico through
   libusb and plays the game with the DS's pad. A thread does the sending, so the game never waits
   on USB. While two bundles are still waiting, frames are left out the way `--half` leaves them
-  out, so the DS stays near live after a big VRAM upload instead of falling behind.
+  out, so the DS stays near live after a big VRAM upload instead of falling behind. The DS's
+  reports also say which frame is on its screen; while more than four bundles sent are not shown
+  yet, frames are left out too (with display capture, where none can be, the game waits). Without
+  that, the DS's 64 KB buffer stayed full after a slow stretch and the picture, and so the pad,
+  ran up to a second late.
 - Cloud test: `--serve sim:PATH` listens on a unix socket instead. A second run,
   `mirrorrun mirrorplay.nds N --dspico PATH`, runs the client with a simulated DSpico
   (`harness/dspico_sim.cpp`, patched into melonDS's card slot through `CardHook`). The sim answers
   the DSpico card commands the way its firmware does, enumerates the client as a USB host, and
   caps the data at `--usbrate` bytes a frame (default 12000, about 700 KB/s, a guess until we
   measure a real DSpico). `--realtime 1` paces both runs at the DS's frame rate.
-  `DSPICO_TRACE=1` prints the sim's traffic per frame.
+  `DSPICO_TRACE=1` prints the sim's traffic per frame, `DSPICO_PROF=1` where the DS's CPU is
+  after frames in which it never looked at USB. `MIRROR_NOHOLD=1` turns off the hold above,
+  `MIRROR_BEHINDLOG=1` prints how far behind the DS is twice a second.
 
 ## Not handled yet
 - Main-memory display mode (DISPCNT mode 3).

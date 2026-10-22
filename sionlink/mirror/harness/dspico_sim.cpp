@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -56,6 +57,14 @@ DSpicoSim::DSpicoSim(NDS* n, const std::string& path, unsigned bytesPerFrame)
 DSpicoSim::~DSpicoSim()
 {
     if (sock >= 0) close(sock);
+    if (!busyPCs.empty())
+    {
+        std::vector<std::pair<unsigned, u32>> v;
+        for (auto& [pc, n] : busyPCs) v.push_back({n, pc});
+        std::sort(v.rbegin(), v.rend());
+        for (size_t i = 0; i < v.size() && i < 40; i++)
+            fprintf(stderr, "dspico sim: busy pc %08x %u\n", v[i].second, v[i].first);
+    }
 }
 
 // ---------------------------------------------------------------- device side
@@ -84,6 +93,7 @@ bool DSpicoSim::Start(const u8* c, u32 len)
         cmd[0] = 0;   // nothing drives the bus: reads come back all ones
         return true;
     }
+    cmdsThisFrame++;
     memcpy(cmd, c, 8);
     cmd0 = (c[0] << 24) | (c[1] << 16) | (c[2] << 8) | c[3];
     cmd1 = (c[4] << 24) | (c[5] << 16) | (c[6] << 8) | c[7];
@@ -443,6 +453,15 @@ void DSpicoSim::Frame()
     if (trace && configured)
         fprintf(stderr, "f%u out %u xfers %u waiting %zu armed %d\n", frameNo, budgetPerFrame - budget, completes - completes0, fromHost.size(), (int)outs[outEp & 0xF].armed);
     completes0 = completes;
+    static int prof = getenv("DSPICO_PROF") ? 1 : 0;
+    if (prof && configured && frameNo > 0 && !cmdsThisFrame)
+    {
+        // the ARM9's PC, and in an IRQ handler (libnds runs them in system mode) the LR too
+        busyPCs[nds->ARM9.R[15]]++;
+        if ((nds->ARM9.CPSR & 0x1F) != 0x10)
+            busyPCs[0x80000000 | nds->ARM9.R[14]]++;
+    }
+    cmdsThisFrame = 0;
     frameNo++;
     budget = budgetPerFrame;
     if (crashed)

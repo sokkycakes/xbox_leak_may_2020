@@ -8,6 +8,7 @@
 #define DSPICO_SIM_H
 
 #include <deque>
+#include <map>
 #include <string>
 #include <vector>
 #include "NDS.h"
@@ -67,6 +68,10 @@ private:
     // the report endpoint: a report waits here until the host polls (next frame)
     struct In { bool armed = false; u8 idx = 0; u32 ep = 0, len = 0; } in;
     bool crashed = false;   // the firmware hit a panic: it answers nothing any more
+    // DSPICO_PROF=1: where the DS's CPU is at the end of frames in which it sent no card
+    // command at all (it went a whole frame without looking at USB)
+    unsigned cmdsThisFrame = 0;
+    std::map<u32, unsigned> busyPCs;
 
     void Event(u32 e);
     void Event64(u32 e0, u32 e1);

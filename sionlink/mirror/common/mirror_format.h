@@ -69,7 +69,7 @@ typedef struct {
     uint16_t val;
 } mirror_reg;
 
-// Live link, DS -> Sion, once a frame: the pad and touch screen.
+// Live link, DS -> Sion, once a frame: the pad and touch screen, and how the DS is doing.
 #define MIRROR_INPUT_MAGIC 0x4E494C53u  // "SLIN"
 typedef struct {
     uint32_t magic;
@@ -87,6 +87,9 @@ typedef struct {
     uint32_t armedTime;           // time those transfers waited for their data
     uint16_t busyMax;             // longest the DS went without looking at USB since its last report
     uint16_t reserved;
+    uint32_t shownFrame;          // the frame (mirror_hdr.frame) of the bundle on screen now, 0 before
+                                  // the first; the DS reports each new one, so the Sion knows how far
+                                  // behind the game the DS is
 } mirror_input;
 // the DS lost track of the stream (a damaged bundle, or it ran out of memory):
 // send a full bundle (MIRROR_FLAG_FULL) so it can start over from cleared hardware

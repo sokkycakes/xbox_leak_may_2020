@@ -17,14 +17,25 @@
 
 #define MIRROR_LZ_HEAD 12   // rawSize, rawSum, packedLen
 
+// called after every 16 KB unpacked (the DS keeps its USB transfers going meanwhile)
+#ifndef MIRROR_LZ_TICK
+#define MIRROR_LZ_TICK()
+#endif
+
 // Unpacks exactly dn bytes; 0 if the data is damaged (it never reads or writes out of bounds)
 static inline int mirrorLzUnpack(const uint8_t* s, uint32_t sn, uint8_t* d, uint32_t dn)
 {
     const uint8_t* se = s + sn;
     uint8_t* const d0 = d;
     uint8_t* const de = d + dn;
+    uint32_t tickAt = 16384;
     while (s < se)
     {
+        if ((uint32_t)(d - d0) >= tickAt)
+        {
+            MIRROR_LZ_TICK();
+            tickAt += 16384;
+        }
         uint32_t t = *s++;
         uint32_t lit = t >> 4, m, b;
         if (lit == 15)
@@ -66,12 +77,17 @@ static inline int mirrorLzUnpack(const uint8_t* s, uint32_t sn, uint8_t* d, uint
     return d == de;
 }
 
-static inline uint32_t mirrorLzSum(const uint32_t* w, uint32_t words)
+// the sum so far, carried on over more words
+static inline uint32_t mirrorLzSumMore(uint32_t sum, const uint32_t* w, uint32_t words)
 {
-    uint32_t sum = 0;
     for (uint32_t i = 0; i < words; i++)
         sum += w[i] ^ (sum >> 7);
     return sum;
+}
+
+static inline uint32_t mirrorLzSum(const uint32_t* w, uint32_t words)
+{
+    return mirrorLzSumMore(0, w, words);
 }
 
 // the checksum a packed bundle carries: its body and its header's frame and flags

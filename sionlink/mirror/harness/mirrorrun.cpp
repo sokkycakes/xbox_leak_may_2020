@@ -30,6 +30,7 @@
 #include <cstdarg>
 #include <string>
 #include <vector>
+#include <deque>
 #include <map>
 #include <unordered_map>
 #include <thread>
@@ -37,6 +38,8 @@
 #include <atomic>
 #include <condition_variable>
 #include <chrono>
+#include <functional>
+#include <utility>
 #include <zlib.h>
 
 #include "NDS.h"
@@ -313,6 +316,8 @@ public:
     // the DS came back on a new link: start over with a full bundle
     void RestartLink(HostLink* l)
     {
+        dsShownValid = false;
+        unshown.clear();
         sendQueue.clear();
         sendBusy = 0;
         fullPending = 0;
@@ -335,6 +340,40 @@ public:
     {
         std::lock_guard<std::mutex> g(sendLock);
         return sendBusy >= 2;
+    }
+    // Bundles sent that the DS hasn't shown yet, from its reports. Every bundle the DS
+    // can't show at once waits in its 64 KB buffer, and after a slow stretch (a course
+    // loading) they stayed there: the DS showed one every VBlank, as many as came in,
+    // but up to a second late, and the pad felt that late (run 9). So frames are left out
+    // while more than a few are on their way, or with display capture the game waits.
+    static constexpr size_t MaxQueued = 4;
+    std::deque<u32> unshown;   // frame numbers of the bundles sent and not shown yet
+    u32 dsShown = 0;           // the frame on the DS's screen
+    u32 dsShownAt = 0;         // emuFrame when that changed
+    bool dsShownValid = false;
+    std::function<void()> pollReports;   // reads the DS's reports while the game waits
+    void Shown(u32 f)
+    {
+        while (!unshown.empty() && (s32)(unshown.front() - f) <= 0)
+            unshown.pop_front();
+    }
+    bool DSBehind()
+    {
+        // while it waits for a full frame, or hasn't shown anything new for a second
+        // (its status page is up), holding frames back wouldn't help it
+        static const bool off = getenv("MIRROR_NOHOLD") != nullptr;   // cloud tests: run 9's way
+        return !off && link && dsShownValid && !full && !fullPending && unshown.size() > MaxQueued &&
+               emuFrame - dsShownAt < 60;
+    }
+    void WaitForDS()
+    {
+        if (!pollReports || !DSBehind()) return;
+        auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+        while (DSBehind() && !linkLost && std::chrono::steady_clock::now() < until)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            pollReports();
+        }
     }
     FILE* stats = nullptr;
     u32 frame = 0;      // bundles written
@@ -411,13 +450,16 @@ public:
             capThis = (nds->GPU.CaptureCnt >> 31) & 1;
             skipThis = holdNext;
             holdNext = false;
-            if (link && !skipThis && frame > 0 && !capThis && !capPrev && LinkBehind())
+            if (link && !skipThis && frame > 0 && !capThis && !capPrev && (LinkBehind() || DSBehind()))
             {
                 skipThis = true;
                 linkSkips++;
             }
             else if (link && !skipThis && frame > 0)
+            {
                 WaitForLink();
+                WaitForDS();
+            }
             if (!skipThis)
             {
                 Snapshot2D();
@@ -776,6 +818,11 @@ public:
             sendBusy++;
             sendWake.notify_one();
         }
+        if (link)
+        {
+            unshown.push_back(emuFrame);
+            if (unshown.size() > 600) unshown.pop_front();   // a DS that doesn't say what it shows
+        }
 
         uLongf zlen = compressBound(buf.size());
         std::vector<u8> z(zlen);
@@ -966,6 +1013,31 @@ int main(int argc, char** argv)
     mirror_input pad {};
     mirror_input linkSeen {};   // the DS's link counters at the last speed line
     u32 busyMax = 0;            // longest the DS went without looking at USB, since then
+    u32 behindMin = ~0u, behindMax = 0;   // how far the DS's screen was behind the game, since then
+    bool reportWaiting = false;   // pollReports took one while the game waited for the DS
+    auto noteShown = [&] {
+        if (!pad.shownFrame) return;
+        if (pad.shownFrame != rec.dsShown || !rec.dsShownValid)
+        {
+            rec.dsShown = pad.shownFrame;
+            rec.dsShownAt = rec.emuFrame;
+        }
+        rec.dsShownValid = true;
+        rec.Shown(pad.shownFrame);
+        u32 behind = rec.emuFrame - pad.shownFrame;
+        if (behind < behindMin) behindMin = behind;
+        if (behind > behindMax) behindMax = behind;
+        static const bool trace = getenv("MIRROR_BEHINDLOG") != nullptr;
+        if (trace && rec.emuFrame % 30 == 0)
+            fprintf(stderr, "behind f%u %u queued %zu\n", rec.emuFrame, behind, rec.unshown.size());
+    };
+    rec.pollReports = [&] {
+        if (link && link->Poll(pad))
+        {
+            reportWaiting = true;
+            noteShown();
+        }
+    };
 
     nds->Start();
 
@@ -1009,10 +1081,15 @@ int main(int argc, char** argv)
             double s = std::chrono::duration<double>(now - speedFrom).count();
             u64 sent = rec.sentBytes;
             u32 shown = pad.applied & ~MIRROR_INPUT_NEED_FULL;
-            fprintf(stderr, "frame %u: %.1f fps, %u bundles sent (%llu KB/s), %u frames left out, DS showed %u, %u reports, pad %03x%s\n",
+            char behind[48] = "";
+            if (behindMax)
+                snprintf(behind, sizeof behind, " (%u to %u frames behind)", behindMin, behindMax);
+            fprintf(stderr, "frame %u: %.1f fps, %u bundles sent (%llu KB/s), %u frames left out, DS showed %u%s, %u reports, pad %03x%s\n",
                     f, 600 / s, rec.frame, (unsigned long long)((sent - sentShown) / 1024 / s), rec.linkSkips,
-                    shown - shownBefore, reports - reportsShown, pad.keys & 0xFFF,
+                    shown - shownBefore, behind, reports - reportsShown, pad.keys & 0xFFF,
                     pad.applied & MIRROR_INPUT_NEED_FULL ? ", DS waiting for a full frame" : "");
+            behindMin = ~0u;
+            behindMax = 0;
             if (memcmp(&pad.damaged, &dsSeen.damaged, 8))
                 fprintf(stderr, "  DS so far: %u damaged bundles, %u with no memory, %u full refreshes, %u stalls\n",
                         pad.damaged, pad.noMemory, pad.fulls, pad.stalls);
@@ -1051,8 +1128,12 @@ int main(int argc, char** argv)
             if (s.touch) nds->TouchScreen(s.tx, s.ty);
             else nds->ReleaseScreen();
         }
-        if (link && link->Poll(pad))
+        bool gotReport = link && link->Poll(pad);
+        if (link && std::exchange(reportWaiting, false))
+            gotReport = true;
+        if (gotReport)
         {
+            noteShown();
             // One full frame at a time: it can take seconds to get through, and the DS
             // keeps asking until it has arrived. Give it time to say so after one has gone
             // out, or each would bring another (run 7: minutes of nothing but full frames).
@@ -1083,6 +1164,7 @@ int main(int argc, char** argv)
             if (!deaf)
                 fprintf(stderr, "link: no reports from the DS since frame %u; sending a full frame every 5 s\n", lastReportAt);
             deaf = true;
+            rec.dsShownValid = false;
             // and let go of its buttons, or the game keeps them held
             nds->SetKeyMask(0xFFF);
             nds->ReleaseScreen();

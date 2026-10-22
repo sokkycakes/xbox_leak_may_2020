@@ -13,6 +13,9 @@
 #include <string.h>
 
 #include "mirror_format.h"
+// a big bundle takes a while to unpack: keep the USB transfers going
+static void lzTick(void);
+#define MIRROR_LZ_TICK() lzTick()
 #include "mirror_lz.h"
 #include "usblink.h"
 
@@ -128,7 +131,12 @@ static int decodeGX(const mirror_hdr* h)
                 break;
             }
             gxWords = r->len / 4;
-            memcpy(gxPayload, p, r->len);
+            // in 16 KB pieces: a course's whole 3D scene is over 100 KB
+            for (u32 at = 0; at < r->len; at += 16384)
+            {
+                memcpy((u8*)gxPayload + at, (const u8*)p + at, r->len - at < 16384 ? r->len - at : 16384);
+                lzTick();
+            }
         }
         else if (r->type == MREC_GXDELTA)
         {
@@ -175,6 +183,8 @@ static int decodeGX(const mirror_hdr* h)
                     memcpy(gxPayload + i, p, len * 4);
                     p += len;
                 }
+                if (((i + len) ^ i) >> 12)
+                    lzTick();   // every 16 KB or so
                 i += len;
             }
         }
@@ -337,7 +347,8 @@ static void apply2D(const mirror_hdr* h)
 extern volatile u32 mirrorStats[4];
 static FILE* recording;
 static u32 vblanks, lastScan, lastReport;
-static u32 lastKeys, lastTouch, lastFlags;   // what the last report said
+static u32 lastKeys, lastTouch, lastFlags, lastShown;   // what the last report said
+static volatile u32 shownFrame;   // frame number of the bundle on screen (vblankHandler)
 
 static void clearHardware(void);
 static bool linkData;     // the Sion has started sending
@@ -518,15 +529,18 @@ static void idle(void)
             touchRead(&t);
         u32 touch = t.px | (u32)t.py << 16;
         u32 flags = needFull && !stallManual ? MIRROR_INPUT_NEED_FULL : 0;
-        // a report when something changed, and every 8 frames to show we're still here:
-        // every card command is a chance for the DSpico to miss one
-        if (keys != lastKeys || touch != lastTouch || flags != lastFlags || vblanks - lastReport >= 8)
+        // a report when something changed, each new frame on screen (the Sion keeps the
+        // game from running ahead of what the DS shows), and every 8 frames to show we're
+        // still here: every card command is a chance for the DSpico to miss one
+        u32 shown = shownFrame;
+        if (keys != lastKeys || touch != lastTouch || flags != lastFlags || shown != lastShown ||
+            vblanks - lastReport >= 8)
         {
             mirror_input in = {MIRROR_INPUT_MAGIC, keys, t.px, t.py, mirrorStats[1] | flags,
                                resyncs, allocFails, fullBundles, stalls,
                                usbDiag.deadReads, usbDiag.irqs, usbDiag.timedPolls,
                                usbDiag.recovered, usbDiag.rearmed, usbDiag.outDone, usbDiag.armTicks,
-                               usbDiag.busyMax, 0};
+                               usbDiag.busyMax, 0, shown};
             if (usbSendReport(&in, sizeof in))
             {
                 usbDiag.busyMax = 0;
@@ -534,6 +548,7 @@ static void idle(void)
                 lastKeys = keys;
                 lastTouch = touch;
                 lastFlags = flags;
+                lastShown = shown;
             }
         }
     }
@@ -630,11 +645,33 @@ static void skipBytes(u32 n)
     }
 }
 
+static void lzTick(void)
+{
+    if (liveLink)
+        usbPoll();
+}
+
 // A packed bundle (MIRROR_FLAG_LZ) unpacked into a new buffer; NULL if there's no
-// memory for it (*damaged false) or the data is damaged (*damaged true)
-ARM_CODE ITCM_CODE static int unpackLz(const u8* s, u32 sn, u8* d, u32 dn)
+// memory for it (*damaged false) or the data is damaged (*damaged true).
+// Both loops run from ITCM as ARM code: course loads bring bundles of 300 KB, and
+// inlined into Thumb code in main RAM they kept the DS off USB for a third of a second.
+ARM_CODE ITCM_CODE __attribute__((noinline)) static int unpackLz(const u8* s, u32 sn, u8* d, u32 dn)
 {
     return mirrorLzUnpack(s, sn, d, dn);
+}
+
+ARM_CODE ITCM_CODE __attribute__((noinline)) static u32 sumLz(const u32* w, u32 words)
+{
+    u32 sum = 0;
+    while (words)
+    {
+        u32 n = words < 4096 ? words : 4096;
+        sum = mirrorLzSumMore(sum, w, n);
+        w += n;
+        words -= n;
+        lzTick();
+    }
+    return sum;
 }
 
 static mirror_hdr* unpackBundle(const mirror_hdr* p, bool* damaged)
@@ -658,7 +695,7 @@ static mirror_hdr* unpackBundle(const mirror_hdr* p, bool* damaged)
     b->flags &= ~MIRROR_FLAG_LZ;
     u32 words = (rawSize - sizeof *b) / 4;
     if (!unpackLz((const u8*)(w + 3), packed, (u8*)(b + 1), rawSize - sizeof *b) ||
-        mirrorLzSeal(mirrorLzSum((const u32*)(b + 1), words), p->frame, p->flags) != w[1])
+        mirrorLzSeal(sumLz((const u32*)(b + 1), words), p->frame, p->flags) != w[1])
     {
         free(b);
         return NULL;
@@ -838,6 +875,7 @@ static void vblankHandler(void)
     if (h->flags & MIRROR_FLAG_HOLD)
         holdFrames = 1;
     mirrorStats[1]++;
+    shownFrame = h->frame;
     pending2D = NULL;
 }
 
