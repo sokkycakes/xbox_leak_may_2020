@@ -362,7 +362,8 @@ public:
         // while it waits for a full frame, or hasn't shown anything new for a second
         // (its status page is up), holding frames back wouldn't help it
         static const bool off = getenv("MIRROR_NOHOLD") != nullptr;   // cloud tests: run 9's way
-        return !off && link && dsShownValid && !full && !fullPending && unshown.size() > MaxQueued &&
+        // at 30 fps each bundle stays up for two frames: half as many make the same wait
+        return !off && link && dsShownValid && !full && !fullPending && unshown.size() > (half ? MaxQueued / 2 : MaxQueued) &&
                emuFrame - dsShownAt < 60;
     }
     void WaitForDS()
