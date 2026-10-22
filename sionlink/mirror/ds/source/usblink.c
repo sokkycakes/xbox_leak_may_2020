@@ -139,8 +139,9 @@ static bool inBusy;
 static u8 inBuf;
 static u32 pollCount;
 static volatile u32 ticks;   // VBlanks (usbTick)
-static u32 lastOutAt;        // tick of the last OUT completion
-static bool silentSinceOut;  // an event read came back all ones since the OUT transfer was armed
+static u32 outSince;         // tick the OUT transfer was armed or last finished
+static u32 inSince;          // tick the last report was started
+static u32 lastBlock[2][128];  // what we last read from each of the DSpico's OUT buffers
 
 void usbTick(void)
 {
@@ -211,40 +212,65 @@ static void armOut(void)
         return;
     cardCmd(USB_BEGIN_TRANSFER(EP_OUT, outBuf, 512));
     outArmed = true;
-    silentSinceOut = false;
+    outSince = ticks;
 }
 
-// The Sion has had data waiting a quarter second and we took none. If our OUT transfer
-// has been armed all that time and an event read came back all ones since it was
-// armed, that read was its completion event, lost: the transfer finished, so take its
-// 512 bytes (all the Sion sends are whole blocks) and go on. Re-arming a transfer
-// that is really still waiting crashes the DSpico's firmware ("already available"),
-// so nothing else counts as proof.
+// The block in DSpico OUT buffer b, `bytes` of it into the ring
+static void takeBlock(u8 b, u32 bytes)
+{
+    cardRead512(USB_READ_DATA(b, EP_OUT), xfer);
+    memcpy(lastBlock[b], xfer, sizeof xfer);
+    const u8* s = (const u8*)xfer;
+    for (u32 i = 0; i < bytes && i < 512; i++)
+        ring[(ringHead + i) % RING] = s[i];
+    ringHead += bytes;
+}
+
+// The Sion has had data waiting a while and we took none, although our OUT transfer
+// has been armed for more than 0.1 s: the DSpico missed a card command.
+// Either the command that armed the transfer (its buffer still holds what we read
+// from it last time: arm it again), or the event read that would have told us it
+// finished (new data in the buffer: take its 512 bytes, all the Sion sends are whole
+// blocks, and go on). Re-arming a transfer that is really still waiting crashes the
+// DSpico's firmware ("already available"), so this only runs when the Sion says it
+// has been sending all along: an armed transfer takes its data within a millisecond.
 static void nudgeOut(void)
 {
-    usbDiag.nudges++;
-    if (!configured)
-        return;
     if (!outArmed)
     {
         armOut();
         return;
     }
-    if (ticks - lastOutAt < 12 || !silentSinceOut)
+    if (ticks - outSince < 6)
+        return;  // it moved lately: we were only slow to take the data
+    cardRead512(USB_READ_DATA(outBuf, EP_OUT), xfer);
+    if (memcmp(xfer, lastBlock[outBuf], sizeof xfer) == 0)
+    {
+        usbDiag.rearmed++;
+        diagLog('A', EP_OUT, outBuf, 0);
+        outArmed = false;
+        armOut();
         return;
+    }
     usbDiag.recovered++;
     diagLog('N', EP_OUT, outBuf, 0);
     u8 done = outBuf;
     outArmed = false;
     outBuf ^= 1;
-    cardRead512(USB_READ_DATA(done, EP_OUT), xfer);
-    const u8* s = (const u8*)xfer;
-    for (u32 i = 0; i < 512; i++)
-        ring[(ringHead + i) % RING] = s[i];
-    ringHead += 512;
-    lastOutAt = ticks;
-    silentSinceOut = false;
     armOut();
+    takeBlock(done, 512);
+}
+
+// The Sion has been reading our reports all along and has had none for a while,
+// although our last one started 0.2 s ago: the DSpico missed the command that started
+// it, and it would stay busy forever (the Sion would keep the pad as it was)
+static void nudgeIn(void)
+{
+    if (!inBusy || ticks - inSince < 12)
+        return;
+    usbDiag.inRearmed++;
+    diagLog('I', EP_IN, inBuf, 0);
+    inBusy = false;
 }
 
 static void sendString(u32 index, u32 maxLen)
@@ -285,7 +311,14 @@ static void setup(u32 w0, u32 w1)
 
     if ((type & 0x60) == 0x40 && request == SL_REQ_NUDGE)
     {
-        nudgeOut();
+        usbDiag.nudges++;
+        if (configured)
+        {
+            if (value & SL_NUDGE_IN)
+                nudgeIn();
+            if (value != SL_NUDGE_IN)  // 0 from older Sion builds means OUT
+                nudgeOut();
+        }
         ep0Status();
         return;
     }
@@ -388,8 +421,7 @@ static void xferComplete(u32 ep, u32 bytes)
         ctrl = CTRL_IDLE;
     else if (ep == EP_OUT)
     {
-        lastOutAt = ticks;
-        silentSinceOut = false;
+        outSince = ticks;
         usbDiag.outDone++;
         usbDiag.outBytes += bytes;
         u8 done = outBuf;
@@ -397,13 +429,7 @@ static void xferComplete(u32 ep, u32 bytes)
         outBuf ^= 1;
         armOut();  // the next transfer fills the other buffer while we read this one
         if (bytes)
-        {
-            cardRead512(USB_READ_DATA(done, EP_OUT), xfer);
-            const u8* s = (const u8*)xfer;
-            for (u32 i = 0; i < bytes && i < 512; i++)
-                ring[(ringHead + i) % RING] = s[i];
-            ringHead += bytes;
-        }
+            takeBlock(done, bytes);
     }
     else if (ep == EP_IN)
     {
@@ -421,7 +447,6 @@ static void drainEvents(void)
         {
             // nothing drives the bus: the DSpico's firmware has stopped
             usbDiag.deadReads++;
-            silentSinceOut = true;
             break;
         }
         bool last = e & EV_LAST;
@@ -508,6 +533,7 @@ bool usbSendReport(const void* data, u32 len)
     cardWrite512(USB_WRITE_DATA(inBuf, EP_IN, 1, len), xfer);
     inBuf ^= 1;
     inBusy = true;
+    inSince = ticks;
     usbDiag.reports++;
     return true;
 }

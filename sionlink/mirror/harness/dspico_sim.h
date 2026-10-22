@@ -59,9 +59,14 @@ private:
     u32 outEp = 0, inEp = 0;
     std::vector<u8> fromHost;   // bytes read from the socket, not yet delivered
     std::string product;
-    unsigned completes = 0;
-    bool progressed = false, kicking = false;
-    unsigned stuckFrames = 0, kicks = 0;
+    unsigned completes = 0, arms = 0, inStarts = 0;
+    bool progressed = false, nudging = false;
+    unsigned stuckFrames = 0, nudges = 0;
+    u16 nudgeWhy = 0;
+    unsigned frameNo = 0, lastInFrame = 0, lastInNudge = 0;
+    // the report endpoint: a report waits here until the host polls (next frame)
+    struct In { bool armed = false; u8 idx = 0; u32 ep = 0, len = 0; } in;
+    bool crashed = false;   // the firmware hit a panic: it answers nothing any more
 
     void Event(u32 e);
     void Event64(u32 e0, u32 e1);
@@ -73,6 +78,8 @@ private:
     void ControlDone(bool ok);
     void PumpOut();
     void ReadSocket();
+    void Nudge(u16 why);
+    void Crash(u32 ep);
 };
 
 #endif

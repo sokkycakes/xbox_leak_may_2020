@@ -24,6 +24,16 @@ enum : u32
 
 static u32 Slot(u32 ep) { return (ep & 0x7F) * 2 + (ep >> 7); }
 
+// fault tests: DSPICO_<name>=N hits the Nth time, and every Nth after it with
+// DSPICO_LOSE_EVERY=1 (a real DSpico now and then misses a card command)
+static bool Fault(const char* name, unsigned count)
+{
+    const char* v = getenv(name);
+    unsigned n = v ? atoi(v) : 0;
+    static int every = getenv("DSPICO_LOSE_EVERY") ? 1 : 0;
+    return n && (count == n || (every && count % n == 0));
+}
+
 DSpicoSim::DSpicoSim(NDS* n, const std::string& path, unsigned bytesPerFrame)
     : nds(n), budgetPerFrame(bytesPerFrame)
 {
@@ -69,6 +79,11 @@ bool DSpicoSim::Start(const u8* c, u32 len)
 {
     if (c[0] < 0xE8 || c[0] > 0xEB)
         return false;
+    if (crashed)
+    {
+        cmd[0] = 0;   // nothing drives the bus: reads come back all ones
+        return true;
+    }
     memcpy(cmd, c, 8);
     cmd0 = (c[0] << 24) | (c[1] << 16) | (c[2] << 8) | c[3];
     cmd1 = (c[4] << 24) | (c[5] << 16) | (c[6] << 8) | c[7];
@@ -119,6 +134,8 @@ void DSpicoSim::Transmit(u32 val)
 
 void DSpicoSim::Finish()
 {
+    if (crashed)
+        return;
     if (cmd[0] == 0xE9 && (cmd0 & 1))
     {
         u32 ep = (cmd0 >> 8) & 0xFF, idx = (cmd0 >> 16) & 1;
@@ -158,12 +175,34 @@ void DSpicoSim::UsbCommand(u32 sub)
 
 void DSpicoSim::StartXfer(u32 ep, u32 idx, u32 len)
 {
-    if (ep & 0x80)
+    if (ep == 0x80)
     {
         DeviceSent(ep, &bufs[Slot(ep)][idx * 512], len);
         return;
     }
+    if (ep & 0x80)
+    {
+        if (configured && Fault("DSPICO_LOSEIN", ++inStarts))
+        {
+            fprintf(stderr, "dspico sim: missed the command that starts report %u\n", inStarts);
+            return;
+        }
+        if (in.armed)
+            return Crash(ep);
+        in.armed = true;
+        in.ep = ep;
+        in.idx = idx;
+        in.len = len;
+        return;
+    }
     Out& o = outs[ep & 0xF];
+    if (ep == outEp && configured && Fault("DSPICO_LOSEARM", ++arms))
+    {
+        fprintf(stderr, "dspico sim: missed the command that arms OUT transfer %u\n", arms);
+        return;
+    }
+    if (o.armed && ep != 0)
+        return Crash(ep);
     o.armed = true;
     o.idx = idx;
     o.len = len;
@@ -177,6 +216,15 @@ void DSpicoSim::StartXfer(u32 ep, u32 idx, u32 len)
     }
 }
 
+// Starting a transfer on an endpoint that still waits panics the real firmware
+// (tinyusb rp2040_usb.c); it stops answering the card bus
+void DSpicoSim::Crash(u32 ep)
+{
+    fprintf(stderr, "dspico sim: PANIC ep %02X was already available (the DSpico has crashed)\n", ep);
+    crashed = true;
+    events.clear();
+}
+
 // ---------------------------------------------------------------- host side
 
 void DSpicoSim::DeviceSent(u32 ep, const u8* data, u32 len)
@@ -184,12 +232,11 @@ void DSpicoSim::DeviceSent(u32 ep, const u8* data, u32 len)
     if (ep == 0x80)
     {
         Event(EV_XFER_COMPLETE | 0x80 | (len << 8));
-        if (kicking && len == 0)
+        if (nudging && len == 0)
         {
-            kicking = false;
-            kicks++;
-            fprintf(stderr, "dspico sim: nudged the DS after %u frames without OUT progress\n", stuckFrames);
-            stuckFrames = 0;
+            nudging = false;
+            nudges++;
+            fprintf(stderr, "dspico sim: nudged the DS (%s) at frame %u\n", nudgeWhy == 2 ? "no reports for 24 frames" : "no OUT progress for 9 frames", frameNo);
             return;
         }
         if (step < 0 || step >= ENUM_DONE) return;
@@ -206,6 +253,8 @@ void DSpicoSim::DeviceSent(u32 ep, const u8* data, u32 len)
     static int deaf = getenv("DSPICO_DEAF") ? 1 : 0;
     if (ep == inEp && deaf)
         return;
+    if (ep == inEp)
+        lastInFrame = frameNo;
     if (ep == inEp && sock >= 0)
     {
         // bulk IN: hand it to the Sion side
@@ -222,6 +271,7 @@ void DSpicoSim::DeviceSent(u32 ep, const u8* data, u32 len)
 
 void DSpicoSim::SendSetup(u8 type, u8 req, u16 value, u16 index, u16 length)
 {
+    outs[0].armed = false;   // a setup packet ends whatever endpoint 0 was doing
     stage = 0;
     ctrlData.clear();
     Event64(EV_SETUP | ((length & 0x1FFF) << 16) | ((type >> 7) << 29) | index,
@@ -293,6 +343,7 @@ void DSpicoSim::ControlDone(bool ok)
         break;
     case ENUM_SET_CONFIG:
         configured = true;
+        lastInFrame = lastInNudge = frameNo;
         fprintf(stderr, "dspico sim: \"%s\" configured, OUT %02x IN %02x\n", product.c_str(), outEp, inEp);
         break;
     }
@@ -342,48 +393,72 @@ void DSpicoSim::PumpOut()
         o.armed = false;
         completes++;
         progressed = true;
-        // fault test: DSPICO_LOSE=N loses the Nth OUT completion event, and every Nth after
-        // it with DSPICO_LOSE_EVERY=1 (a real DSpico drops events when the DS misses a read)
-        static unsigned lose = getenv("DSPICO_LOSE") ? atoi(getenv("DSPICO_LOSE")) : 0;
-        static int every = getenv("DSPICO_LOSE_EVERY") ? 1 : 0;
-        if (lose && (completes == lose || (every && completes % lose == 0)))
+        // DSPICO_LOSE=N: the DS's read of the Nth completion event comes back all ones
+        // (the firmware answered too late) and the event is gone
+        if (Fault("DSPICO_LOSE", completes))
         {
-            // the DS's read of it comes back all ones (the firmware answered too late)
             fprintf(stderr, "dspico sim: lost the completion of OUT transfer %u\n", completes);
             Event(SILENT);
+            return;
+        }
+        // DSPICO_LOSEDONE=N: the event never shows up at all
+        if (Fault("DSPICO_LOSEDONE", completes))
+        {
+            fprintf(stderr, "dspico sim: lost the completion of OUT transfer %u without a trace\n", completes);
             return;
         }
         Event(EV_XFER_COMPLETE | outEp | (o.got << 8));
     }
 }
 
+void DSpicoSim::Nudge(u16 why)
+{
+    nudging = true;
+    nudgeWhy = why;
+    SendSetup(0x41, 1, why, 0, 0);
+}
+
 void DSpicoSim::Frame()
 {
     static int trace = getenv("DSPICO_TRACE") ? 1 : 0;
-    static unsigned fr = 0, completes0 = 0;
+    static unsigned completes0 = 0;
     if (trace && configured)
-        fprintf(stderr, "f%u out %u xfers %u waiting %zu armed %d\n", fr, budgetPerFrame - budget, completes - completes0, fromHost.size(), (int)outs[outEp & 0xF].armed);
+        fprintf(stderr, "f%u out %u xfers %u waiting %zu armed %d\n", frameNo, budgetPerFrame - budget, completes - completes0, fromHost.size(), (int)outs[outEp & 0xF].armed);
     completes0 = completes;
-    fr++;
+    frameNo++;
     budget = budgetPerFrame;
+    if (crashed)
+        return;
     if (attachDelay && --attachDelay == 0)
     {
         step = ENUM_GET_DEV64;
         Event(EV_BUS_RESET);
         NextSetup();
     }
+    // the host polls the report endpoint every millisecond
+    if (in.armed)
+    {
+        in.armed = false;
+        DeviceSent(in.ep, &bufs[Slot(in.ep)][in.idx * 512], in.len);
+    }
     PumpOut();
-    // the Sion side nudges the DS (vendor request 1) when it has had data waiting for
-    // a quarter second without the DS taking any, as mirrorrun does over real USB
+    // The Sion side nudges the DS (vendor request 1) as mirrorrun does over real USB:
+    // when it has had data waiting 0.15 s without the DS taking any, and when it has
+    // had no report for 0.4 s
     ReadSocket();
-    if (configured && step >= ENUM_DONE && !kicking)
+    if (configured && step >= ENUM_DONE && !nudging)
     {
         if (progressed || fromHost.empty())
             stuckFrames = 0;
-        else if (++stuckFrames >= 15)
+        else if (++stuckFrames >= 9)
         {
-            kicking = true;
-            SendSetup(0x41, 1, 0, 0, 0);
+            stuckFrames = 0;
+            Nudge(1);
+        }
+        if (!nudging && frameNo - lastInFrame >= 24 && frameNo - lastInNudge >= 24)
+        {
+            lastInNudge = frameNo;
+            Nudge(2);
         }
     }
     progressed = false;

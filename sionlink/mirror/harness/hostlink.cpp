@@ -4,6 +4,8 @@
 #include <vector>
 #include <mutex>
 #include <atomic>
+#include <chrono>
+#include <algorithm>
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -93,7 +95,19 @@ class UsbLink : public HostLink
     std::mutex accLock;          // InDone runs on whichever thread handles events
     std::atomic<bool> closing {false}, inIdle {false};
     std::atomic<int> inStatus {0};
-    int inErrors = 0, nudges = 0;
+    int inErrors = 0;
+    // the DS's nudge request (ds/source/usblink.h: SL_REQ_NUDGE, wValue SL_NUDGE_OUT or _IN)
+    enum { REQ_NUDGE = 1, NUDGE_OUT = 1, NUDGE_IN = 2 };
+    libusb_transfer* nudgeXfer = nullptr;
+    uint8_t nudgeBuf[LIBUSB_CONTROL_SETUP_SIZE];
+    std::atomic<bool> nudgeBusy {false};
+    std::atomic<int> nudges {0};
+    std::atomic<int64_t> lastReportMs {0}, inSubmittedMs {0};
+    int64_t lastInNudgeMs = 0;
+    static int64_t NowMs()
+    {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
     static const char* StatusName(int s)
     {
         static const char* const names[] = {"completed", "error", "timed out", "cancelled", "stalled", "device gone", "overflow"};
@@ -106,6 +120,7 @@ class UsbLink : public HostLink
         {
             std::lock_guard<std::mutex> g(self->accLock);
             self->acc.insert(self->acc.end(), t->buffer, t->buffer + t->actual_length);
+            if (t->actual_length) self->lastReportMs = NowMs();
         }
         bool again = !self->closing && (t->status == LIBUSB_TRANSFER_COMPLETED || t->status == LIBUSB_TRANSFER_TIMED_OUT);
         if (!again || libusb_submit_transfer(t))
@@ -125,8 +140,29 @@ class UsbLink : public HostLink
             fprintf(stderr, "link: reading the DS's reports %s, starting again\n", StatusName(inStatus));
         if (inStatus == LIBUSB_TRANSFER_STALL) libusb_clear_halt(h, 0x81);
         inIdle = false;
+        inSubmittedMs = NowMs();
         if (libusb_submit_transfer(inXfer))
             inIdle = true;
+    }
+    static void NudgeDone(libusb_transfer* t)
+    {
+        UsbLink* self = (UsbLink*)t->user_data;
+        if (t->status != LIBUSB_TRANSFER_COMPLETED && self->nudges <= 10)
+            fprintf(stderr, "link: the DS didn't answer a nudge (%s)\n", StatusName(t->status));
+        self->nudgeBusy = false;
+    }
+    // Tell the DS something has been stuck a while. It checks for itself and starts the
+    // transfer again if the DSpico missed a command (nudgeOut / nudgeIn in usblink.c).
+    void Nudge(uint16_t why)
+    {
+        if (closing || nudgeBusy.exchange(true)) return;
+        libusb_fill_control_setup(nudgeBuf, LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_DEVICE | LIBUSB_ENDPOINT_OUT,
+                                  REQ_NUDGE, why, 0, 0);
+        libusb_fill_control_transfer(nudgeXfer, h, nudgeBuf, NudgeDone, this, 1000);
+        if (libusb_submit_transfer(nudgeXfer)) { nudgeBusy = false; return; }
+        int n = ++nudges;
+        if (n <= 10 || n % 100 == 0)
+            fprintf(stderr, "link: nudged the DS (%s; %d so far)\n", why == NUDGE_IN ? "no reports" : "it takes no data", n);
     }
 public:
     UsbLink()
@@ -150,9 +186,15 @@ public:
             usleep(500000);
         }
         if (libusb_claim_interface(h, 0)) { fprintf(stderr, "link: can't claim the DSpico\n"); libusb_close(h); h = nullptr; return; }
+        nudgeXfer = libusb_alloc_transfer(0);
         inXfer = libusb_alloc_transfer(0);
         libusb_fill_interrupt_transfer(inXfer, h, 0x81, inBuf, sizeof inBuf, InDone, this, 0);
-        libusb_submit_transfer(inXfer);
+        inSubmittedMs = lastReportMs = NowMs();
+        if (libusb_submit_transfer(inXfer))
+        {
+            inStatus = LIBUSB_TRANSFER_ERROR;
+            inIdle = true;   // Poll tries again
+        }
         fprintf(stderr, "link: DSpico connected\n");
     }
     ~UsbLink()
@@ -169,6 +211,16 @@ public:
             }
             if (inIdle) libusb_free_transfer(inXfer);
         }
+        if (nudgeXfer)
+        {
+            if (nudgeBusy) libusb_cancel_transfer(nudgeXfer);
+            for (int i = 0; i < 50 && nudgeBusy; i++)
+            {
+                timeval tv {0, 20000};
+                libusb_handle_events_timeout(ctx, &tv);
+            }
+            if (!nudgeBusy) libusb_free_transfer(nudgeXfer);
+        }
         if (h) { libusb_release_interface(h, 0); libusb_close(h); }
         if (ctx) libusb_exit(ctx);
     }
@@ -176,29 +228,46 @@ public:
     static void OutDone(libusb_transfer* t) { *(int*)t->user_data = 1; }
     bool Send(const uint8_t* d, size_t n) override
     {
-        // one transfer per bundle (padded to whole 512-byte DS reads by the recorder);
-        // a zero-length packet would only be needed for a length that isn't
+        // in pieces of 4 KB (8 DS reads; the recorder pads bundles to whole reads), so
+        // waiting long on one means the DS stopped taking data, not that a bundle is big
+        while (n)
+        {
+            size_t k = std::min<size_t>(n, 4096);
+            if (!SendPiece(d, k)) return false;
+            d += k;
+            n -= k;
+        }
+        return true;
+    }
+    bool SendPiece(const uint8_t* d, size_t n)
+    {
         int done = 0;
         libusb_transfer* t = libusb_alloc_transfer(0);
         libusb_fill_bulk_transfer(t, h, 0x01, (uint8_t*)d, (int)n, OutDone, &done, 0);
         if (n % 512 && n % 64 == 0) t->flags = LIBUSB_TRANSFER_ADD_ZERO_PACKET;
         if (libusb_submit_transfer(t)) { libusb_free_transfer(t); return false; }
-        int waited = 0;
+        int64_t start = NowMs(), lastNudge = start;
+        bool told = false;
         while (!done)
         {
-            // no progress at all for a quarter second: the DS should have taken some
-            timeval tv {0, 250000};
+            timeval tv {0, 50000};
             libusb_handle_events_timeout_completed(ctx, &tv, &done);
             if (done) break;
-            if (++waited == 20)
+            // 0.15 s without the DS taking 4 KB: it may have missed the DSpico
+            // command that arms its transfer, or the event that ends one
+            int64_t now = NowMs();
+            if (now - lastNudge >= 150)
+            {
+                lastNudge = now;
+                Nudge(NUDGE_OUT);
+            }
+            if (!told && now - start >= 5000)
+            {
+                told = true;
                 fprintf(stderr, "link: the DS has taken no data for 5 s\n");
-            // The DS may have missed the event that says its last 512 bytes arrived, and
-            // then waits forever: tell it we're stuck (it checks that it is too)
-            int r = libusb_control_transfer(h, LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_DEVICE | LIBUSB_ENDPOINT_OUT,
-                                            1, 0, 0, nullptr, 0, 500);
-            if (++nudges <= 10)
-                fprintf(stderr, "link: nudged the DS (%s)\n", r < 0 ? libusb_error_name(r) : "ok");
+            }
         }
+        if (told) fprintf(stderr, "link: the DS takes data again\n");
         bool ok = t->status == LIBUSB_TRANSFER_COMPLETED;
         if (!ok) fprintf(stderr, "link: transfer %s\n", StatusName(t->status));
         libusb_free_transfer(t);
@@ -214,6 +283,15 @@ public:
             libusb_unlock_events(ctx);
         }
         RestartIn();
+        // The DS sends a report at least every 8 frames. None for 0.4 s while we've been
+        // reading all along: the DSpico may have missed the command that started one,
+        // and the DS would wait for it forever while we keep its old buttons held.
+        int64_t now = NowMs();
+        if (!inIdle && now - inSubmittedMs > 250 && now - lastReportMs > 400 && now - lastInNudgeMs > 400)
+        {
+            lastInNudgeMs = now;
+            Nudge(NUDGE_IN);
+        }
         std::lock_guard<std::mutex> g(accLock);
         return TakeReports(acc, in);
     }

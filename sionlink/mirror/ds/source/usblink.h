@@ -9,8 +9,11 @@
 
 #define SL_USB_VID 0x1209   // pid.codes
 #define SL_USB_PID 0x0001   // pid.codes test PID, until we register one
-// vendor request (host to device, no data): the Sion has had data waiting a while
+// vendor request (host to device, no data, wValue says why): the Sion has had data
+// waiting a while (OUT), or has been reading reports and had none for a while (IN)
 #define SL_REQ_NUDGE 1
+#define SL_NUDGE_OUT 1
+#define SL_NUDGE_IN  2
 
 void usbStart(void);
 
@@ -21,12 +24,14 @@ typedef struct {
     u32 irqs, events, resets, setups, configured;
     u32 lastEvent, lastSetup;
     u32 deadReads;          // event reads that came back all ones (DSpico not answering)
-    u32 nudges, recovered;  // Sion's nudges, lost OUT completions recovered
+    u32 nudges;             // the Sion's nudges
+    u32 recovered, rearmed; // OUT blocks whose completion was lost, OUT transfers armed again
+    u32 inRearmed;          // reports started again
     u32 outDone, outBytes, inDone, reports;  // transfers completed, reports started
     bool outArmed, inBusy;
     // recent link history: S setup (x = request, a = value, b = length),
     // C transfer complete (x = endpoint, a = bytes), R bus reset, Z status sent,
-    // N lost OUT completion recovered (a = buffer)
+    // N lost OUT completion recovered, A OUT armed again, I report started again (a = buffer)
     struct { char kind; u8 x; u16 a, b; } log[8];
     u32 logCount;
 } usb_diag;

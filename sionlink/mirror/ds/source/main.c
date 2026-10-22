@@ -240,7 +240,8 @@ static void apply2D(const mirror_hdr* h)
 extern volatile u32 mirrorStats[4];
 static FILE* recording;
 static bool liveLink;
-static u32 vblanks, lastReport;
+static u32 vblanks, lastScan, lastReport;
+static u32 lastKeys, lastTouch, lastFlags;   // what the last report said
 
 static void clearHardware(void);
 static bool linkData;     // the Sion has started sending
@@ -281,6 +282,10 @@ static void showDiag(void)
             printf("status sent         \n");
         else if (e->kind == 'N')
             printf("lost data recovered \n");
+        else if (e->kind == 'A')
+            printf("data started again  \n");
+        else if (e->kind == 'I')
+            printf("report started again\n");
         else
             printf("bus reset           \n");
     }
@@ -324,6 +329,7 @@ static void showStall(void)
     printf("usb state     %-12s\n", usbDiag.deadReads ? "DSpico silent" : usbConfigured() ? "connected" : "lost");
     printf("silent reads  %lu\n", usbDiag.deadReads);
     printf("nudges %lu, recovered %lu\n", usbDiag.nudges, usbDiag.recovered);
+    printf("restarted: data %lu, pad %lu\n", usbDiag.rearmed, usbDiag.inRearmed);
     printf("out done %lu, %lu KB %s\n", usbDiag.outDone, usbDiag.outBytes >> 10, usbDiag.outArmed ? "armed" : "idle ");
     printf("in done %lu of %lu %s\n", usbDiag.inDone, usbDiag.reports, usbDiag.inBusy ? "busy" : "idle");
     printf("%-30s\n", stallManual ? "hold L+R+SELECT: back to game" : "hold L+R+SELECT: keep this");
@@ -394,17 +400,29 @@ static void idle(void)
         }
         showStall();
     }
-    if (vblanks != lastReport && usbConfigured())
+    if (vblanks != lastScan && usbConfigured())
     {
+        lastScan = vblanks;
         scanKeys();
         touchPosition t = {0};
         u32 keys = keysHeld();
         if (keys & KEY_TOUCH)
             touchRead(&t);
-        mirror_input in = {MIRROR_INPUT_MAGIC, keys, t.px, t.py,
-                           mirrorStats[1] | (needFull && !stallManual ? MIRROR_INPUT_NEED_FULL : 0)};
-        if (usbSendReport(&in, sizeof in))
-            lastReport = vblanks;
+        u32 touch = t.px | (u32)t.py << 16;
+        u32 flags = needFull && !stallManual ? MIRROR_INPUT_NEED_FULL : 0;
+        // a report when something changed, and every 8 frames to show we're still here:
+        // every card command is a chance for the DSpico to miss one
+        if (keys != lastKeys || touch != lastTouch || flags != lastFlags || vblanks - lastReport >= 8)
+        {
+            mirror_input in = {MIRROR_INPUT_MAGIC, keys, t.px, t.py, mirrorStats[1] | flags};
+            if (usbSendReport(&in, sizeof in))
+            {
+                lastReport = vblanks;
+                lastKeys = keys;
+                lastTouch = touch;
+                lastFlags = flags;
+            }
+        }
     }
 }
 
