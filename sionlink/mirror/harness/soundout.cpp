@@ -236,7 +236,7 @@ void SoundOut::Push(const int16_t* data, uint32_t frames)
     more.notify_one();
 }
 
-double SoundOut::Skew()
+double SoundOut::Skew(double speed)
 {
     double fill;
     {
@@ -253,7 +253,8 @@ double SoundOut::Skew()
     // its target instead of 30% above it.
     double e = (fillAvg - TargetFill) / TargetFill;
     drift = std::max(-0.01, std::min(0.01, drift + e * 0.00002));
-    return 1.0 + std::max(-0.01, std::min(0.01, e * 0.01 + drift));
+    double trim = 1.0 + std::max(-0.01, std::min(0.01, e * 0.01 + drift));
+    return std::max(0.85, std::min(1.01, speed)) * trim;
 }
 
 void SoundOut::Run()

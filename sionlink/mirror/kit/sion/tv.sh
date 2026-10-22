@@ -1,5 +1,5 @@
 #!/bin/sh
-# Sion Link live mirror with the game on the TV as well (run 11): both screens stacked on
+# Sion Link live mirror with the game on the TV as well (run 14): both screens stacked on
 # the TV in the mode it is already in (no resync), the game's sound on the TV's HDMI, and
 # the same picture mirrored to the DS, whose pad plays it.
 #   sh tv.sh /path/to/game.nds [GAMECODE] [60]    start (it carries on in the background)

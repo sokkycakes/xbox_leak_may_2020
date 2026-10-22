@@ -26,6 +26,8 @@
 //                      TV's pace) or dump:FILE (every 60th picture, 720x480 raw, for tests)
 //     --sound OUT      the game's sound (see soundout.h): alsa ($AUDIODEV, the TV's HDMI
 //                      on the Sion) or wav:FILE
+//     --stretch 0      where the game runs slow (a scene too heavy for the Sion), let the
+//                      sound break up instead of stretching it with the game (up to 15%)
 //
 // SIGTERM or SIGINT stops it cleanly (the TV goes back to xbox-av); a second one at once.
 //
@@ -161,7 +163,7 @@ static std::string CpuUse(double seconds)
 // MIRROR_PROF=FROM:TO (cloud tests): where the time goes in frames FROM..TO-1, per frame
 struct Prof
 {
-    enum { Snap, Lines, Emit, Skipped, Sync, Frame, Tv, N };
+    enum { Snap, Lines, Emit, Skipped, Sync, Frame, Tv, EmitFilter, EmitPack, EmitDelta, N };
     double ms[N] = {};
     u32 from = 0, to = 0, frames = 0;
     bool on = false;
@@ -437,10 +439,26 @@ public:
     // Live: a thread hands bundles to the link so the game never waits on USB.
     // When bundles back up (a big VRAM upload), frames are left out the way
     // --half leaves them out, so the DS stays close to live instead of falling behind.
+    // The 3D commands' state tracking and the bundle's last steps take most of the time
+    // a bundle costs, so they run on that thread too, in frame order (MIRROR_SYNCGX=1 or
+    // MIRROR_GEOCHECK: on the game's thread, as before): a frame's job carries its 3D
+    // writes and the rest of its bundle, ready made.
+    struct Sizes { u32 gx, regs, pal, oam, vram, vramBlocks, lines; } sz {};
+    struct GXJob
+    {
+        bool send = true;           // a bundle; false: a left-out frame's 3D writes, kept as state
+        u32 frame = 0, flags = 0;
+        std::vector<GXFilter::IOW> gx;   // the frame's 3D writes
+        std::vector<u8> post;       // the bundle after its 3D record (2D state, lines)
+        std::vector<u8> built;      // the whole bundle, when it was made on the game's thread
+        Sizes sz {};
+        bool cap = false;
+    };
+    const bool asyncGX = !getenv("MIRROR_SYNCGX") && !getenv("MIRROR_GEOCHECK");
     std::thread sender;
     std::mutex sendLock;
     std::condition_variable sendWake;
-    std::vector<std::vector<u8>> sendQueue;
+    std::deque<GXJob> sendQueue;
     u32 sendBusy = 0;    // bundles queued or being sent
     std::atomic<u32> fullPending {0};   // full bundles queued or being sent
     std::atomic<u64> sentBytes {0};
@@ -456,14 +474,20 @@ public:
             pthread_setname_np(pthread_self(), "mirror-send");
             for (;;)
             {
-                std::vector<u8> b;
+                GXJob job;
                 {
                     std::unique_lock<std::mutex> g(sendLock);
                     sendWake.wait(g, [this] { return sendStop || !sendQueue.empty(); });
                     if (sendQueue.empty()) return;
-                    b.swap(sendQueue.front());
-                    sendQueue.erase(sendQueue.begin());
+                    job = std::move(sendQueue.front());
+                    sendQueue.pop_front();
                 }
+                if (!job.send)
+                {
+                    BuildSkipped(job);
+                    continue;
+                }
+                std::vector<u8> b = job.built.empty() ? BuildBundle(job) : std::move(job.built);
                 auto t0 = std::chrono::steady_clock::now();
                 size_t raw = b.size();
                 b = LzPackBundle(b);
@@ -573,8 +597,7 @@ public:
     // the DS lost track (MIRROR_INPUT_NEED_FULL): next bundle carries everything
     void RequestFull()
     {
-        full = true;
-        prevGX.clear();
+        full = true;   // its bundle clears prevGX where it's built
         fullRequests++;
     }
     bool half = false;  // 30 fps: every other frame, each shown twice
@@ -602,7 +625,7 @@ public:
     int captureBank = -1;
     u32 captureOff = 0, captureLen = 0;
 
-    std::vector<u8> buf, part2D;
+    std::vector<u8> part2D;
     u64 totalRaw = 0, totalZ = 0;
 
     Recorder() { for (int i = 0; i < 9; i++) prevVRAM[i].assign(BankSize[i], 0); }
@@ -704,8 +727,17 @@ public:
             {
                 PROF(Skipped);
                 // not sent: keep the state its 3D commands leave behind for the next bundle
-                for (const IOW& w : ready) filt.Feed(w, false, carry);
-                ready.clear();
+                GXJob j;
+                j.send = false;
+                j.gx.swap(ready);
+                if (link && asyncGX)
+                {
+                    std::lock_guard<std::mutex> g(sendLock);
+                    sendQueue.push_back(std::move(j));
+                    sendWake.notify_one();
+                }
+                else
+                    BuildSkipped(j);
             }
             static const bool geoCheck = getenv("MIRROR_GEOCHECK") != nullptr;
             if (geoCheck) CheckGeo();
@@ -838,8 +870,6 @@ public:
     {
         ((mirror_rec*)&b[at])->len = b.size() - at - sizeof(mirror_rec);
     }
-
-    struct Sizes { u32 gx, regs, pal, oam, vram, vramBlocks, lines; } sz {};
 
     // ---- line 0: the 2D state this frame starts with
     void Snapshot2D()
@@ -1074,111 +1104,133 @@ public:
     }
 
     // ---- line 192: send the frame
+    // the game's thread, line 192: what only this frame knows (2D state, lines, flags)
     void Emit()
     {
-        buf.clear();
         // 30 fps: hold this frame for two unless the game is capturing (3D on both
         // screens, one per frame), where every frame has to go
         holdNext = half && !capThis && !capPrev;
-        u32 flags = (fullThis ? MIRROR_FLAG_FULL : 0) | (holdNext ? MIRROR_FLAG_HOLD : 0);
-        if (fullThis) prevGX.clear();   // its 3D commands go literally
+        GXJob j;
+        j.frame = emuFrame;
+        j.flags = (fullThis ? MIRROR_FLAG_FULL : 0) | (holdNext ? MIRROR_FLAG_HOLD : 0);
         fullThis = false;
-        mirror_hdr h {MIRROR_MAGIC, emuFrame, 0, flags};
+        j.gx.swap(ready);
+        j.post.swap(part2D);
+        if (!lines.empty())
+        {
+            size_t at = BeginRec(j.post, MREC_LINES), s0 = j.post.size();
+            u32 n = lines.size();
+            Put(j.post, n);
+            PutBytes(j.post, lines.data(), n * sizeof(mirror_line));
+            EndRec(j.post, at);
+            sz.lines = j.post.size() - s0;
+            // the client's registers now hold the end-of-frame values
+            memcpy(sent, lineCur, sizeof(sent));
+        }
+        j.sz = sz;
+        j.cap = capThis;
+        if (link)
+        {
+            if (!asyncGX) j.built = BuildBundle(j);
+            std::lock_guard<std::mutex> g(sendLock);
+            if (j.flags & MIRROR_FLAG_FULL) fullPending++;
+            sendQueue.push_back(std::move(j));   // built, packed and padded by the sender
+            sendBusy++;
+            sendWake.notify_one();
+            unshown.push_back(emuFrame);
+            if (unshown.size() > 600) unshown.pop_front();   // a DS that doesn't say what it shows
+        }
+        else
+            BuildBundle(j);
+        frame++;
+    }
+
+    // a left-out frame: keep the state its 3D commands leave behind for the next bundle
+    void BuildSkipped(GXJob& j)
+    {
+        for (const IOW& w : j.gx) filt.Feed(w, false, carry);
+    }
+
+    // the sender's thread (or the game's): the 3D commands as the DS gets them, and the
+    // bundle around them, in frame order
+    std::vector<u8> BuildBundle(GXJob& j)
+    {
+        std::vector<u8> buf;
+        if (j.flags & MIRROR_FLAG_FULL) prevGX.clear();   // its 3D commands go literally
+        mirror_hdr h {MIRROR_MAGIC, j.frame, 0, j.flags};
         Put(buf, h);
+        std::vector<IOW>& ready = j.gx;
         if (half || link)
         {
             static const bool cstat = getenv("MIRROR_CARRYSTAT") != nullptr;
             if (cstat && carry.size() > 8192)
             {
-                fprintf(stderr, "carry f%u: %zu writes:", emuFrame, carry.size());
+                fprintf(stderr, "carry f%u: %zu writes:", j.frame, carry.size());
                 for (int c = 0; c < 256; c++)
                     if (filt.keptBy[c]) fprintf(stderr, " %02x:%u", c, filt.keptBy[c]);
                 fprintf(stderr, "\n");
             }
             memset(filt.keptBy, 0, sizeof filt.keptBy);
+            PROF(EmitFilter);
             std::vector<IOW> gx;
             if (filt.Rebuild(carry, gx))
                 carry.clear();
             else
                 gx.swap(carry);
             filt.Sent();
-            if (flags & MIRROR_FLAG_FULL)
+            if (j.flags & MIRROR_FLAG_FULL)
                 filt.RebuildAll(gx);
             for (const IOW& w : ready) filt.Feed(w, true, gx);
             ready.swap(gx);
         }
 
+        u32 gxSize = 0;
         if (!ready.empty())
         {
+            Prof::Timer packTimer(gProf, Prof::EmitPack);
             std::vector<u8> gx;
             u32 runs = 0;
             Put(gx, runs);
             for (size_t i = 0; i < ready.size();)
             {
-                size_t j = i;
-                while (j < ready.size() && j - i < 0x3FFF && ready[j].off == ready[i].off && ready[j].size == ready[i].size)
-                    j++;
+                size_t k = i;
+                while (k < ready.size() && k - i < 0x3FFF && ready[k].off == ready[i].off && ready[k].size == ready[i].size)
+                    k++;
                 u16 code = ready[i].size == 4 ? 0 : ready[i].size == 2 ? 1 : 2;
-                mirror_run r {ready[i].off, (u16)((j - i) | (code << 14))};
+                mirror_run r {ready[i].off, (u16)((k - i) | (code << 14))};
                 Put(gx, r);
-                for (size_t k = i; k < j; k++) Put(gx, ready[k].val);
+                for (size_t m = i; m < k; m++) Put(gx, ready[m].val);
                 runs++;
-                i = j;
+                i = k;
             }
             memcpy(&gx[0], &runs, 4);
-            ready.clear();
 
             std::vector<u8> delta;
+            Prof::Timer deltaTimer(gProf, Prof::EmitDelta);
             if (gxDelta && !prevGX.empty() && (delta = DeltaGX(gx), delta.size() < gx.size()))
             {
                 size_t at = BeginRec(buf, MREC_GXDELTA), s0 = buf.size();
                 PutBytes(buf, delta.data(), delta.size());
                 EndRec(buf, at);
-                sz.gx = buf.size() - s0;
+                gxSize = buf.size() - s0;
             }
             else
             {
                 size_t at = BeginRec(buf, MREC_GX), s0 = buf.size();
                 PutBytes(buf, gx.data(), gx.size());
                 EndRec(buf, at);
-                sz.gx = buf.size() - s0;
+                gxSize = buf.size() - s0;
             }
             prevGX.swap(gx);
         }
         else
             prevGX.clear();
 
-        PutBytes(buf, part2D.data(), part2D.size());
-
-        if (!lines.empty())
-        {
-            size_t at = BeginRec(buf, MREC_LINES), s0 = buf.size();
-            u32 n = lines.size();
-            Put(buf, n);
-            PutBytes(buf, lines.data(), n * sizeof(mirror_line));
-            EndRec(buf, at);
-            sz.lines = buf.size() - s0;
-            // the client's registers now hold the end-of-frame values
-            memcpy(sent, lineCur, sizeof(sent));
-        }
-
+        PutBytes(buf, j.post.data(), j.post.size());
         size_t at = BeginRec(buf, MREC_END);
         EndRec(buf, at);
         ((mirror_hdr*)buf.data())->size = buf.size();
         if (out) fwrite(buf.data(), 1, buf.size(), out);
-        if (link)
-        {
-            std::lock_guard<std::mutex> g(sendLock);
-            if (((mirror_hdr*)buf.data())->flags & MIRROR_FLAG_FULL) fullPending++;
-            sendQueue.push_back(buf);   // packed and padded by the sender
-            sendBusy++;
-            sendWake.notify_one();
-        }
-        if (link)
-        {
-            unshown.push_back(emuFrame);
-            if (unshown.size() > 600) unshown.pop_front();   // a DS that doesn't say what it shows
-        }
 
         // what zlib would make of it, for recordings' numbers: not live, where it cost the game
         // a millisecond a frame in the course flyover
@@ -1193,9 +1245,9 @@ public:
         totalRaw += buf.size();
         totalZ += zlen;
         if (stats)
-            fprintf(stats, "%u,%zu,%lu,%u,%u,%u,%u,%u,%u,%u,%d\n", emuFrame, buf.size(), (unsigned long)zlen,
-                    sz.gx, sz.regs, sz.pal, sz.oam, sz.vram, sz.vramBlocks, sz.lines, capThis ? 1 : 0);
-        frame++;
+            fprintf(stats, "%u,%zu,%lu,%u,%u,%u,%u,%u,%u,%u,%d\n", j.frame, buf.size(), (unsigned long)zlen,
+                    gxSize, j.sz.regs, j.sz.pal, j.sz.oam, j.sz.vram, j.sz.vramBlocks, j.sz.lines, j.cap ? 1 : 0);
+        return buf;
     }
 };
 
@@ -1252,7 +1304,7 @@ int main(int argc, char** argv)
 {
     if (argc < 3)
     {
-        fprintf(stderr, "usage: %s ROM FRAMES [--input F] [--record F] [--frames F] [--shots DIR] [--every N] [--stats F] [--boottype N] [--lang N] [--gamecode XXXX] [--half 1] [--gxdelta 1] [--serve LINK] [--reconnect 1] [--dspico PATH] [--usbrate N] [--realtime 1] [--jit 1] [--threaded 1] [--tv drm|dump:F] [--sound alsa|wav:F]\n", argv[0]);
+        fprintf(stderr, "usage: %s ROM FRAMES [--input F] [--record F] [--frames F] [--shots DIR] [--every N] [--stats F] [--boottype N] [--lang N] [--gamecode XXXX] [--half 1] [--gxdelta 1] [--serve LINK] [--reconnect 1] [--dspico PATH] [--usbrate N] [--realtime 1] [--jit 1] [--threaded 1] [--tv drm|dump:F] [--sound alsa|wav:F] [--stretch 0]\n", argv[0]);
         return 1;
     }
     const char* rompath = argv[1];
@@ -1269,6 +1321,7 @@ int main(int argc, char** argv)
     u32 usbRate = 12000;
     bool realtime = false, jit = false, threaded = false;
     const char *tvSpec = nullptr, *soundSpec = nullptr;
+    bool stretch = true;
     for (int i = 3; i + 1 < argc; i += 2)
     {
         std::string o = argv[i];
@@ -1293,6 +1346,7 @@ int main(int argc, char** argv)
         else if (o == "--threaded") threaded = atoi(argv[i + 1]) != 0;
         else if (o == "--tv") tvSpec = argv[i + 1];
         else if (o == "--sound") soundSpec = argv[i + 1];
+        else if (o == "--stretch") stretch = atoi(argv[i + 1]) != 0;
         else { fprintf(stderr, "unknown option %s\n", o.c_str()); return 1; }
     }
 
@@ -1377,6 +1431,8 @@ int main(int argc, char** argv)
     }
     if (soundSpec && !sound.Open(soundSpec)) return 1;
     std::vector<s16> soundBuf(4096 * 2);
+    auto lastFrameDone = std::chrono::steady_clock::now();
+    double frameGap = 16715757e-9;   // seconds between frames lately
 
     std::unique_ptr<HostLink> link;
     if (serve)
@@ -1621,6 +1677,8 @@ int main(int argc, char** argv)
             fprintf(stderr, "prof frames %u-%u, ms a frame: game+tap %.2f (2D snapshot %.2f, lines %.2f, bundle %.2f, left-out 3D %.2f, capture sync %.2f), TV+sound %.2f\n",
                     gProf.from, gProf.to, gProf.ms[Prof::Frame] / n, gProf.ms[Prof::Snap] / n, gProf.ms[Prof::Lines] / n,
                     gProf.ms[Prof::Emit] / n, gProf.ms[Prof::Skipped] / n, gProf.ms[Prof::Sync] / n, gProf.ms[Prof::Tv] / n);
+            fprintf(stderr, "prof bundle: 3D filter %.2f, 3D packing %.2f (of it delta %.2f)\n", gProf.ms[Prof::EmitFilter] / n,
+                    gProf.ms[Prof::EmitPack] / n, gProf.ms[Prof::EmitDelta] / n);
             gProf.on = false;
         }
         {
@@ -1646,7 +1704,12 @@ int main(int argc, char** argv)
             // the sound first: showing the picture can wait for the TV
             int n = nds->SPU.ReadOutput(soundBuf.data(), 4096);
             if (n > 0) sound.Push(soundBuf.data(), n);
-            nds->SPU.SetOutputSkew(sound.Skew());
+            // how fast the game runs against the DS, over the last quarter second or so
+            auto done = std::chrono::steady_clock::now();
+            double gap = std::chrono::duration<double>(done - lastFrameDone).count();
+            lastFrameDone = done;
+            if (gap < 0.25) frameGap = frameGap * 0.9 + gap * 0.1;
+            nds->SPU.SetOutputSkew(sound.Skew(stretch ? 16715757e-9 / frameGap : 1));
         }
         if (catchUp) tvSkipped++;
         else if (tvSpec) tv.Show((const u32*)top, (const u32*)bot);

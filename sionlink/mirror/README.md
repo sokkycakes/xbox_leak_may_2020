@@ -65,7 +65,8 @@ It is a vendor-class device, VID 1209 PID 0001 (pid.codes test PID): bundles com
 
 - `mirrorrun ROM N --serve usb` is the Sion side. It streams each bundle to the DSpico through
   libusb and plays the game with the DS's pad. A thread does the sending, so the game never waits
-  on USB. While two bundles are still waiting, frames are left out the way `--half` leaves them
+  on USB; it also filters the 3D commands and assembles each bundle, in frame order, so the game's
+  thread only copies them out (`MIRROR_SYNCGX=1` does it all on the game's thread, as before). While two bundles are still waiting, frames are left out the way `--half` leaves them
   out, so the DS stays near live after a big VRAM upload instead of falling behind. The DS's
   reports also say which frame is on its screen; while more than four bundles sent are not shown
   yet, frames are left out too (with display capture, where none can be, the game waits). Without
@@ -99,7 +100,9 @@ sample rate by how full its buffer is (60.00 Hz TV against the DS's 59.83). A fr
 longer than the TV's (a course loading) would leave the game behind the TV for good and empty
 that buffer (run 11: about once a minute), so the frame after one isn't shown and the game
 catches up. Not in a scene too heavy for 60 frames a second (run 12 left nearly every frame out
-there and the TV stood still): there the game slows down. The speed line gives the average and
+there and the TV stood still): there the game slows down, and the sound slows with it (up to
+15%) instead of breaking up, from how far apart the frames come (`--stretch 0`: short gaps
+instead). The speed line gives the average and
 longest frame, how many weren't shown, and how busy each thread is (`CPU:`). `tv.sh` stops the
 dashboard, runs the mirror with both, and starts the dashboard again when it stops
 (`sh tv.sh stop`). Cloud tests: `--tv dump:FILE` (every 60th picture), `--sound wav:FILE`,

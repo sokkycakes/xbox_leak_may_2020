@@ -26,8 +26,10 @@ public:
     bool Open(const std::string& spec);
     // stereo frames from the game
     void Push(const int16_t* data, uint32_t frames);
-    // how fast the game should make samples, relative to normal: above 1 when the buffer runs full
-    double Skew();
+    // How fast the game should make samples, relative to normal: above 1 when the buffer
+    // runs full. speed: how fast the game runs against the DS (below 1 in a scene too heavy
+    // for the Sion); the sound then stretches with it (slower, lower) instead of running dry.
+    double Skew(double speed = 1);
     void Close();
     // times the buffer ran dry (the game was late), and times the card did (this thread was)
     uint32_t Underruns() const { return underruns; }
