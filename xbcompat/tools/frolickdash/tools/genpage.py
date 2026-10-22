@@ -205,7 +205,7 @@ PAGES = [
     # them, its highlight following the focused row.  Y is Marketplace
     # Home.  Filled by the hub (kind "spotlight") from SPOTLIGHT below.
     ("page_spotlight", dict(scene="spotlight", pad="catalog", first="lstSpot_0", parent="", header="Spotlight",
-                            dynamic="spotlight", list="lstSpot", rows=4,
+                            dynamic="spotlight", list="lstSpot", rows=4 if os.environ.get("FROLICK_SPOT_BANNER", "0") == "1" else 5,
                             legend_y="Marketplace Home")),
     ("page_store_games", dict(scene="1412_GameListScene.xui", pad="catalog", first="lstGames_0", parent="page_market",
                               header="Game Downloads", lists={"lstGames": GAMES}, hide=["btnX"],
@@ -605,7 +605,7 @@ def moved(block, dx, dy):
 # Spotlight's layout, from sokky's reference (1306x735) mapped into the
 # page at 0.842 (the reference list's width onto Frolick's 420), keeping
 # Frolick's sizes.  The live layout has no banner (sokky 2026-10-21): the
-# tabs padded below the header, four rows.  FROLICK_SPOT_BANNER=1 builds
+# tabs with equal room above and below their text, five rows.  FROLICK_SPOT_BANNER=1 builds
 # the unused alternative with the banner's own band (714x80, the
 # reference's 0.649 x 0.130 of the frame) and four rows under it.
 SPOT_BANNER = os.environ.get("FROLICK_SPOT_BANNER", "0") == "1"
@@ -637,7 +637,7 @@ def spotlight_page(spec):
                               " <Position>218,146,0</Position>", " <ImagePath></ImagePath>", "</Properties>", "</XuiImage>"]))
         tab_y, rows = 230, 4
     else:
-        tab_y, rows = 176, 4     # padded below the header (sokky: "not so crowded"), four rows as the reference
+        tab_y, rows = 151, 5     # as much room above the tab text as below it (sokky)
     list_y = tab_y + 40
     tabs = [t for t, _ in SPOTLIGHT]
     for cur in range(len(tabs)):
