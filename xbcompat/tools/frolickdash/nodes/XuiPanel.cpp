@@ -1645,7 +1645,9 @@ void CBelt::Render()
 #define GRID_D 10.0f
 #define GRID_COLW 0.155f
 #define GRID_TILE 0.6f
-#define GRID_GLOW 64
+#define GRID_SPIN 0.003125f     // MBROWS 0x7a8a50: radians added to the shared angle each 60 Hz update
+#define GRID_PULSE 1.0f         // the focused block's tint, seconds per pulse
+#define GRID_TINT 0.35f         // and how far it goes toward white
 static const float c_rgGridRowY[4] = { 0.30f, 0.41f, 0.54f, 0.68f };
 static const float c_rgGridRowShot[4] = { 0.83f, 0.887f, 0.943f, 1.0f };
 #define GRID_LOOK 0.444f        // MBROWS gp-0x7df8: icons tipped toward the viewer, tops showing
@@ -1661,8 +1663,7 @@ static const float c_rgGridLightCol[3] = { 0.4f, 0.2f, 0.0f };
 
 struct SCREENVERTEX { float x, y, z, rhw; float u, v; };
 struct SLABVERTEX { float x, y, z; DWORD color; };
-struct GLOWVERTEX { float x, y, z; DWORD color; float u, v; };
-#define GLOWVERTEX_FVF (D3DFVF_XYZ | D3DFVF_DIFFUSE | D3DFVF_TEX1)
+
 #define SLABVERTEX_FVF (D3DFVF_XYZ | D3DFVF_DIFFUSE)
 #define SCREENVERTEX_FVF (D3DFVF_XYZRHW | D3DFVF_TEX1)
 
@@ -1700,8 +1701,9 @@ protected:
     void Capture();
     void DrawBackground(float alpha);
     void DrawTiles(float alpha);
-    void DrawGlow(const D3DXVECTOR3& c, const D3DXVECTOR3& ax, const D3DXVECTOR3& ay, float a);
-    void DrawSlab(const D3DXVECTOR3& c, const D3DXVECTOR3& ax, const D3DXVECTOR3& ay, const D3DXVECTOR3& az, float a);
+    void DrawTint(const D3DXVECTOR3& c, const D3DXVECTOR3& ax, const D3DXVECTOR3& ay, float a);
+    void DrawSlab(const D3DXVECTOR3& c, const D3DXVECTOR3& ax, const D3DXVECTOR3& ay, const D3DXVECTOR3& az,
+        const D3DXMATRIX* pRot, float tint, float a);
 
     bool m_bDirty;
     CXuiResources m_res;
@@ -1720,7 +1722,8 @@ protected:
     float m_fade;
     bool m_bCapture;        // take the background on the next frame
     LPDIRECT3DTEXTURE8 m_pBlur;
-    LPDIRECT3DTEXTURE8 m_pGlow;
+    float m_spin;           // MBROWS gp-0x7c68: the one angle the focused block tumbles by
+    float m_clock;          // drives the focused block's tint
     float m_screenW, m_screenH;
 };
 
@@ -1748,7 +1751,7 @@ END_NODE_FUN()
 CGameGrid::CGameGrid() :
     m_tile(NULL), m_skin(NULL), m_font(NULL), m_cols(5), m_rowScale(1), m_count(0),
     m_bDirty(true), m_pRenderer(NULL), m_pTileRoot(NULL), m_pSkinRoot(NULL), m_pTile(NULL), m_bFontLoaded(false),
-    m_sel(0), m_top(0.0f), m_dir(0), m_fade(0.0f), m_bCapture(false), m_pBlur(NULL), m_pGlow(NULL), m_screenW(640.0f), m_screenH(480.0f)
+    m_sel(0), m_top(0.0f), m_dir(0), m_fade(0.0f), m_bCapture(false), m_pBlur(NULL), m_spin(0.0f), m_clock(0.0f), m_screenW(640.0f), m_screenH(480.0f)
 {
     ZeroMemory(m_rgImage, sizeof m_rgImage);
     for (int i = 0; i < MAX_GRID_GAMES; i++)
@@ -1761,8 +1764,7 @@ CGameGrid::~CGameGrid()
         delete [] m_rgImage[i];
     if (m_pBlur != NULL)
         m_pBlur->Release();
-    if (m_pGlow != NULL)
-        m_pGlow->Release();
+
     delete m_pTile;
     delete m_pTileRoot;
     delete m_pSkinRoot;
@@ -1844,7 +1846,11 @@ void CGameGrid::Open()
     if (m_top > row) m_top = (float)row;
     if (m_top < row - 3) m_top = (float)(row - 3);
     if (m_fade <= 0.0f)
+    {
         m_bCapture = true;
+        m_spin = 0.0f;
+        m_clock = 0.0f;
+    }
     m_dir = 1;
 }
 
@@ -1898,6 +1904,11 @@ void CGameGrid::Advance(float nSeconds)
     float t = nSeconds / 0.15f;
     if (t > 1.0f) t = 1.0f;
     m_top += (top - m_top) * t;
+    // one clock for the page, wrapped into +-180 degrees as MBROWS does
+    m_spin += GRID_SPIN * 60.0f * nSeconds;
+    if (m_spin > D3DX_PI) m_spin -= 2.0f * D3DX_PI;
+    m_clock += nSeconds;
+    if (m_clock > 1000.0f * GRID_PULSE) m_clock -= 1000.0f * GRID_PULSE;
     if (fabs(top - m_top) < 0.002f) m_top = top;
 }
 
@@ -2053,7 +2064,10 @@ static float GridLight(float nx, float ny, float nz)
 // The icon as a slab: ax/ay are the front face's half extents (ay up on
 // screen), az the thickness pointing away from the camera. The faces that
 // face the camera are drawn lit; the art goes on the front afterwards.
-void CGameGrid::DrawSlab(const D3DXVECTOR3& c, const D3DXVECTOR3& ax, const D3DXVECTOR3& ay, const D3DXVECTOR3& az, float a)
+// pRot, when the block tumbles, turns the face normals for the light
+// (model space: x right, y up, z back); tint takes every face toward white.
+void CGameGrid::DrawSlab(const D3DXVECTOR3& c, const D3DXVECTOR3& ax, const D3DXVECTOR3& ay, const D3DXVECTOR3& az,
+    const D3DXMATRIX* pRot, float tint, float a)
 {
     static const struct { float n[3]; } faces[6] =
     {
@@ -2074,8 +2088,16 @@ void CGameGrid::DrawSlab(const D3DXVECTOR3& c, const D3DXVECTOR3& ax, const D3DX
         if (nz != 0.0f) { u = ax; w = ay; }
         else if (nx != 0.0f) { u = az; w = ay; }
         else { u = ax; w = az; }
-        float l = GridLight(nx, ny, nz) / front;
+        float lx = nx, ly = ny, lz = nz;
+        if (pRot != NULL)
+        {
+            D3DXVECTOR3 m(nx, -ny, -nz), r;
+            D3DXVec3TransformNormal(&r, &m, pRot);
+            lx = r.x; ly = -r.y; lz = -r.z;
+        }
+        float l = GridLight(lx, ly, lz) / front;
         if (l > 1.0f) l = 1.0f;
+        l += (1.0f - l) * tint;
         DWORD col = D3DCOLOR_COLORVALUE(l, l, l, a);
         D3DXVECTOR3 p[4] = { fc - u - w, fc + u - w, fc + u + w, fc - u + w };
         static const int tri[6] = { 0, 1, 2, 0, 2, 3 };
@@ -2101,59 +2123,28 @@ void CGameGrid::DrawSlab(const D3DXVECTOR3& c, const D3DXVECTOR3& ax, const D3DX
     XAppGetD3DDev()->DrawVerticesUP(D3DPT_TRIANGLELIST, n, v, sizeof (SLABVERTEX));
 }
 
-// The focused icon's soft white light: a radial falloff added over its face
-void CGameGrid::DrawGlow(const D3DXVECTOR3& c, const D3DXVECTOR3& ax, const D3DXVECTOR3& ay, float a)
+// The focused block's tint on its art: white added evenly over the face
+void CGameGrid::DrawTint(const D3DXVECTOR3& c, const D3DXVECTOR3& ax, const D3DXVECTOR3& ay, float a)
 {
-    if (m_pGlow == NULL)
-    {
-        if (FAILED(XAppGetD3DDev()->CreateTexture(GRID_GLOW, GRID_GLOW, 1, 0, D3DFMT_LIN_A8R8G8B8, D3DPOOL_MANAGED, &m_pGlow)))
-        {
-            m_pGlow = NULL;
-            return;
-        }
-        D3DLOCKED_RECT lr;
-        if (SUCCEEDED(m_pGlow->LockRect(0, &lr, NULL, 0)))
-        {
-            for (int y = 0; y < GRID_GLOW; y++)
-                for (int x = 0; x < GRID_GLOW; x++)
-                {
-                    float dx = (x + 0.5f) / GRID_GLOW * 2.0f - 1.0f, dy = (y + 0.5f) / GRID_GLOW * 2.0f - 1.0f;
-                    float k = 1.0f - (float)sqrt(dx * dx + dy * dy);
-                    if (k < 0.0f) k = 0.0f;
-                    ((DWORD*)((BYTE*)lr.pBits + y * lr.Pitch))[x] = D3DCOLOR_ARGB((int)(k * k * 255.0f), 0xff, 0xff, 0xff);
-                }
-            m_pGlow->UnlockRect(0);
-        }
-    }
-    // centred a little above the face's middle, as on the PS2's lit icon
-    D3DXVECTOR3 o = c + ay * 0.25f, gx = ax * 1.3f, gy = ay * 1.3f;
-    DWORD col = D3DCOLOR_COLORVALUE(1.0f, 1.0f, 1.0f, 0.7f * a);
-    float t = (float)GRID_GLOW;     // a linear texture takes texel coordinates
-    GLOWVERTEX v[4] =
-    {
-        { 0, 0, 0, col, 0.0f, 0.0f }, { 0, 0, 0, col, t, 0.0f },
-        { 0, 0, 0, col, 0.0f, t }, { 0, 0, 0, col, t, t },
-    };
-    D3DXVECTOR3 p[4] = { o - gx + gy, o + gx + gy, o - gx - gy, o + gx - gy };
+    DWORD col = D3DCOLOR_COLORVALUE(1.0f, 1.0f, 1.0f, a);
+    D3DXVECTOR3 p[4] = { c - ax + ay, c + ax + ay, c - ax - ay, c + ax - ay };
+    SLABVERTEX v[4];
     for (int k = 0; k < 4; k++)
     {
         v[k].x = p[k].x; v[k].y = p[k].y; v[k].z = p[k].z;
+        v[k].color = col;
     }
-    XAppSetTexture(0, m_pGlow);
-    XAppSetTextureStageState(0, D3DTSS_ADDRESSU, D3DTADDRESS_CLAMP);
-    XAppSetTextureStageState(0, D3DTSS_ADDRESSV, D3DTADDRESS_CLAMP);
-    XAppSetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_MODULATE);
-    XAppSetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+    XAppSetTexture(0, NULL);
+    XAppSetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG2);
     XAppSetTextureStageState(0, D3DTSS_COLORARG2, D3DTA_DIFFUSE);
-    XAppSetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_MODULATE);
-    XAppSetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
+    XAppSetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG2);
     XAppSetTextureStageState(0, D3DTSS_ALPHAARG2, D3DTA_DIFFUSE);
     XAppSetTextureStageState(1, D3DTSS_COLOROP, D3DTOP_DISABLE);
     XAppSetTextureStageState(1, D3DTSS_ALPHAOP, D3DTOP_DISABLE);
     XAppSetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA);
     XAppSetRenderState(D3DRS_DESTBLEND, D3DBLEND_ONE);
-    XAppGetD3DDev()->SetVertexShader(GLOWVERTEX_FVF);
-    XAppGetD3DDev()->DrawVerticesUP(D3DPT_TRIANGLESTRIP, 4, v, sizeof (GLOWVERTEX));
+    XAppGetD3DDev()->SetVertexShader(SLABVERTEX_FVF);
+    XAppGetD3DDev()->DrawVerticesUP(D3DPT_TRIANGLESTRIP, 4, v, sizeof (SLABVERTEX));
     XAppSetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
 }
 
@@ -2225,17 +2216,45 @@ void CGameGrid::DrawTiles(float alpha)
                 float px = (col - 0.5f * (cols - 1)) * colStep * scale;
                 float py = (1.0f - 2.0f * sy) * halfH;
                 float hw = 0.5f * GRID_TILE * colStep * scale, hh = hw * ch / cw;
-                D3DXVECTOR3 c(px, py, GRID_D);
+                // the block's axes in view space: model x, y up, z back; the
+                // focused one tumbles by the shared angle (MBROWS 0x7a73e0
+                // writes X -t, Y -t, Z +t for every PS1 icon), turning about
+                // its own centre
+                float hd = GRID_DEPTH * hw;
+                D3DXVECTOR3 mx(1, 0, 0), my(0, 1, 0), mz(0, 0, 1);
+                D3DXMATRIX rot, rx, ry, rz;
+                const D3DXMATRIX* pRot = NULL;
+                if (bSel)
+                {
+                    D3DXMatrixRotationX(&rx, -m_spin);
+                    D3DXMatrixRotationY(&ry, -m_spin);
+                    D3DXMatrixRotationZ(&rz, m_spin);
+                    rot = rx * ry * rz;
+                    pRot = &rot;
+                    D3DXVECTOR3 t;
+                    D3DXVec3TransformNormal(&t, &mx, &rot); mx = t;
+                    D3DXVec3TransformNormal(&t, &my, &rot); my = t;
+                    D3DXVec3TransformNormal(&t, &mz, &rot); mz = t;
+                }
+                D3DXVECTOR3 vx = D3DXVECTOR3(mx.x, 0, 0) + up * mx.y + back * mx.z;
+                D3DXVECTOR3 vy = D3DXVECTOR3(my.x, 0, 0) + up * my.y + back * my.z;
+                D3DXVECTOR3 vz = D3DXVECTOR3(mz.x, 0, 0) + up * mz.y + back * mz.z;
+                D3DXVECTOR3 centre = D3DXVECTOR3(px, py, GRID_D) + back * hd;
+                D3DXVECTOR3 c = centre - vz * hd;           // the front face's centre
+                float tint = 0.0f;
+                if (bSel)
+                    tint = GRID_TINT * (0.5f - 0.5f * (float)cos(2.0f * D3DX_PI * m_clock / GRID_PULSE));
+                DrawSlab(c, vx * hw, vy * hh, vz * hd, pRot, tint, a);
+                // the art only while the front faces the viewer (the eye is at the origin)
+                if (D3DXVec3Dot(&vz, &c) <= 0.0f)
+                    continue;
                 for (int gy = 0; gy < 6; gy++)
                     for (int gx = 0; gx < 7; gx++)
                     {
                         float lx = (gx / 6.0f * 2.0f - 1.0f) * hw;
                         float ly = (1.0f - gy / 5.0f * 2.0f) * hh;
-                        m_be.m_grid[gy][gx] = c + D3DXVECTOR3(lx, 0.0f, 0.0f) + up * ly;
+                        m_be.m_grid[gy][gx] = c + vx * lx + vy * ly;
                     }
-                // the block behind the art: front half extents, then half its depth
-                float hd = GRID_DEPTH * hw;
-                DrawSlab(c, D3DXVECTOR3(hw, 0, 0), up * hh, back * hd, a);
                 SetString(m_pTile->find("image"), "ImagePath", m_rgImage[i] != NULL ? m_rgImage[i] : _T(""));
                 m_be.m_gridMode = true;
                 m_be.m_gx0 = 0.0f; m_be.m_gy0 = 0.0f;
@@ -2243,8 +2262,8 @@ void CGameGrid::DrawTiles(float alpha)
                 m_be.m_alpha = a;
                 m_pRenderer->draw(m_pTile, 0, 0, 1);
                 m_be.m_gridMode = false;
-                if (bSel)
-                    DrawGlow(c, D3DXVECTOR3(hw, 0, 0), up * hh, a);
+                if (tint > 0.0f)
+                    DrawTint(c, vx * hw, vy * hh, tint * a);
             }
 
     XAppSetTexture(0, NULL);
