@@ -859,6 +859,10 @@ func main() {
 	ctx := context.Background()
 	tabs := loadTabs(*confPath)
 
+	if *streamURL != "" {
+		runStream(ctx)
+		return
+	}
 	if *once {
 		if err := buildCatalog(ctx, tabs); err != nil {
 			log.Fatal(err)
