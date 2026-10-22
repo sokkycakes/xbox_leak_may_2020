@@ -10,6 +10,8 @@
 #                                 with its own title ID, name and title
 #                                 image (imagebld /TITLEIMAGE), so each has
 #                                 a cover and launching one boots the hub
+#                                 (EXTRA_GAMES=n adds n more, for the
+#                                 All games grid)
 #   disc\default.xbe              one of them in the disc tray
 #   E:\UDATA\<title>\             TitleMeta.xbx, TitleImage.xbx and saves
 #                                 (SaveMeta.xbx, SaveImage.xbx) for two of
@@ -91,6 +93,9 @@ mkdir -p "$R/disc"
 game GameA "Test Game A" 54455354 40 90 160
 game GameB "Another Game" 54455355 160 70 40
 game GameC "Third Game" 54455356 60 140 70
+for i in $(seq 1 "${EXTRA_GAMES:-0}"); do
+    game "Extra$i" "Extra Game $i" "$(printf '545546%02X' "$i")" $((40 + i * 37 % 160)) $((60 + i * 53 % 140)) $((80 + i * 71 % 150))
+done
 cp "$R/hdd/partition1/Games/GameC/default.xbe" "$R/disc/default.xbe"
 cp "$OUT/dash/default.xip" "$R/disc/"
 

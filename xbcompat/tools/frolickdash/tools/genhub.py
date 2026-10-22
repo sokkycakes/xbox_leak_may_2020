@@ -97,7 +97,7 @@ BELT_COVER_SCALE = 1.0
 BELT_FOCUS_PULL = 5.6
 BELT_SKIP = 2              # slots either side of the focus hidden behind the big cover: they hold nothing
 # The belt's list: two reserved tiles at the left end (sokky, 2026-10-20),
-# "show all games" (grid mode, not built yet) and the game in the disc
+# "show all games" (the grid: CBelt's OpenGrid) and the game in the disc
 # tray or game card, each with an icon centred on its tile, then the games
 # (carousel.go's placeholder titles until a real list exists).  The icon
 # images are not in the cloud yet; the names are placeholders for them.
@@ -882,6 +882,22 @@ function PadMove(dir, step)
                 SndFocus();
             return;
         }
+        // All games: the grid steps four ways
+        if (theBelt.IsGrid())
+        {
+            if (theBelt.IsBusy())
+                return;
+            if (dir == "up")
+                theBelt.GridMove(0, 0 - 1);
+            if (dir == "down")
+                theBelt.GridMove(0, 1);
+            if (dir == "left")
+                theBelt.GridMove(0 - 1, 0);
+            if (dir == "right")
+                theBelt.GridMove(1, 0);
+            SndFocus();
+            return;
+        }
         // the belt: left scrolls it right (Belt_Right), right scrolls it left
         if (step < 0)
             theBelt.Step(0 - 1);
@@ -971,7 +987,7 @@ function OpenLibrary()
     ShowBeltHints(1);
 }
 
-// The belt's tiles: All games (the grid, not built yet), then the
+// The belt's tiles: All games (A opens the grid), then the
 // console's games as GameCollection lists them (the disc tray or game
 // card slots first, then E:\Games), each cover with the game's title image.
 // The library pad's game tile: the disc or game card that is in (its
@@ -1174,7 +1190,13 @@ function OpenGamePage()
 {
     var sel = theBelt.GetSelected();
     if (sel == 0)
+    {
+        // the All games tile: the grid (PS2 browser's grid and tilt)
+        SndSelect();
+        SndOpen();
+        theBelt.OpenGrid();
         return;
+    }
     if (theGameCollection.IsPlayable(sel - 1) == 0)
         return;
     nGame = sel - 1;
@@ -1330,8 +1352,15 @@ function PadBack()
             ShowBeltHints(1);
             return;
         }
-        if (theBelt.IsBusy() == 0)
-            CloseLibrary();
+        if (theBelt.IsBusy())
+            return;
+        if (theBelt.IsGrid())
+        {
+            SndBack();
+            theBelt.CloseGrid();
+            return;
+        }
+        CloseLibrary();
         return;
     }
     if (bZoomed == false)
