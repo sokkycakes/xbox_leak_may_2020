@@ -967,23 +967,6 @@ void CXuiPanel::Reload()
 //       function OnStep() { ... }   a step finished; GetSelected() tells which
 //   }
 //   theBelt.Open();  theBelt.Close();  theBelt.Step(1);  theBelt.SetTitle("...");
-//
-// All games (tile 0): OpenGrid() lays every game after it out as the PS2
-// 1.00 memory card browser lays out its icons (MBROWS; sokky's notes,
-// emulauncher tools/ps2-bios-extract/analysis/BROWSER_ICON_GRID.md; sokky
-// 2026-10-22: "the grid and tilt", not the inward turn).  The grid:
-// gridCols to a row, both axes stepping by 24, placed with x/25 across and
-// y/18 - y/80 down (from the grid's top left, so the browser's extra term
-// for negative coordinates never applies), each row scaled 0.65, 0.68,
-// 0.71, 0.74 from the back row to the front one.  The tilt: every tile
-// pitched back 0.64 rad (36.7 deg), and the grid itself 0.444 rad (25.4
-// deg), so the back rows recede.  The grid is drawn in its own perspective
-// in front of the camera while the belt's covers fade out; up to four
-// rows show, scrolling to keep the selection on them.  GetSelected() is
-// the grid's game while it is open, so A, Start and the game's page work
-// as on the belt.
-//   theBelt.OpenGrid();  theBelt.CloseGrid();  theBelt.GridMove(dx, dy);
-//   theBelt.IsGrid()            1 while the grid is open
 
 struct BELTHDR { char magic[4]; int nNodes, nFrames, nVerts, nIdx; };
 struct BELTVERTEX { float x, y, z, nx, ny, nz, u, v; };
@@ -1025,11 +1008,6 @@ public:
     int IsBusy();
     void SetTitle(const TCHAR* szText);
     void SetGameImage(int game, const TCHAR* szPath);
-    void OpenGrid();
-    void CloseGrid();
-    void GridMove(int dx, int dy);
-    int IsGrid();
-    int m_gridCols;         // games to a row in All games
 
     DECLARE_NODE_PROPS()
     DECLARE_NODE_FUNCTIONS()
@@ -1041,8 +1019,6 @@ protected:
     void CoverGrid(float pos, float pull, D3DXVECTOR3 grid[6][7]);
     float SlotOf(float k);
     void DrawScene(xui::Scene* pScene, float alpha, float rx, float ry, float rw, float rh);
-    void DrawTile(int game, float alpha, bool bFocus);
-    void RenderGrid(float alpha);
 
     BELTHDR m_hdr;
     float m_circleX, m_circleZ, m_circleR, m_coverY;
@@ -1076,11 +1052,6 @@ protected:
     int m_stepDir;          // 0 still, -1 Belt_Right (left pressed), +1 Belt_Left
     XTIME m_stepStart;
     bool m_bStepDone;
-
-    int m_gridDir;          // +1 opening, -1 closing, 0 still
-    float m_gridFade;       // 0 the belt, 1 the grid
-    int m_gridSel;          // the grid's game (1 and on)
-    float m_gridTop;        // the back row shown, eased toward the selection
 };
 
 IMPLEMENT_NODE("Belt", CBelt, CNode)
@@ -1103,7 +1074,6 @@ START_NODE_PROPS(CBelt, CNode)
     NODE_PROP(pt_number, CBelt, stepDuration)
     NODE_PROP(pt_number, CBelt, fadeDuration)
     NODE_PROP(pt_integer, CBelt, count)
-    NODE_PROP(pt_integer, CBelt, gridCols)
 END_NODE_PROPS()
 
 START_NODE_FUN(CBelt, CNode)
@@ -1114,10 +1084,6 @@ START_NODE_FUN(CBelt, CNode)
     NODE_FUN_IV(IsBusy)
     NODE_FUN_VS(SetTitle)
     NODE_FUN_VIS(SetGameImage)
-    NODE_FUN_VV(OpenGrid)
-    NODE_FUN_VV(CloseGrid)
-    NODE_FUN_VII(GridMove)
-    NODE_FUN_IV(IsGrid)
 END_NODE_FUN()
 
 CBelt::CBelt() :
@@ -1128,8 +1094,7 @@ CBelt::CBelt() :
     m_verts(NULL), m_indices(NULL), m_poses(NULL), m_bDirty(true),
     m_pRenderer(NULL), m_pCardRoot(NULL), m_pFocusRoot(NULL), m_pSkinRoot(NULL), m_pIconRoot(NULL), m_pCoverRoot(NULL),
     m_pCard(NULL), m_pFocus(NULL), m_pIcon(NULL), m_pCover(NULL), m_bFontLoaded(false), m_bStarted(false),
-    m_selected(0), m_open(false), m_fadeDir(0), m_fade(0.0f), m_stepDir(0), m_stepStart(0.0), m_bStepDone(false),
-    m_gridCols(5), m_gridDir(0), m_gridFade(0.0f), m_gridSel(1), m_gridTop(0.0f)
+    m_selected(0), m_open(false), m_fadeDir(0), m_fade(0.0f), m_stepDir(0), m_stepStart(0.0), m_bStepDone(false)
 {
     ZeroMemory(&m_hdr, sizeof m_hdr);
     ZeroMemory(m_rgImage, sizeof m_rgImage);
@@ -1369,55 +1334,8 @@ void CBelt::Close()
     m_stepDir = 0;
 }
 
-int CBelt::GetSelected() { return m_gridDir > 0 || (m_gridFade > 0.0f && m_gridDir == 0) ? m_gridSel : m_selected; }
-int CBelt::IsBusy() { return m_fadeDir != 0 || m_stepDir != 0 || m_gridDir != 0; }
-int CBelt::IsGrid() { return m_gridDir > 0 || (m_gridFade > 0.0f && m_gridDir == 0) ? 1 : 0; }
-
-// All games: the grid fades in over the belt, on the game it was last on.
-void CBelt::OpenGrid()
-{
-    if (!m_open || m_count < 2 || IsGrid())
-        return;
-    if (m_gridSel < 1 || m_gridSel >= m_count)
-        m_gridSel = 1;
-    int cols = m_gridCols > 0 ? m_gridCols : 1;
-    int row = (m_gridSel - 1) / cols;
-    if (m_gridTop > row) m_gridTop = (float)row;
-    if (m_gridTop < row - 3) m_gridTop = (float)(row - 3);
-    m_gridDir = 1;
-}
-
-void CBelt::CloseGrid()
-{
-    if (IsGrid())
-        m_gridDir = -1;
-}
-
-// A step on the grid: across a row, or a row up or down (to the last game
-// when the row below is short).  Nothing past the ends.
-void CBelt::GridMove(int dx, int dy)
-{
-    if (!IsGrid() || m_gridDir != 0)
-        return;
-    int cols = m_gridCols > 0 ? m_gridCols : 1;
-    int i = m_gridSel - 1, n = m_count - 1;
-    int col = i % cols, j = i;
-    if (dx != 0)
-    {
-        int c = col + (dx > 0 ? 1 : -1);
-        if (c < 0 || c >= cols)
-            return;
-        j = i + (dx > 0 ? 1 : -1);
-    }
-    else if (dy != 0)
-        j = i + (dy > 0 ? cols : -cols);
-    if (j >= n && dy > 0 && i / cols < (n - 1) / cols)
-        j = n - 1;
-    if (j < 0 || j >= n || j == i)
-        return;
-    m_gridSel = j + 1;
-    m_bStepDone = true;
-}
+int CBelt::GetSelected() { return m_selected; }
+int CBelt::IsBusy() { return m_fadeDir != 0 || m_stepDir != 0; }
 
 // A game's cover image (its title image out of its XBE, T:\GameImages);
 // "" goes back to the icons list.
@@ -1454,25 +1372,6 @@ void CBelt::Advance(float nSeconds)
         m_fade += m_fadeDir * nSeconds / (m_fadeDuration > 0.0f ? m_fadeDuration : 0.001f);
         if (m_fade >= 1.0f) { m_fade = 1.0f; m_fadeDir = 0; }
         if (m_fade <= 0.0f) { m_fade = 0.0f; m_fadeDir = 0; m_open = false; }
-    }
-    if (m_gridDir != 0)
-    {
-        m_gridFade += m_gridDir * nSeconds / 0.3f;
-        if (m_gridFade >= 1.0f) { m_gridFade = 1.0f; m_gridDir = 0; }
-        if (m_gridFade <= 0.0f) { m_gridFade = 0.0f; m_gridDir = 0; m_bStepDone = true; }
-    }
-    if (m_gridFade > 0.0f)
-    {
-        // the selection's row stays among the four shown
-        int cols = m_gridCols > 0 ? m_gridCols : 1;
-        int row = (m_gridSel - 1) / cols;
-        float top = m_gridTop;
-        if (top > row) top = (float)row;
-        if (top < row - 3) top = (float)(row - 3);
-        float t = nSeconds / 0.15f;
-        if (t > 1.0f) t = 1.0f;
-        m_gridTop += (top - m_gridTop) * t;
-        if (fabs(top - m_gridTop) < 0.002f) m_gridTop = top;
     }
     if (m_stepDir != 0 && XAppGetNow() - m_stepStart >= m_stepDuration)
     {
@@ -1589,10 +1488,9 @@ void CBelt::Render()
         Load();
     if (!m_open || m_verts == NULL || m_pCard == NULL || !m_visible)
         return;
-    float alphaAll = m_fade * g_nEffectAlpha;
-    if (alphaAll <= 0.01f)
+    float alpha = m_fade * g_nEffectAlpha;
+    if (alpha <= 0.01f)
         return;
-    float alpha = alphaAll * (1.0f - m_gridFade);
 
     // the clip's frame, and which game each cover carries
     float u = 0.0f;
@@ -1661,13 +1559,29 @@ void CBelt::Render()
     D3DXMatrixIdentity(&identity);
     XAppSetTransform(D3DTS_WORLD, &identity);
 
-    for (i = 0; i < n && alpha > 0.01f; i++)
+    float cw = m_pCard->root->width(), ch = m_pCard->root->height();
+    for (i = 0; i < n; i++)
     {
         int e = order[i];
+        int game = games[e];
         float x = places[e];
         float w = 1.0f - (float)fabs(x);
         CoverGrid(SlotOf(x), w > 0.0f ? w : 0.0f, m_be.m_grid);
-        DrawTile(games[e], alpha, false);
+        DrawScene(m_pCard, alpha, 0.0f, 0.0f, cw > 0 ? cw : 1.0f, ch > 0 ? ch : 1.0f);
+
+        // a game's cover art across the card, else a reserved tile's
+        // icon, centred on it
+        TCHAR szIcon[MAX_PATH];
+        if (m_pCover != NULL && CoverFor(game, szIcon, MAX_PATH))
+        {
+            SetString(m_pCover->find("image"), "ImagePath", szIcon);
+            DrawScene(m_pCover, alpha, 0.0f, 0.0f, cw > 0 ? cw : 1.0f, ch > 0 ? ch : 1.0f);
+        }
+        else if (m_pIcon != NULL && IconFor(game, szIcon, MAX_PATH))
+        {
+            SetString(m_pIcon->find("icon"), "ImagePath", szIcon);
+            DrawScene(m_pIcon, alpha, 0.0f, 0.0f, cw > 0 ? cw : 1.0f, ch > 0 ? ch : 1.0f);
+        }
 
         // the focus overlay rides the cover in the focus slot: its card
         // rectangle (192,40 640x440 of 1024x768) is the cover
@@ -1675,8 +1589,6 @@ void CBelt::Render()
         if (m_pFocus != NULL && fa > 0.01f)
             DrawScene(m_pFocus, alpha * fa, 192.0f, 40.0f, 640.0f, 440.0f);
     }
-    if (m_gridFade > 0.0f)
-        RenderGrid(alphaAll * m_gridFade);
 
     XAppSetTexture(0, NULL);
     XAppSetTextureStageState(0, D3DTSS_ADDRESSU, D3DTADDRESS_WRAP);
@@ -1690,114 +1602,492 @@ void CBelt::Render()
     XAppSetRenderState(D3DRS_LIGHTING, dwLighting);
 }
 
-// A game's tile on the quad in m_be.m_grid: the card, then the game's cover
-// art across it, else a reserved tile's icon centred on it.
-void CBelt::DrawTile(int game, float alpha, bool bFocus)
-{
-    float cw = m_pCard->root->width(), ch = m_pCard->root->height();
-    if (cw <= 0) cw = 1.0f;
-    if (ch <= 0) ch = 1.0f;
-    DrawScene(m_pCard, alpha, 0.0f, 0.0f, cw, ch);
-    TCHAR szIcon[MAX_PATH];
-    if (m_pCover != NULL && CoverFor(game, szIcon, MAX_PATH))
-    {
-        SetString(m_pCover->find("image"), "ImagePath", szIcon);
-        DrawScene(m_pCover, alpha, 0.0f, 0.0f, cw, ch);
-    }
-    else if (m_pIcon != NULL && IconFor(game, szIcon, MAX_PATH))
-    {
-        SetString(m_pIcon->find("icon"), "ImagePath", szIcon);
-        DrawScene(m_pIcon, alpha, 0.0f, 0.0f, cw, ch);
-    }
-    if (bFocus && m_pFocus != NULL)
-    {
-        // the belt's focus without its arrows (the grid steps four ways)
-        xui::Node* rgArrow[2] = { m_pFocus->find("arrowL"), m_pFocus->find("arrowR") };
-        int k;
-        for (k = 0; k < 2; k++)
-            if (rgArrow[k] != NULL)
-            {
-                xui::Value& v = rgArrow[k]->props.set("Show");
-                v.free(); v.type = xui::TBool; v.b = false;
-            }
-        DrawScene(m_pFocus, alpha, 192.0f, 40.0f, 640.0f, 440.0f);
-        for (k = 0; k < 2; k++)
-            if (rgArrow[k] != NULL)
-            {
-                xui::Value& v = rgArrow[k]->props.set("Show");
-                v.free(); v.type = xui::TBool; v.b = true;
-            }
-    }
-}
+// ---------------------------------------------------------------------------
+// All games: every game laid out as the PS2 1.00 memory card browser lays
+// out its icons (MBROWS; sokky's notes, emulauncher tools/ps2-bios-extract/
+// analysis/BROWSER_ICON_GRID.md).  sokky 2026-10-22: its own scene, like
+// the Recent and Favorites pages (the page's chrome is pads/page_allgames
+// on thePage, this node draws under it), "the grid and tilt", and the
+// background blurred as the PS2's is.
+//
+// The grid: cols to a row, both axes stepping by 24, placed with x/25
+// across and y/18 - y/80 down (from the grid's top left, so the browser's
+// extra term for negative coordinates never applies), each row scaled
+// 0.65, 0.68, 0.71, 0.74 from the back row to the front one (rowScale 0
+// leaves that out).  The tilt: every tile pitched back 0.64 rad (36.7 deg)
+// and the grid itself 0.444 rad (25.4 deg), so the back rows recede.  Up
+// to four rows show, scrolling to keep the selection on them.  The
+// browser also turns its left and right halves inward (yaw +-90 deg on its
+// 3D icons); flat tiles turned that far would be edge-on, so it is not
+// drawn.
+//
+// The background: the frame as it stands when the grid opens (the hub and
+// the belt behind it), shrunk to 160x120, box-blurred and drawn across the
+// screen under the tiles.
+//
+//   DEF theGrid GameGrid
+//   {
+//       tile "pads/grid_tile.xui"   a scene with an XuiImage "image": one game
+//       skin "pads/frolick_skin.xui"  font "font.ttf"
+//       cols 5  rowScale 1  count 0
+//   }
+//   theGrid.SetGame(slot, game)  theGrid.SetGameImage(slot, path)
+//   theGrid.Open()  theGrid.Close()  theGrid.Move(dx, dy) (1 when it moved)
+//   theGrid.GetSelected()  the slot;  theGrid.GetGame()  its game
 
-// All games, MBROWS's grid and tilt (see the top of CBelt), in a camera of
-// its own: the eye at the origin looking down +z, the grid's plane GRID_D
-// ahead.  PS2 units (the slot step, 24) become GRID_K world units.
+#define MAX_GRID_GAMES 256
+#define GRID_BLUR_W 160
+#define GRID_BLUR_H 120
 #define GRID_STEP 24.0f
-#define GRID_K 0.95f
+#define GRID_K 1.2f             // PS2 screen units to world units at GRID_D
 #define GRID_D 10.0f
-#define GRID_DROP 0.1f         // the grid's centre below the eye line (between the title and the pads)
+#define GRID_DROP 0.35f         // the grid's centre below the eye line
 #define GRID_TILE 1.05f         // a tile's width, in screen steps (x/25 of 24 units)
 #define GRID_PITCH 0.64f        // MBROWS gp-0x7e74: every icon pitched back
 #define GRID_PLACE 0.444f       // MBROWS gp-0x7df8: the placement transform
 static const float c_rgGridRowScale[4] = { 0.65f, 0.68f, 0.71f, 0.74f };   // gp-0x7e24..0x7e18, back to front
 
-void CBelt::RenderGrid(float alpha)
+struct SCREENVERTEX { float x, y, z, rhw; float u, v; };
+#define SCREENVERTEX_FVF (D3DFVF_XYZRHW | D3DFVF_TEX1)
+
+class CGameGrid : public CNode
 {
-    int cols = m_gridCols > 0 ? m_gridCols : 1;
-    int n = m_count - 1;
-    if (n <= 0 || alpha <= 0.01f)
+    DECLARE_NODE(CGameGrid, CNode)
+public:
+    CGameGrid();
+    ~CGameGrid();
+
+    TCHAR* m_tile;
+    TCHAR* m_skin;
+    TCHAR* m_font;
+    int m_cols;
+    int m_rowScale;
+    int m_count;
+
+    void Advance(float nSeconds);
+    void Render();
+    bool OnSetProperty(const PRD* pprd, const void* pvValue);
+
+    void Open();
+    void Close();
+    int Move(int dx, int dy);
+    int GetSelected();
+    int GetGame();
+    void SetGame(int slot, int game);
+    void SetGameImage(int slot, const TCHAR* szPath);
+
+    DECLARE_NODE_PROPS()
+    DECLARE_NODE_FUNCTIONS()
+
+protected:
+    void Load();
+    void Capture();
+    void DrawBackground(float alpha);
+    void DrawTiles(float alpha);
+
+    bool m_bDirty;
+    CXuiResources m_res;
+    CXuiBackend m_be;
+    xui::Renderer* m_pRenderer;
+    xui::Element* m_pTileRoot;
+    xui::Element* m_pSkinRoot;
+    xui::Scene* m_pTile;
+    bool m_bFontLoaded;
+
+    int m_rgGame[MAX_GRID_GAMES];
+    TCHAR* m_rgImage[MAX_GRID_GAMES];
+    int m_sel;
+    float m_top;            // the back row shown, eased toward the selection
+    int m_dir;              // +1 opening, -1 closing
+    float m_fade;
+    bool m_bCapture;        // take the background on the next frame
+    LPDIRECT3DTEXTURE8 m_pBlur;
+    float m_screenW, m_screenH;
+};
+
+IMPLEMENT_NODE("GameGrid", CGameGrid, CNode)
+
+START_NODE_PROPS(CGameGrid, CNode)
+    NODE_PROP(pt_string, CGameGrid, tile)
+    NODE_PROP(pt_string, CGameGrid, skin)
+    NODE_PROP(pt_string, CGameGrid, font)
+    NODE_PROP(pt_integer, CGameGrid, cols)
+    NODE_PROP(pt_integer, CGameGrid, rowScale)
+    NODE_PROP(pt_integer, CGameGrid, count)
+END_NODE_PROPS()
+
+START_NODE_FUN(CGameGrid, CNode)
+    NODE_FUN_VV(Open)
+    NODE_FUN_VV(Close)
+    NODE_FUN_III(Move)
+    NODE_FUN_IV(GetSelected)
+    NODE_FUN_IV(GetGame)
+    NODE_FUN_VII(SetGame)
+    NODE_FUN_VIS(SetGameImage)
+END_NODE_FUN()
+
+CGameGrid::CGameGrid() :
+    m_tile(NULL), m_skin(NULL), m_font(NULL), m_cols(5), m_rowScale(1), m_count(0),
+    m_bDirty(true), m_pRenderer(NULL), m_pTileRoot(NULL), m_pSkinRoot(NULL), m_pTile(NULL), m_bFontLoaded(false),
+    m_sel(0), m_top(0.0f), m_dir(0), m_fade(0.0f), m_bCapture(false), m_pBlur(NULL), m_screenW(640.0f), m_screenH(480.0f)
+{
+    ZeroMemory(m_rgImage, sizeof m_rgImage);
+    for (int i = 0; i < MAX_GRID_GAMES; i++)
+        m_rgGame[i] = i;
+}
+
+CGameGrid::~CGameGrid()
+{
+    for (int i = 0; i < MAX_GRID_GAMES; i++)
+        delete [] m_rgImage[i];
+    if (m_pBlur != NULL)
+        m_pBlur->Release();
+    delete m_pTile;
+    delete m_pTileRoot;
+    delete m_pSkinRoot;
+    delete m_pRenderer;
+    delete [] m_tile;
+    delete [] m_skin;
+    delete [] m_font;
+}
+
+bool CGameGrid::OnSetProperty(const PRD* pprd, const void* pvValue)
+{
+    if (pprd->nType == pt_string)
+        m_bDirty = true;
+    return true;
+}
+
+void CGameGrid::Load()
+{
+    m_bDirty = false;
+    delete m_pTile; m_pTile = NULL;
+    delete m_pTileRoot; m_pTileRoot = NULL;
+    delete m_pSkinRoot; m_pSkinRoot = NULL;
+    if (m_pRenderer == NULL)
+        m_pRenderer = new xui::Renderer(&m_be, &m_res);
+    char sz[MAX_PATH], err[256];
+    if (m_tile != NULL && m_tile[0])
+    {
+        ToAnsi(sz, m_tile, MAX_PATH);
+        m_res.SetBaseFrom(sz);
+        m_pTileRoot = m_res.scene(sz, err, sizeof err);
+        if (m_pTileRoot == NULL)
+            TRACE(_T("GameGrid: %s: %S\n"), m_tile, err);
+    }
+    if (m_skin != NULL && m_skin[0])
+    {
+        ToAnsi(sz, m_skin, MAX_PATH);
+        m_pSkinRoot = m_res.scene(sz, err, sizeof err);
+    }
+    if (!m_bFontLoaded)
+    {
+        ToAnsi(sz, m_font != NULL && m_font[0] ? m_font : _T("font.ttf"), MAX_PATH);
+        m_pRenderer->setFont(sz);
+        m_bFontLoaded = true;
+    }
+    if (m_pTileRoot != NULL)
+        m_pTile = new xui::Scene(m_pTileRoot, m_pSkinRoot);
+}
+
+void CGameGrid::SetGame(int slot, int game)
+{
+    if (slot >= 0 && slot < MAX_GRID_GAMES)
+        m_rgGame[slot] = game;
+}
+
+void CGameGrid::SetGameImage(int slot, const TCHAR* szPath)
+{
+    if (slot < 0 || slot >= MAX_GRID_GAMES)
         return;
-    D3DXMATRIX view, proj, saveView, saveProj;
+    delete [] m_rgImage[slot];
+    m_rgImage[slot] = NULL;
+    if (szPath != NULL && szPath[0])
+    {
+        m_rgImage[slot] = new TCHAR [_tcslen(szPath) + 1];
+        _tcscpy(m_rgImage[slot], szPath);
+    }
+}
+
+// The grid comes up on the game it was last on, over the frame as it is.
+void CGameGrid::Open()
+{
+    if (m_bDirty)
+        Load();
+    if (m_count > MAX_GRID_GAMES)
+        m_count = MAX_GRID_GAMES;
+    if (m_sel >= m_count)
+        m_sel = m_count > 0 ? m_count - 1 : 0;
+    int cols = m_cols > 0 ? m_cols : 1;
+    int row = m_sel / cols;
+    if (m_top > row) m_top = (float)row;
+    if (m_top < row - 3) m_top = (float)(row - 3);
+    if (m_fade <= 0.0f)
+        m_bCapture = true;
+    m_dir = 1;
+}
+
+void CGameGrid::Close()
+{
+    m_dir = -1;
+}
+
+// A step: across a row, or a row up or down (to the last game when the row
+// below is short).  Nothing past the ends.
+int CGameGrid::Move(int dx, int dy)
+{
+    int cols = m_cols > 0 ? m_cols : 1;
+    int i = m_sel, n = m_count;
+    int j = i;
+    if (dx != 0)
+    {
+        int c = i % cols + (dx > 0 ? 1 : -1);
+        if (c < 0 || c >= cols)
+            return 0;
+        j = i + (dx > 0 ? 1 : -1);
+    }
+    else if (dy != 0)
+        j = i + (dy > 0 ? cols : -cols);
+    if (j >= n && dy > 0 && i / cols < (n - 1) / cols)
+        j = n - 1;
+    if (j < 0 || j >= n || j == i)
+        return 0;
+    m_sel = j;
+    return 1;
+}
+
+int CGameGrid::GetSelected() { return m_sel; }
+int CGameGrid::GetGame() { return m_sel >= 0 && m_sel < MAX_GRID_GAMES ? m_rgGame[m_sel] : -1; }
+
+void CGameGrid::Advance(float nSeconds)
+{
+    if (m_bDirty)
+        Load();
+    if (m_dir != 0)
+    {
+        m_fade += m_dir * nSeconds / 0.25f;
+        if (m_fade >= 1.0f) { m_fade = 1.0f; m_dir = 0; }
+        if (m_fade <= 0.0f) { m_fade = 0.0f; m_dir = 0; }
+    }
+    int cols = m_cols > 0 ? m_cols : 1;
+    int row = m_sel / cols;
+    float top = m_top;
+    if (top > row) top = (float)row;
+    if (top < row - 3) top = (float)(row - 3);
+    float t = nSeconds / 0.15f;
+    if (t > 1.0f) t = 1.0f;
+    m_top += (top - m_top) * t;
+    if (fabs(top - m_top) < 0.002f) m_top = top;
+}
+
+// The frame so far (the 3D scene; the HUD draws after), shrunk and blurred
+// into m_pBlur.
+void CGameGrid::Capture()
+{
+    m_bCapture = false;
+    LPDIRECT3DSURFACE8 pBack = NULL;
+    if (FAILED(XAppGetD3DDev()->GetBackBuffer(0, D3DBACKBUFFER_TYPE_MONO, &pBack)) || pBack == NULL)
+        return;
+    D3DSURFACE_DESC desc;
+    pBack->GetDesc(&desc);
+    int bpp = 0;
+    switch (desc.Format)
+    {
+    case D3DFMT_A8R8G8B8: case D3DFMT_X8R8G8B8: case D3DFMT_LIN_A8R8G8B8: case D3DFMT_LIN_X8R8G8B8: bpp = 4; break;
+    case D3DFMT_R5G6B5: case D3DFMT_LIN_R5G6B5: bpp = 2; break;
+    }
+    D3DLOCKED_RECT lr;
+    static DWORD s_rgPix[GRID_BLUR_W * GRID_BLUR_H], s_rgTmp[GRID_BLUR_W * GRID_BLUR_H];
+    bool ok = false;
+    if (bpp != 0 && desc.Width >= GRID_BLUR_W && desc.Height >= GRID_BLUR_H &&
+        SUCCEEDED(pBack->LockRect(&lr, NULL, D3DLOCK_READONLY)))
+    {
+        m_screenW = (float)desc.Width;
+        m_screenH = (float)desc.Height;
+        // each texel the average of its block (every other pixel of it)
+        int bw = desc.Width / GRID_BLUR_W, bh = desc.Height / GRID_BLUR_H;
+        for (int y = 0; y < GRID_BLUR_H; y++)
+            for (int x = 0; x < GRID_BLUR_W; x++)
+            {
+                DWORD r = 0, g = 0, b = 0, n = 0;
+                for (int yy = 0; yy < bh; yy += 2)
+                {
+                    const BYTE* row = (const BYTE*)lr.pBits + (y * bh + yy) * lr.Pitch;
+                    for (int xx = 0; xx < bw; xx += 2)
+                    {
+                        int px = x * bw + xx;
+                        if (bpp == 4)
+                        {
+                            DWORD c = ((const DWORD*)row)[px];
+                            r += (c >> 16) & 0xff; g += (c >> 8) & 0xff; b += c & 0xff;
+                        }
+                        else
+                        {
+                            WORD c = ((const WORD*)row)[px];
+                            r += ((c >> 11) & 0x1f) * 255 / 31; g += ((c >> 5) & 0x3f) * 255 / 63; b += (c & 0x1f) * 255 / 31;
+                        }
+                        n++;
+                    }
+                }
+                if (n == 0) n = 1;
+                s_rgPix[y * GRID_BLUR_W + x] = D3DCOLOR_ARGB(0xff, r / n, g / n, b / n);
+            }
+        pBack->UnlockRect();
+        ok = true;
+    }
+    pBack->Release();
+    if (!ok)
+        return;
+
+    // three passes of a 5-wide box, across then down: near a gaussian
+    for (int pass = 0; pass < 3; pass++)
+        for (int axis = 0; axis < 2; axis++)
+        {
+            DWORD* src = s_rgPix;
+            DWORD* dst = s_rgTmp;
+            for (int y = 0; y < GRID_BLUR_H; y++)
+                for (int x = 0; x < GRID_BLUR_W; x++)
+                {
+                    DWORD r = 0, g = 0, b = 0;
+                    for (int k = -2; k <= 2; k++)
+                    {
+                        int sx = axis == 0 ? x + k : x, sy = axis == 0 ? y : y + k;
+                        if (sx < 0) sx = 0; if (sx >= GRID_BLUR_W) sx = GRID_BLUR_W - 1;
+                        if (sy < 0) sy = 0; if (sy >= GRID_BLUR_H) sy = GRID_BLUR_H - 1;
+                        DWORD c = src[sy * GRID_BLUR_W + sx];
+                        r += (c >> 16) & 0xff; g += (c >> 8) & 0xff; b += c & 0xff;
+                    }
+                    dst[y * GRID_BLUR_W + x] = D3DCOLOR_ARGB(0xff, r / 5, g / 5, b / 5);
+                }
+            CopyMemory(s_rgPix, s_rgTmp, sizeof s_rgPix);
+        }
+
+    if (m_pBlur == NULL &&
+        FAILED(XAppGetD3DDev()->CreateTexture(GRID_BLUR_W, GRID_BLUR_H, 1, 0, D3DFMT_LIN_A8R8G8B8, D3DPOOL_MANAGED, &m_pBlur)))
+    {
+        m_pBlur = NULL;
+        return;
+    }
+    if (SUCCEEDED(m_pBlur->LockRect(0, &lr, NULL, 0)))
+    {
+        for (int y = 0; y < GRID_BLUR_H; y++)
+            CopyMemory((BYTE*)lr.pBits + y * lr.Pitch, s_rgPix + y * GRID_BLUR_W, GRID_BLUR_W * 4);
+        m_pBlur->UnlockRect(0);
+    }
+}
+
+void CGameGrid::DrawBackground(float alpha)
+{
+    if (m_pBlur == NULL)
+        return;
+    // a linear texture takes texel coordinates
+    float w = m_screenW, h = m_screenH;
+    SCREENVERTEX v[4] =
+    {
+        { -0.5f, -0.5f, 0.0f, 1.0f, 0.0f, 0.0f },
+        { w - 0.5f, -0.5f, 0.0f, 1.0f, (float)GRID_BLUR_W, 0.0f },
+        { -0.5f, h - 0.5f, 0.0f, 1.0f, 0.0f, (float)GRID_BLUR_H },
+        { w - 0.5f, h - 0.5f, 0.0f, 1.0f, (float)GRID_BLUR_W, (float)GRID_BLUR_H },
+    };
+    DWORD dwFactor;
+    XAppGetRenderState(D3DRS_TEXTUREFACTOR, &dwFactor);
+    XAppSetRenderState(D3DRS_TEXTUREFACTOR, D3DCOLOR_COLORVALUE(1.0f, 1.0f, 1.0f, alpha));
+    XAppSetRenderState(D3DRS_ZENABLE, D3DZB_FALSE);
+    XAppSetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+    XAppSetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA);
+    XAppSetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
+    XAppSetTexture(0, m_pBlur);
+    XAppSetTextureStageState(0, D3DTSS_ADDRESSU, D3DTADDRESS_CLAMP);
+    XAppSetTextureStageState(0, D3DTSS_ADDRESSV, D3DTADDRESS_CLAMP);
+    XAppSetTextureStageState(0, D3DTSS_MINFILTER, D3DTEXF_LINEAR);
+    XAppSetTextureStageState(0, D3DTSS_MAGFILTER, D3DTEXF_LINEAR);
+    XAppSetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+    XAppSetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+    XAppSetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
+    XAppSetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_TFACTOR);
+    XAppSetTextureStageState(1, D3DTSS_COLOROP, D3DTOP_DISABLE);
+    XAppSetTextureStageState(1, D3DTSS_ALPHAOP, D3DTOP_DISABLE);
+    XAppGetD3DDev()->SetVertexShader(SCREENVERTEX_FVF);
+    XAppGetD3DDev()->DrawVerticesUP(D3DPT_TRIANGLESTRIP, 4, v, sizeof (SCREENVERTEX));
+    XAppSetRenderState(D3DRS_TEXTUREFACTOR, dwFactor);
+    XAppSetRenderState(D3DRS_ZENABLE, D3DZB_TRUE);
+}
+
+void CGameGrid::DrawTiles(float alpha)
+{
+    if (m_pTile == NULL || m_count <= 0)
+        return;
+    int cols = m_cols > 0 ? m_cols : 1;
+    D3DXMATRIX view, proj, saveView, saveProj, identity;
     XAppGetTransform(D3DTS_VIEW, &saveView);
     XAppGetTransform(D3DTS_PROJECTION, &saveProj);
     D3DXMatrixIdentity(&view);
-    D3DXMatrixPerspectiveFovLH(&proj, D3DX_PI / 4.0f, 4.0f / 3.0f, 0.5f, 100.0f);
+    D3DXMatrixIdentity(&identity);
+    D3DXMatrixPerspectiveFovLH(&proj, D3DX_PI / 4.0f, m_screenW / m_screenH, 0.5f, 100.0f);
+    XAppSetTransform(D3DTS_WORLD, &identity);
     XAppSetTransform(D3DTS_VIEW, &view);
     XAppSetTransform(D3DTS_PROJECTION, &proj);
-    XAppSetRenderState(D3DRS_ZENABLE, D3DZB_FALSE);
 
-    // the screen positions of the slots, from the grid's top left
+    DWORD dwLighting;
+    XAppGetRenderState(D3DRS_LIGHTING, &dwLighting);
+    XAppSetRenderState(D3DRS_LIGHTING, FALSE);
+    XAppSetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+    XAppSetRenderState(D3DRS_ZENABLE, D3DZB_FALSE);
+    XAppSetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+    XAppSetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
+    XAppSetTextureStageState(0, D3DTSS_TEXCOORDINDEX, 0);
+    XAppSetTextureStageState(0, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_DISABLE);
+    XAppSetTextureStageState(0, D3DTSS_MINFILTER, D3DTEXF_LINEAR);
+    XAppSetTextureStageState(0, D3DTSS_MAGFILTER, D3DTEXF_LINEAR);
+
     float sxStep = GRID_STEP / 25.0f;
     float syStep = GRID_STEP / 18.0f - GRID_STEP / 80.0f;
     float sxMid = 0.5f * (cols - 1) * sxStep, syMid = 1.5f * syStep;
-    float cw = m_pCard->root->width(), ch = m_pCard->root->height();
-    float aspect = cw > 0 && ch > 0 ? ch / cw : 1.0f;
+    float cw = m_pTile->root->width(), ch = m_pTile->root->height();
+    if (cw <= 0) cw = 1.0f;
+    if (ch <= 0) ch = 1.0f;
     float cp = (float)cos(GRID_PITCH), sp = (float)sin(GRID_PITCH);
     float cg = (float)cos(GRID_PLACE), sg = (float)sin(GRID_PLACE);
 
-    // back rows first (the art is blended), the focused tile last
-    int first = (int)floor(m_gridTop) - 1, last = (int)ceil(m_gridTop) + 4;
-    int pass, row, col;
-    for (pass = 0; pass < 2; pass++)
-        for (row = first; row <= last; row++)
-            for (col = 0; col < cols; col++)
+    // back rows first (the art is blended), the selected tile last
+    int first = (int)floor(m_top) - 1, last = (int)ceil(m_top) + 4;
+    for (int pass = 0; pass < 2; pass++)
+        for (int row = first; row <= last; row++)
+            for (int col = 0; col < cols; col++)
             {
                 int i = row * cols + col;
-                if (row < 0 || i >= n)
+                if (row < 0 || i >= m_count)
                     continue;
-                bool bFocus = i + 1 == m_gridSel;
-                if (bFocus != (pass == 1))
+                bool bSel = i == m_sel;
+                if (bSel != (pass == 1))
                     continue;
-                float r = row - m_gridTop;          // 0 the back row shown, 3 the front
+                float r = row - m_top;              // 0 the back row shown, 3 the front
                 float a = alpha;
                 if (r < 0.0f) a *= 1.0f + r;         // a row scrolling off the back
                 if (r > 3.0f) a *= 4.0f - r;         // or off the front
                 if (a <= 0.01f)
                     continue;
-                float rc = r < 0.0f ? 0.0f : r > 3.0f ? 3.0f : r;
-                int r0 = (int)rc;
-                if (r0 > 2) r0 = 2;
-                float scale = c_rgGridRowScale[r0] + (c_rgGridRowScale[r0 + 1] - c_rgGridRowScale[r0]) * (rc - r0);
-                if (bFocus)
-                    scale *= 1.08f;
+                float scale = 1.0f;
+                if (m_rowScale)
+                {
+                    float rc = r < 0.0f ? 0.0f : r > 3.0f ? 3.0f : r;
+                    int r0 = (int)rc;
+                    if (r0 > 2) r0 = 2;
+                    scale = c_rgGridRowScale[r0] + (c_rgGridRowScale[r0 + 1] - c_rgGridRowScale[r0]) * (rc - r0);
+                }
+                else
+                    scale = c_rgGridRowScale[3];
+                if (bSel)
+                    scale *= 1.15f;
+                else
+                    a *= 0.75f;
 
                 // the slot on the grid's plane, the plane tipped back
                 float px = (col * sxStep - sxMid) * GRID_K;
                 float py = -(r * syStep - syMid) * GRID_K;
                 D3DXVECTOR3 c(px, py * cg - GRID_DROP, GRID_D + py * sg);
                 // the tile, pitched back about its own horizontal axis
-                float hw = 0.5f * GRID_TILE * sxStep * GRID_K * scale, hh = hw * aspect;
+                float hw = 0.5f * GRID_TILE * sxStep * GRID_K * scale, hh = hw * ch / cw;
                 for (int gy = 0; gy < 6; gy++)
                     for (int gx = 0; gx < 7; gx++)
                     {
@@ -1805,10 +2095,42 @@ void CBelt::RenderGrid(float alpha)
                         float ly = (1.0f - gy / 5.0f * 2.0f) * hh;
                         m_be.m_grid[gy][gx] = D3DXVECTOR3(c.x + lx, c.y + ly * cp, c.z + ly * sp);
                     }
-                DrawTile(i + 1, a, bFocus);
+                SetString(m_pTile->find("image"), "ImagePath", m_rgImage[i] != NULL ? m_rgImage[i] : _T(""));
+                m_be.m_gridMode = true;
+                m_be.m_gx0 = 0.0f; m_be.m_gy0 = 0.0f;
+                m_be.m_gxs = 1.0f / cw; m_be.m_gys = 1.0f / ch;
+                m_be.m_alpha = a;
+                m_pRenderer->draw(m_pTile, 0, 0, 1);
+                m_be.m_gridMode = false;
             }
 
+    XAppSetTexture(0, NULL);
+    XAppSetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA);
+    XAppSetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
+    XAppSetRenderState(D3DRS_CULLMODE, D3DCULL_CCW);
     XAppSetRenderState(D3DRS_ZENABLE, D3DZB_TRUE);
+    XAppSetRenderState(D3DRS_LIGHTING, dwLighting);
     XAppSetTransform(D3DTS_VIEW, &saveView);
     XAppSetTransform(D3DTS_PROJECTION, &saveProj);
+}
+
+void CGameGrid::Render()
+{
+    if (m_bDirty)
+        Load();
+    if (m_bCapture)
+        Capture();
+    float alpha = m_fade * g_nEffectAlpha;
+    if (alpha <= 0.01f || !m_visible)
+        return;
+    D3DXMATRIX saveWorld;
+    XAppGetTransform(D3DTS_WORLD, &saveWorld);
+    DrawBackground(alpha);
+    DrawTiles(alpha);
+    XAppSetTexture(0, NULL);
+    XAppSetTextureStageState(0, D3DTSS_ADDRESSU, D3DTADDRESS_WRAP);
+    XAppSetTextureStageState(0, D3DTSS_ADDRESSV, D3DTADDRESS_WRAP);
+    XAppSetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_DISABLE);
+    XAppSetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_DISABLE);
+    XAppSetTransform(D3DTS_WORLD, &saveWorld);
 }

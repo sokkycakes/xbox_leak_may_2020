@@ -97,7 +97,7 @@ BELT_COVER_SCALE = 1.0
 BELT_FOCUS_PULL = 5.6
 BELT_SKIP = 2              # slots either side of the focus hidden behind the big cover: they hold nothing
 # The belt's list: two reserved tiles at the left end (sokky, 2026-10-20),
-# "show all games" (the grid: CBelt's OpenGrid) and the game in the disc
+# "show all games" (A opens page_allgames over theGrid) and the game in the disc
 # tray or game card, each with an icon centred on its tile, then the games
 # (carousel.go's placeholder titles until a real list exists).  The icon
 # images are not in the cloud yet; the names are placeholders for them.
@@ -700,6 +700,7 @@ var bLibraryOpen;   // the camera is in the game belt
 var nGame;          // the belt game whose page is open (GameCollection index)
 var nLaunchGame;    // the game the launch level starts
 var bLaunching;     // set when the launch level has faded in
+var nGridMoved;     // the All games grid moved (PadMove)
 var bLaunchPending; // a launch is under way (ignore further presses)
 var bLaunchSoundDone; // the launch sound has finished (OnEndOfAudio)
 var nLaunchWait;    // polls since arrival, the 10 s fallback
@@ -807,6 +808,15 @@ DEF theHub Level
                 // The padfocus page: a Blades-style full-screen page
                 // (tools/genpage.py) opened when the camera lands on the
                 // catalog or settings focus view.
+                // All games: the PS2 browser's grid over a blur of the
+                // frame, under its page (page_allgames)
+                DEF theGrid GameGrid
+                {
+                    tile "pads/grid_tile.xui"
+                    skin "pads/frolick_skin.xui"
+                    cols 5
+                    rowScale 1
+                }
                 DEF thePage XuiPanel
                 {
                     url "pads/page_console.xui"
@@ -876,26 +886,26 @@ function PadMove(dir, step)
         {
             if (bBusy)
                 return;
+            if (sPage == "page_allgames")
+            {
+                // (a parameter can't be assigned: the move goes in its own var)
+                if (dir == "up")
+                    nGridMoved = theGrid.Move(0, 0 - 1);
+                else if (dir == "down")
+                    nGridMoved = theGrid.Move(0, 1);
+                else
+                    nGridMoved = theGrid.Move(step, 0);
+                if (nGridMoved != 0)
+                {
+                    SndFocus();
+                    AllGamesShow();
+                }
+                return;
+            }
             if (thePage.Navigate(dir) == 0)
                 PageScroll(dir);
             else
                 SndFocus();
-            return;
-        }
-        // All games: the grid steps four ways
-        if (theBelt.IsGrid())
-        {
-            if (theBelt.IsBusy())
-                return;
-            if (dir == "up")
-                theBelt.GridMove(0, 0 - 1);
-            if (dir == "down")
-                theBelt.GridMove(0, 1);
-            if (dir == "left")
-                theBelt.GridMove(0 - 1, 0);
-            if (dir == "right")
-                theBelt.GridMove(1, 0);
-            SndFocus();
             return;
         }
         // the belt: left scrolls it right (Belt_Right), right scrolls it left
@@ -941,6 +951,11 @@ function PadPress()
         {
             if (bBusy)
                 return;
+            if (sPage == "page_allgames")
+            {
+                AllGamesPlay();
+                return;
+            }
             SndSelect();
             thePage.Press();
             return;
@@ -987,7 +1002,7 @@ function OpenLibrary()
     ShowBeltHints(1);
 }
 
-// The belt's tiles: All games (A opens the grid), then the
+// The belt's tiles: All games (A opens its grid page), then the
 // console's games as GameCollection lists them (the disc tray or game
 // card slots first, then E:\Games), each cover with the game's title image.
 // The library pad's game tile: the disc or game card that is in (its
@@ -1097,7 +1112,11 @@ function PadStart()
         return;
     }
     if (bPageOpen)
+    {
+        if (sPage == "page_allgames")
+            AllGamesPlay();
         return;
+    }
     if (theBelt.IsBusy() == 0)
         LaunchSelected();
 }
@@ -1191,10 +1210,7 @@ function OpenGamePage()
     var sel = theBelt.GetSelected();
     if (sel == 0)
     {
-        // the All games tile: the grid (PS2 browser's grid and tilt)
-        SndSelect();
-        SndOpen();
-        theBelt.OpenGrid();
+        OpenAllGames();
         return;
     }
     if (theGameCollection.IsPlayable(sel - 1) == 0)
@@ -1207,6 +1223,62 @@ function OpenGamePage()
     theOverlay.Fade("promptA", 0, %(pin_fade_out)s);
     ShowPage("page_game", "Open");
     PageChrome(0);
+}
+
+// A on the belt's All games tile: its page (page_allgames) over the PS2
+// browser's grid of every game (theGrid), the frame behind them blurred.
+function OpenAllGames()
+{
+    var n = theGameCollection.Scan();
+    var i;
+    var k = 0;
+    for (i = 0; i < n; i = i + 1)
+    {
+        if (theGameCollection.GetGameKind(i) != 0)
+        {
+            theGrid.SetGame(k, i);
+            theGrid.SetGameImage(k, theGameCollection.GetGameImage(i));
+            k = k + 1;
+        }
+    }
+    theGrid.count = k;
+    SndSelect();
+    SndPageOpen();
+    bPageOpen = true;
+    ShowBeltHints(0);
+    theOverlay.Fade("promptA", 0, %(pin_fade_out)s);
+    theGrid.Open();
+    ShowPage("page_allgames", "Open");
+    PageChrome(0);
+    AllGamesShow();
+}
+
+// The selected game's name over the grid and where it is in the list.
+function AllGamesShow()
+{
+    var n = theGrid.count;
+    theOverlay.SetOpacity("title", 1);
+    if (n == 0)
+    {
+        theOverlay.SetText("title", "No games");
+        thePage.SetText("labTotal", "");
+        return;
+    }
+    theOverlay.SetText("title", theGameCollection.GetGameName(theGrid.GetGame()));
+    thePage.SetText("labTotal", (theGrid.GetSelected() + 1) + " of " + n);
+}
+
+// A or Start on the grid: the game starts, as from Recent Games
+function AllGamesPlay()
+{
+    var g;
+    if (theGrid.count == 0)
+        return;
+    g = theGrid.GetGame();
+    if (theGameCollection.IsPlayable(g) == 0)
+        return;
+    SndSelect();
+    LaunchGameWithLogo(g);
 }
 
 // The page's facts about the game, and whether Install Game applies.
@@ -1348,19 +1420,17 @@ function PadBack()
                 return;
             SndBack();
             SndPageClose();
+            if (sPage == "page_allgames")
+            {
+                theGrid.Close();
+                theOverlay.SetText("title", GameName(theBelt.GetSelected()));
+            }
             ClosePage();
             ShowBeltHints(1);
             return;
         }
-        if (theBelt.IsBusy())
-            return;
-        if (theBelt.IsGrid())
-        {
-            SndBack();
-            theBelt.CloseGrid();
-            return;
-        }
-        CloseLibrary();
+        if (theBelt.IsBusy() == 0)
+            CloseLibrary();
         return;
     }
     if (bZoomed == false)

@@ -156,6 +156,15 @@ PAGES = [
     ("page_favorites", dict(scene="Items.xui", pad="library", first="list_items_0", parent="",
                             header="Favorite Games", visual="list_twoline-icon", dynamic="favorites",
                             labels={"legend_y": "", "txt_EmptyList": "Favorites are not available yet."})),
+    # All games (the belt's first tile, A; sokky 2026-10-22): its own scene
+    # like Recent and Favorites, the games in the PS2 memory card browser's
+    # grid (the hub's GameGrid node draws them and the blurred background
+    # under this page), so the page is the header, the count and the
+    # legends with no body panel and no list.
+    ("page_allgames", dict(scene="Items.xui", pad="library", first="legend_b", parent="",
+                           header="All Games", dynamic="allgames", list="", rows=0, body=False,
+                           hide=["list_items", "txt_EmptyList"],
+                           labels={"legend_y": "", "legend_x": "", "legend_a": "Play"})),
     # Downloads (catalog pad, Y; sokky 2026-10-20, from the NXE's Active
     # Downloads): the active download under "Active", the queue under
     # "Pending"; each row the title, its kind, the status at the right and,
@@ -856,7 +865,8 @@ def page(file, spec):
                         " <Position>0,0,0</Position>", " <Opacity>0</Opacity>", "</Properties>",
                         # the body, edge to edge; the header above it and the
                         # legend bar below have no fill
-                        figure("body", 0, BODY_Y, CANVAS_W, BODY_END - BODY_Y, gradient([(0, PANEL_TOP), (1, PANEL_BOTTOM)])),
+                        figure("body", 0, BODY_Y, CANVAS_W, BODY_END - BODY_Y, gradient([(0, PANEL_TOP), (1, PANEL_BOTTOM)]))
+                        if spec.get("body", True) else "",
                         "</XuiGroup>"])
     content = "\n".join(["<XuiGroup>", "<Properties>", " <Id>content</Id>", " <Width>%d</Width>" % CANVAS_W,
                          " <Height>%d</Height>" % CANVAS_H, " <Position>0,0,0</Position>", " <Opacity>0</Opacity>",
