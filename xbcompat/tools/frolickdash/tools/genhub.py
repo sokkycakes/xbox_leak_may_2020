@@ -575,7 +575,8 @@ DEF theLaunchLevel Level
             if (bLaunchSoundDone)
                 theGameCollection.LaunchGame(nLaunchGame);
         }
-        // the Downloads page follows its active download (twice a second)
+        // the Downloads page follows its active download, Spotlight the
+        // catalog and what is queued (twice a second)
         if (bPageOpen)
         {
             if (sPage == "page_downloads")
@@ -585,6 +586,15 @@ DEF theLaunchLevel Level
                 {
                     nDlTick = 0;
                     DlTick();
+                }
+            }
+            if (sPage == "page_spotlight")
+            {
+                nDlTick = nDlTick + 1;
+                if (nDlTick >= 10)
+                {
+                    nDlTick = 0;
+                    SpotTick();
                 }
             }
         }
@@ -668,6 +678,10 @@ DEF theMemoryMonitor MemoryMonitor
 }
 
 DEF theDownloads Downloads
+{
+}
+
+DEF theStore Store
 {
 }
 
@@ -1544,16 +1558,106 @@ function SpotFillTabs()
     }
 }
 
+// The focused item in the details box: its name, tile and description,
+// and its size and source at the foot (the Internet Archive's credit).
 function SpotMeta()
 {
     if (nListCount == 0)
     {
         thePage.SetText("metaSpot", "");
         thePage.SetData("metaSpot", 1, "");
+        thePage.SetImage("imgSpotTile", "");
+        thePage.SetText("txt_SpotCredit", "");
+        thePage.SetText("txt_EmptyList", SpotEmpty());
+        SpotLegend();
         return;
     }
-    thePage.SetText("metaSpot", SpotName(nTab, nSel));
-    thePage.SetData("metaSpot", 1, SpotDesc(nTab, nSel));
+    thePage.SetText("metaSpot", theStore.GetName(nTab, nSel));
+    thePage.SetData("metaSpot", 1, theStore.GetDesc(nTab, nSel));
+    thePage.SetImage("imgSpotTile", theStore.GetImage(nTab, nSel));
+    thePage.SetText("txt_SpotCredit", theStore.GetSize(nTab, nSel) + "   From the Internet Archive");
+    SpotLegend();
+}
+
+// what an empty tab says: why there is no catalog, or that the tab is empty
+function SpotEmpty()
+{
+    var s = theStore.GetState();
+    if (s == "")
+        return "Nothing here yet.";
+    return s;
+}
+
+// item i's second line: its kind, or where its download is
+function SpotKind(i)
+{
+    var h = theDownloads.Has(theStore.GetId(nTab, i));
+    if (h == 1)
+        return "Queued";
+    if (h == 2)
+        return "Downloaded";
+    return theStore.GetKind(nTab, i);
+}
+
+// A downloads the focused item, once
+function SpotLegend()
+{
+    if (nListCount == 0)
+        thePage.SetVisible("legend_a", 0);
+    else if (theDownloads.Has(theStore.GetId(nTab, nSel)) == 0)
+    {
+        thePage.SetText("legend_a", "Download");
+        thePage.SetVisible("legend_a", 1);
+    }
+    else
+        thePage.SetVisible("legend_a", 0);
+}
+
+function SpotPress()
+{
+    var r;
+    if (nListCount == 0)
+        return;
+    r = theDownloads.Queue(nTab, nSel);
+    if (r == 0 - 1)
+    {
+        Notice("The download queue is full.", "page_spotlight");
+        return;
+    }
+    FillRow(nSel - nScroll);
+    SpotLegend();
+}
+
+// twice a second: the catalog arrived or changed (the list again, the
+// focus kept), or a download moved on (the rows' second lines)
+var nSpotVersion;
+function SpotTick()
+{
+    var v = theStore.GetVersion();
+    var r;
+    if (v != nSpotVersion)
+    {
+        nSpotVersion = v;
+        nListCount = ListCount();
+        if (nSel >= nListCount)
+        {
+            nSel = 0;
+            nScroll = 0;
+        }
+        FillPage();
+        if (nListCount > 0)
+            thePage.SetFocus(RowId(nSel - nScroll));
+        SpotMeta();
+        return;
+    }
+    for (r = 0; r < nRows; r = r + 1)
+    {
+        if (nScroll + r < nListCount)
+            thePage.SetData(RowId(r), 3, SpotKind(nScroll + r));
+    }
+    if (nListCount == 0)
+        thePage.SetText("txt_EmptyList", SpotEmpty());
+    SpotLegend();
 }
 
 // left and right: the next category, its list from the top
@@ -1759,7 +1863,7 @@ function ListCount()
     if (k == "downloads")
         return DlListCount();
     if (k == "spotlight")
-        return SpotCount(nTab);
+        return theStore.GetCount(nTab);
     return 0;
 }
 
@@ -1811,8 +1915,8 @@ function FillRow(r)
     else if (k == "spotlight")
     {
         // btn_twoline_spot: the name, its kind under it (Data3)
-        thePage.SetText(id, SpotName(nTab, i));
-        thePage.SetData(id, 3, SpotKind(nTab, i));
+        thePage.SetText(id, theStore.GetName(nTab, i));
+        thePage.SetData(id, 3, SpotKind(i));
         return;
     }
     else if (k == "saves")
@@ -1895,6 +1999,7 @@ function PageEnter()
     if (k == "spotlight")
     {
         nTab = 0;
+        nSpotVersion = theStore.GetVersion();
         SpotFillTabs();
     }
     nScroll = 0;
@@ -1936,6 +2041,8 @@ function PageScroll(dir)
             nScroll = nScroll + 1;
             nSel = nSel + 1;
             FillPage();
+            if (PageKind(sPage) == "spotlight")
+                SpotMeta();     // the focus stayed on its row: no PageFocus
             SndFocus();
         }
     }
@@ -1946,6 +2053,8 @@ function PageScroll(dir)
             nScroll = nScroll - 1;
             nSel = nSel - 1;
             FillPage();
+            if (PageKind(sPage) == "spotlight")
+                SpotMeta();
             SndFocus();
         }
     }
@@ -2025,6 +2134,11 @@ function PageSpecial(id)
     if (k == "downloads")
     {
         DlPress();
+        return 1;
+    }
+    if (k == "spotlight")
+    {
+        SpotPress();
         return 1;
     }
     if (k == "dest")

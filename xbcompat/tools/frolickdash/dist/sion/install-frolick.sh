@@ -18,6 +18,8 @@ done
 persist=""; for f in $SOUNDS; do persist="$persist $D/$f"; done
 sion persist $D/xboxdash.xbe $D/xboxdash.map $D/default.xip $persist $keep >/dev/null
 /etc/init.d/S98xbox start >/dev/null
+# the storefront helper (frolick-store), when the kit carries it
+[ -f /tmp/install-store.sh ] && sh /tmp/install-store.sh && rm -f /tmp/install-store.sh
 sleep 10
 grep -E 'fatal|error' /var/log/xbox.log | tail -n 3
 pidof xbcompat >/dev/null && echo 'the Frolick dashboard is running' || echo 'the dashboard is not running'

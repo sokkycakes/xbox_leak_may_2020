@@ -25,4 +25,6 @@ for c in /data/xbox/cache/xbcompat /opt/xbcompat/cache; do
   fi
 done
 ls -la "$G"
+# the storefront helper (frolick-store), when the kit carries it
+[ -f /tmp/install-store.sh ] && sh /tmp/install-store.sh && rm -f /tmp/install-store.sh
 echo "Frolick is installed as a game: Games > Frolick on the dashboard"

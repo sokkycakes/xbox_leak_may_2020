@@ -203,7 +203,8 @@ PAGES = [
     # wrapping round), four two-line items (btn_twoline_left, the List_twoline
     # counter under them) and the meta pane metaScene_2lineFocus_Long beside
     # them, its highlight following the focused row.  Y is Marketplace
-    # Home.  Filled by the hub (kind "spotlight") from SPOTLIGHT below.
+    # Home.  Filled by the hub (kind "spotlight") from theStore, the
+    # Internet Archive catalog frolick-store builds (SPOTLIGHT below).
     ("page_spotlight", dict(scene="spotlight", pad="catalog", first="lstSpot_0", parent="", header="Spotlight",
                             dynamic="spotlight", list="lstSpot", rows=4 if os.environ.get("FROLICK_SPOT_BANNER", "0") == "1" else 5,
                             legend_y="Marketplace Home")),
@@ -221,16 +222,11 @@ PAGES = [
 ]
 ROOT_PAGE = {"settings": "page_system", "catalog": "page_market"}
 
-# Spotlight's tabs and items: placeholders (the belt's games) until
-# Frolick has a catalog.  (tab, [(name, kind, description), ...])
-SPOT_GAMES = CAROUSEL_GAMES[BELT_START:]
-SPOTLIGHT = [
-    ("Featured", [(g, k, "") for g, k in zip(SPOT_GAMES, ["Game", "Demo", "Game", "Theme", "Game", "Demo"])]),
-    ("Games", [(g, "Game", "") for g in SPOT_GAMES[:6]]),
-    ("Demos", [(g, "Demo", "") for g in SPOT_GAMES[2:6]]),
-    ("Themes", [("Frolick", "Theme", ""), ("Sion", "Theme", "")]),
-    ("Free Stuff", [(g, "Gamer Picture", "") for g in SPOT_GAMES[1:4]]),
-]
+# Spotlight's tabs: the catalog frolick-store builds on the Sion from the
+# Internet Archive (store/main.go defaultTabs, matched by number; the
+# items come from theStore at run time).  Windows games first (sokky,
+# 2026-10-22).
+SPOTLIGHT = ["Featured", "Demos", "Shareware", "Freeware"]
 
 
 def rect(w, h):
@@ -366,7 +362,7 @@ def spot_row_visual(mp):
     pres = re.search(r"<XuiTextPresenter>\n<Properties>\n <Id>txt_line3</Id>.*?</XuiTextPresenter>", v, flags=re.S).group(0)
     title = pres.replace("<Width>310.538</Width>", "<Width>%g</Width>" % (410 - SPOT_TEXT_X)).replace("<Height>56</Height>", "<Height>30</Height>")
     title = title.replace("<Position>11.4615,6,0</Position>", "<Position>%g,6,0</Position>" % SPOT_TEXT_X)
-    title = title.replace("<TextStyle>16385</TextStyle>", "<TextStyle>%d</TextStyle>" % (16385 | 0x10))
+    title = title.replace("<TextStyle>16385</TextStyle>", "<TextStyle>%d</TextStyle>" % (16385 | 0x10 | STYLE_ELLIPSIS))
     kind = title.replace("<Id>txt_line3</Id>", "<Id>txt_kind</Id>").replace("<Position>%g,6,0</Position>" % SPOT_TEXT_X,
                                                                          "<Position>%g,34,0</Position>" % SPOT_TEXT_X)
     kind = kind.replace("</Properties>", " <Opacity>0.5</Opacity>\n <DataAssociation>3</DataAssociation>\n</Properties>")
@@ -386,6 +382,16 @@ def spot_meta_visual(mp):
     v = re.sub(r"(<Id>Pane_txt1</Id>(?:\n[^\n]*){0,3}?\n <Position>)17.56,108,0", r"\g<1>%g,%g,0" % (17.56 + SPOT_BOX_INSET + 8, 2 * round((74 * 5 - 2) * SPOT_TITLE_BAND) + 8), v, count=1)
     v = re.sub(r"(<Id>Pane_txt</Id>(?:\n[^\n]*){0,3}?\n <Position>)17.56,0,0", r"\g<1>%g,%g,0" % (17.56 + SPOT_BOX_INSET + 8, SPOT_BAND_Y + 6), v, count=1)
     v = re.sub(r"(<Id>Pane_txt1?</Id>\n <Width>)383(</Width>)", r"\g<1>360\g<2>", v)
+    # Catalog text can run long: the title stops at its band (two lines),
+    # the description above the size line at the box's foot, each ending
+    # in "..." (the heights are stretched with the pane, Anchor 15, so they
+    # are set for the five-row pane's 368 of the visual's 450)
+    ph, vh = 74 * 5 - 2, 450
+    title_h = round(ph * SPOT_TITLE_BAND)
+    desc_y = 2 * title_h + 8
+    v = re.sub(r"(<Id>Pane_txt</Id>\n <Width>\d+</Width>\n <Height>)407(</Height>)", r"\g<1>%g\g<2>" % (title_h - 14 - SPOT_BAND_Y - ph + vh), v)
+    v = re.sub(r"(<Id>Pane_txt1</Id>\n <Width>\d+</Width>\n <Height>)367(</Height>)", r"\g<1>%g\g<2>" % (ph - desc_y - 40 - ph + vh), v)
+    v = re.sub(r"(<Id>Pane_txt1?</Id>(?:\n[^\n]*){0,8}?\n <TextStyle>)16385(</TextStyle>)", r"\g<1>%d\g<2>" % (16385 | STYLE_ELLIPSIS), v)
     return restep_pane(v, SPOT_PITCH)
 
 
@@ -397,6 +403,8 @@ def spot_meta_visual(mp):
 # own sizes, and the top strips (drawn upward from the row) grow by the
 # same amount so they still reach the pane's top.
 SPOT_PITCH = 74
+# the XUI runtime's own text style: "..." where text runs out of its box
+STYLE_ELLIPSIS = 0x1000000
 # The details box: Metapane inset from the pane's edge strip, the title
 # band the reference's 23% of the pane, the image band as tall again, the
 # description under them; bands in Frolick's slate (a darker wash).
@@ -707,7 +715,7 @@ def spotlight_page(spec):
     else:
         tab_y, rows = 151, 5     # as much room above the tab text as below it (sokky)
     list_y = tab_y + 40
-    tabs = [t for t, _ in SPOTLIGHT]
+    tabs = SPOTLIGHT
     for cur in range(len(tabs)):
         texts = []
         x = LIST_X + 11
@@ -751,9 +759,17 @@ def spotlight_page(spec):
            figure("metaImageLine", bx, list_y + 2 * title_h, bw, 2, solid(SPOT_BAND_FILL)),
            label("metaBox", META_X + SPOT_BOX_INSET, list_y, 420 - SPOT_BOX_INSET, ph + 10, "Metapane")]   # (its foot sits 10 inside)
     meta = label("metaSpot", META_X, list_y, 420, ph, "metaScene_spot", "", " <Data1></Data1>")
+    # the item's tile from the Archive in the image band, and its size and
+    # where it comes from at the box's foot
+    tile_h = title_h - 12
+    tile = "\n".join(["<XuiImage>", "<Properties>", " <Id>imgSpotTile</Id>", " <Width>%g</Width>" % (tile_h * 4 / 3),
+                      " <Height>%g</Height>" % tile_h, " <Position>%g,%g,0</Position>" % (bx + 30, list_y + title_h + 6),
+                      " <ImagePath></ImagePath>", "</Properties>", "</XuiImage>"])
+    credit = text("txt_SpotCredit", bx + 30, list_y + ph - 34, bw - 44, 26, 14, 0x4010 | STYLE_ELLIPSIS, ITEM_REST, presenter=False,
+                  value="", shadow="0")
     out.append(clip_group("metaClip", 0, list_y - 16, CANVAS_W, BODY_END - (list_y - 16),
-                          [moved(b, 0, -(list_y - 16)) for b in box + [meta]]))
-    out.append(text("txt_EmptyList", LIST_X + SPOT_TEXT_X, list_y + 14, 330, 40, 18, 0x4010, ITEM_REST, presenter=False,
+                          [moved(b, 0, -(list_y - 16)) for b in box + [tile, meta, credit]]))
+    out.append(text("txt_EmptyList", LIST_X + SPOT_TEXT_X - 60, list_y + 14, 380, 120, 18, 0x4000, ITEM_REST, presenter=False,
                     value="Nothing here yet.", shadow=SHADOW))
     return out + legends(spec)
 
@@ -949,22 +965,9 @@ def script():
     # Spotlight's tabs and items
     out += ["function SpotTabs()", "{", "    return %d;" % len(SPOTLIGHT), "}", ""]
     out += ["function SpotTab(t)", "{"]
-    for t, (name, items) in enumerate(SPOTLIGHT):
+    for t, name in enumerate(SPOTLIGHT):
         out += ["    if (t == %d)" % t, "        return %s;" % q(name)]
     out += ['    return "";', "}", ""]
-    out += ["function SpotCount(t)", "{"]
-    for t, (name, items) in enumerate(SPOTLIGHT):
-        out += ["    if (t == %d)" % t, "        return %d;" % len(items)]
-    out += ["    return 0;", "}", ""]
-    for fn, k in (("SpotName", 0), ("SpotKind", 1), ("SpotDesc", 2)):
-        out += ["function %s(t, i)" % fn, "{"]
-        for t, (name, items) in enumerate(SPOTLIGHT):
-            out += ["    if (t == %d)" % t, "    {"]
-            for i, it in enumerate(items):
-                v = it[k] or "%s, %s. A placeholder until Frolick has a catalog." % (it[0], it[1].lower())
-                out += ["        if (i == %d)" % i, "            return %s;" % q(v)]
-            out.append("    }")
-        out += ['    return "";', "}", ""]
     return "\n".join(out)
 
 
