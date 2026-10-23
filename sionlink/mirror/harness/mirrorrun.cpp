@@ -13,6 +13,11 @@
 //                      LINK is sim:PATH (a --dspico run) or usb (the DSpico on this machine)
 //     --reconnect 1    when the DS goes away (switched off), wait for it to come back
 //                      instead of stopping
+//     --hotplug 1      start the game at once and let the DS come and go: a thread waits
+//                      for it, and until it's there no bundles are made, only the state
+//                      a full one needs when it comes
+//     --pads 1         the Sion's own pads play too (pads.h; built with SDL2)
+//     --save FILE      the game's save memory: read at start, written back after it saves
 //     --dspico PATH    run a DS client with a simulated DSpico whose USB host is the
 //                      --serve run listening on PATH
 //     --usbrate N      simulated USB bytes per frame (default 12000, ~700 KB/s)
@@ -64,6 +69,8 @@
 #include "SPI.h"
 #include "../common/mirror_format.h"
 #include "hostlink.h"
+#include "pads.h"
+#include "saves.h"
 #include "dspico_sim.h"
 #include "lzpack.h"
 #include "geostate.h"
@@ -451,6 +458,7 @@ public:
         std::vector<GXFilter::IOW> gx;   // the frame's 3D writes
         std::vector<u8> post;       // the bundle after its 3D record (2D state, lines)
         std::vector<u8> built;      // the whole bundle, when it was made on the game's thread
+        std::vector<GXFilter::IOW> regs3d;   // a full bundle: the 3D registers as the game left them
         Sizes sz {};
         bool cap = false;
     };
@@ -668,6 +676,9 @@ public:
             if (capThis) lastCapture = emuFrame;
             skipThis = holdNext;
             holdNext = false;
+            // no DS yet (--hotplug) and nothing recorded: no bundles, only the state they'd leave
+            dropThis = !link && !out;
+            if (dropThis) skipThis = true;
             bool behind = link && !skipThis && frame > 0 && (LinkBehind() || DSBehind());
             if (link && frame > 0 && (capThis || capPrev))
             {
@@ -730,7 +741,10 @@ public:
                 GXJob j;
                 j.send = false;
                 j.gx.swap(ready);
-                if (link && asyncGX)
+                Note3DRegs(j.gx);
+                if (dropThis)
+                    DropFrame(j);
+                else if (link && asyncGX)
                 {
                     std::lock_guard<std::mutex> g(sendLock);
                     sendQueue.push_back(std::move(j));
@@ -1115,6 +1129,8 @@ public:
         j.flags = (fullThis ? MIRROR_FLAG_FULL : 0) | (holdNext ? MIRROR_FLAG_HOLD : 0);
         fullThis = false;
         j.gx.swap(ready);
+        if (j.flags & MIRROR_FLAG_FULL) j.regs3d = Regs3D();
+        Note3DRegs(j.gx);
         j.post.swap(part2D);
         if (!lines.empty())
         {
@@ -1151,6 +1167,52 @@ public:
         for (const IOW& w : j.gx) filt.Feed(w, false, carry);
     }
 
+    // No DS: the frame's 3D commands count as sent, so the geometry state stays known and
+    // nothing piles up. A DS that comes along gets a full bundle, which sets all of it.
+    void DropFrame(GXJob& j)
+    {
+        std::vector<IOW> none;
+        filt.Sent();
+        for (const IOW& w : j.gx) filt.Feed(w, true, none);
+    }
+
+    // The 3D registers outside the command FIFO that hold state (DISP3DCNT, edge colors,
+    // alpha test, clear color and depth, fog, toon table, 1-dot depth): games set most of
+    // them once a scene, so a DS that joins later or comes back gets them with its full
+    // bundle. Kept on the game's thread from each frame's 3D writes as its job is made.
+    static bool State3D(u32 o) { return (o >= 0x60 && o < 0x64) || (o >= 0x330 && o < 0x3C0) || (o >= 0x610 && o < 0x612); }
+    u8 reg3d[0x614] {};
+    bool reg3dSet[0x614] {};
+    bool dropThis = false;
+    void Note3DRegs(const std::vector<IOW>& v)
+    {
+        for (const IOW& w : v)
+            for (int i = 0; i < w.size; i++)
+                if (State3D(w.off + i))
+                {
+                    reg3d[w.off + i] = (w.val >> (8 * i)) & 0xFF;
+                    reg3dSet[w.off + i] = true;
+                }
+    }
+    std::vector<IOW> Regs3D() const
+    {
+        std::vector<IOW> out;
+        for (u32 o = 0x60; o < 0x614; o += 4)
+        {
+            if (!State3D(o)) continue;
+            u8 size = o == 0x610 ? 2 : 4;
+            bool any = false;
+            u32 v = 0;
+            for (int i = 0; i < size; i++)
+            {
+                any |= reg3dSet[o + i];
+                v |= (u32)reg3d[o + i] << (8 * i);
+            }
+            if (any) out.push_back({(u16)o, size, v});
+        }
+        return out;
+    }
+
     // the sender's thread (or the game's): the 3D commands as the DS gets them, and the
     // bundle around them, in frame order
     std::vector<u8> BuildBundle(GXJob& j)
@@ -1179,7 +1241,10 @@ public:
                 gx.swap(carry);
             filt.Sent();
             if (j.flags & MIRROR_FLAG_FULL)
+            {
+                for (const IOW& w : j.regs3d) filt.Feed(w, true, gx);
                 filt.RebuildAll(gx);
+            }
             for (const IOW& w : ready) filt.Feed(w, true, gx);
             ready.swap(gx);
         }
@@ -1300,11 +1365,72 @@ static void WritePPM(const std::string& path, const u32* top, const u32* bot)
     fclose(f);
 }
 
+// What the game gets from everything that plays it: the DS over the link, a key script
+// (--input) and the Sion's own pads (--pads). Buttons held anywhere count; the touch
+// screen goes to the DS's stylus first, then the script's, then the pads' cursor.
+struct InputMix
+{
+    struct Src { u16 held = 0; bool touch = false; u16 x = 0, y = 0; };   // held: bit set = pressed (libnds order)
+    Src script, ds, pads;
+    void Apply(NDS& nds) const
+    {
+        nds.SetKeyMask(~(script.held | ds.held | pads.held) & 0xFFF);   // melonDS: bit clear = pressed
+        if (ds.touch) nds.TouchScreen(ds.x, ds.y);
+        else if (script.touch) nds.TouchScreen(script.x, script.y);
+        else if (pads.touch) nds.TouchScreen(pads.x, pads.y);
+        else nds.ReleaseScreen();
+    }
+};
+
+// --hotplug: waits for the DS on its own thread while the game runs
+struct LinkWaiter
+{
+    std::thread t;
+    std::mutex m;
+    std::unique_ptr<HostLink> got;
+    std::atomic<bool> stop {false}, done {false};
+    void Start(const std::string& spec)
+    {
+        Stop();
+        stop = false;
+        done = false;
+        t = std::thread([this, spec] {
+            pthread_setname_np(pthread_self(), "mirror-wait");
+            while (!stop && !gMirrorQuit)
+            {
+                if (auto l = OpenHostLink(spec, &stop))
+                {
+                    std::lock_guard<std::mutex> g(m);
+                    got = std::move(l);
+                    break;
+                }
+                for (int i = 0; i < 10 && !stop && !gMirrorQuit; i++)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            done = true;
+        });
+    }
+    std::unique_ptr<HostLink> Take()
+    {
+        if (!done) return nullptr;
+        if (t.joinable()) t.join();
+        std::lock_guard<std::mutex> g(m);
+        return std::move(got);
+    }
+    void Stop()
+    {
+        stop = true;
+        if (t.joinable()) t.join();
+        got.reset();
+    }
+    ~LinkWaiter() { Stop(); }
+};
+
 int main(int argc, char** argv)
 {
     if (argc < 3)
     {
-        fprintf(stderr, "usage: %s ROM FRAMES [--input F] [--record F] [--frames F] [--shots DIR] [--every N] [--stats F] [--boottype N] [--lang N] [--gamecode XXXX] [--half 1] [--gxdelta 1] [--serve LINK] [--reconnect 1] [--dspico PATH] [--usbrate N] [--realtime 1] [--jit 1] [--threaded 1] [--tv drm|dump:F] [--sound alsa|wav:F] [--stretch 0]\n", argv[0]);
+        fprintf(stderr, "usage: %s ROM FRAMES [--input F] [--record F] [--frames F] [--shots DIR] [--every N] [--stats F] [--boottype N] [--lang N] [--gamecode XXXX] [--half 1] [--gxdelta 1] [--serve LINK] [--reconnect 1] [--dspico PATH] [--usbrate N] [--realtime 1] [--jit 1] [--threaded 1] [--tv drm|dump:F] [--sound alsa|wav:F] [--stretch 0] [--hotplug 1] [--pads 1] [--save F]\n", argv[0]);
         return 1;
     }
     const char* rompath = argv[1];
@@ -1322,6 +1448,9 @@ int main(int argc, char** argv)
     bool realtime = false, jit = false, threaded = false;
     const char *tvSpec = nullptr, *soundSpec = nullptr;
     bool stretch = true;
+    bool hotplug = false;   // the game starts at once; the DS can come and go
+    bool padsOn = false;
+    const char* savePath = nullptr;
     for (int i = 3; i + 1 < argc; i += 2)
     {
         std::string o = argv[i];
@@ -1347,6 +1476,9 @@ int main(int argc, char** argv)
         else if (o == "--tv") tvSpec = argv[i + 1];
         else if (o == "--sound") soundSpec = argv[i + 1];
         else if (o == "--stretch") stretch = atoi(argv[i + 1]) != 0;
+        else if (o == "--hotplug") hotplug = atoi(argv[i + 1]) != 0;
+        else if (o == "--pads") padsOn = atoi(argv[i + 1]) != 0;
+        else if (o == "--save") savePath = argv[i + 1];
         else { fprintf(stderr, "unknown option %s\n", o.c_str()); return 1; }
     }
 
@@ -1390,7 +1522,21 @@ int main(int argc, char** argv)
         nds->GPU.GetRenderer().SetRenderSettings(rs);
     }
     nds->Reset();
-    auto cart = NDSCart::ParseROM(std::move(rom), romlen);
+    SaveKeeper saves;
+    std::optional<NDSCart::NDSCartArgs> cartArgs;
+    if (savePath)
+    {
+        std::vector<u8> sav = saves.Load(savePath);
+        cartArgs = NDSCart::NDSCartArgs {};
+        if (!sav.empty())
+        {
+            cartArgs->SRAM = std::make_unique<u8[]>(sav.size());
+            memcpy(cartArgs->SRAM.get(), sav.data(), sav.size());
+            cartArgs->SRAMLength = sav.size();
+        }
+        gSaveKeeper = &saves;
+    }
+    auto cart = NDSCart::ParseROM(std::move(rom), romlen, nullptr, std::move(cartArgs));
     if (!cart) { fprintf(stderr, "bad ROM\n"); return 1; }
     nds->SetNDSCart(std::move(cart));
     nds->Reset();
@@ -1430,12 +1576,18 @@ int main(int argc, char** argv)
         tv.Show(black, black);
     }
     if (soundSpec && !sound.Open(soundSpec)) return 1;
+    SionPads sionPads;
+    if (padsOn) padsOn = sionPads.Open();
+    std::vector<u32> cursorScreen(256 * 192);
     std::vector<s16> soundBuf(4096 * 2);
     auto lastFrameDone = std::chrono::steady_clock::now();
     double frameGap = 16715757e-9;   // seconds between frames lately
 
     std::unique_ptr<HostLink> link;
-    if (serve)
+    LinkWaiter waiter;
+    if (serve && hotplug)
+        waiter.Start(serve);
+    else if (serve)
     {
         link = OpenHostLink(serve);
         if (!link) return gMirrorQuit ? 0 : 1;
@@ -1449,6 +1601,7 @@ int main(int argc, char** argv)
         pico = std::make_unique<DSpicoSim>(nds.get(), dspico, usbRate);
         gCardHook = pico.get();
     }
+    InputMix in;
     u32 reports = 0, padFrames = 0, lastFullReq = 0, lastReportAt = 0, reportsShown = 0;
     u64 sentShown = 0;
     u32 shownBefore = 0;
@@ -1513,6 +1666,30 @@ int main(int argc, char** argv)
             fprintf(stderr, "stopping at frame %u\n", f);
             break;
         }
+        if (hotplug && !link)
+        {
+            if ((link = waiter.Take()))
+            {
+                // a DS: a full bundle first, then on as usual
+                rec.RestartLink(link.get());
+                fprintf(stderr, "link: the DS is here at frame %u\n", f);
+                lastReportAt = lastFullReq = f;
+                deaf = false;
+                firstReport = true;
+            }
+            else if (waiter.done && !gMirrorQuit)
+                waiter.Start(serve);
+        }
+        if (link && rec.linkLost && hotplug)
+        {
+            // the game carries on without it
+            rec.StopLink();
+            link.reset();
+            pad = {};
+            in.ds = {};
+            fprintf(stderr, "link: the game carries on; waiting for the DS to come back\n");
+            waiter.Start(serve);
+        }
         if (link && rec.linkLost)
         {
             if (!reconnect)
@@ -1521,9 +1698,9 @@ int main(int argc, char** argv)
             // keep the game going and wait for it to come back
             rec.StopLink();
             link.reset();
-            nds->SetKeyMask(0xFFF);
-            nds->ReleaseScreen();
             pad = {};
+            in.ds = {};
+            in.Apply(*nds);
             firstReport = true;
             fprintf(stderr, "link: waiting for the DS to come back (switch it on and start Sion Link)\n");
             link = OpenHostLink(serve);
@@ -1537,7 +1714,7 @@ int main(int argc, char** argv)
             lastReportAt = lastFullReq = f;
             deaf = false;
         }
-        if (link && f && f % 600 == 0)
+        if ((link || hotplug) && f && f % 600 == 0)
         {
             // how fast the game runs here, and whether the link keeps up
             auto now = std::chrono::steady_clock::now();
@@ -1547,10 +1724,13 @@ int main(int argc, char** argv)
             char behind[48] = "";
             if (behindMax)
                 snprintf(behind, sizeof behind, " (%u to %u frames behind)", behindMin, behindMax);
-            fprintf(stderr, "frame %u: %.1f fps (%.1f ms a frame, longest %.0f ms), %u bundles sent (%llu KB/s), %u frames left out, DS showed %u%s, %u reports, pad %03x%s\n",
-                    f, 600 / s, workMs / 600, longestMs, rec.frame, (unsigned long long)((sent - sentShown) / 1024 / s), rec.linkSkips,
-                    shown - shownBefore, behind, reports - reportsShown, pad.keys & 0xFFF,
-                    pad.applied & MIRROR_INPUT_NEED_FULL ? ", DS waiting for a full frame" : "");
+            if (!link)
+                fprintf(stderr, "frame %u: %.1f fps (%.1f ms a frame, longest %.0f ms), no DS\n", f, 600 / s, workMs / 600, longestMs);
+            else
+                fprintf(stderr, "frame %u: %.1f fps (%.1f ms a frame, longest %.0f ms), %u bundles sent (%llu KB/s), %u frames left out, DS showed %u%s, %u reports, pad %03x%s\n",
+                        f, 600 / s, workMs / 600, longestMs, rec.frame, (unsigned long long)((sent - sentShown) / 1024 / s), rec.linkSkips,
+                        shown - shownBefore, behind, reports - reportsShown, pad.keys & 0xFFF,
+                        pad.applied & MIRROR_INPUT_NEED_FULL ? ", DS waiting for a full frame" : "");
             longestMs = workMs = 0;
             fprintf(stderr, "  CPU: %s\n", CpuUse(s).c_str());
             if (tvSkipped != tvSkippedShown)
@@ -1615,9 +1795,7 @@ int main(int argc, char** argv)
         while (si < steps.size() && steps[si].frame <= f)
         {
             const InputStep& s = steps[si++];
-            nds->SetKeyMask(s.mask);
-            if (s.touch) nds->TouchScreen(s.tx, s.ty);
-            else nds->ReleaseScreen();
+            in.script = {(u16)(~s.mask & 0xFFF), s.touch, s.tx, s.ty};
         }
         bool gotReport = link && link->Poll(pad);
         if (link && std::exchange(reportWaiting, false))
@@ -1640,10 +1818,8 @@ int main(int argc, char** argv)
                 rec.RequestFull();
                 fprintf(stderr, "link: the DS asked for a full frame at frame %u\n", f);
             }
-            // the DS's pad: libnds bit set = held, melonDS bit clear = pressed
-            nds->SetKeyMask(~pad.keys & 0xFFF);
-            if (pad.keys & (1 << 12)) nds->TouchScreen(pad.touchX, pad.touchY);
-            else nds->ReleaseScreen();
+            // the DS's pad (libnds bit set = held)
+            in.ds = {(u16)(pad.keys & 0xFFF), (pad.keys & (1 << 12)) != 0, pad.touchX, pad.touchY};
             reports++;
             lastReportAt = f;
             if (pad.busyMax > busyMax) busyMax = pad.busyMax;
@@ -1662,13 +1838,18 @@ int main(int argc, char** argv)
             deaf = true;
             rec.dsShownValid = false;
             // and let go of its buttons, or the game keeps them held
-            nds->SetKeyMask(0xFFF);
-            nds->ReleaseScreen();
+            in.ds = {};
             pad.keys = 0;
             lastFullReq = f;
             rec.RequestFull();
         }
-        if (link && (pad.keys & 0xFFF)) padFrames++;
+        if (link && in.ds.held) padFrames++;
+        if (padsOn)
+        {
+            sionPads.Poll(in.pads.held, in.pads.touch, in.pads.x, in.pads.y);
+            if (sionPads.MenuAsked()) fprintf(stderr, "menu: Back held at frame %u (the menu isn't there yet)\n", f);
+        }
+        in.Apply(*nds);
         if (pico) pico->Frame();
         if (gProf.on && f == gProf.from) memset(gProf.ms, 0, sizeof gProf.ms);
         if (gProf.on && f == gProf.to)
@@ -1712,6 +1893,13 @@ int main(int argc, char** argv)
             nds->SPU.SetOutputSkew(sound.Skew(stretch ? 16715757e-9 / frameGap : 1));
         }
         if (catchUp) tvSkipped++;
+        else if (tvSpec && padsOn && sionPads.CursorShown())
+        {
+            // the pads' stylus, on the TV only (the DS has a stylus of its own)
+            memcpy(cursorScreen.data(), bot, 256 * 192 * 4);
+            DrawCursor(cursorScreen.data(), sionPads.CursorX(), sionPads.CursorY(), in.pads.touch);
+            tv.Show((const u32*)top, cursorScreen.data());
+        }
         else if (tvSpec) tv.Show((const u32*)top, (const u32*)bot);
         if (fo)
         {
@@ -1761,6 +1949,7 @@ int main(int argc, char** argv)
     }
     if (fo) fclose(fo);
     if (fidx) fclose(fidx);
+    waiter.Stop();
     rec.StopLink();
     if (link)
     {
@@ -1801,6 +1990,11 @@ int main(int argc, char** argv)
             fprintf(stderr, "client: %u frames applied, %u late, state %u\n", w[1], w[2], w[3]);
             break;
         }
+    }
+    if (savePath)
+    {
+        saves.Close();
+        gSaveKeeper = nullptr;
     }
     if (soundSpec)
     {

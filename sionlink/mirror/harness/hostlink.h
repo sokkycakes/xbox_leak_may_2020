@@ -22,8 +22,8 @@ public:
     virtual bool Poll(mirror_input& in) = 0;
 };
 
-// waits for the DS to be there; nullptr if it can't, or once gMirrorQuit is set
-std::unique_ptr<HostLink> OpenHostLink(const std::string& spec);
+// waits for the DS to be there; nullptr if it can't, or once gMirrorQuit (or *stop) is set
+std::unique_ptr<HostLink> OpenHostLink(const std::string& spec, const std::atomic<bool>* stop = nullptr);
 
 // set when mirrorrun is told to stop (SIGTERM, SIGINT): waiting for the DS stops too
 extern std::atomic<bool> gMirrorQuit;

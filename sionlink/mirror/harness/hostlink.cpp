@@ -18,6 +18,8 @@
 
 std::atomic<bool> gMirrorQuit {false};
 
+static bool Stopped(const std::atomic<bool>* stop) { return gMirrorQuit || (stop && *stop); }
+
 // Reports arrive as whole 16-byte mirror_input structs; keep the newest valid one.
 static bool TakeReports(std::vector<uint8_t>& acc, mirror_input& in)
 {
@@ -41,7 +43,7 @@ class SocketLink : public HostLink
     int fd = -1;
     std::vector<uint8_t> acc;
 public:
-    explicit SocketLink(const std::string& path)
+    SocketLink(const std::string& path, const std::atomic<bool>* stop)
     {
         int l = socket(AF_UNIX, SOCK_STREAM, 0);
         sockaddr_un a {};
@@ -50,7 +52,12 @@ public:
         unlink(path.c_str());
         if (bind(l, (sockaddr*)&a, sizeof a) || listen(l, 1)) { perror("link: bind"); close(l); return; }
         fprintf(stderr, "link: waiting for the DS on %s\n", path.c_str());
-        fd = accept(l, nullptr, nullptr);
+        for (;;)
+        {
+            pollfd p {l, POLLIN, 0};
+            if (poll(&p, 1, 250) > 0) { fd = accept(l, nullptr, nullptr); break; }
+            if (Stopped(stop)) break;
+        }
         close(l);
         unlink(path.c_str());
         int small = 4096;   // see dspico_sim.cpp: little buffering, like USB
@@ -167,13 +174,13 @@ class UsbLink : public HostLink
             fprintf(stderr, "link: nudged the DS (%s; %d so far)\n", why == NUDGE_IN ? "no reports" : "it takes no data", n);
     }
 public:
-    UsbLink()
+    explicit UsbLink(const std::atomic<bool>* stop)
     {
         if (libusb_init(&ctx)) return;
         fprintf(stderr, "link: waiting for the DSpico (1209:0001)\n");
         while (!(h = libusb_open_device_with_vid_pid(ctx, 0x1209, 0x0001)))
         {
-            if (gMirrorQuit) return;
+            if (Stopped(stop)) return;
             usleep(250000);
         }
         libusb_set_auto_detach_kernel_driver(h, 1);
@@ -303,17 +310,17 @@ public:
 };
 #endif
 
-std::unique_ptr<HostLink> OpenHostLink(const std::string& spec)
+std::unique_ptr<HostLink> OpenHostLink(const std::string& spec, const std::atomic<bool>* stop)
 {
     if (spec.rfind("sim:", 0) == 0)
     {
-        auto l = std::make_unique<SocketLink>(spec.substr(4));
+        auto l = std::make_unique<SocketLink>(spec.substr(4), stop);
         if (l->Ok()) return l;
     }
 #ifdef HAVE_LIBUSB
     else if (spec == "usb")
     {
-        auto l = std::make_unique<UsbLink>();
+        auto l = std::make_unique<UsbLink>(stop);
         if (l->Ok()) return l;
     }
 #endif

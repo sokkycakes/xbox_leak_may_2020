@@ -110,6 +110,22 @@ dashboard, runs the mirror with both, and starts the dashboard again when it sto
 `MIRROR_STALLTEST=N:MS` makes every Nth frame MS ms slower, `MIRROR_SOUNDLOG=1`,
 `MIRROR_SOUNDFILL=FRAMES` (default 2560, 53 ms).
 
+## As a runtime (`--hotplug`, `--pads`, `--save`)
+Steps toward DS games as game cards on the Sion (plan: `ds-runtime-plan.md` in the project
+files). `--hotplug 1` starts the game at once: a thread waits for the DS, and a DS can join,
+leave and join again at any time. Until one is there no bundles are made; the 3D commands
+still go through the geometry shadow as if sent, and the 3D registers that hold state (fog,
+toon and edge tables, clear color, DISP3DCNT) are kept, so the full bundle a DS starts with
+sets all of it. Cloud test: a DS joining mid-race shows the game's pictures from its
+second frame on. `--pads 1` lets the Sion's own pads play (`pads.h`: SDL2 game controllers,
+its HIDAPI drivers over libusb as in xbcompat; build SDL with `harness/build-sdl.sh`):
+buttons by position as on a DS, the right stick moves a stylus drawn on the TV, the right
+trigger touches, and holding Back for 2 s will open the runtime's menu. Buttons from the DS,
+the pads and `--input` all count. `MIRROR_PADTEST=FILE` plays a virtual pad in cloud tests
+(a key script played as pad buttons gives the same recording). `--save FILE` loads the
+game's save memory and writes it back 2 s after the game last wrote to it, through a temp
+file and a rename.
+
 ## Not handled yet
 - Main-memory display mode (DISPCNT mode 3).
 - Compression on the client (the sizes above with zlib are what a link would carry).

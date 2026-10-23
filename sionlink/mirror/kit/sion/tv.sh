@@ -4,10 +4,12 @@
 # the same picture mirrored to the DS, whose pad plays it.
 #   sh tv.sh /path/to/game.nds [GAMECODE] [60]    start (it carries on in the background)
 #   sh tv.sh stop                                 stop; the dashboard comes back
-# Start sion-link-live.nds on the DS and plug the DSpico's USB into the Sion; the game
-# starts when the DS is there. The Xbox dashboard stops while the mirror has the TV.
+# The game starts at once; start sion-link-live.nds on the DS and plug the DSpico's USB
+# into the Sion whenever, and unplug it whenever. The Xbox dashboard stops while the
+# mirror has the TV.
 # GAMECODE: AMKE for the Mario Kart DS kiosk demo. The DS shows 30 frames a second
-# (the TV all 60); add 60 for every frame on the DS too. Saves are not kept.
+# (the TV all 60); add 60 for every frame on the DS too. The Sion's own pads play too
+# (right stick and trigger: the stylus). The save goes next to the game (GAME.sav).
 # Log: /tmp/sionlink-tv.log
 case $1 in /*|stop|'') ;; *) set -- "$PWD/$1" "$2" "$3" ;; esac   # the game's path from here
 cd "$(dirname "$0")" || exit 1
@@ -78,8 +80,8 @@ killall -q -9 xbcompat
 echo "$(date '+%F %T') dashboard stopped${session:+ (session loop too)}"
 
 # shellcheck disable=SC2086
-./mirrorrun "$ROM" 0 --serve usb --reconnect 1 --realtime 1 --gxdelta 1 --jit 1 --threaded 1 \
-	$HALF ${2:+--gamecode $2} --tv drm --sound alsa
+./mirrorrun "$ROM" 0 --serve usb --hotplug 1 --realtime 1 --gxdelta 1 --jit 1 --threaded 1 \
+	$HALF ${2:+--gamecode $2} --tv drm --sound alsa --pads 1 --save "${ROM%.*}.sav"
 echo "$(date '+%F %T') mirror exited with $?"
 
 if [ -n "$session" ]; then

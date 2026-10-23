@@ -12,6 +12,7 @@
 #include <pthread.h>
 
 #include "Platform.h"
+#include "saves.h"
 
 namespace melonDS::Platform
 {
@@ -113,7 +114,10 @@ void Sleep(u64 usecs) { std::this_thread::sleep_for(std::chrono::microseconds(us
 u64 GetMSCount() { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 u64 GetUSCount() { return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 
-void WriteNDSSave(const u8*, u32, u32, u32, void*) {}
+void WriteNDSSave(const u8* data, u32 len, u32 off, u32 n, void*)
+{
+    if (gSaveKeeper) gSaveKeeper->Note(data, len, off, n);
+}
 void WriteGBASave(const u8*, u32, u32, u32, void*) {}
 void WriteFirmware(const Firmware&, u32, u32, void*) {}
 void WriteDateTime(int, int, int, int, int, int, void*) {}
