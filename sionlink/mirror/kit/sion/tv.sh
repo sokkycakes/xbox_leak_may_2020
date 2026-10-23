@@ -2,39 +2,50 @@
 # Sion Link live mirror with the game on the TV as well (run 14): both screens stacked on
 # the TV in the mode it is already in (no resync), the game's sound on the TV's HDMI, and
 # the same picture mirrored to the DS, whose pad plays it.
-#   sh tv.sh /path/to/game.nds [GAMECODE] [60]    start (it carries on in the background)
-#   sh tv.sh stop                                 stop; the dashboard comes back
+#   sh tv.sh /path/to/game.nds [GAMECODE] [60] [gl]   start (it carries on in the background)
+#   sh tv.sh stop                                      stop; the dashboard comes back
 # The game starts at once; start sion-link-live.nds on the DS and plug the DSpico's USB
 # into the Sion whenever, and unplug it whenever. The Xbox dashboard stops while the
 # mirror has the TV.
 # GAMECODE: AMKE for the Mario Kart DS kiosk demo. The DS shows 30 frames a second
-# (the TV all 60); add 60 for every frame on the DS too. The Sion's own pads play too
-# (right stick and trigger: the stylus). The save goes next to the game (GAME.sav).
+# (the TV all 60); add 60 for every frame on the DS too. gl draws the game's 3D with the
+# Sion's GPU (OpenGL, mirrorrun-gl) instead of the CPU; the DS gets the same either way.
+# The Sion's own pads play too (right stick and trigger: the stylus). The save goes next
+# to the game (GAME.sav).
 # Log: /tmp/sionlink-tv.log
-case $1 in /*|stop|'') ;; *) set -- "$PWD/$1" "$2" "$3" ;; esac   # the game's path from here
+case $1 in /*|stop|'') ;; *) set -- "$PWD/$1" "$2" "$3" "$4" ;; esac   # the game's path from here
 cd "$(dirname "$0")" || exit 1
 SELF=$PWD/$(basename "$0")
 LOG=/tmp/sionlink-tv.log
 PIDFILE=/var/run/xbox.pid
 
 if [ "$1" = stop ]; then
-	pidof mirrorrun > /dev/null || { echo "the mirror isn't running"; exit 0; }
-	killall mirrorrun
+	pidof mirrorrun mirrorrun-gl > /dev/null || { echo "the mirror isn't running"; exit 0; }
+	killall -q mirrorrun mirrorrun-gl
 	for _ in $(seq 1 25); do
-		pidof mirrorrun > /dev/null || break
+		pidof mirrorrun mirrorrun-gl > /dev/null || break
 		sleep 0.2
 	done
-	killall -q -9 mirrorrun
+	killall -q -9 mirrorrun mirrorrun-gl
 	echo "stopped; the dashboard is coming back"
 	exit 0
 fi
 
 ROM=$1
-[ -n "$ROM" ] || { echo "usage: sh tv.sh GAME.nds [GAMECODE] [60] | sh tv.sh stop"; exit 1; }
+[ -n "$ROM" ] || { echo "usage: sh tv.sh GAME.nds [GAMECODE] [60] [gl] | sh tv.sh stop"; exit 1; }
 [ -r "$ROM" ] || { echo "no $ROM"; exit 1; }
+HALF="--half 1" CODE= RUN=./mirrorrun RENDER=
+for a in "$2" "$3" "$4"; do
+	case $a in
+	'') ;;
+	60) HALF= ;;
+	gl) RUN=./mirrorrun-gl RENDER="--renderer gl" ;;
+	*) CODE="--gamecode $a" ;;
+	esac
+done
 
 if [ -z "$SIONLINK_TV_BG" ]; then
-	pidof mirrorrun > /dev/null && { echo "the mirror is already running (sh tv.sh stop)"; exit 1; }
+	pidof mirrorrun mirrorrun-gl > /dev/null && { echo "the mirror is already running (sh tv.sh stop)"; exit 1; }
 	# never over a game: the dashboard is xbcompat running xboxdash.xbe; a game it starts
 	# replaces it in the same process, and Windows games run under gamescope
 	playing=
@@ -52,9 +63,7 @@ if [ -z "$SIONLINK_TV_BG" ]; then
 	exit 0
 fi
 
-chmod +x mirrorrun 2>/dev/null
-HALF="--half 1"
-[ "$3" = 60 ] && HALF=
+chmod +x mirrorrun mirrorrun-gl 2>/dev/null
 
 # the sound device and display socket the dashboard uses
 eval "$(. /usr/lib/xbox/xbox-env > /dev/null 2>&1
@@ -80,8 +89,8 @@ killall -q -9 xbcompat
 echo "$(date '+%F %T') dashboard stopped${session:+ (session loop too)}"
 
 # shellcheck disable=SC2086
-./mirrorrun "$ROM" 0 --serve usb --hotplug 1 --realtime 1 --gxdelta 1 --jit 1 --threaded 1 \
-	$HALF ${2:+--gamecode $2} --tv drm --sound alsa --pads 1 --save "${ROM%.*}.sav"
+$RUN "$ROM" 0 --serve usb --hotplug 1 --realtime 1 --gxdelta 1 --jit 1 --threaded 1 $RENDER \
+	$HALF $CODE --tv drm --sound alsa --pads 1 --save "${ROM%.*}.sav"
 echo "$(date '+%F %T') mirror exited with $?"
 
 if [ -n "$session" ]; then

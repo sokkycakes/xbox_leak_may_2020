@@ -126,6 +126,19 @@ the pads and `--input` all count. `MIRROR_PADTEST=FILE` plays a virtual pad in c
 game's save memory and writes it back 2 s after the game last wrote to it, through a temp
 file and a rename.
 
+## OpenGL (`--renderer gl`)
+melonDS's OpenGL renderer draws the game's 3D (and puts the screens together) on the GPU,
+instead of the 3D thread the software renderer needs a CPU core for. The mirror opens a GL
+3.2 core context through EGL with no window (Mesa's surfaceless platform, `libEGL.so.1`
+loaded at run time, so a build without it still runs and just draws in software) and reads
+both screens back for the TV. Display captures stay on the GPU until something reads them;
+the mirror reads a capture into VRAM right after it's made, so the DS's own redo of it isn't
+overwritten later by a copy. The DS gets the same bundles as with software (MKDS demo, 2300
+frames, byte for byte); only the TV picture differs, in how the GPU rasterizes (a few thin
+lines on the bottom map, texel edges). Build with `GL=1 harness/build.sh` from a melonDS
+built with `-DENABLE_OGLRENDERER=ON` (see build.sh). The Sion kit has it as `mirrorrun-gl`
+(64-bit, glibc linked, the rest static); `sh tv.sh GAME.nds AMKE gl` uses it.
+
 ## Not handled yet
 - Main-memory display mode (DISPCNT mode 3).
 - Compression on the client (the sizes above with zlib are what a link would carry).

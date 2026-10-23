@@ -71,6 +71,10 @@
 #include "hostlink.h"
 #include "pads.h"
 #include "saves.h"
+#ifdef HAVE_GL
+#include "glctx.h"
+#include "GPU_OpenGL.h"
+#endif
 #include "dspico_sim.h"
 #include "lzpack.h"
 #include "geostate.h"
@@ -631,6 +635,8 @@ public:
     u16 prevPow = 0;
     bool haveFrame = false;
     int captureBank = -1;
+    bool glCaptures = false;   // the OpenGL renderer: captures land in VRAM only when synced
+    bool capToSend = false;    // a capture the DS didn't redo went to VRAM since the last bundle
     u32 captureOff = 0, captureLen = 0;
 
     std::vector<u8> part2D;
@@ -708,6 +714,13 @@ public:
             {
                 skipRun = 0;
                 PROF(Snap);
+                // OpenGL: captured pixels stay on the GPU until something reads them; get
+                // them when this bundle may carry some (a capture the DS didn't redo, or all)
+                if (glCaptures && (capToSend || full))
+                {
+                    nds->GPU.MirrorSyncCaptures();
+                    capToSend = false;
+                }
                 Snapshot2D();
                 haveFrame = true;
             }
@@ -720,6 +733,7 @@ public:
                 NoteCapture();
                 if (captureBank >= 0 && (s32)(dsCaptured[captureBank] - capStart) < 0)
                     captureBank = -1;
+                if (capThis && captureBank < 0) capToSend = true;
             }
         }
         else if (vcount < 192 && haveFrame)
@@ -764,6 +778,9 @@ public:
         else if (vcount == 193)
         {
             PROF(Sync);
+            // OpenGL: the capture is still on the GPU; get it into VRAM now, so it's taken
+            // as one the DS redid, not sent later as changed VRAM over the DS's own
+            if (glCaptures && captureBank >= 0) nds->GPU.MirrorSyncCaptures();
             SyncCapture();
         }
     }
@@ -1430,7 +1447,7 @@ int main(int argc, char** argv)
 {
     if (argc < 3)
     {
-        fprintf(stderr, "usage: %s ROM FRAMES [--input F] [--record F] [--frames F] [--shots DIR] [--every N] [--stats F] [--boottype N] [--lang N] [--gamecode XXXX] [--half 1] [--gxdelta 1] [--serve LINK] [--reconnect 1] [--dspico PATH] [--usbrate N] [--realtime 1] [--jit 1] [--threaded 1] [--tv drm|dump:F] [--sound alsa|wav:F] [--stretch 0] [--hotplug 1] [--pads 1] [--save F]\n", argv[0]);
+        fprintf(stderr, "usage: %s ROM FRAMES [--input F] [--record F] [--frames F] [--shots DIR] [--every N] [--stats F] [--boottype N] [--lang N] [--gamecode XXXX] [--half 1] [--gxdelta 1] [--serve LINK] [--reconnect 1] [--dspico PATH] [--usbrate N] [--realtime 1] [--jit 1] [--threaded 1] [--tv drm|dump:F] [--sound alsa|wav:F] [--stretch 0] [--hotplug 1] [--pads 1] [--save F] [--renderer soft|gl]\n", argv[0]);
         return 1;
     }
     const char* rompath = argv[1];
@@ -1451,6 +1468,7 @@ int main(int argc, char** argv)
     bool hotplug = false;   // the game starts at once; the DS can come and go
     bool padsOn = false;
     const char* savePath = nullptr;
+    std::string renderer = "soft";
     for (int i = 3; i + 1 < argc; i += 2)
     {
         std::string o = argv[i];
@@ -1479,6 +1497,7 @@ int main(int argc, char** argv)
         else if (o == "--hotplug") hotplug = atoi(argv[i + 1]) != 0;
         else if (o == "--pads") padsOn = atoi(argv[i + 1]) != 0;
         else if (o == "--save") savePath = argv[i + 1];
+        else if (o == "--renderer") renderer = argv[i + 1];
         else { fprintf(stderr, "unknown option %s\n", o.c_str()); return 1; }
     }
 
@@ -1513,7 +1532,27 @@ int main(int argc, char** argv)
         }
     }
     auto nds = std::make_unique<NDS>(std::move(args));
-    if (threaded)
+    bool gl = false;
+    if (renderer == "gl")
+    {
+#ifdef HAVE_GL
+        // 2D and 3D on the GPU; the screens are read back for the TV
+        if (GLContextOpen())
+        {
+            nds->SetRenderer(std::make_unique<GLRenderer>(*nds, false));
+            RendererSettings rs {};
+            rs.ScaleFactor = 1;
+            nds->GPU.GetRenderer().SetRenderSettings(rs);
+            int cur = 0, count = 0;
+            while (nds->GPU.GetRenderer().NeedsShaderCompile())
+                nds->GPU.GetRenderer().ShaderCompileStep(cur, count);
+            gl = true;
+        }
+        else
+#endif
+            fprintf(stderr, "gl: not available; drawing in software\n");
+    }
+    if (threaded && !gl)
     {
         // 3D on its own thread; the picture is the same
         RendererSettings rs {};
@@ -1545,6 +1584,7 @@ int main(int argc, char** argv)
 
     Recorder rec;
     rec.nds = nds.get();
+    rec.glCaptures = gl;
     rec.half = half;
     rec.gxDelta = gxDelta;
     if (record)
@@ -1875,6 +1915,15 @@ int main(int argc, char** argv)
         }
         void *top = nullptr, *bot = nullptr;
         nds->GPU.GetFramebuffers(&top, &bot);
+#ifdef HAVE_GL
+        if (gl)
+        {
+            static std::vector<u32> glTop(256 * 192), glBot(256 * 192);
+            GLReadScreens(top, glTop.data(), glBot.data());
+            top = glTop.data();
+            bot = glBot.data();
+        }
+#endif
         double frameMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - frameStart).count();
         longestMs = std::max(longestMs, frameMs);
         heavyMs = heavyMs * 0.9 + std::min(frameMs, tvFrameMs) * 0.1;
@@ -2003,6 +2052,13 @@ int main(int argc, char** argv)
     }
     tv.Close();
     gMirrorTap = nullptr;
+#ifdef HAVE_GL
+    if (gl)
+    {
+        nds.reset();   // the renderer's GL objects go first
+        GLContextClose();
+    }
+#endif
     gCardHook = nullptr;
     return 0;
 }
