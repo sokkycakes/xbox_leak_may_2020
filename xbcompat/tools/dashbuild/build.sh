@@ -59,6 +59,10 @@ patch_src Disc.cpp 's/theApp.m_bHasLaunchData || g_nDiscType == DISC_VIDEO/theAp
 # A viewpoint a Level binds reads isBound true, as one bound from script does
 # (the screen saver asks whether the main menu's camera is the current one).
 patch_src Viewpoint.cpp 's/^\(\s*\)theApp.m_pViewpoint = this;/&\n\1m_isBound = true;/'
+# Start and Back reach the script as OnStartDown/OnBackDown (and the Up
+# pair) instead of being folded into A and B; a script without those
+# functions still gets OnADown/OnBDown, so the stock dashboard is unchanged.
+patch_src Joystick.cpp 's|#if 1 // Make Start/Back the same as A/B|#if 0 // Make Start/Back the same as A/B|; s|^\(\s*\)::CallFunction(this, szFunc);|\1if (!::CallFunction(this, szFunc)) {\n\1    const TCHAR* szAlt = NULL;\n\1    if (!_tcscmp(szFunc, _T("OnStartDown"))) szAlt = _T("OnADown");\n\1    else if (!_tcscmp(szFunc, _T("OnStartUp"))) szAlt = _T("OnAUp");\n\1    else if (!_tcscmp(szFunc, _T("OnBackDown"))) szAlt = _T("OnBDown");\n\1    else if (!_tcscmp(szFunc, _T("OnBackUp"))) szAlt = _T("OnBUp");\n\1    if (szAlt != NULL) ::CallFunction(this, szAlt);\n\1}|'
 # The Memory screen lists each title's downloads (Xbox Live Arcade games) and
 # the games installed from the Games screen next to its saves.  The patched
 # TitleCollection.h sits beside the two patched sources, the only ones built

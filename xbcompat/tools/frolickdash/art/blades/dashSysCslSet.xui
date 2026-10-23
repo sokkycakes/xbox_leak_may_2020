@@ -1,0 +1,208 @@
+<XuiCanvas>
+<Properties>
+ <Width>1120</Width>
+ <Height>770</Height>
+</Properties>
+<XuiScene>
+<Properties>
+ <Id>scCslSettings</Id>
+ <Width>1120</Width>
+ <Height>770</Height>
+ <ClassOverride>dashSettingsRoot</ClassOverride>
+ <TransFrom>FadeOut</TransFrom>
+ <TransTo>FadeIn</TransTo>
+ <TransBackFrom>FadeOut</TransBackFrom>
+ <TransBackTo>FadeIn</TransBackTo>
+</Properties>
+<XuiNavButton>
+<Properties>
+ <Id>btnDisplay</Id>
+ <Width>423</Width>
+ <Height>47</Height>
+ <Position>146,153,0</Position>
+ <NavDown>btnAudio</NavDown>
+ <Text>Display</Text>
+ <PressPath>dashSysCslSetDisplay.xur</PressPath>
+</Properties>
+</XuiNavButton>
+<XuiNavButton>
+<Properties>
+ <Id>btnClock</Id>
+ <Width>423</Width>
+ <Height>47</Height>
+ <Position>146,288,0</Position>
+ <NavUp>btnLanguage</NavUp>
+ <NavDown>btnCountry</NavDown>
+ <Text>Clock</Text>
+ <PressPath>dashSysCslSetClock.xur</PressPath>
+</Properties>
+</XuiNavButton>
+<XuiNavButton>
+<Properties>
+ <Id>btnLanguage</Id>
+ <Width>423</Width>
+ <Height>47</Height>
+ <Position>146,243,0</Position>
+ <NavUp>btnAudio</NavUp>
+ <NavDown>btnClock</NavDown>
+ <Text>Language</Text>
+ <PressPath>dashSysCslSetLanguage.xur</PressPath>
+</Properties>
+</XuiNavButton>
+<XuiNavButton>
+<Properties>
+ <Id>btnAudio</Id>
+ <Width>423</Width>
+ <Height>47</Height>
+ <Position>146,198,0</Position>
+ <NavUp>btnDisplay</NavUp>
+ <NavDown>btnLanguage</NavDown>
+ <Text>Audio</Text>
+ <PressPath>dashSysCslSetAudio.xur</PressPath>
+</Properties>
+</XuiNavButton>
+<XuiNavButton>
+<Properties>
+ <Id>btnCountry</Id>
+ <Width>423</Width>
+ <Height>47</Height>
+ <Position>146,333,0</Position>
+ <NavUp>btnClock</NavUp>
+ <NavDown>btnAutoOff</NavDown>
+ <Text>Locale</Text>
+ <PressPath>dashSysCslSetCountry.xur</PressPath>
+</Properties>
+</XuiNavButton>
+<XuiNavButton>
+<Properties>
+ <Id>btnAutoOff</Id>
+ <Width>423</Width>
+ <Height>47</Height>
+ <Position>146,378,0</Position>
+ <NavUp>btnCountry</NavUp>
+ <NavDown>btnScreensaver</NavDown>
+ <Text>Auto-Off</Text>
+ <PressPath>dashSysCslSetAutoOff.xur</PressPath>
+</Properties>
+</XuiNavButton>
+<XuiNavButton>
+<Properties>
+ <Id>btnRemote</Id>
+ <Width>423</Width>
+ <Height>47</Height>
+ <Position>145.605,467.605,0</Position>
+ <NavUp>btnScreensaver</NavUp>
+ <NavDown>btnPolicy</NavDown>
+ <Text>Remote Control</Text>
+ <PressPath>dashSysCslSetRemoteC.xur</PressPath>
+</Properties>
+</XuiNavButton>
+<XuiNavButton>
+<Properties>
+ <Id>btnPolicy</Id>
+ <Width>423</Width>
+ <Height>47</Height>
+ <Position>145.21,512.391,0</Position>
+ <NavUp>btnRemote</NavUp>
+ <Text>System Info</Text>
+ <PressPath>dashSysCslSetPolicyInfo_System.xur</PressPath>
+</Properties>
+</XuiNavButton>
+<XuiNavButton>
+<Properties>
+ <Id>btnScreensaver</Id>
+ <Width>423</Width>
+ <Height>47</Height>
+ <Position>146,422.79,0</Position>
+ <NavUp>btnAutoOff</NavUp>
+ <NavDown>btnRemote</NavDown>
+ <Text>Screen Saver</Text>
+ <PressPath>dashSysCslSetScreensaver.xur</PressPath>
+</Properties>
+</XuiNavButton>
+<XuiNavButton>
+<Properties>
+ <Id>legend_y</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>165,611,0</Position>
+ <Visual>legend_Y</Visual>
+ <Enabled>false</Enabled>
+ <PressKey>22531</PressKey>
+</Properties>
+</XuiNavButton>
+<XuiNavButton>
+<Properties>
+ <Id>legend_x</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>146,639,0</Position>
+ <Visual>legend_X</Visual>
+ <Enabled>false</Enabled>
+ <PressKey>22530</PressKey>
+</Properties>
+</XuiNavButton>
+<XuiNavButton>
+<Properties>
+ <Id>legend_a</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>573,639,0</Position>
+ <Visual>legend_A</Visual>
+ <Text>Select</Text>
+</Properties>
+</XuiNavButton>
+<XuiBackButton>
+<Properties>
+ <Id>legend_b</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>555,611,0</Position>
+ <Visual>legend_B</Visual>
+ <UnfocusedInput>true</UnfocusedInput>
+ <Text>Back</Text>
+ <PressKey>22593</PressKey>
+</Properties>
+</XuiBackButton>
+<XuiScene>
+<Properties>
+ <Id>metaPanelScene</Id>
+ <Width>395</Width>
+ <Height>426</Height>
+ <Position>584,153,0</Position>
+ <ClassOverride>MetaPanelScene</ClassOverride>
+ <Visual>metaScene_1line</Visual>
+</Properties>
+<Timelines>
+<NamedFrames>
+<NamedFrame><Name>Normal</Name><Time>0</Time><Command>Play</Command><CommandParams></CommandParams></NamedFrame>
+<NamedFrame><Name>EndNormal</Name><Time>1</Time><Command>Stop</Command><CommandParams></CommandParams></NamedFrame>
+<NamedFrame><Name>1to2</Name><Time>2</Time><Command>Play</Command><CommandParams></CommandParams></NamedFrame>
+<NamedFrame><Name>End1to2</Name><Time>30</Time><Command>Stop</Command><CommandParams></CommandParams></NamedFrame>
+<NamedFrame><Name>2to1</Name><Time>31</Time><Command>Play</Command><CommandParams></CommandParams></NamedFrame>
+<NamedFrame><Name>End2to1</Name><Time>60</Time><Command>Stop</Command><CommandParams></CommandParams></NamedFrame>
+</NamedFrames>
+</Timelines>
+</XuiScene>
+<XuiLabel>
+<Properties>
+ <Id>labHeader</Id>
+ <Width>855</Width>
+ <Height>47</Height>
+ <Position>156,96,0</Position>
+ <Visual>Label_Head</Visual>
+ <Text>Console Settings</Text>
+</Properties>
+</XuiLabel>
+<XuiLabel>
+<Properties>
+ <Id>labMetaHeader</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>588,155,0</Position>
+ <Visual>Label_MetaHead_1line</Visual>
+ <Text>Current Setting</Text>
+</Properties>
+</XuiLabel>
+</XuiScene>
+</XuiCanvas>
