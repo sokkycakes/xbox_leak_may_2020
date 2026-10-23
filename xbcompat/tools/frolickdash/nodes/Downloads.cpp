@@ -16,8 +16,12 @@
 //                  done <identifier>
 //                  gone <identifier>   (its game was deleted: out of the
 //                                       history, so it can be had again)
+//                  stream <identifier> <starting|ready|error> <in> <bytes> <detail>
+//                                      (the disc image being streamed)
 //   history.txt  written here: what finished (Download History)
 //                  h <identifier> <MB> <kind> <title>
+//   play.txt     written here: the Streaming Download item to play now
+//                  p <identifier>      (none when the dashboard starts)
 //
 // A finished item leaves the queue for the history and the next pending
 // item starts, as a queue does.  The helper rewrites status.txt every
@@ -47,6 +51,11 @@
 //   Queue(t, i)       queue Store item i of tab t: 1 queued, 0 already
 //                     queued or downloaded, -1 the queue is full
 //   Has(id)           0, 1 queued, 2 downloaded
+//   Play(t, i)        play Store item i of tab t as it downloads: the helper
+//                     streams it and puts it in the DVD tray
+//   GetPlayState()    "" (nothing asked), "starting", "ready" (in the tray:
+//                     start it from there) or "error"
+//   GetPlayDetail()   why, for "error"
 // Not part of Microsoft's dashboard; added for Frolick (tools/frolickdash).
 
 #include "std.h"
@@ -77,6 +86,7 @@ struct DLITEM
 static const CHAR c_szQueue[] = "E:\\FROLICK\\STORE\\queue.txt";
 static const CHAR c_szStatus[] = "E:\\FROLICK\\STORE\\status.txt";
 static const CHAR c_szHistory[] = "E:\\FROLICK\\STORE\\history.txt";
+static const CHAR c_szPlay[] = "E:\\FROLICK\\STORE\\play.txt";
 
 // From status.txt: the helper's word on the store, and on the active
 // download when it isn't simply downloading.
@@ -84,6 +94,11 @@ static int c_nOnline = -1;          // -1: no word from the helper
 static CHAR c_szOnline[96];
 static CHAR c_szActiveState[16];
 static CHAR c_szActiveDetail[64];
+// the item Play asked for, and the helper's word on it
+static CHAR c_szPlayId[DL_ID];
+static CHAR c_szStreamId[DL_ID];
+static CHAR c_szStreamState[16];
+static CHAR c_szStreamDetail[64];
 
 const CHAR* StoreServiceState()
 {
@@ -122,8 +137,12 @@ public:
     void Remove(int i);
     int Queue(int t, int i);
     int Has(const TCHAR* szId);
+    int Play(int t, int i);
+    CStrObject* GetPlayState();
+    CStrObject* GetPlayDetail();
 
 protected:
+    void SavePlay();
     bool OK(int i) { return i >= 0 && i < m_nCount; }
     int Find(const CHAR* szId);
     void StartNext();
@@ -167,6 +186,9 @@ START_NODE_FUN(CDownloads, CNode)
     NODE_FUN_VI(Remove)
     NODE_FUN_III(Queue)
     NODE_FUN_IS(Has)
+    NODE_FUN_III(Play)
+    NODE_FUN_SV(GetPlayState)
+    NODE_FUN_SV(GetPlayDetail)
 END_NODE_FUN()
 
 CDownloads::CDownloads() : m_nCount(0), m_nHist(0), m_nWait(0.0f), m_nStale(0.0f), m_cbStatus(0)
@@ -176,6 +198,7 @@ CDownloads::CDownloads() : m_nCount(0), m_nHist(0), m_nWait(0.0f), m_nStale(0.0f
     CreateDirectoryA("E:\\FROLICK\\STORE", NULL);
     LoadQueue();
     LoadHistory();
+    SavePlay();     // a title that was playing has ended: its disc comes out
     ReadStatus();
 }
 
@@ -318,6 +341,7 @@ void CDownloads::ReadStatus()
     m_nStale = 0.0f;
     c_szActiveState[0] = 0;
     c_szActiveDetail[0] = 0;
+    c_szStreamId[0] = 0;
     bool bChanged = false;
     CHAR* line = p;
     while (line && *line)
@@ -354,6 +378,14 @@ void CDownloads::ReadStatus()
                         Copy(c_szActiveDetail, f[5], sizeof c_szActiveDetail);
                 }
             }
+        }
+        else if (strcmp(f[0], "stream") == 0 && k >= 3)
+        {
+            Copy(c_szStreamId, f[1], sizeof c_szStreamId);
+            Copy(c_szStreamState, f[2], sizeof c_szStreamState);
+            c_szStreamDetail[0] = 0;
+            if (k >= 6)
+                Copy(c_szStreamDetail, f[5], sizeof c_szStreamDetail);
         }
         else if (strcmp(f[0], "have") == 0 && k >= 3)
         {
@@ -464,6 +496,52 @@ int CDownloads::Has(const TCHAR* szId)
         if (strcmp(m_rgHist[h].szId, sz) == 0)
             return 2;
     return 0;
+}
+
+// ---- play as you download ----------------------------------------------
+
+void CDownloads::SavePlay()
+{
+    HANDLE h = CreateFileA(c_szPlay, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE)
+        return;
+    CHAR sz[DL_ID + 8];
+    Put(h, "frolick-play 1\n");
+    if (c_szPlayId[0])
+    {
+        _snprintf(sz, sizeof sz - 1, "p\t%s\n", c_szPlayId);
+        sz[sizeof sz - 1] = 0;
+        Put(h, sz);
+    }
+    Put(h, "end\n");
+    CloseHandle(h);
+}
+
+int CDownloads::Play(int t, int i)
+{
+    const STOREITEM* it = StoreItem(t, i);
+    if (it == NULL || !it->bStream)
+        return 0;
+    Copy(c_szPlayId, it->szId, sizeof c_szPlayId);
+    c_szStreamId[0] = 0;    // its word from the next status.txt on
+    SavePlay();
+    return 1;
+}
+
+CStrObject* CDownloads::GetPlayState()
+{
+    if (c_szPlayId[0] == 0)
+        return StoreStr("");
+    if (strcmp(c_szStreamId, c_szPlayId) != 0)
+        return StoreStr("starting");
+    return StoreStr(c_szStreamState);
+}
+
+CStrObject* CDownloads::GetPlayDetail()
+{
+    if (c_szPlayId[0] == 0 || strcmp(c_szStreamId, c_szPlayId) != 0)
+        return StoreStr("");
+    return StoreStr(c_szStreamDetail);
 }
 
 void CDownloads::StartNext()

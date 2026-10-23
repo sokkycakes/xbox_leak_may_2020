@@ -139,6 +139,8 @@ static void mkdir_p(const char *path)
 void fs_init(const char *xbe_path, const char *hdd_root, const char *dvd_root, const char *dvd_drive)
 {
     struct stat dsb;
+    /* first: the tray looks for <hdd>/.dvdimage (dvd.c) from its first look */
+    snprintf(hdd_dir, sizeof(hdd_dir), "%s", hdd_root);
     if (dvd_root && stat(dvd_root, &dsb) == 0 && !S_ISDIR(dsb.st_mode)) {
         /* An image or a drive: dvd.c reads it. */
         dvd_init(dvd_root, dvd_drive);

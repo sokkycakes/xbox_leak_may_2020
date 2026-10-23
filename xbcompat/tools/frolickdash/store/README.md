@@ -12,6 +12,7 @@ on its hard disk, E:\FROLICK\STORE (/data/xbox/hdd/partition1/FROLICK/STORE):
 | queue.txt | the dashboard (nodes/Downloads.cpp) | the download queue, the active download first, paused or not |
 | status.txt | the helper, every second | whether the Archive answers, the active download's progress, what the others have on disk, which have finished, which history items' cards were deleted (gone) |
 | history.txt | the dashboard | what finished (Download History) |
+| play.txt | the dashboard | the Streaming Download to play now (empty when the dashboard starts) |
 
 The dashboard side is nodes/Store.cpp (the catalog, `theStore`) and
 nodes/Downloads.cpp (the queue, `theDownloads`). Spotlight's tab row is laid
@@ -78,3 +79,18 @@ prefix (/data/wincarts/<cid>) and download record, and status.txt says
 again. The stub holds frolick-size.dat, a sparse file as long as the cart
 folder and prefix, so the Memory screens show the game's real size without
 it taking that space on E:.
+
+Streaming Download (play.go, stream.go, disc.go): an Xbox disc image on
+the Archive (a catalog entry `id <item>/<file>.iso | Xbox game`) is
+flagged `stream` in catalog.txt, and its tile is the title image inside
+its default.xbe, read with a few range requests. Play on it writes
+play.txt; the helper runs itself with `-stream` into
+/data/frolick/stream/<name>/disc.iso and, once the disc's directory and
+default.xbe are in, names the image in /data/xbox/hdd/.dvdimage.
+xbcompat (src/kernel/dvd.c) then has that image in the DVD tray, over the
+USB drive, and the dashboard starts it like a disc, in its own process.
+Reads the game makes ahead of the download wait for their chunk; the rest
+fills in behind them and goes on after the game until the whole disc is in
+and checked (md5, sha1). When the dashboard starts again it empties
+play.txt and the helper takes the image out of the tray; the next Play of
+that game starts at once.

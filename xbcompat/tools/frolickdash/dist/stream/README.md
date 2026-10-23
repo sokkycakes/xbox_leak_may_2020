@@ -1,29 +1,34 @@
-# Play as you download: Sion test kit
+# xbcompat with Streaming Download: Sion kit
 
-Plays an Xbox disc image from the Internet Archive while it downloads. A
-test beside the installed system: everything goes in /data/frolick/stream,
-nothing in /opt/xbcompat or the store service changes.
+The Sion's installed combined xbcompat (push-liveguide, gudfcx ff23b324:
+Windows game cards, Live, the Guide, discs and the USB drive, the game
+fixes) plus play as you download, to replace /opt/xbcompat/bin/xbcompat.
+Built from ff23b324 with only src/kernel/dvd.c and src/kernel/io.c changed
+(frolick-xap-dash branch); the same tree without them builds to md5
+8c1df1869eee9886fa3f7113afdcb85c, the Sion's live binary.
 
 | file | what it is |
 |---|---|
-| xbcompat | the Sion's installed combined build (push-liveguide, gudfcx ff23b324, md5 8c1df186… when built without this change) plus streamed images (src/kernel/dvd.c from frolick-xap-dash 8df79fb1); Sion interpreter /opt/xbcompat/lib/ld-linux.so.2 |
-| frolick-store | the store helper with `-stream` (static x86-64); run under the name frolick-store-stream, so the store service is never touched |
-| stream-play.sh | the test (see its header) |
+| xbcompat | the combined build plus streamed images (i386, stripped; interpreter /opt/xbcompat/lib/ld-linux.so.2) |
 
-Install: copy the three files to /data/frolick/stream (mkdir it first) and
-`chmod 755` them. Check with `sha256sum -c SHA256SUMS` there.
+What it adds:
+- an image beside a game.iso.stream and game.iso.map file is streamed:
+  reads of chunks not there yet ask frolick-store for them on its socket
+  and wait (src/kernel/dvd.c);
+- while /data/xbox/hdd/.dvdimage names an image, that image is in the DVD
+  tray, over the USB drive. frolick-store writes it when a Streaming
+  Download is ready to play and removes it when the dashboard comes back,
+  so the dashboard starts the game the way it starts a disc, in its own
+  process (no stepping aside). Without the file nothing changes.
 
-Run, only while the dashboard alone is on the screen (the script refuses
-otherwise): `sh /data/frolick/stream/stream-play.sh` for Half-Life 2
-(xbox_essentials, 2,059,796,480 bytes, md5 510f7b04…, sha1 fae0a9a3…).
-It stops the dashboard's session and xbcompat (xbox-av keeps the screen),
-plays the game from /data/frolick/stream/hl2/disc.iso as it fills in, and
-starts the dashboard again when the game quits. Results:
-/data/frolick/stream/hl2/result.txt (gate, first frame, bytes fetched by
-then), logs fetch.log and xbcompat.log beside it, the read trace
-disc.iso.trace.
+The Guide is unchanged, so kazeta-guide needs no rebuild.
 
-`stream-play.sh --fetch-only` runs the download alone (gate time, speed
-from the Archive, the md5/sha1 check) and doesn't touch the dashboard.
+Install (nothing running: no game, no test): keep the live binary as
+/opt/xbcompat/bin/xbcompat.pre-stream-<date>, check its md5 is still
+8c1df186..., copy this one over it (`chmod 755`), then restart the
+dashboard. Check with `sha256sum -c SHA256SUMS` first.
 
-Undo: `rm -r /data/frolick/stream`.
+Frolick's side (the Spotlight item, its Play, the store helper that streams
+and fills the tray) comes in the sion and game kits.
+
+Undo: put the .pre-stream copy back.

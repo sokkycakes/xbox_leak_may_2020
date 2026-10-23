@@ -1723,6 +1723,11 @@ function SpotEmpty()
 // item i's second line: its kind, or where its download is
 function SpotKind(i)
 {
+    if (sSpotPlay != "")
+    {
+        if (theStore.GetId(nTab, i) == sSpotPlay)
+            return "Getting the disc ready...";
+    }
     var h = theDownloads.Has(theStore.GetId(nTab, i));
     if (h == 1)
         return "Queued";
@@ -1758,11 +1763,15 @@ function SpotPress()
     var r;
     if (nListCount == 0)
         return;
-    // play as you download needs its launch route first (a streaming
-    // xbcompat beside the dashboard, or the installed one taking streams)
+    // a Streaming Download plays now: the helper streams the disc and
+    // puts it in the tray, and SpotTick starts it from there
     if (theStore.IsStream(nTab, nSel))
     {
-        Notice("Streaming Download for this game is still being set up.", "page_spotlight");
+        if (sSpotPlay != "")
+            return;
+        theDownloads.Play(nTab, nSel);
+        sSpotPlay = theStore.GetId(nTab, nSel);
+        FillRow(nSel - nScroll);
         return;
     }
     r = theDownloads.Queue(nTab, nSel);
@@ -1778,10 +1787,40 @@ function SpotPress()
 // twice a second: the catalog arrived or changed (the list again, the
 // focus kept), or a download moved on (the rows' second lines)
 var nSpotVersion;
+var sSpotPlay;      // the Streaming Download being started ("" none)
 function SpotTick()
 {
     var v = theStore.GetVersion();
     var r;
+    var st;
+    var n;
+    var g;
+    if (sSpotPlay != "")
+    {
+        st = theDownloads.GetPlayState();
+        if (st == "error")
+        {
+            sSpotPlay = "";
+            Notice(theDownloads.GetPlayDetail(), "page_spotlight");
+        }
+        if (st == "ready")
+        {
+            // the disc is in the tray once the dashboard sees it there
+            n = theGameCollection.Scan();
+            for (g = 0; g < n; g = g + 1)
+            {
+                if (theGameCollection.GetGameKind(g) == 1)
+                {
+                    if (theGameCollection.IsPlayable(g) == 1)
+                    {
+                        sSpotPlay = "";
+                        LaunchGameWithLogo(g);
+                        return;
+                    }
+                }
+            }
+        }
+    }
     if (v != nSpotVersion)
     {
         nSpotVersion = v;
@@ -2146,6 +2185,7 @@ function PageEnter()
     if (k == "spotlight")
     {
         nTab = 0;
+        sSpotPlay = "";
         nSpotVersion = theStore.GetVersion();
         SpotFillTabs();
     }

@@ -21,6 +21,12 @@
  * game.iso.trace (milliseconds since start, offset, length), for the chunks
  * a title needs first.
  *
+ * The dashboard's side of streaming: while <hdd>/.dvdimage names an image
+ * that exists, that image is what's in the tray, over the drive (Frolick's
+ * store helper writes it once a streamed disc can start, and takes it out
+ * again). It is looked at with the drive, twice a second, so needs
+ * --dvd-drive (the Sion always passes one, plugged in or not).
+ *
  * A disc in the drive is read as XDVDFS straight from the device: burned
  * XISO discs have it at the start; pressed discs (XGD1) only show their
  * game partition to a drive that has been unlocked: one with Kreon
@@ -684,10 +690,49 @@ static int tray_file_status(bool *changed)
     return CDS_DISC_OK;
 }
 
+/* The image <hdd>/.dvdimage names (above): CDS_DISC_OK while there is
+   one, -1 otherwise. */
+static int drive_look(bool *changed);
+static bool g_inserted;
+static int inserted_status(bool *changed)
+{
+    const char *hdd = fs_hdd_root();
+    char path[PATH_MAX], line[PATH_MAX] = "";
+    struct stat sb;
+    if (!hdd || !hdd[0]) return -1;
+    snprintf(path, sizeof(path), "%s/.dvdimage", hdd);
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+    if (!fgets(line, sizeof(line), f)) line[0] = 0;
+    fclose(f);
+    line[strcspn(line, "\r\n")] = 0;
+    if (!line[0] || stat(line, &sb) != 0 || !S_ISREG(sb.st_mode)) return -1;
+    *changed = !g_inserted || strcmp(line, tray_img) != 0;
+    if (*changed) xlog("DVD: %s goes in the tray (named by %s)", line, path);
+    snprintf(tray_img, sizeof(tray_img), "%s", line);
+    g_inserted = true;
+    return CDS_DISC_OK;
+}
+
 /* One look at the drive: its CDS_* status, or -1 when there is no drive. */
 static int drive_status(bool *changed)
 {
     *changed = false;
+    if (inserted_status(changed) == CDS_DISC_OK) return CDS_DISC_OK;
+    bool left = g_inserted;     /* the image came out: what the drive has now */
+    if (left) {
+        xlog("DVD: %s is out of the tray", tray_img);
+        g_inserted = false;
+        tray_img[0] = 0;
+    }
+    int st = drive_look(changed);
+    if (left) *changed = true;
+    return st;
+}
+
+/* The drive itself (or a tray file standing in for one). */
+static int drive_look(bool *changed)
+{
     struct stat sb;
     if (stat(drive_src, &sb) == 0 && S_ISREG(sb.st_mode)) return tray_file_status(changed);
     if (drive_fd < 0) {

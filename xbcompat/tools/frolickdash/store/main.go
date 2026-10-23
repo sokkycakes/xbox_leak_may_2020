@@ -562,9 +562,17 @@ func buildCatalog(ctx context.Context, tabs []tab) error {
 				continue
 			}
 			// a file of a collection has no picture of its own on the
-			// Archive (the item's is the collection's): no tile
+			// Archive (the item's is the collection's): no tile, unless
+			// it is a disc image
 			tile := ""
-			if !strings.Contains(id, "/") {
+			if ident, file, ok := strings.Cut(id, "/"); ok && it.Stream {
+				// a disc image: the title image inside it
+				tile = tileName(id)
+				if err := discTile(ctx, fileURL(ident, file), filepath.Join(*storeDir, "img", tile)); err != nil {
+					log.Printf("%s: no tile from the disc: %v", id, err)
+					tile = ""
+				}
+			} else if !strings.Contains(id, "/") {
 				tile = tileName(id)
 				fetchTile(ctx, id, filepath.Join(*storeDir, "img", tile))
 				if _, err := os.Stat(filepath.Join(*storeDir, "img", tile)); err != nil {
@@ -679,6 +687,7 @@ func writeStatus(queue []queued) {
 			}
 		}
 	}
+	out.WriteString(playStatus())
 	out.WriteString("end\n")
 	writeAtomic(filepath.Join(*storeDir, "status.txt"), []byte(out.String()))
 }
@@ -947,6 +956,7 @@ func main() {
 			syncCards()
 		}
 		watchSession()
+		watchPlay(ctx)
 		select {
 		case err := <-catDone:
 			if err != nil {
