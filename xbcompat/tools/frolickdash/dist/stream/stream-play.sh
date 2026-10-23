@@ -101,6 +101,8 @@ killall -q -9 xbcompat
 # shellcheck source=/dev/null
 [ -r /etc/default/xbox ] && . /etc/default/xbox
 export XBCOMPAT_BIN=$D/xbcompat
+# the Guide's skin is the installed one (it looks beside the binary otherwise)
+export XBCOMPAT_GUIDE_DIR=${XBCOMPAT_GUIDE_DIR:-$X/bin/guide}
 # The title and any it starts (XLaunchNewImage) go through xbrun.py with
 # this xbcompat, not the Live launcher, which would pick /opt's.
 export XBCOMPAT_LAUNCHER="$X/bin/python3 $X/tools/xbrun.py"
