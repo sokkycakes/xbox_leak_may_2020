@@ -330,12 +330,22 @@ void wlOff(void)
     if (st.state == WL_OFF || st.state == WL_FAILED)
         return;
     if (st.state == WL_LINKED)
+    {
         Send(SL_BYE, NULL, 0);
+        swiWaitForVBlank();   // the ARM7 sends it at its next update
+    }
     DownloadDrop();
-    // idle, not off: a radio switched off and on again heard nothing more
     Leave();
     st.state = WL_OFF;
     st.host[0] = st.motd[0] = st.text[0] = 0;
+    // DSWifi all the way down, radio unpowered, and started again from scratch by wlOn: a
+    // radio only disabled and enabled again (Wifi_DisableWifi, Wifi_EnableWifi) stays
+    // powered down and hears nothing. Deinit takes the ARM7 a couple of updates to be
+    // ready for.
+    Wifi_DisableWifi();
+    for (int i = 0; i < 60 && !Wifi_Deinit(); i++)
+        swiWaitForVBlank();
+    started = false;
 }
 
 void wlTick(void)

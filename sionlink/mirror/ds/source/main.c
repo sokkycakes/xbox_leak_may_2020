@@ -441,20 +441,23 @@ static void showHome(void)
 {
     bool wlChanged;
     const wl_status* w = wlStatus(&wlChanged);
-    static bool silentWas, padWas;
-    bool silent = usbSilent();
-    if (homeDrawn && uiShown() && !wlChanged && silent == silentWas && padOn == padWas)
+    static bool silentWas, padWas, usbWas;
+    bool silent = usbSilent(), usb = usbLinked();
+    if (homeDrawn && uiShown() && !wlChanged && silent == silentWas && padOn == padWas && usb == usbWas)
         return;
     homeDrawn = true;
     silentWas = silent;
     padWas = padOn;
+    usbWas = usb;
 
     char a[96], b[96], foot[64];
     const char* l1 = "Waiting for link...";
     const char* l2 = NULL;
     int percent = -1;
     foot[0] = 0;
-    if (w->state == WL_SEARCHING)
+    if (usb)
+        strcpy(foot, "USB: linked to the Sion (Wi-Fi off)");
+    else if (w->state == WL_SEARCHING)
         strcpy(foot, "Wi-Fi: looking for a Sion");
     else if (w->state == WL_LINKING)
         snprintf(foot, sizeof foot, "Wi-Fi: linking to %s", w->host);
@@ -500,7 +503,8 @@ static void showHome(void)
     uiStatus(l1, l2, percent, foot);
 }
 
-// the mirror's memory is free again and its screens gone: the app's own, and the Wi-Fi link
+// the mirror's memory is free again and its screens gone: the app's own (homeTick brings
+// the Wi-Fi link back if the USB one is gone)
 static void goHome(void)
 {
     mirroring = leaveMirror = false;
@@ -508,11 +512,10 @@ static void goHome(void)
     needFull = true;
     homeDrawn = false;
     showHome();
-    wlOn();
 }
 
-// a game's first full bundle: the Wi-Fi link stops (the mirror needs the DS's time and its
-// memory), and so does being the Sion's pad
+// a game's first full bundle: the Wi-Fi link stops if it was on (the mirror needs the DS's
+// time and its memory), and so does being the Sion's pad
 static void startMirror(void)
 {
     mirroring = true;
@@ -520,8 +523,28 @@ static void startMirror(void)
     wlOff();
 }
 
+// Wi-Fi only while the DSpico's USB isn't linked to a Sion: off as soon as it is, on again
+// 3 s after it goes (the cable out, the DSpico gone quiet), and at the start only after 3 s
+// without it (a DSpico on a Sion links in about a second)
+static u32 usbGoneAt;
+
+static void wifiOrUsb(void)
+{
+    if (usbLinked())
+    {
+        usbGoneAt = 0;
+        wlOff();
+        return;
+    }
+    if (!usbGoneAt)
+        usbGoneAt = vblanks ? vblanks : 1;
+    else if (vblanks - usbGoneAt >= 3 * 60)
+        wlOn();
+}
+
 static void homeTick(void)
 {
+    wifiOrUsb();
     wlTick();
     if (padOn && vblanks - padSeenAt > 3 * 60)
         padOn = false;   // the pad service went (it says so every second)

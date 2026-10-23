@@ -17,6 +17,7 @@ using namespace melonDS;
 enum : u32
 {
     EV_BUS_RESET = 1,
+    EV_SUSPEND = 3,
     EV_XFER_COMPLETE = 0x30000000,
     EV_SETUP = 0x40000000,
     EV_LAST = 1u << 31,
@@ -370,7 +371,7 @@ void DSpicoSim::ControlDone(bool ok)
 
 void DSpicoSim::ReadSocket()
 {
-    if (sock < 0 && !path.empty() && frameNo % 30 == 0)
+    if (sock < 0 && !path.empty() && !unplugged && frameNo % 30 == 0)
     {
         // the Sion side went (the pad service let go, a mirror ended): like the DSpico on
         // a real Sion, wait for whichever process takes the DS next
@@ -496,14 +497,57 @@ void DSpicoSim::Frame()
     budget = budgetPerFrame;
     if (crashed)
         return;
+    // fault test: DSPICO_UNPLUG=N:M[,N:M...] pulls the cable out at frame N and puts it back
+    // M frames later. The DSpico can't see the cable (it forces VBUS on), so the DS only
+    // hears the bus go idle (a suspend), then a bus reset and a new enumeration when it's back.
+    static std::vector<std::pair<long long, long long>> pulls;
+    static bool pullsRead = false;
+    if (!pullsRead)
+    {
+        pullsRead = true;
+        const char* v = getenv("DSPICO_UNPLUG");
+        long long n, m;
+        int used;
+        while (v && sscanf(v, "%lld:%lld%n", &n, &m, &used) == 2)
+        {
+            pulls.push_back({n, m});
+            v += used;
+            v = *v == ',' ? v + 1 : nullptr;
+        }
+    }
+    for (auto& [at, len] : pulls)
+    {
+        if (step >= 0 && (long long)frameNo == at)
+        {
+            fprintf(stderr, "dspico sim: cable out at frame %u\n", frameNo);
+            unplugged = true;
+            configured = false;
+            step = -1;
+            nudging = false;
+            stage = 0;
+            ctrlData.clear();
+            fromHost.clear();
+            if (sock >= 0) { close(sock); sock = -1; }
+            Event(EV_SUSPEND);
+        }
+        if (unplugged && (long long)frameNo == at + len)
+        {
+            fprintf(stderr, "dspico sim: cable in at frame %u\n", frameNo);
+            unplugged = false;
+            attachDelay = 1;
+        }
+    }
     if (attachDelay && --attachDelay == 0)
     {
+        // a bus reset ends whatever transfers were waiting (reset_non_control_endpoints)
+        in.armed = false;
+        for (Out& o : outs) o = Out();
         step = ENUM_GET_DEV64;
         Event(EV_BUS_RESET);
         NextSetup();
     }
-    // the host polls the report endpoint every millisecond
-    if (in.armed)
+    // the host polls the report endpoint every millisecond (none while the cable is out)
+    if (in.armed && !unplugged)
     {
         in.armed = false;
         DeviceSent(in.ep, &bufs[Slot(in.ep)][in.idx * 512], in.len);

@@ -99,6 +99,8 @@ static void cardWrite512(u64 cmd, const u32* src)
 
 #define EV_LAST       (1u << 31)
 #define EV_BUS_RESET  1
+#define EV_SUSPEND    3   // the bus went idle: the cable is out or the host suspended
+#define EV_RESUME     4   // the device (the DSpico can't tell which)
 
 #define EP_OUT 0x01
 #define EP_IN  0x81
@@ -130,6 +132,7 @@ static u8 ring[RING];
 static volatile u32 ringHead, ringTail;  // write / read positions
 
 static bool configured;
+static bool suspended;
 static u8 pendingAddr;
 static enum { CTRL_IDLE, CTRL_DATA_IN, CTRL_STATUS_OUT, CTRL_STATUS_IN } ctrl;
 
@@ -188,6 +191,11 @@ u32 usbRead(void* dst, u32 n)
 bool usbConfigured(void)
 {
     return configured;
+}
+
+bool usbLinked(void)
+{
+    return configured && !suspended && !usbSilent();
 }
 
 // ---- endpoint 0
@@ -487,20 +495,28 @@ static bool drainEvents(void)
             last = e2 & EV_LAST;
             usbDiag.setups++;
             usbDiag.lastSetup = e2 & ~EV_LAST;
+            suspended = false;
             setup(e, e2 & ~EV_LAST);
         }
         else if ((e >> 28) == 3)
+        {
+            suspended = false;
             xferComplete(e & 0xFF, (e >> 8) & 0x1FFF);
+        }
         else if (e == EV_BUS_RESET)
         {
             usbDiag.resets++;
             diagLog('R', 0, 0, 0);
-            configured = false;
+            configured = suspended = false;
             outArmed = inBusy = false;
             pendingAddr = 0;
             ctrl = CTRL_IDLE;
         }
-        // SOF, suspend, resume, unplugged: nothing to do
+        else if (e == EV_SUSPEND)
+            suspended = true;
+        else if (e == EV_RESUME)
+            suspended = false;
+        // SOF, unplugged (never sent: the DSpico doesn't see the cable): nothing to do
         if (last)
             break;
     }

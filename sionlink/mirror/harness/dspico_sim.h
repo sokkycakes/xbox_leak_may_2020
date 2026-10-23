@@ -57,6 +57,7 @@ private:
     int step = -1;          // -1: not attached yet
     int stage = 0;          // 0 setup sent, 1 data received / waiting for status
     int attachDelay = 0;
+    bool unplugged = false;  // DSPICO_UNPLUG: the cable is out
     std::vector<u8> ctrlData;
     bool configured = false;
     u32 outEp = 0, inEp = 0;

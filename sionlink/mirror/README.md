@@ -216,15 +216,17 @@ first install left the Sion with no display keeper until the next boot.
 ## One DS app: Wi-Fi, Download Play and the DS as a pad
 `ds/` is Sion Link's only DS app (`kit/sion-link-live.nds`): the Wi-Fi launcher (branch
 rb4kah, `sionlink/ds`) is in it, with its ARM7 and DSWifi build. It starts at a home screen
-and listens on both links at once. On Wi-Fi it links to the first Sion it hears with no
-buttons pressed (`ds/source/wifilink.c`, the launcher's screens made into a step a frame) and
+and uses one link at a time: Wi-Fi only while the DSpico's USB isn't linked to a Sion (off
+as soon as a host configures the DSpico, on again 3 s after the bus goes idle or the DSpico
+goes quiet, and at the start only after 3 s without USB). On Wi-Fi it links to the first Sion
+it hears with no buttons pressed (`ds/source/wifilink.c`, the launcher's screens made into a step a frame) and
 takes what the Sion sends: text, and programs over Download Play (Sion games with DS players
 send their DS side that way), which it boots from RAM (`boot.c`; the heap stops at
 `SLBOOT_STAGE_END` so the staged program sits where `BootNds` can move it down). On USB, the
-first full bundle switches it to the mirror: Wi-Fi goes idle, as the mirror needs all the
-DS's time, and the home screen comes back when the mirror ends (a stall, or a pad bundle).
-Switching the radio off for the mirror and on again left it hearing nothing, so it is only
-idle (`Wifi_IdleMode`) meanwhile.
+first full bundle switches it to the mirror, and the home screen comes back when the
+mirror ends (a stall, or a pad bundle). Wi-Fi off is DSWifi deinitialized and the radio
+unpowered, started from scratch when it comes back: a radio only disabled and enabled again
+(`Wifi_DisableWifi`, `Wifi_EnableWifi`) stays powered down and hears nothing.
 
 The DS is the Sion's pad whenever no DS game is mirrored. `harness/dspad.cpp` (the
 `dspad` in `kit/sion`, started at boot by `S97sionlink-pad`) holds the DSpico and makes an
@@ -244,7 +246,11 @@ Cloud tests: `dspad --link sim:PATH --dry 1` serves the simulated DSpico and log
 instead of making it; the simulated DSpico reconnects when the Sion side closes, so the pad,
 a mirror and the pad again can follow each other. `MELONDS_AIR=host:port` bridges the
 emulated DS's radio over UDP to `sionlinkd --melon` (branch rb4kah), so the Wi-Fi link and
-Download Play run in the same test. Tested together: the DS as a pad on the home screen,
+Download Play run in the same test. `DSPICO_UNPLUG=N:M[,N:M...]` pulls the simulated
+cable out at frame N for M frames (the DSpico can't see the cable: the DS hears a suspend,
+then a bus reset and a new enumeration). Tested: the DS as a pad with Wi-Fi off, the cable
+out (Wi-Fi on, linked), back in (Wi-Fi off, the Sion told), out again (linked again) and a
+program over Download Play. Tested together before Wi-Fi gave way to USB: the DS as a pad on the home screen,
 linked over Wi-Fi; the MKDS demo's mirror taking over and ending; the pad again, a Wi-Fi
 relink, and `sion-hello.nds` sent over Download Play (63652 bytes, 0.3 s) and booted.
 

@@ -2,7 +2,7 @@
 // launcher (branch rb4kah, sionlink/ds). It finds a Sion and links to it by itself, then takes
 // what the Sion sends: a line of text now and then, and programs over Download Play, booted
 // from RAM (Sion games with DS players send their DS side that way too). It runs a step a
-// frame while no game is mirrored; the mirror leaves it idle, as it needs all the DS's time.
+// frame while no game is mirrored, and only while the DSpico's USB isn't linked to a Sion.
 #ifndef WIFILINK_H
 #define WIFILINK_H
 
@@ -30,7 +30,7 @@ typedef struct {
 
 // looking for a Sion (the first time it starts DSWifi, which takes a moment)
 void wlOn(void);
-// says goodbye to the Sion, drops a download, the radio idle
+// says goodbye to the Sion, drops a download, the radio off (it can take a few frames)
 void wlOff(void);
 // once a frame while on: never blocks, but boots a program once it has all of it (and then
 // doesn't return)

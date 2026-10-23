@@ -43,6 +43,9 @@ extern usb_diag usbDiag;
 void usbPoll(void);
 void usbTick(void);
 bool usbConfigured(void);
+// a host has the DS: configured, and the bus not gone idle (the cable pulled out, or the
+// host suspending the device) nor the DSpico silent
+bool usbLinked(void);
 // the DSpico has answered no event read for 2 s: it has stopped listening to the
 // card bus, and only switching the DS off and on brings it back
 bool usbSilent(void);
