@@ -17,7 +17,10 @@
 //                  gone <identifier>   (its game was deleted: out of the
 //                                       history, so it can be had again)
 //                  stream <identifier> <starting|ready|error> <in> <bytes> <detail>
-//                                      (the disc image being streamed)
+//                                      (the Streaming Download asked for;
+//                                       ready: detail = its E:\Games folder)
+//                  installed <identifier> <folder>
+//                                      (a Streaming Download in E:\Games)
 //   history.txt  written here: what finished (Download History)
 //                  h <identifier> <MB> <kind> <title>
 //   play.txt     written here: the Streaming Download item to play now
@@ -52,10 +55,11 @@
 //                     queued or downloaded, -1 the queue is full
 //   Has(id)           0, 1 queued, 2 downloaded
 //   Play(t, i)        play Store item i of tab t as it downloads: the helper
-//                     streams it and puts it in the DVD tray
-//   GetPlayState()    "" (nothing asked), "starting", "ready" (in the tray:
-//                     start it from there) or "error"
-//   GetPlayDetail()   why, for "error"
+//                     installs it in E:\Games and streams its disc image
+//   GetPlayState()    "" (nothing asked), "starting", "ready" (start it from
+//                     E:\Games\<GetPlayDetail()>) or "error"
+//   GetPlayDetail()   the game's folder (ready), or why (error)
+//   IsInstalled(id)   1 when a Streaming Download is in E:\Games
 // Not part of Microsoft's dashboard; added for Frolick (tools/frolickdash).
 
 #include "std.h"
@@ -99,6 +103,9 @@ static CHAR c_szPlayId[DL_ID];
 static CHAR c_szStreamId[DL_ID];
 static CHAR c_szStreamState[16];
 static CHAR c_szStreamDetail[64];
+#define INST_MAX 32
+static CHAR c_rgszInstalled[INST_MAX][DL_ID];
+static int c_nInstalled;
 
 const CHAR* StoreServiceState()
 {
@@ -140,6 +147,7 @@ public:
     int Play(int t, int i);
     CStrObject* GetPlayState();
     CStrObject* GetPlayDetail();
+    int IsInstalled(const TCHAR* szId);
 
 protected:
     void SavePlay();
@@ -189,6 +197,7 @@ START_NODE_FUN(CDownloads, CNode)
     NODE_FUN_III(Play)
     NODE_FUN_SV(GetPlayState)
     NODE_FUN_SV(GetPlayDetail)
+    NODE_FUN_IS(IsInstalled)
 END_NODE_FUN()
 
 CDownloads::CDownloads() : m_nCount(0), m_nHist(0), m_nWait(0.0f), m_nStale(0.0f), m_cbStatus(0)
@@ -342,6 +351,7 @@ void CDownloads::ReadStatus()
     c_szActiveState[0] = 0;
     c_szActiveDetail[0] = 0;
     c_szStreamId[0] = 0;
+    c_nInstalled = 0;
     bool bChanged = false;
     CHAR* line = p;
     while (line && *line)
@@ -386,6 +396,11 @@ void CDownloads::ReadStatus()
             c_szStreamDetail[0] = 0;
             if (k >= 6)
                 Copy(c_szStreamDetail, f[5], sizeof c_szStreamDetail);
+        }
+        else if (strcmp(f[0], "installed") == 0 && k >= 2)
+        {
+            if (c_nInstalled < INST_MAX)
+                Copy(c_rgszInstalled[c_nInstalled++], f[1], DL_ID);
         }
         else if (strcmp(f[0], "have") == 0 && k >= 3)
         {
@@ -542,6 +557,19 @@ CStrObject* CDownloads::GetPlayDetail()
     if (c_szPlayId[0] == 0 || strcmp(c_szStreamId, c_szPlayId) != 0)
         return StoreStr("");
     return StoreStr(c_szStreamDetail);
+}
+
+int CDownloads::IsInstalled(const TCHAR* szId)
+{
+    CHAR sz[DL_ID];
+    int n = 0;
+    for (; szId[n] && n < DL_ID - 1; n++)
+        sz[n] = (CHAR)szId[n];      // identifiers are ASCII
+    sz[n] = 0;
+    for (int i = 0; i < c_nInstalled; i++)
+        if (strcmp(c_rgszInstalled[i], sz) == 0)
+            return 1;
+    return 0;
 }
 
 void CDownloads::StartNext()

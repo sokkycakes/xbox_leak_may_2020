@@ -84,13 +84,17 @@ Streaming Download (play.go, stream.go, disc.go): an Xbox disc image on
 the Archive (a catalog entry `id <item>/<file>.iso | Xbox game`) is
 flagged `stream` in catalog.txt, and its tile is the title image inside
 its default.xbe, read with a few range requests. Play on it writes
-play.txt; the helper runs itself with `-stream` into
-/data/frolick/stream/<name>/disc.iso and, once the disc's directory and
-default.xbe are in, names the image in /data/xbox/hdd/.dvdimage.
-xbcompat (src/kernel/dvd.c) then has that image in the DVD tray, over the
-USB drive, and the dashboard starts it like a disc, in its own process.
-Reads the game makes ahead of the download wait for their chunk; the rest
-fills in behind them and goes on after the game until the whole disc is in
-and checked (md5, sha1). When the dashboard starts again it empties
-play.txt and the helper takes the image out of the tray; the next Play of
-that game starts at once.
+play.txt; the helper installs the game as E:\Games\<title> (default.iso,
+the disc image at its full size and filled in as it comes; default.xbe;
+frolick-stream.txt, where it comes from) and runs itself with `-stream` to
+fill the image. Once the disc's directory and default.xbe are in, the
+dashboard starts it from E:\Games like any installed game; xbcompat gives
+a game whose folder holds a default.iso that image as its DVD drive
+(src/kernel/misc.c), streamed while default.iso.stream and .map are beside
+it (dvd.c). Reads the game makes ahead of the download wait for their
+chunk; the rest fills in behind them and after the game until the whole
+disc is in and checked (md5, sha1), and then the stream files go: an
+ordinary installed game. The Memory screens show it at its full size and
+delete it like any game (the helper then stops filling it); one left
+unfinished by a reboot is filled again in the background. Logs and stats
+are in /data/frolick/stream/<name>.

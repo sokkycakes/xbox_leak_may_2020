@@ -916,6 +916,7 @@ func main() {
 		return
 	}
 	os.MkdirAll(*dlDir, 0755)
+	migrateStreams(tabs)
 
 	// The catalog in the background: at start (retried every minute until
 	// it works), then every -refresh.

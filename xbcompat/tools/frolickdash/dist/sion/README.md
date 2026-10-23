@@ -26,4 +26,4 @@ If the picture is narrower than the cloud screenshots, the Sion's
 
 Check the files with `sha256sum -c SHA256SUMS`.
 
-Streaming Download (Play on Half-Life 2 in Spotlight) needs the store service from this kit and the xbcompat in dist/stream installed in /opt/xbcompat; with the old xbcompat the item stays on "Getting the disc ready...".
+Streaming Download (Play on Half-Life 2 in Spotlight) needs the store service from this kit and the xbcompat in dist/stream installed in /opt/xbcompat.

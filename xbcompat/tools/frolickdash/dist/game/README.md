@@ -12,7 +12,7 @@ the power button, returns to the dashboard.
 | launch.wav | the launch sound, played while the Xbox logo holds before a game starts | |
 | woosh.wav, blades_*.wav | the UI sounds: Frolick's woosh pad to pad, the 360 Blades' focus / select / back / open / close for the rest | loose files beside the XBE |
 | menu_music.wav | the menu ambience, looped under the menus (Xbox ADPCM, 34 MB, streamed from the file) | |
-| bd0c1ea4...-d3d8+dsound+xapilib-9e55a416902bf3c8.map | the HLE map cache (/data/xbox/cache/xbcompat) | optional: xbrun makes its own on the first launch otherwise |
+| 6e564fbd...-d3d8+dsound+xapilib-9e55a416902bf3c8.map | the HLE map cache (/data/xbox/cache/xbcompat) | optional: xbrun makes its own on the first launch otherwise |
 | frolick-store | /opt/frolick/bin/frolick-store | the storefront helper (`store/`, static x86-64): the Internet Archive catalog for Spotlight and the downloads behind the Downloads page, through files in E:\FROLICK\STORE; downloads land in /data/frolick/downloads |
 | S97frolick-store | /etc/init.d/S97frolick-store | starts the helper at boot; log /var/log/frolick-store.log |
 | install-store.sh | runs on the Sion | installs the two above (sion persist) and starts the helper; the kit's installer runs it |
@@ -29,4 +29,4 @@ the hub renders.
 
 Check the files with `sha256sum -c SHA256SUMS`.
 
-Streaming Download (Play on Half-Life 2 in Spotlight) needs the store service from this kit and the xbcompat in dist/stream installed in /opt/xbcompat; with the old xbcompat the item stays on "Getting the disc ready...".
+Streaming Download (Play on Half-Life 2 in Spotlight) needs the store service from this kit and the xbcompat in dist/stream installed in /opt/xbcompat.

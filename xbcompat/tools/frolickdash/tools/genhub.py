@@ -1728,6 +1728,8 @@ function SpotKind(i)
         if (theStore.GetId(nTab, i) == sSpotPlay)
             return "Getting the disc ready...";
     }
+    if (theDownloads.IsInstalled(theStore.GetId(nTab, i)) == 1)
+        return "Installed";
     var h = theDownloads.Has(theStore.GetId(nTab, i));
     if (h == 1)
         return "Queued";
@@ -1763,8 +1765,8 @@ function SpotPress()
     var r;
     if (nListCount == 0)
         return;
-    // a Streaming Download plays now: the helper streams the disc and
-    // puts it in the tray, and SpotTick starts it from there
+    // a Streaming Download plays now: the helper installs it in E:\\Games
+    // and streams its disc, and SpotTick starts it from there
     if (theStore.IsStream(nTab, nSel))
     {
         if (sSpotPlay != "")
@@ -1805,11 +1807,11 @@ function SpotTick()
         }
         if (st == "ready")
         {
-            // the disc is in the tray once the dashboard sees it there
+            // an installed game like any other: E:\\Games\\<folder>
             n = theGameCollection.Scan();
             for (g = 0; g < n; g = g + 1)
             {
-                if (theGameCollection.GetGameKind(g) == 1)
+                if (theGameCollection.GetGameFolder(g) == theDownloads.GetPlayDetail())
                 {
                     if (theGameCollection.IsPlayable(g) == 1)
                     {
