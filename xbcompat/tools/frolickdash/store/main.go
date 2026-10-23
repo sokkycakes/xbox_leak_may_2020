@@ -948,13 +948,17 @@ func main() {
 		}
 	}
 	tick := time.NewTicker(time.Second)
-	lastWatch := time.Time{}
+	lastWatch, lastSetups := time.Time{}, time.Time{}
 	for {
 		if time.Since(lastWatch) > 15*time.Second {
 			lastWatch = time.Now()
 			recheckInstallers()
 			watchInstalls()
 			syncCards()
+		}
+		if time.Since(lastSetups) > time.Minute {
+			lastSetups = time.Now()
+			syncWinSetups()
 		}
 		watchSession()
 		watchPlay(ctx)

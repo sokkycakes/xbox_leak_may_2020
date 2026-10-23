@@ -23,20 +23,23 @@ What it adds:
   screens: an XBE named "Frolick", or any XBE run from Games/Frolick (the
   Sion's Frolick is an older build still named "Xbox Dashboard"); games
   and the stock dashboard still see a volume of at most 8 GB
-  (src/kernel/io.c).
+  (src/kernel/io.c). As on a console, the cache drives (X:, Y:, Z:) are
+  hidden: Frolick's total is the disk less a 2.25 GB reservation for them,
+  and what they (and xbcompat's own cache beside the hard disk) hold
+  doesn't count as used, never showing more free than there really is.
 
-Replaces 436d7c1e's build (md5 05a81a92), which only knew Frolick by the
-name "Frolick" and so still showed 8 GB free of 8 GB on the Sion.
+Replaces 274fef3a's build (md5 742ff4a0), which counted the cache drives
+in Frolick's used space.
 
 The Guide is unchanged, so kazeta-guide needs no rebuild.
 
 Install (nothing running: no game, no test): check the live binary is
-still 05a81a92... (436d7c1e), keep it as
-/opt/xbcompat/bin/xbcompat.pre-memsize2-<date>, copy this one over it
+still 742ff4a0... (274fef3a), keep it as
+/opt/xbcompat/bin/xbcompat.pre-memcache-<date>, copy this one over it
 (`chmod 755`), then restart the dashboard. Check with
 `sha256sum -c SHA256SUMS` first. Nothing else changes.
 
 Frolick's side (the Spotlight item, its Play, the store helper that streams
 and installs streamed games in E:\Games) comes in the sion and game kits.
 
-Undo: put the .pre-memsize2 copy back.
+Undo: put the .pre-memcache copy back.
