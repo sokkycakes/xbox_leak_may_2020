@@ -777,6 +777,13 @@ NTSTATUS NTAPI NtSetInformationFile(HANDLE FileHandle, IO_STATUS_BLOCK *iosb, PV
     return st;
 }
 
+/* Frolick's dashboard (title FFFE0000; the combined build also checks
+   its name, see tools/frolickdash/dist/stream/xbcompat-gudfcx.patch). */
+static bool frolick_dash(void)
+{
+    return xbe_title_id() == 0xFFFE0000;
+}
+
 NTSTATUS NTAPI NtQueryVolumeInformationFile(HANDLE FileHandle, IO_STATUS_BLOCK *iosb, PVOID Info,
                                             ULONG Length, ULONG Class)
 {
@@ -797,9 +804,12 @@ NTSTATUS NTAPI NtQueryVolumeInformationFile(HANDLE FileHandle, IO_STATUS_BLOCK *
     case 7: {   /* FileFsFullSizeInformation */
         LARGE_INTEGER *li = Info;
         ULONG *u;
-        /* Report a 16 KB cluster FATX-like volume, capped to what a console has. */
+        /* Report a 16 KB cluster FATX-like volume. Titles see it capped to
+           what a console has (8 GB, so 32-bit block math holds); Frolick's
+           dashboard, which counts in 64 bits, sees the disk's real size and
+           free space. */
         ULONGLONG total = (ULONGLONG)vs.f_blocks * vs.f_frsize, avail = (ULONGLONG)vs.f_bavail * vs.f_frsize;
-        if (total > 8ULL << 30) total = 8ULL << 30;
+        if (total > 8ULL << 30 && !frolick_dash()) total = 8ULL << 30;
         if (avail > total) avail = total;
         li[0].QuadPart = total / 16384;
         li[1].QuadPart = avail / 16384;
