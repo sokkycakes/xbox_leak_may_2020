@@ -581,6 +581,7 @@ public:
     u32 capWaits = 0;
     bool sendStop = false;
     bool senderWorking = false;   // the sender has a job in hand
+    bool inSend = false;          // ... and hands it to the link (it's done with the 3D filter)
 
     void StartLink(HostLink* l)
     {
@@ -615,6 +616,7 @@ public:
                 // armed, which loses data or hangs its firmware. The DS skips the zero padding
                 // while it looks for the next bundle's header.
                 b.resize((b.size() + 511) & ~size_t(511), 0);
+                { std::lock_guard<std::mutex> g(sendLock); inSend = true; }   // the job no longer needs the filter
                 bool ok = !linkLost && link->Send(b.data(), b.size());
                 if (ok) sentBytes += b.size();
                 if (((mirror_hdr*)b.data())->flags & MIRROR_FLAG_FULL)
@@ -626,12 +628,13 @@ public:
                                 raw >> 10, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
                 }
                 std::lock_guard<std::mutex> g(sendLock);
+                inSend = false;
                 sendBusy--;
                 senderWorking = false;
                 sendDone.notify_all();
                 if (!ok && !linkLost)
                 {
-                    fprintf(stderr, "link: the DS went away at frame %u\n", emuFrame);
+                    if (!gMirrorQuit) fprintf(stderr, "link: the DS went away at frame %u\n", emuFrame);
                     linkLost = true;
                 }
             }
@@ -656,6 +659,8 @@ public:
         sendBusy = 0;
         fullPending = 0;
         sendStop = false;
+        inSend = false;
+        stalled = false;
         linkLost = false;
         RequestFull();
         StartLink(l);
@@ -668,7 +673,8 @@ public:
         if (sendBusy < 8) return;
         if (capWaits++ < 10)
             fprintf(stderr, "link: %u bundles waiting during display capture; the game waits for the DS\n", sendBusy);
-        sendDone.wait(g, [this] { return sendBusy < 4 || linkLost; });
+        while (!sendDone.wait_for(g, std::chrono::milliseconds(100), [this] { return sendBusy < 4 || linkLost; }))
+            if (StallBegins()) return;
     }
     // until the sender has built and sent everything queued (the 3D state it keeps is then
     // the game's up to the last frame)
@@ -676,7 +682,55 @@ public:
     {
         if (!link) return;
         std::unique_lock<std::mutex> g(sendLock);
-        sendDone.wait(g, [this] { return sendQueue.empty() && !senderWorking; });
+        while (!sendDone.wait_for(g, std::chrono::milliseconds(100), [this] { return sendQueue.empty() && (!senderWorking || (stalled && inSend)); }))
+            if (StallBegins()) return;
+    }
+
+    // The DS that takes nothing (switched off with its DSpico still plugged in, or its
+    // client stuck) left the sender waiting on one bundle for good, while every frame
+    // after it queued its 3D writes as a left-out frame: 6.8 GB in 27 minutes, until the
+    // kernel killed the game (run 18). Now once it has taken nothing for 2 s the frames go
+    // nowhere, as with no DS (DropFrame), the queued ones too, and when it takes data
+    // again it gets a full bundle. Under sendLock, on the game's thread.
+    static constexpr int64_t StallMs = 2000;
+    bool stalled = false;
+    u32 stalls = 0;
+    bool StallBegins()
+    {
+        if (stalled || !inSend || !link || link->WaitingMs() < StallMs) return false;
+        // the sender is in Send, done with the filter: the queue's frames go through it here
+        std::vector<IOW> none;
+        carry.clear();   // the 3D writes kept from left-out frames count as sent
+        for (GXJob& j : sendQueue)
+        {
+            if (j.send)
+            {
+                sendBusy--;
+                if (j.flags & MIRROR_FLAG_FULL) fullPending--;
+                if (!j.built.empty()) continue;   // went through the filter as it was built
+                for (const IOW& w : j.regs3d) filt.Feed(w, true, none);
+            }
+            DropFrame(j);
+        }
+        sendQueue.clear();
+        unshown.clear();
+        stalled = true;
+        stalls++;
+        RequestFull();
+        fprintf(stderr, "link: the DS has taken nothing for %lld s; the game goes on without it until it does\n",
+                (long long)(link->WaitingMs() / 1000));
+        return true;
+    }
+    // line 0: whether this frame goes nowhere for a DS that takes nothing
+    bool Stalled()
+    {
+        std::lock_guard<std::mutex> g(sendLock);
+        if (stalled && !inSend)
+        {
+            stalled = false;
+            if (!linkLost) fprintf(stderr, "link: the DS takes data again at frame %u; a full frame next\n", emuFrame);
+        }
+        return stalled || StallBegins();
     }
     // The game's menu is up and the game stands still, but the DS takes a link with
     // nothing on it for a stalled one (its status page after 2 s). A bundle with nothing
@@ -816,7 +870,7 @@ public:
             skipThis = holdNext;
             holdNext = false;
             // no DS yet (--hotplug) and nothing recorded: no bundles, only the state they'd leave
-            dropThis = !link && !out;
+            dropThis = (!link && !out) || (link && Stalled());
             if (dropThis) skipThis = true;
             bool behind = link && !skipThis && frame > 0 && (LinkBehind() || DSBehind());
             if (link && frame > 0 && (capThis || capPrev))
@@ -2266,7 +2320,7 @@ int main(int argc, char** argv)
                 fprintf(stderr, "frame %u: %.1f fps (%.1f ms a frame, longest %.0f ms), %u bundles sent (%llu KB/s), %u frames left out, DS showed %u%s, %u reports, pad %03x%s\n",
                         f, 600 / s, workMs / 600, longestMs, rec.frame, (unsigned long long)((sent - sentShown) / 1024 / s), rec.linkSkips,
                         shown - shownBefore, behind, reports - reportsShown, pad.keys & 0xFFF,
-                        pad.applied & MIRROR_INPUT_NEED_FULL ? ", DS waiting for a full frame" : "");
+                        rec.stalled ? ", the DS takes no data" : pad.applied & MIRROR_INPUT_NEED_FULL ? ", DS waiting for a full frame" : "");
             longestMs = workMs = 0;
             fprintf(stderr, "  CPU: %s\n", CpuUse(s).c_str());
 #ifdef HAVE_GL
@@ -2548,8 +2602,8 @@ int main(int argc, char** argv)
     rec.StopLink();
     if (link)
     {
-        fprintf(stderr, "link: sent %u bundles, %u frames left out while the link was busy, %u pad reports from the DS, %u frames with buttons held\n",
-                rec.frame, rec.linkSkips, reports, padFrames);
+        fprintf(stderr, "link: sent %u bundles, %u frames left out while the link was busy, %u pad reports from the DS, %u frames with buttons held, %u times the DS took nothing for 2 s\n",
+                rec.frame, rec.linkSkips, reports, padFrames, rec.stalls);
         if (pad.magic == MIRROR_INPUT_MAGIC)
             fprintf(stderr, "link: the DS's last report: %u shown%s, %u damaged bundles, %u with no memory, %u full refreshes, %u stalls, %u silent reads\n",
                     pad.applied & ~MIRROR_INPUT_NEED_FULL, pad.applied & MIRROR_INPUT_NEED_FULL ? " (waiting for a full frame)" : "",

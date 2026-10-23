@@ -6,6 +6,7 @@
 #define HOSTLINK_H
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -20,6 +21,18 @@ public:
     virtual bool Send(const uint8_t* data, size_t len) = 0;
     // newest pad report since the last call, if any
     virtual bool Poll(mirror_input& in) = 0;
+    // how long Send has waited for the DS to take any of what it's sending (0: not waiting)
+    int64_t WaitingMs() const
+    {
+        int64_t from = waitFrom;
+        return from ? NowMs() - from : 0;
+    }
+    static int64_t NowMs()
+    {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+protected:
+    std::atomic<int64_t> waitFrom {0};   // Send: when the DS last took some (0 when not sending)
 };
 
 // waits for the DS to be there; nullptr if it can't, or once gMirrorQuit (or *stop) is set

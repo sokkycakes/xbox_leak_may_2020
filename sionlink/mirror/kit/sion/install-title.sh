@@ -45,12 +45,24 @@ fi
 
 py() { /usr/bin/env LD_LIBRARY_PATH=$X/lib PYTHONHOME=$X PYTHONDONTWRITEBYTECODE=1 $X/bin/python3 "$@"; }
 
+# The dashboard again, so it lists the change: its session loop and xbcompat go, as in
+# tv.sh, and xbox-av stays, keeping the picture (S98xbox stop stops it too, and the session
+# started right after found it still on its way out and started none: the display had no
+# keeper until the next boot). A session that starts with none starts one.
 restart_dash() {
 	pidof xbcompat > /dev/null || { echo "the dashboard isn't running: it lists the change when it next starts"; return 0; }
-	/etc/init.d/S98xbox stop > /dev/null 2>&1
+	start-stop-daemon -K -q -p /var/run/xbox.pid
+	rm -f /var/run/xbox.pid
+	killall -q xbcompat
+	for _ in 1 2 3 4 5 6 7 8 9 10; do
+		pidof xbcompat > /dev/null || break
+		sleep 0.3
+	done
+	killall -q -9 xbcompat
 	/etc/init.d/S98xbox start > /dev/null 2>&1
 	sleep 10
 	pidof xbcompat > /dev/null && echo "the Xbox dashboard is running" || echo "the dashboard is not running"
+	pidof xbox-av > /dev/null && echo "xbox-av keeps the picture" || echo "xbox-av is not running"
 }
 
 if [ "$1" = --remove ]; then

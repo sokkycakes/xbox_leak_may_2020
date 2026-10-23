@@ -67,17 +67,20 @@ public:
     bool Ok() const { return fd >= 0; }
     bool Send(const uint8_t* d, size_t n) override
     {
+        waitFrom = NowMs();
         while (n)
         {
+            if (gMirrorQuit) { waitFrom = 0; return false; }
             // keep draining reports while the DS side is slow to take data
             pollfd p {fd, POLLOUT | POLLIN, 0};
             poll(&p, 1, 100);
             if (p.revents & POLLIN) ReadSome();
-            if (!(p.revents & POLLOUT)) { if (p.revents & (POLLHUP | POLLERR)) return false; continue; }
+            if (!(p.revents & POLLOUT)) { if (p.revents & (POLLHUP | POLLERR)) { waitFrom = 0; return false; } continue; }
             ssize_t w = send(fd, d, n, MSG_DONTWAIT | MSG_NOSIGNAL);
-            if (w > 0) { d += w; n -= w; }
-            else if (errno != EAGAIN) return false;
+            if (w > 0) { d += w; n -= w; waitFrom = NowMs(); }
+            else if (errno != EAGAIN) { waitFrom = 0; return false; }
         }
+        waitFrom = 0;
         return true;
     }
     void ReadSome()
@@ -113,10 +116,6 @@ class UsbLink : public HostLink
     std::atomic<int> nudges {0};
     std::atomic<int64_t> lastReportMs {0}, inSubmittedMs {0};
     int64_t lastInNudgeMs = 0;
-    static int64_t NowMs()
-    {
-        return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-    }
     static const char* StatusName(int s)
     {
         static const char* const names[] = {"completed", "error", "timed out", "cancelled", "stalled", "device gone", "overflow"};
@@ -242,14 +241,17 @@ public:
     {
         // in pieces of 4 KB (8 DS reads; the recorder pads bundles to whole reads), so
         // waiting long on one means the DS stopped taking data, not that a bundle is big
-        while (n)
+        bool ok = true;
+        while (n && ok)
         {
             size_t k = std::min<size_t>(n, 4096);
-            if (!SendPiece(d, k)) return false;
+            waitFrom = NowMs();
+            ok = SendPiece(d, k);
             d += k;
             n -= k;
         }
-        return true;
+        waitFrom = 0;
+        return ok;
     }
     bool SendPiece(const uint8_t* d, size_t n)
     {
@@ -265,6 +267,19 @@ public:
             timeval tv {0, 50000};
             libusb_handle_events_timeout_completed(ctx, &tv, &done);
             if (done) break;
+            if (gMirrorQuit)
+            {
+                // told to stop while the DS takes nothing (switched off with its DSpico
+                // still plugged in): stopping mustn't wait for it
+                libusb_cancel_transfer(t);
+                for (int i = 0; i < 40 && !done; i++)
+                {
+                    timeval tw {0, 50000};
+                    libusb_handle_events_timeout_completed(ctx, &tw, &done);
+                }
+                if (done) libusb_free_transfer(t);   // else libusb still has it: leave it be
+                return false;
+            }
             // 0.15 s without the DS taking 4 KB: it may have missed the DSpico
             // command that arms its transfer, or the event that ends one
             int64_t now = NowMs();

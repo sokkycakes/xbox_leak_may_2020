@@ -119,7 +119,15 @@ leave and join again at any time. Until one is there no bundles are made; the 3D
 still go through the geometry shadow as if sent, and the 3D registers that hold state (fog,
 toon and edge tables, clear color, DISP3DCNT) are kept, so the full bundle a DS starts with
 sets all of it. Cloud test: a DS joining mid-race shows the game's pictures from its
-second frame on. `--pads 1` lets the Sion's own pads play (`pads.h`: SDL2 game controllers,
+second frame on. A DS that's there but takes nothing (switched off with its DSpico still
+plugged in, or its client stuck) is handled the same way once it has taken nothing for 2 s:
+the frames go nowhere, as with no DS, until it takes data again and gets a full bundle.
+Before, every frame queued its 3D writes behind the bundle it was stuck on, and run 18 grew
+to 6.8 GB in 27 minutes until the kernel killed it; stopping in that state waited for the DS
+for good. Cloud test (`DSPICO_STALL=N:M`, the simulated DSpico taking nothing for M frames
+from frame N): a 30 s stall, memory flat (it grew 270 MB before), the DS back 4 frames
+behind with one 284 KB full bundle; quitting and a reset from the menu during one work.
+`--pads 1` lets the Sion's own pads play (`pads.h`: SDL2 game controllers,
 its HIDAPI drivers over libusb as in xbcompat; build SDL with `harness/build-sdl.sh`):
 buttons by position as on a DS, the right stick moves a stylus drawn on the TV, the right
 trigger touches, and holding Back for 1.5 s opens the game's menu (below). Buttons from the DS,
@@ -178,7 +186,9 @@ xbcompat started for the stub execs `wincart-run` with the cart, which hands DS 
 layout in `UDATA/<title id>/000000000001/`, so the Memory screen lists them under the game's
 name and icon. Back to dashboard in the game's menu ends it, and the dashboard comes back as
 after any title. Log: `/data/sionlink/logs/ID.log`. Tested in the cloud on a mock of the Sion's
-paths: install, launch through `wincart-run`, reinstall, remove.
+paths: install, launch through `wincart-run`, reinstall, remove. The installer restarts the
+dashboard as `tv.sh` hands back to it, keeping `xbox-av`: with `S98xbox stop` and `start` the
+first install left the Sion with no display keeper until the next boot.
 
 ## OpenGL (`--renderer gl`)
 melonDS's OpenGL renderer draws the game's 3D (and puts the screens together) on the GPU,

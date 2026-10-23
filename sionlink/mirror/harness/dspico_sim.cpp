@@ -365,6 +365,16 @@ void DSpicoSim::ControlDone(bool ok)
 void DSpicoSim::ReadSocket()
 {
     if (sock < 0 || fromHost.size() >= 1024) return;
+    // fault test: DSPICO_STALL=N:M takes nothing from the Sion for M frames from frame N
+    // (a DS switched off with its DSpico still plugged in, then on again)
+    static long long stallAt = -1, stallFor = 0;
+    static bool stallRead = false;
+    if (!stallRead)
+    {
+        stallRead = true;
+        if (const char* v = getenv("DSPICO_STALL")) sscanf(v, "%lld:%lld", &stallAt, &stallFor);
+    }
+    if (stallAt >= 0 && frameNo >= stallAt && frameNo < stallAt + stallFor) return;
     u8 tmp[1024];
     ssize_t r = read(sock, tmp, sizeof tmp);
     if (r <= 0) return;
