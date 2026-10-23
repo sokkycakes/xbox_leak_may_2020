@@ -2,14 +2,15 @@
 # Sion Link live mirror with the game on the TV as well (run 14): both screens stacked on
 # the TV in the mode it is already in (no resync), the game's sound on the TV's HDMI, and
 # the same picture mirrored to the DS, whose pad plays it.
-#   sh tv.sh /path/to/game.nds [GAMECODE] [60] [gl]   start (it carries on in the background)
-#   sh tv.sh stop                                      stop; the dashboard comes back
+#   sh tv.sh /path/to/game.nds [GAMECODE] [60] [soft]   start (it carries on in the background)
+#   sh tv.sh stop                                        stop; the dashboard comes back
 # The game starts at once; start sion-link-live.nds on the DS and plug the DSpico's USB
 # into the Sion whenever, and unplug it whenever. The Xbox dashboard stops while the
 # mirror has the TV.
 # GAMECODE: AMKE for the Mario Kart DS kiosk demo. The DS shows 30 frames a second
-# (the TV all 60); add 60 for every frame on the DS too. gl draws the game's 3D with the
-# Sion's GPU (OpenGL, mirrorrun-gl) instead of the CPU; the DS gets the same either way.
+# (the TV all 60); add 60 for every frame on the DS too. The game's 3D is drawn with the
+# Sion's GPU (OpenGL, mirrorrun-gl: run 16 held 57-60 fps where software dipped to 53);
+# soft draws it with the CPU (mirrorrun) instead. The DS gets the same either way.
 # The Sion's own pads play too (right stick and trigger: the stylus). The save goes next
 # to the game (GAME.sav).
 # Log: /tmp/sionlink-tv.log
@@ -32,14 +33,15 @@ if [ "$1" = stop ]; then
 fi
 
 ROM=$1
-[ -n "$ROM" ] || { echo "usage: sh tv.sh GAME.nds [GAMECODE] [60] [gl] | sh tv.sh stop"; exit 1; }
+[ -n "$ROM" ] || { echo "usage: sh tv.sh GAME.nds [GAMECODE] [60] [soft] | sh tv.sh stop"; exit 1; }
 [ -r "$ROM" ] || { echo "no $ROM"; exit 1; }
-HALF="--half 1" CODE= RUN=./mirrorrun RENDER=
+HALF="--half 1" CODE= RUN=./mirrorrun-gl RENDER="--renderer gl"
 for a in "$2" "$3" "$4"; do
 	case $a in
 	'') ;;
 	60) HALF= ;;
-	gl) RUN=./mirrorrun-gl RENDER="--renderer gl" ;;
+	gl) ;;
+	soft) RUN=./mirrorrun RENDER= ;;
 	*) CODE="--gamecode $a" ;;
 	esac
 done

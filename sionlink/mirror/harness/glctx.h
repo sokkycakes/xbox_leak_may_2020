@@ -13,5 +13,7 @@ void GLContextClose();
 // the GL renderer's output (the texture GetFramebuffers gives) as two XRGB screens.
 // late: without waiting for the GPU, the frame before's (this one's comes next call)
 void GLReadScreens(const void* output, uint32_t* top, uint32_t* bottom, bool late = false);
+// ms spent getting late pictures (mapping the buffer: the GPU not done yet) since the last call
+double GLTakeWaitMs();
 
 #endif

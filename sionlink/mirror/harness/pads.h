@@ -7,11 +7,15 @@
 // the left stick or the d-pad the d-pad. The right stick moves a stylus over the bottom
 // screen and the right trigger (or a click of the right stick) touches there. The Guide
 // button stays the Guide's. Holding Back for 2 s asks for the game's menu (MenuAsked):
-// until then Back is Select for the game, from then on it's let go.
+// until then Back is Select for the game, from then on it's let go. SDL runs on a thread of
+// its own ("pads"): a pad coming or going (run 16: 142 ms) doesn't hold the game up.
 #ifndef MIRROR_PADS_H
 #define MIRROR_PADS_H
 
+#include <atomic>
 #include <cstdint>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 class SionPads
@@ -30,7 +34,16 @@ public:
     bool MenuAsked() { bool m = menuAsked; menuAsked = false; return m; }
 
 private:
-    bool open = false;
+    // what the pads have pressed (buttons since the game last looked, too) and the right stick
+    struct State { uint16_t held = 0; bool back = false, touch = false; float sx = 0, sy = 0; };
+    void Read(State& st);
+    bool Init();
+
+    bool open = false, threaded = false;
+    std::thread thread;
+    std::mutex lock;
+    std::atomic<bool> stop {false};
+    State latest, pressed;     // pressed: held at any poll since the game's last Poll
     std::vector<void*> pads;   // SDL_GameController*
     float cx = 128, cy = 96;
     int cursorFrames = 0;

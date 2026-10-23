@@ -1,5 +1,6 @@
 #include "glctx.h"
 
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <dlfcn.h>
@@ -28,6 +29,7 @@ static EGLBoolean (*eglMakeCurrent_)(EGLDisplay, EGLSurface, EGLSurface, EGLCont
 static EGLBoolean (*eglDestroyContext_)(EGLDisplay, EGLContext);
 static EGLBoolean (*eglTerminate_)(EGLDisplay);
 static GLuint readFB;
+static double waitMs;   // in GLReadScreens getting the frame before's picture
 
 bool GLContextOpen()
 {
@@ -107,9 +109,13 @@ void GLReadScreens(const void* output, uint32_t* top, uint32_t* bottom, bool lat
     }
     glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
     if (!late) return;
+    // to the GPU now, with this frame's drawing: left in the driver's batch, it went with
+    // the next frame's drawing, and getting it then waited for all of that (run 16)
+    glFlush();
     cur ^= 1;
     if (havePrev)
     {
+        auto t0 = std::chrono::steady_clock::now();
         glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo[cur]);
         if (const uint8_t* p = (const uint8_t*)glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, 2 * screen, GL_MAP_READ_BIT))
         {
@@ -117,7 +123,15 @@ void GLReadScreens(const void* output, uint32_t* top, uint32_t* bottom, bool lat
             memcpy(bottom, p + screen, screen);
             glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
         }
+        waitMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     }
     havePrev = true;
     glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+}
+
+double GLTakeWaitMs()
+{
+    double w = waitMs;
+    waitMs = 0;
+    return w;
 }

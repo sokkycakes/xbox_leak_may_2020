@@ -57,6 +57,7 @@
 #include <utility>
 #include <zlib.h>
 #include <csignal>
+#include <ctime>
 #include <dirent.h>
 #include <pthread.h>
 #include <unistd.h>
@@ -1727,6 +1728,8 @@ int main(int argc, char** argv)
     auto speedFrom = std::chrono::steady_clock::now();
     u32 underrunsShown = 0, xrunsShown = 0;
     double longestMs = 0, workMs = 0;   // the longest a frame took here (game, bundle), all of them, since the last speed line
+    double offCpuMs = 0;                // of workMs, the time this thread wasn't running (waiting for the GPU, the DS, a lock)
+    auto threadCpuMs = [] { timespec ts; clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts); return ts.tv_sec * 1e3 + ts.tv_nsec / 1e6; };
     for (u32 f = 0; f < frames; f++)
     {
         if (gMirrorQuit)
@@ -1801,6 +1804,14 @@ int main(int argc, char** argv)
                         pad.applied & MIRROR_INPUT_NEED_FULL ? ", DS waiting for a full frame" : "");
             longestMs = workMs = 0;
             fprintf(stderr, "  CPU: %s\n", CpuUse(s).c_str());
+#ifdef HAVE_GL
+            if (gl)
+                fprintf(stderr, "  waits: %.1f ms a frame not running (%.1f of it for the TV picture from the GPU)\n",
+                        offCpuMs / 600, GLTakeWaitMs() / 600);
+            else
+#endif
+                fprintf(stderr, "  waits: %.1f ms a frame not running\n", offCpuMs / 600);
+            offCpuMs = 0;
             if (tvSkipped != tvSkippedShown)
                 fprintf(stderr, "  TV: %u frames not shown, catching up after slow ones\n", tvSkipped - tvSkippedShown);
             tvSkippedShown = tvSkipped;
@@ -1860,6 +1871,7 @@ int main(int argc, char** argv)
             caughtUp = catchUp;
         }
         auto frameStart = std::chrono::steady_clock::now();
+        double cpuStart = threadCpuMs();
         while (si < steps.size() && steps[si].frame <= f)
         {
             const InputStep& s = steps[si++];
@@ -1959,6 +1971,7 @@ int main(int argc, char** argv)
         longestMs = std::max(longestMs, frameMs);
         heavyMs = heavyMs * 0.9 + std::min(frameMs, tvFrameMs) * 0.1;
         workMs += frameMs;
+        offCpuMs += std::max(0.0, frameMs - (threadCpuMs() - cpuStart));
         Prof::Timer tvTimer(gProf, Prof::Tv);
         if (soundSpec)
         {

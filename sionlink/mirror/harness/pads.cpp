@@ -4,6 +4,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <future>
+#include <pthread.h>
 #include <string>
 #include <unistd.h>
 
@@ -66,7 +68,7 @@ static void PlayPadTest()
     testFrame++;
 }
 
-bool SionPads::Open()
+bool SionPads::Init()
 {
     // mirrorrun stops cleanly on SIGINT/SIGTERM itself; no window, so events come regardless
     SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
@@ -83,28 +85,69 @@ bool SionPads::Open()
         int n = SDL_GameControllerAddMappingsFromFile(db);
         if (n > 0) fprintf(stderr, "pads: %d mappings from %s\n", n, db);
     }
-    open = true;
-    if (const char* t = getenv("MIRROR_PADTEST")) LoadPadTest(t);
     return true;
+}
+
+bool SionPads::Open()
+{
+    if (const char* t = getenv("MIRROR_PADTEST"))
+    {
+        // cloud tests: the virtual pad steps a frame at a time, so SDL stays on the game's thread
+        if (!Init()) return false;
+        open = true;
+        LoadPadTest(t);
+        return true;
+    }
+    std::promise<bool> ready;
+    auto started = ready.get_future();
+    thread = std::thread([this, &ready] {
+        pthread_setname_np(pthread_self(), "pads");
+        bool ok = Init();
+        ready.set_value(ok);
+        if (!ok) return;
+        while (!stop)
+        {
+            State st;
+            Read(st);
+            {
+                std::lock_guard<std::mutex> g(lock);
+                latest = st;
+                pressed.held |= st.held;
+                pressed.back |= st.back;
+                pressed.touch |= st.touch;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(4));
+        }
+        for (void* p : pads) SDL_GameControllerClose((SDL_GameController*)p);
+        pads.clear();
+        SDL_Quit();
+    });
+    open = threaded = started.get();
+    if (!open) thread.join();
+    return open;
 }
 
 void SionPads::Close()
 {
     if (!open) return;
-    for (void* p : pads) SDL_GameControllerClose((SDL_GameController*)p);
-    pads.clear();
-    if (testPad) SDL_JoystickClose(testPad);
-    testPad = nullptr;
-    SDL_Quit();
-    open = false;
+    if (threaded)
+    {
+        stop = true;
+        thread.join();
+    }
+    else
+    {
+        for (void* p : pads) SDL_GameControllerClose((SDL_GameController*)p);
+        pads.clear();
+        if (testPad) SDL_JoystickClose(testPad);
+        testPad = nullptr;
+        SDL_Quit();
+    }
+    open = threaded = false;
 }
 
-void SionPads::Poll(uint16_t& held, bool& touch, uint16_t& x, uint16_t& y)
+void SionPads::Read(State& st)
 {
-    held = 0;
-    touch = false;
-    if (!open) return;
-    PlayPadTest();
     SDL_GameControllerUpdate();
     SDL_Event e;
     while (SDL_PollEvent(&e))
@@ -134,40 +177,65 @@ void SionPads::Poll(uint16_t& held, bool& touch, uint16_t& x, uint16_t& y)
     }
 
     // every pad plays: buttons held on any of them count
-    float sx = 0, sy = 0;
-    bool back = false;
     for (void* p : pads)
     {
         SDL_GameController* c = (SDL_GameController*)p;
         auto b = [c](SDL_GameControllerButton k) { return SDL_GameControllerGetButton(c, k) != 0; };
         auto ax = [c](SDL_GameControllerAxis a) { return SDL_GameControllerGetAxis(c, a) / 32767.0f; };
-        if (b(SDL_CONTROLLER_BUTTON_B)) held |= DS_A;
-        if (b(SDL_CONTROLLER_BUTTON_A)) held |= DS_B;
-        if (b(SDL_CONTROLLER_BUTTON_Y)) held |= DS_X;
-        if (b(SDL_CONTROLLER_BUTTON_X)) held |= DS_Y;
-        if (b(SDL_CONTROLLER_BUTTON_START)) held |= DS_START;
-        if (b(SDL_CONTROLLER_BUTTON_LEFTSHOULDER)) held |= DS_L;
-        if (b(SDL_CONTROLLER_BUTTON_RIGHTSHOULDER)) held |= DS_R;
-        if (b(SDL_CONTROLLER_BUTTON_DPAD_UP)) held |= DS_UP;
-        if (b(SDL_CONTROLLER_BUTTON_DPAD_DOWN)) held |= DS_DOWN;
-        if (b(SDL_CONTROLLER_BUTTON_DPAD_LEFT)) held |= DS_LEFT;
-        if (b(SDL_CONTROLLER_BUTTON_DPAD_RIGHT)) held |= DS_RIGHT;
-        back |= b(SDL_CONTROLLER_BUTTON_BACK);
+        if (b(SDL_CONTROLLER_BUTTON_B)) st.held |= DS_A;
+        if (b(SDL_CONTROLLER_BUTTON_A)) st.held |= DS_B;
+        if (b(SDL_CONTROLLER_BUTTON_Y)) st.held |= DS_X;
+        if (b(SDL_CONTROLLER_BUTTON_X)) st.held |= DS_Y;
+        if (b(SDL_CONTROLLER_BUTTON_START)) st.held |= DS_START;
+        if (b(SDL_CONTROLLER_BUTTON_LEFTSHOULDER)) st.held |= DS_L;
+        if (b(SDL_CONTROLLER_BUTTON_RIGHTSHOULDER)) st.held |= DS_R;
+        if (b(SDL_CONTROLLER_BUTTON_DPAD_UP)) st.held |= DS_UP;
+        if (b(SDL_CONTROLLER_BUTTON_DPAD_DOWN)) st.held |= DS_DOWN;
+        if (b(SDL_CONTROLLER_BUTTON_DPAD_LEFT)) st.held |= DS_LEFT;
+        if (b(SDL_CONTROLLER_BUTTON_DPAD_RIGHT)) st.held |= DS_RIGHT;
+        st.back |= b(SDL_CONTROLLER_BUTTON_BACK);
         float lx = ax(SDL_CONTROLLER_AXIS_LEFTX), ly = ax(SDL_CONTROLLER_AXIS_LEFTY);
         if (lx * lx + ly * ly > 0.25f)
         {
             // eight ways: a direction counts within 67.5 degrees of it
             float a = atan2f(ly, lx);
-            if (cosf(a) > 0.38f) held |= DS_RIGHT;
-            if (cosf(a) < -0.38f) held |= DS_LEFT;
-            if (sinf(a) > 0.38f) held |= DS_DOWN;
-            if (sinf(a) < -0.38f) held |= DS_UP;
+            if (cosf(a) > 0.38f) st.held |= DS_RIGHT;
+            if (cosf(a) < -0.38f) st.held |= DS_LEFT;
+            if (sinf(a) > 0.38f) st.held |= DS_DOWN;
+            if (sinf(a) < -0.38f) st.held |= DS_UP;
         }
         float rx = ax(SDL_CONTROLLER_AXIS_RIGHTX), ry = ax(SDL_CONTROLLER_AXIS_RIGHTY);
-        if (fabsf(rx) > fabsf(sx)) sx = rx;
-        if (fabsf(ry) > fabsf(sy)) sy = ry;
-        if (ax(SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > 0.5f || b(SDL_CONTROLLER_BUTTON_RIGHTSTICK)) touch = true;
+        if (fabsf(rx) > fabsf(st.sx)) st.sx = rx;
+        if (fabsf(ry) > fabsf(st.sy)) st.sy = ry;
+        if (ax(SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > 0.5f || b(SDL_CONTROLLER_BUTTON_RIGHTSTICK)) st.touch = true;
     }
+}
+
+void SionPads::Poll(uint16_t& held, bool& touch, uint16_t& x, uint16_t& y)
+{
+    held = 0;
+    touch = false;
+    if (!open) return;
+    State st;
+    if (threaded)
+    {
+        // what's held now, and what was pressed and let go since the last frame
+        std::lock_guard<std::mutex> g(lock);
+        st = latest;
+        st.held |= pressed.held;
+        st.back |= pressed.back;
+        st.touch |= pressed.touch;
+        pressed = {};
+    }
+    else
+    {
+        PlayPadTest();
+        Read(st);
+    }
+    held = st.held;
+    touch = st.touch;
+    bool back = st.back;
+    float sx = st.sx, sy = st.sy;
 
     // Back: Select for the game, until it's been held 2 s; then the menu, and the game's
     // Select is let go until Back is

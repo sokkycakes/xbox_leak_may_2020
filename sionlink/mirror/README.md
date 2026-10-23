@@ -141,7 +141,10 @@ so a copy of it is never sent over the DS's own, and nothing waits for the GPU t
 The DS gets the same bundles as with software (MKDS demo, 2300 frames, byte for byte); only the TV picture differs, in how the GPU rasterizes (a few thin
 lines on the bottom map, texel edges). Build with `GL=1 harness/build.sh` from a melonDS
 built with `-DENABLE_OGLRENDERER=ON` (see build.sh). The Sion kit has it as `mirrorrun-gl`
-(64-bit, glibc linked, the rest static); `sh tv.sh GAME.nds AMKE gl` uses it.
+(64-bit, glibc linked, the rest static), and `tv.sh` uses it unless told `soft`: run 16
+held 57-60 fps in the demo's heavy scenes with the DS connected and the sound never ran dry,
+where software (run 13) dipped to 53 with gaps, on half the CPU. The speed line's `waits:`
+says how long a frame spent not running (waiting for the GPU, the DS or a lock).
 
 ## Not handled yet
 - Main-memory display mode (DISPCNT mode 3).
