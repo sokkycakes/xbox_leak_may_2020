@@ -1,5 +1,8 @@
-// Mirror replay client: plays nitro:/mirror.bin, a recording of what an
-// emulated game did to its display hardware, on this DS's own hardware.
+// Sion Link for the DS: the live mirror of a DS game running on the Sion (bundles over the
+// DSpico's USB), its home screen with the Sion's Wi-Fi link (Download Play, wifilink.c) and
+// the DS as the Sion's pad while no game is mirrored. With nitro:/mirror.bin (or one on the
+// SD card) it replays that recording of what an emulated game did to its display hardware
+// instead.
 //
 // Per frame: during the visible lines push the bundle's 3D writes (their
 // SWAP_BUFFERS lands at the next VBlank, as it did in the emulator), then in
@@ -18,7 +21,9 @@ static void lzTick(void);
 #define MIRROR_LZ_TICK() lzTick()
 #include "mirror_lz.h"
 #include "nitroui.h"
+#include "slboot.h"
 #include "usblink.h"
+#include "wifilink.h"
 
 static const u32 bankLCDC[9] = {
     0x06800000, 0x06820000, 0x06840000, 0x06860000,
@@ -353,6 +358,13 @@ static volatile u32 shownFrame;   // frame number of the bundle on screen (vblan
 
 static void clearHardware(void);
 static bool linkData;     // the Sion has started sending
+// Live: a game is mirrored (from its first full bundle). Otherwise the app's own screens
+// are up (home), the Wi-Fi link runs, and the Sion may take the DS as its pad.
+static bool mirroring;
+static bool leaveMirror;  // the mirror ends: readBundleLive gives up, the main loop goes home
+static bool padOn;        // the Sion's pad service has the DS (MREC_PAD)
+static u32 padSeenAt;
+static char padText[2][64];
 // Live: the screens no longer match the stream (a bundle was lost, or the
 // stall screen took over); bundles are dropped until the Sion sends a full one
 static bool needFull = true;
@@ -421,20 +433,100 @@ static void showStallScreen(void)
     BG_PALETTE_SUB[255] = RGB15(31, 31, 31);
 }
 
-// The picture stopped, the link isn't there yet, or the DSpico went quiet: the NitroLink
-// look, with what's wrong in its words
-static int waitingSaid = -1;   // what showWaiting has on the lower screen (-1: something else)
+// Home: no game mirrored. The NitroLink look, saying what the links are doing: the DSpico's
+// (the Sion's pad, or the DSpico gone quiet) and the Wi-Fi one (a Sion linked, Download Play).
+static bool homeDrawn;   // what's on the lower screen is showHome's, and up to date
 
-static void showWaiting(void)
+static void showHome(void)
 {
-    int now = usbSilent() ? 1 : 0;
-    if (uiShown() && waitingSaid == now)
+    bool wlChanged;
+    const wl_status* w = wlStatus(&wlChanged);
+    static bool silentWas, padWas;
+    bool silent = usbSilent();
+    if (homeDrawn && uiShown() && !wlChanged && silent == silentWas && padOn == padWas)
         return;
-    waitingSaid = now;
-    if (now)
-        uiMessage("The DSpico stopped answering:", "switch the DS off and on.");
-    else
-        uiMessage("Waiting for link...", NULL);
+    homeDrawn = true;
+    silentWas = silent;
+    padWas = padOn;
+
+    char a[96], b[96], foot[64];
+    const char* l1 = "Waiting for link...";
+    const char* l2 = NULL;
+    int percent = -1;
+    foot[0] = 0;
+    if (w->state == WL_SEARCHING)
+        strcpy(foot, "Wi-Fi: looking for a Sion");
+    else if (w->state == WL_LINKING)
+        snprintf(foot, sizeof foot, "Wi-Fi: linking to %s", w->host);
+    else if (w->state == WL_LINKED)
+        snprintf(foot, sizeof foot, "Wi-Fi: linked to %s", w->host);
+    else if (w->state == WL_FAILED)
+        strcpy(foot, "Wi-Fi didn't start");
+
+    if (w->receiving || w->booting)
+    {
+        snprintf(a, sizeof a, "%s %s", w->booting ? "Starting" : "Receiving", w->name);
+        l1 = a;
+        if (!w->booting)
+        {
+            snprintf(b, sizeof b, "%lu%%", w->percent);
+            l2 = b;
+            percent = w->percent;
+        }
+    }
+    else if (w->refused)
+    {
+        snprintf(a, sizeof a, "Couldn't start %s:", w->name);
+        l1 = a;
+        l2 = w->refused;
+    }
+    else if (silent)
+    {
+        l1 = "The DSpico stopped answering:";
+        l2 = "switch the DS off and on.";
+    }
+    else if (padOn)
+    {
+        l1 = padText[0];
+        l2 = padText[1][0] ? padText[1] : NULL;
+    }
+    else if (w->state == WL_LINKED)
+    {
+        snprintf(a, sizeof a, "Linked to %s", w->host);
+        l1 = a;
+        l2 = w->text[0] ? w->text : w->motd[0] ? w->motd : NULL;
+        foot[0] = 0;
+    }
+    uiStatus(l1, l2, percent, foot);
+}
+
+// the mirror's memory is free again and its screens gone: the app's own, and the Wi-Fi link
+static void goHome(void)
+{
+    mirroring = leaveMirror = false;
+    menuUp = stallShown = false;
+    needFull = true;
+    homeDrawn = false;
+    showHome();
+    wlOn();
+}
+
+// a game's first full bundle: the Wi-Fi link stops (the mirror needs the DS's time and its
+// memory), and so does being the Sion's pad
+static void startMirror(void)
+{
+    mirroring = true;
+    padOn = false;
+    wlOff();
+}
+
+static void homeTick(void)
+{
+    wlTick();
+    if (padOn && vblanks - padSeenAt > 3 * 60)
+        padOn = false;   // the pad service went (it says so every second)
+    if (!diagShown && !stallManual)
+        showHome();
 }
 
 // L+R+SELECT: what the link and the stream are doing
@@ -489,7 +581,7 @@ static void idle(void)
                 lastDiag = ~0u - 15;
             }
             else
-                showWaiting();
+                homeDrawn = false;
         }
         else if (!comboDone && vblanks - comboSince >= 60)
         {
@@ -506,9 +598,10 @@ static void idle(void)
             }
             else
             {
-                // back to the game: a full frame repaints everything
+                // back to the game: a full frame repaints everything (home: its own screen)
                 stallShown = false;
                 needFull = true;
+                homeDrawn = false;
                 lastAppliedAt = vblanks;   // not a stall: give the full frame time to come
             }
         }
@@ -522,22 +615,25 @@ static void idle(void)
         lastOutBytes = usbDiag.outBytes;
         lastDataAt = vblanks;
     }
-    if (!linkData)
+    if (!linkData && usbAvailable())
     {
-        if (usbAvailable())
+        // the time spent waiting for the Sion is not a stalled picture
+        linkData = true;
+        diagShown = false;
+        homeDrawn = false;
+        lastAppliedAt = vblanks;
+    }
+    if (diagShown)
+        showDiag();
+    if (!mirroring)
+    {
+        // home: the Wi-Fi link and the screen, a step a frame
+        static u32 lastHome = ~0u;
+        if (lastHome != vblanks)
         {
-            // the first bundle sets every display register; start from cleared VRAM.
-            // The time spent waiting for the Sion is not a stalled picture.
-            linkData = true;
-            diagShown = false;
-            lastAppliedAt = vblanks;
-            uiLeave();
-            clearHardware();
+            lastHome = vblanks;
+            homeTick();
         }
-        else if (diagShown)
-            showDiag();
-        else
-            showWaiting();
     }
     else if (mirrorStats[1] != lastApplied)
     {
@@ -550,18 +646,15 @@ static void idle(void)
         // nothing new for two seconds and no data for one (with the menu up, the Sion keeps
         // sending: no data for two): the link stopped. A big bundle can take seconds to come
         // in; asking for a full frame then would only throw it away and bring a bigger one
-        // (run 7).
+        // (run 7). Home meanwhile: the Sion sends a full bundle when it can again.
         if (!stallShown)
         {
             stallShown = true;
             stalls++;
             needFull = true;
             menuUp = false;
+            leaveMirror = true;
         }
-        if (stallManual)
-            showStall();
-        else
-            showWaiting();
     }
     if (vblanks != lastScan && usbConfigured())
     {
@@ -606,6 +699,8 @@ static bool readBytes(void* dst, u32 n)
     u8* d = dst;
     while (n)
     {
+        if (leaveMirror)
+            return false;
         u32 got = usbRead(d, n);
         d += got;
         n -= got;
@@ -675,6 +770,9 @@ static bool validBundle(const mirror_hdr* h)
         case MREC_MENU:
             if (r->len < sizeof(mirror_menu)) return false;
             break;   // its text is read within the record (uiMenu)
+        case MREC_PAD:
+            if (r->len < sizeof(mirror_pad)) return false;
+            break;   // its text is read within the record (showPad)
         default:
             return false;
         }
@@ -682,15 +780,17 @@ static bool validBundle(const mirror_hdr* h)
     }
 }
 
-static void skipBytes(u32 n)
+static bool skipBytes(u32 n)
 {
     static u8 scratch[512];
     while (n)
     {
         u32 k = n < sizeof scratch ? n : sizeof scratch;
-        readBytes(scratch, k);
+        if (!readBytes(scratch, k))
+            return false;
         n -= k;
     }
+    return true;
 }
 
 static void lzTick(void)
@@ -787,26 +887,57 @@ static void showMenu(const mirror_hdr* h)
             needFull = true;
         }
         uiMenu(m, r->len);
-        waitingSaid = -1;
+        homeDrawn = false;
     }
 }
 
-// Live stream: never gives up. Finds the next bundle header (resyncing byte by
-// byte after a damaged one), and while a full refresh is wanted drops bundles
-// that aren't full ones.
+// The Sion's pad service has the DS (MREC_PAD), or lets go of it
+static void showPad(const mirror_hdr* h)
+{
+    for (const mirror_rec* r = (const mirror_rec*)(h + 1); r->type != MREC_END; r = nextRec(r))
+    {
+        if (r->type != MREC_PAD)
+            continue;
+        const mirror_pad* p = (const mirror_pad*)(r + 1);
+        const char* text = (const char*)(p + 1);
+        const char* limit = (const char*)p + r->len;
+        for (int i = 0; i < 2; i++)
+        {
+            const char* z = text < limit ? memchr(text, 0, limit - text) : NULL;
+            u32 n = z ? (u32)(z - text) : 0;
+            if (n >= sizeof padText[i])
+                n = sizeof padText[i] - 1;
+            memcpy(padText[i], text, n);
+            padText[i][n] = 0;
+            text = z ? z + 1 : limit;
+        }
+        if (!padText[0][0])
+            strcpy(padText[0], "Controller for the Sion");
+        padOn = p->on;
+        padSeenAt = vblanks;
+    }
+}
+
+// Live stream. Finds the next bundle header (resyncing byte by byte after a damaged one),
+// and while a full refresh is wanted drops bundles that aren't full ones. Takes the menu
+// and pad bundles itself. Gives up (NULL) only when the mirror ends: the picture stopped,
+// or the Sion's pad service has the DS again.
 static mirror_hdr* readBundleLive(void)
 {
     for (;;)
     {
         mirror_hdr h;
-        readBytes(&h.magic, 4);
+        if (!readBytes(&h.magic, 4))
+            return NULL;
         while (h.magic != MIRROR_MAGIC)
         {
             u8 b;
-            readBytes(&b, 1);
+            if (!readBytes(&b, 1))
+                return NULL;
             h.magic = (h.magic >> 8) | ((u32)b << 24);
         }
-        readBytes((u8*)&h + 4, sizeof h - 4);
+        if (!readBytes((u8*)&h + 4, sizeof h - 4))
+            return NULL;
         if (h.size < sizeof h || h.size > 0x200000)
         {
             resyncs++;
@@ -824,7 +955,8 @@ static mirror_hdr* readBundleLive(void)
             needFull = true;
             continue;
         }
-        readBytes(head, sizeof head);
+        if (!readBytes(head, sizeof head))
+            return NULL;
         if (head[2] > 0x200000 || h.size != mirrorLzSize(sizeof h, head[2]) || head[0] > 0x200000)
         {
             resyncs++;
@@ -832,9 +964,10 @@ static mirror_hdr* readBundleLive(void)
             continue;
         }
         u32 body = h.size - sizeof h - sizeof head;
-        if ((needFull && !(h.flags & (MIRROR_FLAG_FULL | MIRROR_FLAG_MENU))) || stallManual)
+        if ((needFull && !(h.flags & (MIRROR_FLAG_FULL | MIRROR_FLAG_MENU | MIRROR_FLAG_PAD))) || stallManual)
         {
-            skipBytes(body);
+            if (!skipBytes(body))
+                return NULL;
             continue;
         }
         mirror_hdr* b = malloc(h.size);
@@ -842,12 +975,17 @@ static mirror_hdr* readBundleLive(void)
         {
             allocFails++;
             needFull = true;
-            skipBytes(body);
+            if (!skipBytes(body))
+                return NULL;
             continue;
         }
         *b = h;
         memcpy(b + 1, head, sizeof head);
-        readBytes((u8*)(b + 1) + sizeof head, body);
+        if (!readBytes((u8*)(b + 1) + sizeof head, body))
+        {
+            free(b);
+            return NULL;
+        }
         if (h.flags & MIRROR_FLAG_LZ)
         {
             bool damaged;
@@ -871,6 +1009,24 @@ static mirror_hdr* readBundleLive(void)
             needFull = true;
             continue;
         }
+        if (h.flags & MIRROR_FLAG_PAD)
+        {
+            showPad(b);
+            free(b);
+            if (mirroring && padOn)
+            {
+                // the game ended on the Sion and its pad service took the DS back
+                leaveMirror = true;
+                return NULL;
+            }
+            continue;
+        }
+        if (!mirroring && !(h.flags & MIRROR_FLAG_FULL))
+        {
+            // a menu, or a bundle from before the mirror ended: nothing to show it over
+            free(b);
+            continue;
+        }
         if (h.flags & MIRROR_FLAG_MENU)
         {
             showMenu(b);
@@ -882,6 +1038,8 @@ static mirror_hdr* readBundleLive(void)
             needFull = false;
             fullBundles++;
             menuUp = false;
+            if (!mirroring)
+                startMirror();
         }
         return b;
     }
@@ -989,12 +1147,17 @@ static void openSource(void)
         return;
     liveLink = true;
     mirrorStats[3] = 4;
-    showWaiting();
     usbStart();
+    goHome();
 }
 
 int main(int argc, char** argv)
 {
+    // Download Play stages a program in the heap and moves it into place from there; the
+    // top of main RAM (the header a booted program reads) must stay out of it
+    u8* heapTop = getHeapLimit();
+    if (heapTop > (u8*)SLBOOT_STAGE_END)
+        reduceHeapSize(heapTop - (u8*)SLBOOT_STAGE_END);
     powerOn(POWER_ALL);
     clearHardware();
     irqSet(IRQ_VBLANK, vblankHandler);
@@ -1034,6 +1197,21 @@ int main(int argc, char** argv)
             free(old);
             old = cur;   // still on screen (its line list) until the next one is applied
             cur = next;
+        }
+        if (liveLink)
+        {
+            // the mirror ended: its memory and screens go, home comes back
+            swiWaitForVBlank();
+            irqDisable(IRQ_HBLANK);
+            lineList = NULL;
+            lineCount = lineNext = 0;
+            free(old);
+            free(gxPayload);
+            gxPayload = NULL;
+            gxWords = 0;
+            if (mirroring)
+                goHome();
+            continue;
         }
         mirrorStats[3] = 3;
         // play it again from the start: the first bundle assumes cleared hardware

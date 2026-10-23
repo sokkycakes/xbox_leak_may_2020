@@ -1,5 +1,6 @@
 #include "hostlink.h"
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 #include <mutex>
@@ -325,8 +326,35 @@ public:
 };
 #endif
 
+// The pad service (dspad.cpp) holds the DSpico while no mirror runs: ask it to let go, once,
+// and keep the connection open for as long as this process runs (it takes the DS back when
+// that closes, however we end). No pad service, nothing to ask.
+bool gDsPadSelf;
+
+static void HoldDsPadOff()
+{
+    static bool asked;
+    if (asked || gDsPadSelf) return;
+    asked = true;
+    const char* path = getenv("MIRROR_PAD_SOCK");
+    if (!path) path = "/run/sionlink-pad.sock";
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    sockaddr_un a {};
+    a.sun_family = AF_UNIX;
+    strncpy(a.sun_path, path, sizeof a.sun_path - 1);
+    if (connect(fd, (sockaddr*)&a, sizeof a)) { close(fd); return; }
+    char reply[16] = {};
+    pollfd p {fd, POLLIN, 0};
+    if (write(fd, "release\n", 8) != 8 || poll(&p, 1, 4000) <= 0 || read(fd, reply, sizeof reply - 1) <= 0)
+        fprintf(stderr, "link: the pad service didn't let go of the DS\n");
+    else
+        fprintf(stderr, "link: the pad service let go of the DS\n");
+    // fd stays open: closing it gives the DS back
+}
+
 std::unique_ptr<HostLink> OpenHostLink(const std::string& spec, const std::atomic<bool>* stop)
 {
+    HoldDsPadOff();
     if (spec.rfind("sim:", 0) == 0)
     {
         auto l = std::make_unique<SocketLink>(spec.substr(4), stop);

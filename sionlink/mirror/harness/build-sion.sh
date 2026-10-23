@@ -1,6 +1,7 @@
 #!/bin/sh
-# The Sion kit's two builds (kit/sion): mirrorrun, all static, software 3D; and mirrorrun-gl,
-# 64-bit with glibc linked (the Sion's Mesa libEGL is loaded at run time) and the rest static.
+# The Sion kit's builds (kit/sion): mirrorrun, all static, software 3D; mirrorrun-gl, 64-bit
+# with glibc linked (the Sion's Mesa libEGL is loaded at run time) and the rest static; and
+# dspad, the DS as a pad while no game is mirrored, all static.
 # SDL=prefix of the static SDL2 from build-sdl.sh, LIBUSB=prefix of a static libusb-1.0,
 # MELONDS as for build.sh (build/ and build-gl/ both made).
 set -e
@@ -21,4 +22,6 @@ g++ $FLAGS -I"$M/build-gl/src" -DHAVE_GL -DOGLRENDERER_ENABLED '-DMELONDS_GL_HEA
     -o $OUT/mirrorrun-gl $SRC glctx.cpp /tmp/mirrorrun-glad.o $(libs build-gl) \
     "$SDL/lib/libSDL2.a" "$LIBUSB/lib/libusb-1.0.a" "$(gcc -print-file-name=libz.a)" \
     -static-libstdc++ -static-libgcc -lpthread -lrt -ldl -lm
-strip $OUT/mirrorrun $OUT/mirrorrun-gl
+g++ -O2 -std=gnu++17 -DHAVE_LIBUSB -I"$LIBUSB/include" -o $OUT/dspad dspad.cpp hostlink.cpp \
+    "$LIBUSB/lib/libusb-1.0.a" -static -lpthread
+strip $OUT/mirrorrun $OUT/mirrorrun-gl $OUT/dspad

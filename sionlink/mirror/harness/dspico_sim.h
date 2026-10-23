@@ -35,6 +35,8 @@ private:
 
     melonDS::NDS* nds;
     int sock = -1;
+    std::string path;           // the Sion side's socket: connected to again when it goes (a new Sion process)
+    void Connect(int tries);
     unsigned budgetPerFrame, budget = 0;
 
     // device side (what the DSpico firmware keeps)

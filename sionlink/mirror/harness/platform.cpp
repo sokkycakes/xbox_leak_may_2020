@@ -10,6 +10,11 @@
 #include <chrono>
 #include <functional>
 #include <pthread.h>
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #include "Platform.h"
 #include "saves.h"
@@ -122,14 +127,51 @@ void WriteGBASave(const u8*, u32, u32, u32, void*) {}
 void WriteFirmware(const Firmware&, u32, u32, void*) {}
 void WriteDateTime(int, int, int, int, int, int, void*) {}
 
+// The DS's radio. Cloud tests of the DS app's Wi-Fi link: MELONDS_AIR=host:port trades the
+// emulated radio's frames (melonDS's 12-byte TX/RX header kept) with a UDP peer, a software
+// Sion such as sionlinkd --melon (branch rb4kah), as its AirMP bridge does. Otherwise nothing
+// is out there.
+static int AirSock()
+{
+    static int sock = -2;
+    static sockaddr_in peer;
+    if (sock != -2) return sock;
+    sock = -1;
+    const char* air = getenv("MELONDS_AIR");
+    if (!air) return sock;
+    std::string s(air);
+    size_t colon = s.rfind(':');
+    peer.sin_family = AF_INET;
+    peer.sin_port = htons(atoi(colon == std::string::npos ? s.c_str() : s.c_str() + colon + 1));
+    inet_pton(AF_INET, colon == std::string::npos ? "127.0.0.1" : s.substr(0, colon).c_str(), &peer.sin_addr);
+    sock = socket(AF_INET, SOCK_DGRAM, 0);
+    fcntl(sock, F_SETFL, O_NONBLOCK);
+    connect(sock, (sockaddr*)&peer, sizeof peer);
+    send(sock, "", 0, 0);   // the peer learns our port before we send anything
+    return sock;
+}
+static int AirSend(u8* data, int len)
+{
+    if (AirSock() < 0 || !data || len <= 0) return 0;
+    send(AirSock(), data, len, 0);
+    return len;
+}
+static int AirRecv(u8* data, u64* timestamp)
+{
+    if (AirSock() < 0) return 0;
+    *timestamp = 0;   // keeps melonDS out of its instance-synced MP client mode
+    int n = recv(AirSock(), data, 2048, 0);
+    return n > 0 ? n : 0;
+}
+
 void MP_Begin(void*) {}
 void MP_End(void*) {}
-int MP_SendPacket(u8*, int, u64, void*) { return 0; }
-int MP_RecvPacket(u8*, u64*, void*) { return 0; }
-int MP_SendCmd(u8*, int, u64, void*) { return 0; }
-int MP_SendReply(u8*, int, u64, u16, void*) { return 0; }
-int MP_SendAck(u8*, int, u64, void*) { return 0; }
-int MP_RecvHostPacket(u8*, u64*, void*) { return 0; }
+int MP_SendPacket(u8* d, int n, u64, void*) { return AirSend(d, n); }
+int MP_RecvPacket(u8* d, u64* t, void*) { return AirRecv(d, t); }
+int MP_SendCmd(u8* d, int n, u64, void*) { return AirSend(d, n); }
+int MP_SendReply(u8* d, int n, u64, u16, void*) { return d ? AirSend(d, n) : 0; }
+int MP_SendAck(u8* d, int n, u64, void*) { return AirSend(d, n); }
+int MP_RecvHostPacket(u8* d, u64* t, void*) { return AirRecv(d, t); }
 u16 MP_RecvReplies(u8*, u64, u16, void*) { return 0; }
 
 int Net_SendPacket(u8*, int, void*) { return 0; }

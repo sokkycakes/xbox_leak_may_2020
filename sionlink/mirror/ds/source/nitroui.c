@@ -241,15 +241,39 @@ static int wrapLine(const char* s, int maxW, const char** next)
 
 #define LINE_TOP(slot) (MIRROR_MENU_ROW_Y + (slot) * MIRROR_MENU_ROW_H)
 
-void uiMessage(const char* line1, const char* line2)
+static void centred(u16* fb, int y, const char* s, u16 c)
+{
+    int w = width(s) < W - 32 ? width(s) : W - 32;
+    draw(fb, (W - w) / 2, y, s, c, W - 32);
+}
+
+void uiStatus(const char* line1, const char* line2, int percent, const char* foot)
 {
     u16* fb = begin();
     // in the middle, where the Figma has its "Waiting for link..."
     int y = H / 2 - (line2 ? FONT_LINE + 1 : FONT_LINE / 2);
-    draw(fb, (W - width(line1)) / 2, y, line1, C_TEXT, W - 32);
+    centred(fb, y, line1, C_TEXT);
     if (line2)
-        draw(fb, (W - width(line2)) / 2, y + FONT_LINE + 2, line2, C_TEXT, W - 32);
+        centred(fb, y + FONT_LINE + 2, line2, C_TEXT);
+    if (percent >= 0)
+    {
+        // a bar in the box's colours under the lines
+        int x0 = 48, x1 = W - 48, top = y + 2 * (FONT_LINE + 2) + 6;
+        fill(fb, x0, top, x1, top + 1, C_RULE);
+        fill(fb, x0, top + 7, x1, top + 8, C_RULE);
+        fill(fb, x0, top, x0 + 1, top + 8, C_RULE);
+        fill(fb, x1 - 1, top, x1, top + 8, C_RULE);
+        int n = (x1 - x0 - 4) * (percent > 100 ? 100 : percent) / 100;
+        fill(fb, x0 + 2, top + 2, x0 + 2 + n, top + 6, C_BOX);
+    }
+    if (foot && *foot)
+        centred(fb, H - 26, foot, C_VALUE);
     end(fb);
+}
+
+void uiMessage(const char* line1, const char* line2)
+{
+    uiStatus(line1, line2, -1, NULL);
 }
 
 // a button for the legend: a light disc with its letter, then what it does

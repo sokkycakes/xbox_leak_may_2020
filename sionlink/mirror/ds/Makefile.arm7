@@ -1,0 +1,6 @@
+SOURCEDIRS	:= arm7/source
+INCLUDEDIRS	:= ../common
+LIBS		:= -ldswifi7 -lnds7
+LIBDIRS		:= $(CURDIR)/build/dswifi
+
+include $(BLOCKSDS)/sys/default_makefiles/rom_arm9arm7/Makefile.arm7

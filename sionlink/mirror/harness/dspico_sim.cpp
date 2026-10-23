@@ -35,16 +35,22 @@ static bool Fault(const char* name, unsigned count)
     return n && (count == n || (every && count % n == 0));
 }
 
-DSpicoSim::DSpicoSim(NDS* n, const std::string& path, unsigned bytesPerFrame)
-    : nds(n), budgetPerFrame(bytesPerFrame)
+DSpicoSim::DSpicoSim(NDS* n, const std::string& p, unsigned bytesPerFrame)
+    : nds(n), path(p), budgetPerFrame(bytesPerFrame)
+{
+    Connect(200);
+    if (sock < 0) perror("dspico sim: connect");
+}
+
+void DSpicoSim::Connect(int tries)
 {
     sock = socket(AF_UNIX, SOCK_STREAM, 0);
     sockaddr_un a {};
     a.sun_family = AF_UNIX;
     strncpy(a.sun_path, path.c_str(), sizeof a.sun_path - 1);
-    for (int tries = 0; connect(sock, (sockaddr*)&a, sizeof a) != 0; tries++)
+    for (int i = 0; connect(sock, (sockaddr*)&a, sizeof a) != 0; i++)
     {
-        if (tries > 200) { perror("dspico sim: connect"); close(sock); sock = -1; return; }
+        if (i >= tries) { close(sock); sock = -1; return; }
         usleep(50000);
     }
     fcntl(sock, F_SETFL, fcntl(sock, F_GETFL) | O_NONBLOCK);
@@ -364,6 +370,13 @@ void DSpicoSim::ControlDone(bool ok)
 
 void DSpicoSim::ReadSocket()
 {
+    if (sock < 0 && !path.empty() && frameNo % 30 == 0)
+    {
+        // the Sion side went (the pad service let go, a mirror ended): like the DSpico on
+        // a real Sion, wait for whichever process takes the DS next
+        Connect(0);
+        if (sock >= 0) fprintf(stderr, "dspico sim: the Sion side is back\n");
+    }
     if (sock < 0 || fromHost.size() >= 1024) return;
     // fault test: DSPICO_STALL=N:M takes nothing from the Sion for M frames from frame N
     // (a DS switched off with its DSpico still plugged in, then on again)
@@ -377,7 +390,14 @@ void DSpicoSim::ReadSocket()
     if (stallAt >= 0 && frameNo >= stallAt && frameNo < stallAt + stallFor) return;
     u8 tmp[1024];
     ssize_t r = read(sock, tmp, sizeof tmp);
-    if (r <= 0) return;
+    if (r == 0)
+    {
+        fprintf(stderr, "dspico sim: the Sion side closed the link\n");
+        close(sock);
+        sock = -1;
+        return;
+    }
+    if (r < 0) return;
     // fault test: DSPICO_DROP=N loses 100 bytes of the stream at byte N
     static long long dropAt = getenv("DSPICO_DROP") ? atoll(getenv("DSPICO_DROP")) : -1;
     static long long seen = 0;

@@ -26,6 +26,8 @@ typedef struct {
 #define MIRROR_FLAG_LZ   4  // live link: the body is packed (mirror_lz.h)
 #define MIRROR_FLAG_MENU 8  // live link: the game's menu (MREC_MENU), nothing else; read even
                             // while the DS waits for a full bundle
+#define MIRROR_FLAG_PAD  16 // live link: no game is mirrored, the Sion takes the DS as a pad
+                            // (MREC_PAD), nothing else; read like MIRROR_FLAG_MENU
 
 enum {
     MREC_END   = 0,
@@ -38,6 +40,7 @@ enum {
     MREC_LINES = 7,  // u32 count, then count x mirror_line, sorted by line
     MREC_GXDELTA = 8, // an MREC_GX payload built from the previous bundle's (see below)
     MREC_MENU  = 9,  // mirror_menu, then its text (see below); only to a DS that asks for it
+    MREC_PAD   = 10, // mirror_pad, then its text (see below)
 };
 
 // MREC_GXDELTA: u32 payload length in words, then ops until it is complete:
@@ -90,6 +93,16 @@ typedef struct {
 #define MIRROR_MENU_SLOTS 8
 #define MIRROR_MENU_X0    14    // the rows' boxes, across
 #define MIRROR_MENU_X1    242
+
+// MREC_PAD: no game is mirrored; the Sion's pad service (harness/dspad.cpp) has the DSpico and
+// takes the DS's reports as a pad for whatever the Sion shows. Sent when it takes the DS and
+// then every second; the DS shows its own screens (and its Wi-Fi link) meanwhile. After
+// mirror_pad come two NUL-ended UTF-8 lines for the DS to show, zeros to a multiple of 4.
+// A mirror that takes the DSpico over starts with a full bundle.
+typedef struct {
+    uint8_t on;         // 0: the pad service let go of the DS (a mirror is about to start)
+    uint8_t reserved[3];
+} mirror_pad;
 
 // Live link, DS -> Sion, once a frame: the pad and touch screen, and how the DS is doing.
 #define MIRROR_INPUT_MAGIC 0x4E494C53u  // "SLIN"

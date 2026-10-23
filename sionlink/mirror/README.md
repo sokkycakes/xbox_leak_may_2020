@@ -38,7 +38,9 @@ VBlank IRQ.
 - melonDS at `melonds/BASE` with `melonds/mirror-tap.patch` applied, built with
   `cmake -B build -DBUILD_QT_SDL=OFF -DENABLE_OGLRENDERER=OFF`. Then run `harness/build.sh`
   (set MELONDS=path). The tap and runner are GPL with melonDS.
-- `ds/`: BlockSDS (`make`, BLOCKSDS set). The client and `common/` are our own code.
+- `ds/`: BlockSDS (`make`, BLOCKSDS set). The client and `common/` are our own code. The
+  first `make` also builds our DSWifi (`ds/dswifi/build.sh`: blocksds/dswifi at `dswifi/BASE`
+  with `dswifi/sionlink.patch`, the Wi-Fi launcher's, into `ds/build/dswifi`).
 
 ## Results (2026-10-22)
 All 12 BlockSDS demos tried match pixel for pixel after the first boot frame. That covers 2D
@@ -210,6 +212,41 @@ after any title. Log: `/data/sionlink/logs/ID.log`. Tested in the cloud on a moc
 paths: install, launch through `wincart-run`, reinstall, remove. The installer restarts the
 dashboard as `tv.sh` hands back to it, keeping `xbox-av`: with `S98xbox stop` and `start` the
 first install left the Sion with no display keeper until the next boot.
+
+## One DS app: Wi-Fi, Download Play and the DS as a pad
+`ds/` is Sion Link's only DS app (`kit/sion-link-live.nds`): the Wi-Fi launcher (branch
+rb4kah, `sionlink/ds`) is in it, with its ARM7 and DSWifi build. It starts at a home screen
+and listens on both links at once. On Wi-Fi it links to the first Sion it hears with no
+buttons pressed (`ds/source/wifilink.c`, the launcher's screens made into a step a frame) and
+takes what the Sion sends: text, and programs over Download Play (Sion games with DS players
+send their DS side that way), which it boots from RAM (`boot.c`; the heap stops at
+`SLBOOT_STAGE_END` so the staged program sits where `BootNds` can move it down). On USB, the
+first full bundle switches it to the mirror: Wi-Fi goes idle, as the mirror needs all the
+DS's time, and the home screen comes back when the mirror ends (a stall, or a pad bundle).
+Switching the radio off for the mirror and on again left it hearing nothing, so it is only
+idle (`Wifi_IdleMode`) meanwhile.
+
+The DS is the Sion's pad whenever no DS game is mirrored. `harness/dspad.cpp` (the
+`dspad` in `kit/sion`, started at boot by `S97sionlink-pad`) holds the DSpico and makes an
+Xbox 360 pad on uinput from the DS's reports, laid out as xpad reports one, so the
+dashboard, Frolick and games take it like a real pad: A, B, X, Y as labelled, L and R the
+triggers, Select is Back, Start, the d-pad, and Select held 1.5 s on its own is the Guide.
+The pad exists only while the DS reports (it goes 3 s after the DS does). It tells the DS
+so with a pad bundle (`MIRROR_FLAG_PAD`, record `MREC_PAD`: on/off and two lines to show),
+when it takes the DS and every second; the DS shows the lines on its home screen. A mirror
+takes the DS over: `mirrorrun` connects to `/run/sionlink-pad.sock` (`MIRROR_PAD_SOCK`)
+before it opens the link and sends `release`, `dspad` lets go and answers `released`, and it
+takes the DS back when that connection closes, however the mirror ends.
+`sh install-pad.sh` on the Sion installs `dspad`, its boot service and the runtime that asks
+for the DS (log `/var/log/sionlink-pad.log`, emptied past 256 KB).
+
+Cloud tests: `dspad --link sim:PATH --dry 1` serves the simulated DSpico and logs the pad
+instead of making it; the simulated DSpico reconnects when the Sion side closes, so the pad,
+a mirror and the pad again can follow each other. `MELONDS_AIR=host:port` bridges the
+emulated DS's radio over UDP to `sionlinkd --melon` (branch rb4kah), so the Wi-Fi link and
+Download Play run in the same test. Tested together: the DS as a pad on the home screen,
+linked over Wi-Fi; the MKDS demo's mirror taking over and ending; the pad again, a Wi-Fi
+relink, and `sion-hello.nds` sent over Download Play (63652 bytes, 0.3 s) and booted.
 
 ## OpenGL (`--renderer gl`)
 melonDS's OpenGL renderer draws the game's 3D (and puts the screens together) on the GPU,
