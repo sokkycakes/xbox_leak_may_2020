@@ -345,6 +345,13 @@ def skin():
     mp = mp[mp.find("<XuiVisual>"):mp.rfind("</XuiScene>")]
     mp += spot_row_visual(mp) + spot_meta_visual(mp)
     s = s.replace("</XuiScene></XuiCanvas>", mp + "</XuiScene></XuiCanvas>")
+    # btn_3Line_Icon_prgbr's logo spot is bound to Data1, the line our device
+    # rows put their free space in, so the engine looked that text up as an
+    # image file; Frolick has no logo for it
+    s = s.replace(" <Id>msLogoSpace</Id>\n <Width>195</Width>\n <Height>32</Height>\n"
+                  " <Position>653,70,0</Position>\n <Anchor>4</Anchor>\n <DataAssociation>1</DataAssociation>\n",
+                  " <Id>msLogoSpace</Id>\n <Width>195</Width>\n <Height>32</Height>\n"
+                  " <Position>653,70,0</Position>\n <Anchor>4</Anchor>\n", 1)
     def fix(m):
         if m.group(1) in ITEM_VISUALS:
             return item_text_colours(m.group(0))
