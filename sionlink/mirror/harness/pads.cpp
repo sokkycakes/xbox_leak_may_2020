@@ -17,7 +17,6 @@
 enum { DS_A = 1 << 0, DS_B = 1 << 1, DS_SELECT = 1 << 2, DS_START = 1 << 3, DS_RIGHT = 1 << 4, DS_LEFT = 1 << 5,
        DS_UP = 1 << 6, DS_DOWN = 1 << 7, DS_R = 1 << 8, DS_L = 1 << 9, DS_X = 1 << 10, DS_Y = 1 << 11 };
 
-static const uint32_t MenuHoldFrames = 120;   // Back held this long (2 s) opens the menu
 
 // Cloud tests: MIRROR_PADTEST=FILE plays a virtual pad. Lines "FRAME BUTTONS [RX RY RT]":
 // BUTTONS like b+dpleft or - (SDL's names), RX RY RT the right stick and trigger, -1..1.
@@ -282,7 +281,7 @@ void SionPads::Poll(uint16_t& held, bool& touch, uint16_t& x, uint16_t& y)
     bool back = st.back && !backSwallowed;
     float sx = st.sx, sy = st.sy;
 
-    // Back: Select for the game, until it's been held 2 s; then the menu, and the game's
+    // Back: Select for the game, until it's been held 1.5 s; then the menu, and the game's
     // Select is let go until Back is
     if (back)
     {

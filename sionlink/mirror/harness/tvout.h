@@ -1,8 +1,8 @@
 // The game on the Sion's TV: both screens, in the mode the TV is already in.
 //   drm         the Sion's display (KMS dumb buffers, as xbox-av does), taken over from
 //               xbox-av the way a title does ('T' first, 'S' and the last frame when done)
-//   dump:FILE   the composed pictures, one in 60 (MIRROR_TVDUMPEVERY), for tests where
-//               there is no display
+//   dump:FILE   the composed pictures, one in 60 (MIRROR_TVDUMPEVERY) from the first
+//               (MIRROR_TVDUMPFROM), for tests where there is no display
 #ifndef MIRROR_TVOUT_H
 #define MIRROR_TVOUT_H
 
@@ -13,9 +13,10 @@
 #include <string>
 #include <vector>
 
-// where the screens go (the game menu's Screen layout): one above the other, side by
-// side, or one big with the other at half its size beside it
-enum class TVLayout { Stacked, SideBySide, BigTop, BigBottom };
+// where the screens go (the game menu's Screen layout): one of them alone, one above the
+// other, side by side, or one big with the other at half its size beside it
+enum class TVLayout { TopOnly, BottomOnly, Stacked, SideBySide, BigTop, BigBottom, Count };
+inline bool SingleScreen(TVLayout l) { return l == TVLayout::TopOnly || l == TVLayout::BottomOnly; }
 
 class TVOut
 {
@@ -29,7 +30,8 @@ public:
     // the TV's frame rate (the mode's pixel clock over its frame size)
     double Hz() const;
     void Close();
-    // swap: the bottom screen where the top one goes and the other way round
+    // swap: the bottom screen where the top one goes and the other way round (not with
+    // one screen alone)
     void SetLayout(TVLayout layout, bool swap);
     // drawn over each picture once it's composed (the game menu): the frame, its pitch in
     // bytes, its size and a pixel's width over its height
@@ -44,7 +46,7 @@ private:
     uint32_t w = 720, h = 480;
     double par = 1;                    // a pixel's width over its height
     bool paced = false;
-    TVLayout layout = TVLayout::Stacked;
+    TVLayout layout = TVLayout::TopOnly;
     bool swap = false;
     // where each screen goes: the top one first
     struct Place
@@ -59,7 +61,7 @@ private:
     // dump: (MIRROR_TVPACE=1: paced by a pretend 60 Hz TV, for cloud tests)
     FILE* dump = nullptr;
     double vblankPeriod = 0, flipAt = 0;   // seconds on the steady clock
-    uint32_t frames = 0, dumpEvery = 60;
+    uint32_t frames = 0, dumpEvery = 60, dumpFrom = 0;
     std::vector<uint32_t> dumpBuf;
 
     // drm:

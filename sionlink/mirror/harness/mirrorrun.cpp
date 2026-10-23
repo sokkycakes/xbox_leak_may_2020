@@ -35,7 +35,7 @@
 //                      sound break up instead of making it longer to match (up to 18%,
 //                      at the same pitch)
 //
-// Holding Select for 2 s (Back on the Sion's pads, Select on the DS) opens the game's menu
+// Holding Select for 1.5 s (Back on the Sion's pads, Select on the DS) opens the game's menu
 // on the TV (menu.h): screen layout, quick save and load (GAME.state beside the save, or
 // beside the game without --save), reset, back to the dashboard. The layout stays with the
 // game (GAME.layout).
@@ -139,9 +139,8 @@ static bool GXKeepWhenSkipped(u8 c)
 // How busy each of mirrorrun's threads has been since the last call, in % of one core:
 // on the Sion's two cores the game, melonDS's 3D thread, the USB sender and the sound
 // share them.
-static std::string CpuUse(double seconds)
+static std::map<std::string, unsigned long long> CpuTicks()
 {
-    static std::map<std::string, unsigned long long> before;
     std::map<std::string, unsigned long long> now;
     if (DIR* d = opendir("/proc/self/task"))
     {
@@ -165,11 +164,17 @@ static std::string CpuUse(double seconds)
         }
         closedir(d);
     }
+    return now;
+}
+static std::map<std::string, unsigned long long> cpuBefore, cpuMark;
+static std::string CpuUse(double seconds)
+{
+    std::map<std::string, unsigned long long> now = CpuTicks();
     static const long hz = sysconf(_SC_CLK_TCK);
     std::string out;
     for (auto& [name, ticks] : now)
     {
-        unsigned long long was = before.count(name) ? before[name] : 0;
+        unsigned long long was = cpuBefore.count(name) ? cpuBefore[name] : 0;
         int pct = (int)((ticks - was) * 100.0 / hz / seconds + 0.5);
         if (pct < 1) continue;
         static const std::map<std::string, std::string> nice = {
@@ -179,8 +184,16 @@ static std::string CpuUse(double seconds)
         snprintf(part, sizeof part, "%s%s %d%%", out.empty() ? "" : ", ", it == nice.end() ? name.c_str() : it->second.c_str(), pct);
         out += part;
     }
-    before = now;
+    cpuBefore = now;
     return out;
+}
+// The game menu's time doesn't count towards the speed line (its seconds don't): what
+// the threads used while it was up is left out of their share too.
+static void CpuMenuOpened() { cpuMark = CpuTicks(); }
+static void CpuMenuClosed()
+{
+    for (auto& [name, ticks] : CpuTicks())
+        cpuBefore[name] += ticks - (cpuMark.count(name) ? cpuMark[name] : ticks);
 }
 
 // MIRROR_PROF=FROM:TO (cloud tests): where the time goes in frames FROM..TO-1, per frame
@@ -1709,7 +1722,8 @@ static std::string WithoutExtension(const std::string& p)
     return dot != std::string::npos && (slash == std::string::npos || dot > slash) ? p.substr(0, dot) : p;
 }
 
-static const char* const LayoutWords[] = {"stacked", "side", "bigtop", "bigbottom"};
+static const char* const LayoutWords[] = {"top", "bottom", "stacked", "side", "bigtop", "bigbottom"};   // TVLayout's order
+static_assert(sizeof LayoutWords / sizeof *LayoutWords == (size_t)TVLayout::Count);
 
 int main(int argc, char** argv)
 {
@@ -1982,7 +1996,7 @@ int main(int argc, char** argv)
         char word[32] = "";
         int sw = 0;
         if (fscanf(lf, "%31s %d", word, &sw) >= 1)
-            for (int i = 0; i < 4; i++)
+            for (int i = 0; i < (int)TVLayout::Count; i++)
                 if (!strcmp(word, LayoutWords[i])) menu.layout = (TVLayout)i;
         menu.swap = sw != 0;
         fclose(lf);
@@ -2087,7 +2101,10 @@ int main(int argc, char** argv)
         rec.Resync(nullptr);
     };
     // the game stops while it's up: the TV shows its last picture under the menu, the sound
-    // goes quiet, the DS gets a bundle now and then to keep its picture
+    // goes quiet, the DS gets a bundle now and then to keep its picture. The TV gets a new
+    // picture only when the menu changes: drawing it every frame took a whole core of the
+    // Sion's (run 18), and the DS's keep-alive bundles, counted in pictures then, came too
+    // late for it (its status page after a second with no data), so they go by the clock.
     auto runMenu = [&](const u32* top, const u32* bot, u32 f) {
         std::vector<u32> t(top, top + 256 * 192), b(bot, bot + 256 * 192);
         menu.link = linkLine();
@@ -2098,24 +2115,36 @@ int main(int argc, char** argv)
         menu.Open();
         showOverlay();
         if (soundSpec) sound.Pause(true);
+        CpuMenuOpened();
         fprintf(stderr, "menu: open at frame %u\n", f);
-        auto opened = std::chrono::steady_clock::now();
+        auto opened = std::chrono::steady_clock::now(), keptAlive = opened;
         MenuAction act = MenuAction::None;
-        for (u32 n = 1; !gMirrorQuit && act == MenuAction::None; n++)
+        u32 drawn = ~0u;
+        std::string linkDrawn;
+        bool linkedDrawn = false;
+        while (!gMirrorQuit && act == MenuAction::None)
         {
-            if (link && link->Poll(pad))
-            {
-                noteShown();
-                reports++;
-            }
+            if (link && link->Poll(pad)) noteShown();
             u16 keys = (padsOn ? sionPads.MenuKeys() : 0) | dsMenuKeys();
             act = menu.Update(keys);
             if (tvSpec) tv.SetLayout(menu.layout, menu.swap);
             menu.link = linkLine();
             menu.linked = link && !deaf;
-            if (tvSpec) tv.Show(t.data(), b.data());
-            if (!tv.Paced()) std::this_thread::sleep_for(std::chrono::milliseconds(16));
-            if (n % 30 == 0) rec.KeepAlive();
+            bool redraw = menu.Changes() != drawn || menu.link != linkDrawn || menu.linked != linkedDrawn;
+            if (tvSpec && redraw && act == MenuAction::None)
+            {
+                tv.Show(t.data(), b.data());
+                drawn = menu.Changes();
+                linkDrawn = menu.link;
+                linkedDrawn = menu.linked;
+            }
+            if (!tvSpec || !redraw || !tv.Paced()) std::this_thread::sleep_for(std::chrono::milliseconds(16));
+            auto now = std::chrono::steady_clock::now();
+            if (now - keptAlive >= std::chrono::milliseconds(250))
+            {
+                rec.KeepAlive();
+                keptAlive = now;
+            }
         }
         static const char* const names[] = {"none", "resume", "quick save", "quick load", "reset", "dashboard"};
         fprintf(stderr, "menu: %s after %.1f s\n", names[(int)act],
@@ -2127,7 +2156,8 @@ int main(int argc, char** argv)
                 fprintf(lf, "%s %d\n", LayoutWords[(int)menu.layout], menu.swap ? 1 : 0);
                 fclose(lf);
             }
-            fprintf(stderr, "menu: screens %s%s\n", GameMenu::LayoutName(menu.layout), menu.swap ? ", swapped" : "");
+            fprintf(stderr, "menu: screens %s%s\n", GameMenu::LayoutName(menu.layout),
+                    menu.swap && !SingleScreen(menu.layout) ? ", swapped" : "");
         }
         switch (act)
         {
@@ -2158,6 +2188,7 @@ int main(int argc, char** argv)
         // buttons that closed it stay out of the game until they're let go
         auto now = std::chrono::steady_clock::now();
         speedFrom += now - opened;
+        CpuMenuClosed();
         tick = lastFrameDone = now;
         if (padsOn) sionPads.Swallow();
         dsSwallow = link ? pad.keys & 0xFFF : 0;
@@ -2364,11 +2395,11 @@ int main(int argc, char** argv)
             if (sionPads.MenuAsked()) menuWanted = true;
         }
         {
-            // the DS's Select held for 2 s opens the menu too; until then it's the game's
+            // the DS's Select held for 1.5 s opens the menu too; until then it's the game's
             u16 ds = link ? in.ds.held : 0;
             if (ds & 4)
             {
-                if (++dsSelectFrames == 120) menuWanted = dsSelectSpent = true;
+                if (++dsSelectFrames == MenuHoldFrames) menuWanted = dsSelectSpent = true;
             }
             else
                 dsSelectFrames = 0, dsSelectSpent = false;

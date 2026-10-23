@@ -290,10 +290,13 @@ const char* GameMenu::LayoutName(TVLayout l)
 {
     switch (l)
     {
+    case TVLayout::TopOnly: return "Top screen only";
+    case TVLayout::BottomOnly: return "Bottom screen only";
     case TVLayout::Stacked: return "Stacked";
     case TVLayout::SideBySide: return "Side by side";
     case TVLayout::BigTop: return "Top screen big";
     case TVLayout::BigBottom: return "Bottom screen big";
+    default: break;
     }
     return "";
 }
@@ -354,6 +357,17 @@ void GameMenu::Toast(const std::string& text)
 MenuAction GameMenu::Update(uint16_t keys)
 {
     if (!open) return MenuAction::None;
+    struct Shown { int page, focus, confirmFocus; TVLayout layout; bool swap; };
+    const Shown was {page, focus, confirmFocus, layout, swap};
+    MenuAction a = Act(keys);
+    if (a != MenuAction::None || page != was.page || focus != was.focus || confirmFocus != was.confirmFocus ||
+        layout != was.layout || swap != was.swap)
+        changes++;
+    return a;
+}
+
+MenuAction GameMenu::Act(uint16_t keys)
+{
     blocked &= keys;
     uint16_t k = keys & ~blocked;
     uint16_t edge = k & ~prev;
@@ -385,15 +399,16 @@ MenuAction GameMenu::Update(uint16_t keys)
         return MenuAction::None;
     }
     if (fire & MK_BACK) return close(MenuAction::Resume);
-    auto enabled = [&](int r) { return r != 4 || !stateWhen.empty(); };
+    auto enabled = [&](int r) { return Enabled(r); };
     if (fire & (MK_UP | MK_DOWN))
     {
         int step = fire & MK_UP ? Rows - 1 : 1;
         do focus = (focus + step) % Rows;
         while (!enabled(focus));
     }
+    const int layouts = (int)TVLayout::Count;
     if (focus == 1 && (fire & (MK_LEFT | MK_RIGHT | MK_OK)))
-        layout = (TVLayout)(((int)layout + (fire & MK_LEFT ? 3 : 1)) % 4);
+        layout = (TVLayout)(((int)layout + (fire & MK_LEFT ? layouts - 1 : 1)) % layouts);
     else if (focus == 2 && (fire & (MK_LEFT | MK_RIGHT | MK_OK)))
         swap = !swap;
     else if (fire & MK_OK)
@@ -509,7 +524,7 @@ void GameMenu::Draw(uint32_t* dst, uint32_t pitch, uint32_t w, uint32_t h, doubl
                                              U"Reset game", U"Back to dashboard"};
         const std::u32string values[Rows] = {U"", focus == 1 ? U"‹  " + lay + U"  ›" : lay, swap ? U"On" : U"Off",
                                              U"", Decode(stateWhen), U"", U""};
-        for (int i = 0; i < Rows; i++) row(i, labels[i], values[i], i == focus, i != 4 || !stateWhen.empty());
+        for (int i = 0; i < Rows; i++) row(i, labels[i], values[i], i == focus, Enabled(i));
         legend("Select", "Resume");
         return;
     }

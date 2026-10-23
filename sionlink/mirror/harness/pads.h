@@ -6,7 +6,7 @@
 // the bottom one B, the top one X, the left one Y. Back is Select, the shoulders L and R,
 // the left stick or the d-pad the d-pad. The right stick moves a stylus over the bottom
 // screen and the right trigger (or a click of the right stick) touches there. The Guide
-// button stays the Guide's. Holding Back for 2 s asks for the game's menu (MenuAsked):
+// button stays the Guide's. Holding Back for 1.5 s asks for the game's menu (MenuAsked):
 // until then Back is Select for the game, from then on it's let go. SDL runs on a thread of
 // its own ("pads"): a pad coming or going (run 16: 142 ms) doesn't hold the game up.
 #ifndef MIRROR_PADS_H
@@ -30,7 +30,7 @@ public:
     bool CursorShown() const { return cursorFrames > 0; }
     int CursorX() const { return (int)cx; }
     int CursorY() const { return (int)cy; }
-    // Back held for 2 s since the last call
+    // Back held for 1.5 s since the last call
     bool MenuAsked() { bool m = menuAsked; menuAsked = false; return m; }
     // while the game menu is up instead of Poll: its keys held now (menu.h's MK_*, the
     // dashboard's way: A picks, B goes back, Back or Start closes, d-pad or left stick moves)

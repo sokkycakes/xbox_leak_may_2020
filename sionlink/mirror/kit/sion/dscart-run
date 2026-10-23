@@ -1,0 +1,100 @@
+#!/bin/sh
+#
+# dscart-run: run a DS Kazeta cart (Runtime=nds) on the Sion as an Xbox title would run:
+# the game on the TV with its sound, the Sion's pads playing it, a DS over Sion Link
+# (start sion-link-live.nds and plug its DSpico into the Sion, whenever), the game's
+# menu on a 1.5 s Back (or the DS's Select) hold, and the dashboard back when it ends.
+#
+#   dscart-run <path to .kzi> [--title-id XXXXXXXX]
+#
+# A DS cart is an Xbox title through a stub in E:\Games (dstitle.py): the xbcompat
+# started for it execs wincart-run, which hands DS carts here. The cart:
+#   NAME.kzi    Name=, Id=, Runtime=nds, Exec=GAME.nds; Gamecode=XXXX for a game whose
+#               header code melonDS doesn't know (AMKE: the Mario Kart DS kiosk demo);
+#               Renderer=soft draws the 3D with the CPU instead of the GPU
+#   NAME/GAME.nds
+# The game's save, its quick save and its screen layout go on the Xbox hard disk under
+# the title's ID, UDATA/<title id>/000000000001/GAME.{sav,state,layout}, so the
+# dashboard's Memory screen lists them. Log: /data/sionlink/logs/<Id>.log (.1 the run
+# before).
+
+# xbcompat's environment is for its 32-bit tree.
+unset LD_LIBRARY_PATH LIBGL_DRIVERS_PATH GBM_DRIVERS_PATH __EGL_VENDOR_LIBRARY_FILENAMES \
+	PYTHONHOME PYTHONDONTWRITEBYTECODE SDL_VIDEODRIVER SDL_AUDIODRIVER XBCOMPAT_LAUNCHER
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+B=/opt/sionlink
+X=/opt/xbcompat
+HDD=/data/xbox/hdd
+LOGS=/data/sionlink/logs
+
+# A DRM descriptor inherited from the title that exec'd us would keep the display from us.
+for f in /proc/$$/fd/*; do
+	n=${f##*/}
+	[ "$n" -gt 2 ] 2>/dev/null || continue
+	case $(readlink "$f" 2>/dev/null) in /dev/dri/*) eval "exec $n>&-" ;; esac
+done
+
+kzi=
+tid=
+while [ $# -gt 0 ]; do
+	case $1 in
+	--title-id) tid=$2; shift 2 ;;
+	--*=*) shift ;;
+	--*) case $2 in -*|'') shift ;; *) shift 2 ;; esac ;;
+	*) [ -z "$kzi" ] && kzi=$1; shift ;;
+	esac
+done
+[ -n "$kzi" ] && [ -r "$kzi" ] || { echo "usage: dscart-run <cart.kzi> [--title-id XXXXXXXX]" >&2; exit 64; }
+
+key() { sed -n "s/^$1[[:space:]]*=[[:space:]]*//p" "$kzi" | tr -d '\r' | head -n1; }
+name=$(key Name)
+id=$(key Id)
+exec_=$(key Exec)
+runtime=$(key Runtime)
+gamecode=$(key Gamecode)
+renderer=$(key Renderer)
+base=${kzi##*/}
+base=${base%.*}
+[ -n "$id" ] || id=$base
+[ -n "$name" ] || name=$id
+card=$(cd "$(dirname "$kzi")" && pwd)
+cartdir=$card/$base
+[ -d "$cartdir" ] || cartdir=$card
+rom=$cartdir/$exec_
+
+mkdir -p "$LOGS"
+LOG=$LOGS/$id.log
+[ -e "$LOG" ] && mv "$LOG" "$LOG.1"
+exec >> "$LOG" 2>&1
+echo "$(date '+%F %T') dscart-run: $name ($id), title ${tid:-none}, runtime $runtime, game $rom"
+case $runtime in
+nds*) ;;
+*) echo "not a DS cart (Runtime=$runtime)"; exit 65 ;;
+esac
+[ -r "$rom" ] || { echo "no $rom"; exit 66; }
+
+# The save folder on the Xbox hard disk, with the files the Memory screen reads (made
+# again if it deleted them).
+py() { /usr/bin/env LD_LIBRARY_PATH=$X/lib PYTHONHOME=$X PYTHONDONTWRITEBYTECODE=1 $X/bin/python3 "$@"; }
+t=$(py $B/dstitle.py "$kzi" --udata $HDD/partition1/UDATA | tail -n1)
+[ -n "$tid" ] || tid=$t
+tid=$(echo "$tid" | tr 'A-F' 'a-f')
+slot=$HDD/partition1/UDATA/$tid/000000000001
+mkdir -p "$slot"
+game=${exec_##*/}
+game=${game%.*}
+
+# the sound device, TV mode and display socket the dashboard uses
+eval "$(. /usr/lib/xbox/xbox-env > /dev/null 2>&1
+	echo "AUDIODEV='$AUDIODEV' KMS_MODE='$KMS_MODE' XBOX_AV_SOCKET='$XBOX_AV_SOCKET'")"
+export AUDIODEV KMS_MODE XBOX_AV_SOCKET
+echo "sound device ${AUDIODEV:-default}, display socket ${XBOX_AV_SOCKET:-none}, save $slot/$game.sav"
+
+RUN=$B/mirrorrun-gl
+RENDER="--renderer gl"
+[ "$renderer" = soft ] && RUN=$B/mirrorrun RENDER=
+CODE=
+[ -n "$gamecode" ] && CODE="--gamecode $gamecode"
+# shellcheck disable=SC2086
+exec $RUN "$rom" 0 --serve usb --hotplug 1 --realtime 1 --gxdelta 1 --jit 1 --threaded 1 $RENDER \
+	--half 1 $CODE --tv drm --sound alsa --pads 1 --save "$slot/$game.sav"

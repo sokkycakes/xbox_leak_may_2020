@@ -122,23 +122,24 @@ sets all of it. Cloud test: a DS joining mid-race shows the game's pictures from
 second frame on. `--pads 1` lets the Sion's own pads play (`pads.h`: SDL2 game controllers,
 its HIDAPI drivers over libusb as in xbcompat; build SDL with `harness/build-sdl.sh`):
 buttons by position as on a DS, the right stick moves a stylus drawn on the TV, the right
-trigger touches, and holding Back for 2 s opens the game's menu (below). Buttons from the DS,
+trigger touches, and holding Back for 1.5 s opens the game's menu (below). Buttons from the DS,
 the pads and `--input` all count. `MIRROR_PADTEST=FILE` plays a virtual pad in cloud tests
 (a key script played as pad buttons gives the same recording). `--save FILE` loads the
 game's save memory and writes it back 2 s after the game last wrote to it, through a temp
 file and a rename.
 
 ## The game's menu (`menu.h`)
-Holding Select for 2 s (Back on the Sion's pads, or Select on the DS over the link) stops the
+Holding Select for 1.5 s (Back on the Sion's pads, or Select on the DS over the link) stops the
 game and opens its menu on the TV, as Game Boy Player and Virtual Console do; the Guide button
-stays the Guide's. Until the 2 s are up the game gets Select as usual. The menu is drawn over
+stays the Guide's. Until the 1.5 s are up the game gets Select as usual. The menu is drawn over
 the dimmed picture in Frolick's look (its slate panel and Fira Sans, the focused row light with
 dark text, the Blades' A and B buttons; `menuart.h` is baked from Frolick's art by
 `mkmenuart.py`), with the game's banner icon and title and a line on how the DS link is doing:
 - Resume (also B, Back, Start or Select)
-- Screen layout: stacked, side by side, top screen big or bottom screen big (the other at half
-  its size beside it), seen behind the menu as it changes; kept for the game in `GAME.layout`
-- Swap screens
+- Screen layout: top screen only (the first time), bottom screen only, stacked, side by side,
+  top screen big or bottom screen big (the other at half its size beside it), seen behind the
+  menu as it changes; kept for the game in `GAME.layout`
+- Swap screens (not with one screen alone)
 - Quick save: one per game, `GAME.state` beside the save (melonDS's savestate, zlib, and the
   2D and 3D registers' last writes, which the DS can't read back), packed and written on a
   thread of its own while the game goes on; "Quick save made" shows at the foot of the TV.
@@ -149,14 +150,35 @@ dark text, the Blades' A and B buttons; `menuart.h` is baked from Frolick's art 
 
 The pads work it the dashboard's way (A picks, B goes back, the d-pad or left stick moves);
 the DS the DS's way (A, B, the d-pad). The sound stops while it's up, and the DS gets a bundle
-with nothing in it every half second, so it keeps its picture instead of showing its link
-page. The buttons that close it stay out of the game until they're let go. After a quick load
+with nothing in it every quarter second by the clock, so it keeps its picture instead of
+showing its link page. The TV gets a new picture only when the menu changes: drawing it every
+frame took a whole core on the Sion, and the DS's bundles, counted in pictures then, came more
+than a second apart (run 18: the DS's link page after each long menu, and a full frame after).
+Its time is left out of the speed line's seconds and CPU shares. The buttons that close it stay out of the game until they're let go. After a quick load
 or a reset the DS gets a full bundle of the new state: first zeros for any command it was part
 way through, then the new 3D registers and the whole geometry state as melonDS has it (moving
 the matrix stack pointers from where the old state left them), then the frames as usual. Cloud
 test (MKDS demo, DS joined over the simulated DSpico): every DS frame matches an emulator frame
 after the quick load and after the reset, from the 5th frame on (as when a DS joins); before
 that it shows the DS's VRAM being cleared and one frame with the 3D a frame off.
+
+## As an Xbox title (`kit/sion/install-title.sh`)
+A DS game installed this way shows up in the Xbox dashboard's Games and in Frolick like any
+game, and runs in the DS runtime when launched:
+`sh install-title.sh GAME.nds ["Name"] [id] [GAMECODE]` on the Sion, from the kit folder
+(the defaults are the Mario Kart DS kiosk demo's; `--remove [id]` takes it off again). It is a
+Kazeta cart with `Runtime=nds` on the Sion's own disk (`/data/sionlink/carts/ID.kzi` and
+`ID/GAME.nds`) made into a title the way xbcompat's `wincart.c` makes a Windows cart on the
+game card into one: `dstitle.py` writes `E:\Games\ID\default.xbe`, a stub with the cart's
+name, a title ID from its Id (`SN` + CRC-16) and the ROM banner's icon as its title image
+(the same bytes `wincart.c` writes, checked), and a `.wincart` beside it naming the cart. The
+xbcompat started for the stub execs `wincart-run` with the cart, which hands DS carts to
+`dscart-run` (one line the installer adds, keeping `wincart-run.pre-ds`); that runs
+`mirrorrun-gl` from `/opt/sionlink` as `tv.sh` does, with the save, the quick save and the
+layout in `UDATA/<title id>/000000000001/`, so the Memory screen lists them under the game's
+name and icon. Back to dashboard in the game's menu ends it, and the dashboard comes back as
+after any title. Log: `/data/sionlink/logs/ID.log`. Tested in the cloud on a mock of the Sion's
+paths: install, launch through `wincart-run`, reinstall, remove.
 
 ## OpenGL (`--renderer gl`)
 melonDS's OpenGL renderer draws the game's 3D (and puts the screens together) on the GPU,

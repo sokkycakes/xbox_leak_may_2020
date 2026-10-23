@@ -50,7 +50,8 @@ void TVOut::Layout()
     double r = 4.0 / 3.0 / par;   // a screen's width in pixels for each line of its height
     // the whole arrangement's size, in screen heights (the big one's)
     double fw = r, fh = 2;
-    if (layout == TVLayout::SideBySide) fw = 2 * r, fh = 1;
+    if (SingleScreen(layout)) fh = 1;
+    else if (layout == TVLayout::SideBySide) fw = 2 * r, fh = 1;
     else if (layout == TVLayout::BigTop || layout == TVLayout::BigBottom) fw = 1.5 * r, fh = 1;
     uint32_t bh = (uint32_t)std::min(aw / fw, ah / fh) & ~1u;
     uint32_t bw = (uint32_t)lround(bh * r) & ~1u;
@@ -63,6 +64,18 @@ void TVOut::Layout()
     Place& b = place[1];
     switch (layout)
     {
+    case TVLayout::TopOnly:
+    case TVLayout::BottomOnly:
+    {
+        // the other one isn't drawn at all
+        Place& one = layout == TVLayout::TopOnly ? t : b;
+        Place& none = layout == TVLayout::TopOnly ? b : t;
+        one.w = bw; one.h = bh;
+        one.x = (w - bw) / 2;
+        one.y = (h - bh) / 2;
+        none.x = none.y = none.w = none.h = 0;
+        break;
+    }
     case TVLayout::Stacked:
         t.w = b.w = bw; t.h = b.h = bh;
         t.x = b.x = (w - bw) / 2;
@@ -90,8 +103,10 @@ void TVOut::Layout()
         b.x = t.x + t.w;
         t.y = b.y = (h - bh) / 2;
         break;
+    default:
+        break;
     }
-    if (swap)
+    if (swap && !SingleScreen(layout))
     {
         std::swap(t.x, b.x); std::swap(t.y, b.y);
         std::swap(t.w, b.w); std::swap(t.h, b.h);
@@ -120,6 +135,7 @@ void TVOut::Layout()
 
 void TVOut::SetLayout(TVLayout l, bool s)
 {
+    if (SingleScreen(l)) s = false;
     if (l == layout && s == swap) return;
     layout = l;
     swap = s;
@@ -146,6 +162,7 @@ void TVOut::Compose(uint32_t* dst, uint32_t pitch, const uint32_t* top, const ui
     {
         const uint32_t* src = screens[s];
         const Place& p = place[s];
+        if (!p.w) continue;   // not shown (one screen alone)
         for (uint32_t y = 0; y < 192; y++)
         {
             const uint32_t* in = src + y * 256;
@@ -176,6 +193,7 @@ bool TVOut::Open(const std::string& spec)
         if (!dump) { perror(spec.c_str() + 5); return false; }
         dumpBuf.assign((size_t)w * h, 0);
         if (const char* e = getenv("MIRROR_TVDUMPEVERY")) dumpEvery = std::max(1, atoi(e));
+        if (const char* e = getenv("MIRROR_TVDUMPFROM")) dumpFrom = std::max(0, atoi(e));
         Layout();
         if (getenv("MIRROR_TVPACE"))
         {
@@ -375,7 +393,7 @@ void TVOut::Show(const uint32_t* top, const uint32_t* bottom)
             }
             flipAt = (floor(now / vblankPeriod + 1e-6) + 1) * vblankPeriod;
         }
-        if (frames++ % dumpEvery == 0)
+        if (frames++ >= dumpFrom && (frames - 1 - dumpFrom) % dumpEvery == 0)
         {
             Compose(dumpBuf.data(), w * 4, top, bottom);
             fwrite(dumpBuf.data(), 4, dumpBuf.size(), dump);
