@@ -1674,6 +1674,7 @@ function SpotMeta()
         thePage.SetData("metaSpot", 1, "");
         thePage.SetImage("imgSpotTile", "");
         thePage.SetText("txt_SpotCredit", "");
+        SpotMark(0);
         thePage.SetText("txt_EmptyList", SpotEmpty());
         SpotLegend();
         return;
@@ -1682,7 +1683,32 @@ function SpotMeta()
     thePage.SetData("metaSpot", 1, theStore.GetDesc(nTab, nSel));
     thePage.SetImage("imgSpotTile", theStore.GetImage(nTab, nSel));
     thePage.SetText("txt_SpotCredit", theStore.GetSize(nTab, nSel) + "   From the Internet Archive");
+    SpotMark(theStore.IsStream(nTab, nSel));
     SpotLegend();
+}
+
+// The Streaming Download mark on items that play as they download: the
+// row's second line, a badge by the tile, or a line in the details box
+function SpotMark(on)
+{
+    var mark;
+    mark = "";
+    if (on)
+        mark = "%(stream_mark)s";
+    if (mark == "badge")
+    {
+        thePage.SetVisible("imgSpotBadge", 1);
+        thePage.SetVisible("txt_SpotBadge", 1);
+    }
+    else
+    {
+        thePage.SetVisible("imgSpotBadge", 0);
+        thePage.SetVisible("txt_SpotBadge", 0);
+    }
+    if (mark == "line")
+        thePage.SetText("txt_SpotStream", "Streaming Download available");
+    else
+        thePage.SetText("txt_SpotStream", "");
 }
 
 // what an empty tab says: why there is no catalog, or that the tab is empty
@@ -1702,6 +1728,11 @@ function SpotKind(i)
         return "Queued";
     if (h == 2)
         return "Downloaded";
+    if ("%(stream_mark)s" == "row")
+    {
+        if (theStore.IsStream(nTab, i))
+            return "Streaming Download";
+    }
     return theStore.GetKind(nTab, i);
 }
 
@@ -1712,7 +1743,10 @@ function SpotLegend()
         thePage.SetVisible("legend_a", 0);
     else if (theDownloads.Has(theStore.GetId(nTab, nSel)) == 0)
     {
-        thePage.SetText("legend_a", "Download");
+        if (theStore.IsStream(nTab, nSel))
+            thePage.SetText("legend_a", "Play");
+        else
+            thePage.SetText("legend_a", "Download");
         thePage.SetVisible("legend_a", 1);
     }
     else
@@ -1724,6 +1758,13 @@ function SpotPress()
     var r;
     if (nListCount == 0)
         return;
+    // play as you download needs its launch route first (a streaming
+    // xbcompat beside the dashboard, or the installed one taking streams)
+    if (theStore.IsStream(nTab, nSel))
+    {
+        Notice("Streaming Download for this game is still being set up.", "page_spotlight");
+        return;
+    }
     r = theDownloads.Queue(nTab, nSel);
     if (r == 0 - 1)
     {
@@ -2607,6 +2648,7 @@ def main():
     for name in ("catalogfocus", "settingsfocus", "carousel"):
         vals["vp_" + name] = viewpoint(name)
     vals["zoom_duration"] = ZOOM_DURATION
+    vals["stream_mark"] = os.environ.get("FROLICK_STREAM_MARK", "badge")
     for name in ("catalog", "settings"):
         o = label_focus_offset(name)
         for k, v in zip("xyz", o):

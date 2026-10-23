@@ -14,6 +14,7 @@ struct STOREITEM
     const CHAR* szTile;
     const CHAR* szTitle;
     const CHAR* szDesc;
+    bool bStream;           // plays as it downloads (flag "stream")
 };
 
 const STOREITEM* StoreItem(int t, int i);

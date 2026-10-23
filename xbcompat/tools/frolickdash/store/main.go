@@ -82,11 +82,13 @@ type tab struct {
 	Rows  int
 }
 
-// The built-in tabs (store.conf replaces them).  Windows games only for
-// now (sokky, 2026-10-22); Featured is a hand-picked list of free,
-// shareware and demo releases.
+// The built-in tabs (store.conf replaces them).  Windows games first
+// (sokky, 2026-10-22); Featured is a hand-picked list of free, shareware
+// and demo releases, and Half-Life 2 for Xbox, which plays as it
+// downloads (sokky, 2026-10-23).
 var defaultTabs = []tab{
 	{Name: "Featured", Kind: "Windows game", IDs: []string{
+		"xbox_essentials/Half-Life 2.iso | Xbox game",
 		"oni-ae",
 		"DiabloSharewareWindowsBlizzardEntertainment1997",
 		"SURVEY_PROGRAM",
@@ -109,6 +111,8 @@ var defaultTabs = []tab{
 //	tab <name> | <kind>
 //	query <lucene query>       (the tab's search) or
 //	id <identifier>            (one per line: a hand-picked list)
+//	id <identifier>/<file>     (one file of an item, e.g. one disc of a set)
+//	id ... | <kind>            (this entry's kind instead of the tab's)
 //	rows <n>
 func loadTabs(path string) []tab {
 	f, err := os.Open(path)
@@ -209,6 +213,8 @@ type iaFile struct {
 	Format string `json:"format"`
 	Source string `json:"source"`
 	Size   string `json:"size"`
+	MD5    string `json:"md5"`
+	SHA1   string `json:"sha1"`
 }
 
 type iaMeta struct {
@@ -295,12 +301,13 @@ func size(f iaFile) int64 {
 }
 
 type item struct {
-	ID    string
-	Title string
-	Kind  string
-	Desc  string
-	Size  int64
-	Files []iaFile
+	ID     string
+	Title  string
+	Kind   string
+	Desc   string
+	Size   int64
+	Files  []iaFile
+	Stream bool // an Xbox disc image that can be played as it downloads (stream.go)
 }
 
 var reTags = regexp.MustCompile(`(?s)<[^>]*>`)
@@ -403,22 +410,38 @@ func search(ctx context.Context, q string, rows int) ([]string, error) {
 }
 
 func makeItem(ctx context.Context, id, kind string) (*item, error) {
-	m, err := metadata(ctx, id)
+	ident, file, _ := strings.Cut(id, "/")
+	m, err := metadata(ctx, ident)
 	if err != nil {
 		return nil, err
 	}
-	files := pickFiles(m.Files)
-	if len(files) == 0 {
-		return nil, fmt.Errorf("%s: no game files", id)
+	it := &item{ID: id, Kind: kind}
+	if file != "" {
+		// one file of the item: a game in a collection of discs
+		for _, f := range m.Files {
+			if f.Name == file {
+				it.Files = []iaFile{f}
+			}
+		}
+		if it.Files == nil {
+			return nil, fmt.Errorf("%s: no file %q", ident, file)
+		}
+		it.Title = clean(strings.TrimSuffix(file, filepath.Ext(file)))
+		it.Desc = plain(fmt.Sprintf("A disc image from the Internet Archive's %s collection.", clean(metaString(m.Metadata, "title"))), 400)
+		it.Stream = strings.EqualFold(filepath.Ext(file), ".iso") && strings.Contains(kind, "Xbox")
+	} else {
+		it.Files = pickFiles(m.Files)
+		if len(it.Files) == 0 {
+			return nil, fmt.Errorf("%s: no game files", id)
+		}
+		title := metaString(m.Metadata, "title")
+		if unreadable(title) {
+			return nil, fmt.Errorf("%s: title not in Latin script", id)
+		}
+		it.Title = clean(title)
+		it.Desc = plain(metaString(m.Metadata, "description"), 400)
 	}
-	it := &item{ID: id, Kind: kind, Files: files}
-	title := metaString(m.Metadata, "title")
-	if unreadable(title) {
-		return nil, fmt.Errorf("%s: title not in Latin script", id)
-	}
-	it.Title = clean(title)
-	it.Desc = plain(metaString(m.Metadata, "description"), 400)
-	for _, f := range files {
+	for _, f := range it.Files {
 		it.Size += size(f)
 	}
 	return it, nil
@@ -527,18 +550,32 @@ func buildCatalog(ctx context.Context, tabs []tab) error {
 		}
 		okTabs++
 		n := 0
-		for _, id := range ids {
-			it, err := makeItem(ctx, id, t.Kind)
+		for _, entry := range ids {
+			id, kind, ok := strings.Cut(entry, "|")
+			id, kind = strings.TrimSpace(id), strings.TrimSpace(kind)
+			if !ok {
+				kind = t.Kind
+			}
+			it, err := makeItem(ctx, id, kind)
 			if err != nil {
 				log.Printf("tab %s: %v", t.Name, err)
 				continue
 			}
-			tile := tileName(id)
-			fetchTile(ctx, id, filepath.Join(*storeDir, "img", tile))
-			if _, err := os.Stat(filepath.Join(*storeDir, "img", tile)); err != nil {
-				tile = ""
+			// a file of a collection has no picture of its own on the
+			// Archive (the item's is the collection's): no tile
+			tile := ""
+			if !strings.Contains(id, "/") {
+				tile = tileName(id)
+				fetchTile(ctx, id, filepath.Join(*storeDir, "img", tile))
+				if _, err := os.Stat(filepath.Join(*storeDir, "img", tile)); err != nil {
+					tile = ""
+				}
 			}
-			fmt.Fprintf(&out, "item\t%d\t%s\t%d\t%s\t%s\t%s\t%s\n", ti, it.ID, it.Size, it.Kind, tile, it.Title, it.Desc)
+			flags := ""
+			if it.Stream {
+				flags = "stream"
+			}
+			fmt.Fprintf(&out, "item\t%d\t%s\t%d\t%s\t%s\t%s\t%s\t%s\n", ti, it.ID, it.Size, it.Kind, tile, it.Title, it.Desc, flags)
 			n++
 		}
 		log.Printf("tab %s: %d items", t.Name, n)

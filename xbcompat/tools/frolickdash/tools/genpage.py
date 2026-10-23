@@ -776,8 +776,18 @@ def spotlight_page(spec):
                       " <ImagePath></ImagePath>", "</Properties>", "</XuiImage>"])
     credit = text("txt_SpotCredit", bx + 30, list_y + ph - 34, bw - 44, 26, 14, 0x4010 | STYLE_ELLIPSIS, ITEM_REST, presenter=False,
                   value="", shadow="0")
+    # the Streaming Download mark (play as you download): a lime badge in
+    # the image band beside the tile, or a line over the credit; the script
+    # shows whichever FROLICK_STREAM_MARK picked, on items that stream
+    bdg_x, bdg_y = bx + 30 + tile_h * 4 / 3 + 16, list_y + title_h + 10
+    # (dark text: 0xff101010, as the body's 0xff0f0f0f turns white)
+    stream = [figure("imgSpotBadge", bdg_x, bdg_y, 236, 34, solid("0xffc4ff46")),
+              text("txt_SpotBadge", bdg_x, bdg_y, 236, 34, 12, 0x10 | 0x400 | 0x1000, "0xff101010", presenter=False,
+                   value="STREAMING DOWNLOAD", shadow="0"),
+              text("txt_SpotStream", bx + 30, list_y + ph - 62, bw - 44, 26, 14, 0x4010 | STYLE_ELLIPSIS, "0xffc4ff46",
+                   presenter=False, value="", shadow="0")]
     out.append(clip_group("metaClip", 0, list_y - 16, CANVAS_W, BODY_END - (list_y - 16),
-                          [moved(b, 0, -(list_y - 16)) for b in box + [tile, meta, credit]]))
+                          [moved(b, 0, -(list_y - 16)) for b in box + [tile, meta, credit] + stream]))
     out.append(text("txt_EmptyList", LIST_X + SPOT_TEXT_X - 60, list_y + 14, 380, 120, 18, 0x4000, ITEM_REST, presenter=False,
                     value="Nothing here yet.", shadow=SHADOW))
     return out + legends(spec)

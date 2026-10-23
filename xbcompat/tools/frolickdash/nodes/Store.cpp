@@ -6,7 +6,9 @@
 // separated, ending in a line "end"):
 //
 //   tab   <t> <name>
-//   item  <t> <identifier> <bytes> <kind> <tile> <title> <description>
+//   item  <t> <identifier> <bytes> <kind> <tile> <title> <description> [<flags>]
+//
+// Flags: "stream", an Xbox disc that plays as it downloads.
 //
 // Tiles are PNGs in E:\FROLICK\STORE\img.  The file is read again when it
 // changes (checked every two seconds), and GetVersion() moves on so the
@@ -22,6 +24,7 @@
 //   GetSize(t, i)     "412 MB"
 //   GetImage(t, i)    its tile's path, or ""
 //   GetId(t, i)       its archive.org identifier
+//   IsStream(t, i)    1 for a Streaming Download (plays as it downloads)
 //   GetVersion()      changes whenever the catalog is read again
 //   GetState()        "" with a catalog, else what the page says instead
 // Not part of Microsoft's dashboard; added for Frolick (tools/frolickdash).
@@ -142,8 +145,9 @@ static bool LoadCatalog()
         int n = strlen(line);
         if (n > 0 && line[n - 1] == '\r')
             line[n - 1] = 0;
-        CHAR* f[8];
-        if (strncmp(line, "item\t", 5) == 0 && c_nItems < STORE_MAX && StoreSplit(line, f, 8) == 8)
+        CHAR* f[9];
+        int nf = strncmp(line, "item\t", 5) == 0 ? StoreSplit(line, f, 9) : 0;
+        if (nf >= 8 && c_nItems < STORE_MAX)
         {
             STOREITEM* it = &c_rgItems[c_nItems++];
             it->nTab = atoi(f[1]);
@@ -156,6 +160,7 @@ static bool LoadCatalog()
             it->szTile = f[5];
             it->szTitle = f[6];
             it->szDesc = f[7];
+            it->bStream = nf == 9 && strstr(f[8], "stream") != NULL;
         }
         line = next;
     }
@@ -185,6 +190,7 @@ public:
     void Advance(float nSeconds);
 
     int GetCount(int t);
+    int IsStream(int t, int i);
     CStrObject* GetName(int t, int i);
     CStrObject* GetKind(int t, int i);
     CStrObject* GetDesc(int t, int i);
@@ -211,6 +217,7 @@ END_NODE_PROPS()
 
 START_NODE_FUN(CStore, CNode)
     NODE_FUN_II(GetCount)
+    NODE_FUN_III(IsStream)
     NODE_FUN_SII(GetName)
     NODE_FUN_SII(GetKind)
     NODE_FUN_SII(GetDesc)
@@ -259,6 +266,12 @@ int CStore::GetCount(int t)
         if (c_rgItems[j].nTab == t)
             n++;
     return n;
+}
+
+int CStore::IsStream(int t, int i)
+{
+    const STOREITEM* it = StoreItem(t, i);
+    return it && it->bStream ? 1 : 0;
 }
 
 CStrObject* CStore::GetName(int t, int i)
