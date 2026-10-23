@@ -72,6 +72,9 @@ name=$(key Name)
 id=$(key Id)
 exec_=$(key Exec)
 runtime=$(key Runtime)
+# DS carts go to Sion Link's runner (its install-title.sh adds this line to an
+# installed copy too).
+case $runtime in nds*) exec sh /opt/sionlink/dscart-run "$kzi" --title-id "$tid" ;; esac
 base=${kzi##*/}
 base=${base%.*}
 [ -n "$id" ] || id=$base
