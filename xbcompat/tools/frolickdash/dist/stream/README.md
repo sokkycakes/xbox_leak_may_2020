@@ -19,22 +19,24 @@ What it adds:
   default.xbe; Frolick's Streaming Downloads) runs with that image as its
   DVD drive for that launch (src/kernel/misc.c). The USB drive is left
   alone. Every other game launches as before;
-- Frolick's dashboard sees the hard disk's real size and free space (its
-  Memory screens); games and the stock dashboard still see a volume of
-  at most 8 GB (src/kernel/io.c).
+- Frolick sees the hard disk's real size and free space on its Memory
+  screens: an XBE named "Frolick", or any XBE run from Games/Frolick (the
+  Sion's Frolick is an older build still named "Xbox Dashboard"); games
+  and the stock dashboard still see a volume of at most 8 GB
+  (src/kernel/io.c).
 
-Replaces 8984cdff's build (md5 1ca4a892), which had Frolick's Memory
-screens at 8 GB free of 8 GB on the internal SSD.
+Replaces 436d7c1e's build (md5 05a81a92), which only knew Frolick by the
+name "Frolick" and so still showed 8 GB free of 8 GB on the Sion.
 
 The Guide is unchanged, so kazeta-guide needs no rebuild.
 
 Install (nothing running: no game, no test): check the live binary is
-still 1ca4a892... (8984cdff), keep it as
-/opt/xbcompat/bin/xbcompat.pre-memsize-<date>, copy this one over it
+still 05a81a92... (436d7c1e), keep it as
+/opt/xbcompat/bin/xbcompat.pre-memsize2-<date>, copy this one over it
 (`chmod 755`), then restart the dashboard. Check with
 `sha256sum -c SHA256SUMS` first. Nothing else changes.
 
 Frolick's side (the Spotlight item, its Play, the store helper that streams
 and installs streamed games in E:\Games) comes in the sion and game kits.
 
-Undo: put the .pre-memsize copy back.
+Undo: put the .pre-memsize2 copy back.

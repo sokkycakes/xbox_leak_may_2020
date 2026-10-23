@@ -172,7 +172,7 @@ index e8eeb181..84d24b74 100644
         rather than waiting out the retries below. */
      if (drive && mt_unlock(d, path)) {
 diff --git a/xbcompat/src/kernel/io.c b/xbcompat/src/kernel/io.c
-index e9269d1c..654816cb 100644
+index e9269d1c..754950c9 100644
 --- a/xbcompat/src/kernel/io.c
 +++ b/xbcompat/src/kernel/io.c
 @@ -151,6 +151,8 @@ static void mkdir_p(const char *path)
@@ -184,27 +184,34 @@ index e9269d1c..654816cb 100644
      if (dvd_root && stat(dvd_root, &dsb) == 0 && !S_ISDIR(dsb.st_mode)) {
          /* An image or a drive: dvd.c reads it. */
          dvd_init(dvd_root, dvd_drive);
-@@ -944,6 +946,13 @@ NTSTATUS NTAPI NtSetInformationFile(HANDLE FileHandle, IO_STATUS_BLOCK *iosb, PV
+@@ -944,6 +946,20 @@ NTSTATUS NTAPI NtSetInformationFile(HANDLE FileHandle, IO_STATUS_BLOCK *iosb, PV
      return st;
  }
  
 +/* Frolick's dashboard (title FFFE0000 named "Frolick"). */
++/* Frolick, as the dashboard (FFFE0000) or as the game in E:\Games\Frolick
++   (FRLK): its XBE is named "Frolick", or older builds named "Xbox Dashboard"
++   run from a Games/Frolick folder. The stock dashboard is neither. */
 +static bool frolick_dash(void)
 +{
-+    const char *name = xbe_title_name();
-+    return xbe_title_id() == 0xFFFE0000 && name && !strcmp(name, "Frolick");
++    const char *name = xbe_title_name(), *path = xbe_file_path();
++    if (name && !strcmp(name, "Frolick")) return true;
++    if (!path) return false;
++    size_t n = strlen(path);
++    const char *tail = "/games/frolick/default.xbe";
++    return n >= strlen(tail) && !strcasecmp(path + n - strlen(tail), tail);
 +}
 +
  NTSTATUS NTAPI NtQueryVolumeInformationFile(HANDLE FileHandle, IO_STATUS_BLOCK *iosb, PVOID Info,
                                              ULONG Length, ULONG Class)
  {
-@@ -965,10 +974,12 @@ NTSTATUS NTAPI NtQueryVolumeInformationFile(HANDLE FileHandle, IO_STATUS_BLOCK *
+@@ -965,10 +981,12 @@ NTSTATUS NTAPI NtQueryVolumeInformationFile(HANDLE FileHandle, IO_STATUS_BLOCK *
          LARGE_INTEGER *li = Info;
          ULONG *u;
          /* Report a FATX-like volume with the partition's cluster size (16 KB
 -           unless formatted otherwise), capped to what a console has. */
 +           unless formatted otherwise). Titles see it capped to what a console
-+           has (8 GB, so 32-bit block math holds); Frolick's dashboard, which
++           has (8 GB, so 32-bit block math holds); Frolick, which
 +           counts in 64 bits, sees the disk's real size and free space. */
          ULONG cluster = f->is_dvd ? 16384 : partition_cluster_bytes(partition_of(f->host));
          ULONGLONG total = (ULONGLONG)vs.f_blocks * vs.f_frsize, avail = (ULONGLONG)vs.f_bavail * vs.f_frsize;
