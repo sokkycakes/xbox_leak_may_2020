@@ -17,6 +17,7 @@
 static void lzTick(void);
 #define MIRROR_LZ_TICK() lzTick()
 #include "mirror_lz.h"
+#include "nitroui.h"
 #include "usblink.h"
 
 static const u32 bankLCDC[9] = {
@@ -356,6 +357,8 @@ static bool linkData;     // the Sion has started sending
 // stall screen took over); bundles are dropped until the Sion sends a full one
 static bool needFull = true;
 static bool stallShown, stallManual;
+static bool menuUp;      // the game's menu is up on the TV, and here on the lower screen
+static bool diagShown;   // before the Sion sends anything: the link's details instead of the art
 static u32 comboSince;   // VBlank count when L+R+SELECT went down, 0 while it isn't held
 static bool comboDone;
 static u32 lastApplied, lastAppliedAt;
@@ -365,10 +368,10 @@ static void showStall(void);
 static void showStallScreen(void);
 static u32 lastDiag = ~0u;
 
-// Before the Sion sends anything, the bottom screen shows what the link has seen
+// Before the Sion sends anything, L+R+SELECT shows what the link has seen
 static void showDiag(void)
 {
-    if (vblanks - lastDiag < 15)
+    if (!diagShown || vblanks - lastDiag < 15)
         return;
     lastDiag = vblanks;
     printf("\x1b[0;0HSion Link: waiting  %5lu\n", vblanks / 60);
@@ -418,7 +421,23 @@ static void showStallScreen(void)
     BG_PALETTE_SUB[255] = RGB15(31, 31, 31);
 }
 
-// The picture stopped: what the link and the stream are doing
+// The picture stopped, the link isn't there yet, or the DSpico went quiet: the NitroLink
+// look, with what's wrong in its words
+static int waitingSaid = -1;   // what showWaiting has on the lower screen (-1: something else)
+
+static void showWaiting(void)
+{
+    int now = usbSilent() ? 1 : 0;
+    if (uiShown() && waitingSaid == now)
+        return;
+    waitingSaid = now;
+    if (now)
+        uiMessage("The DSpico stopped answering:", "switch the DS off and on.");
+    else
+        uiMessage("Waiting for link...", NULL);
+}
+
+// L+R+SELECT: what the link and the stream are doing
 static void showStall(void)
 {
     if (vblanks - lastDiag < 15)
@@ -453,20 +472,36 @@ static void idle(void)
     if (!liveLink)
         return;
     usbPoll();
-    // L+R+SELECT held for a second: show or hide the status page
-    if (linkData && (keysHeld() & (KEY_L | KEY_R | KEY_SELECT)) == (KEY_L | KEY_R | KEY_SELECT))
+    // L+R+SELECT held for a second: show or hide the status page (before the Sion sends
+    // anything, the link's details)
+    if ((keysHeld() & (KEY_L | KEY_R | KEY_SELECT)) == (KEY_L | KEY_R | KEY_SELECT))
     {
         if (!comboSince)
             comboSince = vblanks | 1;
-        if (!comboDone && vblanks - comboSince >= 60)
+        if (!comboDone && vblanks - comboSince >= 60 && !linkData)
+        {
+            comboDone = true;
+            diagShown = !diagShown;
+            if (diagShown)
+            {
+                uiLeave();
+                showStallScreen();
+                lastDiag = ~0u - 15;
+            }
+            else
+                showWaiting();
+        }
+        else if (!comboDone && vblanks - comboSince >= 60)
         {
             comboDone = true;
             stallManual = !stallManual;
+            menuUp = false;
             if (stallManual)
             {
                 // the game's frames would draw over the page: drop them until it closes
                 stallShown = true;
                 needFull = true;
+                uiLeave();
                 showStallScreen();
             }
             else
@@ -494,30 +529,39 @@ static void idle(void)
             // the first bundle sets every display register; start from cleared VRAM.
             // The time spent waiting for the Sion is not a stalled picture.
             linkData = true;
+            diagShown = false;
             lastAppliedAt = vblanks;
+            uiLeave();
             clearHardware();
         }
-        else
+        else if (diagShown)
             showDiag();
+        else
+            showWaiting();
     }
     else if (mirrorStats[1] != lastApplied)
     {
         lastApplied = mirrorStats[1];
         lastAppliedAt = vblanks;
     }
-    else if (vblanks - lastAppliedAt > 120 && vblanks - lastDataAt > 60)
+    else if (menuUp ? vblanks - lastDataAt > 120 :
+             vblanks - lastAppliedAt > 120 && vblanks - lastDataAt > 60)
     {
-        // nothing new for two seconds and no data for one: show what the link is doing.
-        // A big bundle can take seconds to come in; asking for a full frame then
-        // would only throw it away and bring a bigger one (run 7).
+        // nothing new for two seconds and no data for one (with the menu up, the Sion keeps
+        // sending: no data for two): the link stopped. A big bundle can take seconds to come
+        // in; asking for a full frame then would only throw it away and bring a bigger one
+        // (run 7).
         if (!stallShown)
         {
             stallShown = true;
             stalls++;
             needFull = true;
-            showStallScreen();
+            menuUp = false;
         }
-        showStall();
+        if (stallManual)
+            showStall();
+        else
+            showWaiting();
     }
     if (vblanks != lastScan && usbConfigured())
     {
@@ -528,7 +572,8 @@ static void idle(void)
         if (keys & KEY_TOUCH)
             touchRead(&t);
         u32 touch = t.px | (u32)t.py << 16;
-        u32 flags = needFull && !stallManual ? MIRROR_INPUT_NEED_FULL : 0;
+        // (the menu has the screens: the full frame comes when it closes)
+        u32 flags = (needFull && !stallManual && !menuUp ? MIRROR_INPUT_NEED_FULL : 0) | MIRROR_INPUT_MENUS;
         // a report when something changed, each new frame on screen (the Sion keeps the
         // game from running ahead of what the DS shows), and every 8 frames to show we're
         // still here: every card command is a chance for the DSpico to miss one
@@ -627,6 +672,9 @@ static bool validBundle(const mirror_hdr* h)
         case MREC_GX:
         case MREC_GXDELTA:
             break;   // checked as the payload is built (decodeGX, pushGX)
+        case MREC_MENU:
+            if (r->len < sizeof(mirror_menu)) return false;
+            break;   // its text is read within the record (uiMenu)
         default:
             return false;
         }
@@ -649,6 +697,11 @@ static void lzTick(void)
 {
     if (liveLink)
         usbPoll();
+}
+
+void uiPoll(void)
+{
+    lzTick();
 }
 
 // A packed bundle (MIRROR_FLAG_LZ) unpacked into a new buffer; NULL if there's no
@@ -703,6 +756,41 @@ static mirror_hdr* unpackBundle(const mirror_hdr* p, bool* damaged)
     return b;
 }
 
+// The game's menu is up on the TV (MREC_MENU): it takes the screens here too, the way it
+// stands; when it closes, the game's screens come back with the full bundle that follows.
+static mirror_hdr* volatile pending2D;
+static volatile u32 holdFrames;
+
+static void showMenu(const mirror_hdr* h)
+{
+    for (const mirror_rec* r = (const mirror_rec*)(h + 1); r->type != MREC_END; r = nextRec(r))
+    {
+        if (r->type != MREC_MENU)
+            continue;
+        const mirror_menu* m = (const mirror_menu*)(r + 1);
+        if (!m->open)
+        {
+            // the full bundle is on its way: not a stalled picture meanwhile
+            menuUp = false;
+            lastAppliedAt = vblanks;
+            return;
+        }
+        if (!menuUp)
+        {
+            // the game's last frame goes up first, then the menu takes its place
+            while (pending2D || holdFrames)
+                idle();
+            lineList = NULL;
+            lineCount = lineNext = 0;
+            menuUp = true;
+            stallShown = false;
+            needFull = true;
+        }
+        uiMenu(m, r->len);
+        waitingSaid = -1;
+    }
+}
+
 // Live stream: never gives up. Finds the next bundle header (resyncing byte by
 // byte after a damaged one), and while a full refresh is wanted drops bundles
 // that aren't full ones.
@@ -744,7 +832,7 @@ static mirror_hdr* readBundleLive(void)
             continue;
         }
         u32 body = h.size - sizeof h - sizeof head;
-        if ((needFull && !(h.flags & MIRROR_FLAG_FULL)) || stallManual)
+        if ((needFull && !(h.flags & (MIRROR_FLAG_FULL | MIRROR_FLAG_MENU))) || stallManual)
         {
             skipBytes(body);
             continue;
@@ -783,10 +871,17 @@ static mirror_hdr* readBundleLive(void)
             needFull = true;
             continue;
         }
+        if (h.flags & MIRROR_FLAG_MENU)
+        {
+            showMenu(b);
+            free(b);
+            continue;
+        }
         if (h.flags & MIRROR_FLAG_FULL)
         {
             needFull = false;
             fullBundles++;
+            menuUp = false;
         }
         return b;
     }
@@ -847,11 +942,10 @@ static void clearHardware(void)
 // next bundle not ready yet, state (1 no NitroFS, 2 no file, 3 finished).
 volatile u32 mirrorStats[4] __attribute__((used)) = {0x5354524D, 0, 0, 0}; // "MRTS"
 
-// The bundle whose 3D writes are queued; its 2D state goes in at VBlank start,
-// from the IRQ, so it lands in the same VBlank as its SWAP_BUFFERS however long
-// the main loop spends reading.
-static mirror_hdr* volatile pending2D;
-static volatile u32 holdFrames;  // 30 fps mode: VBlanks left that keep showing the current frame
+// The bundle whose 3D writes are queued (pending2D, above); its 2D state goes in at VBlank
+// start, from the IRQ, so it lands in the same VBlank as its SWAP_BUFFERS however long
+// the main loop spends reading. holdFrames: 30 fps mode, VBlanks left that keep showing
+// the current frame.
 
 static void vblankHandler(void)
 {
@@ -879,15 +973,6 @@ static void vblankHandler(void)
     pending2D = NULL;
 }
 
-// Plain colour on both screens: blue while waiting for the Sion
-static void showColor(u16 color)
-{
-    REG_DISPCNT = MODE_0_2D;
-    REG_DISPCNT_SUB = MODE_0_2D;
-    BG_PALETTE[0] = color;
-    BG_PALETTE_SUB[0] = color;
-}
-
 static void openSource(void)
 {
     // a recording inside this .nds (NitroFS) or next to it on the SD card,
@@ -904,8 +989,7 @@ static void openSource(void)
         return;
     liveLink = true;
     mirrorStats[3] = 4;
-    showColor(RGB15(0, 8, 24));
-    consoleDemoInit();
+    showWaiting();
     usbStart();
 }
 
@@ -926,12 +1010,13 @@ int main(int argc, char** argv)
         while (cur)
         {
             // start early in the visible lines so the 3D engine reaches SWAP_BUFFERS before VBlank
-            if (liveLink && (cur->flags & MIRROR_FLAG_FULL) && fullBundles > 1)
+            if (liveLink && (cur->flags & MIRROR_FLAG_FULL) && (fullBundles > 1 || uiShown()))
             {
                 // a full refresh: it assumes cleared hardware, like the first bundle
                 swiWaitForVBlank();
                 lineList = NULL;
                 lineCount = lineNext = 0;
+                uiLeave();
                 clearHardware();
                 stallShown = false;
             }

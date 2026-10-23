@@ -746,6 +746,23 @@ public:
         sendBusy++;
         sendWake.notify_one();
     }
+    // The game's menu for a DS that shows it (MREC_MENU): false while it takes nothing
+    // (a DS that comes back gets it again)
+    bool SendMenu(const std::vector<u8>& menu)
+    {
+        if (!link || linkLost || Stalled()) return false;
+        GXJob j;
+        j.frame = emuFrame - 1;
+        j.flags = MIRROR_FLAG_MENU;
+        size_t at = BeginRec(j.post, MREC_MENU);
+        PutBytes(j.post, menu.data(), menu.size());
+        EndRec(j.post, at);
+        std::lock_guard<std::mutex> g(sendLock);
+        sendQueue.push_back(std::move(j));
+        sendBusy++;
+        sendWake.notify_one();
+        return true;
+    }
     bool LinkBehind()
     {
         std::lock_guard<std::mutex> g(sendLock);
@@ -1530,6 +1547,17 @@ public:
     std::vector<u8> BuildBundle(GXJob& j)
     {
         std::vector<u8> buf;
+        if (j.flags & MIRROR_FLAG_MENU)
+        {
+            // the game's menu, alone: the 3D commands' state and the deltas go on past it
+            mirror_hdr h {MIRROR_MAGIC, j.frame, 0, j.flags};
+            Put(buf, h);
+            PutBytes(buf, j.post.data(), j.post.size());
+            size_t at = BeginRec(buf, MREC_END);
+            EndRec(buf, at);
+            ((mirror_hdr*)buf.data())->size = buf.size();
+            return buf;
+        }
         if (j.flags & MIRROR_FLAG_FULL) prevGX.clear();   // its 3D commands go literally
         mirror_hdr h {MIRROR_MAGIC, j.frame, 0, j.flags};
         Put(buf, h);
@@ -1685,11 +1713,12 @@ struct InputMix
 {
     struct Src { u16 held = 0; bool touch = false; u16 x = 0, y = 0; };   // held: bit set = pressed (libnds order)
     Src script, ds, pads;
-    u16 dsHide = 0;   // the DS's buttons the game doesn't get (its Select once it opened the menu)
+    u16 dsHide = 0;   // the DS's buttons the game doesn't get (its Select once it opened the menu; bit
+                      // 12 its stylus, still down from a tap on its menu)
     void Apply(NDS& nds) const
     {
         nds.SetKeyMask(~(script.held | (ds.held & ~dsHide) | pads.held) & 0xFFF);   // melonDS: bit clear = pressed
-        if (ds.touch) nds.TouchScreen(ds.x, ds.y);
+        if (ds.touch && !(dsHide & 0x1000)) nds.TouchScreen(ds.x, ds.y);
         else if (script.touch) nds.TouchScreen(script.x, script.y);
         else if (pads.touch) nds.TouchScreen(pads.x, pads.y);
         else nds.ReleaseScreen();
@@ -2173,14 +2202,21 @@ int main(int argc, char** argv)
         fprintf(stderr, "menu: open at frame %u\n", f);
         auto opened = std::chrono::steady_clock::now(), keptAlive = opened;
         MenuAction act = MenuAction::None;
-        u32 drawn = ~0u;
+        u32 drawn = ~0u, dsDrawn = ~0u;
         std::string linkDrawn;
-        bool linkedDrawn = false;
+        bool linkedDrawn = false, touched = true;   // a stylus already down isn't a tap
+        auto dsMenus = [&] { return link && !rec.linkLost && (pad.applied & MIRROR_INPUT_MENUS); };
         while (!gMirrorQuit && act == MenuAction::None)
         {
             if (link && link->Poll(pad)) noteShown();
             u16 keys = (padsOn ? sionPads.MenuKeys() : 0) | dsMenuKeys();
-            act = menu.Update(keys);
+            // the DS shows the menu too: a tap on a row there picks it
+            bool touch = dsMenus() && (pad.keys & (1 << 12));
+            int tapped = touch && !touched ? menu.DSRow(pad.touchX, pad.touchY) : -1;
+            touched = touch;
+            act = menu.Update(keys, tapped);
+            if (dsMenus() && menu.Changes() != dsDrawn && act == MenuAction::None && rec.SendMenu(menu.DSRecord()))
+                dsDrawn = menu.Changes();
             if (tvSpec) tv.SetLayout(menu.layout, menu.swap);
             menu.link = linkLine();
             menu.linked = link && !deaf;
@@ -2200,6 +2236,8 @@ int main(int argc, char** argv)
                 keptAlive = now;
             }
         }
+        // the DS's menu closes; the game's screens come back with a full bundle
+        if (dsMenus() && dsDrawn != ~0u && rec.SendMenu(menu.DSRecord())) rec.RequestFull();
         static const char* const names[] = {"none", "resume", "quick save", "quick load", "reset", "dashboard"};
         fprintf(stderr, "menu: %s after %.1f s\n", names[(int)act],
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - opened).count());
@@ -2245,7 +2283,7 @@ int main(int argc, char** argv)
         CpuMenuClosed();
         tick = lastFrameDone = now;
         if (padsOn) sionPads.Swallow();
-        dsSwallow = link ? pad.keys & 0xFFF : 0;
+        dsSwallow = link ? pad.keys & 0x1FFF : 0;
         if (soundSpec) sound.Pause(false);
     };
 
@@ -2310,7 +2348,7 @@ int main(int argc, char** argv)
             auto now = std::chrono::steady_clock::now();
             double s = std::chrono::duration<double>(now - speedFrom).count();
             u64 sent = rec.sentBytes;
-            u32 shown = pad.applied & ~MIRROR_INPUT_NEED_FULL;
+            u32 shown = pad.applied & MIRROR_INPUT_COUNT;
             char behind[48] = "";
             if (behindMax)
                 snprintf(behind, sizeof behind, " (%u to %u frames behind)", behindMin, behindMax);
@@ -2403,7 +2441,7 @@ int main(int argc, char** argv)
         {
             if (std::exchange(firstReport, false))
             {
-                shownBefore = pad.applied & ~MIRROR_INPUT_NEED_FULL;
+                shownBefore = pad.applied & MIRROR_INPUT_COUNT;
                 linkSeen = dsSeen = pad;
             }
             noteShown();
@@ -2457,7 +2495,7 @@ int main(int argc, char** argv)
             }
             else
                 dsSelectFrames = 0, dsSelectSpent = false;
-            dsSwallow &= ds;
+            dsSwallow &= ds | (link && in.ds.touch ? 0x1000 : 0);
             in.dsHide = dsSwallow | (dsSelectSpent ? 4 : 0);
         }
         in.Apply(*nds);
@@ -2606,7 +2644,7 @@ int main(int argc, char** argv)
                 rec.frame, rec.linkSkips, reports, padFrames, rec.stalls);
         if (pad.magic == MIRROR_INPUT_MAGIC)
             fprintf(stderr, "link: the DS's last report: %u shown%s, %u damaged bundles, %u with no memory, %u full refreshes, %u stalls, %u silent reads\n",
-                    pad.applied & ~MIRROR_INPUT_NEED_FULL, pad.applied & MIRROR_INPUT_NEED_FULL ? " (waiting for a full frame)" : "",
+                    pad.applied & MIRROR_INPUT_COUNT, pad.applied & MIRROR_INPUT_NEED_FULL ? " (waiting for a full frame)" : "",
                     pad.damaged, pad.noMemory, pad.fulls, pad.stalls, pad.silent);
     }
     if (pico)

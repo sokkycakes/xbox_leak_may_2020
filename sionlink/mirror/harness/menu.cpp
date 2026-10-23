@@ -1,5 +1,6 @@
 #include "menu.h"
 #include "menuart.h"
+#include "../common/mirror_format.h"
 
 #include <algorithm>
 #include <cmath>
@@ -354,19 +355,19 @@ void GameMenu::Toast(const std::string& text)
     toastFrames = 100;
 }
 
-MenuAction GameMenu::Update(uint16_t keys)
+MenuAction GameMenu::Update(uint16_t keys, int tapped)
 {
     if (!open) return MenuAction::None;
     struct Shown { int page, focus, confirmFocus; TVLayout layout; bool swap; };
     const Shown was {page, focus, confirmFocus, layout, swap};
-    MenuAction a = Act(keys);
+    MenuAction a = Act(keys, tapped);
     if (a != MenuAction::None || page != was.page || focus != was.focus || confirmFocus != was.confirmFocus ||
         layout != was.layout || swap != was.swap)
         changes++;
     return a;
 }
 
-MenuAction GameMenu::Act(uint16_t keys)
+MenuAction GameMenu::Act(uint16_t keys, int tapped)
 {
     blocked &= keys;
     uint16_t k = keys & ~blocked;
@@ -386,16 +387,18 @@ MenuAction GameMenu::Act(uint16_t keys)
         return a;
     };
     if (fire & MK_CLOSE) return close(MenuAction::Resume);
+    // a tap on the DS: that row, as if it had the focus and A went down
+    if (tapped >= 0 && tapped < (page ? 2 : Rows) && (page || Enabled(tapped)))
+    {
+        (page ? confirmFocus : focus) = tapped;
+        return Choose();
+    }
     if (page)
     {
         // a yes or no
         if (fire & MK_BACK) page = 0;
         else if (fire & (MK_UP | MK_DOWN)) confirmFocus ^= 1;
-        else if (fire & MK_OK)
-        {
-            if (confirmFocus == 0) return close((MenuAction)page);
-            page = 0;
-        }
+        else if (fire & MK_OK) return Choose();
         return MenuAction::None;
     }
     if (fire & MK_BACK) return close(MenuAction::Resume);
@@ -407,22 +410,115 @@ MenuAction GameMenu::Act(uint16_t keys)
         while (!enabled(focus));
     }
     const int layouts = (int)TVLayout::Count;
-    if (focus == 1 && (fire & (MK_LEFT | MK_RIGHT | MK_OK)))
+    if (focus == 1 && (fire & (MK_LEFT | MK_RIGHT)))
         layout = (TVLayout)(((int)layout + (fire & MK_LEFT ? layouts - 1 : 1)) % layouts);
-    else if (focus == 2 && (fire & (MK_LEFT | MK_RIGHT | MK_OK)))
+    else if (focus == 2 && (fire & (MK_LEFT | MK_RIGHT)))
         swap = !swap;
     else if (fire & MK_OK)
+        return Choose();
+    return MenuAction::None;
+}
+
+MenuAction GameMenu::Choose()
+{
+    if (page)
     {
-        switch (focus)
-        {
-        case 0: return close(MenuAction::Resume);
-        case 3: return close(MenuAction::QuickSave);
-        case 4: page = (int)MenuAction::QuickLoad; confirmFocus = 0; break;
-        case 5: page = (int)MenuAction::Reset; confirmFocus = 0; break;
-        case 6: page = (int)MenuAction::Dashboard; confirmFocus = 0; break;
-        }
+        open = confirmFocus != 0;
+        MenuAction a = open ? MenuAction::None : (MenuAction)page;
+        page = 0;
+        return a;
+    }
+    switch (focus)
+    {
+    case 0: open = false; return MenuAction::Resume;
+    case 1: layout = (TVLayout)(((int)layout + 1) % (int)TVLayout::Count); break;
+    case 2: swap = !swap; break;
+    case 3: open = false; return MenuAction::QuickSave;
+    case 4: page = (int)MenuAction::QuickLoad; confirmFocus = 0; break;
+    case 5: page = (int)MenuAction::Reset; confirmFocus = 0; break;
+    case 6: page = (int)MenuAction::Dashboard; confirmFocus = 0; break;
     }
     return MenuAction::None;
+}
+
+GameMenu::Content GameMenu::Contents() const
+{
+    Content c;
+    if (page == 0)
+    {
+        std::string lay = LayoutName(layout);
+        const char* const labels[Rows] = {"Resume", "Screen layout", "Swap screens", "Quick save", "Quick load",
+                                          "Reset game", "Back to dashboard"};
+        const std::string values[Rows] = {"", focus == 1 ? "\u2039  " + lay + "  \u203a" : lay, swap ? "On" : "Off",
+                                          "", stateWhen, "", ""};
+        for (int i = 0; i < Rows; i++) c.rows.push_back({labels[i], values[i], Enabled(i)});
+        c.focus = focus;
+        c.aText = "Select";
+        c.bText = "Resume";
+        return c;
+    }
+    // asking first: what it does, then yes or no
+    std::string yes;
+    switch ((MenuAction)page)
+    {
+    case MenuAction::QuickLoad:
+        c.question = "Load the quick save from " + stateWhen + "? The game goes back to then, its own save too.";
+        yes = "Load it";
+        break;
+    case MenuAction::Reset:
+        c.question = "Reset the game? Anything since the game last saved is lost.";
+        yes = "Reset";
+        break;
+    default:
+        c.question = "Quit the game and go back to the dashboard? Anything since the game last saved is lost.";
+        yes = "Quit";
+        break;
+    }
+    c.rows = {{yes, "", true}, {"Cancel", "", true}};
+    c.focus = confirmFocus;
+    c.aText = "OK";
+    c.bText = "Cancel";
+    return c;
+}
+
+// On the DS the list starts at the top slot; a question takes the slots above its yes
+// and Cancel (the DS wraps it in the room it has).
+static int DSFirstSlot(int page) { return page ? 4 : 0; }
+
+std::vector<uint8_t> GameMenu::DSRecord() const
+{
+    std::vector<uint8_t> out(sizeof(mirror_menu));
+    mirror_menu m {};
+    m.open = open;
+    if (open)
+    {
+        Content c = Contents();
+        m.rows = (uint8_t)c.rows.size();
+        m.firstSlot = (uint8_t)DSFirstSlot(page);
+        m.focus = (uint8_t)c.focus;
+        for (size_t i = 0; i < c.rows.size(); i++)
+            if (!c.rows[i].enabled) m.disabled |= 1u << i;
+        auto put = [&](const std::string& t) { out.insert(out.end(), t.begin(), t.end()); out.push_back(0); };
+        put(title);
+        put(c.question);
+        put(c.aText);
+        put(c.bText);
+        for (const Row& r : c.rows)
+        {
+            put(r.label);
+            put(r.value);
+        }
+    }
+    memcpy(out.data(), &m, sizeof m);
+    out.resize((out.size() + 3) & ~size_t(3), 0);
+    return out;
+}
+
+int GameMenu::DSRow(int x, int y) const
+{
+    if (!open || x < MIRROR_MENU_X0 || x >= MIRROR_MENU_X1 || y < MIRROR_MENU_ROW_Y) return -1;
+    int row = (y - MIRROR_MENU_ROW_Y) / MIRROR_MENU_ROW_H - DSFirstSlot(page);
+    return row >= 0 && row < (page ? 2 : Rows) ? row : -1;
 }
 
 void GameMenu::Draw(uint32_t* dst, uint32_t pitch, uint32_t w, uint32_t h, double par)
@@ -517,38 +613,15 @@ void GameMenu::Draw(uint32_t* dst, uint32_t pitch, uint32_t w, uint32_t h, doubl
         button(x + ux(22), y, A.b, U'B', bText);
     };
 
-    if (page == 0)
+    const Content m = Contents();
+    int first = 0;
+    if (!m.question.empty())
     {
-        std::u32string lay = Decode(LayoutName(layout));
-        const std::u32string labels[Rows] = {U"Resume", U"Screen layout", U"Swap screens", U"Quick save", U"Quick load",
-                                             U"Reset game", U"Back to dashboard"};
-        const std::u32string values[Rows] = {U"", focus == 1 ? U"‹  " + lay + U"  ›" : lay, swap ? U"On" : U"Off",
-                                             U"", Decode(stateWhen), U"", U""};
-        for (int i = 0; i < Rows; i++) row(i, labels[i], values[i], i == focus, Enabled(i));
-        legend("Select", "Resume");
-        return;
+        std::vector<std::u32string> lines = A.body.Wrap(Decode(m.question), ux(PanelW - 52));
+        for (size_t i = 0; i < lines.size(); i++) c.Text(A.body, X(26), Y(RowsY + 26 + i * 28), lines[i], TextColor);
+        first = (int)std::max<size_t>(3, lines.size() + 1);
     }
-    // asking first: what it does, then yes or no
-    std::string q, yes;
-    switch ((MenuAction)page)
-    {
-    case MenuAction::QuickLoad:
-        q = "Load the quick save from " + stateWhen + "? The game goes back to then, its own save too.";
-        yes = "Load it";
-        break;
-    case MenuAction::Reset:
-        q = "Reset the game? Anything since the game last saved is lost.";
-        yes = "Reset";
-        break;
-    default:
-        q = "Quit the game and go back to the dashboard? Anything since the game last saved is lost.";
-        yes = "Quit";
-        break;
-    }
-    std::vector<std::u32string> lines = A.body.Wrap(Decode(q), ux(PanelW - 52));
-    for (size_t i = 0; i < lines.size(); i++) c.Text(A.body, X(26), Y(RowsY + 26 + i * 28), lines[i], TextColor);
-    int first = (int)std::max<size_t>(3, lines.size() + 1);
-    row(first, Decode(yes), U"", confirmFocus == 0, true);
-    row(first + 1, U"Cancel", U"", confirmFocus == 1, true);
-    legend("OK", "Cancel");
+    for (size_t i = 0; i < m.rows.size(); i++)
+        row(first + (int)i, Decode(m.rows[i].label), Decode(m.rows[i].value), (int)i == m.focus, m.rows[i].enabled);
+    legend(m.aText.c_str(), m.bText.c_str());
 }

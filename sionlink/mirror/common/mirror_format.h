@@ -24,6 +24,8 @@ typedef struct {
 #define MIRROR_FLAG_FULL 1  // first bundle: everything is sent
 #define MIRROR_FLAG_HOLD 2  // show this frame for two VBlanks (30 fps mode)
 #define MIRROR_FLAG_LZ   4  // live link: the body is packed (mirror_lz.h)
+#define MIRROR_FLAG_MENU 8  // live link: the game's menu (MREC_MENU), nothing else; read even
+                            // while the DS waits for a full bundle
 
 enum {
     MREC_END   = 0,
@@ -35,6 +37,7 @@ enum {
     MREC_VRAM  = 6,  // u32 count, then count x (u32 bank<<16 | block, 512 bytes)
     MREC_LINES = 7,  // u32 count, then count x mirror_line, sorted by line
     MREC_GXDELTA = 8, // an MREC_GX payload built from the previous bundle's (see below)
+    MREC_MENU  = 9,  // mirror_menu, then its text (see below); only to a DS that asks for it
 };
 
 // MREC_GXDELTA: u32 payload length in words, then ops until it is complete:
@@ -69,6 +72,25 @@ typedef struct {
     uint16_t val;
 } mirror_reg;
 
+// MREC_MENU: the game's menu is up on the TV (the game stands still), and the DS shows it on
+// its lower screen in its own look, rows in slots MIRROR_MENU_ROW_H high from
+// MIRROR_MENU_ROW_Y. A tap on a slot comes back as the touch in the DS's reports. After
+// mirror_menu come NUL-ended UTF-8 strings: the game's title, the question (empty on the
+// list), what A and B do, then each row's label and value; zeros to a multiple of 4.
+// open = 0: the menu closed; a full bundle (the game's screens again) follows.
+typedef struct {
+    uint8_t open;
+    uint8_t rows;
+    uint8_t firstSlot;  // the slot the first row is in (a question goes above)
+    uint8_t focus;      // the row with the focus
+    uint32_t disabled;  // a bit per row: shown greyed, does nothing
+} mirror_menu;
+#define MIRROR_MENU_ROW_Y 28
+#define MIRROR_MENU_ROW_H 18
+#define MIRROR_MENU_SLOTS 8
+#define MIRROR_MENU_X0    14    // the rows' boxes, across
+#define MIRROR_MENU_X1    242
+
 // Live link, DS -> Sion, once a frame: the pad and touch screen, and how the DS is doing.
 #define MIRROR_INPUT_MAGIC 0x4E494C53u  // "SLIN"
 typedef struct {
@@ -94,6 +116,9 @@ typedef struct {
 // the DS lost track of the stream (a damaged bundle, or it ran out of memory):
 // send a full bundle (MIRROR_FLAG_FULL) so it can start over from cleared hardware
 #define MIRROR_INPUT_NEED_FULL 0x80000000u
+// this DS shows the game's menu (MREC_MENU)
+#define MIRROR_INPUT_MENUS 0x40000000u
+#define MIRROR_INPUT_COUNT 0x3FFFFFFFu   // the bundles applied
 
 #define MIRROR_ROW   32   // palette/OAM granularity
 #define MIRROR_BLOCK 512  // VRAM granularity

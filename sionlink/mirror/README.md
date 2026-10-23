@@ -58,8 +58,8 @@ Mario Kart DS (kiosk demo, menus and a race) with `--gxdelta 1`: every frame pix
 60 and 30 fps, the race at about 40 KB/s with zlib.
 
 ## Live link (Sion -> DSpico USB -> DS)
-With no `mirror.bin` in NitroFS or on the SD card, the client turns blue and becomes a USB device
-on the DSpico's USB port (`ds/source/usblink.c`, driven through the DSpico's USB card commands).
+With no `mirror.bin` in NitroFS or on the SD card, the client shows "Waiting for link..." and becomes
+a USB device on the DSpico's USB port (`ds/source/usblink.c`, driven through the DSpico's USB card commands).
 It is a vendor-class device, VID 1209 PID 0001 (pid.codes test PID): bundles come in on bulk OUT
 0x01, and once a frame the DS sends its pad and touch state (`mirror_input`) on bulk IN 0x81.
 
@@ -169,6 +169,27 @@ the matrix stack pointers from where the old state left them), then the frames a
 test (MKDS demo, DS joined over the simulated DSpico): every DS frame matches an emulator frame
 after the quick load and after the reset, from the 5th frame on (as when a DS joins); before
 that it shows the DS's VRAM being cleared and one frame with the 3D a frame off.
+
+The DS shows the menu too, on its own screens: the NitroLink art on top and the menu on the lower
+screen, in Tahoma at its own 10 pixels (`ds/source/nitroui.c`). A DS app that can draw it says so
+in its reports (`MIRROR_INPUT_MENUS`); the Sion then sends a bundle with only a menu record
+(`MIRROR_FLAG_MENU`, `MREC_MENU`: the title, the question on a confirm page, the rows with their
+values and which are greyed, the focus) each time the menu changes, and one saying it closed,
+then a full frame. The DS works it with its buttons as before, or with a tap on a row; a stylus
+still down when it closes stays out of the game. The DS doesn't ask for a full frame while the
+menu is up and takes the menu's quarter-second bundles as the link being there (two seconds
+without any: "Waiting for link..."). Older DS apps get no menu bundles and keep the game's
+last picture, as before. Cloud tests: the list, a tapped Reset and Cancel, B to resume (a full
+frame, then the game), a tapped Back to dashboard (the DS goes back to waiting), the old DS
+app, and a DS that stops taking data for 400 frames.
+
+The DS app's look is sokky's "DS UI" Figma (NitroLink): `ds/art/top.png` as exported,
+`ds/art/bottom.png` with its placeholder text taken out. `python3 ds/art/mkart.py tahoma.bdf`
+bakes both (dithered to 15-bit colour, LZ4-packed: 55 KB of the app) and the font into
+`ds/source/nitroart.h`. The font is akmenu-next's Tahoma (`tahoma.bdf`; the `tahoma.pcf` in
+Frolick's assets is the same font): Latin-1, Latin Extended-A and the menus' punctuation. Its
+screens: "Waiting for link..." (before the link, and when the picture stops), "The DSpico
+stopped answering" when it does, and the menu. L+R+Select still brings up the link's numbers.
 
 ## As an Xbox title (`kit/sion/install-title.sh`)
 A DS game installed this way shows up in the Xbox dashboard's Games and in Frolick like any

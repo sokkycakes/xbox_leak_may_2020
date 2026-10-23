@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "tvout.h"
 
@@ -41,8 +42,13 @@ public:
 
     void Open();
     bool IsOpen() const { return open; }
-    // once a TV frame while it's open, with the keys held then: None while it stays open
-    MenuAction Update(uint16_t keys);
+    // once a TV frame while it's open, with the keys held then, and the row tapped on the
+    // DS's screen (DSRow) or -1: None while it stays open
+    MenuAction Update(uint16_t keys, int tapped = -1);
+    // what the DS shows on its lower screen: MREC_MENU's payload (open = 0 once it closed)
+    std::vector<uint8_t> DSRecord() const;
+    // the row a tap on the DS's lower screen hit, or -1
+    int DSRow(int x, int y) const;
     // goes up whenever Update changes what the menu shows: it needs drawing again
     uint32_t Changes() const { return changes; }
     // a line at the foot of the TV for a moment, over the game (after a quick save)
@@ -56,7 +62,13 @@ public:
     static const char* LayoutName(TVLayout l);
 
 private:
-    MenuAction Act(uint16_t keys);
+    MenuAction Act(uint16_t keys, int tapped);
+    // what it shows, on the TV and the DS: the rows, or asking first, the question and the
+    // yes and Cancel rows
+    struct Row { std::string label, value; bool enabled; };
+    struct Content { std::string question, aText, bText; std::vector<Row> rows; int focus; };
+    Content Contents() const;
+    MenuAction Choose();   // A on the row with the focus
     // Swap screens does nothing with one screen alone; Quick load needs a quick save
     bool Enabled(int row) const { return row == 2 ? !SingleScreen(layout) : row != 4 || !stateWhen.empty(); }
 
