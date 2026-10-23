@@ -100,9 +100,11 @@ sample rate by how full its buffer is (60.00 Hz TV against the DS's 59.83). A fr
 longer than the TV's (a course loading) would leave the game behind the TV for good and empty
 that buffer (run 11: about once a minute), so the frame after one isn't shown and the game
 catches up. Not in a scene too heavy for 60 frames a second (run 12 left nearly every frame out
-there and the TV stood still): there the game slows down, and the sound slows with it (up to
-15%) instead of breaking up, from how far apart the frames come (`--stretch 0`: short gaps
-instead). The speed line gives the average and
+there and the TV stood still): there the game slows down, and its sound is made longer to
+match (up to 18%, from how far apart the frames come) instead of breaking up. Not by playing
+it slower, which lowered the pitch (run 15): `stretch.h` overlaps 16 ms pieces of it a little
+more, each placed where it lines up with the sound before it, so the pitch stays (`--stretch
+0`: short gaps instead). The speed line gives the average and
 longest frame, how many weren't shown, and how busy each thread is (`CPU:`). `tv.sh` stops the
 dashboard, runs the mirror with both, and starts the dashboard again when it stops
 (`sh tv.sh stop`). Cloud tests: `--tv dump:FILE` (every 60th picture), `--sound wav:FILE`,
@@ -131,10 +133,12 @@ melonDS's OpenGL renderer draws the game's 3D (and puts the screens together) on
 instead of the 3D thread the software renderer needs a CPU core for. The mirror opens a GL
 3.2 core context through EGL with no window (Mesa's surfaceless platform, `libEGL.so.1`
 loaded at run time, so a build without it still runs and just draws in software) and reads
-both screens back for the TV. Display captures stay on the GPU until something reads them;
-the mirror reads a capture into VRAM right after it's made, so the DS's own redo of it isn't
-overwritten later by a copy. The DS gets the same bundles as with software (MKDS demo, 2300
-frames, byte for byte); only the TV picture differs, in how the GPU rasterizes (a few thin
+both screens back for the TV, a frame late (into a buffer the GPU fills when it gets there:
+copying the frame just made would wait for the GPU to finish it). Display captures stay on
+the GPU until something reads them; when one comes into VRAM (melonDS tells the mirror,
+`MirrorCaptureSynced`), a capture the DS made too goes into what the DS is known to have,
+so a copy of it is never sent over the DS's own, and nothing waits for the GPU to get it.
+The DS gets the same bundles as with software (MKDS demo, 2300 frames, byte for byte); only the TV picture differs, in how the GPU rasterizes (a few thin
 lines on the bottom map, texel edges). Build with `GL=1 harness/build.sh` from a melonDS
 built with `-DENABLE_OGLRENDERER=ON` (see build.sh). The Sion kit has it as `mirrorrun-gl`
 (64-bit, glibc linked, the rest static); `sh tv.sh GAME.nds AMKE gl` uses it.

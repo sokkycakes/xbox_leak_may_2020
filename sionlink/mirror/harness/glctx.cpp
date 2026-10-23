@@ -1,6 +1,7 @@
 #include "glctx.h"
 
 #include <cstdio>
+#include <cstring>
 #include <dlfcn.h>
 #include <vector>
 
@@ -71,16 +72,52 @@ void GLContextClose()
     ctx = nullptr;
 }
 
-void GLReadScreens(const void* output, uint32_t* top, uint32_t* bottom)
+void GLReadScreens(const void* output, uint32_t* top, uint32_t* bottom, bool late)
 {
     // an array texture: layer 0 the top screen, layer 1 the bottom one (RGBA8, 1x)
+    static const GLsizeiptr screen = 256 * 192 * 4;
+    static GLuint pbo[2];
+    static int cur = 0;
+    static bool havePrev = false;
     GLuint tex = *(const GLuint*)output;
     glBindFramebuffer(GL_READ_FRAMEBUFFER, readFB);
     glPixelStorei(GL_PACK_ALIGNMENT, 4);
-    glFramebufferTextureLayer(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, tex, 0, 0);
     glReadBuffer(GL_COLOR_ATTACHMENT0);
-    glReadPixels(0, 0, 256, 192, GL_BGRA, GL_UNSIGNED_BYTE, top);
-    glFramebufferTextureLayer(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, tex, 0, 1);
-    glReadPixels(0, 0, 256, 192, GL_BGRA, GL_UNSIGNED_BYTE, bottom);
+    if (late)
+    {
+        // into a buffer the GPU fills when it gets there; the frame before's is ready by now
+        if (!pbo[0])
+        {
+            glGenBuffers(2, pbo);
+            for (GLuint b : pbo)
+            {
+                glBindBuffer(GL_PIXEL_PACK_BUFFER, b);
+                glBufferData(GL_PIXEL_PACK_BUFFER, 2 * screen, nullptr, GL_STREAM_READ);
+            }
+        }
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo[cur]);
+    }
+    for (int layer = 0; layer < 2; layer++)
+    {
+        glFramebufferTextureLayer(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, tex, 0, layer);
+        if (late)
+            glReadPixels(0, 0, 256, 192, GL_BGRA, GL_UNSIGNED_BYTE, (void*)(layer * screen));
+        else
+            glReadPixels(0, 0, 256, 192, GL_BGRA, GL_UNSIGNED_BYTE, layer ? bottom : top);
+    }
     glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+    if (!late) return;
+    cur ^= 1;
+    if (havePrev)
+    {
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo[cur]);
+        if (const uint8_t* p = (const uint8_t*)glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, 2 * screen, GL_MAP_READ_BIT))
+        {
+            memcpy(top, p, screen);
+            memcpy(bottom, p + screen, screen);
+            glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+        }
+    }
+    havePrev = true;
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
 }

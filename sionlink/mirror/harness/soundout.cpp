@@ -224,6 +224,10 @@ bool SoundOut::Open(const std::string& spec)
 
 void SoundOut::Push(const int16_t* data, uint32_t frames)
 {
+    stretched.clear();
+    stretcher.Process(data, frames, stretchBy, stretched);
+    data = stretched.data();
+    frames = (uint32_t)(stretched.size() / 2);
     std::lock_guard<std::mutex> g(lock);
     for (uint32_t i = 0; i < frames; i++)
     {
@@ -254,7 +258,8 @@ double SoundOut::Skew(double speed)
     double e = (fillAvg - TargetFill) / TargetFill;
     drift = std::max(-0.01, std::min(0.01, drift + e * 0.00002));
     double trim = 1.0 + std::max(-0.01, std::min(0.01, e * 0.01 + drift));
-    return std::max(0.85, std::min(1.01, speed)) * trim;
+    stretchBy = 1 / std::max(0.85, std::min(1.0, speed));
+    return trim;
 }
 
 void SoundOut::Run()

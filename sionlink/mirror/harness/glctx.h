@@ -10,7 +10,8 @@
 // makes a GL 3.2 core context current on this thread and loads GL; false if it can't
 bool GLContextOpen();
 void GLContextClose();
-// the GL renderer's output (the texture GetFramebuffers gives) as two XRGB screens
-void GLReadScreens(const void* output, uint32_t* top, uint32_t* bottom);
+// the GL renderer's output (the texture GetFramebuffers gives) as two XRGB screens.
+// late: without waiting for the GPU, the frame before's (this one's comes next call)
+void GLReadScreens(const void* output, uint32_t* top, uint32_t* bottom, bool late = false);
 
 #endif

@@ -32,7 +32,8 @@
 //     --sound OUT      the game's sound (see soundout.h): alsa ($AUDIODEV, the TV's HDMI
 //                      on the Sion) or wav:FILE
 //     --stretch 0      where the game runs slow (a scene too heavy for the Sion), let the
-//                      sound break up instead of stretching it with the game (up to 15%)
+//                      sound break up instead of making it longer to match (up to 18%,
+//                      at the same pitch)
 //
 // SIGTERM or SIGINT stops it cleanly (the TV goes back to xbox-av); a second one at once.
 //
@@ -174,7 +175,7 @@ static std::string CpuUse(double seconds)
 // MIRROR_PROF=FROM:TO (cloud tests): where the time goes in frames FROM..TO-1, per frame
 struct Prof
 {
-    enum { Snap, Lines, Emit, Skipped, Sync, Frame, Tv, EmitFilter, EmitPack, EmitDelta, N };
+    enum { Snap, Lines, Emit, Skipped, Sync, Frame, Tv, EmitFilter, EmitPack, EmitDelta, GLRead, N };
     double ms[N] = {};
     u32 from = 0, to = 0, frames = 0;
     bool on = false;
@@ -636,6 +637,7 @@ public:
     bool haveFrame = false;
     int captureBank = -1;
     bool glCaptures = false;   // the OpenGL renderer: captures land in VRAM only when synced
+    bool dsOwned[16] = {};     // capture blocks (bank * 4 + 32 KB block) whose last capture the DS has too
     bool capToSend = false;    // a capture the DS didn't redo went to VRAM since the last bundle
     u32 captureOff = 0, captureLen = 0;
 
@@ -732,7 +734,10 @@ public:
                 // stretch of capture: then they go as VRAM like any other change.
                 NoteCapture();
                 if (captureBank >= 0 && (s32)(dsCaptured[captureBank] - capStart) < 0)
+                {
+                    ForCaptureBlocks([this](u32 b) { dsOwned[b] = false; });
                     captureBank = -1;
+                }
                 if (capThis && captureBank < 0) capToSend = true;
             }
         }
@@ -778,9 +783,6 @@ public:
         else if (vcount == 193)
         {
             PROF(Sync);
-            // OpenGL: the capture is still on the GPU; get it into VRAM now, so it's taken
-            // as one the DS redid, not sent later as changed VRAM over the DS's own
-            if (glCaptures && captureBank >= 0) nds->GPU.MirrorSyncCaptures();
             SyncCapture();
         }
     }
@@ -1121,9 +1123,35 @@ public:
         }
     }
 
+    template <typename F> void ForCaptureBlocks(F f)
+    {
+        for (u32 i = 0; i < captureLen; i += 0x8000)
+            f(captureBank * 4 + (((captureOff + i) >> 15) & 3));
+    }
+
+    // OpenGL: captures stay on the GPU, so at line 193 VRAM doesn't have this one yet. It's
+    // still the DS's own: when anything brings it into VRAM (the game reading or writing
+    // there, a full bundle), it goes into what the DS is known to have, the way it does here
+    // with software. Waiting for the GPU here instead would stall every frame.
+    void UseGLCaptures()
+    {
+        glCaptures = true;
+        nds->GPU.MirrorCaptureCtx = this;
+        nds->GPU.MirrorCaptureSynced = [](void* ctx, u32 bank, u32 start, u32 len) {
+            Recorder* r = (Recorder*)ctx;
+            for (u32 i = 0; i < (len ? len : 1); i++)
+            {
+                u32 o = ((start + i) & 3) * 0x8000;
+                if (r->dsOwned[bank * 4 + (o >> 15)])
+                    memcpy(r->prevVRAM[bank].data() + o, r->nds->GPU.VRAM[bank] + o, 0x8000);
+            }
+        };
+    }
+
     void SyncCapture()
     {
         if (captureBank < 0) return;
+        ForCaptureBlocks([this](u32 b) { dsOwned[b] = true; });
         const u8* cur = nds->GPU.VRAM[captureBank];
         u8* prev = prevVRAM[captureBank].data();
         for (u32 i = 0; i < captureLen; i += MIRROR_BLOCK)
@@ -1584,7 +1612,7 @@ int main(int argc, char** argv)
 
     Recorder rec;
     rec.nds = nds.get();
-    rec.glCaptures = gl;
+    if (gl) rec.UseGLCaptures();
     rec.half = half;
     rec.gxDelta = gxDelta;
     if (record)
@@ -1898,8 +1926,8 @@ int main(int argc, char** argv)
             fprintf(stderr, "prof frames %u-%u, ms a frame: game+tap %.2f (2D snapshot %.2f, lines %.2f, bundle %.2f, left-out 3D %.2f, capture sync %.2f), TV+sound %.2f\n",
                     gProf.from, gProf.to, gProf.ms[Prof::Frame] / n, gProf.ms[Prof::Snap] / n, gProf.ms[Prof::Lines] / n,
                     gProf.ms[Prof::Emit] / n, gProf.ms[Prof::Skipped] / n, gProf.ms[Prof::Sync] / n, gProf.ms[Prof::Tv] / n);
-            fprintf(stderr, "prof bundle: 3D filter %.2f, 3D packing %.2f (of it delta %.2f)\n", gProf.ms[Prof::EmitFilter] / n,
-                    gProf.ms[Prof::EmitPack] / n, gProf.ms[Prof::EmitDelta] / n);
+            fprintf(stderr, "prof bundle: 3D filter %.2f, 3D packing %.2f (of it delta %.2f); GL readback %.2f\n", gProf.ms[Prof::EmitFilter] / n,
+                    gProf.ms[Prof::EmitPack] / n, gProf.ms[Prof::EmitDelta] / n, gProf.ms[Prof::GLRead] / n);
             gProf.on = false;
         }
         {
@@ -1918,8 +1946,11 @@ int main(int argc, char** argv)
 #ifdef HAVE_GL
         if (gl)
         {
+            // for the TV, the frame before's: copying this one back would wait for the GPU
+            // to finish it (a frame later on the TV; --frames gets every frame as it is)
+            PROF(GLRead);
             static std::vector<u32> glTop(256 * 192), glBot(256 * 192);
-            GLReadScreens(top, glTop.data(), glBot.data());
+            GLReadScreens(top, glTop.data(), glBot.data(), !fo);
             top = glTop.data();
             bot = glBot.data();
         }

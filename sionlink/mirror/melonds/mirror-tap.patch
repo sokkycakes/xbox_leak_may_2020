@@ -42,18 +42,35 @@ index b695ee9..db46e01 100644
      GPU2D_B.UpdateWindows(VCount);
  
 diff --git a/src/GPU.h b/src/GPU.h
-index b0e1faf..f80d261 100644
+index b0e1faf..4f7fbf6 100644
 --- a/src/GPU.h
 +++ b/src/GPU.h
-@@ -65,6 +65,9 @@ public:
+@@ -65,6 +65,13 @@ public:
      void DoSavestate(Savestate* file) noexcept;
  
      void SetRenderer(std::unique_ptr<Renderer>&& renderer) noexcept;
 +    // Sion Link mirror: with the OpenGL renderer, captured pixels stay on the GPU until
 +    // something reads them; the mirror sends VRAM, so it brings them back first
 +    void MirrorSyncCaptures() { SyncAllVRAMCaptures(); }
++    // and is told whenever a capture comes back into VRAM (whatever made it), with the
++    // capture's bank, first 32 KB block and size (0: 128x128, else that many blocks)
++    void (*MirrorCaptureSynced)(void* ctx, u32 bank, u32 start, u32 len) = nullptr;
++    void* MirrorCaptureCtx = nullptr;
      const Renderer& GetRenderer() const noexcept { return *Rend; }
      Renderer& GetRenderer() noexcept { return *Rend; }
+ 
+diff --git a/src/GPU_OpenGL.cpp b/src/GPU_OpenGL.cpp
+index 4853369..8474d97 100644
+--- a/src/GPU_OpenGL.cpp
++++ b/src/GPU_OpenGL.cpp
+@@ -909,6 +909,8 @@ void GLRenderer::SyncVRAMCapture(u32 bank, u32 start, u32 len, bool complete)
+             pos &= 3;
+         }
+     }
++
++    if (GPU.MirrorCaptureSynced) GPU.MirrorCaptureSynced(GPU.MirrorCaptureCtx, bank, start, len);
+ }
+ 
  
 diff --git a/src/MirrorTap.h b/src/MirrorTap.h
 new file mode 100644
