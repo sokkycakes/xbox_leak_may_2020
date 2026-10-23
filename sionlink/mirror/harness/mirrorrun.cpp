@@ -35,6 +35,11 @@
 //                      sound break up instead of making it longer to match (up to 18%,
 //                      at the same pitch)
 //
+// Holding Select for 2 s (Back on the Sion's pads, Select on the DS) opens the game's menu
+// on the TV (menu.h): screen layout, quick save and load (GAME.state beside the save, or
+// beside the game without --save), reset, back to the dashboard. The layout stays with the
+// game (GAME.layout).
+//
 // SIGTERM or SIGINT stops it cleanly (the TV goes back to xbox-av); a second one at once.
 //
 // melonDS is GPL; this runner links it and stays GPL with it.
@@ -59,6 +64,9 @@
 #include <csignal>
 #include <ctime>
 #include <dirent.h>
+#include <future>
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <pthread.h>
 #include <unistd.h>
 
@@ -82,6 +90,8 @@
 #include "geostate.h"
 #include "tvout.h"
 #include "soundout.h"
+#include "menu.h"
+#include "Savestate.h"
 
 using namespace melonDS;
 
@@ -370,14 +380,18 @@ struct GXFilter
 
     // A full bundle: the DS may have missed everything so far (switched off and on
     // again), so set every part of the geometry state that's known. The matrix stack
-    // pointer can only be moved, so it's taken to be where ours is.
+    // pointer can only be moved, so it's taken to be where ours is (after a quick load
+    // or a reset, where the old state's was: clientSP).
+    bool clientSPSet = false;
+    s32 clientSP[3] = {};   // projection, position, texture
     void RebuildAll(std::vector<IOW>& out)
     {
         if (MidRaw()) return;
         GeoState none;
-        none.projSP = geo.projSP;
-        none.posSP = geo.posSP;
-        none.texSP = geo.texSP;
+        none.projSP = clientSPSet ? clientSP[0] : geo.projSP;
+        none.posSP = clientSPSet ? clientSP[1] : geo.posSP;
+        none.texSP = clientSPSet ? clientSP[2] : geo.texSP;
+        clientSPSet = false;
         std::vector<GeoCmd> cmds;
         geo.Rebuild(none, cmds);
         for (const GeoCmd& c : cmds) Direct(out, c.cmd, c.params);
@@ -385,6 +399,24 @@ struct GXFilter
     }
     u32 rebuilds = 0, fullRebuilds = 0;
     u64 rebuildSaved = 0;   // writes the rebuilds saved
+
+    // The writes that finish what the client is part way through as it was written (a
+    // packet, a command at its own port), with zeros: it's about to be given a whole new
+    // state (a quick load, a reset), and a command still waiting for parameters would
+    // take that state's commands for them.
+    std::vector<IOW> Finish() const
+    {
+        std::vector<IOW> out;
+        if (ci < ncmds && packetRaw)
+        {
+            u32 n = GXParamCount(cmds[ci]) - (u32)params.size();
+            for (int i = ci + 1; i < ncmds; i++) n += GXParamCount(cmds[i]);
+            for (u32 i = 0; i < n; i++) out.push_back({0x400, 4, 0});
+        }
+        if (dActive && dRaw)
+            for (u32 i = dparams.size(); i < GXParamCount(dcmd); i++) out.push_back({(u16)(0x400 + dcmd * 4), 4, 0});
+        return out;
+    }
 
     // after a bundle: the next run of left-out frames starts from here
     void Sent()
@@ -394,6 +426,60 @@ struct GXFilter
         headLen = 0;
     }
 };
+
+// The geometry engine's state as melonDS has it, all of it known: what a quick load or a
+// reset leaves, for the DS's full bundle to set. Light directions are kept turned by the
+// vector matrix at the time; with the identity as that matrix, LIGHT_VECTOR's parameter is
+// the direction itself, negated (and one too long for its 10 bits stays unknown).
+static GeoState GeoFromMelonDS(const GPU3D& g)
+{
+    GeoState s;
+    auto mtx = [](GeoState::Mtx& m, const s32* v) { memcpy(m.m, v, sizeof m.m); m.known = true; };
+    auto rgb = [](const u8* c) { return (u32)c[0] | (u32)c[1] << 5 | (u32)c[2] << 10; };
+    s.mode = {g.MatrixMode & 3, true};
+    mtx(s.proj, g.ProjMatrix); mtx(s.pos, g.PosMatrix); mtx(s.vec, g.VecMatrix); mtx(s.tex, g.TexMatrix);
+    mtx(s.projStack, g.ProjMatrixStack); mtx(s.texStack, g.TexMatrixStack);
+    for (int i = 0; i < 32; i++)
+    {
+        mtx(s.posStack[i], g.PosMatrixStack[i]);
+        mtx(s.vecStack[i], g.VecMatrixStack[i]);
+    }
+    s.projSP = g.ProjMatrixStackPointer;
+    s.posSP = g.PosMatrixStackPointer;
+    s.texSP = g.TexMatrixStackPointer;
+    for (int l = 0; l < 4; l++)
+    {
+        GeoState::Light& L = s.light[l];
+        GeoState::Identity(L.vec);
+        L.known = true;
+        L.param = (u32)l << 30;
+        for (int k = 0; k < 3; k++)
+        {
+            int d = -g.LightDirection[l][k];
+            if (d < -512 || d > 511) L.known = false;
+            L.param |= (u32)(d & 0x3FF) << (10 * k);
+        }
+        s.lightColor[l] = {rgb(g.LightColor[l]), true};
+    }
+    s.difAmb = {rgb(g.MatDiffuse) | rgb(g.MatAmbient) << 16, true};
+    s.speEmi = {rgb(g.MatSpecular) | rgb(g.MatEmission) << 16 | (g.UseShininessTable ? 0x8000u : 0), true};
+    s.polyAttr = {g.PolygonAttr, true};
+    s.texParam = {g.TexParam, true};
+    s.texPal = {g.TexPalette, true};
+    s.viewport = {(g.Viewport[0] & 0xFF) | ((191 - g.Viewport[1]) & 0xFF) << 8 | (g.Viewport[2] & 0xFF) << 16 |
+                  ((191 - g.Viewport[3]) & 0xFF) << 24, true};
+    s.color = {rgb(g.VertexColor), true};
+    memcpy(s.shininess, g.ShininessTable, sizeof s.shininess);
+    s.shininessKnown = true;
+    return s;
+}
+
+// nothing of the game's 3D commands half done: no packet part way written, nothing waiting
+// in the FIFO (a quick save made then has no commands in flight to lose)
+static bool GXIdle(const GPU3D& g)
+{
+    return g.CmdFIFO.IsEmpty() && g.CmdPIPE.IsEmpty() && g.CmdStallQueue.IsEmpty() && !g.ExecParamCount && !g.NumCommands;
+}
 
 // ---------------------------------------------------------------- recorder
 
@@ -465,6 +551,7 @@ public:
         std::vector<u8> post;       // the bundle after its 3D record (2D state, lines)
         std::vector<u8> built;      // the whole bundle, when it was made on the game's thread
         std::vector<GXFilter::IOW> regs3d;   // a full bundle: the 3D registers as the game left them
+        std::vector<GXFilter::IOW> lead;     // the first full bundle after a resync: what finishes the old state's commands
         Sizes sz {};
         bool cap = false;
     };
@@ -480,6 +567,7 @@ public:
     std::condition_variable sendDone;
     u32 capWaits = 0;
     bool sendStop = false;
+    bool senderWorking = false;   // the sender has a job in hand
 
     void StartLink(HostLink* l)
     {
@@ -495,10 +583,14 @@ public:
                     if (sendQueue.empty()) return;
                     job = std::move(sendQueue.front());
                     sendQueue.pop_front();
+                    senderWorking = true;
                 }
                 if (!job.send)
                 {
                     BuildSkipped(job);
+                    std::lock_guard<std::mutex> g(sendLock);
+                    senderWorking = false;
+                    sendDone.notify_all();
                     continue;
                 }
                 std::vector<u8> b = job.built.empty() ? BuildBundle(job) : std::move(job.built);
@@ -522,6 +614,7 @@ public:
                 }
                 std::lock_guard<std::mutex> g(sendLock);
                 sendBusy--;
+                senderWorking = false;
                 sendDone.notify_all();
                 if (!ok && !linkLost)
                 {
@@ -542,6 +635,8 @@ public:
     // the DS came back on a new link: start over with a full bundle
     void RestartLink(HostLink* l)
     {
+        resyncLead.clear();
+        filt.clientSPSet = false;
         dsShownValid = false;
         unshown.clear();
         sendQueue.clear();
@@ -561,6 +656,28 @@ public:
         if (capWaits++ < 10)
             fprintf(stderr, "link: %u bundles waiting during display capture; the game waits for the DS\n", sendBusy);
         sendDone.wait(g, [this] { return sendBusy < 4 || linkLost; });
+    }
+    // until the sender has built and sent everything queued (the 3D state it keeps is then
+    // the game's up to the last frame)
+    void Drain()
+    {
+        if (!link) return;
+        std::unique_lock<std::mutex> g(sendLock);
+        sendDone.wait(g, [this] { return sendQueue.empty() && !senderWorking; });
+    }
+    // The game's menu is up and the game stands still, but the DS takes a link with
+    // nothing on it for a stalled one (its status page after 2 s). A bundle with nothing
+    // in it now and then keeps its picture as it is.
+    void KeepAlive()
+    {
+        if (!link || linkLost) return;
+        std::lock_guard<std::mutex> g(sendLock);
+        if (sendBusy) return;   // still sending, which keeps it going too
+        GXJob j;
+        j.frame = emuFrame - 1;
+        sendQueue.push_back(std::move(j));
+        sendBusy++;
+        sendWake.notify_one();
     }
     bool LinkBehind()
     {
@@ -1175,7 +1292,11 @@ public:
         j.flags = (fullThis ? MIRROR_FLAG_FULL : 0) | (holdNext ? MIRROR_FLAG_HOLD : 0);
         fullThis = false;
         j.gx.swap(ready);
-        if (j.flags & MIRROR_FLAG_FULL) j.regs3d = Regs3D();
+        if (j.flags & MIRROR_FLAG_FULL)
+        {
+            j.regs3d = Regs3D();
+            j.lead.swap(resyncLead);
+        }
         Note3DRegs(j.gx);
         j.post.swap(part2D);
         if (!lines.empty())
@@ -1205,6 +1326,84 @@ public:
         else
             BuildBundle(j);
         frame++;
+    }
+
+    // ---- quick save, quick load, reset
+    // what a quick save keeps of the recorder: the 2D registers' last writes (the DS's
+    // are write-only, so they can't be read back from melonDS) and the 3D registers'
+    static constexpr size_t ExtrasSize = 0x1070 + 0x614 * 2;
+    std::vector<u8> Extras() const
+    {
+        std::vector<u8> out(shadow, shadow + 0x1070);
+        u8 r[0x614];
+        bool set[0x614];
+        memcpy(r, reg3d, sizeof r);
+        memcpy(set, reg3dSet, sizeof set);
+        // and those the frames not sent yet wrote
+        for (const std::vector<IOW>* v : {&ready, &pending})
+            for (const IOW& w : *v)
+                for (int i = 0; i < w.size; i++)
+                    if (State3D(w.off + i))
+                    {
+                        r[w.off + i] = (w.val >> (8 * i)) & 0xFF;
+                        set[w.off + i] = true;
+                    }
+        out.insert(out.end(), r, r + sizeof r);
+        for (bool b : set) out.push_back(b);
+        return out;
+    }
+    // melonDS's state was just replaced (a quick save loaded: its Extras; the game reset:
+    // none). The DS still has the old one, so it gets a full bundle of the new one: first
+    // what finishes the old state's half-written commands, then the new 3D registers and
+    // geometry state, then the frames as usual.
+    std::vector<IOW> resyncLead;
+    void Resync(const u8* extras)
+    {
+        Drain();
+        std::vector<IOW> lead = filt.Finish();
+        {
+            std::vector<IOW> none;
+            for (const IOW& w : lead) filt.Feed(w, true, none);   // where that leaves the DS's matrix stacks
+        }
+        GXFilter fresh;
+        fresh.geo = GeoFromMelonDS(nds->GPU.GPU3D);
+        fresh.clientSPSet = link != nullptr;   // (a DS that joins later starts afresh)
+        fresh.clientSP[0] = filt.geo.projSP;
+        fresh.clientSP[1] = filt.geo.posSP;
+        fresh.clientSP[2] = filt.geo.texSP;
+        fresh.powcnt = nds->PowerControl9;
+        fresh.kept = filt.kept;
+        fresh.dropped = filt.dropped;
+        fresh.rebuilds = filt.rebuilds;
+        fresh.rebuildMisses = filt.rebuildMisses;
+        fresh.rebuildSaved = filt.rebuildSaved;
+        fresh.fullRebuilds = filt.fullRebuilds;
+        filt = std::move(fresh);
+        if (link) resyncLead.insert(resyncLead.end(), lead.begin(), lead.end());
+        if (!GXIdle(nds->GPU.GPU3D))
+            fprintf(stderr, "menu: 3D commands were in flight in the new state; the DS's 3D may be off for a frame\n");
+        // the old state's frames not sent yet are gone
+        pending.clear();
+        ready.clear();
+        if (extras)
+        {
+            memcpy(shadow, extras, 0x1070);
+            memcpy(reg3d, extras + 0x1070, 0x614);
+            for (int i = 0; i < 0x614; i++) reg3dSet[i] = extras[0x1070 + 0x614 + i] != 0;
+        }
+        else
+        {
+            memset(shadow, 0, sizeof shadow);
+            memset(reg3d, 0, sizeof reg3d);
+            memset(reg3dSet, 0, sizeof reg3dSet);
+        }
+        // the captures the DS did itself were the old state's
+        memset(dsOwned, 0, sizeof dsOwned);
+        memset(dsCaptured, 0, sizeof dsCaptured);
+        capToSend = capPrev = capThis = holdNext = skipThis = haveFrame = false;
+        captureBank = -1;
+        capStart = lastCapture = skipRun = 0;
+        RequestFull();
     }
 
     // a left-out frame: keep the state its 3D commands leave behind for the next bundle
@@ -1288,6 +1487,7 @@ public:
             filt.Sent();
             if (j.flags & MIRROR_FLAG_FULL)
             {
+                gx.insert(gx.end(), j.lead.begin(), j.lead.end());
                 for (const IOW& w : j.regs3d) filt.Feed(w, true, gx);
                 filt.RebuildAll(gx);
             }
@@ -1418,9 +1618,10 @@ struct InputMix
 {
     struct Src { u16 held = 0; bool touch = false; u16 x = 0, y = 0; };   // held: bit set = pressed (libnds order)
     Src script, ds, pads;
+    u16 dsHide = 0;   // the DS's buttons the game doesn't get (its Select once it opened the menu)
     void Apply(NDS& nds) const
     {
-        nds.SetKeyMask(~(script.held | ds.held | pads.held) & 0xFFF);   // melonDS: bit clear = pressed
+        nds.SetKeyMask(~(script.held | (ds.held & ~dsHide) | pads.held) & 0xFFF);   // melonDS: bit clear = pressed
         if (ds.touch) nds.TouchScreen(ds.x, ds.y);
         else if (script.touch) nds.TouchScreen(script.x, script.y);
         else if (pads.touch) nds.TouchScreen(pads.x, pads.y);
@@ -1471,6 +1672,44 @@ struct LinkWaiter
     }
     ~LinkWaiter() { Stop(); }
 };
+
+// ---------------------------------------------------------------- quick save
+
+// GAME.state: this, melonDS's savestate (zlib), then the recorder's extras
+struct QuickSaveHead { char magic[4]; u32 version; char game[4]; u32 stateLen, packedLen, extrasLen; };
+static const u32 QuickSaveVersion = 1;
+
+// written beside it, then renamed over it, so a power cut leaves the old one or the new
+static bool WriteWhole(const std::string& path, const std::vector<u8>& d)
+{
+    std::string tmp = path + ".new";
+    int fd = open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    bool ok = fd >= 0 && write(fd, d.data(), d.size()) == (ssize_t)d.size() && fsync(fd) == 0;
+    if (fd >= 0) close(fd);
+    return ok && rename(tmp.c_str(), path.c_str()) == 0;
+}
+
+// when a file was last written, for the menu ("" if there's none)
+static std::string FileTime(const std::string& path)
+{
+    struct stat st;
+    if (stat(path.c_str(), &st) != 0) return "";
+    time_t now = time(nullptr);
+    tm t, n;
+    localtime_r(&st.st_mtime, &t);
+    localtime_r(&now, &n);
+    char buf[32];
+    strftime(buf, sizeof buf, t.tm_yday == n.tm_yday && t.tm_year == n.tm_year ? "%H:%M" : "%b %d, %H:%M", &t);
+    return buf;
+}
+
+static std::string WithoutExtension(const std::string& p)
+{
+    size_t dot = p.rfind('.'), slash = p.rfind('/');
+    return dot != std::string::npos && (slash == std::string::npos || dot > slash) ? p.substr(0, dot) : p;
+}
+
+static const char* const LayoutWords[] = {"stacked", "side", "bigtop", "bigbottom"};
 
 int main(int argc, char** argv)
 {
@@ -1604,6 +1843,10 @@ int main(int argc, char** argv)
         }
         gSaveKeeper = &saves;
     }
+    GameMenu menu;
+    menu.TakeBanner(rom.get(), romlen);
+    char gameCode[4] = {};
+    if (romlen >= 0x10) memcpy(gameCode, &rom[0x0C], 4);
     auto cart = NDSCart::ParseROM(std::move(rom), romlen, nullptr, std::move(cartArgs));
     if (!cart) { fprintf(stderr, "bad ROM\n"); return 1; }
     nds->SetNDSCart(std::move(cart));
@@ -1730,6 +1973,197 @@ int main(int argc, char** argv)
     double longestMs = 0, workMs = 0;   // the longest a frame took here (game, bundle), all of them, since the last speed line
     double offCpuMs = 0;                // of workMs, the time this thread wasn't running (waiting for the GPU, the DS, a lock)
     auto threadCpuMs = [] { timespec ts; clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts); return ts.tv_sec * 1e3 + ts.tv_nsec / 1e6; };
+
+    // ---- the game's menu (menu.h)
+    const std::string base = WithoutExtension(savePath ? savePath : rompath);
+    const std::string statePath = base + ".state", layoutPath = base + ".layout";
+    if (FILE* lf = fopen(layoutPath.c_str(), "r"))
+    {
+        char word[32] = "";
+        int sw = 0;
+        if (fscanf(lf, "%31s %d", word, &sw) >= 1)
+            for (int i = 0; i < 4; i++)
+                if (!strcmp(word, LayoutWords[i])) menu.layout = (TVLayout)i;
+        menu.swap = sw != 0;
+        fclose(lf);
+        if (tvSpec) tv.SetLayout(menu.layout, menu.swap);
+    }
+    bool menuWanted = false, overlayOn = false;
+    u32 dsSelectFrames = 0;
+    bool dsSelectSpent = false;
+    u16 dsSwallow = 0;          // the DS's buttons held as the menu closed, until let go
+    bool savePending = false;   // a quick save waits for the game's 3D commands to be done
+    u32 saveWaited = 0;
+    std::future<std::string> saveWrite;   // the quick save going to the disk
+    auto tapOn = [&] { return (MirrorTap*)(record || serve ? &rec : nullptr); };
+    auto showOverlay = [&] {
+        if (overlayOn || !tvSpec) return;
+        tv.SetOverlay([&menu](uint32_t* d, uint32_t pitch, uint32_t w, uint32_t h, double par) { menu.Draw(d, pitch, w, h, par); });
+        overlayOn = true;
+    };
+    auto linkLine = [&]() -> std::string {
+        if (!serve) return "No DS link in this run";
+        if (!link) return "No DS: start Sion Link on the DS and plug in its DSpico";
+        if (deaf) return "DS linked, but it isn't answering";
+        if (pad.applied & MIRROR_INPUT_NEED_FULL) return "DS linked, catching up";
+        return half ? "DS linked, 30 frames a second on it" : "DS linked, 60 frames a second on it";
+    };
+    // the DS's keys in the menu: A picks, B goes back, Select or Start closes
+    auto dsMenuKeys = [&]() -> u16 {
+        if (!link || rec.linkLost) return 0;
+        u16 k = pad.keys, m = 0;
+        if (k & 1) m |= MK_OK;
+        if (k & 2) m |= MK_BACK;
+        if (k & 0xC) m |= MK_CLOSE;
+        if (k & 0x10) m |= MK_RIGHT;
+        if (k & 0x20) m |= MK_LEFT;
+        if (k & 0x40) m |= MK_UP;
+        if (k & 0x80) m |= MK_DOWN;
+        return m;
+    };
+    auto quickSave = [&]() {
+        Savestate st;
+        if (st.Error) { menu.Toast("Couldn't quick save: out of memory"); return; }
+        if (!nds->DoSavestate(&st) || st.Error) { menu.Toast("Couldn't quick save"); return; }
+        QuickSaveHead h {{'S', 'L', 'Q', 'S'}, QuickSaveVersion, {}, st.Length(), 0, (u32)Recorder::ExtrasSize};
+        memcpy(h.game, gameCode, 4);
+        std::vector<u8> raw((const u8*)st.Buffer(), (const u8*)st.Buffer() + st.Length()), extras = rec.Extras();
+        // packed and written on a thread of its own: the game carries on meanwhile
+        saveWrite = std::async(std::launch::async, [h, raw = std::move(raw), extras = std::move(extras), statePath]() mutable {
+            uLongf zlen = compressBound(raw.size());
+            std::vector<u8> out(sizeof h + zlen);
+            if (compress2(out.data() + sizeof h, &zlen, raw.data(), raw.size(), 1) != Z_OK) return std::string("Couldn't quick save");
+            h.packedLen = zlen;
+            out.resize(sizeof h + zlen);
+            memcpy(out.data(), &h, sizeof h);
+            out.insert(out.end(), extras.begin(), extras.end());
+            if (!WriteWhole(statePath, out)) return "Couldn't quick save: " + std::string(strerror(errno));
+            fprintf(stderr, "menu: quick save written, %zu KB (%u KB unpacked)\n", out.size() >> 10, h.stateLen >> 10);
+            return std::string();
+        });
+    };
+    auto quickLoad = [&]() -> std::string {
+        FILE* qf = fopen(statePath.c_str(), "rb");
+        if (!qf) return "there's no quick save";
+        std::vector<u8> d;
+        u8 buf[65536];
+        size_t got;
+        while ((got = fread(buf, 1, sizeof buf, qf)) > 0) d.insert(d.end(), buf, buf + got);
+        fclose(qf);
+        QuickSaveHead h;
+        if (d.size() < sizeof h) return "the quick save is damaged";
+        memcpy(&h, d.data(), sizeof h);
+        if (memcmp(h.magic, "SLQS", 4) || h.version != QuickSaveVersion || h.extrasLen != Recorder::ExtrasSize ||
+            sizeof h + (u64)h.packedLen + h.extrasLen != d.size())
+            return "the quick save is damaged";
+        if (memcmp(h.game, gameCode, 4)) return "the quick save is another game's";
+        std::vector<u8> raw(h.stateLen);
+        uLongf rlen = h.stateLen;
+        if (uncompress(raw.data(), &rlen, d.data() + sizeof h, h.packedLen) != Z_OK || rlen != h.stateLen)
+            return "the quick save is damaged";
+        // what the game is now, back in place if melonDS won't take the quick save
+        Savestate before;
+        if (before.Error || !nds->DoSavestate(&before) || before.Error) return "out of memory";
+        if (savePath) saves.Backup(std::string(savePath) + ".before-load");
+        gMirrorTap = nullptr;
+        Savestate st(raw.data(), raw.size(), false);
+        bool ok = nds->DoSavestate(&st) && !st.Error;
+        if (!ok)
+        {
+            Savestate back(before.Buffer(), before.Length(), false);
+            nds->DoSavestate(&back);
+        }
+        gMirrorTap = tapOn();
+        if (!ok) return "this build of the mirror can't read it";
+        rec.Resync(d.data() + sizeof h + h.packedLen);
+        return "";
+    };
+    auto resetGame = [&] {
+        gMirrorTap = nullptr;
+        nds->Reset();
+        nds->SetupDirectBoot(rompath);
+        if (bootType >= 0) nds->ARM9Write16(0x027FFC40, bootType);
+        gMirrorTap = tapOn();
+        rec.Resync(nullptr);
+    };
+    // the game stops while it's up: the TV shows its last picture under the menu, the sound
+    // goes quiet, the DS gets a bundle now and then to keep its picture
+    auto runMenu = [&](const u32* top, const u32* bot, u32 f) {
+        std::vector<u32> t(top, top + 256 * 192), b(bot, bot + 256 * 192);
+        menu.link = linkLine();
+        menu.linked = link && !deaf;
+        menu.stateWhen = saveWrite.valid() ? "" : FileTime(statePath);
+        TVLayout layout0 = menu.layout;
+        bool swap0 = menu.swap;
+        menu.Open();
+        showOverlay();
+        if (soundSpec) sound.Pause(true);
+        fprintf(stderr, "menu: open at frame %u\n", f);
+        auto opened = std::chrono::steady_clock::now();
+        MenuAction act = MenuAction::None;
+        for (u32 n = 1; !gMirrorQuit && act == MenuAction::None; n++)
+        {
+            if (link && link->Poll(pad))
+            {
+                noteShown();
+                reports++;
+            }
+            u16 keys = (padsOn ? sionPads.MenuKeys() : 0) | dsMenuKeys();
+            act = menu.Update(keys);
+            if (tvSpec) tv.SetLayout(menu.layout, menu.swap);
+            menu.link = linkLine();
+            menu.linked = link && !deaf;
+            if (tvSpec) tv.Show(t.data(), b.data());
+            if (!tv.Paced()) std::this_thread::sleep_for(std::chrono::milliseconds(16));
+            if (n % 30 == 0) rec.KeepAlive();
+        }
+        static const char* const names[] = {"none", "resume", "quick save", "quick load", "reset", "dashboard"};
+        fprintf(stderr, "menu: %s after %.1f s\n", names[(int)act],
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - opened).count());
+        if (menu.layout != layout0 || menu.swap != swap0)
+        {
+            if (FILE* lf = fopen(layoutPath.c_str(), "w"))
+            {
+                fprintf(lf, "%s %d\n", LayoutWords[(int)menu.layout], menu.swap ? 1 : 0);
+                fclose(lf);
+            }
+            fprintf(stderr, "menu: screens %s%s\n", GameMenu::LayoutName(menu.layout), menu.swap ? ", swapped" : "");
+        }
+        switch (act)
+        {
+        case MenuAction::QuickSave:
+            // now, unless the game is part way through sending 3D commands: then at the end
+            // of the first frame where it isn't
+            savePending = true;
+            saveWaited = 0;
+            break;
+        case MenuAction::QuickLoad:
+        {
+            std::string err = quickLoad();
+            fprintf(stderr, "menu: quick load%s%s\n", err.empty() ? "ed" : ": ", err.c_str());
+            menu.Toast(err.empty() ? "Quick save loaded" : "Couldn't load: " + err);
+            break;
+        }
+        case MenuAction::Reset:
+            resetGame();
+            fprintf(stderr, "menu: the game was reset\n");
+            break;
+        case MenuAction::Dashboard:
+            gMirrorQuit = true;
+            break;
+        default:
+            break;
+        }
+        // the game goes on from here: no catching up on the time the menu was up, and the
+        // buttons that closed it stay out of the game until they're let go
+        auto now = std::chrono::steady_clock::now();
+        speedFrom += now - opened;
+        tick = lastFrameDone = now;
+        if (padsOn) sionPads.Swallow();
+        dsSwallow = link ? pad.keys & 0xFFF : 0;
+        if (soundSpec) sound.Pause(false);
+    };
+
     for (u32 f = 0; f < frames; f++)
     {
         if (gMirrorQuit)
@@ -1927,7 +2361,19 @@ int main(int argc, char** argv)
         if (padsOn)
         {
             sionPads.Poll(in.pads.held, in.pads.touch, in.pads.x, in.pads.y);
-            if (sionPads.MenuAsked()) fprintf(stderr, "menu: Back held at frame %u (the menu isn't there yet)\n", f);
+            if (sionPads.MenuAsked()) menuWanted = true;
+        }
+        {
+            // the DS's Select held for 2 s opens the menu too; until then it's the game's
+            u16 ds = link ? in.ds.held : 0;
+            if (ds & 4)
+            {
+                if (++dsSelectFrames == 120) menuWanted = dsSelectSpent = true;
+            }
+            else
+                dsSelectFrames = 0, dsSelectSpent = false;
+            dsSwallow &= ds;
+            in.dsHide = dsSwallow | (dsSelectSpent ? 4 : 0);
         }
         in.Apply(*nds);
         if (pico) pico->Frame();
@@ -2039,7 +2485,32 @@ int main(int argc, char** argv)
             snprintf(name, sizeof name, "%s/f%05u.ppm", shots, f);
             WritePPM(name, (u32*)top, (u32*)bot);
         }
+        if (savePending && !saveWrite.valid() && (GXIdle(nds->GPU.GPU3D) || ++saveWaited > 60))
+        {
+            savePending = false;
+            if (saveWaited) fprintf(stderr, "menu: quick save after %u frames' wait for the 3D commands\n", saveWaited);
+            quickSave();
+            if (!saveWrite.valid()) showOverlay();   // its toast says why not
+        }
+        if (saveWrite.valid() && saveWrite.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+        {
+            std::string err = saveWrite.get();
+            menu.Toast(err.empty() ? "Quick save made" : err);
+            showOverlay();
+        }
+        if (menuWanted && !gMirrorQuit)
+        {
+            menuWanted = false;
+            runMenu((const u32*)top, (const u32*)bot, f);
+        }
+        menu.Tick();
+        if (overlayOn && !menu.IsOpen() && !menu.Toasting())
+        {
+            tv.SetOverlay(nullptr);
+            overlayOn = false;
+        }
     }
+    if (saveWrite.valid()) saveWrite.wait();
     if (fo) fclose(fo);
     if (fidx) fclose(fidx);
     waiter.Stop();

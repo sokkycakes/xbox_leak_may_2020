@@ -21,7 +21,7 @@ if pkg-config --exists libusb-1.0 2>/dev/null; then USB_CFLAGS=-DHAVE_LIBUSB; US
 if [ -n "$SDL" ]; then SDL_CFLAGS="-DHAVE_SDL -I$SDL/include/SDL2"; SDL_LIBS="$SDL/lib/libSDL2.a"
 elif pkg-config --exists sdl2 2>/dev/null; then SDL_CFLAGS="-DHAVE_SDL $(pkg-config --cflags sdl2)"; SDL_LIBS=$(pkg-config --libs sdl2); fi
 cd "$(dirname "$0")"
-g++ -O2 -std=gnu++17 -DARCHITECTURE_x86_64=1 -DJIT_ENABLED $GL_FLAGS -I"$M/src" -I"$M/$B/src" -o mirrorrun mirrorrun.cpp platform.cpp hostlink.cpp dspico_sim.cpp tvout.cpp soundout.cpp pads.cpp saves.cpp $GL_SRC $USB_CFLAGS $SDL_CFLAGS \
+g++ -O2 -std=gnu++17 -DARCHITECTURE_x86_64=1 -DJIT_ENABLED $GL_FLAGS -I"$M/src" -I"$M/$B/src" -o mirrorrun mirrorrun.cpp platform.cpp hostlink.cpp dspico_sim.cpp tvout.cpp soundout.cpp pads.cpp saves.cpp menu.cpp $GL_SRC $USB_CFLAGS $SDL_CFLAGS \
     "$M/$B/src/libcore.a" "$M/$B/src/teakra/src/libteakra.a" \
     $(ls "$M"/$B/src/*/lib*.a "$M"/$B/src/*/*/lib*.a 2>/dev/null | grep -v teakra) \
     $SDL_LIBS -lz -lpthread -lrt $USB_LIBS -ldl

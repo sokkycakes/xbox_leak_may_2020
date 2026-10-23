@@ -273,12 +273,14 @@ void SoundOut::Run()
         uint32_t got = 0;
         {
             std::unique_lock<std::mutex> g(lock);
+            // paused: silence, and from a full buffer again after
+            if (paused) started = false;
             // start once there's a buffer's worth, so it doesn't run dry straight away
-            if (!started && head - tail >= TargetFill) started = true;
+            else if (!started && head - tail >= TargetFill) started = true;
             // Short of a period: the card still has most of its buffer to play (16 ms), so
             // give a slow frame (a course loading, a big bundle) that long before silence.
             if (started && head - tail < period)
-                more.wait_for(g, std::chrono::milliseconds(12), [&] { return head - tail >= period || stop; });
+                more.wait_for(g, std::chrono::milliseconds(12), [&] { return head - tail >= period || stop || paused; });
             size_t have = head - tail;
             if (started)
             {
@@ -290,7 +292,7 @@ void SoundOut::Run()
                     buf[i * 2 + 1] = ring[at + 1];
                     tail++;
                 }
-                if (got < period)
+                if (got < period && !paused)
                 {
                     underruns++;
                     started = false;   // let it fill up again

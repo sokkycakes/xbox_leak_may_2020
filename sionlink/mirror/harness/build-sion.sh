@@ -8,7 +8,7 @@ M=${MELONDS:-/opt/src/melonDS}
 : "${SDL:?SDL=prefix of a static SDL2}" "${LIBUSB:?LIBUSB=prefix of a static libusb-1.0}"
 cd "$(dirname "$0")"
 OUT=../kit/sion
-SRC="mirrorrun.cpp platform.cpp hostlink.cpp dspico_sim.cpp tvout.cpp soundout.cpp pads.cpp saves.cpp"
+SRC="mirrorrun.cpp platform.cpp hostlink.cpp dspico_sim.cpp tvout.cpp soundout.cpp pads.cpp saves.cpp menu.cpp"
 FLAGS="-O2 -std=gnu++17 -DARCHITECTURE_x86_64=1 -DJIT_ENABLED -DHAVE_LIBUSB -DHAVE_SDL -I$SDL/include/SDL2 -I$LIBUSB/include -I$M/src"
 libs() { echo "$M/$1/src/libcore.a $M/$1/src/teakra/src/libteakra.a $(ls "$M"/$1/src/*/lib*.a "$M"/$1/src/*/*/lib*.a 2>/dev/null | grep -v teakra)"; }
 

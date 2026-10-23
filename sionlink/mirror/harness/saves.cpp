@@ -69,28 +69,50 @@ void SaveKeeper::Run()
             std::vector<uint8_t> d = mem;
             dirty = false;
             g.unlock();
-            WriteFile(d);
+            WriteFile(d, path);
             g.lock();
         }
         if (stop) return;
     }
 }
 
-bool SaveKeeper::WriteFile(const std::vector<uint8_t>& d)
+bool SaveKeeper::Backup(const std::string& to)
 {
-    std::string tmp = path + ".new";
+    std::vector<uint8_t> d;
+    {
+        std::lock_guard<std::mutex> g(m);
+        d = mem;
+    }
+    if (d.empty())
+    {
+        // nothing written this time: the file as it was
+        if (FILE* f = fopen(path.c_str(), "rb"))
+        {
+            uint8_t buf[65536];
+            size_t n;
+            while ((n = fread(buf, 1, sizeof buf, f)) > 0) d.insert(d.end(), buf, buf + n);
+            fclose(f);
+        }
+    }
+    if (d.empty()) return true;   // no save yet
+    return WriteFile(d, to);
+}
+
+bool SaveKeeper::WriteFile(const std::vector<uint8_t>& d, const std::string& file)
+{
+    std::string tmp = file + ".new";
     int fd = open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
     bool ok = fd >= 0 && write(fd, d.data(), d.size()) == (ssize_t)d.size() && fsync(fd) == 0;
     if (fd >= 0) close(fd);
-    ok = ok && rename(tmp.c_str(), path.c_str()) == 0;
+    ok = ok && rename(tmp.c_str(), file.c_str()) == 0;
     if (ok)
     {
         // and the rename itself
-        std::string dir = path.substr(0, path.rfind('/') + 1);
+        std::string dir = file.substr(0, file.rfind('/') + 1);
         int dfd = open(dir.empty() ? "." : dir.c_str(), O_RDONLY | O_DIRECTORY);
         if (dfd >= 0) { fsync(dfd); close(dfd); }
-        writes++;
-        fprintf(stderr, "save: written (%zu KB)\n", d.size() >> 10);
+        if (file == path) writes++;
+        fprintf(stderr, "save: %s written (%zu KB)\n", file.c_str(), d.size() >> 10);
     }
     else
         perror("save");

@@ -32,10 +32,16 @@ public:
     int CursorY() const { return (int)cy; }
     // Back held for 2 s since the last call
     bool MenuAsked() { bool m = menuAsked; menuAsked = false; return m; }
+    // while the game menu is up instead of Poll: its keys held now (menu.h's MK_*, the
+    // dashboard's way: A picks, B goes back, Back or Start closes, d-pad or left stick moves)
+    uint16_t MenuKeys();
+    // the game gets none of the buttons held now until they're let go (the menu closed
+    // with them), nor any pressed while the menu was up
+    void Swallow();
 
 private:
     // what the pads have pressed (buttons since the game last looked, too) and the right stick
-    struct State { uint16_t held = 0; bool back = false, touch = false; float sx = 0, sy = 0; };
+    struct State { uint16_t held = 0, menu = 0; bool back = false, touch = false; float sx = 0, sy = 0; };
     void Read(State& st);
     bool Init();
 
@@ -49,6 +55,8 @@ private:
     int cursorFrames = 0;
     uint32_t backFrames = 0;
     bool backSpent = false, menuAsked = false;
+    uint16_t swallowed = 0;      // buttons held when the menu closed, until let go
+    bool backSwallowed = false;
 };
 
 // draws the stylus on a copy of the bottom screen (256x192 XRGB)

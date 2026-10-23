@@ -122,11 +122,41 @@ sets all of it. Cloud test: a DS joining mid-race shows the game's pictures from
 second frame on. `--pads 1` lets the Sion's own pads play (`pads.h`: SDL2 game controllers,
 its HIDAPI drivers over libusb as in xbcompat; build SDL with `harness/build-sdl.sh`):
 buttons by position as on a DS, the right stick moves a stylus drawn on the TV, the right
-trigger touches, and holding Back for 2 s will open the runtime's menu. Buttons from the DS,
+trigger touches, and holding Back for 2 s opens the game's menu (below). Buttons from the DS,
 the pads and `--input` all count. `MIRROR_PADTEST=FILE` plays a virtual pad in cloud tests
 (a key script played as pad buttons gives the same recording). `--save FILE` loads the
 game's save memory and writes it back 2 s after the game last wrote to it, through a temp
 file and a rename.
+
+## The game's menu (`menu.h`)
+Holding Select for 2 s (Back on the Sion's pads, or Select on the DS over the link) stops the
+game and opens its menu on the TV, as Game Boy Player and Virtual Console do; the Guide button
+stays the Guide's. Until the 2 s are up the game gets Select as usual. The menu is drawn over
+the dimmed picture in Frolick's look (its slate panel and Fira Sans, the focused row light with
+dark text, the Blades' A and B buttons; `menuart.h` is baked from Frolick's art by
+`mkmenuart.py`), with the game's banner icon and title and a line on how the DS link is doing:
+- Resume (also B, Back, Start or Select)
+- Screen layout: stacked, side by side, top screen big or bottom screen big (the other at half
+  its size beside it), seen behind the menu as it changes; kept for the game in `GAME.layout`
+- Swap screens
+- Quick save: one per game, `GAME.state` beside the save (melonDS's savestate, zlib, and the
+  2D and 3D registers' last writes, which the DS can't read back), packed and written on a
+  thread of its own while the game goes on; "Quick save made" shows at the foot of the TV.
+  It waits for a frame where the game has no 3D commands half sent (MKDS: 2 frames).
+- Quick load (asks first): melonDS takes the quick save, and so does the game's save memory,
+  as melonDS's own savestates do; the save as it was is kept as `GAME.sav.before-load`.
+- Reset game, Back to dashboard (both ask first)
+
+The pads work it the dashboard's way (A picks, B goes back, the d-pad or left stick moves);
+the DS the DS's way (A, B, the d-pad). The sound stops while it's up, and the DS gets a bundle
+with nothing in it every half second, so it keeps its picture instead of showing its link
+page. The buttons that close it stay out of the game until they're let go. After a quick load
+or a reset the DS gets a full bundle of the new state: first zeros for any command it was part
+way through, then the new 3D registers and the whole geometry state as melonDS has it (moving
+the matrix stack pointers from where the old state left them), then the frames as usual. Cloud
+test (MKDS demo, DS joined over the simulated DSpico): every DS frame matches an emulator frame
+after the quick load and after the reset, from the 5th frame on (as when a DS joins); before
+that it shows the DS's VRAM being cleared and one frame with the 3D a frame off.
 
 ## OpenGL (`--renderer gl`)
 melonDS's OpenGL renderer draws the game's 3D (and puts the screens together) on the GPU,

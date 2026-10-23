@@ -1,15 +1,21 @@
-// The game on the Sion's TV: both screens, stacked, in the mode the TV is already in.
+// The game on the Sion's TV: both screens, in the mode the TV is already in.
 //   drm         the Sion's display (KMS dumb buffers, as xbox-av does), taken over from
 //               xbox-av the way a title does ('T' first, 'S' and the last frame when done)
-//   dump:FILE   the composed pictures, one in 60, for tests where there is no display
+//   dump:FILE   the composed pictures, one in 60 (MIRROR_TVDUMPEVERY), for tests where
+//               there is no display
 #ifndef MIRROR_TVOUT_H
 #define MIRROR_TVOUT_H
 
 #include <cstdint>
 #include <chrono>
 #include <cstdio>
+#include <functional>
 #include <string>
 #include <vector>
+
+// where the screens go (the game menu's Screen layout): one above the other, side by
+// side, or one big with the other at half its size beside it
+enum class TVLayout { Stacked, SideBySide, BigTop, BigBottom };
 
 class TVOut
 {
@@ -23,6 +29,12 @@ public:
     // the TV's frame rate (the mode's pixel clock over its frame size)
     double Hz() const;
     void Close();
+    // swap: the bottom screen where the top one goes and the other way round
+    void SetLayout(TVLayout layout, bool swap);
+    // drawn over each picture once it's composed (the game menu): the frame, its pitch in
+    // bytes, its size and a pixel's width over its height
+    using Overlay = std::function<void(uint32_t* dst, uint32_t pitch, uint32_t w, uint32_t h, double par)>;
+    void SetOverlay(Overlay o);
 
 private:
     void Layout();
@@ -30,16 +42,24 @@ private:
     bool WaitFlip(int ms);
 
     uint32_t w = 720, h = 480;
+    double par = 1;                    // a pixel's width over its height
     bool paced = false;
-    // layout: each screen sw x sh, the top one at (x0, y0), the bottom one under it
-    uint32_t sw = 0, sh = 0, x0 = 0, y0 = 0;
-    std::vector<uint32_t> xs, ys;      // per output column/row: source index << 9 | weight (of 256)
+    TVLayout layout = TVLayout::Stacked;
+    bool swap = false;
+    // where each screen goes: the top one first
+    struct Place
+    {
+        uint32_t x = 0, y = 0, w = 0, h = 0;
+        std::vector<uint32_t> xs, ys;  // per output column/row: source index << 9 | weight (of 256)
+    } place[2];
     std::vector<uint32_t> rowCache;    // horizontally scaled source rows
+    Overlay overlay;
+    int clearFrames = 0;               // pictures still to clear whole (the layout or overlay changed)
 
     // dump: (MIRROR_TVPACE=1: paced by a pretend 60 Hz TV, for cloud tests)
     FILE* dump = nullptr;
     double vblankPeriod = 0, flipAt = 0;   // seconds on the steady clock
-    uint32_t frames = 0;
+    uint32_t frames = 0, dumpEvery = 60;
     std::vector<uint32_t> dumpBuf;
 
     // drm:

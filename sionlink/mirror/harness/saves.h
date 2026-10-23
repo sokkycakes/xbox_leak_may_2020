@@ -21,13 +21,16 @@ public:
     std::vector<uint8_t> Load(const std::string& path);
     // from melonDS (Platform::WriteNDSSave), on the game's thread
     void Note(const uint8_t* data, uint32_t len, uint32_t off, uint32_t n);
+    // the save as it stands (the game's last writes too, if they aren't in the file yet)
+    // copied to `to`, before a quick save is loaded over it
+    bool Backup(const std::string& to);
     // writes what's left and stops the thread
     void Close();
     uint32_t Writes() const { return writes; }
 
 private:
     void Run();
-    bool WriteFile(const std::vector<uint8_t>& d);
+    bool WriteFile(const std::vector<uint8_t>& d, const std::string& file);
 
     std::string path;
     std::mutex m;

@@ -33,6 +33,9 @@ public:
     // too heavy for the Sion); the sound pushed next is then made longer to match (up to
     // 18%, at the same pitch: stretch.h) instead of running dry.
     double Skew(double speed = 1);
+    // the game stands still (its menu is up): silence, and not counted as running dry;
+    // what was waiting plays once it goes on
+    void Pause(bool p) { paused = p; more.notify_one(); }
     void Close();
     // times the buffer ran dry (the game was late), and times the card did (this thread was)
     uint32_t Underruns() const { return underruns; }
@@ -52,7 +55,7 @@ private:
     size_t head = 0, tail = 0;       // in frames
     std::mutex lock;
     std::thread thread;
-    std::atomic<bool> stop {false};
+    std::atomic<bool> stop {false}, paused {false};
     std::atomic<uint32_t> underruns {0}, xruns {0};
     std::condition_variable more;    // the game pushed samples
     double fillAvg = -1, drift = 0;

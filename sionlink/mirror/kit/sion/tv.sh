@@ -12,7 +12,8 @@
 # Sion's GPU (OpenGL, mirrorrun-gl: run 16 held 57-60 fps where software dipped to 53);
 # soft draws it with the CPU (mirrorrun) instead. The DS gets the same either way.
 # The Sion's own pads play too (right stick and trigger: the stylus). The save goes next
-# to the game (GAME.sav).
+# to the game (GAME.sav). Holding Back (or Select on the DS) for 2 s opens the game's menu:
+# screen layout, quick save and load (GAME.state), reset, back to the dashboard.
 # Log: /tmp/sionlink-tv.log
 case $1 in /*|stop|'') ;; *) set -- "$PWD/$1" "$2" "$3" "$4" ;; esac   # the game's path from here
 cd "$(dirname "$0")" || exit 1

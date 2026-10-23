@@ -1,4 +1,5 @@
 #include "pads.h"
+#include "menu.h"
 
 #include <cmath>
 #include <cstdio>
@@ -113,6 +114,7 @@ bool SionPads::Open()
                 std::lock_guard<std::mutex> g(lock);
                 latest = st;
                 pressed.held |= st.held;
+                pressed.menu |= st.menu;
                 pressed.back |= st.back;
                 pressed.touch |= st.touch;
             }
@@ -204,11 +206,51 @@ void SionPads::Read(State& st)
             if (sinf(a) > 0.38f) st.held |= DS_DOWN;
             if (sinf(a) < -0.38f) st.held |= DS_UP;
         }
+        // the menu goes by the labels, as the dashboard does: A picks, B goes back
+        if (b(SDL_CONTROLLER_BUTTON_A)) st.menu |= MK_OK;
+        if (b(SDL_CONTROLLER_BUTTON_B)) st.menu |= MK_BACK;
+        if (b(SDL_CONTROLLER_BUTTON_BACK) || b(SDL_CONTROLLER_BUTTON_START)) st.menu |= MK_CLOSE;
         float rx = ax(SDL_CONTROLLER_AXIS_RIGHTX), ry = ax(SDL_CONTROLLER_AXIS_RIGHTY);
         if (fabsf(rx) > fabsf(st.sx)) st.sx = rx;
         if (fabsf(ry) > fabsf(st.sy)) st.sy = ry;
         if (ax(SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > 0.5f || b(SDL_CONTROLLER_BUTTON_RIGHTSTICK)) st.touch = true;
     }
+    if (st.held & DS_UP) st.menu |= MK_UP;
+    if (st.held & DS_DOWN) st.menu |= MK_DOWN;
+    if (st.held & DS_LEFT) st.menu |= MK_LEFT;
+    if (st.held & DS_RIGHT) st.menu |= MK_RIGHT;
+}
+
+uint16_t SionPads::MenuKeys()
+{
+    if (!open) return 0;
+    if (!threaded)
+    {
+        PlayPadTest();
+        State st;
+        Read(st);
+        return st.menu;
+    }
+    std::lock_guard<std::mutex> g(lock);
+    uint16_t k = latest.menu | pressed.menu;
+    pressed.menu = 0;
+    return k;
+}
+
+void SionPads::Swallow()
+{
+    if (!open) return;
+    State st;
+    if (threaded)
+    {
+        std::lock_guard<std::mutex> g(lock);
+        st = latest;
+        pressed = {};
+    }
+    else
+        Read(st);
+    swallowed = st.held;
+    backSwallowed = st.back;
 }
 
 void SionPads::Poll(uint16_t& held, bool& touch, uint16_t& x, uint16_t& y)
@@ -232,9 +274,12 @@ void SionPads::Poll(uint16_t& held, bool& touch, uint16_t& x, uint16_t& y)
         PlayPadTest();
         Read(st);
     }
-    held = st.held;
+    // what closed the menu stays out of the game until it's let go
+    swallowed &= st.held;
+    held = st.held & ~swallowed;
     touch = st.touch;
-    bool back = st.back;
+    if (backSwallowed && !st.back) backSwallowed = false;
+    bool back = st.back && !backSwallowed;
     float sx = st.sx, sy = st.sy;
 
     // Back: Select for the game, until it's been held 2 s; then the menu, and the game's
@@ -279,6 +324,8 @@ bool SionPads::Open()
     return false;
 }
 void SionPads::Close() {}
+uint16_t SionPads::MenuKeys() { return 0; }
+void SionPads::Swallow() {}
 void SionPads::Poll(uint16_t& held, bool& touch, uint16_t&, uint16_t&)
 {
     held = 0;

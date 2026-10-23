@@ -7,6 +7,7 @@
 
 #include <drm/drm.h>
 #include <drm/drm_mode.h>
+#include <algorithm>
 #include <cerrno>
 #include <cmath>
 #include <cstdlib>
@@ -35,26 +36,69 @@ static inline uint32_t Lerp(uint32_t a, uint32_t b, uint32_t f)   // f: 0..256 o
     return rb | g;
 }
 
-// The screens one above the other, as big as fits inside the TV's title-safe area
-// (an SD picture on a CRT loses its edges), at the DS's shape: SD modes fill a 4:3
-// TV, so their pixels aren't square.
+// The screens as big as they fit inside the TV's title-safe area (an SD picture on a CRT
+// loses its edges), at the DS's shape: SD modes fill a 4:3 TV, so their pixels aren't
+// square. Stacked, each screen gets half the height; side by side, half the width; with
+// one big, the other is half its size beside it, on the side and at the edge where it
+// would be on the DS (the bottom screen low on the right, the top one high on the left).
 void TVOut::Layout()
 {
     bool sd = h <= 576;
     double aspect = sd ? 4.0 / 3.0 : (double)w / h;
-    double par = aspect / ((double)w / h);   // a pixel's width over its height
-    sh = (uint32_t)(h * (sd ? 0.9 : 1.0)) / 2 & ~1u;
-    sw = (uint32_t)lround(sh * 4.0 / 3.0 / par) & ~1u;
-    if (sw > w)
+    par = aspect / ((double)w / h);
+    double aw = w * (sd ? 0.9 : 1.0), ah = h * (sd ? 0.9 : 1.0);
+    double r = 4.0 / 3.0 / par;   // a screen's width in pixels for each line of its height
+    // the whole arrangement's size, in screen heights (the big one's)
+    double fw = r, fh = 2;
+    if (layout == TVLayout::SideBySide) fw = 2 * r, fh = 1;
+    else if (layout == TVLayout::BigTop || layout == TVLayout::BigBottom) fw = 1.5 * r, fh = 1;
+    uint32_t bh = (uint32_t)std::min(aw / fw, ah / fh) & ~1u;
+    uint32_t bw = (uint32_t)lround(bh * r) & ~1u;
+    if (bw * fw / r > w)
     {
-        sw = w & ~1u;
-        sh = (uint32_t)lround(sw * par * 3.0 / 4.0) & ~1u;
+        bw = (uint32_t)(w / (fw / r)) & ~1u;
+        bh = (uint32_t)lround(bw / r) & ~1u;
     }
-    x0 = (w - sw) / 2;
-    y0 = (h - 2 * sh) / 2;
+    Place& t = place[0];
+    Place& b = place[1];
+    switch (layout)
+    {
+    case TVLayout::Stacked:
+        t.w = b.w = bw; t.h = b.h = bh;
+        t.x = b.x = (w - bw) / 2;
+        t.y = (h - 2 * bh) / 2;
+        b.y = t.y + bh;
+        break;
+    case TVLayout::SideBySide:
+        t.w = b.w = bw; t.h = b.h = bh;
+        t.x = (w - 2 * bw) / 2;
+        b.x = t.x + bw;
+        t.y = b.y = (h - bh) / 2;
+        break;
+    case TVLayout::BigTop:
+        t.w = bw; t.h = bh;
+        b.w = bw / 2 & ~1u; b.h = bh / 2 & ~1u;
+        t.x = (w - t.w - b.w) / 2;
+        b.x = t.x + t.w;
+        t.y = (h - bh) / 2;
+        b.y = t.y + t.h - b.h;
+        break;
+    case TVLayout::BigBottom:
+        b.w = bw; b.h = bh;
+        t.w = bw / 2 & ~1u; t.h = bh / 2 & ~1u;
+        t.x = (w - t.w - b.w) / 2;
+        b.x = t.x + t.w;
+        t.y = b.y = (h - bh) / 2;
+        break;
+    }
+    if (swap)
+    {
+        std::swap(t.x, b.x); std::swap(t.y, b.y);
+        std::swap(t.w, b.w); std::swap(t.h, b.h);
+    }
     // bilinear: per output column/row the source pixel (<< 9) and how much of the next one
-    auto table = [](std::vector<uint32_t>& t, uint32_t out, uint32_t in) {
-        t.resize(out);
+    auto table = [](std::vector<uint32_t>& tab, uint32_t out, uint32_t in) {
+        tab.resize(out);
         for (uint32_t i = 0; i < out; i++)
         {
             double p = (i + 0.5) * in / out - 0.5;
@@ -62,40 +106,66 @@ void TVOut::Layout()
             uint32_t k = (uint32_t)p;
             uint32_t f = (uint32_t)lround((p - k) * 256);
             if (k >= in - 1) { k = in - 2; f = 256; }
-            t[i] = k << 9 | f;
+            tab[i] = k << 9 | f;
         }
     };
-    table(xs, sw, 256);
-    table(ys, sh, 192);
-    rowCache.resize(192 * sw);
-    fprintf(stderr, "tv: %ux%u, each screen %ux%u at %u,%u\n", w, h, sw, sh, x0, y0);
+    for (Place& p : place)
+    {
+        table(p.xs, p.w, 256);
+        table(p.ys, p.h, 192);
+    }
+    rowCache.resize(192 * std::max(t.w, b.w));
+    fprintf(stderr, "tv: %ux%u, top screen %ux%u at %u,%u, bottom %ux%u at %u,%u\n", w, h, t.w, t.h, t.x, t.y, b.w, b.h, b.x, b.y);
+}
+
+void TVOut::SetLayout(TVLayout l, bool s)
+{
+    if (l == layout && s == swap) return;
+    layout = l;
+    swap = s;
+    Layout();
+    clearFrames = 2;   // both buffers
+}
+
+void TVOut::SetOverlay(Overlay o)
+{
+    if (overlay && !o) clearFrames = 2;
+    overlay = std::move(o);
 }
 
 void TVOut::Compose(uint32_t* dst, uint32_t pitch, const uint32_t* top, const uint32_t* bottom)
 {
+    if (overlay || clearFrames > 0)
+    {
+        // what was outside the screens (the menu, the layout before) goes
+        for (uint32_t y = 0; y < h; y++) memset((uint8_t*)dst + (size_t)y * pitch, 0, w * 4);
+        if (clearFrames > 0) clearFrames--;
+    }
     const uint32_t* screens[2] = {top, bottom};
     for (int s = 0; s < 2; s++)
     {
         const uint32_t* src = screens[s];
+        const Place& p = place[s];
         for (uint32_t y = 0; y < 192; y++)
         {
             const uint32_t* in = src + y * 256;
-            uint32_t* out = &rowCache[y * sw];
-            for (uint32_t x = 0; x < sw; x++)
+            uint32_t* out = &rowCache[y * p.w];
+            for (uint32_t x = 0; x < p.w; x++)
             {
-                uint32_t k = xs[x] >> 9, f = xs[x] & 511;
+                uint32_t k = p.xs[x] >> 9, f = p.xs[x] & 511;
                 out[x] = Lerp(in[k], in[k + 1], f);
             }
         }
-        for (uint32_t y = 0; y < sh; y++)
+        for (uint32_t y = 0; y < p.h; y++)
         {
-            uint32_t k = ys[y] >> 9, f = ys[y] & 511;
-            const uint32_t* a = &rowCache[k * sw];
-            const uint32_t* b = a + sw;
-            uint32_t* out = dst + (size_t)(y0 + s * sh + y) * (pitch / 4) + x0;
-            for (uint32_t x = 0; x < sw; x++) out[x] = Lerp(a[x], b[x], f);
+            uint32_t k = p.ys[y] >> 9, f = p.ys[y] & 511;
+            const uint32_t* a = &rowCache[k * p.w];
+            const uint32_t* b = a + p.w;
+            uint32_t* out = dst + (size_t)(p.y + y) * (pitch / 4) + p.x;
+            for (uint32_t x = 0; x < p.w; x++) out[x] = Lerp(a[x], b[x], f);
         }
     }
+    if (overlay) overlay(dst, pitch, w, h, par);
 }
 
 bool TVOut::Open(const std::string& spec)
@@ -105,6 +175,7 @@ bool TVOut::Open(const std::string& spec)
         dump = fopen(spec.c_str() + 5, "wb");
         if (!dump) { perror(spec.c_str() + 5); return false; }
         dumpBuf.assign((size_t)w * h, 0);
+        if (const char* e = getenv("MIRROR_TVDUMPEVERY")) dumpEvery = std::max(1, atoi(e));
         Layout();
         if (getenv("MIRROR_TVPACE"))
         {
@@ -304,7 +375,7 @@ void TVOut::Show(const uint32_t* top, const uint32_t* bottom)
             }
             flipAt = (floor(now / vblankPeriod + 1e-6) + 1) * vblankPeriod;
         }
-        if (frames++ % 60 == 0)
+        if (frames++ % dumpEvery == 0)
         {
             Compose(dumpBuf.data(), w * 4, top, bottom);
             fwrite(dumpBuf.data(), 4, dumpBuf.size(), dump);
