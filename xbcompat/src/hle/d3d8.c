@@ -693,6 +693,19 @@ static void d3d_vblank(void)
     }
 }
 
+/* D3DPRESENT_INTERVAL_TWO (2), THREE (4), FOUR (8), alone or with IMMEDIATE
+   (0x80000000: "or at once when late"): a frame stays up that many blanks.
+   MechAssault asks for TWO_OR_IMMEDIATE and times its Bink movies by
+   Present, so at one blank per frame they played twice as fast. */
+static unsigned present_vblanks = 1;
+static void set_present_interval(ULONG interval)
+{
+    ULONG n = interval & 0xF;
+    unsigned v = n & 8 ? 4 : n & 4 ? 3 : n & 2 ? 2 : 1;
+    if (v != present_vblanks) xlog("D3D: presentation interval %#lx: %u blanks per frame", (unsigned long)interval, v);
+    present_vblanks = v;
+}
+
 static LONG NTAPI Direct3D_CreateDevice(UINT_ Adapter, ULONG DeviceType, PVOID pUnused, ULONG Flags,
                                        D3DPRESENT_PARAMETERS *pp, PVOID *ppDevice)
 {
@@ -706,6 +719,7 @@ static LONG NTAPI Direct3D_CreateDevice(UINT_ Adapter, ULONG DeviceType, PVOID p
     gamma_identity();
     xlog("D3D: CreateDevice %ux%u, format %#x, depth %s, multisample %#x", d3d.width, d3d.height,
          pp->BackBufferFormat, pp->EnableAutoDepthStencil ? "yes" : "no", pp->MultiSampleType);
+    set_present_interval(pp->FullScreen_PresentationInterval);
 
     av_title_starting();
     const char *boot_path = "/tmp/xbcompat-trace-boot";
@@ -1243,7 +1257,7 @@ static void pace_present(void)
     static Uint64 next;
     log_fps();
     if (unpaced()) return;
-    Uint64 now = SDL_GetPerformanceCounter(), period = SDL_GetPerformanceFrequency() / 60;
+    Uint64 now = SDL_GetPerformanceCounter(), period = SDL_GetPerformanceFrequency() / 60 * present_vblanks;
     if (!next || now > next + period) next = now;   /* first frame, or fell behind: resync */
     TIMED(t_pace, sleep_until(next));
     next += period;
@@ -10353,7 +10367,7 @@ static void NTAPI D3D_Nop12(ULONG a, ULONG b, ULONG c) { (void)a; (void)b; (void
 static void FASTCALL D3D_FastNop(ULONG a, ULONG b) { (void)a; (void)b; }
 static LONG NTAPI D3DDevice_Reset(PVOID pp)
 {
-    (void)pp;
+    if (pp) set_present_interval(((D3DPRESENT_PARAMETERS *)pp)->FullScreen_PresentationInterval);
     persisted.first_flip = true;   /* the mode is set again: the next Present frees the persisted frame */
     return D3D_OK;
 }
