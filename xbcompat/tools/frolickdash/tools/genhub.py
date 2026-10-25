@@ -1543,6 +1543,7 @@ function ShowPage(page, how)
     var first;
     sPage = page;
     nMetaRow = 0 - 1;
+    nRows = 0;      // the last page's rows: PageEnter sets this page's
     thePage.url = PageUrl(page);
     thePage.Play("page", how);
     first = PageFirst(page);
@@ -1922,6 +1923,7 @@ function initialize()
     nRows = 0;
     nScroll = 0;
     nSel = 0;
+    nTab = 0;
     nListCount = 0;
     nDev = 8;
     nTitle = 0;
