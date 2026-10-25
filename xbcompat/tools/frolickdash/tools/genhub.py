@@ -2581,7 +2581,9 @@ function DlLegend()
     if (d < 0)
         thePage.SetText("legend_a", "");
     else if (theDownloads.ItemStream(d) == 2)
-        thePage.SetText("legend_a", "");      // filling: no pause
+        thePage.SetText("legend_a", "Pause");
+    else if (theDownloads.ItemStream(d) == 3)
+        thePage.SetText("legend_a", "Resume");
     else if (d > 0)
         thePage.SetText("legend_a", "Start Now");
     else if (theDownloads.HasActive() == 0)
@@ -2647,7 +2649,22 @@ function DlPress()
     if (d < 0)
         return;
     if (theDownloads.ItemStream(d) == 2)
+    {
+        theDownloads.PauseStream(d);
+        DlRefresh();
         return;
+    }
+    if (theDownloads.ItemStream(d) == 3)
+    {
+        // resumed: it fills first, the active item unless the queue has one
+        if (theDownloads.HasActive() == 0)
+            nSel = 0;
+        else if (theDownloads.ItemStream(0) != 0)
+            nSel = 0;
+        theDownloads.PauseStream(d);
+        DlRefresh();
+        return;
+    }
     if (theDownloads.ItemStream(d) == 1)
     {
         // it fills first; listed as the active item unless the queue has one

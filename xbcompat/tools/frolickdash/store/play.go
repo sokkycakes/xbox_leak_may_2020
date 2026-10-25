@@ -8,6 +8,8 @@ package main
 //	p <id>          play this one
 //	f <id>          fill this one before the others (Downloads, Start Now)
 //	x <id>          remove this one and its game (Downloads, Remove)
+//	z <id>          pause this one: it only fetches what its game reads
+//	r <id>          resume it (Downloads, Resume or Start Now; Play)
 //	end
 //
 // (an empty one when nothing is to be played; the dashboard writes that
@@ -35,8 +37,12 @@ package main
 //
 //	stream <id> <starting|ready|error> <bytes in> <bytes> <detail>
 //	        (ready: the detail is the game's folder name in E:\Games)
-//	streaming <id> <bytes in> <bytes> <1 filling|0> <title>
+//	streaming <id> <bytes in> <bytes> <1 filling|0|2 paused> <title>
 //	installed <id> <folder>
+//
+// A paused game stays paused (its state folder's "paused" file) until it
+// is resumed or played; while one is paused nothing else starts filling
+// by itself, as a paused download holds a queue.
 
 import (
 	"bufio"
@@ -87,6 +93,10 @@ func readPlay() (playReq, bool) {
 			req.first = f[1]
 		case "x":
 			req.remove = append(req.remove, f[1])
+		case "z":
+			req.pause = append(req.pause, f[1])
+		case "r":
+			req.resume = append(req.resume, f[1])
 		}
 	}
 	return playReq{}, false
@@ -194,8 +204,29 @@ var play = players{procs: map[string]*streamProc{}}
 // playReq is play.txt: p the game to play, f the one to fill first, x
 // the ones to remove (their games are deleted).
 type playReq struct {
-	play, first string
-	remove      []string
+	play, first   string
+	remove        []string
+	pause, resume []string
+}
+
+// paused: the Downloads page paused this game's fill.
+func paused(id string) bool {
+	return fileExists(filepath.Join(stateDir(id), "paused"))
+}
+
+func setPaused(id string, on bool) {
+	f := filepath.Join(stateDir(id), "paused")
+	if on == fileExists(f) {
+		return
+	}
+	if on {
+		os.MkdirAll(stateDir(id), 0755)
+		os.WriteFile(f, nil, 0644)
+		log.Printf("play %s: paused", id)
+	} else {
+		os.Remove(f)
+		log.Printf("play %s: resumed", id)
+	}
 }
 
 // watchPlay is called every second by the main loop.
@@ -207,6 +238,17 @@ func watchPlay(ctx context.Context) {
 	if ok {
 		if req.play != p.want {
 			p.state, p.detail = "starting", ""
+			if req.play != "" {
+				setPaused(req.play, false) // playing it: it fills again
+			}
+		}
+		for _, id := range req.resume {
+			setPaused(id, false)
+		}
+		for _, id := range req.pause {
+			if id != req.play {
+				setPaused(id, true)
+			}
 		}
 		p.want, p.first = req.play, req.first
 		for _, id := range req.remove {
@@ -274,13 +316,17 @@ func watchPlay(ctx context.Context) {
 // pickFiller gives the -fill file to one streamer.
 func (p *players) pickFiller() {
 	f := ""
+	held := false // a paused game holds the others back
+	for id := range p.procs {
+		held = held || paused(id)
+	}
 	for _, id := range []string{p.want, p.first, p.filler} {
-		if id != "" && p.procs[id] != nil {
+		if id != "" && p.procs[id] != nil && !paused(id) {
 			f = id
 			break
 		}
 	}
-	if f == "" {
+	if f == "" && !held {
 		var oldest time.Time
 		for id, sp := range p.procs {
 			st, err := os.Stat(filepath.Join(sp.dir, streamFile))
@@ -467,7 +513,7 @@ func streamIn(sp *streamProc) (int64, int64) {
 // playStatus is the status.txt lines for streamed games:
 //
 //	installed <id> <folder>
-//	streaming <id> <bytes in> <bytes> <1 filling | 0 only what it reads> <title>
+//	streaming <id> <bytes in> <bytes> <1 filling | 0 only what it reads | 2 paused> <title>
 //	stream <id> <state> <bytes in> <bytes> <detail>   (the game asked to play)
 func playStatus() string {
 	var out strings.Builder
@@ -491,6 +537,8 @@ func playStatus() string {
 		fill := 0
 		if id == p.filler {
 			fill = 1
+		} else if paused(id) {
+			fill = 2
 		}
 		fmt.Fprintf(&out, "streaming\t%s\t%d\t%d\t%d\t%s\n", id, in, size, fill, clean(gameFolder(id)))
 	}

@@ -21,10 +21,11 @@
 //                                       ready: detail = its E:\Games folder)
 //                  installed <identifier> <folder>
 //                                      (a Streaming Download in E:\Games)
-//                  streaming <identifier> <in> <bytes> <1|0> <title>
+//                  streaming <identifier> <in> <bytes> <1|0|2> <title>
 //                                      (a Streaming Download still coming
 //                                       in; 1: the one filling now, the
-//                                       others only fetch what they read)
+//                                       others only fetch what they read;
+//                                       2: paused)
 //   history.txt  written here: what finished (Download History)
 //                  h <identifier> <MB> <kind> <title>
 //   play.txt     written here: the Streaming Download item to play now
@@ -32,6 +33,8 @@
 //                  f <identifier>      fill this one first (Start Now)
 //                  x <identifier>      remove this one (until the helper
 //                                      no longer lists it)
+//                  z <identifier>      pause this one  } until the helper
+//                  r <identifier>      resume this one } says it did
 //
 // A finished item leaves the queue for the history and the next pending
 // item starts, as a queue does.  Streaming Downloads still coming in are
@@ -56,7 +59,9 @@
 //   GetIcon(i)        the Blades' 64x icon for the kind
 //   IsPaused()        the active download is paused
 //   ItemStream(i)     0 a queued download, 1 a Streaming Download,
-//                     2 the Streaming Download filling now (no pause)
+//                     2 the Streaming Download filling now, 3 a paused one
+//   PauseStream(i)    pause or resume Streaming Download i (a paused one
+//                     holds the others back, as the queue's does)
 //   StartNow(i)       a pending item becomes the active download; the one
 //                     that was active goes back to the top of the queue
 //                     (resumes where it was when started again); a
@@ -135,6 +140,13 @@ static int c_nStreams;
 static CHAR c_szFirstId[DL_ID];                 // Start Now on a stream
 static CHAR c_rgszRemove[STREAM_MAX][DL_ID];    // removed, until unlisted
 static int c_nRemove;
+struct PAUSECMD
+{
+    CHAR szId[DL_ID];
+    int bPause;
+};
+static PAUSECMD c_rgPause[STREAM_MAX];          // z / r, until the helper says
+static int c_nPause;
 
 const CHAR* StoreServiceState()
 {
@@ -169,6 +181,7 @@ public:
     CStrObject* GetIcon(int i);
     int IsPaused();
     int ItemStream(int i);
+    void PauseStream(int i);
     void StartNow(int i);
     void TogglePause();
     void Remove(int i);
@@ -181,6 +194,7 @@ public:
 
 protected:
     void SavePlay();
+    void SetPause(STREAMITEM* ps, int bPause);
     bool OK(int i) { return i >= 0 && i < m_nCount; }
     bool QueueActive() { return m_nCount > 0 && m_rg[0].nState != dlPending; }
     int StreamActive();
@@ -223,6 +237,7 @@ START_NODE_FUN(CDownloads, CNode)
     NODE_FUN_SI(GetIcon)
     NODE_FUN_IV(IsPaused)
     NODE_FUN_II(ItemStream)
+    NODE_FUN_VI(PauseStream)
     NODE_FUN_VI(StartNow)
     NODE_FUN_VV(TogglePause)
     NODE_FUN_VI(Remove)
@@ -502,6 +517,28 @@ void CDownloads::ReadStatus()
         c_nRemove = nKeep;
         bPlay = true;
     }
+    // a pause or resume the helper has carried out (or a game it dropped)
+    nKeep = 0;
+    for (int c = 0; c < c_nPause; c++)
+    {
+        bool bPending = false;
+        for (int s = 0; s < c_nStreams; s++)
+        {
+            STREAMITEM* ps = &c_rgStream[s];
+            if (strcmp(ps->szId, c_rgPause[c].szId) != 0)
+                continue;
+            bPending = (ps->bFill == 2) != (c_rgPause[c].bPause != 0);
+            if (bPending)
+                ps->bFill = c_rgPause[c].bPause ? 2 : 0;   // shown as asked meanwhile
+        }
+        if (bPending)
+            c_rgPause[nKeep++] = c_rgPause[c];
+    }
+    if (nKeep != c_nPause)
+    {
+        c_nPause = nKeep;
+        bPlay = true;
+    }
     if (c_szFirstId[0])
     {
         bool bThere = false;
@@ -621,6 +658,12 @@ void CDownloads::SavePlay()
         sz[sizeof sz - 1] = 0;
         Put(h, sz);
     }
+    for (int c = 0; c < c_nPause; c++)
+    {
+        _snprintf(sz, sizeof sz - 1, "%c\t%s\n", c_rgPause[c].bPause ? 'z' : 'r', c_rgPause[c].szId);
+        sz[sizeof sz - 1] = 0;
+        Put(h, sz);
+    }
     Put(h, "end\n");
     CloseHandle(h);
 }
@@ -678,7 +721,11 @@ int CDownloads::StreamActive()
     if (QueueActive())
         return -1;
     for (int k = 0; k < c_nStreams; k++)
-        if (c_rgStream[k].bFill)
+        if (c_rgStream[k].bFill == 1)
+            return k;
+    // none fills while one is paused: the paused one is the active item
+    for (int k = 0; k < c_nStreams; k++)
+        if (c_rgStream[k].bFill == 2)
             return k;
     return -1;
 }
@@ -734,6 +781,8 @@ int CDownloads::ItemStream(int i)
     Item(i, &ps);
     if (ps == NULL)
         return 0;
+    if (ps->bFill == 2)
+        return 3;
     return ps->bFill ? 2 : 1;
 }
 
@@ -761,6 +810,8 @@ CStrObject* CDownloads::GetStatus(int i)
     int q = Item(i, &ps);
     if (ps)
     {
+        if (ps->bFill == 2)
+            return new CStrObject(_T("Paused"));
         if (!ps->bFill)
             return new CStrObject(_T("Pending"));
         if (c_nOnline < 0)
@@ -855,9 +906,17 @@ void CDownloads::StartNow(int i)
     int q = Item(i, &ps);
     if (ps)
     {
+        if (ps->bFill == 2)
+            SetPause(ps, 0);
         Copy(c_szFirstId, ps->szId, sizeof c_szFirstId);
         for (int k = 0; k < c_nStreams; k++)
-            c_rgStream[k].bFill = &c_rgStream[k] == ps;     // until the helper says
+        {
+            // until the helper says
+            if (&c_rgStream[k] == ps)
+                c_rgStream[k].bFill = 1;
+            else if (c_rgStream[k].bFill == 1)
+                c_rgStream[k].bFill = 0;
+        }
         SavePlay();
         return;
     }
@@ -876,6 +935,41 @@ void CDownloads::StartNow(int i)
     m_rg[0].nState = dlDownloading;
     m_rg[1].nState = dlPending;
     SaveQueue();
+}
+
+// The helper is told to pause or resume a Streaming Download; the item
+// shows it at once.
+void CDownloads::SetPause(STREAMITEM* ps, int bPause)
+{
+    int c = 0;
+    while (c < c_nPause && strcmp(c_rgPause[c].szId, ps->szId) != 0)
+        c++;
+    if (c == c_nPause)
+    {
+        if (c_nPause >= STREAM_MAX)
+            return;
+        c_nPause++;
+    }
+    Copy(c_rgPause[c].szId, ps->szId, DL_ID);
+    c_rgPause[c].bPause = bPause;
+    ps->bFill = bPause ? 2 : 0;
+}
+
+void CDownloads::PauseStream(int i)
+{
+    STREAMITEM* ps;
+    Item(i, &ps);
+    if (ps == NULL)
+        return;
+    if (ps->bFill == 2)
+    {
+        StartNow(i);    // resumed, and filled first
+        return;
+    }
+    SetPause(ps, 1);
+    if (strcmp(c_szFirstId, ps->szId) == 0)
+        c_szFirstId[0] = 0;
+    SavePlay();
 }
 
 void CDownloads::TogglePause()
