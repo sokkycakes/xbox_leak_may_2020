@@ -27,6 +27,7 @@
 #include <unistd.h>
 #include <dirent.h>
 #include <limits.h>
+#include <sys/stat.h>
 
 extern "C" {
 typedef unsigned long ULONG;
@@ -46,6 +47,13 @@ void xlog(const char *fmt, ...);
 // without them (kazeta-guide) shows the game box without the picture.
 __attribute__((weak)) const char *xbe_file_path(void);
 __attribute__((weak)) bool xbe_image_read(const char *xbe, const char *section, unsigned char **bgra, int *w, int *h);
+__attribute__((weak)) bool xpr_image_read(const char *path, unsigned char **bgra, int *w, int *h);
+// kazeta-guide: the cart's icon as BGRA rows (malloc'd), when it has one.
+__attribute__((weak)) bool kazeta_title_image(unsigned char **bgra, int *w, int *h);
+// Quick Launch's start of another title and the game card's folder
+// (misc.c, io.c); a host without them lists the games but can't start one.
+__attribute__((weak)) void guide_launch(const char *nt_dir, const char *xbe);
+__attribute__((weak)) bool fs_card_dir(char *out, size_t outlen);
 bool guide_frame(int w, int h);
 void guide_draw(int w, int h);
 }
@@ -68,11 +76,27 @@ namespace {
 
 // ---- assets: one directory of .xui scenes, .xtx images and font.ttf ------
 
-// titleimage.png is the title's own picture, decoded from its XBE.
+// titleimage.png is the title's own picture, decoded from its XBE; the
+// list pages' pictures (games' title images, saves' images) are made the
+// same way and kept by name.
+struct MemImage { char name[96]; unsigned char* xtx; int len; };
 struct DirResources : xui::Resources {
     char dir[512];
     unsigned char* tile; int tileLen;  // titleimage.png as .xtx bytes
-    DirResources() : tile(0), tileLen(0) {}
+    MemImage mem[96]; int nmem;
+    DirResources() : tile(0), tileLen(0), nmem(0) {}
+    // name: "<name>.xtx"; bgra: w*h pixels
+    bool add(const char* name, const unsigned char* bgra, int w, int h) {
+        for (int i = 0; i < nmem; i++) if (!strcasecmp(mem[i].name, name)) return true;
+        if (nmem == (int)(sizeof mem / sizeof mem[0])) return false;
+        MemImage& m = mem[nmem++];
+        snprintf(m.name, sizeof m.name, "%s", name);
+        m.len = 12 + w * h * 4;
+        m.xtx = new unsigned char[m.len];
+        memcpy(m.xtx, "XTX1", 4); memcpy(m.xtx + 4, &w, 4); memcpy(m.xtx + 8, &h, 4);
+        memcpy(m.xtx + 12, bgra, w * h * 4);
+        return true;
+    }
     bool read(const char* path, unsigned char** data, int* len) {
         const char* name = path;
         const char* s = strstr(name, "://");
@@ -89,6 +113,12 @@ struct DirResources : xui::Resources {
             memcpy(*data, tile, tileLen); *len = tileLen;
             return true;
         }
+        for (int i = 0; i < nmem; i++)
+            if (!strcasecmp(mem[i].name, nm)) {
+                *data = new unsigned char[mem[i].len];
+                memcpy(*data, mem[i].xtx, mem[i].len); *len = mem[i].len;
+                return true;
+            }
         char full[800]; snprintf(full, sizeof full, "%s/%s", dir, nm);
         FILE* f = fopen(full, "rb");
         if (!f) return false;
@@ -226,10 +256,14 @@ struct Guide {
     xui::Renderer* r;
     xui::Element *frameEl, *mainEl, *settingsEl, *skinEl, *cardEl, *volumeEl, *vibrationEl;
     xui::Element *tabsEl, *tabsSkinEl, *gameEl, *gameSkinEl;
+    xui::Element *recentEl, *downloadsEl, *savesEl, *confirmEl;
     // menu: the page showing.  main and settings are the home's Game and
     // Settings tabs; volume and vibration are Settings' own pages, game the
     // Game tab's fuller view of the game.
     xui::Scene *frame, *main, *settings, *volume, *vibration, *game, *menu;
+    // Frolick's list pages: Quick Launch (Recent Games), Downloads (Active
+    // Downloads), Game Storage (the title's Saved Games) and its Yes / No.
+    xui::Scene *recent, *downloads, *saves, *confirm;
     xui::Scene* card;  // the game box, drawn in the main menu's ctlGamerCard
     xui::Scene* tabs;  // the Blades tab strip over the home's pages
     xui::Node* strip;  // ... its pieces and 1To2 / 2To1 timelines
@@ -238,6 +272,8 @@ struct Guide {
     char startedAt[16];
     int shownMinutes;
     bool full;         // the frame expanded (HalfToFull) for the game view
+    const char* launchDir;  // Quick Launch: the game to start once the Guide is away
+    double listedAt;   // when the Downloads page last read the queue
     xui::Node* hud;  // HUDRootScene: owns the open/close timelines
     State state;
     unsigned prev;
@@ -248,8 +284,10 @@ struct Guide {
     bool vibrationOn;
     Sound sounds[SndCount];
     Guide() : r(0), frameEl(0), mainEl(0), settingsEl(0), skinEl(0), cardEl(0), volumeEl(0), vibrationEl(0),
-              tabsEl(0), tabsSkinEl(0), gameEl(0), gameSkinEl(0), frame(0), main(0), settings(0), volume(0), vibration(0), game(0), menu(0), card(0),
-              tabs(0), strip(0), tab(0), started(0), shownMinutes(-1), full(false),
+              tabsEl(0), tabsSkinEl(0), gameEl(0), gameSkinEl(0), recentEl(0), downloadsEl(0), savesEl(0), confirmEl(0),
+              frame(0), main(0), settings(0), volume(0), vibration(0), game(0), menu(0),
+              recent(0), downloads(0), saves(0), confirm(0), card(0),
+              tabs(0), strip(0), tab(0), started(0), shownMinutes(-1), full(false), launchDir(0), listedAt(0),
               hud(0), state(Off), prev(0), holdStart(-1), lastTime(-1), repeatAt(0), leaveAt(0), port(0),
               armed(false), volumeLevel(10), vibrationOn(true) {}
 };
@@ -306,20 +344,24 @@ float text_zoom_for(xui::Node* n, float zoom) {
 // Frolick's page has white text for its slate band; on the Guide's grey
 // panel it takes the Guide's black (sokky), keeping each text's fade, and
 // so does the clock the full view would turn white (the prompts stay white).
+bool is_page(xui::Scene* m) {
+    return m && (m == g.game || m == g.recent || m == g.downloads || m == g.saves || m == g.confirm);
+}
+
 xui::Color text_color_for(xui::Node* n, xui::Color col) {
-    if (!g.game || g.menu != g.game) return col;
+    if (!is_page(g.menu)) return col;
     if (!strcmp(n->id(), "DateTimeTextId")) return col & 0xff000000;
     for (xui::Node* p = n; p; p = p->parent)
-        if (p == g.game->root) return col & 0xff000000;
+        if (p == g.menu->root) return col & 0xff000000;
     return col;
 }
 
 // Its dark shadows, made for white text, become the light one its rows
 // have (0x5aebebeb: the header's 0xbe was much stronger, sokky).
 xui::Color text_shadow_for(xui::Node* n, xui::Color col) {
-    if (!g.game || g.menu != g.game || (col & 0xff) >= 0x80) return col;
+    if (!is_page(g.menu) || (col & 0xff) >= 0x80) return col;
     for (xui::Node* p = n; p; p = p->parent)
-        if (p == g.game->root) return 0x5aebebeb;
+        if (p == g.menu->root) return 0x5aebebeb;
     return col;
 }
 
@@ -471,7 +513,9 @@ void compact_card() {
 void load_title_image() {
     unsigned char* px = 0; int w = 0, h = 0;
     const char* xbe = xbe_file_path ? xbe_file_path() : 0;
-    if (!xbe || !xbe_image_read || !xbe_image_read(xbe, "$$XTIMAGE", &px, &w, &h)) {
+    if (kazeta_title_image && kazeta_title_image(&px, &w, &h)) {
+        // kazeta-guide: the cart's own icon
+    } else if (!xbe || !xbe_image_read || !xbe_image_read(xbe, "$$XTIMAGE", &px, &w, &h)) {
         xlog("Guide: no title image");
         return;
     }
@@ -540,6 +584,528 @@ void session_text() {
     if (g.card) set_text(g.card, "credText", buf);
 }
 
+
+// ---- Frolick's list pages ------------------------------------------------
+// Quick Launch, Downloads and Game Storage are Frolick's own pages (sokky,
+// 2026-10-25): its Recent Games, Active Downloads and Saved Games, filled
+// here from what Frolick keeps on the hard disk, as Frolick's hub fills
+// them.  The hard disk's folders are named as the titles made them, so
+// paths are matched without case.
+
+// dir/name, its name as the folder spells it
+bool ci_path(const char* dir, const char* name, char* out, int n) {
+    DIR* d = opendir(dir);
+    if (!d) return false;
+    bool ok = false;
+    while (struct dirent* e = readdir(d))
+        if (!strcasecmp(e->d_name, name)) { snprintf(out, n, "%s/%s", dir, e->d_name); ok = true; break; }
+    closedir(d);
+    return ok;
+}
+
+// root + "a/b/c", each part matched without case
+bool ci_walk(const char* root, const char* rel, char* out, int n) {
+    if (!root) return false;
+    char cur[1024]; snprintf(cur, sizeof cur, "%s", root);
+    char part[256];
+    while (*rel) {
+        const char* sl = strchr(rel, '/');
+        int l = sl ? (int)(sl - rel) : (int)strlen(rel);
+        snprintf(part, sizeof part, "%.*s", l, rel);
+        char next[1024];
+        if (!ci_path(cur, part, next, sizeof next)) return false;
+        snprintf(cur, sizeof cur, "%s", next);
+        rel += l + (sl ? 1 : 0);
+    }
+    snprintf(out, n, "%s", cur);
+    return true;
+}
+
+char* read_file(const char* path, long* len) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return 0;
+    fseek(f, 0, SEEK_END); long l = ftell(f); fseek(f, 0, SEEK_SET);
+    if (l < 0 || l > (1 << 20)) { fclose(f); return 0; }
+    char* p = new char[l + 2];
+    l = (long)fread(p, 1, l, f);
+    p[l] = p[l + 1] = 0;
+    fclose(f);
+    if (len) *len = l;
+    return p;
+}
+
+// the next line of p (cut in place, its \r gone), or 0 at the end
+char* next_line(char** p) {
+    if (!*p || !**p) return 0;
+    char* line = *p;
+    char* nl = strchr(line, '\n');
+    if (nl) { *nl = 0; *p = nl + 1; } else *p = line + strlen(line);
+    int n = (int)strlen(line);
+    if (n && line[n - 1] == '\r') line[n - 1] = 0;
+    return line;
+}
+
+int split_tabs(char* s, char** f, int n) {
+    int k = 0;
+    f[k++] = s;
+    for (; *s && k < n; s++)
+        if (*s == '\t') { *s = 0; f[k++] = s + 1; }
+    return k;
+}
+
+void format_mb(char* out, int n, int mb) {
+    if (mb >= 1024) snprintf(out, n, "%d.%d GB", mb / 1024, (mb % 1024) * 10 / 1024);
+    else snprintf(out, n, "%d MB", mb);
+}
+
+unsigned rd32le(const unsigned char* p) { return p[0] | p[1] << 8 | p[2] << 16 | (unsigned)p[3] << 24; }
+
+// An XBE's title ID and name (its certificate), the name as ASCII.
+bool xbe_info(const char* path, ULONG* tid, char* name, int n) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return false;
+    unsigned char h[0x1000];
+    size_t got = fread(h, 1, sizeof h, f);
+    fclose(f);
+    if (got < 0x178 || memcmp(h, "XBEH", 4)) return false;
+    unsigned cert = rd32le(h + 0x118) - rd32le(h + 0x104);
+    if (cert + 0x5c > got) return false;
+    *tid = rd32le(h + cert + 8);
+    int k = 0;
+    for (int i = 0; i < 40 && k < n - 1; i++) {
+        unsigned c = h[cert + 0xc + 2 * i] | h[cert + 0xd + 2 * i] << 8;
+        if (!c) break;
+        name[k++] = c < 0x80 ? (char)c : '?';
+    }
+    name[k] = 0;
+    return true;
+}
+
+// An image for a row: a picture made from bgra under `name`, else the
+// Blades icon (Frolick's default for its rows).
+void row_image(char* out, int n, const char* name, unsigned char* px, int w, int h, const char* fallback) {
+    if (px && g.res.add(name, px, w, h)) {
+        snprintf(out, n, "%.*s.png", (int)strlen(name) - 4, name);
+    } else snprintf(out, n, "%s", fallback);
+    free(px);
+}
+
+// -- Quick Launch: Frolick's recently played games --------------------------
+// Frolick writes each launch's key at the top of its T:\recent.txt (the
+// dashboard title's TDATA): an XBE's title ID in hex (a cart's stub XBE
+// included).  Listed are the games those keys name that are here now, the
+// hard disk's E:\Games folders and the game card, newest first, the game
+// being played left out.
+struct Game { char name[96], ntdir[600], img[100]; bool windows; };
+Game games[20]; int ngames;
+
+void scan_recent() {
+    ngames = 0;
+    const char* hdd = fs_hdd_root();
+    char path[1024];
+    if (!ci_walk(hdd, "partition1/TDATA/FFFE0000/recent.txt", path, sizeof path)) return;
+    char* text = read_file(path, 0);
+    if (!text) return;
+    // the games here: E:\Games\<folder>\default.xbe, and the card's
+    struct Here { ULONG tid; char name[96], ntdir[600], xbe[1024]; };
+    static Here here[64]; int nhere = 0;
+    char gdir[1024];
+    if (ci_walk(hdd, "partition1/Games", gdir, sizeof gdir)) {
+        if (DIR* d = opendir(gdir)) {
+            while (struct dirent* e = readdir(d)) {
+                if (e->d_name[0] == '.' || nhere == 64) continue;
+                char sub[1100]; snprintf(sub, sizeof sub, "%s/%s", gdir, e->d_name);
+                Here& h = here[nhere];
+                if (!ci_path(sub, "default.xbe", h.xbe, sizeof h.xbe) || !xbe_info(h.xbe, &h.tid, h.name, sizeof h.name)) continue;
+                if (!h.name[0]) snprintf(h.name, sizeof h.name, "%s", e->d_name);
+                snprintf(h.ntdir, sizeof h.ntdir, "\\Device\\Harddisk0\\Partition1\\%s\\%s", strrchr(gdir, '/') + 1, e->d_name);
+                nhere++;
+            }
+            closedir(d);
+        }
+    }
+    char card[1024];
+    if (fs_card_dir && nhere < 64 && fs_card_dir(card, sizeof card)) {
+        Here& h = here[nhere];
+        if (ci_path(card, "default.xbe", h.xbe, sizeof h.xbe) && xbe_info(h.xbe, &h.tid, h.name, sizeof h.name)) {
+            snprintf(h.ntdir, sizeof h.ntdir, "\\Device\\GameCard0");
+            nhere++;
+        }
+    }
+    char* p = text;
+    while (char* key = next_line(&p)) {
+        if (ngames == 20) break;
+        ULONG tid = (ULONG)strtoul(key, 0, 16);
+        if (!key[0] || tid == xbe_title_id()) continue;
+        for (int i = 0; i < nhere; i++) {
+            if (here[i].tid != tid) continue;
+            Game& gm = games[ngames++];
+            snprintf(gm.name, sizeof gm.name, "%s", here[i].name);
+            snprintf(gm.ntdir, sizeof gm.ntdir, "%s", here[i].ntdir);
+            // a Windows card's stub XBE has its .wincart beside it (wincart.c)
+            char dir[1024], wc[1100]; snprintf(dir, sizeof dir, "%s", here[i].xbe);
+            if (char* sl = strrchr(dir, '/')) *sl = 0;
+            gm.windows = ci_path(dir, ".wincart", wc, sizeof wc);
+            unsigned char* px = 0; int w = 0, h = 0;
+            char nm[64]; snprintf(nm, sizeof nm, "game_%08lx.xtx", (unsigned long)tid);
+            if (!xbe_image_read || !xbe_image_read(here[i].xbe, "$$XTIMAGE", &px, &w, &h)) px = 0;
+            row_image(gm.img, sizeof gm.img, nm, px, w, h, "frolick_ico_64x_games.png");
+            break;
+        }
+    }
+    delete[] text;
+}
+
+// -- Downloads: Frolick's download queue -----------------------------------
+// Frolick's Downloads node keeps the queue in E:\FROLICK\STORE\queue.txt,
+// the active download first ("q id go|pause bytes kind title"), and its
+// helper (frolick-store, running beside the game) reports in status.txt;
+// the page reads both, and A / X change the queue as Frolick's page does.
+struct Download { char id[96], name[128], kind[32]; long long bytes; int sizeMB; float doneMB; int state; };
+enum { DlPending, DlDownloading, DlPaused };
+Download dls[16]; int ndl;
+int dlOnline;              // -1 the helper isn't running
+char dlActiveState[16], dlActiveDetail[64];
+
+bool store_path(const char* file, char* out, int n) {
+    char dir[1024];
+    if (!ci_walk(fs_hdd_root(), "partition1/FROLICK/STORE", dir, sizeof dir)) return false;
+    if (!ci_path(dir, file, out, n)) snprintf(out, n, "%s/%s", dir, file);
+    return true;
+}
+
+void load_downloads() {
+    ndl = 0; dlOnline = -1; dlActiveState[0] = dlActiveDetail[0] = 0;
+    char path[1100];
+    char* text = store_path("queue.txt", path, sizeof path) ? read_file(path, 0) : 0;
+    if (text && strstr(text, "\nend")) {
+        char* p = text;
+        while (char* line = next_line(&p)) {
+            char* f[6];
+            if (strncmp(line, "q\t", 2) || ndl == 16 || split_tabs(line, f, 6) != 6) continue;
+            Download& d = dls[ndl];
+            memset(&d, 0, sizeof d);
+            snprintf(d.id, sizeof d.id, "%s", f[1]);
+            snprintf(d.kind, sizeof d.kind, "%s", f[4]);
+            snprintf(d.name, sizeof d.name, "%s", f[5]);
+            d.bytes = atoll(f[3]);
+            d.sizeMB = (int)(d.bytes / (1024 * 1024));
+            d.state = ndl == 0 ? (!strcmp(f[2], "pause") ? DlPaused : DlDownloading) : DlPending;
+            ndl++;
+        }
+    }
+    delete[] text;
+    // status.txt: the helper rewrites it every second
+    struct stat st;
+    text = store_path("status.txt", path, sizeof path) && !stat(path, &st) && time(0) - st.st_mtime < 10 ? read_file(path, 0) : 0;
+    if (text && strstr(text, "\nend")) {
+        char* p = text;
+        while (char* line = next_line(&p)) {
+            char* f[6];
+            int k = split_tabs(line, f, 6);
+            int i = -1;
+            if (k >= 2) for (int j = 0; j < ndl; j++) if (!strcmp(dls[j].id, f[1])) i = j;
+            if (!strcmp(f[0], "online") && k >= 2) dlOnline = atoi(f[1]);
+            else if (!strcmp(f[0], "active") && k >= 5 && i >= 0) {
+                long long total = atoll(f[4]);
+                if (total > 0) { dls[i].bytes = total; dls[i].sizeMB = (int)(total / (1024 * 1024)); }
+                dls[i].doneMB = (float)(atoll(f[3]) / 1024) / 1024.0f;
+                if (i == 0) {
+                    snprintf(dlActiveState, sizeof dlActiveState, "%s", f[2]);
+                    if (k >= 6) snprintf(dlActiveDetail, sizeof dlActiveDetail, "%s", f[5]);
+                }
+            }
+            else if (!strcmp(f[0], "have") && k >= 3 && i >= 0) dls[i].doneMB = (float)(atoll(f[2]) / 1024) / 1024.0f;
+            else if (!strcmp(f[0], "done") && k >= 2 && i >= 0) {
+                // finished: Frolick moves it to its history when it next runs
+                memmove(&dls[i], &dls[i + 1], (ndl - i - 1) * sizeof dls[0]);
+                ndl--;
+                if (i == 0 && ndl && dls[0].state == DlPending) dls[0].state = DlDownloading;
+            }
+        }
+    }
+    delete[] text;
+}
+
+void save_downloads() {
+    char path[1100];
+    if (!store_path("queue.txt", path, sizeof path)) return;
+    FILE* f = fopen(path, "w");
+    if (!f) return;
+    fprintf(f, "frolick-queue 1\n");
+    for (int i = 0; i < ndl; i++)
+        fprintf(f, "q\t%s\t%s\t%lld\t%s\t%s\n", dls[i].id, dls[i].state == DlPaused ? "pause" : "go", dls[i].bytes, dls[i].kind, dls[i].name);
+    fprintf(f, "end\n");
+    fclose(f);
+}
+
+const char* dl_status(int i) {
+    if (dls[i].state == DlPaused) return "Paused";
+    if (dls[i].state == DlPending) return "Pending";
+    if (dlOnline < 0) return "Waiting";
+    if (!strcmp(dlActiveState, "nospace")) return "Not enough space";
+    if (!strcmp(dlActiveState, "error")) return "Retrying";
+    if (!strcmp(dlActiveState, "installing")) return "Installing";
+    return "Downloading";
+}
+
+void dl_detail(int i, char* out, int n) {
+    char size[24], done[24];
+    format_mb(size, sizeof size, dls[i].sizeMB);
+    if (i == 0 && dlActiveDetail[0] && dls[0].state == DlDownloading) snprintf(out, n, "%s", dlActiveDetail);
+    else if (dls[i].state == DlPending && dls[i].doneMB <= 0) snprintf(out, n, "%s", size);
+    else { format_mb(done, sizeof done, (int)dls[i].doneMB); snprintf(out, n, "%s of %s", done, size); }
+}
+
+// A pending item jumps the queue (the active one waits again at the top);
+// the active one pauses or resumes.
+void dl_start(int i) {
+    if (i < 0 || i >= ndl) return;
+    if (i == 0) dls[0].state = dls[0].state == DlDownloading ? DlPaused : DlDownloading;
+    else {
+        Download d = dls[i];
+        memmove(&dls[1], &dls[0], i * sizeof dls[0]);
+        dls[0] = d;
+        dls[0].state = DlDownloading;
+        dls[1].state = DlPending;
+    }
+    save_downloads();
+}
+
+void dl_remove(int i) {
+    if (i < 0 || i >= ndl) return;
+    memmove(&dls[i], &dls[i + 1], (ndl - i - 1) * sizeof dls[0]);
+    ndl--;
+    if (i == 0 && ndl && dls[0].state == DlPending) dls[0].state = DlDownloading;
+    save_downloads();
+}
+
+// -- Game Storage: the title's saved games ---------------------------------
+// E:\UDATA\<title id>\<save>: its name from SaveMeta.xbx, its picture from
+// SaveImage.xbx (else the title's TitleImage.xbx), "date, size" under it,
+// as Frolick's Saved Games page shows a title's saves.
+struct Save { char name[96], info[96], dir[1100], img[100]; };
+Save saves[48]; int nsaves;
+
+// Name= in a SaveMeta.xbx (UTF-16): the [en] section's, else the first.
+void save_name(const char* dir, char* out, int n) {
+    snprintf(out, n, "Broken Save");
+    char path[1200];
+    long len = 0;
+    char* raw = ci_path(dir, "SaveMeta.xbx", path, sizeof path) ? read_file(path, &len) : 0;
+    if (!raw) return;
+    char* a = new char[len / 2 + 2]; int k = 0;
+    for (long i = (len >= 2 && (unsigned char)raw[0] == 0xff) ? 2 : 0; i + 1 < len; i += 2) {
+        unsigned c = (unsigned char)raw[i] | (unsigned char)raw[i + 1] << 8;
+        a[k++] = c < 0x80 ? (char)c : '?';
+    }
+    a[k] = 0;
+    bool found = false, inEn = false;
+    char* p = a;
+    while (char* line = next_line(&p)) {
+        if (line[0] == '[') { inEn = !strncasecmp(line, "[en", 3); continue; }
+        if (strncasecmp(line, "Name=", 5)) continue;
+        if (!found || inEn) { snprintf(out, n, "%s", line + 5); found = true; }
+        if (inEn) break;
+    }
+    delete[] a; delete[] raw;
+}
+
+// bytes in 16 KB blocks, as the dashboard counts a save
+long long dir_blocks(const char* dir) {
+    long long b = 0;
+    DIR* d = opendir(dir);
+    if (!d) return 0;
+    while (struct dirent* e = readdir(d)) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        char p[1300]; snprintf(p, sizeof p, "%s/%s", dir, e->d_name);
+        struct stat st;
+        if (stat(p, &st)) continue;
+        if (S_ISDIR(st.st_mode)) b += dir_blocks(p);
+        else b += (st.st_size + 16383) / 16384 * 16384;
+    }
+    closedir(d);
+    return b;
+}
+
+void scan_saves() {
+    nsaves = 0;
+    char hex[16], tdir[1024];
+    snprintf(hex, sizeof hex, "%08lX", (unsigned long)xbe_title_id());
+    char rel[64]; snprintf(rel, sizeof rel, "partition1/UDATA/%s", hex);
+    if (!ci_walk(fs_hdd_root(), rel, tdir, sizeof tdir)) return;
+    char tpath[1100];
+    bool timg = ci_path(tdir, "TitleImage.xbx", tpath, sizeof tpath);
+    DIR* d = opendir(tdir);
+    if (!d) return;
+    while (struct dirent* e = readdir(d)) {
+        if (e->d_name[0] == '.' || nsaves == 48) continue;
+        Save& sv = saves[nsaves];
+        snprintf(sv.dir, sizeof sv.dir, "%s/%s", tdir, e->d_name);
+        struct stat st;
+        if (stat(sv.dir, &st) || !S_ISDIR(st.st_mode)) continue;
+        save_name(sv.dir, sv.name, sizeof sv.name);
+        char when[48];
+        struct tm lt; time_t mt = st.st_mtime; localtime_r(&mt, &lt);
+        int hr = lt.tm_hour % 12; if (!hr) hr = 12;
+        snprintf(when, sizeof when, "%d/%d/%d %d:%02d %s", lt.tm_mon + 1, lt.tm_mday, lt.tm_year + 1900, hr, lt.tm_min, lt.tm_hour < 12 ? "AM" : "PM");
+        long long kb = dir_blocks(sv.dir) / 1024;
+        if (kb >= 1024) snprintf(sv.info, sizeof sv.info, "%s, %lld.%lld MB", when, kb / 1024, kb % 1024 * 10 / 1024);
+        else snprintf(sv.info, sizeof sv.info, "%s, %lld KB", when, kb);
+        unsigned char* px = 0; int w = 0, h = 0;
+        char ipath[1300], nm[64];
+        unsigned hash = 5381; for (const char* c = sv.dir; *c; c++) hash = hash * 33 + (unsigned char)*c;
+        snprintf(nm, sizeof nm, "save_%08x.xtx", hash);
+        if (!xpr_image_read || !((ci_path(sv.dir, "SaveImage.xbx", ipath, sizeof ipath) && xpr_image_read(ipath, &px, &w, &h)) ||
+                                 (timg && xpr_image_read(tpath, &px, &w, &h)))) px = 0;
+        row_image(sv.img, sizeof sv.img, nm, px, w, h, "frolick_ico_64x_games.png");
+        nsaves++;
+    }
+    closedir(d);
+}
+
+bool remove_tree(const char* path) {
+    struct stat st;
+    if (lstat(path, &st)) return false;
+    if (S_ISDIR(st.st_mode)) {
+        DIR* d = opendir(path);
+        if (!d) return false;
+        while (struct dirent* e = readdir(d)) {
+            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+            char p[1300]; snprintf(p, sizeof p, "%s/%s", path, e->d_name);
+            remove_tree(p);
+        }
+        closedir(d);
+        return rmdir(path) == 0;
+    }
+    return unlink(path) == 0;
+}
+
+// -- the pages -------------------------------------------------------------
+// Each is a Blades list of six rows (Downloads five, the active one on top
+// under "Active", the queue under "Pending"); sel is the item with the
+// focus, scroll the first one showing.
+struct List { int rows, count, scroll, sel; };
+List lRecent = { 6, 0, 0, 0 }, lDownloads = { 5, 0, 0, 0 }, lSaves = { 6, 0, 0, 0 };
+// the confirm page's question and what Yes does
+enum { AskNone, AskDeleteSave, AskRemoveDownload };
+int ask; xui::Scene* askFrom;
+
+List* list_of(xui::Scene* m) {
+    return m == g.recent ? &lRecent : m == g.downloads ? &lDownloads : m == g.saves ? &lSaves : 0;
+}
+
+// Downloads: row 0 is the active download, hidden when there is none
+int dl_off() { return ndl && dls[0].state != DlPending ? 0 : 1; }
+
+void row_id(char* out, int n, int r) { snprintf(out, n, "list_items_%d", r); }
+
+void fill_row(xui::Scene* m, int r, int i) {
+    char id[32], sub[48]; row_id(id, sizeof id, r);
+    snprintf(sub, sizeof sub, "%s_icon", id);
+    if (m == g.downloads) {
+        int d = r - dl_off();
+        set_show(m, id, d >= 0 && d < ndl);
+        if (d < 0 || d >= ndl) return;
+        char detail[96], line[160];
+        dl_detail(d, detail, sizeof detail);
+        snprintf(line, sizeof line, "%s   %s", dls[d].kind, detail);
+        set_text(m, id, dls[d].name);
+        set_str(m, id, "Data1", line);
+        set_str(m, id, "Data3", dl_status(d));
+        set_image(m, sub, !strcmp(dls[d].kind, "Theme") ? "frolick_ico_64x_Themes.png" : "frolick_ico_64x_GameDownloads.png");
+        char bar[48]; snprintf(bar, sizeof bar, "%s_bar", id);
+        bool on = d == 0 && dls[0].state != DlPending;
+        set_show(m, bar, on);
+        if (xui::Node* b = m->find(bar)) {
+            float f = dls[d].sizeMB > 0 ? dls[d].doneMB / dls[d].sizeMB : 0;
+            xui::Value& v = b->props.set("Value"); v.free(); v.type = xui::TFloat; v.f = f < 0 ? 0 : f > 1 ? 1 : f;
+            b->setBarValue();
+        }
+        return;
+    }
+    List* l = list_of(m);
+    set_show(m, id, i < l->count);
+    if (i >= l->count) return;
+    if (m == g.recent) {
+        set_text(m, id, games[i].name);
+        set_str(m, id, "Data1", games[i].windows ? "Windows" : "Xbox");
+        set_image(m, sub, games[i].img);
+    } else {
+        set_text(m, id, saves[i].name);
+        set_str(m, id, "Data1", saves[i].info);
+        set_image(m, sub, saves[i].img);
+    }
+}
+
+void set_legend(const char* id, const char* text);
+
+// the prompts for the focused item
+void list_legends() {
+    List* l = list_of(g.menu);
+    if (!l) l = &lRecent;  // the confirm page
+    const char* a = 0, *x = 0, *y = 0;
+    if (g.menu == g.recent && l->count) a = guide_launch ? "Play" : 0;
+    else if (g.menu == g.saves && l->count) y = "Delete";  // Frolick's Y
+    else if (g.menu == g.downloads && ndl) {
+        int d = l->sel - dl_off();
+        a = d == 0 ? (dls[0].state == DlPaused ? "Resume" : "Pause") : "Start Now";
+        x = "Remove";
+    }
+    else if (g.menu == g.confirm) a = "Select";
+    set_legend("Legend_A", a);
+    set_legend("Legend_X", x);
+    set_legend("Legend_Y", y);
+}
+
+void fill_list(xui::Scene* m) {
+    List* l = list_of(m);
+    if (!l) return;
+    if (m == g.downloads) {
+        l->count = ndl + dl_off(); if (l->count > l->rows) l->count = l->rows;
+        if (l->sel < dl_off()) l->sel = dl_off();
+        if (l->sel >= l->count) l->sel = l->count - 1;
+        l->scroll = 0;
+    } else {
+        if (l->sel >= l->count) l->sel = l->count - 1;
+        if (l->sel < 0) l->sel = 0;
+        if (l->sel < l->scroll) l->scroll = l->sel;
+        if (l->sel >= l->scroll + l->rows) l->scroll = l->sel - l->rows + 1;
+    }
+    for (int r = 0; r < l->rows; r++) fill_row(m, r, l->scroll + r);
+    bool empty = m == g.downloads ? ndl == 0 : l->count == 0;
+    set_show(m, "txt_EmptyList", empty);
+    char total[32] = "";
+    if (m == g.downloads) {
+        if (ndl && l->sel - dl_off() >= 0) snprintf(total, sizeof total, "%d of %d", l->sel - dl_off() + 1, ndl);
+        else if (ndl) snprintf(total, sizeof total, "%d waiting", ndl);
+    } else if (l->count) snprintf(total, sizeof total, "%d of %d", l->sel + 1, l->count);
+    set_text(m, "labTotal", total);
+    char id[32]; row_id(id, sizeof id, l->sel - l->scroll);
+    m->setFocus(empty ? 0 : m->find(id));
+    if (m == g.menu) list_legends();
+}
+
+// up / down on a list page; true when the focus moved
+bool list_move(int dir) {
+    List* l = list_of(g.menu);
+    int lo = g.menu == g.downloads ? dl_off() : 0;
+    int s = l->sel + dir;
+    if (s < lo || s >= l->count) return false;
+    l->sel = s;
+    fill_list(g.menu);
+    return true;
+}
+
+// Frolick's page as a Guide page: its slate band and its own prompts go
+// (the frame has its own), the header names the Guide's row.
+void page_dress(xui::Scene* m, const char* header) {
+    hide_drawn(m, "body");
+    static const char* legends[] = { "legend_A", "legend_B", "legend_X", "legend_Y", "legend_a", "legend_b", "legend_x", "legend_y" };
+    for (unsigned i = 0; i < sizeof legends / sizeof legends[0]; i++) set_show(m, legends[i], false);
+    if (header) { set_text(m, "txt_Header", header); set_text(m, "labHeader", header); }
+}
+
 void show_menu(xui::Scene* m, const char* focus);
 
 // Shows a home tab: the strip plays its switch, the tab's page comes up.
@@ -590,6 +1156,11 @@ bool load() {
     g.gameSkinEl = g.gameEl ? g.res.scene("GuideGameSkin.xui", err, sizeof err) : 0;
     if (!g.gameSkinEl) { xlog("Guide: off, scene load failed: %s", err); return false; }
     g.cardEl = g.res.scene("GuideCard.xui", err, sizeof err);  // optional
+    // Frolick's list pages (optional: the rows they're behind stay inactive)
+    g.recentEl = g.res.scene("GuideRecent.xui", err, sizeof err);
+    g.downloadsEl = g.res.scene("GuideDownloads.xui", err, sizeof err);
+    g.savesEl = g.res.scene("GuideSaves.xui", err, sizeof err);
+    g.confirmEl = g.res.scene("GuideConfirm.xui", err, sizeof err);
     g.started = now_s();
     {
         time_t t = time(0); struct tm lt; localtime_r(&t, &lt);
@@ -619,6 +1190,10 @@ bool load() {
     g.game = new xui::Scene(g.gameEl, g.gameSkinEl);
     g.tabs = new xui::Scene(g.tabsEl, g.tabsSkinEl);
     g.tabs->setFocus(0);
+    if (g.recentEl) page_dress(g.recent = new xui::Scene(g.recentEl, g.gameSkinEl), "Quick Launch");
+    if (g.downloadsEl) page_dress(g.downloads = new xui::Scene(g.downloadsEl, g.gameSkinEl), "Downloads");
+    if (g.savesEl) page_dress(g.saves = new xui::Scene(g.savesEl, g.gameSkinEl), "Game Storage");
+    if (g.confirmEl) page_dress(g.confirm = new xui::Scene(g.confirmEl, g.gameSkinEl), 0);
     g.strip = g.tabs->find("tabStrip");
     nrows = 0;
     collect_rows(g.main->root, false); collect_rows(g.settings->root, false);
@@ -808,6 +1383,34 @@ void show_menu(xui::Scene* m, const char* focus) {
     set_legend("Legend_B", back && back[0] ? back : "Back");
     // Y leaves for the Dashboard from the top screen only, not sub menus (sokky)
     set_legend("Legend_Y", m == g.main || m == g.settings ? "Xbox Dashboard" : 0);
+    set_legend("Legend_X", 0);
+    if (list_of(m) || m == g.confirm) list_legends();
+}
+
+// Opens one of Frolick's pages: the frame opens out to the Blades' width
+// (from the home), the page plays its Open.
+void open_page(xui::Scene* m, const char* focus) {
+    if (!g.full) { g.full = true; g.hud->play("HalfToFull"); }
+    show_menu(m, focus);
+    if (list_of(m)) fill_list(m);
+    if (xui::Node* pg = m->find("page")) pg->play("Open");
+}
+
+void ask_confirm(int what, const char* question) {
+    ask = what;
+    askFrom = g.menu;
+    set_text(g.confirm, "labHeader", question);
+    open_page(g.confirm, "btnNo");
+}
+
+// Back from a page: where it was opened from
+void page_back() {
+    xui::Scene* m = g.menu;
+    if (m == g.confirm) { ask = AskNone; open_page(askFrom, 0); if (list_of(askFrom)) fill_list(askFrom); return; }
+    if (m == g.saves) { show_menu(g.game, "btnManageGameFiles"); return; }
+    g.full = false;
+    g.hud->play("FullToHalf");
+    show_menu(g.main, m == g.recent ? "btnBlank1" : m == g.downloads ? "btnQuickChat" : "ctlGamerCard");
 }
 
 void open_guide() {
@@ -850,9 +1453,45 @@ bool press(const char* id) {
         if (xui::Node* pg = g.game->find("page")) pg->play("Open");
     }
     else if (!strcmp(id, "btnViewAchievements")) return false;  // Controller Configuration: not here yet
-    else if (!strcmp(id, "btnManageGameFiles")) return false;  // Game Storage: not here yet
+    else if (!strcmp(id, "btnManageGameFiles")) {  // Game Storage: Frolick's Saved Games
+        if (!g.saves) return false;
+        scan_saves(); lSaves.count = nsaves; lSaves.sel = lSaves.scroll = 0;
+        open_page(g.saves, 0);
+    }
     else if (!strcmp(id, "btnOptions")) leave();  // Exit Game
-    else if (!strcmp(id, "btnBlank1") || !strcmp(id, "btnQuickChat")) return false;  // Quick Launch, Downloads
+    else if (!strcmp(id, "btnBlank1")) {  // Quick Launch: Frolick's Recent Games
+        if (!g.recent) return false;
+        scan_recent(); lRecent.count = ngames; lRecent.sel = lRecent.scroll = 0;
+        open_page(g.recent, 0);
+    }
+    else if (!strcmp(id, "btnQuickChat")) {  // Downloads: Frolick's Active Downloads
+        if (!g.downloads) return false;
+        load_downloads(); lDownloads.sel = 0;
+        open_page(g.downloads, 0);
+    }
+    else if (!strncmp(id, "list_items_", 11)) {
+        List* l = list_of(g.menu);
+        if (!l || l->sel >= l->count) return false;
+        if (g.menu == g.recent) {
+            if (!guide_launch) return false;
+            xlog("Guide: Quick Launch %s", games[l->sel].name);
+            leave();
+            g.launchDir = games[l->sel].ntdir;
+        }
+        else if (g.menu == g.downloads) { dl_start(l->sel - dl_off()); fill_list(g.downloads); }
+        else return false;  // a save: Y deletes it
+    }
+    else if (!strcmp(id, "btnYes") || !strcmp(id, "btnNo")) {
+        bool yes = id[3] == 'Y';
+        if (yes && ask == AskDeleteSave && lSaves.sel < nsaves) {
+            xlog("Guide: delete save %s", saves[lSaves.sel].dir);
+            remove_tree(saves[lSaves.sel].dir);
+            scan_saves(); lSaves.count = nsaves;
+            game_page();  // its saved games count
+        }
+        if (yes && ask == AskRemoveDownload) { load_downloads(); dl_remove(lDownloads.sel - dl_off()); }
+        page_back();
+    }
     else if (!strcmp(id, "btnOnlineStatus")) { settings_text(); show_menu(g.volume, "sliderVolume"); }
     else if (!strcmp(id, "btnVoice")) { settings_text(); show_menu(g.vibration, "chkVibration"); }
     else if (!strcmp(id, "chkVibration")) {
@@ -884,11 +1523,7 @@ void step(double t) {
         bool home = g.menu == g.main || g.menu == g.settings;
         if ((down & GUIDE_B) && !home && !toggle) {
             play(SndBack);
-            if (g.menu == g.game) {
-                g.full = false;
-                g.hud->play("FullToHalf");
-                show_menu(g.main, "ctlGamerCard");
-            }
+            if (g.menu == g.game || list_of(g.menu) || g.menu == g.confirm) page_back();
             else show_menu(g.settings, g.menu == g.volume ? "btnOnlineStatus" : "btnVoice");
             break;
         }
@@ -912,6 +1547,18 @@ void step(double t) {
             break;
         }
         if ((down & GUIDE_Y) && home) { leave(); break; }
+        if ((down & GUIDE_Y) && g.menu == g.saves && lSaves.sel < nsaves) {  // Delete, as Frolick's Y
+            play(SndSelect);
+            char q[160]; snprintf(q, sizeof q, "Delete %s?", saves[lSaves.sel].name);
+            ask_confirm(AskDeleteSave, q);
+            break;
+        }
+        if ((down & GUIDE_X) && g.menu == g.downloads && ndl && lDownloads.sel - dl_off() >= 0) {
+            play(SndSelect);
+            char q[200]; snprintf(q, sizeof q, "Remove %s from Downloads?", dls[lDownloads.sel - dl_off()].name);
+            ask_confirm(AskRemoveDownload, q);
+            break;
+        }
         if (down & GUIDE_A) {
             if (g.menu->focus && g.menu != g.volume) {
                 const char* id = g.menu->focus->id();
@@ -922,7 +1569,9 @@ void step(double t) {
         }
         if (b & (GUIDE_UP | GUIDE_DOWN)) {
             if ((down & (GUIDE_UP | GUIDE_DOWN)) || t >= g.repeatAt) {
-                if (g.menu->navigate((b & GUIDE_UP) ? "up" : "down")) play(SndFocus);
+                bool moved = list_of(g.menu) ? list_move((b & GUIDE_UP) ? -1 : 1)
+                                             : g.menu->navigate((b & GUIDE_UP) ? "up" : "down");
+                if (moved) play(SndFocus);
                 g.repeatAt = t + ((down & (GUIDE_UP | GUIDE_DOWN)) ? 0.4 : 0.12);
             }
         }
@@ -932,7 +1581,10 @@ void step(double t) {
         if (!g.hud->playing) g.state = Closed;
         break;
     case Leaving:
-        if (t >= g.leaveAt) reset_request_always("Guide");
+        if (t >= g.leaveAt) {
+            if (g.launchDir && guide_launch) guide_launch(g.launchDir, "default.xbe");
+            reset_request_always("Guide");
+        }
         break;
     case Off:
         break;
@@ -960,6 +1612,11 @@ bool guide_frame(int w, int h) {
     g.lastTime = t;
     step(t);
     if (g.state == Closed) return false;
+    if (g.menu == g.downloads && t - g.listedAt >= 1) {  // the helper's progress, once a second
+        g.listedAt = t;
+        load_downloads();
+        fill_list(g.downloads);
+    }
     { static const char* dbg = getenv("XBCOMPAT_GUIDE_DEBUG"); if (dbg && strstr(dbg, "nodraw")) return false; }
     g.frame->update(dt);
     g.menu->update(dt);
@@ -1165,7 +1822,7 @@ void guide_draw(int w, int h) {
     g.r->textZoom = h <= 576 && zoom > 0 ? zoom : 1;
     // Frolick's page is sized for Frolick's screen already (its text at
     // Frolick's size at this scale)
-    if (g.menu == g.game) g.r->textZoom = 1;
+    if (is_page(g.menu)) g.r->textZoom = 1;
     narrow_frame(n);
     fit_legends(cw * 0.1f, ch * 0.1f, cw * 0.9f, ch * 0.9f);
     float fx = 0, fy = 0;
@@ -1188,7 +1845,12 @@ void guide_draw(int w, int h) {
     }
     if (host && shown && op > 0.001f) {
         xui::Value& o = g.menu->root->props.set("Opacity"); o.free(); o.type = xui::TFloat; o.f = op;
+        // Frolick's list pages with Frolick's own baseline (the font's ascent):
+        // their two-line rows and bars are packed to it
+        float ae = g.r->ascentEm;
+        if (list_of(g.menu) || g.menu == g.confirm) g.r->ascentEm = 0;
         g.r->draw(g.menu, fx + hx * s, fy + hy * s, s * hs);
+        g.r->ascentEm = ae;
         xui::Node* slot = g.menu == g.main && g.card ? g.main->find("ctlGamerCard") : 0;
         if (slot && xui::propB(slot->props, "Show", true)) {
             xui::Vec3 z = {0, 0, 0};

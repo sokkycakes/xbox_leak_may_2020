@@ -91,6 +91,9 @@ static bool find_card(char *out, size_t outlen)
     return true;
 }
 
+/* The card's folder on the host, as CARD0: shows it (the Guide's Quick Launch). */
+bool fs_card_dir(char *out, size_t outlen) { return find_card(out, outlen); }
+
 static bool find_card_raw(char *out, size_t outlen)
 {
     if (card_dir[0]) {

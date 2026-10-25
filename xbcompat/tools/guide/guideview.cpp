@@ -12,7 +12,9 @@
 //     --bg RRGGBB   clear colour (default 1a1c20, the GFWL host's)
 //     --focus ID    focus this control
 //     --guide       the whole Guide as xbcompat draws it (frame + main)
-//     --page P      ... with page P open: settings, volume, vibration, game
+//     --page P      ... with page P open: settings, volume, vibration, game,
+//                   recent, downloads, saves, confirm (a save's delete)
+//   GUIDEVIEW_HDD=DIR           the hard disk the pages read (default /tmp)
 //   GUIDEVIEW_XBE=default.xbe   the title image comes from this XBE
 //     --dump        print the frame's tree (id, class, size, position, scale, show)
 //
@@ -32,7 +34,7 @@ void ds_set_volume(float) {}
 void ds_play_ui(const float*, int) {}
 unsigned xinput_guide_ports(void) { return 1; }
 void xinput_guide_vibration(bool) {}
-const char* fs_hdd_root(void) { return "/tmp"; }
+const char* fs_hdd_root(void) { return getenv("GUIDEVIEW_HDD") ? getenv("GUIDEVIEW_HDD") : "/tmp"; }
 void reset_request_always(const char*) {}
 void xlog(const char* fmt, ...) {
     va_list a; va_start(a, fmt); vfprintf(stderr, fmt, a); va_end(a); fputc('\n', stderr);
@@ -97,6 +99,12 @@ int main(int argc, char** argv) {
         if (page && !strcmp(page, "game")) { g.main->setFocus(g.main->find("ctlGamerCard")); press("ctlGamerCard"); }
         if (page && !strcmp(page, "volume")) { settings_text(); show_menu(g.volume, "sliderVolume"); }
         if (page && !strcmp(page, "vibration")) { settings_text(); show_menu(g.vibration, "chkVibration"); }
+        if (page && !strcmp(page, "recent")) press("btnBlank1");
+        if (page && !strcmp(page, "downloads")) press("btnQuickChat");
+        if (page && (!strcmp(page, "saves") || !strcmp(page, "confirm"))) {
+            press("ctlGamerCard"); press("btnManageGameFiles");
+            if (!strcmp(page, "confirm") && nsaves) ask_confirm(AskDeleteSave, "Delete Level 12 - Gold?");
+        }
         if (focus) g.menu->setFocus(g.menu->find(focus));
         if (play) for (int i = 0; i < 6; i++) { g.lastTime = now_s() - 1.0 / 30; guide_frame(W, H); }
         if (play) g.hud->play(play);  // the frame's state, e.g. HalfToFull

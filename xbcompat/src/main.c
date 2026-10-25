@@ -273,6 +273,7 @@ int main(int argc, char **argv)
     launch_init(argc, argv, d_path, launch_data, xbe_rel);
     kernel_resolve_imports(&img);
     reset_init(((XBE_CERTIFICATE *)img.header->Certificate)->TitleID);
+    guide_launch_pending(((XBE_CERTIFICATE *)img.header->Certificate)->TitleID);
     hle_patch(&img, hle);
     probe_init();
 

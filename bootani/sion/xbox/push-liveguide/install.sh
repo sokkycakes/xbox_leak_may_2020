@@ -4,7 +4,8 @@
 # merged in (network card, NAT, saved settings). Installs it as
 # /opt/xbcompat/bin/xbcompat with the Guide's assets, and points the Live
 # dashboard at it (new launch-title and an HLE map made for this binary).
-# Needs push-livedash and push-liveaccounts already installed for Live; games
+# The Windows cards' Guide (kazeta-guide) goes in beside it, from the same
+# Guide source. Needs push-livedash and push-liveaccounts already installed for Live; games
 # and the Guide don't. Run on the PC from a checkout of this branch:
 #
 #   bootani/sion/xbox/push-liveguide/install.sh             (ssh host "sion")
@@ -27,6 +28,7 @@ trap 'rm -rf "$T"' EXIT
 K=$T/xbox-liveguide
 mkdir -p "$K"
 cp xbcompat sion-install.sh ../push-livedash/launch-title "$K/"
+cp ../push-wincart/kazeta-guide/kazeta-guide "$K/"   # the Windows cards' Guide, rebuilt with every Guide change
 tar -xzf ../push-guide/guide.tar.gz -C "$K"
 [ -f "$K/guide/hudbkgnd.xui" ] || { echo 'guide.tar.gz did not unpack to guide/'; exit 1; }
 

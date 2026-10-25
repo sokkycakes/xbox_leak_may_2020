@@ -6,6 +6,8 @@
 #                                  xbcompat.prev (and, if it had no network card,
 #                                  as xbcompat.pre-live)
 #   /opt/xbcompat/bin/guide        the Guide's assets
+#   /opt/xbcompat/bin/kazeta-guide the Windows cards' Guide (old one kept as
+#                                  kazeta-guide.prev)
 #   /data/xbox-live/launch-title   runs the Live dashboard on /opt's xbcompat
 #   /data/xbox-live/xodash.hlemap  the Live dashboard's map, made for that
 #                                  binary; the map for the Live dashboard's own
@@ -32,6 +34,11 @@ cp $B/xbcompat $B/xbcompat.prev
 cp $K/xbcompat $B/xbcompat.new && chmod 755 $B/xbcompat.new && mv $B/xbcompat.new $B/xbcompat
 rm -rf $B/guide.prev && cp -a $B/guide $B/guide.prev 2> /dev/null
 rm -rf $B/guide.new && mv $K/guide $B/guide.new && rm -rf $B/guide && mv $B/guide.new $B/guide
+if [ -f $K/kazeta-guide ]; then
+	[ -f $B/kazeta-guide ] && cp $B/kazeta-guide $B/kazeta-guide.prev
+	cp $K/kazeta-guide $B/kazeta-guide.new && chmod 755 $B/kazeta-guide.new && mv $B/kazeta-guide.new $B/kazeta-guide
+	sion persist $B/kazeta-guide $B/kazeta-guide.prev > /dev/null 2>&1
+fi
 keep=
 for f in $B/xbcompat.pre-live $B/guide.prev; do [ -e $f ] && keep="$keep $f"; done
 sion persist $B/xbcompat $B/xbcompat.prev $B/guide $keep > /dev/null
@@ -61,5 +68,5 @@ if ! pidof xbcompat > /dev/null && [ -f $B/xbcompat.prev ]; then
 	sleep 10
 fi
 rm -rf $K
-md5sum $B/xbcompat $L/launch-title
+md5sum $B/xbcompat $B/kazeta-guide $L/launch-title
 pidof xbcompat > /dev/null && echo "the Xbox dashboard is running" || echo "the dashboard is not running"

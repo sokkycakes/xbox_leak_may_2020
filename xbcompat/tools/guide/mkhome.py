@@ -21,6 +21,10 @@ pages.  Writes
   GuideGame.xui      the Game tab's fuller view: Frolick's Game Summary
                      page (genpage.py's page_game, the Blades'
                      401_GameDetails in Frolick's dress) as it is, and
+  GuideRecent.xui, GuideDownloads.xui, GuideSaves.xui, GuideConfirm.xui
+                     Frolick's Recent Games, Active Downloads, Saved Games
+                     and Yes / No pages, for Quick Launch, Downloads and
+                     Game Storage
   GuideGameSkin.xui  its skin (page_skin.xui) with the button images it
                      names.
 """
@@ -124,17 +128,30 @@ def game(frolick, out, tmp):
     subprocess.run([sys.executable, os.path.join(frolick, 'tools', 'genpage.py'), dash], check=True,
                    stdout=subprocess.DEVNULL)
     pads = os.path.join(dash, 'pads')
-    shutil.copy(os.path.join(pads, 'page_game.xui'), os.path.join(out, 'GuideGame.xui'))
-    skin = open(os.path.join(pads, 'page_skin.xui')).read()
-    # its images, under names of their own (the Guide has GFWL's A-Button...)
+    # the Game tab's fuller view, and the pages its rows open: Quick Launch
+    # (Recent Games), Downloads (Active Downloads), Game Storage (Saved
+    # Games) and its Yes / No
+    pages = {'page_game.xui': 'GuideGame.xui', 'page_recent.xui': 'GuideRecent.xui',
+             'page_downloads.xui': 'GuideDownloads.xui', 'page_memory_saves.xui': 'GuideSaves.xui',
+             'page_confirm.xui': 'GuideConfirm.xui', 'page_skin.xui': 'GuideGameSkin.xui'}
+    texts = {k: open(os.path.join(pads, k)).read() for k in pages}
+    # their images, under names of their own (the Guide has GFWL's A-Button...),
+    # with the row icons the Guide fills in from code
     from PIL import Image
-    for name in sorted(set(re.findall(r'<(?:TextureFileName|ImagePath)>([^<]+\.png)<', skin))):
+    names = set(['ico_64x_games.png', 'ico_64x_GameDownloads.png', 'ico_64x_Themes.png'])
+    for t in texts.values():
+        names |= set(re.findall(r'<(?:TextureFileName|ImagePath)>([^<]+\.png)<', t))
+    for name in sorted(names):
         png = os.path.join(frolick, 'art', 'blades', name)
+        if not os.path.exists(png):
+            continue
         im = Image.open(png).convert('RGBA')
         with open(os.path.join(out, 'frolick_' + name[:-4] + '.xtx'), 'wb') as f:
             f.write(b'XTX1' + struct.pack('<II', *im.size) + im.tobytes('raw', 'BGRA'))
-        skin = skin.replace('>%s<' % name, '>frolick_%s<' % name)
-    open(os.path.join(out, 'GuideGameSkin.xui'), 'w').write(skin)
+        for k in texts:
+            texts[k] = texts[k].replace('>%s<' % name, '>frolick_%s<' % name)
+    for k, v in pages.items():
+        open(os.path.join(out, v), 'w').write(texts[k])
 
 
 def main():
@@ -142,7 +159,7 @@ def main():
     tmp = tempfile.mkdtemp()
     tabs(blades, out, tmp)
     game(frolick, out, tmp)
-    print('%s: GuideTabs.xui, GuideTabsSkin.xui, GuideGame.xui, GuideGameSkin.xui' % out)
+    print('%s: GuideTabs.xui, GuideTabsSkin.xui, GuideGame.xui, GuideGameSkin.xui and the list pages' % out)
 
 
 if __name__ == '__main__':

@@ -275,6 +275,11 @@ ULONG xbe_title_id(void);
 const char *xbe_title_name(void);
 const char *xbe_file_path(void);
 bool xbe_image_read(const char *xbe, const char *section, uint8_t **bgra, int *w, int *h);
+bool xpr_image_read(const char *path, uint8_t **bgra, int *w, int *h);
+/* The Guide's Quick Launch (misc.c, io.c) */
+void guide_launch(const char *nt_dir, const char *xbe);
+void guide_launch_pending(ULONG title_id);
+bool fs_card_dir(char *out, size_t outlen);
 void xbe_reload_section(ULONG va, ULONG raw_offset, ULONG raw_size, ULONG virtual_size);
 void kernel_resolve_imports(xbe_image *img);
 void kernel_init(void);

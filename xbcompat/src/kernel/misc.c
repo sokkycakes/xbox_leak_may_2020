@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <dirent.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "../xbcompat.h"
@@ -262,6 +263,42 @@ static void relaunch(const char *path)
     thread_untrap_tsc();   /* the trap survives exec: python and the next xbcompat would fault */
     execvp(args[0], args);
     xlog("relaunch failed: %s", strerror(errno));
+}
+
+/* The Guide's Quick Launch: another title, as an XLaunchNewImage with no
+   launch data would start it ("<D: target>" and the XBE in it). */
+void guide_launch(const char *nt_dir, const char *xbe)
+{
+    if (!LaunchDataPage) LaunchDataPage = MmAllocateContiguousMemory(4096);
+    if (!LaunchDataPage) return;
+    memset(LaunchDataPage, 0, 4096);
+    char path[1100];
+    snprintf(path, sizeof(path), "%s;%s", nt_dir, xbe);
+    xlog("Guide: Quick Launch %s", path);
+    relaunch(path);
+}
+
+/* Quick Launch from a Guide outside xbcompat (kazeta-guide, over a Windows
+   game card): it leaves "<D: target>;<xbe>" in <hdd>/.guidelaunch and goes
+   back to the dashboard, and the dashboard's xbcompat starts that title in
+   its place before the dashboard runs.  Taken once, and only fresh. */
+void guide_launch_pending(ULONG title_id)
+{
+    if (title_id != 0xFFFE0000) return;
+    char path[4096], buf[1100];
+    snprintf(path, sizeof(path), "%s/.guidelaunch", fs_hdd_root());
+    struct stat st;
+    if (stat(path, &st)) return;
+    FILE *f = fopen(path, "r");
+    size_t n = f ? fread(buf, 1, sizeof(buf) - 1, f) : 0;
+    if (f) fclose(f);
+    unlink(path);
+    buf[n] = 0;
+    buf[strcspn(buf, "\r\n")] = 0;
+    char *semi = strchr(buf, ';');
+    if (!semi || time(NULL) - st.st_mtime > 120) { xlog("Guide: stale or bad %s, ignored", path); return; }
+    *semi = 0;
+    guide_launch(buf, semi + 1);
 }
 
 /* Where in the title a reboot came from: the return address and the saved
