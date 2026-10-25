@@ -13,3 +13,8 @@ Install: keep /opt/xbcompat/bin/xbcompat as xbcompat.pre-gpu-<date>, copy
 xbcompat and xbcompat-gpu into /opt/xbcompat/bin (and /data/overlay/opt/...),
 copy missing lib/ files, touch /data/xbox/use-gpu, restart the dashboard.
 Off: rm /data/xbox/use-gpu. Undo fully: put xbcompat.pre-gpu back.
+
+2026-10-25 fix: xbcompat-gpu now asks xbox-av for the display (av_title_starting)
+before SDL_Init, like the normal build's CreateDevice. Without it every game
+failed with "SDL_Init: kmsdrm not available". Only xbcompat-gpu changed; swap it
+in and the next game launch uses it.

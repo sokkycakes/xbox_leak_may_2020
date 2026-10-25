@@ -11,6 +11,32 @@ index dc81ea03..b60c2791 100644
  else
  all: $(BUILD)/xbcompat $(BUILD)/glslcheck
  endif
+diff --git a/xbcompat/src/gpu/gpu_host.h b/xbcompat/src/gpu/gpu_host.h
+index 49370424..c1196753 100644
+--- a/xbcompat/src/gpu/gpu_host.h
++++ b/xbcompat/src/gpu/gpu_host.h
+@@ -25,6 +25,8 @@ void gpu_set_display_mode(int width, int height, uint32_t pitch, int bpp, uint32
+ uint32_t gpu_crtc_start(void);
+ uint32_t gpu_crtc_start_writes(void);
+ void gpu_display_init(int width, int height, bool fullscreen);
++/* xbox-av display keeper handoff (src/kernel/av.c). */
++void av_title_starting(void);
+ void gpu_vblank(void);
+ bool gpu_display_frame(uint8_t *pixels, int *pw, int *ph);
+ bool gpu_poll_events(void);
+diff --git a/xbcompat/src/gpu/nv2a_host.c b/xbcompat/src/gpu/nv2a_host.c
+index 90cd2f0a..95f0760d 100644
+--- a/xbcompat/src/gpu/nv2a_host.c
++++ b/xbcompat/src/gpu/nv2a_host.c
+@@ -438,6 +438,8 @@ static GLuint compile(GLenum type, const char *src)
+ 
+ void gpu_display_init(int width, int height, bool fullscreen)
+ {
++    /* On the Sion xbox-av holds DRM master between titles; ask for it first. */
++    av_title_starting();
+     if (SDL_Init(SDL_INIT_VIDEO) != 0) gpu_fatal("SDL_Init: %s", SDL_GetError());
+     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
+     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
 diff --git a/xbcompat/src/main.c b/xbcompat/src/main.c
 index fd4f48ee..7338e229 100644
 --- a/xbcompat/src/main.c
