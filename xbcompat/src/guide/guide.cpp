@@ -773,19 +773,22 @@ void scan_recent() {
 // helper (frolick-store, running beside the game) reports in status.txt;
 // the page reads both, and A / X change the queue as Frolick's page does.
 // Streaming Downloads still coming in are listed too, as Frolick's page
-// lists them (its d00cfd0d): status.txt's "streaming id in bytes 1|0
-// title" lines; the one filling (1) is the active item when the queue has
-// none, the others pend after the queue.  Start Now and Remove on one go
-// to the helper through play.txt (f / x), its p line kept.
+// lists them (its d00cfd0d, 240cc4f6): status.txt's "streaming id in
+// bytes 1|0|2 title" lines; the one filling (1), else a paused one (2), is
+// the active item when the queue has none, the others pend after the
+// queue.  Start Now, Pause / Resume and Remove on one go to the helper
+// through play.txt (f, z / r, x), its p line kept.
 struct Download { char id[96], name[128], kind[32]; long long bytes; int sizeMB; float doneMB; int state; };
 enum { DlPending, DlDownloading, DlPaused };
 Download dls[16]; int ndl;
 int dlOnline;              // -1 the helper isn't running
 char dlActiveState[16], dlActiveDetail[64];
-struct Stream { char id[96], name[128]; long long in, bytes; int fill; };
+struct Stream { char id[96], name[128]; long long in, bytes; int fill; };  // fill: 0 pending, 1 filling, 2 paused
 Stream streams[16]; int nstreams;
 char streamFirst[96];          // Start Now on a stream, until the helper drops it
 char streamGone[16][96]; int nstreamGone;  // removed, until no longer listed
+struct PauseCmd { char id[96]; bool pause; };
+PauseCmd pauses[16]; int npauses;          // z / r, until the helper says
 
 bool store_path(const char* file, char* out, int n) {
     char dir[1024];
@@ -868,8 +871,23 @@ void load_downloads() {
             for (int k = 0; k < nstreams; k++) there = there || !strcmp(streams[k].id, streamFirst);
             if (!there) { streamFirst[0] = 0; changed = true; }
             // until the helper says, the one asked for fills
-            else for (int k = 0; k < nstreams; k++) streams[k].fill = !strcmp(streams[k].id, streamFirst);
+            else for (int k = 0; k < nstreams; k++) {
+                if (!strcmp(streams[k].id, streamFirst)) streams[k].fill = 1;
+                else if (streams[k].fill == 1) streams[k].fill = 0;
+            }
         }
+        // a pause or resume the helper has carried out (or a game it dropped)
+        keep = 0;
+        for (int c = 0; c < npauses; c++) {
+            bool pending = false;
+            for (int k = 0; k < nstreams; k++) {
+                if (strcmp(streams[k].id, pauses[c].id)) continue;
+                pending = (streams[k].fill == 2) != pauses[c].pause;
+                if (pending) streams[k].fill = pauses[c].pause ? 2 : 0;  // shown as asked meanwhile
+            }
+            if (pending) pauses[keep++] = pauses[c];
+        }
+        if (keep != npauses) { npauses = keep; changed = true; }
         if (changed) save_play();
     }
     delete[] text;
@@ -946,6 +964,7 @@ void save_play() {
     if (play[0]) fprintf(f, "%s\n", play);
     if (streamFirst[0]) fprintf(f, "f\t%s\n", streamFirst);
     for (int r = 0; r < nstreamGone; r++) fprintf(f, "x\t%s\n", streamGone[r]);
+    for (int c = 0; c < npauses; c++) fprintf(f, "%c\t%s\n", pauses[c].pause ? 'z' : 'r', pauses[c].id);
     fprintf(f, "end\n");
     fclose(f);
     rename(tmp, path);
@@ -958,7 +977,9 @@ struct DlItem { int q, s; };
 bool queue_active() { return ndl && dls[0].state != DlPending; }
 int stream_active() {
     if (queue_active()) return -1;
-    for (int k = 0; k < nstreams; k++) if (streams[k].fill) return k;
+    for (int k = 0; k < nstreams; k++) if (streams[k].fill == 1) return k;
+    // none fills while one is paused: the paused one is the active item
+    for (int k = 0; k < nstreams; k++) if (streams[k].fill == 2) return k;
     return -1;
 }
 bool dl_has_active() { return queue_active() || stream_active() >= 0; }
@@ -986,7 +1007,7 @@ void dl_item_text(int i, char* name, int nn, char* line, int nl, const char** st
         format_mb(size, sizeof size, (int)(sm.bytes / (1024 * 1024)));
         snprintf(name, nn, "%s", sm.name);
         snprintf(line, nl, "Streaming Download   %s of %s", done, size);
-        *status = !sm.fill ? "Pending" : dlOnline < 0 ? "Waiting" : sm.in >= sm.bytes ? "Checking" : "Downloading";
+        *status = sm.fill == 0 ? "Pending" : sm.fill == 2 ? "Paused" : dlOnline < 0 ? "Waiting" : sm.in >= sm.bytes ? "Checking" : "Downloading";
         *progress = sm.bytes > 0 ? (float)((double)sm.in / (double)sm.bytes) : 0;
         return;
     }
@@ -1000,15 +1021,35 @@ void dl_item_text(int i, char* name, int nn, char* line, int nl, const char** st
     *theme = !strcmp(dls[d].kind, "Theme");
 }
 
-// A on an item: the queue's active one pauses / resumes, a pending one
-// starts now; a pending stream fills first (the one filling has no pause,
-// as on Frolick's page).  False when A does nothing.
+// The helper is told to pause or resume a stream; the item shows it at once.
+void stream_pause(int k, bool pause) {
+    int c = 0;
+    while (c < npauses && strcmp(pauses[c].id, streams[k].id)) c++;
+    if (c == npauses) { if (npauses == 16) return; npauses++; }
+    snprintf(pauses[c].id, sizeof pauses[c].id, "%s", streams[k].id);
+    pauses[c].pause = pause;
+    streams[k].fill = pause ? 2 : 0;
+}
+
+// A on an item, as on Frolick's page: the active one pauses / resumes, a
+// pending one starts now (a paused stream resumes and fills first).
+// False when A does nothing.
 bool dl_press(int i) {
     DlItem it = dl_item(i);
     if (it.q >= 0) { dl_start(it.q); return true; }
-    if (it.s < 0 || streams[it.s].fill) return false;
+    if (it.s < 0) return false;
+    if (streams[it.s].fill == 1) {
+        stream_pause(it.s, true);
+        if (!strcmp(streamFirst, streams[it.s].id)) streamFirst[0] = 0;
+        save_play();
+        return true;
+    }
+    if (streams[it.s].fill == 2) stream_pause(it.s, false);
     snprintf(streamFirst, sizeof streamFirst, "%s", streams[it.s].id);
-    for (int k = 0; k < nstreams; k++) streams[k].fill = k == it.s;
+    for (int k = 0; k < nstreams; k++) {
+        if (k == it.s) streams[k].fill = 1;
+        else if (streams[k].fill == 1) streams[k].fill = 0;
+    }
     save_play();
     return true;
 }
@@ -1019,6 +1060,8 @@ void dl_remove_item(int i) {
     if (it.s < 0 || nstreamGone == 16) return;
     snprintf(streamGone[nstreamGone++], sizeof streamGone[0], "%s", streams[it.s].id);
     if (!strcmp(streamFirst, streams[it.s].id)) streamFirst[0] = 0;
+    for (int c = 0; c < npauses; c++)
+        if (!strcmp(pauses[c].id, streams[it.s].id)) { pauses[c] = pauses[--npauses]; break; }
     save_play();
     memmove(&streams[it.s], &streams[it.s + 1], (nstreams - it.s - 1) * sizeof streams[0]);
     nstreams--;
@@ -1193,7 +1236,9 @@ void list_legends() {
     else if (g.menu == g.downloads && dl_count() && l->sel - dl_off() >= 0) {
         DlItem it = dl_item(l->sel - dl_off());
         if (it.q == 0 && queue_active()) a = dls[0].state == DlPaused ? "Resume" : "Pause";
-        else if (it.q >= 0 || (it.s >= 0 && !streams[it.s].fill)) a = "Start Now";
+        else if (it.s >= 0 && streams[it.s].fill == 1) a = "Pause";
+        else if (it.s >= 0 && streams[it.s].fill == 2) a = "Resume";
+        else if (it.q >= 0 || it.s >= 0) a = "Start Now";
         x = "Remove";
     }
     else if (g.menu == g.confirm) a = "Select";
