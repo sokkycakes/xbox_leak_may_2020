@@ -1,7 +1,7 @@
 # Milestone 2026-10-25
 
 Everything the project had built by 2026-10-25, gathered on one branch
-(`claude/project-thread-kgb2jx`, tagged `milestone-2026-10-25`). It starts
+(`claude/project-thread-kgb2jx`; tag it `milestone-2026-10-25` when it merges). It starts
 from the combined Sion build (`claude/project-thread-gudfcx`: games, Guide,
 Live/Insignia, Windows game cards), which already contained the earlier
 consolidation (`claude/project-thread-p7e5s4`, PR #2), and merges every other
