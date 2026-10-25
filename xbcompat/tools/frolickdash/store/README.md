@@ -28,8 +28,8 @@ scans, covers or manuals. A finished item gets a frolick-item.txt (title,
 kind, files, source, the Archive's credit). Removing an item from the queue
 deletes what it had; finished items are kept.
 
-Tabs (built in, Windows games first): Featured (a hand-picked list of free,
-shareware and demo releases), Demos, Shareware, Freeware (searches on the
+Tabs (built in): Featured (sokky's pick of Xbox games, all Streaming
+Downloads: Xbox Essentials discs and MechAssault), Demos, Shareware, Freeware (searches on the
 items' subjects, most downloaded first). /data/frolick/store.conf replaces
 them:
 

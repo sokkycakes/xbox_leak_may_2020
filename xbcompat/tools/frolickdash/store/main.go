@@ -83,20 +83,24 @@ type tab struct {
 }
 
 // The built-in tabs (store.conf replaces them).  Windows games first
-// (sokky, 2026-10-22); Featured is a hand-picked list of free, shareware
-// and demo releases, and Half-Life 2 for Xbox, which plays as it
-// downloads (sokky, 2026-10-23).
+// (sokky, 2026-10-22); Featured is sokky's pick of Xbox games, all
+// Streaming Downloads (2026-10-25): Half-Life 2 and the rest from the
+// Archive's Xbox Essentials, MechAssault from its own item.
 var defaultTabs = []tab{
-	{Name: "Featured", Kind: "Windows game", IDs: []string{
+	{Name: "Featured", Kind: "Xbox game", IDs: []string{
 		"xbox_essentials/Half-Life 2.iso | Xbox game",
-		"oni-ae",
-		"DiabloSharewareWindowsBlizzardEntertainment1997",
-		"SURVEY_PROGRAM",
-		"CometBusters14Image",
-		"bejeweled_blitz_demo",
-		"UltimateRideKelloggs",
-		"tennis-critters-full-english-version",
-		"quibbleracev1.5",
+		"mech-assault/MechAssault.iso | Xbox game",
+		"xbox_essentials/Counter-Strike.iso | Xbox game",
+		"xbox_essentials/Doom 3 Limited Collector's Edition.iso | Xbox game",
+		"xbox_essentials/Halo 2.iso | Xbox game",
+		"xbox_essentials/Hulk.iso | Xbox game",
+		"xbox_essentials/Metal Gear Solid 2 Substance.iso | Xbox game",
+		"xbox_essentials/Ninja Gaiden Black.iso | Xbox game",
+		"xbox_essentials/Peter Jackson's King Kong The Official Game of the Movie.iso | Xbox game",
+		"xbox_essentials/Prince of Persia The Sands of Time.iso | Xbox game",
+		"xbox_essentials/The House of the Dead III.iso | Xbox game",
+		"xbox_essentials/Grand Theft Auto San Andreas.iso | Xbox game",
+		"xbox_essentials/Castlevania Curse of Darkness.iso | Xbox game",
 	}},
 	{Name: "Demos", Kind: "Demo", Rows: 24,
 		Query: "mediatype:software AND subject:(windows) AND subject:(game) AND subject:(demo)"},
@@ -427,7 +431,17 @@ func makeItem(ctx context.Context, id, kind string) (*item, error) {
 			return nil, fmt.Errorf("%s: no file %q", ident, file)
 		}
 		it.Title = clean(strings.TrimSuffix(file, filepath.Ext(file)))
-		it.Desc = plain(fmt.Sprintf("A disc image from the Internet Archive's %s collection.", clean(metaString(m.Metadata, "title"))), 400)
+		discs := 0
+		for _, f := range m.Files {
+			if strings.EqualFold(filepath.Ext(f.Name), filepath.Ext(file)) {
+				discs++
+			}
+		}
+		if discs > 1 {
+			it.Desc = plain(fmt.Sprintf("A disc image from the Internet Archive's %s collection.", clean(metaString(m.Metadata, "title"))), 400)
+		} else {
+			it.Desc = "A disc image from the Internet Archive."
+		}
 		it.Stream = strings.EqualFold(filepath.Ext(file), ".iso") && strings.Contains(kind, "Xbox")
 	} else {
 		it.Files = pickFiles(m.Files)

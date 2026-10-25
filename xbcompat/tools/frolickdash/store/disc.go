@@ -28,8 +28,26 @@ func fileURL(ident, file string) string {
 	return *base + "/download/" + url.PathEscape(ident) + "/" + url.PathEscape(file)
 }
 
-// rangeAt reads len(b) bytes at off of the file at u.
+// rangeAt reads len(b) bytes at off of the file at u, trying again when
+// the Archive answers with a passing server error (it does, now and then).
 func rangeAt(ctx context.Context, u string, b []byte, off int64) error {
+	var err error
+	for try := 0; try < 4; try++ {
+		if try > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Duration(try) * time.Second):
+			}
+		}
+		if err = rangeOnce(ctx, u, b, off); err == nil {
+			return nil
+		}
+	}
+	return err
+}
+
+func rangeOnce(ctx context.Context, u string, b []byte, off int64) error {
 	resp, err := get(ctx, u, map[string]string{"Range": fmt.Sprintf("bytes=%d-%d", off, off+int64(len(b))-1)})
 	if err != nil {
 		return err
@@ -62,13 +80,21 @@ func discTile(ctx context.Context, u, path string) error {
 
 func discTitleImage(ctx context.Context, u string) (image.Image, error) {
 	// the redirect to a datanode once, then range requests there
-	resp, err := get(ctx, u, map[string]string{"Range": "bytes=0-0"})
-	if err != nil {
-		return nil, err
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusPartialContent {
-		return nil, fmt.Errorf("HTTP %d to a range request", resp.StatusCode)
+	var resp *http.Response
+	var err error
+	for try := 0; ; try++ {
+		resp, err = get(ctx, u, map[string]string{"Range": "bytes=0-0"})
+		if err != nil {
+			return nil, err
+		}
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusPartialContent {
+			break
+		}
+		if try == 3 || resp.StatusCode < 500 {
+			return nil, fmt.Errorf("HTTP %d to a range request", resp.StatusCode)
+		}
+		time.Sleep(time.Duration(try+1) * time.Second)
 	}
 	u = resp.Request.URL.String()
 	vd := make([]byte, 2048)
