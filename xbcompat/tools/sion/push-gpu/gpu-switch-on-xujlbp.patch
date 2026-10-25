@@ -1,0 +1,64 @@
+diff --git a/xbcompat/Makefile b/xbcompat/Makefile
+index dc81ea03..b60c2791 100644
+--- a/xbcompat/Makefile
++++ b/xbcompat/Makefile
+@@ -209,7 +209,7 @@ $(BUILD)/src/gpu/%.o: src/gpu/%.c $(wildcard src/gpu/shim/*/*.h) src/gpu/gpu_hos
+ 	$(CC) $(GPUFLAGS) -c -o $@ $<
+ all: $(BUILD)/xbcompat-gpu
+ $(BUILD)/xbcompat-gpu: $(OBJ) $(GPUOBJ)
+-	$(CXX) $(LDFLAGS) -o $@ $^ $(LDLIBS) $(shell $(PKGCFG) --libs $(GPUPKGS)) -lGL -ldl
++	$(CXX) $(LDFLAGS) -o $@ $^ $(LDLIBS) $(shell $(PKGCFG) --libs $(GPUPKGS)) -ldl
+ else
+ all: $(BUILD)/xbcompat $(BUILD)/glslcheck
+ endif
+diff --git a/xbcompat/src/main.c b/xbcompat/src/main.c
+index fd4f48ee..7338e229 100644
+--- a/xbcompat/src/main.c
++++ b/xbcompat/src/main.c
+@@ -225,6 +225,36 @@ static void usage(void)
+ 
+ char *g_dvd_root, *g_dvd_drive;
+ 
++#ifndef XBC_GPU
++/* With /data/xbox/use-gpu present (or XBCOMPAT_GPU_GAMES set), games run in
++   xbcompat-gpu beside this binary, which emulates the GPU instead of
++   replacing Direct3D; dashboards (the stock one, Frolick) stay here. */
++static void maybe_run_gpu_build(char **argv, const char *xbe)
++{
++    if (!getenv("XBCOMPAT_GPU_GAMES") && access("/data/xbox/use-gpu", F_OK)) return;
++    char self[4096];
++    ssize_t n = readlink("/proc/self/exe", self, sizeof(self) - 16);
++    if (n <= 0) return;
++    self[n] = 0;
++    char *slash = strrchr(self, '/');
++    if (!slash) return;
++    strcpy(slash + 1, "xbcompat-gpu");
++    if (access(self, X_OK)) return;
++    if (strstr(xbe, "/Frolick/") || strstr(xbe, "/frolick/")) return;
++    FILE *f = fopen(xbe, "rb");
++    if (!f) return;
++    uint32_t base = 0, cert = 0, title = 0;
++    if (fseek(f, 0x104, SEEK_SET) || fread(&base, 4, 1, f) != 1 ||
++        fseek(f, 0x118, SEEK_SET) || fread(&cert, 4, 1, f) != 1 ||
++        fseek(f, (long)(cert - base) + 8, SEEK_SET) || fread(&title, 4, 1, f) != 1) { fclose(f); return; }
++    fclose(f);
++    if (title == 0xFFFE0000 || title == 0x46524C4B || title == 0) return;
++    fprintf(stderr, "xbcompat: title %08X runs in %s\n", title, self);
++    argv[0] = self;
++    execv(self, argv);
++}
++#endif
++
+ int main(int argc, char **argv)
+ {
+     static const struct option opts[] = {
+@@ -262,6 +292,9 @@ int main(int argc, char **argv)
+     if (optind != argc - 1) usage();
+     const char *xbe = argv[optind];
+     wincart_exec(xbe);   /* a Windows cart's stub: wincart-run takes over this process */
++#ifndef XBC_GPU
++    maybe_run_gpu_build(argv, xbe);
++#endif
+ 
+     char hddbuf[4096];
+     if (!hdd) {
