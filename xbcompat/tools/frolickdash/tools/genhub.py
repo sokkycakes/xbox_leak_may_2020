@@ -2149,9 +2149,9 @@ function SysAudio()
 
 function SysGpu()
 {
-    var g = theSysSettings.GetSys("gpu.1");
+    var g = theSysSettings.GetValue("gpu");     // the choice, then the helper's word
     if (g == "")
-        g = theSysSettings.GetValue("gpu");
+        g = theSysSettings.GetSys("gpu.1");
     if (g == "1")
         return 1;
     return 0;
@@ -2206,9 +2206,8 @@ function SysSync()
         return "Setting the clock from the Internet...";
     if (st == "ok")
         return theSysSettings.GetSys("sync.3");
-    if (st == "failed")
-        return theSysSettings.GetSys("sync.3");
-    return "";
+    // failed, or not asked yet ("Time server: ...")
+    return theSysSettings.GetSys("sync.3");
 }
 
 // the console list's "Current Setting" for a row
@@ -2430,7 +2429,11 @@ function SysRefresh()
     var s;
     var n;
     if (PageKind(sPage) == "options")
+    {
         thePage.SetText("labCurrentSettings", OptName(sPage, OptCurrent(sPage)));
+        if (sPage == "page_developer")
+            FillPage();
+    }
     if (sPage == "page_display_format")
         thePage.SetText("labCurrentSettings", SysFormat());
     if (sPage == "page_screensaver")
@@ -2729,6 +2732,14 @@ function FillRow(r)
     else if (k == "options")
     {
         thePage.SetText(id, OptName(sPage, i));
+        if (sPage == "page_developer")
+        {
+            // radio buttons: the build in use checked
+            if (i == OptCurrent(sPage))
+                thePage.SetChecked(id, 1);
+            else
+                thePage.SetChecked(id, 0);
+        }
         return;
     }
     else if (k == "spotlight")

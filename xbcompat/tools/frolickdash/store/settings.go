@@ -30,9 +30,11 @@ package main
 import (
 	"bufio"
 	"crypto/md5"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -41,6 +43,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -98,7 +101,7 @@ type sysState struct {
 	written   string
 }
 
-var sys = sysState{syncState: "none"}
+var sys = sysState{syncState: "none", syncText: "Time server: " + timeServers[0]}
 
 func readSettings() map[string]string {
 	m := map[string]string{}
@@ -226,18 +229,77 @@ func persist(path string) {
 	}
 }
 
-// syncClock sets the clock from the Internet (busybox ntpd), then the
-// hardware clock.
-func syncClock() {
-	state, text := "ok", ""
-	out, err := exec.Command("ntpd", "-n", "-q", "-p", "pool.ntp.org").CombinedOutput()
+// The time servers Sync to Internet Time asks, in order.
+var timeServers = []string{"pool.ntp.org", "time.google.com", "time.cloudflare.com", "time.nist.gov"}
+
+// sntpTime asks one server for the time (SNTP, RFC 4330): the Sion's
+// busybox has no ntpd. The answer is corrected by half the round trip.
+func sntpTime(server string) (time.Time, error) {
+	return sntpAt(net.JoinHostPort(server, "123"))
+}
+
+func sntpAt(addr string) (time.Time, error) {
+	server := addr
+	c, err := net.DialTimeout("udp", addr, 5*time.Second)
 	if err != nil {
-		state, text = "failed", "Couldn't reach a time server."
-		log.Printf("settings: ntpd: %v %s", err, strings.TrimSpace(string(out)))
-	} else {
+		return time.Time{}, err
+	}
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(5 * time.Second))
+	req := make([]byte, 48)
+	req[0] = 0x23 // version 4, client
+	sent := time.Now()
+	if _, err := c.Write(req); err != nil {
+		return time.Time{}, err
+	}
+	resp := make([]byte, 48)
+	n, err := c.Read(resp)
+	if err != nil {
+		return time.Time{}, err
+	}
+	rtt := time.Since(sent)
+	if n < 48 || resp[0]&7 != 4 || resp[1] == 0 {
+		return time.Time{}, fmt.Errorf("%s: not a server answer", server)
+	}
+	sec := binary.BigEndian.Uint32(resp[40:])
+	frac := binary.BigEndian.Uint32(resp[44:])
+	const ntpToUnix = 2208988800
+	t := time.Unix(int64(sec)-ntpToUnix, int64(frac)*1e9>>32)
+	return t.Add(rtt / 2), nil
+}
+
+// syncClock sets the clock from the first time server that answers, then
+// the hardware clock, so it holds across a reboot.
+func syncClock() {
+	state, text := "failed", "Couldn't reach a time server."
+	for _, srv := range timeServers {
+		t, err := sntpTime(srv)
+		if err != nil {
+			log.Printf("settings: %s: %v", srv, err)
+			continue
+		}
+		off := time.Until(t)
+		tv := syscall.NsecToTimeval(t.UnixNano())
+		if err := syscall.Settimeofday(&tv); err != nil {
+			log.Printf("settings: setting the clock: %v", err)
+			text = "Couldn't set the clock."
+			break
+		}
 		exec.Command("hwclock", "-w", "-u").Run()
-		text = "Set from the Internet " + time.Now().UTC().Format("15:04 UTC")
-		log.Printf("settings: clock set from the Internet")
+		state, text = "ok", fmt.Sprintf("Set from %s at %s", srv, time.Now().UTC().Format("15:04 UTC"))
+		log.Printf("settings: clock set from %s (it was %.1f s off)", srv, off.Seconds())
+		break
+	}
+	if state != "ok" {
+		// no NTP answer (UDP blocked?): the time protocol over TCP, which
+		// the Sion's busybox speaks
+		if out, err := exec.Command("rdate", "-s", "time.nist.gov").CombinedOutput(); err == nil {
+			exec.Command("hwclock", "-w", "-u").Run()
+			state, text = "ok", "Set from time.nist.gov at "+time.Now().UTC().Format("15:04 UTC")
+			log.Printf("settings: clock set from time.nist.gov (rdate)")
+		} else {
+			log.Printf("settings: rdate: %v %s", err, strings.TrimSpace(string(out)))
+		}
 	}
 	sys.mu.Lock()
 	sys.syncState, sys.syncText = state, text

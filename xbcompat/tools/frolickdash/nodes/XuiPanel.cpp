@@ -413,6 +413,7 @@ public:
     void SetFocus(const TCHAR* szId);
     CStrObject* GetFocus();
     CObject* SetVisible(CObject** rgparam, int nParam);
+    CObject* SetChecked(CObject** rgparam, int nParam);
     CObject* SetOpacity(CObject** rgparam, int nParam);
     CObject* SetData(CObject** rgparam, int nParam);
     void Reload();
@@ -467,6 +468,7 @@ START_NODE_FUN(CXuiPanel, CNode)
     NODE_FUN_VS(SetFocus)
     NODE_FUN_SV(GetFocus)
     NODE_FUN(SetVisible)
+    NODE_FUN(SetChecked)
     NODE_FUN(SetOpacity)
     NODE_FUN(SetData)
     NODE_FUN(SetValue)
@@ -734,6 +736,26 @@ CObject* CXuiPanel::SetVisible(CObject** rgparam, int nParam)
     v.free();
     v.type = xui::TBool;
     v.b = rgparam[1]->Deref()->ToNum()->m_nValue != 0.0f;
+    return NULL;
+}
+
+// SetChecked(id, 0|1): a radio button's or checkbox's Checked, its state
+// played again in the Check variant (or out of it).
+CObject* CXuiPanel::SetChecked(CObject** rgparam, int nParam)
+{
+    if (nParam != 2)
+        return NULL;
+    xui::Node* n = Find(rgparam[0]->Deref()->ToStr()->GetSz());
+    if (n == NULL)
+        return NULL;
+    bool b = rgparam[1]->Deref()->ToNum()->m_nValue != 0.0f;
+    xui::Value& v = n->props.set("Checked");
+    if (v.type == xui::TBool && v.b == b)
+        return NULL;
+    v.free();
+    v.type = xui::TBool;
+    v.b = b;
+    n->playState(m_pScene != NULL && m_pScene->focus == n ? "Focus" : "Normal");
     return NULL;
 }
 

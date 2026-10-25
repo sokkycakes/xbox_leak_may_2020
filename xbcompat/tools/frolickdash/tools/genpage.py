@@ -82,6 +82,9 @@ LIST_ITEMS = {
     "List_3Line_Icon_prgbr": ("btn_3Line_Icon_prgbr", 105, [2, 1], (6, 5, 60, 60)),
     "List_Fullwidth_3Icon_4string": ("ListItem_Fullwidth_3Icon_4String", 47, [], (11, 8, 32, 32)),
     "List_oneline_icon": ("btn_oneline_icon", 72, [], (11, 4.25, 64, 64)),
+    # List_Radio's items: the Blades' radio button, its dot on the checked
+    # one (the script checks it: thePage.SetChecked)
+    "List_Radio": ("XuiRadioButton", 45, [], None),
 }
 # The last tuple is the item visual's image presenter (x, y, w, h), where
 # an item's icon (the 360's ico_64x_*.png, kept in art/blades/) goes.
@@ -183,7 +186,7 @@ PAGES = [
     ("page_sysinfo", dict(scene="dashSysCslSetPolicyInfo_System.xui", pad="settings", first="btnB", parent="page_console",
                           hide=["btnA", "btnX", "btnY"], labels={"edInfo": ""})),
     ("page_developer", dict(scene="dashSysCslSetAudioAnalog.xui", pad="settings", first="listOptions_0",
-                            parent="page_console", header="Developer Settings", dynamic="options",
+                            parent="page_console", header="Developer Settings", dynamic="options", visual="List_Radio",
                             labels={"labCurrentSettingsText": "Games Run On", "labMetaBody":
                                     "xbcompat replaces the Xbox's graphics library and is the fastest. xbcompat-gpu "
                                     "emulates the Xbox's GPU (xemu's NV2A) and draws some games more faithfully. "
@@ -357,7 +360,7 @@ def track(id, prop, keys):
 # ---- the skin ---------------------------------------------------------------
 
 # The visuals whose text follows focus: the buttons and list items.
-ITEM_VISUALS = ("XuiButton", "btn_oneline_icon", "btn_twoline-icon", "btn_twoline-status", "btn_3Line_Icon_prgbr",
+ITEM_VISUALS = ("XuiButton", "XuiRadioButton", "btn_oneline_icon", "btn_twoline-icon", "btn_twoline-status", "btn_3Line_Icon_prgbr",
                 "ListItem_Fullwidth_3Icon_4String", "btn_1line_icon", "btn_twoline_left", "btn_twoline_spot")
 REST_STATES = ("Normal", "EndNormal", "NormalDisable", "EndNormalDisable", "NormalSelDisable", "EndNormalSelDisable")
 
@@ -688,7 +691,10 @@ def list_items(block, items, visual=None, dynamic=False, sections=None, bar=Fals
                                    " <Position>%g,%g,0</Position>" % (bx, by), " <Visual>%s</Visual>" % bvis,
                                    " <RangeMin>0</RangeMin>", " <RangeMax>1</RangeMax>", " <Value>%g</Value>" % frac, "</Properties>", "</XuiProgressBar>"]))
         n.update(data)
-        out.append(nav_button("%s_%d" % (id, i), x, y + i * pitch + dy, w, h, label, vis if vis != "XuiButton" else None, n, "\n".join(kids)))
+        b = nav_button("%s_%d" % (id, i), x, y + i * pitch + dy, w, h, label, vis if vis != "XuiButton" else None, n, "\n".join(kids))
+        if vis == "XuiRadioButton":
+            b = b.replace("XuiNavButton>", "XuiRadioButton>")
+        out.append(b)
     return out
 
 

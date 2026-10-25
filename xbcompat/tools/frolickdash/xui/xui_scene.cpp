@@ -46,11 +46,12 @@ bool Node::focusable()
 
 // ---- construction ----------------------------------------------------------
 
-// A checked checkbox plays the Check variant of each state (NormalCheck,
-// FocusCheck); Checked is set from code.
+// A checked checkbox or radio button plays the Check variant of each state
+// (NormalCheck, FocusCheck); Checked is set from code.
 static bool checked(Node* n)
 {
-    return n && n->cls && strcmp(n->cls->name, "XuiCheckbox") == 0 && propB(n->props, "Checked", false);
+    return n && n->cls && (strcmp(n->cls->name, "XuiCheckbox") == 0 || strcmp(n->cls->name, "XuiRadioButton") == 0) &&
+        propB(n->props, "Checked", false);
 }
 
 
