@@ -1,0 +1,156 @@
+From 2592c9473a3929e7dcb8099bc5108052f3247383 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 25 Oct 2026 09:26:43 +0000
+Subject: [PATCH 1/2] Fix MechAssault crash at its loading screen
+
+MechAssault calls DoWork (vtable slot 9) on the XFileMediaObject it gets
+from XFileCreateMediaObjectAsync. Our file XMO vtable stopped at
+GetLength, so the call jumped to NULL and the game died, which on the
+Sion looks like being sent back to the dashboard. Add a DoWork that
+returns S_OK (our file objects complete synchronously).
+
+The crash handler also tried to decode the instruction at EIP before
+reporting a jump to unmapped code, and faulted again reading it, so no
+crash report was logged. Skip the decoders when the fault is the fetch.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01H46hG5LKXDzhHxLGAY5dE3
+---
+ xbcompat/src/hle/dsound.c | 12 ++++++++----
+ xbcompat/src/main.c       |  4 +++-
+ 2 files changed, 11 insertions(+), 5 deletions(-)
+
+diff --git a/xbcompat/src/hle/dsound.c b/xbcompat/src/hle/dsound.c
+index d59d02c4..f4930599 100644
+--- a/xbcompat/src/hle/dsound.c
++++ b/xbcompat/src/hle/dsound.c
+@@ -2034,7 +2034,7 @@ struct ds_filexmo {
+ };
+ 
+ static void *wave_vtbl[11];
+-static void *file_vtbl[9];
++static void *file_vtbl[10];
+ 
+ static void xmo_accept(const XMEDIAPACKET *p)
+ {
+@@ -2260,6 +2260,8 @@ static HRESULT NTAPI File_GetLength(struct ds_filexmo *f, DWORD *len)
+     return DS_OK;
+ }
+ 
++static HRESULT NTAPI File_DoWork(struct ds_filexmo *f) { (void)f; return DS_OK; }
++
+ static HRESULT NTAPI XFileCreateMediaObject(const char *name, DWORD access, DWORD share, DWORD disp, DWORD attrs,
+                                             void **ppxmo)
+ {
+@@ -3183,9 +3185,11 @@ static void *wave_vtbl[11] = {
+     (void *)Wave_GetFormat, (void *)Wave_GetLoopRegion,
+ };
+ 
+-static void *file_vtbl[9] = {
++/* Later XDKs add DoWork to XFileMediaObject for XFileCreateMediaObjectAsync
++   objects (MechAssault calls it while loading); ours complete at once. */
++static void *file_vtbl[10] = {
+     (void *)File_AddRef, (void *)File_Release, (void *)File_GetInfo, (void *)File_GetStatus, (void *)File_Process,
+-    (void *)File_Discontinuity, (void *)File_Flush, (void *)File_Seek, (void *)File_GetLength,
++    (void *)File_Discontinuity, (void *)File_Flush, (void *)File_Seek, (void *)File_GetLength, (void *)File_DoWork,
+ };
+ 
+ /* The guest calls these objects' methods through the vtables: give it
+@@ -3195,7 +3199,7 @@ static void guest_vtbls_once(void)
+     cpu_guest_table(refhdr_vtbl, 3);
+     cpu_guest_table(stream_vtbl, 7);
+     cpu_guest_table(wave_vtbl, 11);
+-    cpu_guest_table(file_vtbl, 9);
++    cpu_guest_table(file_vtbl, 10);
+ }
+ 
+ static void guest_vtbls(void)
+diff --git a/xbcompat/src/main.c b/xbcompat/src/main.c
+index f9556634..6b84cd0e 100644
+--- a/xbcompat/src/main.c
++++ b/xbcompat/src/main.c
+@@ -78,7 +78,9 @@ static void crash_handler(int sig, siginfo_t *si, void *uc_)
+ {
+     ucontext_t *uc = uc_;
+     greg_t *r = uc->uc_mcontext.gregs;
+-    if (sig == SIGSEGV && (read_tsc(r) || debug_service(r) || privileged_insn(r))) { g_guest_traps++; return; }
++    /* A jump to unmapped code faults on the fetch: nothing to decode there. */
++    bool fetch = sig == SIGSEGV && (greg_t)si->si_addr == r[REG_EIP];
++    if (sig == SIGSEGV && !fetch && (read_tsc(r) || debug_service(r) || privileged_insn(r))) { g_guest_traps++; return; }
+     if (sig == SIGSEGV && nic_trap_fault(si->si_addr, uc)) return;
+     if (sig == SIGTRAP && nic_trap_step(uc)) return;
+     if (sig == SIGTRAP && probe_trap(uc)) return;
+-- 
+2.43.0
+
+
+From 48b2109c74a4a789233d2c962760ee2400a45478 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 25 Oct 2026 09:33:44 +0000
+Subject: [PATCH 2/2] Honour the presentation interval when pacing Present
+
+MechAssault creates its device with D3DPRESENT_INTERVAL_TWO_OR_IMMEDIATE
+and its Bink movies advance one frame per Present, so pacing every
+Present to one 60 Hz blank played the intros at twice their speed.
+CreateDevice and Reset now set how many blanks a frame stays up (TWO,
+THREE, FOUR, with or without IMMEDIATE). The 22 s intro now takes 22 s.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01H46hG5LKXDzhHxLGAY5dE3
+---
+ xbcompat/src/hle/d3d8.c | 18 ++++++++++++++++--
+ 1 file changed, 16 insertions(+), 2 deletions(-)
+
+diff --git a/xbcompat/src/hle/d3d8.c b/xbcompat/src/hle/d3d8.c
+index eaeb185c..8bc0a1ec 100644
+--- a/xbcompat/src/hle/d3d8.c
++++ b/xbcompat/src/hle/d3d8.c
+@@ -657,6 +657,19 @@ static void d3d_vblank(void)
+     }
+ }
+ 
++/* D3DPRESENT_INTERVAL_TWO (2), THREE (4), FOUR (8), alone or with IMMEDIATE
++   (0x80000000: "or at once when late"): a frame stays up that many blanks.
++   MechAssault asks for TWO_OR_IMMEDIATE and times its Bink movies by
++   Present, so at one blank per frame they played twice as fast. */
++static unsigned present_vblanks = 1;
++static void set_present_interval(ULONG interval)
++{
++    ULONG n = interval & 0xF;
++    unsigned v = n & 8 ? 4 : n & 4 ? 3 : n & 2 ? 2 : 1;
++    if (v != present_vblanks) xlog("D3D: presentation interval %#lx: %u blanks per frame", (unsigned long)interval, v);
++    present_vblanks = v;
++}
++
+ static LONG NTAPI Direct3D_CreateDevice(UINT_ Adapter, ULONG DeviceType, PVOID pUnused, ULONG Flags,
+                                        D3DPRESENT_PARAMETERS *pp, PVOID *ppDevice)
+ {
+@@ -670,6 +683,7 @@ static LONG NTAPI Direct3D_CreateDevice(UINT_ Adapter, ULONG DeviceType, PVOID p
+     gamma_identity();
+     xlog("D3D: CreateDevice %ux%u, format %#x, depth %s, multisample %#x", d3d.width, d3d.height,
+          pp->BackBufferFormat, pp->EnableAutoDepthStencil ? "yes" : "no", pp->MultiSampleType);
++    set_present_interval(pp->FullScreen_PresentationInterval);
+ 
+     av_title_starting();
+     const char *boot_path = "/tmp/xbcompat-trace-boot";
+@@ -1196,7 +1210,7 @@ static void pace_present(void)
+     static Uint64 next;
+     log_fps();
+     if (unpaced()) return;
+-    Uint64 now = SDL_GetPerformanceCounter(), period = SDL_GetPerformanceFrequency() / 60;
++    Uint64 now = SDL_GetPerformanceCounter(), period = SDL_GetPerformanceFrequency() / 60 * present_vblanks;
+     if (!next || now > next + period) next = now;   /* first frame, or fell behind: resync */
+     TIMED(t_pace, sleep_until(next));
+     next += period;
+@@ -10256,7 +10270,7 @@ static void NTAPI D3D_Nop12(ULONG a, ULONG b, ULONG c) { (void)a; (void)b; (void
+ static void FASTCALL D3D_FastNop(ULONG a, ULONG b) { (void)a; (void)b; }
+ static LONG NTAPI D3DDevice_Reset(PVOID pp)
+ {
+-    (void)pp;
++    if (pp) set_present_interval(((D3DPRESENT_PARAMETERS *)pp)->FullScreen_PresentationInterval);
+     persisted.first_flip = true;   /* the mode is set again: the next Present frees the persisted frame */
+     return D3D_OK;
+ }
+-- 
+2.43.0
+
