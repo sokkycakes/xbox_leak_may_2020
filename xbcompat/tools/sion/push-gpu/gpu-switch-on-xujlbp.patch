@@ -11,6 +11,23 @@ index dc81ea03..b60c2791 100644
  else
  all: $(BUILD)/xbcompat $(BUILD)/glslcheck
  endif
+diff --git a/xbcompat/src/gpu/gpu_glue.c b/xbcompat/src/gpu/gpu_glue.c
+index 0a8cbec4..13f094bb 100644
+--- a/xbcompat/src/gpu/gpu_glue.c
++++ b/xbcompat/src/gpu/gpu_glue.c
+@@ -461,6 +461,12 @@ void gpu_display_loop(void)
+         clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL);
+         gpu_vblank();
+         vblanks++;
++        /* In-game reset (L + R + Back + Start, power button): normally checked
++           at D3D's Present, which the title's own D3D runs here. The main
++           thread keeps looping even when a game thread is stuck (a streamed
++           disc read waiting on the network), so the reset still gets out. */
++        xinput_check_reset_combo();
++        reset_check();
+         if (gpu_poll_events()) {
+             xlog("GPU: window closed");
+             exit(0);
 diff --git a/xbcompat/src/gpu/gpu_host.h b/xbcompat/src/gpu/gpu_host.h
 index 49370424..44ccbabf 100644
 --- a/xbcompat/src/gpu/gpu_host.h

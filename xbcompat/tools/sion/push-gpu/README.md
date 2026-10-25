@@ -43,3 +43,8 @@ mixbin addresses out of its effect state segment and crashed on the raw offset. 
 the normal build's dsound.c. Cloud: menus, new game, Mars City render. pfifo now logs
 GET/PUT/len before its "Dma value is out of range" abort (seen once, not reproducible).
 doom3-input-script.txt: the XBCOMPAT_INPUT_SCRIPT used for the test.
+
+2026-10-25 fix 6: in-game reset. L+R+Back+Start and the reset itself were only
+checked at D3D's Present (HLE), which the GPU build doesn't run. The display
+loop on the main thread now checks both every vblank, so the reset also works
+while a game thread is stuck (e.g. a streamed disc read waiting on archive.org).
