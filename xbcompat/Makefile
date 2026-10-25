@@ -35,6 +35,10 @@ override CFLAGS += -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-format-tr
 # alignment hint, and guest structures are often only 4-aligned (MSVC's stack),
 # which faults (SIGBUS) under a 64-bit kernel.  VFP-only code has no hints.
 override CFLAGS += -mfpu=vfpv4
+# ARMv7 with the divide instructions every Pi from the 2 on has (plain
+# armv7-a calls a library routine for each division), scheduled for the
+# Pi 3's Cortex-A53.
+override CFLAGS += -march=armv7ve -mtune=cortex-a53
 # char is signed on x86 (and in the Xbox code xbcompat mirrors), unsigned on ARM.
 override CFLAGS += -fsigned-char
 override LDFLAGS += -no-pie -Wl,-Ttext-segment=0x60000000

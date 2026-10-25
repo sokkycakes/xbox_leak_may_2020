@@ -84,7 +84,8 @@ struct dsmix_voice {
     uint32_t playing;                 /* out, buffer: still playing */
     uint32_t consumed;                /* out, stream: packets played to the end */
     uint32_t ran_out;                 /* out, stream: every packet was played */
-    uint32_t reserved[2];
+    uint32_t quiet;                   /* in, buffer: every gain under 2^-16: advance it, mix nothing */
+    uint32_t reserved;
 };
 
 struct dsmix_job { struct dsmix_voice *voices; uint32_t nvoices; float *out; uint32_t frames; };
@@ -212,6 +213,24 @@ static inline float dsmix_eg_tick(struct dsmix_eg *e)
     return v;
 }
 
+/* n ticks of an envelope at once, as n dsmix_eg_tick calls would leave it
+   (up to float rounding inside a segment; each segment still ends on its
+   own value). */
+static void dsmix_eg_advance(struct dsmix_eg *e, uint32_t n)
+{
+    static const int8_t next[] = { [EG_DELAY] = EG_ATTACK, [EG_ATTACK] = EG_HOLD, [EG_HOLD] = EG_DECAY,
+                                   [EG_DECAY] = EG_SUSTAIN, [EG_RELEASE] = EG_OFF };
+    while (n && (e->seg == EG_DELAY || e->seg == EG_ATTACK || e->seg == EG_HOLD || e->seg == EG_DECAY
+                 || e->seg == EG_RELEASE)) {
+        uint32_t k = n < e->count ? n : e->count;
+        if (e->seg == EG_ATTACK) e->value += e->step * (float)k;
+        else if (e->seg == EG_DECAY) e->value = e->target + (e->value - e->target) * powf(e->coef, (float)k);
+        else if (e->seg == EG_RELEASE) e->value *= powf(e->coef, (float)k);
+        n -= k;
+        if ((e->count -= k) == 0) dsmix_eg_enter(e, next[e->seg]);
+    }
+}
+
 static inline float dsmix_s16field(uint32_t v) { return (float)(int16_t)(uint16_t)(v & 0xFFFF); }
 static inline float dsmix_s8field(uint32_t v) { return (float)(int8_t)(uint8_t)(v & 0xFF); }
 
@@ -305,6 +324,46 @@ static inline int dsmix_format(const struct dsmix_voice *j)
 
 /* ---- voices ---------------------------------------------------------------- */
 
+/* An inaudible buffer voice for n frames: only its position, envelopes
+   and control phase move, as dsmix_buffer_t would move them, but a run of
+   frames at a time (one per 32-frame control update with the voice
+   processor, the whole block without it). */
+static void dsmix_quiet(struct dsmix_voice *j, int n)
+{
+    struct dsmix_state *v = j->st;
+    uint32_t total = j->total, ls = j->loop_start, ll = j->loop_len;
+    int looping = j->looping && ll > 0 && ls + ll <= total;
+    uint32_t le = ls + ll;
+    double step = exp2((double)j->pitch / 4096.0), pos = j->pos;
+    int playing = 1;
+    for (int i = 0; i < n;) {
+        if (looping && pos >= le) pos = ls + fmod(pos - ls, (double)ll);
+        if (pos >= total) { playing = 0; break; }
+        uint32_t k = (uint32_t)(n - i);
+        if (j->vp) {
+            if ((v->ctl & 31) == 0) dsmix_frame_params(v, j->pitch);
+            step = v->step_cur;
+            if (k > 32 - (v->ctl & 31)) k = 32 - (v->ctl & 31);
+            v->ctl += k;
+            dsmix_eg_advance(&v->eg[DSEG_IDX_AMP], k);
+            dsmix_eg_advance(&v->eg[DSEG_IDX_MULTI], k);
+            if (v->noteoff && v->eg[DSEG_IDX_AMP].seg == EG_OFF) { playing = 0; break; }
+        }
+        /* the frames after the first start at pos + step ...: one of them
+           past the end stops the voice */
+        if (!looping && pos + (k - 1) * step >= total) { playing = 0; break; }
+        pos += k * step;
+        i += (int)k;
+    }
+    if (playing) {
+        if (looping && pos >= le) pos = ls + fmod(pos - ls, (double)ll);
+        j->pos = pos;
+    } else {
+        j->pos = 0;
+    }
+    j->playing = (uint32_t)playing;
+}
+
 /* One buffer voice for n frames.  fmt, ch, vp and filt (the DLS2 low-pass on)
    are constants in each specialisation, so the per-frame work has no format
    branches and keeps the samples in registers. */
@@ -320,7 +379,7 @@ dsmix_buffer_t(struct dsmix_voice *j, float *out, int n, int fmt, int ch, int vp
     struct dsmix_src src = { j->data, j, v };
     float *sub = j->sub;
     double pos = j->pos;
-    int playing = 1;
+    int playing = 1, quiet = (int)j->quiet;
     float a[6], c[6], gl[6], gr[6], gm[6];
     for (int k = 0; k < ch; k++) { gl[k] = j->gain[k][0]; gr[k] = j->gain[k][1]; gm[k] = j->subgain[k]; }
     if (fmt == DSMIX_ADPCM) dsmix_adpcm_begin(v, j->data);
@@ -332,31 +391,34 @@ dsmix_buffer_t(struct dsmix_voice *j, float *out, int n, int fmt, int ch, int vp
         uint32_t nxt = idx + 1;
         if (looping && nxt >= le) nxt = ls;
         if (nxt >= total) nxt = idx;
-        dsmix_fetch_t(&src, idx, a, fmt, ch);
-        dsmix_fetch_t(&src, nxt, c, fmt, ch);
-        float l = 0, r = 0, m = 0, amp = 1.0f;
+        float amp = 1.0f;
         if (vp) {
             if ((v->ctl++ & 31) == 0) dsmix_frame_params(v, pitch);
             step = v->step_cur;
             amp = dsmix_eg_tick(&v->eg[DSEG_IDX_AMP]);
             dsmix_eg_tick(&v->eg[DSEG_IDX_MULTI]);
         }
-        for (int k = 0; k < ch; k++) {
-            float s = a[k] + (c[k] - a[k]) * frac;
-            if (filt) {   /* Chamberlin state-variable low-pass */
-                v->low[k] += v->svf_f * v->band[k];
-                float high = s - v->low[k] - v->svf_q * v->band[k];
-                v->band[k] += v->svf_f * high;
-                s = v->low[k];
+        if (!quiet) {   /* quiet: only the position and the envelopes move */
+            dsmix_fetch_t(&src, idx, a, fmt, ch);
+            dsmix_fetch_t(&src, nxt, c, fmt, ch);
+            float l = 0, r = 0, m = 0;
+            for (int k = 0; k < ch; k++) {
+                float s = a[k] + (c[k] - a[k]) * frac;
+                if (filt) {   /* Chamberlin state-variable low-pass */
+                    v->low[k] += v->svf_f * v->band[k];
+                    float high = s - v->low[k] - v->svf_q * v->band[k];
+                    v->band[k] += v->svf_f * high;
+                    s = v->low[k];
+                }
+                s *= amp;
+                l += s * gl[k];
+                r += s * gr[k];
+                if (sub) m += s * gm[k];
             }
-            s *= amp;
-            l += s * gl[k];
-            r += s * gr[k];
-            if (sub) m += s * gm[k];
+            out[2 * i] += l;
+            out[2 * i + 1] += r;
+            if (sub) sub[i] += m;
         }
-        out[2 * i] += l;
-        out[2 * i + 1] += r;
-        if (sub) sub[i] += m;
         if (v->noteoff && v->eg[DSEG_IDX_AMP].seg == EG_OFF) {   /* end of release: voice off */
             playing = 0;
             break;
@@ -403,6 +465,7 @@ static void dsmix_buffer(struct dsmix_voice *j, float *out, int n)
         { { dsmix_adpcm1, dsmix_adpcm1_vp, dsmix_adpcm1_vpf }, { dsmix_adpcm2, dsmix_adpcm2_vp, dsmix_adpcm2_vpf } },
         { { dsmix_pcm16_1, dsmix_pcm16_1_vp, dsmix_pcm16_1_vpf }, { dsmix_pcm16_2, dsmix_pcm16_2_vp, dsmix_pcm16_2_vpf } },
     };
+    if (j->quiet) { dsmix_quiet(j, n); return; }
     int fmt = dsmix_format(j);
     if (fmt == DSMIX_PCM8 || j->ch < 1 || j->ch > 2) { dsmix_buffer_any(j, out, n); return; }
     int var = !j->vp ? 0 : j->st->fmode == 1 ? 2 : 1;

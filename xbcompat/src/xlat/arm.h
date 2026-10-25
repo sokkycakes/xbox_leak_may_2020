@@ -246,5 +246,6 @@ static inline uint32_t a_vstr_s(int s, int rn, int off)
 #define A_NRSQRTE(q, d, m)     NEON3(0xF3BB0580u, q, d, 0, m)
 #define A_NRSQRTS(q, d, n, m)  NEON3(0xF2200F10u, q, d, n, m)   /* (3 - n * m) / 2 */
 #define A_NZERO(q, d)          NEON3(0xF2800010u, q, d, 0, 0)   /* vmov.i32 d, #0 */
+#define A_NDUP32(q, d, m, x)   (0xF3B40C00u | (uint32_t)(x) << 19 | (uint32_t)(q) << 6 | VD(d) | VM(m))   /* vdup.32 d, dm[x] */
 
 #endif

@@ -68,6 +68,11 @@ enum { EXIT_LINK = 1, EXIT_INDIRECT = 2 };
 #define O_DF   ((int)offsetof(xcpu, df))
 #define O_FS   ((int)offsetof(xcpu, fs_base))
 #define O_SITE ((int)offsetof(xcpu, jit_site))
+#define O_FVALID ((int)offsetof(xcpu, jit_fvalid))
+#define O_FEXIT  ((int)offsetof(xcpu, jit_fexit))
+#define O_FBAD   ((int)offsetof(xcpu, jit_fbad_at))
+#define O_FFROM  ((int)offsetof(xcpu, jit_fbad_from))
+#define O_FMASK  ((int)offsetof(xcpu, jit_fbad_mask))
 #define O_TOP  ((int)offsetof(xcpu, top))
 #define O_ST   ((int)offsetof(xcpu, st))
 #define O_FPCW ((int)offsetof(xcpu, fpcw))
@@ -105,7 +110,10 @@ static struct plist **pages;
 static unsigned live_blocks;
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static uint32_t stop_lo, stop_hi;
-static unsigned stop_live, unknown_live, abi_live;
+static unsigned stop_live, unknown_live;
+/* the flags kept at calls, rets and indirect jumps (see jit_init) */
+static unsigned abi_call, abi_ret, abi_jmp;
+static bool flag_check;      /* XLAT_FLAG_CHECK: report blocks reading undefined flags */
 
 static bool stats;
 static const char *count_dir;   /* XLAT_COUNT=DIR: count block runs, dump the hottest there */
@@ -230,27 +238,37 @@ static int branch_kind(const xinsn *in, uint32_t *target)
     return BR_NONE;
 }
 
+/* Flags kept defined at a call, ret or indirect jump */
+static unsigned abi_flags(const xinsn *in, int kind)
+{
+    if (kind == BR_RET) return abi_ret;
+    if (kind == BR_CALL || (kind == BR_IND && in->reg == 2)) return abi_call;
+    return abi_jmp;
+}
+
 /* Flags the code at eip may read before writing them: liveness over the
    code reachable from eip (up to LOOK_NODES straight-line pieces of up to
    LOOK_INSNS instructions each), solved to a fixed point so loops don't
-   end the search.  Flags are dead at calls, rets and indirect jumps (the
-   MSVC ABI never passes them; XLAT_SAFE_FLAGS keeps them), and the ones a
-   piece past the limit might read count as live. */
-static unsigned flags_needed(uint32_t eip)
+   end the search.  At calls, rets and indirect jumps only the flags
+   jit_init keeps there count as live, and the ones a piece past the limit
+   might read count as live.  With sure set, only
+   reads the search reaches count (XLAT_FLAG_CHECK's view: a flag read that
+   is certain, not assumed). */
+static unsigned flags_needed(uint32_t eip, bool sure)
 {
     struct { uint32_t addr; uint8_t need, done, end, in; int16_t succ[2]; } nd[LOOK_NODES];
     int n = 1, work = 0;
     nd[0].addr = eip;
     for (; work < n; work++) {
         uint32_t a = nd[work].addr;
-        unsigned need = 0, done = 0, end = unknown_live;
+        unsigned need = 0, done = 0, end = sure ? 0 : unknown_live;
         int16_t succ[2] = { -1, -1 };
         uint32_t to[2];
         int nto = 0;
         for (int k = 0; k < LOOK_INSNS; k++) {
-            if (in_stop(a)) { end = stop_live; break; }
+            if (in_stop(a)) { end = sure ? 0 : stop_live; break; }
             xinsn in;
-            if (!x86_decode(&in, a)) { end = FL_ALL; break; }
+            if (!x86_decode(&in, a)) { end = sure ? 0 : FL_ALL; break; }
             unsigned r, w;
             flag_info(&in, &r, &w);
             need |= r & ~done;
@@ -261,7 +279,8 @@ static unsigned flags_needed(uint32_t eip)
             if (kind == BR_NONE) { a += in.len; continue; }
             if (kind == BR_JMP) { a = target; continue; }
             if (kind == BR_JCC) { to[nto++] = target; to[nto++] = a + in.len; end = 0; }
-            else if (kind == BR_CALL || kind == BR_RET || kind == BR_IND) end = abi_live;
+            else if (sure) end = 0;
+            else if (kind == BR_CALL || kind == BR_RET || kind == BR_IND) end = abi_flags(&in, kind);
             else end = FL_ALL;
             break;
         }
@@ -269,7 +288,7 @@ static unsigned flags_needed(uint32_t eip)
             int m = 0;
             while (m < n && nd[m].addr != to[j]) m++;
             if (m == n) {
-                if (n == LOOK_NODES) { end |= unknown_live; continue; }
+                if (n == LOOK_NODES) { end |= sure ? 0 : unknown_live; continue; }
                 nd[n++].addr = to[j];
             }
             succ[j] = (int16_t)m;
@@ -316,6 +335,12 @@ typedef struct {
     int fcom_at;                   /* in[fcom_at] left vcmp's result in the CPSR */
     int force_cond;                /* the block's jcc uses this ARM condition (-1: its own) */
     uint32_t eip;                  /* the block's address */
+    uint32_t *loop_to;             /* where a loop back to the block's start branches */
+    /* the xmm registers held in q2-q7 (see xmm_sync) */
+    int8_t xs_slot[8];             /* each xmm register's slot, or -1 */
+    int8_t xs_reg[6];              /* each slot's xmm register, or -1 */
+    uint8_t xs_age[6];             /* the instruction that last used each slot */
+    uint8_t xs_dirty, xs_pin;      /* slots changed since loaded; slots in[cur] uses */
 } tctx;
 
 #define E(w) emit(&t->a, (w))
@@ -326,6 +351,16 @@ static void invert_c(tctx *t)
     E(dp_i(C_AL, OP_EOR, 0, T3, T3, arm_imm(XF_C)));
     E(A_MSR(T3));
     t->cf_inv = !t->cf_inv;
+}
+
+/* CF and OF after a multiply, from a compare that set Z when the product
+   fits in its low half (x86 leaves SF ZF AF PF undefined there) */
+static void mul_flags(tctx *t)
+{
+    E(dp_i(C_NE, OP_MOV, 0, T3, 0, arm_imm(XF_C | XF_V)));
+    E(dp_i(C_EQ, OP_MOV, 0, T3, 0, arm_imm(0)));
+    E(A_MSR(T3));
+    t->cf_inv = false;
 }
 
 static void mov_imm(tctx *t, int rd, uint32_t v)
@@ -716,7 +751,8 @@ static bool emit_shift(tctx *t, const xinsn *in, int count, unsigned live)
     if (in->mod != 3 && (in->ad16 || (in->pfx & XP_LOCK))) return false;
     bool rot = sop < 2;
     if (count < 0) {
-        if (live & FL_ALL) return false;   /* a count of 0 leaves the flags */
+        /* a count of 0 leaves the flags: kept by hand below for SF ZF CF */
+        if ((live & FL_ALL) && (rot || (live & (FL_O | FL_P | FL_A)))) return false;
     } else {
         if (!count) return true;
         if (rot && (live & (FL_C | FL_O))) return false;
@@ -738,6 +774,21 @@ static bool emit_shift(tctx *t, const xinsn *in, int count, unsigned live)
         E(dp_r(C_AL, OP_MOV, s, r, 0, r, kind, amt));
         if (s) t->cf_inv = false;
         if (!rot && (live & FL_P)) store_pf(t, r, 0);
+    } else if (live & FL_ALL) {
+        /* shl, shr, sar by cl with SF ZF CF wanted: movs sets them as x86
+           does for counts 1-31; a count of 0 puts the old ones back */
+        E(A_MRS(T3));
+        if (t->cf_inv) E(dp_i(C_AL, OP_EOR, 0, T3, T3, arm_imm(XF_C)));
+        E(dp_i(C_AL, OP_AND, 1, T2, HR(XR_ECX), 31));
+        uint32_t *zero = t->a.p;
+        E(0);
+        E(dp_rr(C_AL, OP_MOV, 1, r, 0, r, kind, T2));
+        uint32_t *done = t->a.p;
+        E(0);
+        if (zero < t->a.end) *zero = a_b(C_EQ, zero, t->a.p);
+        E(A_MSR(T3));
+        if (done < t->a.end) *done = a_b(C_AL, done, t->a.p);
+        t->cf_inv = false;
     } else {
         if (sop == 0) E(dp_i(C_AL, OP_RSB, 0, T2, HR(XR_ECX), 0));
         else if (sop == 1) E(A_MOV(T2, HR(XR_ECX)));
@@ -863,6 +914,80 @@ static void x87_sync(tctx *t)
     x_reset(t);
 }
 
+/* ---- the xmm registers ---------------------------------------------------- */
+
+/* Within a block up to six xmm registers live in q2-q7 (slot k in q(2 + k):
+   d(4 + 2k) and d(5 + 2k), lanes s(8 + 4k) to s(11 + 4k)), loaded from xcpu
+   where the block first reads them.  xmm_sync stores the changed ones back
+   before the block leaves and before the interpreter or a C helper runs;
+   a slot needed for another register is stored back first.  C calls keep
+   q4-q7 but not q2-q3; enter saves q4-q7 for its caller.  The SSE code's
+   scratch is q0-q1 and q12-q15. */
+#define XS_SLOTS 6
+static int xs_d(int k) { return 4 + 2 * k; }
+static int xs_s(int k) { return 8 + 4 * k; }
+
+static void xs_reset(tctx *t)
+{
+    memset(t->xs_slot, -1, sizeof t->xs_slot);
+    memset(t->xs_reg, -1, sizeof t->xs_reg);
+    t->xs_dirty = t->xs_pin = 0;
+}
+
+static void xs_writeback(tctx *t, int k)
+{
+    int x = O_XMM + 16 * t->xs_reg[k];
+    E(a_vstr(xs_d(k), R0, x));
+    E(a_vstr(xs_d(k) + 1, R0, x + 8));
+    t->xs_dirty &= (uint8_t)~(1u << k);
+}
+
+/* Stores the changed xmm registers to xcpu and empties the cache (no flags
+   or core registers touched) */
+static void xmm_sync(tctx *t)
+{
+    for (int k = 0; k < XS_SLOTS; k++)
+        if (t->xs_dirty >> k & 1) xs_writeback(t, k);
+    xs_reset(t);
+}
+
+/* xmm register x's slot for in[cur]: loaded from xcpu unless in[cur]
+   writes all of it (def, which marks it changed) */
+static int xs_get(tctx *t, int x, bool def)
+{
+    int k = t->xs_slot[x];
+    if (k < 0) {
+        for (int i = 0; i < XS_SLOTS && k < 0; i++)
+            if (t->xs_reg[i] < 0) k = i;
+        if (k < 0) {
+            /* the slot used longest ago, not by in[cur] (it uses two at most) */
+            for (int i = 0; i < XS_SLOTS; i++)
+                if (!(t->xs_pin >> i & 1) && (k < 0 || t->xs_age[i] < t->xs_age[k])) k = i;
+            if (t->xs_dirty >> k & 1) xs_writeback(t, k);
+            t->xs_slot[t->xs_reg[k]] = -1;
+        }
+        t->xs_reg[k] = (int8_t)x;
+        t->xs_slot[x] = (int8_t)k;
+        if (!def) {
+            E(a_vldr(xs_d(k), R0, O_XMM + 16 * x));
+            E(a_vldr(xs_d(k) + 1, R0, O_XMM + 16 * x + 8));
+        }
+    }
+    t->xs_pin |= (uint8_t)(1u << k);
+    t->xs_age[k] = (uint8_t)t->cur;
+    if (def) t->xs_dirty |= (uint8_t)(1u << k);
+    return k;
+}
+
+static void xs_set(tctx *t, int k) { t->xs_dirty |= (uint8_t)(1u << k); }
+
+/* Everything translated code keeps in host registers back in xcpu */
+static void sync_regs(tctx *t)
+{
+    x87_sync(t);
+    xmm_sync(t);
+}
+
 /* VFP's 8-bit immediate for the double with bits v, or -1 */
 static int vfp_imm(uint64_t v)
 {
@@ -979,6 +1104,10 @@ static uint32_t *unaligned_stub(const uint32_t *site, uint32_t w)
     uint32_t *stub = cache_cur;
     cache_cur = a.p;
     flush_icache(stub, cache_cur);
+    if (perf_map) {   /* named, so a profile shows the time the reroutes cost */
+        fprintf(perf_map, "%x %x xlat_unaligned\n", (unsigned)(uintptr_t)stub, (unsigned)((cache_cur - stub) * 4));
+        fflush(perf_map);
+    }
     return stub;
 }
 
@@ -1235,6 +1364,7 @@ uint64_t jit_fist64(double v, uint32_t fpcw)
 static void x_fistp64(tctx *t, const xinsn *in, int s, unsigned live)
 {
     bool keep = live & FL_NZCV;
+    xmm_sync(t);   /* its slow path calls C */
     x_cvt(t, s, live);
     if (keep) E(A_MRS(T4));
     E(dp_i(C_AL, OP_TST, 1, 0, T3, 1));
@@ -1307,6 +1437,89 @@ static void x_fst_reg(tctx *t, int i, bool pop)
         x_tag(t, xq(t, i), false, -1);
     }
     if (pop) x_pop(t);
+}
+
+/* d9 f0-f3, f9, fb-ff for x_math: computed as fpu.c's interpreter does, so
+   both give the same bits.  op is the low nibble of the second byte | 8
+   for the d9 /7 row; x is st0, y st1; a and b are the results. */
+struct jit_dd { double a, b; };
+struct jit_dd jit_x87_math(uint32_t fpcw, uint32_t op, double x, double y);
+struct jit_dd jit_x87_math(uint32_t fpcw, uint32_t op, double x, double y)
+{
+    struct jit_dd r = { 0.0, 0.0 };
+    switch (op) {
+    case 0: r.a = exp2(x) - 1.0; break;                       /* f2xm1 */
+    case 1: r.a = y * log2(x); break;                         /* fyl2x */
+    case 2: r.a = tan(x); break;                              /* fptan */
+    case 3: r.a = atan2(y, x); break;                         /* fpatan */
+    case 9: r.a = y * (log1p(x) / M_LN2); break;              /* fyl2xp1 */
+    case 11: r.a = sin(x); r.b = cos(x); break;               /* fsincos */
+    case 12:                                                  /* frndint */
+        switch ((fpcw >> 10) & 3) {
+        case 0: r.a = nearbyint(x); break;
+        case 1: r.a = floor(x); break;
+        case 2: r.a = ceil(x); break;
+        default: r.a = trunc(x); break;
+        }
+        break;
+    case 13: {                                                /* fscale */
+        double e = trunc(y);
+        if (isnan(e)) { r.a = NAN; break; }
+        if (isinf(e)) {
+            if ((e > 0 && x == 0.0) || (e < 0 && isinf(x))) r.a = NAN;
+            else if (e > 0) r.a = copysign(isnan(x) ? x : INFINITY, x);
+            else r.a = copysign(isnan(x) ? x : 0.0, x);
+            break;
+        }
+        r.a = ldexp(x, e > 4096 ? 4096 : e < -4096 ? -4096 : (int)e);
+        break;
+    }
+    case 14: r.a = sin(x); break;                             /* fsin */
+    case 15: r.a = cos(x); break;                             /* fcos */
+    }
+    return r;
+}
+
+/* One of jit_x87_math's operations on the x87 registers, with a call to it
+   (the registers saved around it; flags kept when live) */
+static void x_math(tctx *t, unsigned op, unsigned live)
+{
+    bool keep = live & FL_NZCV, two = op == 1 || op == 3 || op == 9 || op == 13;
+    int a = x_get(t, 0), b = two ? x_get(t, 1) : a, d;
+    xmm_sync(t);
+    if (keep) {
+        E(A_MRS(T4));
+        E(A_STR(T4, SP, 4));
+    }
+    E(A_VPUSH(16, 8));
+    E(A_VMOV(0, a));
+    E(A_VMOV(1, b));
+    E(A_LDR(R0, R0, O_FPCW));
+    E(dp_i(C_AL, OP_MOV, 0, R1, 0, (int)op));
+    mov_imm(t, R12, (uint32_t)(uintptr_t)jit_x87_math);
+    E(A_BLX(R12));
+    E(A_VPOP(16, 8));
+    E(A_LDR(R0, SP, 0));
+    if (keep) {
+        E(A_LDR(T4, SP, 4));
+        E(A_MSR(T4));
+    }
+    if (op == 1 || op == 3 || op == 9) {   /* into st1, then pop */
+        E(A_VMOV(x_put(t, 1), 0));
+        x_pop(t);
+    } else {
+        E(A_VMOV(x_put(t, 0), 0));
+    }
+    if (op == 2) x_const(t, x_push(t), 1.0);
+    if (op == 11) {
+        d = x_push(t);
+        E(A_VMOV(d, 1));
+    }
+    if (op == 2 || op == 11 || op == 14 || op == 15) {   /* C2: the argument was in range */
+        E(A_LDR(T3, R0, O_FPSW));
+        E(dp_i(C_AL, OP_BIC, 0, T3, T3, arm_imm(0x400)));
+        E(A_STR(T3, R0, O_FPSW));
+    }
 }
 
 static const double x87_consts[7] = {
@@ -1461,6 +1674,10 @@ static bool x87(tctx *t, const xinsn *in, unsigned live)
                 return true;
             }
             return false;
+        case 6:
+            if (i > 3) return false;
+            x_math(t, i, live);
+            return true;
         case 7:
             if (i == 2) {   /* fsqrt */
                 a = x_get(t, 0);
@@ -1468,7 +1685,9 @@ static bool x87(tctx *t, const xinsn *in, unsigned live)
                 E(A_VSQRT(d, a));
                 return true;
             }
-            return false;
+            if (i == 0) return false;   /* fprem */
+            x_math(t, 8 + i, live);
+            return true;
         }
         return false;
     case 2: case 3:
@@ -1604,67 +1823,11 @@ static bool emit_string(tctx *t, const xinsn *in, unsigned live)
     return true;
 }
 
-/* n dwords from [sb, #so] to [db, #do_] through T1-T4 (all loaded first) */
-static void copy_words(tctx *t, int n, int sb, int32_t so, int db, int32_t do_)
+/* in's memory operand for span bytes by vldr/vstr: base register, *off a
+   multiple of 4 (uses T0).  An unaligned address faults once and
+   jit_fix_unaligned reroutes the access. */
+static int sse_mem(tctx *t, const xinsn *in, int span, int32_t *off)
 {
-    static const int tr[4] = { T1, T2, T3, T4 };
-    for (int i = 0; i < n; i++) E(A_LDR(tr[i], sb, so + 4 * i));
-    for (int i = 0; i < n; i++) E(A_STR(tr[i], db, do_ + 4 * i));
-}
-
-/* the Pentium III's SSE moves (no 66 or F2 forms: those are SSE2) */
-static bool emit_sse_move(tctx *t, const xinsn *in)
-{
-    unsigned op = in->op;
-    bool ss = in->pfx & XP_REP, m = in->mod != 3;
-    if (in->pfx & (XP_OPSZ | XP_REPNE | XP_LOCK)) return false;
-    if (ss && op != 0x110 && op != 0x111) return false;
-    int x = O_XMM + 16 * in->reg, y = O_XMM + 16 * in->rm, base = R0;
-    int32_t off = y;
-    if (m) base = mem_addr(t, in, T0, 4083, &off);
-    switch (op) {
-    case 0x110: case 0x128:   /* movups, movaps, movss xmm, xmm/m */
-        if (!ss) {
-            copy_words(t, 4, base, off, R0, x);
-        } else if (m) {
-            copy_words(t, 1, base, off, R0, x);
-            E(dp_i(C_AL, OP_MOV, 0, T1, 0, 0));
-            for (int i = 1; i < 4; i++) E(A_STR(T1, R0, x + 4 * i));
-        } else {
-            copy_words(t, 1, R0, y, R0, x);
-        }
-        return true;
-    case 0x111: case 0x129: case 0x12B:   /* movups, movaps, movss, movntps xmm/m, xmm */
-        if (op == 0x12B && !m) return false;
-        copy_words(t, ss ? 1 : 4, R0, x, base, off);
-        return true;
-    case 0x112:   /* movlps xmm, m64; movhlps xmm, xmm */
-        copy_words(t, 2, base, m ? off : y + 8, R0, x);
-        return true;
-    case 0x116:   /* movhps xmm, m64; movlhps xmm, xmm */
-        copy_words(t, 2, base, off, R0, x + 8);
-        return true;
-    case 0x113: case 0x117:   /* movlps, movhps m64, xmm */
-        if (!m) return false;
-        copy_words(t, 2, R0, op == 0x113 ? x : x + 8, base, off);
-        return true;
-    }
-    return false;
-}
-
-/* The Pentium III's SSE arithmetic, on the xmm registers in xcpu: VFP
-   single precision for + - * /, sqrt and compares (IEEE with denormals,
-   as SSE computes them), NEON for logic and the estimates.  The
-   destination goes in q0 (s0-s3), the source in q1 (s4-s7), results that
-   aren't in place in q2 (s8-s11), q3 is scratch. */
-
-/* in's xmm/m operand: base and offset for span bytes from it by vldr */
-static int sse_src(tctx *t, const xinsn *in, int span, int32_t *off)
-{
-    if (in->mod == 3) {
-        *off = O_XMM + 16 * in->rm;
-        return R0;
-    }
     int base = mem_addr(t, in, T0, 1024 - span, off);
     if (*off & 3) {
         add_imm(t, T0, base, (uint32_t)*off, T0);
@@ -1674,7 +1837,7 @@ static int sse_src(tctx *t, const xinsn *in, int span, int32_t *off)
     return base;
 }
 
-/* lanes from xcpu's xmm at x, or from base + off, into s(first) */
+/* lanes from base + off into s(first) */
 static void sse_load(tctx *t, int first, int lanes, int base, int32_t off)
 {
     if (lanes == 1) {
@@ -1685,14 +1848,93 @@ static void sse_load(tctx *t, int first, int lanes, int base, int32_t off)
     }
 }
 
-static void sse_store(tctx *t, int first, int lanes, int32_t x)
+/* the Pentium III's SSE moves (no 66 or F2 forms: those are SSE2), on the
+   xmm slots (xs_get) */
+static bool emit_sse_move(tctx *t, const xinsn *in)
 {
-    if (lanes == 1) {
-        E(a_vstr_s(first, R0, x));
-    } else {
-        E(a_vstr(first / 2, R0, x));
-        E(a_vstr(first / 2 + 1, R0, x + 8));
+    unsigned op = in->op;
+    bool ss = in->pfx & XP_REP, m = in->mod != 3;
+    if (in->pfx & (XP_OPSZ | XP_REPNE | XP_LOCK)) return false;
+    if (ss && op != 0x110 && op != 0x111) return false;
+    if ((op == 0x12B || op == 0x113 || op == 0x117) && !m) return false;
+    int32_t off = 0;
+    int base = m ? sse_mem(t, in, 16, &off) : 0, d, s;
+    switch (op) {
+    case 0x110: case 0x128:   /* movups, movaps, movss xmm, xmm/m */
+        if (!m) {
+            if (in->rm == in->reg) return true;
+            s = xs_get(t, in->rm, false);
+            d = xs_get(t, in->reg, !ss);
+            if (ss) {
+                E(A_VMOVc_S(C_AL, xs_s(d), xs_s(s)));
+                xs_set(t, d);
+            } else {
+                E(A_NORR(1, xs_d(d), xs_d(s), xs_d(s)));
+            }
+            return true;
+        }
+        d = xs_get(t, in->reg, true);
+        if (ss) {
+            /* not when shufps x, x, 0 comes next: it replaces lanes 1-3
+               with lane 0 (how compiled code loads a scalar to broadcast) */
+            const xinsn *nx = t->cur + 1 < t->n ? &t->in[t->cur + 1] : NULL;
+            if (!nx || nx->op != 0x1C6 || (nx->pfx & (XP_OPSZ | XP_REP | XP_REPNE | XP_LOCK)) || nx->mod != 3 ||
+                nx->reg != in->reg || nx->rm != in->reg || (nx->imm & 0xFF) || (interp_ops & op_class(nx)))
+                E(A_NZERO(1, xs_d(d)));
+            E(a_vldr_s(xs_s(d), base, off));
+        } else {
+            sse_load(t, xs_s(d), 4, base, off);
+        }
+        return true;
+    case 0x111: case 0x129: case 0x12B:   /* movups, movaps, movss, movntps xmm/m, xmm */
+        if (!m && in->rm == in->reg) return true;
+        s = xs_get(t, in->reg, false);
+        if (!m) {
+            d = xs_get(t, in->rm, !ss);
+            if (ss) {
+                E(A_VMOVc_S(C_AL, xs_s(d), xs_s(s)));
+                xs_set(t, d);
+            } else {
+                E(A_NORR(1, xs_d(d), xs_d(s), xs_d(s)));
+            }
+        } else if (ss) {
+            E(a_vstr_s(xs_s(s), base, off));
+        } else {
+            E(a_vstr(xs_d(s), base, off));
+            E(a_vstr(xs_d(s) + 1, base, off + 8));
+        }
+        return true;
+    case 0x112: case 0x116:   /* movlps, movhps xmm, m64; movhlps, movlhps xmm, xmm */
+        d = xs_get(t, in->reg, false);
+        if (m) {
+            E(a_vldr(xs_d(d) + (op == 0x116), base, off));
+        } else {
+            s = xs_get(t, in->rm, false);
+            E(op == 0x112 ? A_VMOV(xs_d(d), xs_d(s) + 1) : A_VMOV(xs_d(d) + 1, xs_d(s)));
+        }
+        xs_set(t, d);
+        return true;
+    case 0x113: case 0x117:   /* movlps, movhps m64, xmm */
+        s = xs_get(t, in->reg, false);
+        E(a_vstr(xs_d(s) + (op == 0x117), base, off));
+        return true;
     }
+    return false;
+}
+
+/* The Pentium III's SSE arithmetic, on the xmm slots: VFP single precision
+   lane by lane for + - * /, sqrt and compares (IEEE with denormals, as SSE
+   computes them), NEON for logic and the estimates. */
+
+/* in's xmm/m source operand: the first of the s registers holding its
+   lanes (its slot's, or s4-s7 loaded from memory) */
+static int sse_in(tctx *t, const xinsn *in, int lanes)
+{
+    if (in->mod == 3) return xs_s(xs_get(t, in->rm, false));
+    int32_t off;
+    int base = sse_mem(t, in, 4 * lanes, &off);
+    sse_load(t, 4, lanes, base, off);
+    return 4;
 }
 
 /* r = s1 as a 32-bit integer (toward zero, or as MXCSR rounds), the
@@ -1747,94 +1989,109 @@ static void sse_cvt(tctx *t, int r, bool trunc, unsigned live)
     if (keep) E(A_MSR(T4));
 }
 
+
 static bool emit_sse_op(tctx *t, const xinsn *in, unsigned live)
 {
     unsigned op = in->op & 0xFF;
     bool ss = in->pfx & XP_REP, m = in->mod != 3;
     if (in->pfx & (XP_OPSZ | XP_REPNE | XP_LOCK)) return false;
-    int x = O_XMM + 16 * in->reg, lanes = ss ? 1 : 4, q = !ss, base;
-    int32_t off;
+    switch (op) {
+    case 0x14: case 0x15: case 0x2E: case 0x2F: case 0x54: case 0x55: case 0x56: case 0x57: case 0xC6:
+        if (ss) return false;
+        break;
+    case 0x50:
+        if (ss || m) return false;
+        break;
+    case 0x2A: case 0x2C: case 0x2D:   /* the ps forms read or write MMX */
+        if (!ss) return false;
+        break;
+    }
+    int lanes = ss ? 1 : 4, q = !ss, s, k, d;
     switch (op) {
     case 0x51: case 0x58: case 0x59: case 0x5C: case 0x5E:   /* sqrt add mul sub div */
-        base = sse_src(t, in, 4 * lanes, &off);
-        sse_load(t, 4, lanes, base, off);
-        if (op != 0x51) sse_load(t, 0, lanes, R0, x);
+        s = sse_in(t, in, lanes);
+        k = xs_get(t, in->reg, op == 0x51 && !ss);
+        d = xs_s(k);
         for (int i = 0; i < lanes; i++)
             switch (op) {
-            case 0x51: E(A_VSQRT_S(i, 4 + i)); break;
-            case 0x58: E(A_VADD_S(i, i, 4 + i)); break;
-            case 0x59: E(A_VMUL_S(i, i, 4 + i)); break;
-            case 0x5C: E(A_VSUB_S(i, i, 4 + i)); break;
-            default: E(A_VDIV_S(i, i, 4 + i)); break;
+            case 0x51: E(A_VSQRT_S(d + i, s + i)); break;
+            case 0x58: E(A_VADD_S(d + i, d + i, s + i)); break;
+            case 0x59: E(A_VMUL_S(d + i, d + i, s + i)); break;
+            case 0x5C: E(A_VSUB_S(d + i, d + i, s + i)); break;
+            default: E(A_VDIV_S(d + i, d + i, s + i)); break;
             }
-        sse_store(t, 0, lanes, x);
+        xs_set(t, k);
         return true;
     case 0x5D: case 0x5F: {   /* min, max */
         /* d < s ? d : s and d > s ? d : s (s when unordered or both zero),
            compared by VFP: NEON would see denormals as zero */
         bool keep = live & FL_NZCV;
-        base = sse_src(t, in, 4 * lanes, &off);
-        sse_load(t, 4, lanes, base, off);
-        sse_load(t, 0, lanes, R0, x);
+        s = sse_in(t, in, lanes);
+        k = xs_get(t, in->reg, false);
+        d = xs_s(k);
         if (keep) E(A_MRS(T4));
         for (int i = 0; i < lanes; i++) {
-            E(A_VCMP_S(i, 4 + i));
+            E(A_VCMP_S(d + i, s + i));
             E(A_VMRS_APSR);
-            E(A_VMOVc_S(op == 0x5D ? C_PL : C_LE, i, 4 + i));
+            E(A_VMOVc_S(op == 0x5D ? C_PL : C_LE, d + i, s + i));
         }
         if (keep) E(A_MSR(T4));
-        sse_store(t, 0, lanes, x);
+        xs_set(t, k);
         return true;
     }
-    case 0x52: case 0x53:   /* rsqrt, rcp */
+    case 0x52: case 0x53: {   /* rsqrt, rcp, into d28 (q14) through q12-q13 */
         /* x86's estimates are good to 12 bits, NEON's to 8: one Newton step
            makes 16.  Both see denormals as zero. */
-        base = sse_src(t, in, 4 * lanes, &off);
-        sse_load(t, 4, lanes, base, off);
+        int x = sse_in(t, in, lanes) / 2;
         if (op == 0x52) {
             /* e * (3 - (x * e) * e) / 2 (e * e can underflow); x * e is a
                NaN only for 0, infinity and NaN, where e is already right */
-            E(A_NRSQRTE(q, 4, 2));
-            E(A_NMUL_F(q, 6, 4, 2));
-            E(A_NCEQ_F(q, 0, 6, 6));
-            E(A_NRSQRTS(q, 6, 6, 4));
-            E(A_NMUL_F(q, 6, 4, 6));
-            E(A_NBSL(q, 0, 6, 4));
-            sse_store(t, 0, lanes, x);
+            E(A_NRSQRTE(q, 24, x));
+            E(A_NMUL_F(q, 26, 24, x));
+            E(A_NCEQ_F(q, 28, 26, 26));
+            E(A_NRSQRTS(q, 26, 26, 24));
+            E(A_NMUL_F(q, 26, 24, 26));
+            E(A_NBSL(q, 28, 26, 24));
         } else {
-            E(A_NRECPE(q, 4, 2));   /* e * (2 - x * e) */
-            E(A_NRECPS(q, 6, 2, 4));
-            E(A_NMUL_F(q, 4, 4, 6));
-            sse_store(t, 8, lanes, x);
+            E(A_NRECPE(q, 24, x));   /* e * (2 - x * e) */
+            E(A_NRECPS(q, 26, x, 24));
+            E(A_NMUL_F(q, 28, 24, 26));
+        }
+        k = xs_get(t, in->reg, !ss);
+        if (ss) {
+            E(A_VMOV(0, 28));
+            E(A_VMOVc_S(C_AL, xs_s(k), 0));
+            xs_set(t, k);
+        } else {
+            E(A_NORR(1, xs_d(k), 28, 28));
         }
         return true;
+    }
     case 0x54: case 0x55: case 0x56: case 0x57:   /* and andn or xor */
-        if (ss) return false;
         if (!m && in->rm == in->reg) {
             if (op == 0x54 || op == 0x56) return true;
-            E(A_NZERO(1, 0));
-            E(a_vstr(0, R0, x));
-            E(a_vstr(0, R0, x + 8));
+            k = xs_get(t, in->reg, true);
+            E(A_NZERO(1, xs_d(k)));
             return true;
         }
-        base = sse_src(t, in, 16, &off);
-        sse_load(t, 4, 4, base, off);
-        sse_load(t, 0, 4, R0, x);
+        s = sse_in(t, in, 4) / 2;
+        k = xs_get(t, in->reg, false);
+        d = xs_d(k);
         switch (op) {
-        case 0x54: E(A_NAND(1, 0, 0, 2)); break;
-        case 0x55: E(A_NBIC(1, 0, 2, 0)); break;
-        case 0x56: E(A_NORR(1, 0, 0, 2)); break;
-        default: E(A_NEOR(1, 0, 0, 2)); break;
+        case 0x54: E(A_NAND(1, d, d, s)); break;
+        case 0x55: E(A_NBIC(1, d, s, d)); break;
+        case 0x56: E(A_NORR(1, d, d, s)); break;
+        default: E(A_NEOR(1, d, d, s)); break;
         }
-        sse_store(t, 0, 4, x);
+        xs_set(t, k);
         return true;
     case 0xC2: {   /* cmpps, cmpss: a mask per lane from VFP's compare */
-        base = sse_src(t, in, 4 * lanes, &off);
-        sse_load(t, 4, lanes, base, off);
-        sse_load(t, 0, lanes, R0, x);
+        s = sse_in(t, in, lanes);
+        k = xs_get(t, in->reg, false);
+        d = xs_s(k);
         int pred = in->imm & 7;
         for (int i = 0; i < lanes; i++) {
-            E(A_VCMP_S(i, 4 + i));
+            E(A_VCMP_S(d + i, s + i));
             E(A_VMRS(T1));   /* NZCV: less 1000, equal 0110, greater 0010, unordered 0011 */
             switch (pred & 3) {
             case 0: E(A_SBFX(T1, T1, 30, 1)); break;   /* Z: eq, neq */
@@ -1846,82 +2103,85 @@ static bool emit_sse_op(tctx *t, const xinsn *in, unsigned live)
             default: E(A_SBFX(T1, T1, 28, 1)); break;  /* V: unord, ord */
             }
             if (pred & 4) E(dp_r(C_AL, OP_MVN, 0, T1, 0, T1, SH_LSL, 0));
-            E(A_STR(T1, R0, x + 4 * i));
+            E(A_VMOV_SR(d + i, T1));
         }
+        xs_set(t, k);
         return true;
     }
-    case 0xC6: {   /* shufps */
-        if (ss) return false;
-        base = sse_src(t, in, 16, &off);
-        unsigned k = in->imm;
-        E(A_LDR(T1, R0, x + 4 * (int)(k & 3)));
-        E(A_LDR(T2, R0, x + 4 * (int)(k >> 2 & 3)));
-        E(A_LDR(T3, base, off + 4 * (int)(k >> 4 & 3)));
-        E(A_LDR(T4, base, off + 4 * (int)(k >> 6 & 3)));
-        E(A_STR(T1, R0, x));
-        E(A_STR(T2, R0, x + 4));
-        E(A_STR(T3, R0, x + 8));
-        E(A_STR(T4, R0, x + 12));
+    case 0xC6: {   /* shufps: two lanes of the destination, then two of the source */
+        unsigned imm = in->imm, l0 = imm & 3, l1 = imm >> 2 & 3, l2 = imm >> 4 & 3, l3 = imm >> 6 & 3;
+        s = sse_in(t, in, 4);
+        k = xs_get(t, in->reg, false);
+        d = xs_s(k);
+        if (s == d && l0 == l1 && l1 == l2 && l2 == l3) {
+            E(A_NDUP32(1, xs_d(k), xs_d(k) + (int)(l0 >> 1), l0 & 1));   /* one lane everywhere */
+        } else {
+            E(A_VMOVc_S(C_AL, 0, d + (int)l0));
+            E(A_VMOVc_S(C_AL, 1, d + (int)l1));
+            E(A_VMOVc_S(C_AL, 2, s + (int)l2));
+            E(A_VMOVc_S(C_AL, 3, s + (int)l3));
+            E(A_NORR(1, xs_d(k), 0, 0));
+        }
+        xs_set(t, k);
         return true;
     }
-    case 0x14:   /* unpcklps: d0 s0 d1 s1 */
-        if (ss) return false;
-        base = sse_src(t, in, 16, &off);
-        E(A_LDR(T2, base, off));
-        E(A_LDR(T3, R0, x + 4));
-        E(A_LDR(T4, base, off + 4));
-        E(A_STR(T2, R0, x + 4));
-        E(A_STR(T3, R0, x + 8));
-        E(A_STR(T4, R0, x + 12));
+    case 0x14:   /* unpcklps: d0 s0 d1 s1 (in place, last lane first) */
+        s = sse_in(t, in, 4);
+        k = xs_get(t, in->reg, false);
+        d = xs_s(k);
+        E(A_VMOVc_S(C_AL, d + 3, s + 1));
+        E(A_VMOVc_S(C_AL, d + 2, d + 1));
+        E(A_VMOVc_S(C_AL, d + 1, s));
+        xs_set(t, k);
         return true;
     case 0x15:   /* unpckhps: d2 s2 d3 s3 */
-        if (ss) return false;
-        base = sse_src(t, in, 16, &off);
-        E(A_LDR(T1, R0, x + 8));
-        E(A_LDR(T2, base, off + 8));
-        E(A_LDR(T3, R0, x + 12));
-        E(A_LDR(T4, base, off + 12));
-        E(A_STR(T1, R0, x));
-        E(A_STR(T2, R0, x + 4));
-        E(A_STR(T3, R0, x + 8));
-        E(A_STR(T4, R0, x + 12));
+        s = sse_in(t, in, 4);
+        k = xs_get(t, in->reg, false);
+        d = xs_s(k);
+        E(A_VMOVc_S(C_AL, d, d + 2));
+        E(A_VMOVc_S(C_AL, d + 1, s + 2));
+        E(A_VMOVc_S(C_AL, d + 2, d + 3));
+        E(A_VMOVc_S(C_AL, d + 3, s + 3));
+        xs_set(t, k);
         return true;
-    case 0x50: {   /* movmskps */
-        if (ss || m) return false;
-        int y = O_XMM + 16 * in->rm;
-        E(A_LDR(T1, R0, y));
+    case 0x50:   /* movmskps */
+        s = xs_s(xs_get(t, in->rm, false));
+        E(A_VMOV_RS(T1, s));
         E(dp_r(C_AL, OP_MOV, 0, T1, 0, T1, SH_LSR, 31));
         for (int i = 1; i < 4; i++) {
-            E(A_LDR(T2, R0, y + 4 * i));
+            E(A_VMOV_RS(T2, s + i));
             E(dp_r(C_AL, OP_MOV, 0, T2, 0, T2, SH_LSR, 31));
             E(dp_r(C_AL, OP_ORR, 0, i == 3 ? HR(in->reg) : T1, T1, T2, SH_LSL, i));
         }
         return true;
-    }
     case 0x2E: case 0x2F:   /* ucomiss, comiss */
-        if (ss) return false;
-        base = sse_src(t, in, 4, &off);
-        E(a_vldr_s(1, base, off));
-        E(a_vldr_s(0, R0, x));
-        E(A_VCMP_S(0, 1));
+        s = sse_in(t, in, 1);
+        d = xs_s(xs_get(t, in->reg, false));
+        E(A_VCMP_S(d, s));
         E(A_VMRS(T1));
         vcmp_flags(t, live);
         return true;
-    case 0x2A:   /* cvtsi2ss (cvtpi2ps reads MMX) */
-        if (!ss) return false;
+    case 0x2A: {   /* cvtsi2ss */
         if (m) {
-            base = sse_src(t, in, 4, &off);
+            int32_t off;
+            int base = sse_mem(t, in, 4, &off);
             E(a_vldr_s(0, base, off));
         } else {
             E(A_VMOV_SR(0, HR(in->rm)));
         }
-        E(A_VCVT_S_S32(0, 0));
-        E(a_vstr_s(0, R0, x));
+        k = xs_get(t, in->reg, false);
+        E(A_VCVT_S_S32(xs_s(k), 0));
+        xs_set(t, k);
         return true;
-    case 0x2C: case 0x2D:   /* cvttss2si, cvtss2si (the ps forms write MMX) */
-        if (!ss) return false;
-        base = sse_src(t, in, 4, &off);
-        E(a_vldr_s(1, base, off));
+    }
+    case 0x2C: case 0x2D:   /* cvttss2si, cvtss2si */
+        if (m) {
+            int32_t off;
+            int base = sse_mem(t, in, 4, &off);
+            E(a_vldr_s(1, base, off));
+        } else {
+            E(A_VMOVc_S(C_AL, 1, xs_s(xs_get(t, in->rm, false))));
+        }
         sse_cvt(t, HR(in->reg), op == 0x2C, live);
         return true;
     }
@@ -1990,7 +2250,7 @@ static bool native(tctx *t, const xinsn *in, unsigned live)
         E(A_PUSH1(T0, R8));
         return true;
     case 0x69: case 0x6B: {
-        if (osz != 4 || (live & (FL_C | FL_O))) return false;
+        if (osz != 4) return false;
         int src;
         if (m) {
             base = mem_addr(t, in, T0, 4095, &off);
@@ -2000,6 +2260,13 @@ static bool native(tctx *t, const xinsn *in, unsigned live)
             src = HR(in->rm);
         }
         mov_imm(t, T2, op == 0x6B ? (uint32_t)(int8_t)in->imm : in->imm);
+        if (live & (FL_C | FL_O)) {
+            E(A_SMULL(T0, T3, src, T2));
+            E(A_MOV(HR(in->reg), T0));
+            E(dp_r(C_AL, OP_CMP, 1, 0, T3, T0, SH_ASR, 31));
+            mul_flags(t);
+            return true;
+        }
         E(A_MUL(HR(in->reg), src, T2));
         return true;
     }
@@ -2222,7 +2489,7 @@ static bool native(tctx *t, const xinsn *in, unsigned live)
             return true;
         }
         case 4: case 5: {
-            if (sz != 4 || (live & (FL_C | FL_O))) return false;
+            if (sz != 4) return false;
             int src = HR(in->rm);
             if (m) {
                 base = mem_addr(t, in, T0, 4095, &off);
@@ -2230,6 +2497,11 @@ static bool native(tctx *t, const xinsn *in, unsigned live)
                 src = T1;
             }
             E(in->reg == 4 ? A_UMULL(R4, HR(XR_EDX), R4, src) : A_SMULL(R4, HR(XR_EDX), R4, src));
+            if (live & (FL_C | FL_O)) {   /* edx is more than eax's extension */
+                if (in->reg == 4) E(dp_i(C_AL, OP_CMP, 1, 0, HR(XR_EDX), arm_imm(0)));
+                else E(dp_r(C_AL, OP_CMP, 1, 0, HR(XR_EDX), R4, SH_ASR, 31));
+                mul_flags(t);
+            }
             return true;
         }
         case 6: case 7: {
@@ -2238,7 +2510,7 @@ static bool native(tctx *t, const xinsn *in, unsigned live)
                interpreter takes the rest and the divide errors.  The flags
                are undefined after either. */
             if (sz != 4 || (in->pfx & XP_LOCK)) return false;
-            x87_sync(t);
+            sync_regs(t);
             int src = HR(in->rm), eax = HR(XR_EAX), edx = HR(XR_EDX);
             if (m) {
                 base = mem_addr(t, in, T0, 4095, &off);
@@ -2354,12 +2626,19 @@ static bool native(tctx *t, const xinsn *in, unsigned live)
         }
         return true;
     case 0x1AF: {
-        if (osz != 4 || (live & (FL_C | FL_O))) return false;
+        if (osz != 4) return false;
         int src = HR(in->rm);
         if (m) {
             base = mem_addr(t, in, T0, 4095, &off);
             E(A_LDR(T1, base, off));
             src = T1;
+        }
+        if (live & (FL_C | FL_O)) {
+            E(A_SMULL(T2, T3, HR(in->reg), src));
+            E(A_MOV(HR(in->reg), T2));
+            E(dp_r(C_AL, OP_CMP, 1, 0, T3, T2, SH_ASR, 31));
+            mul_flags(t);
+            return true;
         }
         E(A_MUL(HR(in->reg), HR(in->reg), src));
         return true;
@@ -2447,8 +2726,21 @@ static bool native(tctx *t, const xinsn *in, unsigned live)
 
 /* ---- block exits -------------------------------------------------------- */
 
+/* XLAT_FLAG_CHECK: the exit leaves the flags in live defined */
+static void note_exit(tctx *t, unsigned live)
+{
+    E(dp_i(C_AL, OP_MOV, 0, T3, 0, (int)live));
+    E(A_STR(T3, R0, O_FVALID));
+    mov_imm(t, T3, t->eip);
+    E(A_STR(T3, R0, O_FEXIT));
+}
+
 static void emit_exit(tctx *t, uint32_t target, unsigned live, uint32_t *alt)
 {
+    if (flag_check) {
+        note_exit(t, live);
+        alt = NULL;   /* a linked conditional branch would skip the note */
+    }
     if (!t->cf_inv && (live & FL_C)) {
         E(A_MRS(T3));
         E(dp_i(C_AL, OP_EOR, 0, T3, T3, arm_imm(XF_C)));
@@ -2459,18 +2751,19 @@ static void emit_exit(tctx *t, uint32_t target, unsigned live, uint32_t *alt)
     E((uint32_t)(uintptr_t)alt);
 }
 
-/* jump to the guest address in T0 (after x87_sync) */
-static void emit_indirect(tctx *t)
+/* jump to the guest address in T0 (after x87_sync), the flags in live defined */
+static void emit_indirect(tctx *t, unsigned live)
 {
-    if (!t->cf_inv && (abi_live & FL_C)) invert_c(t);
-    E(a_b(C_AL, t->a.p, abi_live ? indirect[t->xtop] : indirect_nf[t->xtop]));
+    if (flag_check) note_exit(t, live);
+    if (!t->cf_inv && (live & FL_C)) invert_c(t);
+    E(a_b(C_AL, t->a.p, live ? indirect[t->xtop] : indirect_nf[t->xtop]));
 }
 
 static bool emit_branch(tctx *t, const xinsn *in, int kind, uint32_t target, unsigned lt, unsigned lf)
 {
     uint32_t next = in->addr + in->len;
     if (in->pfx & XP_OPSZ) return false;
-    x87_sync(t);
+    sync_regs(t);
     /* a loop back to the block's own start with the TOP it starts with
        branches there directly */
     bool loop_ok = t->xtop == t->top0;
@@ -2500,7 +2793,7 @@ static bool emit_branch(tctx *t, const xinsn *in, int kind, uint32_t target, uns
         uint32_t *j = t->a.p;
         E(0);
         if (target == t->eip && loop_ok && !norm) {
-            if (j < t->a.end) *j = a_b(c, j, t->a.start);
+            if (j < t->a.end) *j = a_b(c, j, t->loop_to);
             emit_exit(t, next, lf, NULL);
             return true;
         }
@@ -2511,7 +2804,7 @@ static bool emit_branch(tctx *t, const xinsn *in, int kind, uint32_t target, uns
     }
     case BR_JMP:
         if (target == t->eip && loop_ok && !(!t->cf_inv && (lt & FL_C))) {
-            E(a_b(C_AL, t->a.p, t->a.start));
+            E(a_b(C_AL, t->a.p, t->loop_to));
             return true;
         }
         emit_exit(t, target, lt, NULL);
@@ -2525,7 +2818,7 @@ static bool emit_branch(tctx *t, const xinsn *in, int kind, uint32_t target, uns
         if (in->op != 0xC2 && in->op != 0xC3) return false;
         E(A_POP1(T0, R8));
         if (in->op == 0xC2) add_imm(t, R8, R8, in->imm, T1);
-        emit_indirect(t);
+        emit_indirect(t, abi_ret);
         return true;
     case BR_IND:
         if (in->reg == 3 || in->reg == 5 || (in->has_modrm && in->mod != 3 && in->ad16)) return false;
@@ -2540,7 +2833,7 @@ static bool emit_branch(tctx *t, const xinsn *in, int kind, uint32_t target, uns
             mov_imm(t, T1, next);
             E(A_PUSH1(T1, R8));
         }
-        emit_indirect(t);
+        emit_indirect(t, in->reg == 2 ? abi_call : abi_jmp);
         return true;
     }
     return false;
@@ -2594,7 +2887,7 @@ static void emit_fallback(tctx *t, const xinsn *in)
     xinsn *copy = pool++;
     left--;
     *copy = *in;
-    x87_sync(t);
+    sync_regs(t);
     int e = top_effect(in);
     t->xtop = (uint8_t)(e >= 8 ? e - 8 : (t->xtop + e) & 7);
     E(a_bl(C_AL, t->a.p, t->cf_inv ? fb_tramp : fb_tramp_c));
@@ -2664,14 +2957,20 @@ static struct block *translate(uint32_t eip, unsigned top)
     int kind = last->len ? branch_kind(last, &target) : BR_OTHER;
     unsigned lt = 0, lf = 0;
     switch (kind) {
-    case BR_NONE: lf = flags_needed(next); break;
-    case BR_JCC: lt = flags_needed(target); lf = flags_needed(next); break;
-    case BR_JMP: lt = flags_needed(target); break;
-    case BR_CALL: case BR_RET: case BR_IND: lt = abi_live; break;
+    case BR_NONE: lf = flags_needed(next, false); break;
+    case BR_JCC: lt = flags_needed(target, false); lf = flags_needed(next, false); break;
+    case BR_JMP: lt = flags_needed(target, false); break;
+    case BR_CALL: case BR_RET: case BR_IND: lt = abi_flags(last, kind); break;
     default: lt = lf = FL_ALL; break;
     }
     t->live[n] = (uint8_t)(lt | lf);
     for (int i = n - 1; i >= 0; i--) t->live[i] = (uint8_t)((t->live[i + 1] & ~wr[i]) | rd[i]);
+    unsigned reads = 0;   /* flags the code from eip surely reads before writing */
+    if (flag_check) {
+        if (kind == BR_NONE || kind == BR_JCC) reads |= flags_needed(next, true);
+        if (kind == BR_JCC || kind == BR_JMP) reads |= flags_needed(target, true);
+        for (int i = n - 1; i >= 0; i--) reads = (reads & ~wr[i]) | rd[i];
+    }
 
     struct block *b = calloc(1, sizeof(*b));
     if (!b) die("out of memory");
@@ -2679,8 +2978,25 @@ static struct block *translate(uint32_t eip, unsigned top)
     t->cf_inv = true;
     t->top0 = t->xtop = (uint8_t)top;
     x_reset(t);
+    xs_reset(t);
     t->fcom_at = t->force_cond = -1;
     t->eip = eip;
+    if (reads & FL_ALL) {
+        /* if the last exit left flags this block reads undefined, note
+           both blocks (jit_run reports them); the CPSR is kept */
+        E(A_MRS(T4));
+        E(A_LDR(T3, R0, O_FVALID));
+        E(dp_i(C_AL, OP_MOV, 0, T2, 0, reads & FL_ALL));
+        E(dp_r(C_AL, OP_BIC, 1, T2, T2, T3, SH_LSL, 0));
+        E(a_ldst(C_NE, 1, 0, T3, R0, O_FEXIT, 1, 0));
+        E(a_ldst(C_NE, 0, 0, T3, R0, O_FFROM, 1, 0));
+        E(a_ldst(C_NE, 0, 0, T2, R0, O_FMASK, 1, 0));
+        E(a_movw(C_NE, T3, eip & 0xFFFF));
+        E(a_movt(C_NE, T3, eip >> 16));
+        E(a_ldst(C_NE, 0, 0, T3, R0, O_FBAD, 1, 0));
+        E(A_MSR(T4));
+    }
+    t->loop_to = t->a.p;
     if (count_dir) {
         mov_imm(t, T3, (uint32_t)(uintptr_t)&b->count);
         E(A_LDR(T2, T3, 0));
@@ -2711,6 +3027,7 @@ static struct block *translate(uint32_t eip, unsigned top)
         }
         t->cur = i;
         t->skip = 0;
+        t->xs_pin = 0;
         if (in->len && !(interp_ops & op_class(in)) && native(t, in, t->live[i + 1])) {
             nat += 1 + t->skip;
             i += t->skip;
@@ -2720,7 +3037,7 @@ static struct block *translate(uint32_t eip, unsigned top)
         }
         if (!in->len) ended = true;
     }
-    if (!ended) x87_sync(t);
+    if (!ended) sync_regs(t);
     if (!ended) emit_exit(t, next, kind == BR_NONE || kind == BR_OTHER ? lf : lt | lf, NULL);
     n_native += nat;
     if (t->a.p > t->a.end) die("a block outgrew the code cache");
@@ -2793,13 +3110,43 @@ static void link_exit(uint32_t *site, uint32_t *alt, const uint32_t *code)
     n_links++;
 }
 
+/* XLAT_FLAG_CHECK: a block read flags the exit before it left undefined
+   (noted by the block itself; reported once per pair of blocks) */
+static void report_flags(xcpu *c)
+{
+    static struct { uint32_t at, from; } seen[256];
+    static unsigned nseen;
+    uint32_t at = c->jit_fbad_at, from = c->jit_fbad_from, mask = c->jit_fbad_mask;
+    c->jit_fbad_at = 0;
+    pthread_mutex_lock(&lock);
+    unsigned i = 0;
+    while (i < nseen && (seen[i].at != at || seen[i].from != from)) i++;
+    if (i == nseen && nseen < 256) {
+        seen[nseen].at = at;
+        seen[nseen].from = from;
+        nseen++;
+        static const char *kinds[] = { "falls through", "branches", "jumps", "calls", "returns", "jumps indirectly", "ends" };
+        struct block *b = NULL;
+        for (unsigned t = 0; t < 8 && !b; t++) b = find_block(from, t);
+        char fl[8], *p = fl;
+        for (int k = 0; k < 6; k++)
+            if (mask & 1u << k) *p++ = "CPAZSO"[k];
+        *p = 0;
+        fprintf(stderr, "xlat: flag check: x86_%08x reads %s, undefined after x86_%08x (which %s)\n", at, fl, from,
+                b && b->kind < sizeof kinds / sizeof *kinds ? kinds[b->kind] : "?");
+    }
+    pthread_mutex_unlock(&lock);
+}
+
 void jit_run(xcpu *c)
 {
     for (;;) {
         uint32_t eip = c->eip;
         if (in_stop(eip)) return;
         const uint32_t *code = code_for(eip, c->top & 7);
-        if (enter(c, code) != EXIT_LINK) continue;   /* indirect: c->eip is the target */
+        int why = enter(c, code);
+        if (c->jit_fbad_at) report_flags(c);
+        if (why != EXIT_LINK) continue;   /* indirect: c->eip is the target */
         uint32_t *w = (uint32_t *)(uintptr_t)c->jit_site;
         uint32_t target = w[0];
         c->eip = target;
@@ -2862,6 +3209,7 @@ uintptr_t jit_fallback(xcpu *c, uint32_t *site)
     }
     if (!in->len || xi_exec(c, in) != XI_OK) xrt_fault(c, "invalid instruction");
     if (c->eip == in->addr + in->len && c->top == site[1]) return (uintptr_t)(site + 2);
+    c->jit_fvalid = FL_ALL;   /* the interpreter left every flag defined */
     return (uintptr_t)indirect_any;
 }
 
@@ -2886,6 +3234,7 @@ static void gen_trampolines(void)
     /* int enter(xcpu *c, const void *code) */
     enter = (int (*)(xcpu *, const void *))(uintptr_t)a.p;
     emit(&a, A_PUSH(0x4FF0));                         /* r4-r11, lr */
+    emit(&a, A_VPUSH(8, 8));                          /* d8-d15: xmm slots (xs_get) */
     emit(&a, dp_i(C_AL, OP_SUB, 0, SP, SP, 12));      /* [sp] = c, sp 8-aligned */
     emit(&a, A_STR(R0, SP, 0));
     emit(&a, A_LDR(R2, R0, O_NZCV));
@@ -2897,6 +3246,7 @@ static void gen_trampolines(void)
     emit(&a, A_BX(R1));
     exit_common = a.p;                                /* r0 = why */
     emit(&a, dp_i(C_AL, OP_ADD, 0, SP, SP, 12));
+    emit(&a, A_VPOP(8, 8));
     emit(&a, A_POP(0x8FF0));                          /* r4-r11, pc */
 
     /* direct exit: lr points at the target eip */
@@ -3077,12 +3427,28 @@ void jit_init(uint32_t lo, uint32_t hi, bool flags_at_stop)
     stop_hi = hi;
     stop_live = flags_at_stop ? FL_ALL : 0;
     if (cache) return;
-    /* Flags are dead across ret and indirect jumps (MSVC never passes them
-       there); where the lookahead gives up, SF ZF CF OF are kept.
-       XLAT_SAFE_FLAGS keeps every flag everywhere. */
-    bool safe = getenv("XLAT_SAFE_FLAGS") != NULL;
-    unknown_live = safe ? FL_ALL : FL_NZCV;
-    abi_live = safe ? FL_ALL : 0;
+    /* SF ZF CF are kept across calls, rets and indirect jumps; where the
+       lookahead gives up, OF too.  The MSVC ABI never passes flags there,
+       but hand-written code does: Phantom Dust has a function that returns
+       its answer in ZF, and dropping it broke the characters' models.  ZF
+       and CF are the flags code returns answers in; keeping OF, PF and AF
+       as well would send more shifts to the interpreter.  XLAT_SAFE_FLAGS=1
+       keeps every flag everywhere; naming any of call, ret, jmp, look keeps
+       every flag only there. */
+    const char *safe = getenv("XLAT_SAFE_FLAGS");
+    abi_call = abi_ret = abi_jmp = FL_C | FL_Z | FL_S;
+    unknown_live = FL_NZCV;
+    if (safe) {
+        bool some = strstr(safe, "call") || strstr(safe, "ret") || strstr(safe, "jmp") || strstr(safe, "look");
+        if (!some || strstr(safe, "call")) abi_call = FL_ALL;
+        if (!some || strstr(safe, "ret")) abi_ret = FL_ALL;
+        if (!some || strstr(safe, "jmp")) abi_jmp = FL_ALL;
+        if (!some || strstr(safe, "look")) unknown_live = FL_ALL;
+        fprintf(stderr, "xlat: flags kept at calls %#x, rets %#x, indirect jumps %#x, past the lookahead %#x\n",
+                abi_call, abi_ret, abi_jmp, unknown_live);
+    }
+    flag_check = getenv("XLAT_FLAG_CHECK") != NULL;
+    if (flag_check) fprintf(stderr, "xlat: flag check on (each block checks the flags it reads)\n");
     stats = getenv("XLAT_STATS") != NULL;
     count_dir = getenv("XLAT_COUNT");
     const char *ops = getenv("XLAT_INTERP_OPS");

@@ -5,7 +5,7 @@ GL ?= gl
 BUILD ?= build-renderer-$(TARGET)
 ifeq ($(TARGET),armhf)
 CC = arm-linux-gnueabihf-gcc
-ARCH_FLAGS = -mfpu=vfpv4 -fsigned-char
+ARCH_FLAGS = -mfpu=vfpv4 -march=armv7ve -mtune=cortex-a53 -fsigned-char
 TRIPLE = arm-linux-gnueabihf
 else ifeq ($(TARGET),i386)
 CC = i686-linux-gnu-gcc

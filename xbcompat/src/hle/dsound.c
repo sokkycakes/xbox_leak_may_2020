@@ -805,6 +805,7 @@ static struct {
     uint64_t start, mix_ns, mix_max, wait_ns, wait_max;
     unsigned blocks, waits, calls;
     unsigned long long voice_frames[4];   /* PCM, ADPCM, voice-processor, stream */
+    unsigned long long quiet_frames;      /* of the buffers', inaudible ones (advanced, not mixed) */
     unsigned voices_max[4];
 } dstat = { .on = -1 };
 static __thread int ds_in_mixer;
@@ -842,12 +843,12 @@ static void dstat_block(uint64_t t0, const unsigned voices[4])
     double span = (now - dstat.start) / 1e9;
     if (span < 5) return;
     xlog("DSound: mixer held the lock %.0f%% of the time (%.2f ms a block, worst %.2f, %u blocks); "
-         "voice frames/s pcm %.0f adpcm %.0f vp %.0f stream %.0f (most at once %u/%u/%u/%u); "
+         "voice frames/s pcm %.0f adpcm %.0f vp %.0f stream %.0f (most at once %u/%u/%u/%u, inaudible %.0f); "
          "title calls waited %.1f ms/s (%u of %u calls, worst %.2f ms)",
          dstat.mix_ns / 1e7 / span, dstat.mix_ns / 1e6 / dstat.blocks, dstat.mix_max / 1e6, dstat.blocks,
          dstat.voice_frames[0] / span, dstat.voice_frames[1] / span, dstat.voice_frames[2] / span,
          dstat.voice_frames[3] / span, dstat.voices_max[0], dstat.voices_max[1], dstat.voices_max[2],
-         dstat.voices_max[3], dstat.wait_ns / 1e6 / span, dstat.waits, dstat.calls, dstat.wait_max / 1e6);
+         dstat.voices_max[3], dstat.quiet_frames / span, dstat.wait_ns / 1e6 / span, dstat.waits, dstat.calls, dstat.wait_max / 1e6);
     int on = dstat.on;
     memset(&dstat, 0, sizeof dstat);
     dstat.on = on;
@@ -1040,6 +1041,23 @@ static void voice_job(struct dsmix_voice *j, struct ds_voice *v)
     memcpy(j->subgain, v->subgain, sizeof(j->subgain));
 }
 
+/* Every gain of the voice under 2^-16 (-96 dB): the mixer only advances
+   it.  XBCOMPAT_MIX_SILENT=1 mixes such voices too. */
+static bool voice_quiet(const struct dsmix_voice *j)
+{
+    static int mix_all = -1;
+    if (mix_all < 0) {
+        const char *e = getenv("XBCOMPAT_MIX_SILENT");
+        mix_all = e && *e && *e != '0';
+    }
+    if (mix_all) return false;
+    const float q = 1.0f / 65536;
+    for (uint32_t k = 0; k < j->ch && k < 6; k++)
+        if (fabsf(j->gain[k][0]) >= q || fabsf(j->gain[k][1]) >= q || (j->sub && fabsf(j->subgain[k]) >= q))
+            return false;
+    return true;
+}
+
 /* Describe a playing buffer for dsmix_run; false when there is nothing to mix. */
 static bool buffer_job(struct ds_buffer *b, struct dsmix_voice *j, struct ds_events *ev)
 {
@@ -1057,6 +1075,7 @@ static bool buffer_job(struct ds_buffer *b, struct dsmix_voice *j, struct ds_eve
     j->looping = (uint32_t)b->looping;
     j->vp = voice_has_vp(v);
     j->pos = b->pos;
+    j->quiet = voice_quiet(j);
     return true;
 }
 
@@ -1256,6 +1275,7 @@ void ds_mix_block(float *out, int n)
             if (b->stop_at && now >= b->stop_at) { b->stop_at = 0; buffer_stopex_locked(b, b->stop_flags, &ev); }
             if (buffer_job(b, &jobs[nj], &ev)) {
                 if (t0) voices[jobs[nj].vp ? 2 : jobs[nj].adpcm ? 1 : 0]++;
+                if (t0 && jobs[nj].quiet) dstat.quiet_frames += (unsigned)n;
                 owners[nj++] = b;
             }
         } else if (e->kind == DS_STREAM) {

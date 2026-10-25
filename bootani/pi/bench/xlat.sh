@@ -42,13 +42,14 @@ if [ "$1" = undo ]; then
 fi
 {
 echo "== $(date)"
-md5sum $X/xbcompat.arm $T/xbcompat.xlat $T/xbprof
+md5sum $X/xbcompat.arm $T/xbcompat.xlat $T/xbprof $T/pistat
 } > $R
 [ -e $X/xbcompat.arm.unicorn ] || cp -p $X/xbcompat.arm $X/xbcompat.arm.unicorn
 [ -e $PREV ] || grep '^[[:space:]]*\(export[[:space:]]*\)\{0,1\}XBOX_CPU=' $CONF > $PREV
 install -m 755 $T/xbcompat.xlat $X/xbcompat.arm
 install -m 755 $T/xlat.sh /root/xlat.sh
 install -m 755 $T/xbprof /root/xbprof
+install -m 755 $T/pistat /root/pistat
 set_cpu XBOX_CPU=unicorn
 sync
 for l in $LOGS; do [ -f $l ] && wc -c < $l > /tmp/xlat.$(basename $l).off; done

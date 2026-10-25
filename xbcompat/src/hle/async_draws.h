@@ -79,6 +79,7 @@ static const struct { unsigned short off, size, group; } async_fields[] = {
     AF(direct_mv, G_XFORM),
 };
 #undef AF
+_Static_assert(sizeof(d3d_state) <= 0xFFFF, "async_fields keeps offsets in 16 bits");
 
 static bool async_front(void) { return async_on && !async_worker_thread; }
 
@@ -143,9 +144,9 @@ static void async_delta_(void)
         const float (*fv)[4] = d3d_storage[0].vs_const;
         float (*sv)[4] = async_sent.vs_const;
         for (unsigned r = 0; r < 192;) {
-            if (!(async_vs_rows[r >> 5] >> (r & 31) & 1) || !memcmp(fv[r], sv[r], 16)) { r++; continue; }
+            if (!(async_vs_rows[r >> 5] >> (r & 31) & 1) || same_bytes(fv[r], sv[r], 16)) { r++; continue; }
             unsigned e = r + 1;
-            while (e < 192 && e - r < 16 && (async_vs_rows[e >> 5] >> (e & 31) & 1) && memcmp(fv[e], sv[e], 16)) e++;
+            while (e < 192 && e - r < 16 && (async_vs_rows[e >> 5] >> (e & 31) & 1) && !same_bytes(fv[e], sv[e], 16)) e++;
             memcpy(sv[r], fv[r], (e - r) * 16);
             uint32_t *p = as_op(AS_FIELD, 2 + (e - r) * 4);
             p[0] = offsetof(d3d_state, vs_const) + r * 16;
@@ -158,7 +159,7 @@ static void async_delta_(void)
         if (!(async_fields[i].group & dirty) || async_fields[i].group == G_VSC) continue;
         for (unsigned o = 0; o < async_fields[i].size; o += 64) {
             unsigned off = async_fields[i].off + o, n = async_fields[i].size - o < 64 ? async_fields[i].size - o : 64;
-            if (!memcmp(front + off, sent + off, n)) continue;
+            if (same_bytes(front + off, sent + off, n)) continue;
             memcpy(sent + off, front + off, n);
             uint32_t *p = as_op(AS_FIELD, 2 + (n + 3) / 4);
             p[0] = off;
@@ -173,7 +174,7 @@ static void async_delta_(void)
     unsigned nrs = d3d_storage[0].rs_count;
     for (unsigned i = 0; i < nrs; i += 16) {
         unsigned n = nrs - i < 16 ? nrs - i : 16;
-        if (!memcmp(rs + i, async_sent_rs + i, n * 4)) continue;
+        if (same_bytes(rs + i, async_sent_rs + i, n * 4)) continue;
         memcpy(async_sent_rs + i, rs + i, n * 4);
         uint32_t *p = as_op(AS_RS, 2 + n);
         p[0] = i;
@@ -181,7 +182,7 @@ static void async_delta_(void)
         memcpy(p + 2, rs + i, n * 4);
     }
     for (unsigned i = 0; i < 4 * 32; i += 16) {
-        if (!memcmp(tss + i, async_sent_tss + i, 64)) continue;
+        if (same_bytes(tss + i, async_sent_tss + i, 64)) continue;
         memcpy(async_sent_tss + i, tss + i, 64);
         uint32_t *p = as_op(AS_TSS, 2 + 16);
         p[0] = i;
@@ -440,6 +441,12 @@ void d3d_async_run(const uint32_t *buf, unsigned n)
         switch (op) {
         case AS_FIELD:
             memcpy((char *)back + a[0], a + 2, a[1]);
+            if (a[0] < offsetof(d3d_state, vs_const) + sizeof back->vs_const &&
+                a[0] + a[1] > offsetof(d3d_state, vs_const)) {
+                unsigned lo = a[0] > offsetof(d3d_state, vs_const) ? (a[0] - offsetof(d3d_state, vs_const)) / 16 : 0;
+                unsigned hi = (a[0] + a[1] - offsetof(d3d_state, vs_const) + 15) / 16;
+                vsc_touch_in(back, lo, hi - lo);
+            }
             if (a[0] < offsetof(d3d_state, stipple) + sizeof back->stipple && a[0] + a[1] > offsetof(d3d_state, stipple))
                 back->stipple_dirty = true;
             break;

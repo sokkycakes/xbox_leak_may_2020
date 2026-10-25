@@ -333,6 +333,24 @@ static const struct tmpl tmpls[] = {
        registers, so its loop can't keep them) */
     { "x87 loop fadd", "D9 C0 D8 C2 DD D9 49 75 F7", C_X87, T_LOOP, 0 },
     { "x87 loop fxch", "D9 C1 D8 C9 D9 C9 DD DA 49 75 F5", C_X87, T_LOOP, 0 },
+    /* SSE runs: xlat keeps xmm registers in host registers across a block
+       (six at a time), so these use more of them than fit, and put x87
+       helper calls and the interpreter between SSE instructions */
+    { "sse run reg", "0F 58+a /r 0F 58+a /r 0F C6 /r ib 0F 58+a /r 0F 28 /r 0F 14 /r 0F 58+a /r 0F 15 /r", C_SSE,
+      T_GX | T_EX | T_REG, 0 },
+    { "sse run mem", "0F 28 /r 0F 59 /r F3 0F 58+a /r 0F C6 /r ib 0F 11 /r", C_SSE, T_GX | T_EX, 0 },
+    { "sse run ss", "F3 0F 10 /r F3 0F 58+a /r F3 0F 59 /r F3 0F 11 /r 0F 2F /r", C_SSE, T_GX | T_EX, 0 },
+    { "sse run logic", "0F 54+l /r 0F 57 /r 0F 28 /r 0F 55 /r 0F 16 /r 0F 12 /r 0F 56 /r", C_SSE,
+      T_GX | T_EX | T_REG, 0 },
+    { "sse run est", "0F 52 /r F3 0F 53 /r 0F 59 /r 0F 53 /r", C_SSE, T_GX | T_EX | T_REG | T_APPROX, 0 },
+    { "sse run cmp", "0F C2 /r ic F3 0F C2 /r ic 0F 54 /r 0F 58 /r F3 0F 51 /r", C_SSE, T_GX | T_EX | T_REG, 0 },
+    { "sse run fsin", "0F 59 /r 0F 58 /r D9 FE 0F 58 /r 0F 28 /r", C_SSE, T_GX | T_EX | T_REG | T_SMALL | T_APPROX, 0 },
+    { "sse run lahf", "0F 59 /r 9F 0F 58 /r 0F 28 /r", C_SSE, T_GX | T_EX | T_REG, 0 },
+    { "sse run fistp", "0F 59 /r DF /7 0F 58 /r", C_X87, T_GX | T_EX | T_MEM, 0 },
+    /* a scalar loaded and broadcast (xlat skips the load's zeroing) */
+    { "movss + shufps 0", "F3 0F 10 05 md 0F C6 C0 00 0F 59 C1", C_SSE, 0, 0 },
+    { "movss + shufps 0 xmm3", "F3 0F 10 1D md 0F C6 DB 00", C_SSE, 0, 0 },
+    { "movss + shufps 55", "F3 0F 10 1D md 0F C6 DB 55", C_SSE, 0, 0 },
 };
 #define NTMPL (sizeof(tmpls) / sizeof(tmpls[0]))
 
@@ -451,8 +469,11 @@ static void make_test(struct test *t, struct state *s)
         else { s->r[XR_EDX] = rn(4); }
         if (rn(2)) s->r[XR_EDX] = (uint32_t)-(int32_t)rn(3);
     }
-    for (int i = 0; i < 2; i++)
+    for (int i = 0; i < 2; i++) {
+        /* a long first instruction (an SSE run) leaves no room for them */
+        if (t->follow[i] != NO_TMPL && p - t->code > (int)sizeof(t->code) - 8) t->follow[i] = NO_TMPL;
         if (t->follow[i] != NO_TMPL) p = encode(&tmpls[t->follow[i]], p, s, true);
+    }
     t->len = (uint8_t)(p - t->code);
 }
 

@@ -26,6 +26,7 @@ static void (APIENTRY *p_glMultiTexCoord4fv)(GLenum, const GLfloat *);
 static void (APIENTRY *p_glPointParameterfv)(GLenum, const GLfloat *);
 static void (APIENTRY *p_glPointParameterf)(GLenum, GLfloat);
 static void (APIENTRY *p_glBindBuffer)(GLenum, GLuint);
+static void (APIENTRY *p_glVertexAttribPointer)(GLuint, GLint, GLenum, GLboolean, GLsizei, const void *);
 
 #define GC_UNITS 4
 #define GC_UNKNOWN 0xFFFFFFFFu
@@ -80,6 +81,14 @@ static uint32_t gc_ntex;
 static unsigned gc_epoch;      /* bumped whenever GL state may have changed */
 static unsigned gc_calls, gc_skipped;   /* this frame, for the fps log */
 
+/* Generic attribute pointers, with the array buffer bound when each was
+   given (GL keeps that buffer with the pointer).  A programmable draw
+   points every attribute it reads, mostly where the last draw of the mesh
+   did; Mesa checks each call in full before finding nothing changed. */
+static struct { uint32_t buf, size, type, norm, stride; const void *ptr; } gc_vap[16];
+static uint16_t gc_vap_known;
+static bool gc_vap_bypass;   /* XBCOMPAT_WHATIF=cuts: every call goes through */
+
 static void gc_reset(void)
 {
     gc_epoch++;
@@ -90,6 +99,7 @@ static void gc_reset(void)
     memset(gc.matrix_known, 0, sizeof gc.matrix_known);
     gc.attrib_on = gc.attrib_off = 0;
     gc.attrib_val_known = 0;
+    gc_vap_known = 0;
     if (gc_tex) memset(gc_tex, 0xFF, gc_ntex * sizeof *gc_tex);
 }
 
@@ -408,6 +418,25 @@ static void gc_forget_buffer(GLuint id)
     gc_epoch++;
     if (gc.array_buffer == id) gc.array_buffer = GC_UNKNOWN;
     if (gc.element_buffer == id) gc.element_buffer = GC_UNKNOWN;
+    /* Deleting a buffer unbinds it from the attributes that use it. */
+    for (int r = 0; r < 16; r++)
+        if (gc_vap[r].buf == id) gc_vap_known &= ~(1u << r);
+}
+
+static void gc_vertex_attrib_pointer(GLuint r, GLint size, GLenum type, GLboolean norm, GLsizei stride, const void *ptr)
+{
+    if (r < 16) {
+        uint16_t bit = 1u << r;
+        uint32_t buf = gc.array_buffer;
+        if (!gc_vap_bypass && (gc_vap_known & bit) && gc_vap[r].buf == buf && gc_vap[r].ptr == ptr &&
+            gc_vap[r].size == (uint32_t)size && gc_vap[r].type == type && gc_vap[r].norm == norm &&
+            gc_vap[r].stride == (uint32_t)stride) { gc_skipped++; return; }
+        gc_vap[r].buf = buf; gc_vap[r].size = size; gc_vap[r].type = type;
+        gc_vap[r].norm = norm; gc_vap[r].stride = stride; gc_vap[r].ptr = ptr;
+        if (buf != GC_UNKNOWN) gc_vap_known |= bit; else gc_vap_known &= ~bit;
+    }
+    gc_calls++; gc_epoch++;
+    (p_glVertexAttribPointer)(r, size, type, norm, stride, ptr);
 }
 
 static void gc_use_program(GLuint p)
@@ -599,6 +628,7 @@ static void gc_pop_attrib(void)
 #define p_glEnableVertexAttribArray(r) gc_attrib_array(r, true)
 #define p_glDisableVertexAttribArray(r) gc_attrib_array(r, false)
 #define p_glVertexAttrib4fv(r, v) gc_vertex_attrib4fv(r, v)
+#define p_glVertexAttribPointer(r, s, t, n, st, p) gc_vertex_attrib_pointer(r, s, t, n, st, p)
 #define glDepthFunc(f) gc_depth_func(f)
 #define glDepthMask(m) gc_depth_mask(m)
 #define glShadeModel(m) gc_shade_model(m)
