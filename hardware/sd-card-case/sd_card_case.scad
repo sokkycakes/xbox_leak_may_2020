@@ -87,17 +87,31 @@ module bump() {
                  [tx_tip + 1.6, floor_t + bump_h], [tx_tip + 2.6, floor_t]]);
 }
 
-spine_y0 = case_h - corner_r - spine_h;
+label_top = case_h - margin;                  // top edge of the whole label
+spine_y0  = label_top - spine_h;
 assert(spine_y0 > slot_y + grip_l/2 + 1, "spine runs into the card slot: shorten spine_h");
+module outline() { hull() for (x = [corner_r, case_w-corner_r], y = [corner_r, case_h-corner_r]) translate([x, y]) circle(r=corner_r); }
 module label_cuts() {
     z = case_t - label_depth;
     ax = margin + 8.9;                        // front art starts here, as in the mockup
-    // front art panel
-    translate([ax, margin + 0.8, z]) rplate(case_w - ax - margin - 0.6, case_h - 2*margin - 0.8, 1, label_r + 1);
-    // fold strip joining the art to the left edge
-    translate([-1, spine_y0, z]) cube([ax + label_r + 2, spine_h, 1]);
-    // spine on the left edge face
-    translate([-1, spine_y0, -1]) cube([1 + label_depth, spine_h, case_t + 2]);
+    lr = label_r + 1;
+    // front: art panel and the fold strip as one shape, square where they join
+    translate([0, 0, z]) linear_extrude(1) intersection() {
+        union() {
+            translate([ax, margin + 0.8]) hull() {
+                for (x = [lr, case_w - ax - margin - 0.6 - lr], y = [lr, label_top - margin - 0.8 - lr])
+                    translate([x, y]) circle(r=lr);
+                translate([0, spine_y0 - margin - 0.8]) square([1, label_top - spine_y0]);
+            }
+            translate([-1, spine_y0]) square([ax + lr + 1, spine_h]);
+        }
+        outline();
+    }
+    // spine: a skin of label_depth taken off the left edge (follows the rounded corner)
+    translate([0, 0, -1]) linear_extrude(case_t + 2) intersection() {
+        difference() { outline(); offset(delta=-label_depth) outline(); }
+        translate([-1, spine_y0]) square([ax, spine_h]);
+    }
     if (spine_back > 0)
         translate([-1, spine_y0, -1]) cube([1 + spine_back, spine_h, 1 + label_depth]);
 }
