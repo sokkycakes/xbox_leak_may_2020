@@ -22,7 +22,7 @@
 // copyProgress (0..1 while a copy runs).  Functions:
 //   IsDeviceReady(dev)   the device is mounted
 //   GetDeviceName(dev)   "Hard Drive", or the memory unit's name
-//   GetDeviceSpace(dev)  "12,345 blocks free of 123,456"
+//   GetDeviceSpace(dev)  "8.4 GB free of 238 GB"
 //   GetDeviceFill(dev)   the used fraction, for a gauge
 //   Refresh()            scan the device's titles; returns their count
 //   GetTitleCount(), FindTitle(id), GetTitleName(i), GetTitleID(i), GetTitleInfo(i)
@@ -99,6 +99,7 @@ protected:
     bool SaveOK(int nSave) { return TitleOK(m_title) && nSave >= 0 && nSave < g_titles[m_device].GetSavedGameCount(m_title); }
     bool GetSavePath(TCHAR* szPath, int nSave);
     bool GetSpace(int nDev, int* pnTotal, int* pnFree);
+    bool GetSpaceBytes(int nDev, ULONGLONG* pqwTotal, ULONGLONG* pqwFree);
 
     static void WINAPI DeleteThread(CStorage* p);
 
@@ -220,6 +221,50 @@ CStrObject* CStorage::GetDeviceName(int nDev)
 
 // The device's root (C: holds UDATA and TDATA on the hard disk; a memory
 // unit is its mounted drive).
+// A size in bytes as "96 KB", "8.4 GB" (sokky 2026-10-21: KB, MB, GB, TB
+// instead of the Xbox's 16 KB blocks): 1024-based, the largest unit that
+// keeps the number at 1 or more, one decimal under 10, at least 1 KB.
+static void FormatBytes(TCHAR* sz, ULONGLONG qwBytes)
+{
+    static const TCHAR* const rgszUnit[] = { _T("KB"), _T("MB"), _T("GB"), _T("TB") };
+    double n = (double)qwBytes / 1024.0;
+    int i = 0;
+    while (n >= 1024.0 && i < 3)
+    {
+        n /= 1024.0;
+        i += 1;
+    }
+    if (i == 0 && qwBytes > 0 && n < 1.0)
+        n = 1.0;
+    if (n < 10.0 && i > 0)
+        _stprintf(sz, _T("%.1f %s"), n, rgszUnit[i]);
+    else
+        _stprintf(sz, _T("%.0f %s"), n, rgszUnit[i]);
+}
+
+static void FormatBlockBytes(TCHAR* sz, int nBlocks)
+{
+    FormatBytes(sz, (ULONGLONG)(nBlocks < 0 ? 0 : nBlocks) * BLOCK_SIZE);
+}
+
+bool CStorage::GetSpaceBytes(int nDev, ULONGLONG* pqwTotal, ULONGLONG* pqwFree)
+{
+    *pqwTotal = *pqwFree = 0;
+    if (!IsDeviceReady(nDev))
+        return false;
+    CHAR szRoot [4];
+    szRoot[0] = nDev == Dev0 ? 'C' : (CHAR)g_titles[nDev].GetUData()[0];
+    szRoot[1] = ':'; szRoot[2] = '\\'; szRoot[3] = 0;
+    if (szRoot[0] == 0)
+        return false;
+    ULARGE_INTEGER qwAvail, qwTotal, qwFree;
+    if (!GetDiskFreeSpaceExA(szRoot, &qwAvail, &qwTotal, &qwFree))
+        return false;
+    *pqwTotal = qwTotal.QuadPart;
+    *pqwFree = qwFree.QuadPart;
+    return true;
+}
+
 bool CStorage::GetSpace(int nDev, int* pnTotal, int* pnFree)
 {
     *pnTotal = *pnFree = 0;
@@ -240,13 +285,13 @@ bool CStorage::GetSpace(int nDev, int* pnTotal, int* pnFree)
 
 CStrObject* CStorage::GetDeviceSpace(int nDev)
 {
-    int nTotal, nFree;
-    if (!GetSpace(nDev, &nTotal, &nFree))
+    ULONGLONG qwTotal, qwFree;
+    if (!GetSpaceBytes(nDev, &qwTotal, &qwFree))
         return new CStrObject;
-    TCHAR szFree [16], szTotal [16], sz [64];
-    FormatBlocks(szFree, nFree);
-    FormatBlocks(szTotal, nTotal);
-    _stprintf(sz, _T("%s blocks free of %s"), szFree, szTotal);
+    TCHAR szFree [24], szTotal [24], sz [64];
+    FormatBytes(szFree, qwFree);
+    FormatBytes(szTotal, qwTotal);
+    _stprintf(sz, _T("%s free of %s"), szFree, szTotal);
     return new CStrObject(sz);
 }
 
@@ -310,7 +355,7 @@ int CStorage::GetSaveCount(int nTitle)
     return TitleOK(nTitle) ? g_titles[m_device].GetSavedGameCount(nTitle) : 0;
 }
 
-// "3 saved games, 1,234 blocks" (downloads and installed games counted
+// "3 saved games, 19.3 MB" (downloads and installed games counted
 // apart, as the Memory screen's "N games, N saves")
 CStrObject* CStorage::GetTitleInfo(int nTitle)
 {
@@ -324,8 +369,8 @@ CStrObject* CStorage::GetTitleInfo(int nTitle)
         else
             nSaves += 1;
     }
-    TCHAR szBlocks [16], sz [128], szPart [48];
-    FormatBlocks(szBlocks, g_titles[m_device].GetTitleTotalBlocks(nTitle, NULL));
+    TCHAR szBlocks [24], sz [128], szPart [48];
+    FormatBlockBytes(szBlocks, g_titles[m_device].GetTitleTotalBlocks(nTitle, NULL));
     sz[0] = 0;
     if (nGames > 0)
     {
@@ -338,7 +383,7 @@ CStrObject* CStorage::GetTitleInfo(int nTitle)
         _stprintf(szPart, _T("%d saved game%s"), nSaves, nSaves == 1 ? _T("") : _T("s"));
         _tcscat(sz, szPart);
     }
-    _stprintf(szPart, _T(", %s blocks"), szBlocks);
+    _stprintf(szPart, _T(", %s"), szBlocks);
     _tcscat(sz, szPart);
     return new CStrObject(sz);
 }
@@ -413,23 +458,23 @@ CStrObject* CStorage::GetSaveName(int nSave)
     return new CStrObject(szName);
 }
 
-// "10/20/2026 8:05 AM, 12 blocks"
+// "10/20/2026 8:05 AM, 192 KB"
 CStrObject* CStorage::GetSaveInfo(int nSave)
 {
     TCHAR szPath [MAX_PATH];
     if (!GetSavePath(szPath, nSave))
         return new CStrObject;
-    TCHAR szTime [48], szBlocks [16], sz [96];
+    TCHAR szTime [48], szBlocks [24], sz [96];
     szTime[0] = 0;
     FILETIME ft = g_titles[m_device].GetSavedGameTime(m_title, nSave), lft;
     SYSTEMTIME st;
     if ((ft.dwLowDateTime != 0 || ft.dwHighDateTime != 0) && FileTimeToLocalFileTime(&ft, &lft) && FileTimeToSystemTime(&lft, &st))
         FormatTime(szTime, countof(szTime), &st);
-    FormatBlocks(szBlocks, GetDirectoryBlocks(szPath, BLOCK_SIZE, true, NULL));
+    FormatBlockBytes(szBlocks, GetDirectoryBlocks(szPath, BLOCK_SIZE, true, NULL));
     if (szTime[0])
-        _stprintf(sz, _T("%s, %s blocks"), szTime, szBlocks);
+        _stprintf(sz, _T("%s, %s"), szTime, szBlocks);
     else
-        _stprintf(sz, _T("%s blocks"), szBlocks);
+        _stprintf(sz, _T("%s"), szBlocks);
     return new CStrObject(sz);
 }
 

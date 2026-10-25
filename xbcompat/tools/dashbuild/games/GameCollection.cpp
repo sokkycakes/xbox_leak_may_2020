@@ -33,6 +33,8 @@ struct GAMEINFO
     CHAR m_szId[64];            // the cart's Kazeta save Id
     CHAR m_szPlatform[32];      // the cart's Platform key, when its .kzi names one
     CHAR m_szPublisher[48];     // the cart's Publisher (or Developer) key, when its .kzi names one
+    CHAR m_szIcon[160];         // the cart's Icon, as a path on the card, when it has one
+    bool m_bWincart;            // a Windows cart: xbcompat's stub XBE stands in for it
     bool m_bOrder;              // the cart's .kzi has an Order key
     int m_nOrder;               // its value: carts with one come first, lowest first
     WCHAR m_szName[41];
@@ -86,6 +88,7 @@ public:
     void LaunchXOnlineDash();
 
     int IsInstalled(int nGame);
+    int CanInstall(int nGame);
     int StartInstall(int nGame);
     CStrObject* GetInstallStatus();
     CStrObject* GetInstallError();
@@ -127,6 +130,7 @@ START_NODE_FUN(CGameCollection, CNode)
     NODE_FUN_VI(LaunchGame)
     NODE_FUN_VV(LaunchXOnlineDash)
     NODE_FUN_II(IsInstalled)
+    NODE_FUN_II(CanInstall)
     NODE_FUN_II(StartInstall)
     NODE_FUN_SV(GetInstallStatus)
     NODE_FUN_SV(GetInstallError)
@@ -253,6 +257,51 @@ static void GetCardSignature(CHAR* szSig, int cchSig)
     FindClose(hFind);
 }
 
+// An Xbox title, as opposed to a cart for another runtime (a Windows cart's
+// stub XBE included, on the card or installed in E:\Games by Frolick's
+// store).
+static bool IsXboxTitle(const GAMEINFO* pGame)
+{
+    return !pGame->m_bWincart && (pGame->m_nKind != KIND_CARD || pGame->m_bXbox);
+}
+
+// xbcompat's .wincart beside a Windows cart's stub XBE (key=value lines):
+// its runtime= is the cart's own Runtime; Frolick's store adds id= and
+// publisher= for the games it installs in E:\Games.
+static void ReadWincart(const CHAR* szPath, GAMEINFO* pGame)
+{
+    CHAR rgch [1024];
+    DWORD cb = 0;
+    HANDLE hFile = CreateFileA(szPath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (hFile == INVALID_HANDLE_VALUE)
+        return;
+    if (!ReadFile(hFile, rgch, sizeof (rgch) - 1, &cb, NULL))
+        cb = 0;
+    CloseHandle(hFile);
+    rgch[cb] = 0;
+    pGame->m_bWincart = true;
+    pGame->m_szRuntime[0] = 0;
+    for (CHAR* pch = rgch; *pch != 0; )
+    {
+        CHAR* pchEnd = pch;
+        while (*pchEnd != 0 && *pchEnd != '\n' && *pchEnd != '\r')
+            pchEnd += 1;
+        CHAR chEnd = *pchEnd;
+        *pchEnd = 0;
+        if (strncmp(pch, "runtime=", 8) == 0)
+            lstrcpynA(pGame->m_szRuntime, pch + 8, sizeof (pGame->m_szRuntime));
+        else if (strncmp(pch, "publisher=", 10) == 0)
+            lstrcpynA(pGame->m_szPublisher, pch + 10, sizeof (pGame->m_szPublisher));
+        else if (strncmp(pch, "id=", 3) == 0 && pGame->m_szId[0] == 0)
+            lstrcpynA(pGame->m_szId, pch + 3, sizeof (pGame->m_szId));
+        pch = pchEnd;
+        if (chEnd != 0)
+            pch += 1;
+    }
+    if (pGame->m_szRuntime[0] == 0)
+        strcpy(pGame->m_szRuntime, "windows");
+}
+
 // A Kazeta cart info file: Name, Id, Exec, Runtime (key=value lines, UTF-8).
 static void ReadCart(const CHAR* szKzi, GAMEINFO* pGame)
 {
@@ -270,6 +319,8 @@ static void ReadCart(const CHAR* szKzi, GAMEINFO* pGame)
 
     CHAR szExec [128];
     szExec[0] = 0;
+    CHAR szIcon [128];
+    szIcon[0] = 0;
     for (CHAR* pchLine = rgch; *pchLine != 0; )
     {
         CHAR* pchEnd = pchLine;
@@ -299,6 +350,8 @@ static void ReadCart(const CHAR* szKzi, GAMEINFO* pGame)
                 lstrcpynA(pGame->m_szPublisher, pchValue, sizeof (pGame->m_szPublisher));
             else if (_stricmp(pchLine, "Developer") == 0 && pGame->m_szPublisher[0] == 0)
                 lstrcpynA(pGame->m_szPublisher, pchValue, sizeof (pGame->m_szPublisher));
+            else if (_stricmp(pchLine, "Icon") == 0)
+                lstrcpynA(szIcon, pchValue, sizeof (szIcon));
             else if (_stricmp(pchLine, "Order") == 0 && pchValue[0] != 0)
                 pGame->m_bOrder = true, pGame->m_nOrder = atoi(pchValue);
             else if (_stricmp(pchLine, "Exec") == 0)
@@ -337,6 +390,42 @@ static void ReadCart(const CHAR* szKzi, GAMEINFO* pGame)
         pGame->m_bXbox = ReadXbeTitle(szPath, pGame);
         if (szName[0] != 0)
             lstrcpyW(pGame->m_szName, szName);   // the cart's own name wins
+
+        // A Windows cart on the Sion: xbcompat shows the dashboard a stub
+        // XBE for it (its .kzi rewritten to Runtime=xbox) and leaves a
+        // .wincart beside it naming the cart's real runtime.  The game is
+        // still launched through the stub, but it is not an Xbox game:
+        // platform, runtime and publisher come from the cart, never from
+        // the stub's made-up title ID.
+        sprintf(szPath, "%s\\.wincart", pGame->m_szDir);
+        ReadWincart(szPath, pGame);
+    }
+
+    // The cart's icon, found the way Kazeta finds it (beside the .kzi,
+    // which is at the top of the card), else in the cart's folder (by its
+    // Id, then the directory it runs from).
+    if (szIcon[0] != 0)
+    {
+        for (CHAR* pch = szIcon; *pch != 0; pch += 1)
+        {
+            if (*pch == '/')
+                *pch = '\\';
+        }
+        CHAR szTry [MAX_PATH];
+        for (int nTry = 0; nTry < 3 && pGame->m_szIcon[0] == 0; nTry += 1)
+        {
+            if (nTry == 0)
+                sprintf(szTry, "CARD0:\\%s", szIcon);
+            else if (nTry == 1 && pGame->m_szId[0] != 0)
+                sprintf(szTry, "CARD0:\\%s\\%s", pGame->m_szId, szIcon);
+            else if (nTry == 2 && pGame->m_szDir[0] != 0)
+                sprintf(szTry, "%s\\%s", pGame->m_szDir, szIcon);
+            else
+                continue;
+            DWORD dwAttr = GetFileAttributesA(szTry);
+            if (dwAttr != (DWORD)-1 && !(dwAttr & FILE_ATTRIBUTE_DIRECTORY) && strlen(szTry) < sizeof (pGame->m_szIcon))
+                strcpy(pGame->m_szIcon, szTry);
+        }
     }
 }
 
@@ -437,6 +526,18 @@ int CGameCollection::Scan()
         sprintf(szPath, "%s\\%s", pGame->m_szDir, pGame->m_szXbe);
         if (!ReadXbeTitle(szPath, pGame))
             continue;
+
+        // a Windows game installed by Frolick's store: a stub XBE with a
+        // .wincart beside it (xbcompat runs the cart instead), and the
+        // Archive's tile as its icon
+        sprintf(szPath, "%s\\.wincart", pGame->m_szDir);
+        if (GetFileAttributesA(szPath) != (DWORD)-1)
+        {
+            ReadWincart(szPath, pGame);
+            sprintf(szPath, "%s\\icon.png", pGame->m_szDir);
+            if (GetFileAttributesA(szPath) != (DWORD)-1 && strlen(szPath) < sizeof (pGame->m_szIcon))
+                strcpy(pGame->m_szIcon, szPath);
+        }
 
         if (pGame->m_szName[0] == 0)
         {
@@ -548,7 +649,7 @@ CStrObject* CGameCollection::GetGamePlatform(int nGame)
     if (nGame < 0 || nGame >= c_nGameCount)
         return new CStrObject;
     const GAMEINFO* pGame = &c_rgGames[nGame];
-    if (pGame->m_nKind != KIND_CARD || pGame->m_bXbox)
+    if (IsXboxTitle(pGame))
         return new CStrObject(_T("Xbox"));
     if (pGame->m_szPlatform[0] != 0)
     {
@@ -581,7 +682,7 @@ CStrObject* CGameCollection::GetGameRuntime(int nGame)
     if (nGame < 0 || nGame >= c_nGameCount)
         return new CStrObject;
     const GAMEINFO* pGame = &c_rgGames[nGame];
-    if (pGame->m_nKind != KIND_CARD || pGame->m_bXbox)
+    if (IsXboxTitle(pGame))
         return new CStrObject(_T("xbcompat"));
     if (EndsWith(pGame->m_szCart, ".kzp"))
         return new CStrObject(_T("inside the cart"));
@@ -602,7 +703,7 @@ CStrObject* CGameCollection::GetGameRuntime(int nGame)
             if (pchDot != NULL)
                 *pchDot = 0;
             TCHAR sz [80];
-            _stprintf(sz, _T("%hs (on the card)"), fd.cFileName);
+            _stprintf(sz, _T("%hs"), fd.cFileName);
             return new CStrObject(sz);
         }
     }
@@ -681,7 +782,7 @@ CStrObject* CGameCollection::GetGamePublisher(int nGame)
         _stprintf(szOwn, _T("%hs"), pGame->m_szPublisher);
         return new CStrObject(szOwn);
     }
-    if (pGame->m_nKind != KIND_CARD || pGame->m_bXbox)
+    if (IsXboxTitle(pGame))
     {
         const TCHAR* szPub = GetPublisher(pGame->m_dwTitleID);
         if (szPub != NULL)
@@ -724,6 +825,15 @@ CStrObject* CGameCollection::GetGameInfo(int nGame)
             pch += _stprintf(pch, _T("Cart Id: %hs\n"), pGame->m_szId);
         if (!pGame->m_bXbox)
             return new CStrObject(sz);
+    }
+    else if (pGame->m_bWincart)
+    {
+        pch += _stprintf(pch, _T("Windows game: E:\\Games\\%hs\n"), pGame->m_szFolder);
+        pch += _stprintf(pch, _T("Runtime: %hs (Wine)\n"), pGame->m_szRuntime);
+        if (pGame->m_szId[0] != 0)
+            pch += _stprintf(pch, _T("Cart Id: %hs\n"), pGame->m_szId);
+        pch += _stprintf(pch, _T("Saved games: %d"), GetSavedGameCount(nGame));
+        return new CStrObject(sz);
     }
 
     pch += _stprintf(pch, _T("Title ID: %08X\n"), pGame->m_dwTitleID);
@@ -928,11 +1038,21 @@ bool CacheXbeTitleImage(const CHAR* szXbe, CHAR* szCache /*[MAX_PATH]*/)
     return ReadXbeTitle(szXbe, &game) && CacheTitleImage(szXbe, &game, szCache);
 }
 
-// The game's title image as a file (T:\GameImages, cached out of the XBE),
-// for Frolick's belt covers; "" when the XBE has none.
+// The game's image as a file: a cart's Icon, else the title image
+// (T:\GameImages, cached out of the XBE), for Frolick's belt covers,
+// library tile and pages; "" when there is neither.
 CStrObject* CGameCollection::GetGameImage(int nGame)
 {
-    if (nGame < 0 || nGame >= c_nGameCount || c_rgGames[nGame].m_dwImageSize == 0)
+    if (nGame < 0 || nGame >= c_nGameCount)
+        return new CStrObject;
+    if (c_rgGames[nGame].m_szIcon[0] != 0)
+    {
+        // a cart's own Icon wins (a PNG on the card, decoded by D3DX)
+        TCHAR szIcon [MAX_PATH];
+        _stprintf(szIcon, _T("%hs"), c_rgGames[nGame].m_szIcon);
+        return new CStrObject(szIcon);
+    }
+    if (c_rgGames[nGame].m_dwImageSize == 0)
         return new CStrObject;
     CHAR szPath [MAX_PATH];
     CHAR szCache [MAX_PATH];
@@ -1298,10 +1418,16 @@ int CGameCollection::IsInstalled(int nGame)
     return FindInstalled(nGame) >= 0;
 }
 
+// A disc or cart game that copies to E:\Games: an Xbox game, not a
+// Windows cart (its stub XBE only runs the cart from the card).
+int CGameCollection::CanInstall(int nGame)
+{
+    return nGame >= 0 && nGame < c_nMediaCount && c_rgGames[nGame].m_bXbox && !c_rgGames[nGame].m_bWincart;
+}
+
 int CGameCollection::StartInstall(int nGame)
 {
-    if (c_install.m_hThread != NULL || nGame < 0 || nGame >= c_nMediaCount || !c_rgGames[nGame].m_bXbox ||
-        FindInstalled(nGame) >= 0)
+    if (c_install.m_hThread != NULL || !CanInstall(nGame) || FindInstalled(nGame) >= 0)
         return 0;
 
     // The folder is the game's name, kept to characters FATX allows.

@@ -11,6 +11,20 @@
  *     is ignored: it is polled twice a second, so discs can go in and come
  *     out while a title runs, the way the Xbox's SMC reports its tray.
  *
+ * An image can also be streamed (play as you download): beside game.iso a
+ * game.iso.stream file names the chunk size and a local socket, and
+ * game.iso.map holds a byte per chunk, nonzero once it is in the image.
+ * game.iso is the size of the whole disc and filled in as chunks arrive
+ * (frolick-store -stream does that from an HTTP URL). A read that needs a
+ * chunk not there yet sends its number down the socket and waits for it to
+ * come back; the game sees a slow disc. Every read is also appended to
+ * game.iso.trace (milliseconds since start, offset, length), for the chunks
+ * a title needs first.
+ *
+ * A game installed on the hard disk as its image (default.iso beside its
+ * default.xbe) gets that image as its DVD drive when launched (misc.c,
+ * relaunch), streamed or not.
+ *
  * A disc in the drive is read as XDVDFS straight from the device: burned
  * XISO discs have it at the start; pressed discs (XGD1) only show their
  * game partition to a drive that has been unlocked: one with Kreon
@@ -35,8 +49,11 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <sys/mount.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -76,6 +93,7 @@ typedef struct disc {
     struct dvd_node root;
     char dir[PATH_MAX];     /* DISC_DIR: where its file system is mounted */
     bool mounted_here;      /* ...by us, so we unmount it when it goes */
+    struct stream *stream;  /* a streamed image (above), else NULL */
     pthread_mutex_t lock;   /* device reads */
 } disc;
 
@@ -117,12 +135,118 @@ static bool sg_read(int fd, void *buf, uint32_t lba, uint32_t count)
     return sg_cmd(fd, cdb, sizeof(cdb), buf, count * SECTOR);
 }
 
+/* ---- streamed images ---------------------------------------------------------------------- */
+
+typedef struct stream {
+    uint64_t chunk;         /* bytes per chunk */
+    uint32_t nchunks;
+    const volatile uint8_t *map;    /* game.iso.map, shared with the fetcher */
+    char sock[sizeof(((struct sockaddr_un *)0)->sun_path)];
+    int fd;                 /* the connection to the fetcher, -1 until the first miss */
+    FILE *trace;
+    struct timespec t0;
+} stream;
+
+static stream *stream_open(const char *path, uint64_t size)
+{
+    char p[PATH_MAX + 16], line[256], key[32], val[200];
+    snprintf(p, sizeof(p), "%s.stream", path);
+    FILE *f = fopen(p, "r");
+    if (!f) return NULL;
+    stream *st = calloc(1, sizeof(*st));
+    st->fd = -1;
+    while (fgets(line, sizeof(line), f))
+        if (sscanf(line, "%31s %199s", key, val) == 2) {
+            if (!strcmp(key, "chunk")) st->chunk = strtoull(val, NULL, 10);
+            else if (!strcmp(key, "socket")) snprintf(st->sock, sizeof(st->sock), "%s", val);
+        }
+    fclose(f);
+    snprintf(p, sizeof(p), "%s.map", path);
+    int mfd = open(p, O_RDONLY);
+    if (!st->chunk || !st->sock[0] || mfd < 0) {
+        xlog("DVD: %s.stream needs a chunk size, a socket and %s", path, p);
+        if (mfd >= 0) close(mfd);
+        free(st);
+        return NULL;
+    }
+    st->nchunks = (size + st->chunk - 1) / st->chunk;
+    void *m = mmap(NULL, st->nchunks, PROT_READ, MAP_SHARED, mfd, 0);
+    close(mfd);
+    if (m == MAP_FAILED) {
+        xlog("DVD: cannot map %s: %s", p, strerror(errno));
+        free(st);
+        return NULL;
+    }
+    st->map = m;
+    snprintf(p, sizeof(p), "%s.trace", path);
+    st->trace = fopen(p, "a");
+    clock_gettime(CLOCK_MONOTONIC, &st->t0);
+    unsigned have = 0;
+    for (uint32_t i = 0; i < st->nchunks; i++) have += st->map[i] != 0;
+    xlog("DVD: %s is streamed: %u of %u chunks of %llu bytes are here", path, have, st->nchunks,
+         (unsigned long long)st->chunk);
+    return st;
+}
+
+/* Ask the fetcher for chunk c and wait until it has it. */
+static bool stream_fetch(stream *st, uint32_t c)
+{
+    for (int attempt = 0; attempt < 2; attempt++) {
+        if (st->fd < 0) {
+            struct sockaddr_un a = { .sun_family = AF_UNIX };
+            snprintf(a.sun_path, sizeof(a.sun_path), "%s", st->sock);
+            st->fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+            if (st->fd < 0 || connect(st->fd, (struct sockaddr *)&a, sizeof(a)) != 0) {
+                xlog("DVD: the stream's fetcher (%s) isn't there: %s", st->sock, strerror(errno));
+                if (st->fd >= 0) close(st->fd);
+                st->fd = -1;
+                return false;
+            }
+        }
+        char req[16], rep[16];
+        int n = snprintf(req, sizeof(req), "%u\n", c), got = 0;
+        if (write(st->fd, req, n) == n) {
+            /* the answer: the number back once the chunk is in, or !number */
+            while (got < (int)sizeof(rep) - 1) {
+                ssize_t r = read(st->fd, rep + got, 1);
+                if (r <= 0) break;
+                if (rep[got++] == '\n') break;
+            }
+            rep[got] = 0;
+            if (got && rep[got - 1] == '\n') return rep[0] != '!' && st->map[c];
+        }
+        close(st->fd);
+        st->fd = -1;
+    }
+    return false;
+}
+
+static bool stream_ensure(stream *st, uint64_t off, size_t len)
+{
+    if (st->trace) {
+        struct timespec t;
+        clock_gettime(CLOCK_MONOTONIC, &t);
+        fprintf(st->trace, "%lld %llu %zu\n", (long long)(t.tv_sec - st->t0.tv_sec) * 1000 +
+                (t.tv_nsec - st->t0.tv_nsec) / 1000000, (unsigned long long)off, len);
+        fflush(st->trace);
+    }
+    if (!len) return true;
+    uint32_t first = off / st->chunk, last = (off + len - 1) / st->chunk;
+    for (uint32_t c = first; c <= last && c < st->nchunks; c++)
+        if (!st->map[c] && !stream_fetch(st, c)) {
+            xlog("DVD: chunk %u of the streamed image didn't arrive", c);
+            return false;
+        }
+    return true;
+}
+
 /* Raw bytes of the volume, `off` from its start. */
 static bool disc_read_raw(disc *d, void *buf, size_t len, uint64_t off)
 {
     if (d->fd < 0) return false;
     off += d->base;
     if (!d->sg) {
+        if (d->stream && !stream_ensure(d->stream, off, len)) return false;
         while (len) {
             ssize_t n = pread(d->fd, buf, len, (off_t)off);
             if (n <= 0) return false;
@@ -468,6 +592,8 @@ static disc *probe(const char *path, bool drive)
         xlog("DVD: cannot open %s: %s", path, strerror(errno));
         return d;
     }
+    struct stat sb;
+    if (!drive && fstat(d->fd, &sb) == 0) d->stream = stream_open(path, sb.st_size);
     /* A pressed disc in an LG drive xbcompat can unlock: do that first,
        rather than waiting out the retries below. */
     if (drive && mt_unlock(d, path)) {

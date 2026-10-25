@@ -142,6 +142,7 @@ struct Node {
     void anchor(float dw, float dh);
     void fitVisual();
     void markOwner(Node* owner);
+    void setBarValue();
     double frameTime(const char* name, double def);
     double lastKey();
     bool hasCommandsAfter(double t);

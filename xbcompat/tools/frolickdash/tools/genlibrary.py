@@ -187,6 +187,13 @@ def image(id_, x, y, w, h, path):
 
 
 CENTRE, LEFT_ONE_LINE = 1024, 16
+# Every line on the tile is one line of its own (Figma lays each out as a
+# single line); word wrap broke "Insert a Game Disc" in two over the line
+# under it, the renderer's Fira being a little wider than the 270 px box.
+CENTRE_ONE_LINE = CENTRE | LEFT_ONE_LINE
+# a game's name or publisher too long for the tile shrinks to fit
+# (styleShrink, Frolick's own TextStyle bit in xui/xui_draw.cpp)
+CENTRE_FIT = CENTRE_ONE_LINE | 0x100000
 GREY_TEXT, WHITE = "0xffd2d2d2", "0xffffffff"
 BORDER = (2, "0xff404040")
 
@@ -222,8 +229,8 @@ def library():
                 ("solid", "0xffd9d9d9"), (1, "0xff000000"))
     s += image("cover", 105, 63, 126, 126, "cover.png")
     # 73:99 "Game Title" 32 px and 73:100 "Developer" 24 px, centred on the tile
-    s += text("title", 0, 200, gw, 38, "Game Title", 32, GREY_TEXT, CENTRE)
-    s += text("subtitle", 0, 238, gw, 29, "Developer", 24, GREY_TEXT, CENTRE)
+    s += text("title", 0, 200, gw, 38, "Game Title", 32, GREY_TEXT, CENTRE_FIT)
+    s += text("subtitle", 0, 238, gw, 29, "Developer", 24, GREY_TEXT, CENTRE_FIT)
     # 73:101 Xelu 360_Start, 87 square at 125,283
     s += image("glyphA", 125, 283, 87, 87, "glyph_a.png")
     # The no-media variant (Figma 143:47 "Group 17", tile 143:55): the cover,
@@ -233,8 +240,8 @@ def library():
     # 121,237 and 170,237 (art/figma/nodisc_*.svg, rasterised by
     # tools/svgicon.py).  The hub shows one set or the other (SetVisible)
     # by whether a game disc or game card is in.
-    s += text("insertLine1", 33, 144, 270, 38, "Insert a Game Disc", 32, GREY_TEXT, CENTRE)
-    s += text("insertLine2", 33, 182, 270, 38, "or Game Card.", 32, GREY_TEXT, CENTRE)
+    s += text("insertLine1", 33, 144, 270, 38, "Insert a Game Disc", 32, GREY_TEXT, CENTRE_ONE_LINE)
+    s += text("insertLine2", 33, 182, 270, 38, "or Game Card.", 32, GREY_TEXT, CENTRE_ONE_LINE)
     s += image("icoDisc", 121, 237, 45, 45, "nodisc_album.png")
     s += image("icoCard", 170, 237, 45, 45, "nodisc_sdcard.png")
     s.append("</XuiButton>")

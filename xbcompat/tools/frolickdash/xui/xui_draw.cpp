@@ -563,6 +563,10 @@ Texture Renderer::imageTex(const char* path, int* w, int* h)
         t = be->upload(*img);
         *w = img->w; *h = img->h;
         delete img;
+    } else if (strchr(path, ':')) {
+        // a file on a drive rather than in the scene's assets (a game
+        // card's icon PNG): the host decodes it too
+        t = be->native(path, w, h);
     }
     remember(key, t, *w, *h);
     return t;
@@ -670,7 +674,14 @@ void Renderer::quad(Texture tex, Blend blend, const Affine& m, float x0, float y
 
 // ---- text ------------------------------------------------------------------
 
-enum { styleOneLine = 0x10, styleRight = 0x200, styleCenterH = 0x400, styleCenterV = 0x1000, styleShadow = 0x4000 };
+// styleShrink is not the XUI engine's: Frolick's one-line titles (a game's
+// name on the library tile) shrink to fit their box instead of running out
+// of it.
+enum { styleOneLine = 0x10, styleRight = 0x200, styleCenterH = 0x400, styleCenterV = 0x1000, styleShadow = 0x4000, styleShrink = 0x100000 };
+// Frolick's own: text that runs past its box ends in "..." (one-line text
+// at the box's width, wrapped text at the last line its height holds),
+// for text from outside the dashboard (the store's catalog)
+enum { styleEllipsis = 0x1000000 };
 
 // The XUI engine lays a line out with whole-pixel advances (each glyph's
 // advance rounded up) and no kerning: lines measured against the GFWL
@@ -824,6 +835,10 @@ void Renderer::text(Node* n, const Affine& m, float alpha, Blend blend)
     float px = size * (96.0f / 72.0f) * scale * zoom;
     float fs = stbtt_ScaleForMappingEmToPixels(&font->info, px);
     float w = n->width(), h = n->height();
+    if ((style & styleShrink) && w > 0) {
+        float tw = measure(font, fs, txt, tl);
+        if (tw > w * scale) { px *= w * scale / tw; fs = stbtt_ScaleForMappingEmToPixels(&font->info, px); }
+    }
 
     // wrap into lines (word wrap unless one-line style)
     char* lines[64]; int nl = 0;
@@ -855,6 +870,26 @@ void Renderer::text(Node* n, const Affine& m, float alpha, Blend blend)
     }
 
     float lh = (float)ceil((font->ascent - font->descent + font->lineGap) * fs) / scale;
+    char cut[1100];
+    if ((style & styleEllipsis) && w > 0 && nl > 0) {
+        int keep = h > 0 ? (int)((h + 0.5f) / lh) : nl;
+        if (keep < 1) keep = 1;
+        bool more = nl > keep;
+        if (more) nl = keep;
+        char* last = lines[nl - 1];
+        int ll = (int)strlen(last);
+        if (more || measure(font, fs, last, ll) > w * scale) {
+            // drop whole characters until the line and its "..." fit
+            static const char dots[] = "\xE2\x80\xA6";
+            for (;;) {
+                while (ll > 0 && last[ll - 1] == ' ') ll--;
+                memcpy(cut, last, ll); strcpy(cut + ll, dots);
+                if (ll == 0 || measure(font, fs, cut, ll + 3) <= w * scale) break;
+                do ll--; while (ll > 0 && (last[ll] & 0xC0) == 0x80);
+            }
+            lines[nl - 1] = cut;
+        }
+    }
     float total = lh * nl;
     float y = 0;
     if (style & styleCenterV) y = (h - total) / 2;

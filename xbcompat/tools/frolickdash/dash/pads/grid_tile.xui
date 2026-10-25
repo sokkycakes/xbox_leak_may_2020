@@ -1,0 +1,26 @@
+<XuiCanvas version="000c">
+<Properties>
+ <Id>canvas</Id>
+ <Width>128</Width>
+ <Height>128</Height>
+</Properties>
+<XuiScene>
+<Properties>
+ <Id>GridTile</Id>
+ <Width>128</Width>
+ <Height>128</Height>
+ <Position>0,0,0</Position>
+ <Pivot>64,64,0</Pivot>
+</Properties>
+<XuiImage>
+<Properties>
+ <Id>image</Id>
+ <Width>128</Width>
+ <Height>128</Height>
+ <Position>0,0,0</Position>
+ <ImagePath></ImagePath>
+ <SizeMode>4</SizeMode>
+</Properties>
+</XuiImage>
+</XuiScene>
+</XuiCanvas>

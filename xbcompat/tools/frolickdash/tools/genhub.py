@@ -97,7 +97,7 @@ BELT_COVER_SCALE = 1.0
 BELT_FOCUS_PULL = 5.6
 BELT_SKIP = 2              # slots either side of the focus hidden behind the big cover: they hold nothing
 # The belt's list: two reserved tiles at the left end (sokky, 2026-10-20),
-# "show all games" (grid mode, not built yet) and the game in the disc
+# "show all games" (A opens page_allgames over theGrid) and the game in the disc
 # tray or game card, each with an icon centred on its tile, then the games
 # (carousel.go's placeholder titles until a real list exists).  The icon
 # images are not in the cloud yet; the names are placeholders for them.
@@ -384,6 +384,12 @@ def overlay_scene():
                    " <Position>0,122,0</Position>", " <Opacity>0</Opacity>", " <Text></Text>", " <TextColor>0xffffffff</TextColor>",
                    " <DropShadowColor>0</DropShadowColor>", " <PointSize>%.2f</PointSize>" % (22 * PT), " <TextStyle>1040</TextStyle>",
                    "</Properties>", "</XuiText>"]),
+        # the focused game's name on the All games page, top right on the
+        # header's line, where the PS2 browser puts its status line
+        "\n".join(["<XuiText>", "<Properties>", " <Id>gridTitle</Id>", " <Width>400</Width>", " <Height>30</Height>",
+                   " <Position>262,48,0</Position>", " <Opacity>0</Opacity>", " <Text></Text>", " <TextColor>0xffffffff</TextColor>",
+                   " <DropShadowColor>0</DropShadowColor>", " <PointSize>%.2f</PointSize>" % (22 * PT), " <TextStyle>528</TextStyle>",
+                   "</Properties>", "</XuiText>"]),
         # B + return arrow of the belt view: screen space, centred between
         # the focused cover and the library label as in sokky's mockup (B at
         # 0.506 W, the arrow box 0.482-0.519 W; 52 px above the mockup's
@@ -511,6 +517,31 @@ DEF theLaunchSound AudioClip
     function OnEndOfAudio() { bLaunchSoundDone = true; }
 }
 
+// The UI sounds (sokky 2026-10-21): Frolick's own woosh (frolick_assets
+// woosh111.ogg) for moving pad to pad, the Xbox 360 Blades dashboard's
+// sounds for everything else (xam shrdres btn_Focus / btn_Select /
+// btn_Back; dashmain's 2ndLevelOpen/Close for the pad focus and the belt,
+// 3rdLevelOpen/Close for a page over a page), decoded from XMA to WAV in
+// art/sounds/, loose files beside the XBE like launch.wav.  Stop() before
+// Play() so a sound retriggers from its start.
+DEF sndWoosh AudioClip { url "woosh.wav" volume 1 }
+DEF sndFocus AudioClip { url "blades_focus.wav" volume 1 }
+DEF sndSelect AudioClip { url "blades_select.wav" volume 1 }
+DEF sndBack AudioClip { url "blades_back.wav" volume 1 }
+DEF sndOpen AudioClip { url "blades_open.wav" volume 1 }
+DEF sndClose AudioClip { url "blades_close.wav" volume 1 }
+DEF sndPageOpen AudioClip { url "blades_page_open.wav" volume 1 }
+DEF sndPageClose AudioClip { url "blades_page_close.wav" volume 1 }
+
+// The menu ambience (sokky 2026-10-21, menu_music.mp3, 11.5 minutes):
+// looped under the menus from start-up, at the track's own (quiet)
+// level.  It is an Xbox ADPCM WAV (tools/xbadpcm.c, 34 MB), which the
+// engine streams from the file (CFilePump, anything over 64 KB) and wraps
+// to the start at the end.  A launch fades it out over the hub's fade
+// (volume is attenuation in dB here: 1 - volume = hundreds of dB) and
+// stops it; Frolick comes back as a fresh start, music and all.
+DEF sndMusic AudioClip { url "menu_music.wav" loop true pause_on_moving false volume 1 }
+
 DEF theLaunchLevel Level
 {
     function OnActivate()
@@ -531,6 +562,17 @@ DEF theLaunchLevel Level
         // the launch waits for the sound to end as well, or for 10 s if
         // the sound never reports its end)
         sleep 0.05;
+        if (bMusicFade)
+        {
+            nMusicVol = nMusicVol - 0.07;
+            if (nMusicVol <= 0)
+            {
+                bMusicFade = false;
+                sndMusic.Stop();
+            }
+            else
+                sndMusic.volume = nMusicVol;
+        }
         if (bLaunching)
         {
             nLaunchWait = nLaunchWait + 1;
@@ -538,6 +580,29 @@ DEF theLaunchLevel Level
                 bLaunchSoundDone = true;
             if (bLaunchSoundDone)
                 theGameCollection.LaunchGame(nLaunchGame);
+        }
+        // the Downloads page follows its active download, Spotlight the
+        // catalog and what is queued (twice a second)
+        if (bPageOpen)
+        {
+            if (sPage == "page_downloads")
+            {
+                nDlTick = nDlTick + 1;
+                if (nDlTick >= 10)
+                {
+                    nDlTick = 0;
+                    DlTick();
+                }
+            }
+            if (sPage == "page_spotlight")
+            {
+                nDlTick = nDlTick + 1;
+                if (nDlTick >= 10)
+                {
+                    nDlTick = 0;
+                    SpotTick();
+                }
+            }
         }
     }
 }
@@ -618,6 +683,14 @@ DEF theMemoryMonitor MemoryMonitor
     function OnInvalidMURemoved() { }
 }
 
+DEF theDownloads Downloads
+{
+}
+
+DEF theStore Store
+{
+}
+
 DEF theStorage Storage
 {
     function OnCopyProgress() { StorageProgress(); }
@@ -633,6 +706,7 @@ var bLibraryOpen;   // the camera is in the game belt
 var nGame;          // the belt game whose page is open (GameCollection index)
 var nLaunchGame;    // the game the launch level starts
 var bLaunching;     // set when the launch level has faded in
+var nGridMoved;     // the All games grid moved (PadMove)
 var bLaunchPending; // a launch is under way (ignore further presses)
 var bLaunchSoundDone; // the launch sound has finished (OnEndOfAudio)
 var nLaunchWait;    // polls since arrival, the 10 s fallback
@@ -740,6 +814,15 @@ DEF theHub Level
                 // The padfocus page: a Blades-style full-screen page
                 // (tools/genpage.py) opened when the camera lands on the
                 // catalog or settings focus view.
+                // All games: the PS2 browser's grid over a blur of the
+                // frame, under its page (page_allgames)
+                DEF theGrid GameGrid
+                {
+                    tile "pads/grid_tile.xui"
+                    skin "pads/frolick_skin.xui"
+                    cols 5
+                    rowScale 1
+                }
                 DEF thePage XuiPanel
                 {
                     url "pads/page_console.xui"
@@ -772,6 +855,15 @@ DEF theHub Level
     }
 }
 
+function SndWoosh() { sndWoosh.Stop(); sndWoosh.Play(); }
+function SndFocus() { sndFocus.Stop(); sndFocus.Play(); }
+function SndSelect() { sndSelect.Stop(); sndSelect.Play(); }
+function SndBack() { sndBack.Stop(); sndBack.Play(); }
+function SndOpen() { sndOpen.Stop(); sndOpen.Play(); }
+function SndClose() { sndClose.Stop(); sndClose.Play(); }
+function SndPageOpen() { sndPageOpen.Stop(); sndPageOpen.Play(); }
+function SndPageClose() { sndPageClose.Stop(); sndPageClose.Play(); }
+
 // Left and right fly to the next pad; the tiles inside a panel are not
 // navigated (sokky: the pads are the choices, not the tiles), so up and
 // down do nothing on the hub.
@@ -789,6 +881,8 @@ function PadMove(dir, step)
         {
             if (thePage.Navigate(dir) == 0)
                 PageScroll(dir);
+            else
+                SndFocus();
         }
         return;
     }
@@ -798,8 +892,26 @@ function PadMove(dir, step)
         {
             if (bBusy)
                 return;
+            if (sPage == "page_allgames")
+            {
+                // (a parameter can't be assigned: the move goes in its own var)
+                if (dir == "up")
+                    nGridMoved = theGrid.Move(0, 0 - 1);
+                else if (dir == "down")
+                    nGridMoved = theGrid.Move(0, 1);
+                else
+                    nGridMoved = theGrid.Move(step, 0);
+                if (nGridMoved != 0)
+                {
+                    SndFocus();
+                    AllGamesShow();
+                }
+                return;
+            }
             if (thePage.Navigate(dir) == 0)
                 PageScroll(dir);
+            else
+                SndFocus();
             return;
         }
         // the belt: left scrolls it right (Belt_Right), right scrolls it left
@@ -807,6 +919,8 @@ function PadMove(dir, step)
             theBelt.Step(0 - 1);
         else if (step > 0)
             theBelt.Step(1);
+        if (step != 0)
+            SndFocus();
         return;
     }
 
@@ -830,7 +944,10 @@ function PadPress()
         if (bBusy)
             return;
         if (bPageOpen)
+        {
+            SndSelect();
             thePage.Press();
+        }
         return;
     }
     if (bLibraryOpen)
@@ -840,6 +957,12 @@ function PadPress()
         {
             if (bBusy)
                 return;
+            if (sPage == "page_allgames")
+            {
+                AllGamesPlay();
+                return;
+            }
+            SndSelect();
             thePage.Press();
             return;
         }
@@ -885,7 +1008,7 @@ function OpenLibrary()
     ShowBeltHints(1);
 }
 
-// The belt's tiles: All games (the grid, not built yet), then the
+// The belt's tiles: All games (A opens its grid page), then the
 // console's games as GameCollection lists them (the disc tray or game
 // card slots first, then E:\Games), each cover with the game's title image.
 // The library pad's game tile: the disc or game card that is in (its
@@ -967,6 +1090,8 @@ function LaunchGameWithLogo(n)
     nLaunchGame = n;
     bLaunchSoundDone = false;
     nLaunchWait = 0;
+    nMusicVol = 1;
+    bMusicFade = true;
     theLaunchSound.Play();
     if (theLaunchSound.transportMode != 1)   // no sound: don't wait for it
         bLaunchSoundDone = true;
@@ -993,7 +1118,11 @@ function PadStart()
         return;
     }
     if (bPageOpen)
+    {
+        if (sPage == "page_allgames")
+            AllGamesPlay();
         return;
+    }
     if (theBelt.IsBusy() == 0)
         LaunchSelected();
 }
@@ -1002,8 +1131,8 @@ function PadStart()
 // the button that opens it, and a press first flies to the pad's focus
 // view, then opens the menu).  Library: Start launches the disc or game
 // card at once, X the recent games, Y the favorites.  Catalog: Start the
-// Marketplace, X (spotlight) its hot list, Y (downloads) its download
-// history.  Settings: Start the settings menu, X (quick panel) and Y
+// Marketplace, X (spotlight) its hot list, Y (downloads) the Downloads
+// page.  Settings: Start the settings menu, X (quick panel) and Y
 // (video) the console settings, Display first; the Blades scenes stand in
 // until the real pages exist.
 function HubButton(btn)
@@ -1031,9 +1160,12 @@ function HubButton(btn)
     if (nPad == 0)
     {
         if (btn == "x")
-            FocusPad("page_store_hot");
+        {
+            sSpotBack = "";
+            FocusPad("page_spotlight");
+        }
         else
-            FocusPad("page_store_history");
+            FocusPad("page_downloads");
     }
     else
         FocusPad("page_console");
@@ -1052,6 +1184,15 @@ function PadX()
         return;
     if (bBusy)
         return;
+    if (bPageOpen)
+    {
+        if (PageKind(sPage) == "downloads")
+        {
+            SndSelect();
+            DlRemove();
+        }
+        return;
+    }
     if (bZoomed)
         return;
     if (bLibraryOpen)
@@ -1074,15 +1215,76 @@ function OpenGamePage()
 {
     var sel = theBelt.GetSelected();
     if (sel == 0)
+    {
+        OpenAllGames();
         return;
+    }
     if (theGameCollection.IsPlayable(sel - 1) == 0)
         return;
     nGame = sel - 1;
+    SndSelect();
+    SndPageOpen();
     bPageOpen = true;
     ShowBeltHints(0);
     theOverlay.Fade("promptA", 0, %(pin_fade_out)s);
     ShowPage("page_game", "Open");
     PageChrome(0);
+}
+
+// A on the belt's All games tile: its page (page_allgames) over the PS2
+// browser's grid of every game (theGrid), the frame behind them blurred.
+function OpenAllGames()
+{
+    var n = theGameCollection.Scan();
+    var i;
+    var k = 0;
+    for (i = 0; i < n; i = i + 1)
+    {
+        if (theGameCollection.GetGameKind(i) != 0)
+        {
+            theGrid.SetGame(k, i);
+            theGrid.SetGameImage(k, theGameCollection.GetGameImage(i));
+            k = k + 1;
+        }
+    }
+    theGrid.count = k;
+    SndSelect();
+    SndPageOpen();
+    bPageOpen = true;
+    ShowBeltHints(0);
+    theOverlay.Fade("promptA", 0, %(pin_fade_out)s);
+    theGrid.Open();
+    ShowPage("page_allgames", "Open");
+    PageChrome(0);
+    AllGamesShow();
+}
+
+// The selected game's name over the grid and where it is in the list.
+function AllGamesShow()
+{
+    var n = theGrid.count;
+    theOverlay.SetOpacity("gridTitle", 1);
+    if (n == 0)
+    {
+        theOverlay.SetText("gridTitle", "No games");
+        thePage.SetText("labTotal", "");
+        return;
+    }
+    theOverlay.SetText("gridTitle", theGameCollection.GetGameName(theGrid.GetGame()));
+    thePage.SetText("labTotal", (theGrid.GetSelected() + 1) + " of " + n);
+}
+
+// A or Start on the grid: the game starts, as from Recent Games
+function AllGamesPlay()
+{
+    var g;
+    if (theGrid.count == 0)
+        return;
+    g = theGrid.GetGame();
+    if (theGameCollection.IsPlayable(g) == 0)
+        return;
+    SndSelect();
+    LaunchGameWithLogo(g);
 }
 
 // The page's facts about the game, and whether Install Game applies.
@@ -1100,7 +1302,7 @@ function FillGamePage()
         if (theGameCollection.IsInstalled(nGame) == 1)
             where = where + ", installed";
         else
-            bInstall = 1;
+            bInstall = theGameCollection.CanInstall(nGame);
     }
     thePage.SetText("labGameTitle", theGameCollection.GetGameName(nGame));
     thePage.SetImage("imgGameIcon", theGameCollection.GetGameImage(nGame));
@@ -1170,6 +1372,7 @@ function ShowBeltHints(on)
 function CloseLibrary()
 {
     bMoving = true;
+    SndClose();
     bLibraryOpen = false;
     SetPadAlpha(1, 1);
     theZoomer.GoTo(vpLibrary);
@@ -1197,6 +1400,7 @@ function ZoomIn()
 {
     bMoving = true;
     bZoomed = true;
+    SndOpen();
     SetPadAlpha(nPad, 0);
     LabelFocus(1);
     if (nPad == 0)
@@ -1220,6 +1424,14 @@ function PadBack()
             // the game's page, or a Memory page reached from it
             if (PageBack() == 1)
                 return;
+            SndBack();
+            SndPageClose();
+            if (sPage == "page_allgames")
+            {
+                theGrid.Close();
+                theOverlay.SetOpacity("gridTitle", 0);
+                theOverlay.SetText("title", GameName(theBelt.GetSelected()));
+            }
             ClosePage();
             ShowBeltHints(1);
             return;
@@ -1238,6 +1450,7 @@ function PadBack()
     }
     bMoving = true;
     bZoomed = false;
+    SndClose();
     SetPadAlpha(nPad, 1);
     LabelFocus(0);
     if (nPad == 0)
@@ -1266,6 +1479,8 @@ function SetPadAlpha(pad, a)
 // the hub's own A prompt gives way to the page's legend.
 var sPage;      // the page on thePage
 var sPendingPage; // the page a hub button opens once the focus flight lands
+var bMusicFade;     // the menu music is fading out for a launch
+var nMusicVol;      // its volume while it fades
 
 function OpenPage()
 {
@@ -1327,6 +1542,7 @@ function ShowPage(page, how)
 {
     var first;
     sPage = page;
+    nMetaRow = 0 - 1;
     thePage.url = PageUrl(page);
     thePage.Play("page", how);
     first = PageFirst(page);
@@ -1351,10 +1567,14 @@ function PageBack()
         parent = sConfirmBack;
     else if (sPage == "page_notice")
         parent = sConfirmBack;
+    else if (sPage == "page_spotlight")
+        parent = sSpotBack;     // the Marketplace when it was opened from there
     else
         parent = PageParent(sPage);
     if (parent == "")
         return 0;
+    SndBack();
+    SndPageClose();
     ShowPage(parent, "Fade");
     return 1;
 }
@@ -1368,12 +1588,278 @@ function PageFocus(id)
     s = PageMeta(sPage, id);
     thePage.SetData("metaPanelScene", 4, s);   // metaScene_1line's Pane_txtCurrentSetting
     thePage.SetText("txt_Meta", s);
+    thePage.SetText("txt_MetaTitle", PageItemName(sPage, id));
     r = RowOf(id);
     if (r >= 0)
     {
         nSel = nScroll + r;
         UpdateTotal();
+        if (PageKind(sPage) == "downloads")
+            DlLegend();
+        if (PageKind(sPage) == "spotlight")
+            SpotMeta();
     }
+    else
+        r = PageItemRow(sPage, id);
+    MetaHighlight(r);
+}
+
+// The later dashboard's meta panes (metaScene_MarketPlace,
+// metaScene_2lineFocus_Long) carry a highlight that follows the focused
+// row out of the list: its named frames "1To2", "2To1"... slide it a row.
+var nMetaRow;   // the row the pane's highlight is on (-1: none yet)
+function MetaHighlight(r)
+{
+    var pane = PageMetaPane(sPage);
+    if (pane == "")
+        return;
+    if (r < 0)
+        return;
+    if (r == nMetaRow)
+        return;
+    if (nMetaRow < 0)
+    {
+        if (r == 0)
+            thePage.Play(pane, "Default");
+        else
+            thePage.Play(pane, r + "To" + (r + 1));
+    }
+    else if (r < nMetaRow)
+        thePage.Play(pane, (nMetaRow + 1) + "To" + (r + 1));
+    else
+        thePage.Play(pane, r + "To" + (r + 1));
+    nMetaRow = r;
+}
+
+// ---- Spotlight -----------------------------------------------------------
+
+var nTab;       // Spotlight's category
+var sSpotBack;  // the page B returns to from Spotlight ("": the hub)
+
+function SpotTabWrap(t)
+{
+    var n = SpotTabs();
+    var w = t;
+    // (the script has no while, and a parameter cannot be assigned: w is
+    // at most one strip away)
+    if (w < 0)
+        w = w + n;
+    if (w >= n)
+        w = w - n;
+    if (w >= n)
+        w = w - n;
+    return w;
+}
+
+// the tab row: one strip per category, laid out for it (genpage)
+function SpotFillTabs()
+{
+    var k;
+    for (k = 0; k < SpotTabs(); k = k + 1)
+    {
+        if (k == nTab)
+            thePage.SetVisible("tabs_" + k, 1);
+        else
+            thePage.SetVisible("tabs_" + k, 0);
+    }
+}
+
+// The focused item in the details box: its name, tile and description,
+// and its size and source at the foot (the Internet Archive's credit).
+function SpotMeta()
+{
+    if (nListCount == 0)
+    {
+        thePage.SetText("metaSpot", "");
+        thePage.SetData("metaSpot", 1, "");
+        thePage.SetImage("imgSpotTile", "");
+        thePage.SetText("txt_SpotCredit", "");
+        SpotMark(0);
+        thePage.SetText("txt_EmptyList", SpotEmpty());
+        SpotLegend();
+        return;
+    }
+    thePage.SetText("metaSpot", theStore.GetName(nTab, nSel));
+    thePage.SetData("metaSpot", 1, theStore.GetDesc(nTab, nSel));
+    thePage.SetImage("imgSpotTile", theStore.GetImage(nTab, nSel));
+    thePage.SetText("txt_SpotCredit", theStore.GetSize(nTab, nSel) + "   From the Internet Archive");
+    SpotMark(theStore.IsStream(nTab, nSel));
+    SpotLegend();
+}
+
+// The Streaming Download mark on items that play as they download: the
+// row's second line, a badge by the tile, or a line in the details box
+function SpotMark(on)
+{
+    var mark;
+    mark = "";
+    if (on)
+        mark = "%(stream_mark)s";
+    if (mark == "badge")
+    {
+        thePage.SetVisible("imgSpotBadge", 1);
+        thePage.SetVisible("txt_SpotBadge", 1);
+    }
+    else
+    {
+        thePage.SetVisible("imgSpotBadge", 0);
+        thePage.SetVisible("txt_SpotBadge", 0);
+    }
+    if (mark == "line")
+        thePage.SetText("txt_SpotStream", "Streaming Download available");
+    else
+        thePage.SetText("txt_SpotStream", "");
+}
+
+// what an empty tab says: why there is no catalog, or that the tab is empty
+function SpotEmpty()
+{
+    var s = theStore.GetState();
+    if (s == "")
+        return "Nothing here yet.";
+    return s;
+}
+
+// item i's second line: its kind, or where its download is
+function SpotKind(i)
+{
+    if (sSpotPlay != "")
+    {
+        if (theStore.GetId(nTab, i) == sSpotPlay)
+            return "Getting the disc ready...";
+    }
+    if (theDownloads.IsInstalled(theStore.GetId(nTab, i)) == 1)
+        return "Installed";
+    var h = theDownloads.Has(theStore.GetId(nTab, i));
+    if (h == 1)
+        return "Queued";
+    if (h == 2)
+        return "Downloaded";
+    if ("%(stream_mark)s" == "row")
+    {
+        if (theStore.IsStream(nTab, i))
+            return "Streaming Download";
+    }
+    return theStore.GetKind(nTab, i);
+}
+
+// A downloads the focused item, once
+function SpotLegend()
+{
+    if (nListCount == 0)
+        thePage.SetVisible("legend_a", 0);
+    else if (theDownloads.Has(theStore.GetId(nTab, nSel)) == 0)
+    {
+        if (theStore.IsStream(nTab, nSel))
+            thePage.SetText("legend_a", "Play");
+        else
+            thePage.SetText("legend_a", "Download");
+        thePage.SetVisible("legend_a", 1);
+    }
+    else
+        thePage.SetVisible("legend_a", 0);
+}
+
+function SpotPress()
+{
+    var r;
+    if (nListCount == 0)
+        return;
+    // a Streaming Download plays now: the helper installs it in E:\\Games
+    // and streams its disc, and SpotTick starts it from there
+    if (theStore.IsStream(nTab, nSel))
+    {
+        if (sSpotPlay != "")
+            return;
+        theDownloads.Play(nTab, nSel);
+        sSpotPlay = theStore.GetId(nTab, nSel);
+        FillRow(nSel - nScroll);
+        return;
+    }
+    r = theDownloads.Queue(nTab, nSel);
+    if (r == 0 - 1)
+    {
+        Notice("The download queue is full.", "page_spotlight");
+        return;
+    }
+    FillRow(nSel - nScroll);
+    SpotLegend();
+}
+
+// twice a second: the catalog arrived or changed (the list again, the
+// focus kept), or a download moved on (the rows' second lines)
+var nSpotVersion;
+var sSpotPlay;      // the Streaming Download being started ("" none)
+function SpotTick()
+{
+    var v = theStore.GetVersion();
+    var r;
+    var st;
+    var n;
+    var g;
+    if (sSpotPlay != "")
+    {
+        st = theDownloads.GetPlayState();
+        if (st == "error")
+        {
+            sSpotPlay = "";
+            Notice(theDownloads.GetPlayDetail(), "page_spotlight");
+        }
+        if (st == "ready")
+        {
+            // an installed game like any other: E:\\Games\\<folder>
+            n = theGameCollection.Scan();
+            for (g = 0; g < n; g = g + 1)
+            {
+                if (theGameCollection.GetGameFolder(g) == theDownloads.GetPlayDetail())
+                {
+                    if (theGameCollection.IsPlayable(g) == 1)
+                    {
+                        sSpotPlay = "";
+                        LaunchGameWithLogo(g);
+                        return;
+                    }
+                }
+            }
+        }
+    }
+    if (v != nSpotVersion)
+    {
+        nSpotVersion = v;
+        nListCount = ListCount();
+        if (nSel >= nListCount)
+        {
+            nSel = 0;
+            nScroll = 0;
+        }
+        FillPage();
+        if (nListCount > 0)
+            thePage.SetFocus(RowId(nSel - nScroll));
+        SpotMeta();
+        return;
+    }
+    for (r = 0; r < nRows; r = r + 1)
+    {
+        if (nScroll + r < nListCount)
+            thePage.SetData(RowId(r), 3, SpotKind(nScroll + r));
+    }
+    if (nListCount == 0)
+        thePage.SetText("txt_EmptyList", SpotEmpty());
+    SpotLegend();
+}
+
+// left and right: the next category, its list from the top
+function SpotSwitch(step)
+{
+    nTab = SpotTabWrap(nTab + step);
+    SpotFillTabs();
+    nScroll = 0;
+    nSel = 0;
+    nListCount = ListCount();
+    FillPage();
+    thePage.SetFocus(RowId(0));
+    PageFocus(RowId(0));
+    SndFocus();
 }
 
 function PagePress(id)
@@ -1384,6 +1870,9 @@ function PagePress(id)
     target = PageTarget(sPage, id);
     if (target == "")
         return;     // no page behind this item yet: the bar's Press frame plays and that is all
+    if (target == "page_spotlight")
+        sSpotBack = sPage;
+    SndPageOpen();
     ShowPage(target, "Fade");
 }
 
@@ -1392,6 +1881,7 @@ function PagePress(id)
 function GoPad(n)
 {
     bMoving = true;
+    SndWoosh();
     theOverlay.Fade("promptA", 0, %(pin_fade_out)s);
     SetPadAlpha(nPad, 0);
     nPad = n;
@@ -1443,6 +1933,11 @@ function initialize()
     bLaunchPending = false;
     bLaunchSoundDone = false;
     nLaunchWait = 0;
+    nDlTick = 0;
+    nDlItem = 0;
+    bMusicFade = false;
+    nMusicVol = 1;
+    sndMusic.Play();
     // the A pin's idle pulse: a small dip every PIN_PULSE_PERIOD seconds
     theOverlay.Pulse("promptA", %(pin_pulse_dy)s, %(pin_pulse_period)s, %(pin_pulse_dur)s);
     UpdateLibraryTile();
@@ -1472,6 +1967,8 @@ var nSave;          // the save the actions page is about
 var nDest;          // the device a copy goes to
 var sAction;        // "copy", "move", "delete", "deleteall"
 var sConfirmBack;   // the page behind the confirm or notice page
+var nDlTick;        // frames since the Downloads page last refreshed
+var nDlItem;        // the download a confirm is about
 
 // ---- the lists ----------------------------------------------------------
 
@@ -1551,6 +2048,10 @@ function ListCount()
         return theStorage.GetSaveCount(nTitle);
     if (k == "recent")
         return theGameCollection.GetRecentCount();
+    if (k == "downloads")
+        return DlListCount();
+    if (k == "spotlight")
+        return theStore.GetCount(nTab);
     return 0;
 }
 
@@ -1564,6 +2065,7 @@ function FillRow(r)
     var d;
     var g;
     var img;
+    var pub;
     if (i >= nListCount)
     {
         thePage.SetVisible(id, 0);
@@ -1583,11 +2085,27 @@ function FillRow(r)
     {
         g = theGameCollection.GetRecentGame(i);
         thePage.SetText(id, theGameCollection.GetGameName(g));
-        thePage.SetData(id, 1, theGameCollection.GetGamePlatform(g) + ", " + theGameCollection.GetGamePublisher(g));
+        pub = theGameCollection.GetGamePublisher(g);
+        if (pub == "")
+            thePage.SetData(id, 1, theGameCollection.GetGamePlatform(g));
+        else
+            thePage.SetData(id, 1, theGameCollection.GetGamePlatform(g) + ", " + pub);
         img = theGameCollection.GetGameImage(g);
         if (img == "")
             img = "ico_64x_games.png";
         thePage.SetImage(id + "_icon", img);
+    }
+    else if (k == "downloads")
+    {
+        DlFillRow(id, i);
+        return;
+    }
+    else if (k == "spotlight")
+    {
+        // btn_twoline_spot: the name, its kind under it (Data3)
+        thePage.SetText(id, theStore.GetName(nTab, i));
+        thePage.SetData(id, 3, SpotKind(i));
+        return;
     }
     else if (k == "saves")
     {
@@ -1619,6 +2137,11 @@ function UpdateTotal()
 {
     if (nRows == 0)
         return;
+    if (PageKind(sPage) == "downloads")
+    {
+        DlTotal();
+        return;
+    }
     if (nListCount == 0)
         thePage.SetText("labTotal", "");
     else
@@ -1661,12 +2184,23 @@ function PageEnter()
     }
     if (k == "recent")
         theGameCollection.Scan();
+    if (k == "spotlight")
+    {
+        nTab = 0;
+        sSpotPlay = "";
+        nSpotVersion = theStore.GetVersion();
+        SpotFillTabs();
+    }
     nScroll = 0;
     nSel = 0;
     nListCount = ListCount();
     FillPage();
     if (nListCount > 0)
         thePage.SetFocus(RowId(0));
+    if (k == "downloads")
+        DlEnter();
+    if (k == "spotlight")
+        SpotMeta();
 }
 
 // The focus ran off an end of the rows: the list moves one item.
@@ -1674,6 +2208,21 @@ function PageScroll(dir)
 {
     if (nRows == 0)
         return;
+    if (PageKind(sPage) == "downloads")
+        return;     // its sections are fixed to their rows (no scrolling yet)
+    if (PageKind(sPage) == "spotlight")
+    {
+        if (dir == "left")
+        {
+            SpotSwitch(0 - 1);
+            return;
+        }
+        if (dir == "right")
+        {
+            SpotSwitch(1);
+            return;
+        }
+    }
     if (dir == "down")
     {
         if (nScroll + nRows < nListCount)
@@ -1681,6 +2230,9 @@ function PageScroll(dir)
             nScroll = nScroll + 1;
             nSel = nSel + 1;
             FillPage();
+            if (PageKind(sPage) == "spotlight")
+                SpotMeta();     // the focus stayed on its row: no PageFocus
+            SndFocus();
         }
     }
     else if (dir == "up")
@@ -1690,6 +2242,9 @@ function PageScroll(dir)
             nScroll = nScroll - 1;
             nSel = nSel - 1;
             FillPage();
+            if (PageKind(sPage) == "spotlight")
+                SpotMeta();
+            SndFocus();
         }
     }
 }
@@ -1765,6 +2320,16 @@ function PageSpecial(id)
     }
     if (k == "favorites")
         return 1;
+    if (k == "downloads")
+    {
+        DlPress();
+        return 1;
+    }
+    if (k == "spotlight")
+    {
+        SpotPress();
+        return 1;
+    }
     if (k == "dest")
     {
         nDest = DeviceAt(nSel, nDev);
@@ -1815,7 +2380,12 @@ function PageSpecial(id)
     if (sPage == "page_confirm")
     {
         if (id == "btnYes")
-            StorageStart();
+        {
+            if (sAction == "dlremove")
+                DlRemoveNow();
+            else
+                StorageStart();
+        }
         else
             ShowPage(sConfirmBack, "Fade");
         return 1;
@@ -1844,12 +2414,21 @@ function PadY()
         HubButton("y");
         return;
     }
+    if (sPage == "page_spotlight")
+    {
+        // Marketplace Home
+        SndSelect();
+        SndPageOpen();
+        ShowPage("page_market", "Fade");
+        return;
+    }
     if (PageKind(sPage) == "titles")
     {
         if (nListCount == 0)
             return;
         nTitle = nSel;
         sAction = "deleteall";
+        SndSelect();
         Confirm("Delete all data for " + theStorage.GetTitleName(nTitle) + "?", "page_memory_titles");
     }
     else if (PageKind(sPage) == "saves")
@@ -1858,6 +2437,7 @@ function PadY()
             return;
         nSave = nSel;
         sAction = "delete";
+        SndSelect();
         Confirm("Delete " + theStorage.GetSaveName(nSave) + "?", "page_memory_saves");
     }
 }
@@ -1928,6 +2508,169 @@ function StorageFailed(text)
     sAction = "";
     Notice(text, "page_memory_saves");
 }
+
+// ---- the Downloads page --------------------------------------------------
+// The NXE's Active Downloads (sokky 2026-10-20): row 0 is the active
+// download under "Active" (blank when none), the rows under "Pending"
+// the queue.  theDownloads lists the active item first, so the list's
+// virtual item v is download v - nDlOff (nDlOff 1 when nothing is
+// active, the blank row).  A starts a pending download now or pauses /
+// resumes the active one, X removes the focused one (asking first when
+// it is under way), the legend's A names what it does.
+
+function DlOff()
+{
+    return 1 - theDownloads.HasActive();
+}
+
+function DlListCount()
+{
+    var n = theDownloads.GetCount() + DlOff();
+    if (n > nRows)
+        n = nRows;      // no scrolling: the sections are fixed to their rows
+    return n;
+}
+
+function DlFillRow(id, v)
+{
+    var d = v - DlOff();
+    if (d < 0)
+    {
+        thePage.SetVisible(id, 0);
+        return;
+    }
+    thePage.SetText(id, theDownloads.GetName(d));
+    thePage.SetData(id, 1, theDownloads.GetKind(d) + "   " + theDownloads.GetDetail(d));
+    thePage.SetData(id, 3, theDownloads.GetStatus(d));
+    thePage.SetImage(id + "_icon", theDownloads.GetIcon(d));
+    if (d == 0)
+    {
+        if (theDownloads.HasActive() == 1)
+        {
+            thePage.SetValue(id + "_bar", theDownloads.GetProgress(d));
+            thePage.SetVisible(id + "_bar", 1);
+        }
+        else
+            thePage.SetVisible(id + "_bar", 0);
+    }
+    else
+        thePage.SetVisible(id + "_bar", 0);
+}
+
+function DlTotal()
+{
+    var n = theDownloads.GetCount();
+    var d = nSel - DlOff();
+    if (n == 0)
+        thePage.SetText("labTotal", "");
+    else if (d < 0)
+        thePage.SetText("labTotal", n + " waiting");
+    else
+        thePage.SetText("labTotal", (d + 1) + " of " + n);
+}
+
+// what A does to the focused item
+function DlLegend()
+{
+    var d = nSel - DlOff();
+    if (d < 0)
+        thePage.SetText("legend_a", "");
+    else if (d > 0)
+        thePage.SetText("legend_a", "Start Now");
+    else if (theDownloads.HasActive() == 0)
+        thePage.SetText("legend_a", "Start Now");
+    else if (theDownloads.IsPaused() == 1)
+        thePage.SetText("legend_a", "Resume");
+    else
+        thePage.SetText("legend_a", "Pause");
+    if (theDownloads.GetCount() == 0)
+        thePage.SetText("legend_x", "");
+    else
+        thePage.SetText("legend_x", "Remove");
+}
+
+// the page just opened: the first download focused (row 0 is blank when
+// nothing is active)
+function DlEnter()
+{
+    if (theDownloads.GetCount() == 0)
+        return;
+    nSel = DlOff();
+    thePage.SetFocus(RowId(nSel));
+    DlTotal();
+    DlLegend();
+}
+
+// the list again after a change, the focus kept on the same row
+function DlRefresh()
+{
+    var n = DlListCount();
+    nListCount = n;
+    if (nSel >= n)
+        nSel = n - 1;
+    if (nSel < DlOff())
+        nSel = DlOff();
+    FillPage();
+    if (n > DlOff())
+        thePage.SetFocus(RowId(nSel));
+    DlLegend();
+}
+
+// twice a second while the page shows: the active row's progress, or
+// the whole list when a download finished (the queue moved up)
+function DlTick()
+{
+    if (nRows == 0)
+        return;
+    if (DlListCount() != nListCount)
+        DlRefresh();
+    else if (theDownloads.HasActive() == 1)
+        DlFillRow(RowId(0), 0);
+}
+
+function DlPress()
+{
+    var d = nSel - DlOff();
+    if (d < 0)
+        return;
+    if (d == 0)
+    {
+        if (theDownloads.HasActive() == 1)
+            theDownloads.TogglePause();
+        else
+            theDownloads.StartNow(0);
+    }
+    else
+    {
+        theDownloads.StartNow(d);
+        nSel = 0;
+    }
+    DlRefresh();
+}
+
+function DlRemove()
+{
+    var d = nSel - DlOff();
+    if (d < 0)
+        return;
+    nDlItem = d;
+    if (theDownloads.GetProgress(d) > 0)
+    {
+        sAction = "dlremove";
+        Confirm("Remove " + theDownloads.GetName(d) + "?", "page_downloads");
+        return;
+    }
+    DlRemoveNow();
+}
+
+function DlRemoveNow()
+{
+    theDownloads.Remove(nDlItem);
+    if (sPage == "page_downloads")
+        DlRefresh();
+    else
+        ShowPage("page_downloads", "Fade");
+}
 """
 
 
@@ -1947,6 +2690,7 @@ def main():
     for name in ("catalogfocus", "settingsfocus", "carousel"):
         vals["vp_" + name] = viewpoint(name)
     vals["zoom_duration"] = ZOOM_DURATION
+    vals["stream_mark"] = os.environ.get("FROLICK_STREAM_MARK", "badge")
     for name in ("catalog", "settings"):
         o = label_focus_offset(name)
         for k, v in zip("xyz", o):

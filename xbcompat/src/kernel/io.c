@@ -151,6 +151,8 @@ static void mkdir_p(const char *path)
 void fs_init(const char *xbe_path, const char *hdd_root, const char *dvd_root, const char *dvd_drive)
 {
     struct stat dsb;
+    /* first: the tray looks for <hdd>/.dvdimage (dvd.c) from its first look */
+    snprintf(hdd_dir, sizeof(hdd_dir), "%s", hdd_root);
     if (dvd_root && stat(dvd_root, &dsb) == 0 && !S_ISDIR(dsb.st_mode)) {
         /* An image or a drive: dvd.c reads it. */
         dvd_init(dvd_root, dvd_drive);
@@ -944,6 +946,13 @@ NTSTATUS NTAPI NtSetInformationFile(HANDLE FileHandle, IO_STATUS_BLOCK *iosb, PV
     return st;
 }
 
+/* Frolick's dashboard (title FFFE0000; the combined build also checks
+   its name, see tools/frolickdash/dist/stream/xbcompat-gudfcx.patch). */
+static bool frolick_dash(void)
+{
+    return xbe_title_id() == 0xFFFE0000;
+}
+
 NTSTATUS NTAPI NtQueryVolumeInformationFile(HANDLE FileHandle, IO_STATUS_BLOCK *iosb, PVOID Info,
                                             ULONG Length, ULONG Class)
 {
@@ -965,10 +974,12 @@ NTSTATUS NTAPI NtQueryVolumeInformationFile(HANDLE FileHandle, IO_STATUS_BLOCK *
         LARGE_INTEGER *li = Info;
         ULONG *u;
         /* Report a FATX-like volume with the partition's cluster size (16 KB
-           unless formatted otherwise), capped to what a console has. */
+           unless formatted otherwise). Titles see it capped to what a console
+           has (8 GB, so 32-bit block math holds); Frolick's dashboard, which
+           counts in 64 bits, sees the disk's real size and free space. */
         ULONG cluster = f->is_dvd ? 16384 : partition_cluster_bytes(partition_of(f->host));
         ULONGLONG total = (ULONGLONG)vs.f_blocks * vs.f_frsize, avail = (ULONGLONG)vs.f_bavail * vs.f_frsize;
-        if (total > 8ULL << 30) total = 8ULL << 30;
+        if (total > 8ULL << 30 && !frolick_dash()) total = 8ULL << 30;
         if (avail > total) avail = total;
         li[0].QuadPart = total / cluster;
         li[1].QuadPart = avail / cluster;

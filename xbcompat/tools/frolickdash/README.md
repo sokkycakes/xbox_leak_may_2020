@@ -202,12 +202,44 @@ unchanged, and only the script and two small nodes are Frolick's:
   `GetRecentGame` list the scanned games those keys name, newest first;
   A or Start plays one), Y opens Favorite Games (`page_favorites`, an
   empty Blades list until favorites exist).  Catalog: Start the
-  Marketplace, X (spotlight) its hot list, Y (downloads) its download
-  history.  Settings: Start the settings menu, X (quick panel) and Y
+  Marketplace, X (spotlight) its hot list, Y (downloads) the Downloads
+  page.  Settings: Start the settings menu, X (quick panel) and Y
   (video) the console settings with Display first.  The Blades scenes
-  stand in until the real pages exist.  The library's label hides on
+  stand in until the real pages exist.
+  Downloads (`page_downloads`, also the Marketplace's Download Status
+  and History item) is laid out as the NXE's Active Downloads (sokky
+  2026-10-20): the active download under "Active", the queue under
+  "Pending", each row the title, its kind and size, the status at the
+  right (`btn_twoline-status`, the Blades' two-line item with a third
+  presenter on Data3) and, on the active one, a progress bar
+  (`prgbr_Download`, a white fill scaled by the bar's Value).  A on a
+  pending item starts it now (the one that was active goes back to the
+  top of the queue, paused where it was), A on the active one pauses or
+  resumes it, X removes an item (asking first when it is under way), B
+  closes.  The legend's A names what it does.  The data is the
+  `Downloads` node (`nodes/Downloads.cpp`), a PLACEHOLDER queue that
+  moves its active download along by itself until Frolick can download;
+  its script interface is what a real downloader will get.  The page
+  does not scroll yet (its section headers are fixed to their rows), so
+  it shows the active download and four pending items.  The library's label hides on
   its pages (the belt camera leaves it small and far off), the pages'
   own header serving as the title.
+  Sounds (sokky 2026-10-21): Frolick's own woosh (`woosh111.ogg`) when
+  the camera moves pad to pad; the Xbox 360 Blades dashboard's sounds
+  for everything else, decoded from the dump's XMA to PCM WAV in
+  `art/sounds/`: btn_Focus for a focus move (lists, pages, the belt),
+  btn_Select for A (and X/Y actions on a page), btn_Back for B on a
+  page, dashmain's 2ndLevelOpen/Close for the pad focus zoom and the
+  belt, 3rdLevelOpen/Close for a page over a page.  AudioClip nodes
+  (`snd*` in genhub.py) read them as loose files beside the XBE, like
+  launch.wav; the kits carry them.
+  The menu ambience (sokky's `menu_music.mp3`, 11 min 30 s) loops under
+  the menus from start-up at the track's own level and fades out over
+  the hub's fade when a game launches.  It is `art/sounds/menu_music.wav`,
+  Xbox ADPCM (format 0x69, 4:1, 34 MB at 44.1 kHz stereo) made by
+  `tools/xbadpcm.c`, an encoder that mirrors xbcompat's decoder
+  (47 dB SNR against the source); the engine streams any WAV over 64 KB
+  from its file (CFilePump) and wraps to the start at the end.
   The library pad's own game tile shows the disc or game card that is
   in (cover, name, publisher, Start; the publisher is the title ID's
   two-letter code named through the XboxDev wiki's table in

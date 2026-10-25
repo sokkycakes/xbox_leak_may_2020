@@ -166,6 +166,7 @@ cp "$OUT/dash/default.xip" "$R/hdd/partition2/"
 cp "$WORK"/dash/*.xtf "$R/hdd/partition2/"
 cp -ru "$WORK/dash/Fonts" "$R/hdd/partition2/" 2>/dev/null || true
 cp xboxdash.xbe "$R/hdd/partition2/"
-# the launch sound, a loose file beside the XBE (AudioClip reads wavs as files)
-cp "$HERE/art/sounds/launch.wav" "$R/hdd/partition2/"; cp "$HERE/art/sounds/launch.wav" "$OUT/game/"
+# the launch sound and the UI sounds, loose files beside the XBE (AudioClip
+# reads wavs as files)
+cp "$HERE"/art/sounds/*.wav "$R/hdd/partition2/"; cp "$HERE"/art/sounds/*.wav "$OUT/game/"
 echo "built $OUT/xboxdash.xbe; run it with $HERE/run.sh $WORK"

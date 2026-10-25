@@ -54,20 +54,35 @@ static bool checked(Node* n)
 }
 
 
+// A progress bar's visual (and every timeline inside it: the Blades'
+// prgbr_Memory keeps its keys on a group under the visual, which has no
+// named frames of its own) is held at the point its Value picks in
+// RangeMin..RangeMax: between Normal and EndNormal where a timeline has
+// them, else between 0 and its last key.  Nothing in it plays on its own.
+struct ParkBar { float f; bool operator()(Node* n) {
+    if (!n->timeline) return true;
+    double a = n->frameTime("Normal", 0), b = n->frameTime("EndNormal", n->lastKey());
+    n->time = a + (b - a) * f; n->playing = false; n->apply();
+    return true; } };
+
+void Node::setBarValue()
+{
+    if (!visual) return;
+    float lo = propN(props, "RangeMin", 0), hi = propN(props, "RangeMax", 100);
+    float f = hi > lo ? (propN(props, "Value", 0) - lo) / (hi - lo) : 0;
+    if (f < 0) f = 0; if (f > 1) f = 1;
+    ParkBar pb; pb.f = f; visual->walk(pb);
+}
+
+static bool isBar(Node* n) { return n && n->cls && strcmp(n->cls->name, "XuiProgressBar") == 0; }
+
 // A timeline starts at frame 0 unless it has a Normal frame; a Stop command
 // at frame 0 (the Blades' meta panes rest at "Default") holds it there.
-// A progress bar's visual is held at the frame between Normal and
-// EndNormal that its Value picks in RangeMin..RangeMax.
+// A progress bar's visual is parked by setBarValue.
 struct InitTimelines { bool operator()(Node* n) {
+    if (isBar(n)) { n->setBarValue(); return true; }
     if (!n->timeline) return true;
-    if (n->owner && n->owner->visual == n && strcmp(n->owner->cls->name, "XuiProgressBar") == 0) {
-        float lo = propN(n->owner->props, "RangeMin", 0), hi = propN(n->owner->props, "RangeMax", 100);
-        float f = hi > lo ? (propN(n->owner->props, "Value", 0) - lo) / (hi - lo) : 0;
-        if (f < 0) f = 0; if (f > 1) f = 1;
-        double a = n->frameTime("Normal", 0), b = n->frameTime("EndNormal", n->lastKey());
-        n->time = a + (b - a) * f; n->playing = false; n->apply();
-        return true;
-    }
+    if (isBar(n->owner)) return true;
     if (n->owner && n->owner->visual == n && !propB(n->owner->props, "Enabled", true) && n->play("NormalDisable")) return true;
     if (n->owner && n->owner->visual == n && checked(n->owner) && n->play("NormalCheck")) return true;
     if (!n->play("Normal")) { n->time = 0; n->playing = !n->stopsAt(0); n->apply(); }

@@ -203,6 +203,19 @@ static void relaunch(const char *path)
     char full[1100];
     snprintf(full, sizeof(full), "%s\\%s", dpath, rel);
     if (!NT_SUCCESS(fs_host_path(full, img, sizeof(img)))) { xlog("cannot map %s", full); return; }
+    /* A game installed on the hard disk as its disc image (default.iso
+       beside default.xbe, e.g. a Streaming Download that may still be
+       filling in): for this title D: is the DVD drive with that image in
+       it, not the folder; the real drive is left out of this launch. */
+    char disc[4200];
+    struct stat dsb;
+    bool as_disc = false;
+    snprintf(disc, sizeof(disc), "%s/default.iso", dir);
+    if (stat(disc, &dsb) == 0 && S_ISREG(dsb.st_mode)) {
+        as_disc = true;
+        snprintf(dpath, sizeof(dpath), "\\Device\\CdRom0");
+        xlog("XLaunchNewImage: %s is installed as a disc image: D: is %s", dir, disc);
+    }
     char page[4096];
     snprintf(page, sizeof(page), "%s/.launchdata", fs_hdd_root());
     FILE *f = fopen(page, "wb");
@@ -232,8 +245,11 @@ static void relaunch(const char *path)
         args[n++] = saved_argv[i];
     }
     extern char *g_dvd_root, *g_dvd_drive;
-    if (g_dvd_root) { args[n++] = "--dvd"; args[n++] = g_dvd_root; }
-    if (g_dvd_drive) { args[n++] = "--dvd-drive"; args[n++] = g_dvd_drive; }
+    if (as_disc) { args[n++] = "--dvd"; args[n++] = disc; }
+    else {
+        if (g_dvd_root) { args[n++] = "--dvd"; args[n++] = g_dvd_root; }
+        if (g_dvd_drive) { args[n++] = "--dvd-drive"; args[n++] = g_dvd_drive; }
+    }
     args[n++] = "--d-path"; args[n++] = dpath;
     args[n++] = "--xbe-path"; args[n++] = rel;
     args[n++] = "--launch-data"; args[n++] = page;

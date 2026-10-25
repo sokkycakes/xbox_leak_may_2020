@@ -12,5 +12,5 @@ if [ "$1" = remove ]; then
 	exit
 fi
 echo "Copying to the Sion ($HOST)..."
-scp $OPT default.xbe default.xip launch.wav *.map install-game.sh "$HOST:/tmp/" || { echo 'Copy failed: is the Sion on and on the network?'; exit 1; }
+scp $OPT default.xbe default.xip *.wav *.map install-game.sh frolick-store S97frolick-store install-store.sh "$HOST:/tmp/" || { echo 'Copy failed: is the Sion on and on the network?'; exit 1; }
 ssh $OPT "$HOST" 'sh /tmp/install-game.sh; rm -f /tmp/install-game.sh'

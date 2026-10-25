@@ -10,7 +10,12 @@ the power button, returns to the dashboard.
 | default.xbe | E:\Games\Frolick\default.xbe | title ID 46524C4B "Frolick"; loads its files from D: (beside itself) |
 | default.xip | E:\Games\Frolick\default.xip | the scene, art and XUI panels |
 | launch.wav | the launch sound, played while the Xbox logo holds before a game starts | |
-| fec5b6d5...-d3d8+dsound+xapilib-9e55a416902bf3c8.map | the HLE map cache (/data/xbox/cache/xbcompat) | optional: xbrun makes its own on the first launch otherwise |
+| woosh.wav, blades_*.wav | the UI sounds: Frolick's woosh pad to pad, the 360 Blades' focus / select / back / open / close for the rest | loose files beside the XBE |
+| menu_music.wav | the menu ambience, looped under the menus (Xbox ADPCM, 34 MB, streamed from the file) | |
+| 4950020f...-d3d8+dsound+xapilib-9e55a416902bf3c8.map | the HLE map cache (/data/xbox/cache/xbcompat) | optional: xbrun makes its own on the first launch otherwise |
+| frolick-store | /opt/frolick/bin/frolick-store | the storefront helper (`store/`, static x86-64): the Internet Archive catalog for Spotlight and the downloads behind the Downloads page, through files in E:\FROLICK\STORE; downloads land in /data/frolick/downloads |
+| S97frolick-store | /etc/init.d/S97frolick-store | starts the helper at boot; log /var/log/frolick-store.log |
+| install-store.sh | runs on the Sion | installs the two above (sion persist) and starts the helper; the kit's installer runs it |
 | install-game.sh | runs on the Sion | makes the folder, copies the engine's fonts (Xbox.xtf, XBox Book.xtf, Fonts/tahoma.ttf) from /opt/xbcompat/dash beside the XBE |
 | sion-game.sh | runs on the PC | scp + ssh wrapper: `sh sion-game.sh` installs, `sh sion-game.sh remove` deletes the folder |
 
@@ -23,3 +28,5 @@ ID, Play Game launches it (XLaunchNewImage with D: = the game folder) and
 the hub renders.
 
 Check the files with `sha256sum -c SHA256SUMS`.
+
+Streaming Download (Play on Half-Life 2 in Spotlight) needs the store service from this kit and the xbcompat in dist/stream installed in /opt/xbcompat.
