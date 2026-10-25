@@ -66,7 +66,7 @@ HEADER_LABEL_Y = 107
 # The page's header (the Blades' scene title at 156,96) is the sub-title
 # under the pad's big label.  The catalog's label sits top left in its
 # mirrored view, so its pages' header moves right of it.
-HEADER_IDS = ("labSceneTitle", "txt_Header", "labHeader", "labelHeading")
+HEADER_IDS = ("labSceneTitle", "txt_Header", "labHeader", "labelHeading", "lblHelpTitle")
 CATALOG_HEADER_X = 500
 
 # The Blades' list visuals: the item visual, its height (the skin's
@@ -129,10 +129,68 @@ PAGES = [
                        clone={"labAchievementsNum": ("labRecentAchievementsNum", "782,286,0"),
                               "labAchievementsText": ("labRuntimeText", "581,326,0"),
                               "labAchievementsNum ": ("labRuntimeNum", "782,326,0")})),
+    # Console Settings (sokky, 2026-10-25): the Blades' list without
+    # Locale, the rows under it moved up, Developer Settings added at the
+    # end.  Auto-Off and Remote Control come later.  "@" meta: the hub
+    # script says the current setting (SysMeta).
     ("page_console", dict(scene="dashSysCslSet.xui", pad="settings", first="btnDisplay", parent="page_system",
-                          meta={"btnDisplay": "480i NTSC, 4:3", "btnAudio": "Stereo", "btnLanguage": "English",
-                                "btnClock": "Set from the network", "btnCountry": "United States", "btnAutoOff": "Off",
-                                "btnScreensaver": "Off", "btnRemote": "Not set up", "btnPolicy": "Frolick on the Sion"})),
+                          hide=["btnCountry"],
+                          positions={"btnAutoOff": "146,333,0", "btnScreensaver": "146,378,0", "btnRemote": "146,423,0",
+                                     "btnPolicy": "146,468,0"},
+                          clone={"btnPolicy": ("btnDeveloper", "146,513,0")},
+                          labels={"btnDeveloper": "Developer Settings"},
+                          nav={"btnClock": {"NavDown": "btnAutoOff"}, "btnAutoOff": {"NavUp": "btnClock"},
+                               "btnPolicy": {"NavDown": "btnDeveloper"}, "btnDeveloper": {"NavUp": "btnPolicy"}},
+                          press={"btnDisplay": "page_display", "btnAudio": "page_audio", "btnLanguage": "page_language",
+                                 "btnClock": "page_clock", "btnScreensaver": "page_screensaver", "btnPolicy": "page_sysinfo",
+                                 "btnDeveloper": "page_developer"},
+                          meta={k: "@" for k in ("btnDisplay", "btnAudio", "btnLanguage", "btnClock", "btnAutoOff",
+                                                 "btnScreensaver", "btnRemote", "btnPolicy", "btnDeveloper")})),
+    ("page_display", dict(scene="dashSysCslSetDisplay.xui", pad="settings", first="btnHD", parent="page_console",
+                          hide=["btnPAL", "labAVPackInfo", "labCurrentSetting", "scnCurrentFormat"],
+                          labels={"btnHD": "Resolution", "labDescription":
+                                  "Set the resolution and screen format to match your TV. A new resolution shows "
+                                  "at once; keep it within 15 seconds or the console goes back to the old one."},
+                          nav={"btnScreenFormat": {"NavDown": ""}},
+                          press={"btnHD": "page_display_hd", "btnScreenFormat": "page_display_format"},
+                          meta={"btnHD": "@", "btnScreenFormat": "@"})),
+    # The option lists below are filled by the hub script (kind "options":
+    # OptCount / OptName / OptSelect), the current one in labCurrentSettings.
+    ("page_display_hd", dict(scene="dashSysCslSetDisplayHiDef.xui", pad="settings", first="listOptions_0",
+                             parent="page_display", header="Resolution", dynamic="options", hide=["labAVPackInfo"],
+                             labels={"labMetaBody": "480i and 480p are standard definition; 720p and 1080p are "
+                                     "high definition. Games that support HDTV modes use the ones up to the "
+                                     "resolution set here."})),
+    ("page_display_format", dict(scene="dashSysCslSetDisplayFormat.xui", pad="settings", first="btnNormal",
+                                 parent="page_display", labels={"btnNormal": "Normal (4:3)", "btnWide": "Widescreen (16:9)"})),
+    ("page_audio", dict(scene="dashSysCslSetAudioAnalog.xui", pad="settings", first="listOptions_0", parent="page_console",
+                        header="Audio Settings", dynamic="options",
+                        labels={"labMetaBody": "• Mono for a TV with one speaker.\n• Stereo for two speakers.\n"
+                                "• Dolby Digital 5.1 for a surround receiver; games that support it play in 5.1."})),
+    ("page_language", dict(scene="dashSysCslSetLanguage.xui", pad="settings", first="lstLanguages_0", parent="page_console",
+                           dynamic="options", labels={"labMetaBody": "Games use this language when they have it."})),
+    ("page_clock", dict(scene="dashSysCslSetClock.xui", pad="settings", first="btnOption1", parent="page_console",
+                        hide=["btnOption4"],
+                        labels={"btnOption1": "Sync to Internet Time", "btnOption2": "Time Zone",
+                                "btnOption3": "Daylight Saving Time", "labMetaBody": ""},
+                        nav={"btnOption3": {"NavDown": ""}},
+                        press={"btnOption2": "page_timezone"})),
+    ("page_timezone", dict(scene="dashSysCslSetClockTimeZone.xui", pad="settings", first="lstTimezone_0",
+                           parent="page_clock", dynamic="options")),
+    ("page_screensaver", dict(scene="dashSysCslSetScreensaver.xui", pad="settings", first="btnOn", parent="page_console",
+                              labels={"labMetaBody": "The screen saver dims the picture after five minutes "
+                                      "without a button pressed. More screen savers will come later."})),
+    ("page_sysinfo", dict(scene="dashSysCslSetPolicyInfo_System.xui", pad="settings", first="btnB", parent="page_console",
+                          hide=["btnA", "btnX", "btnY"], labels={"edInfo": ""})),
+    ("page_developer", dict(scene="dashSysCslSetAudioAnalog.xui", pad="settings", first="listOptions_0",
+                            parent="page_console", header="Developer Settings", dynamic="options",
+                            labels={"labCurrentSettingsText": "Games Run On", "labMetaBody":
+                                    "xbcompat replaces the Xbox's graphics library and is the fastest. xbcompat-gpu "
+                                    "emulates the Xbox's GPU (xemu's NV2A) and draws some games more faithfully. "
+                                    "The dashboards always run on xbcompat. The change applies to the next game."})),
+    # A new resolution's question (the hub counts down in its header)
+    ("page_keep", dict(scene=None, pad="settings", first="btnKeep", parent="page_display_hd", header="Keep this resolution?",
+                       items=[("btnKeep", "Keep", ""), ("btnRevert", "Go Back", "")])),
     # The Memory pages read the console (hub script: theStorage,
     # theMemoryMonitor, the dashboard's own saved-game code): a dynamic page
     # is a list the script fills a row at a time (dynamic: what it lists,
@@ -863,6 +921,10 @@ def page(file, spec):
                     b = set_prop(b, "Enabled", "true" if spec["labels"][id] else "false")
             if id in spec.get("positions", {}):
                 b = set_prop(b, "Position", spec["positions"][id])
+            # a read-only edit box (System Info) is a label of the script's text
+            if b.startswith("<XuiEdit>"):
+                b = b.replace("<XuiEdit>", "<XuiLabel>").replace("</XuiEdit>", "</XuiLabel>")
+                b = re.sub(r"\s*<(Visual|ReadOnly|Multiline|SmoothScroll)>.*?</\1>", "", b)
             # clone: {source id (a trailing space makes a second copy): (new id, position)}
             for src, (nid, pos) in spec.get("clone", {}).items():
                 if src.strip() == id:
@@ -870,6 +932,18 @@ def page(file, spec):
             if id == "txt_Meta":
                 b = set_prop(b, "Text", "")
             kept.append(b)
+
+    # what a clone is called, and navigation the page changes ("" none)
+    out = []
+    clones = [nid for nid, _ in spec.get("clone", {}).values()]
+    for b in kept:
+        id = prop(b, "Id")
+        if id in clones and id in spec.get("labels", {}):
+            b = set_prop(b, "Text", spec["labels"][id])
+        for k, v in spec.get("nav", {}).get(id, {}).items():
+            b = set_prop(b, k, v) if v else re.sub(r"\s*<%s>.*?</%s>" % (k, k), "", b)
+        out.append(b)
+    kept = out
 
     hx = CATALOG_HEADER_X if pad == "catalog" else 156
     kept = [set_prop(b, "Position", "%d,%d,0" % (hx, HEADER_LABEL_Y)) if prop(b, "Id") in HEADER_IDS else b for b in kept]

@@ -23,3 +23,5 @@ sion persist $D/xboxdash.xbe $D/xboxdash.map $D/default.xip $persist $keep >/dev
 sleep 10
 grep -E 'fatal|error' /var/log/xbox.log | tail -n 3
 pidof xbcompat >/dev/null && echo 'the Frolick dashboard is running' || echo 'the dashboard is not running'
+# the display keeper with the resolution switch, when the kit carries it
+[ -f /tmp/install-xbox-av.sh ] && sh /tmp/install-xbox-av.sh && rm -f /tmp/install-xbox-av.sh

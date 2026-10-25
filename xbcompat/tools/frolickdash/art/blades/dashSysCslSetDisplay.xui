@@ -1,0 +1,162 @@
+<XuiCanvas>
+<Properties>
+ <Width>1120</Width>
+ <Height>770</Height>
+</Properties>
+<XuiScene>
+<Properties>
+ <Id>scDisplaySettings</Id>
+ <Width>1120</Width>
+ <Height>770</Height>
+ <ClassOverride>dashVideoSettings</ClassOverride>
+ <TransFrom>FadeOut</TransFrom>
+ <TransTo>FadeIn</TransTo>
+ <TransBackFrom>FadeOut</TransBackFrom>
+ <TransBackTo>FadeIn</TransBackTo>
+</Properties>
+<XuiNavButton>
+<Properties>
+ <Id>btnHD</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>144,153,0</Position>
+ <NavDown>btnScreenFormat</NavDown>
+ <Text>HDTV Settings
+</Text>
+ <PressPath>dashSysCslSetDisplayHiDef.xur</PressPath>
+</Properties>
+</XuiNavButton>
+<XuiNavButton>
+<Properties>
+ <Id>btnScreenFormat</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>144,198,0</Position>
+ <NavUp>btnHD</NavUp>
+ <NavDown>btnPAL</NavDown>
+ <Text>Screen Format</Text>
+ <PressPath>dashSysCslSetDisplayFormat.xur</PressPath>
+</Properties>
+</XuiNavButton>
+<XuiNavButton>
+<Properties>
+ <Id>btnPAL</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>144,243,0</Position>
+ <NavUp>btnScreenFormat</NavUp>
+ <Text>PAL Settings</Text>
+ <PressPath>dashSysCslSetDisplayPal.xur</PressPath>
+</Properties>
+</XuiNavButton>
+<XuiNavButton>
+<Properties>
+ <Id>legend_y</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>165,611,0</Position>
+ <Visual>legend_Y</Visual>
+ <Enabled>false</Enabled>
+ <PressKey>22531</PressKey>
+</Properties>
+</XuiNavButton>
+<XuiNavButton>
+<Properties>
+ <Id>legend_x</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>146,639,0</Position>
+ <Visual>legend_X</Visual>
+ <Enabled>false</Enabled>
+ <PressKey>22530</PressKey>
+</Properties>
+</XuiNavButton>
+<XuiNavButton>
+<Properties>
+ <Id>legend_a</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>573,639,0</Position>
+ <Visual>legend_A</Visual>
+ <Text>Select</Text>
+</Properties>
+</XuiNavButton>
+<XuiBackButton>
+<Properties>
+ <Id>legend_b</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>555,611,0</Position>
+ <Visual>legend_B</Visual>
+ <UnfocusedInput>true</UnfocusedInput>
+ <Text>Back</Text>
+ <PressKey>22593</PressKey>
+</Properties>
+</XuiBackButton>
+<XuiScene>
+<Properties>
+ <Id>metaPanelScene</Id>
+ <Width>420</Width>
+ <Height>450</Height>
+ <Position>579,153,0</Position>
+ <ClassOverride>MetaPanelScene</ClassOverride>
+ <Visual>metaScene_1line</Visual>
+</Properties>
+</XuiScene>
+<XuiLabel>
+<Properties>
+ <Id>labHeader</Id>
+ <Width>855</Width>
+ <Height>47</Height>
+ <Position>156,96,0</Position>
+ <Visual>Label_Head</Visual>
+ <Text>Display Settings</Text>
+</Properties>
+</XuiLabel>
+<XuiLabel>
+<Properties>
+ <Id>labMetaHeader</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>579,155,0</Position>
+ <Visual>Label_MetaHead_1line</Visual>
+ <Text>Current Setting</Text>
+</Properties>
+</XuiLabel>
+<XuiLabel>
+<Properties>
+ <Id>labCurrentSetting</Id>
+ <Width>235</Width>
+ <Height>47</Height>
+ <Position>751,210,0</Position>
+ <Visual>XuiLabel</Visual>
+ <Text>&lt;setting&gt;</Text>
+</Properties>
+</XuiLabel>
+<XuiScene>
+<Properties>
+ <Id>scnCurrentFormat</Id>
+ <Width>420</Width>
+ <Height>450</Height>
+ <Position>579,153,0</Position>
+</Properties>
+</XuiScene>
+<XuiLabel>
+<Properties>
+ <Id>labDescription</Id>
+ <Width>411</Width>
+ <Height>272</Height>
+ <Position>579,332,0</Position>
+ <Text>Set the screen format to match your TV. You must connect an Xbox 360 Component HD AV Cable to configure high definition display modes. When you connect this cable, your screen format will be set automatically.</Text>
+</Properties>
+</XuiLabel>
+<XuiLabel>
+<Properties>
+ <Id>labAVPackInfo</Id>
+ <Width>420</Width>
+ <Height>150</Height>
+ <Position>147,424,0</Position>
+</Properties>
+</XuiLabel>
+</XuiScene>
+</XuiCanvas>

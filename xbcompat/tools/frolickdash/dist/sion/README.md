@@ -14,6 +14,8 @@ the commit it ships in), packaged to run on the Sion in place of the Xbox dashbo
 | frolick-store | /opt/frolick/bin/frolick-store | the storefront helper (`store/`, static x86-64): the Internet Archive catalog for Spotlight and the downloads behind the Downloads page, through files in E:\FROLICK\STORE; downloads land in /data/frolick/downloads |
 | S97frolick-store | /etc/init.d/S97frolick-store | starts the helper at boot; log /var/log/frolick-store.log |
 | install-store.sh | runs on the Sion | installs the two above (sion persist) and starts the helper; the kit's installer runs it |
+| xbox-av | /opt/xbcompat/bin/xbox-av | the display keeper (`tools/sion/av`, static x86-64) with Console Settings > Display's resolution switch: a mode in /run/xbox-av-mode is set when a title leaves; the old one stays as xbox-av.pre-settings |
+| install-xbox-av.sh | runs on the Sion | installs xbox-av (sion persist) and restarts it; the kit's installer runs it |
 | install-frolick.sh | runs on the Sion | keeps the replaced files as `*.pre-frolick`, restarts S98xbox |
 | revert-frolick.sh | runs on the Sion | puts the `*.pre-frolick` copies back |
 | sion-frolick.sh | runs on the PC | scp + ssh wrapper: `sh sion-frolick.sh` installs, `sh sion-frolick.sh revert` reverts |

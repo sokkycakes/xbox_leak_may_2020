@@ -25,7 +25,7 @@ A Godot Transform3D(a..i, ox, oy, oz) lists its basis by rows, so the
 axes (columns) are X = (a, d, g), Y = (b, e, h), Z = (c, f, i); a camera
 looks down its -Z.
 """
-import math, os, re, sys
+import math, os, re, subprocess, sys, time
 
 # ---- main.tscn -------------------------------------------------------------
 NAV_SCALE, NAV_ORIGIN = 0.725065, (0.0, -0.0441807, 0.116777)
@@ -582,9 +582,16 @@ DEF theLaunchLevel Level
                 theGameCollection.LaunchGame(nLaunchGame);
         }
         // the Downloads page follows its active download, Spotlight the
-        // catalog and what is queued (twice a second)
+        // catalog and what is queued (twice a second); the settings pages
+        // their clock and a resolution's countdown (once a second)
         if (bPageOpen)
         {
+            nSysTick = nSysTick + 1;
+            if (nSysTick >= 20)
+            {
+                nSysTick = 0;
+                SysTick();
+            }
             if (sPage == "page_downloads")
             {
                 nDlTick = nDlTick + 1;
@@ -613,6 +620,12 @@ DEF theMover CameraMover
     function OnArrive()
     {
         bMoving = false;
+        if (bKeepAtStart)
+        {
+            bKeepAtStart = false;
+            FocusPad("page_keep");
+            return;
+        }
         // settled on the pad: the A pin fades back in
         if (bZoomed == false)
         {
@@ -689,6 +702,29 @@ DEF theDownloads Downloads
 
 DEF theStore Store
 {
+}
+
+// Console Settings: the Xbox's settings (the EEPROM), the Sion's, and the
+// stock dashboard's screen saver (it dims the picture after 5 minutes)
+DEF theConfig Config
+{
+}
+
+DEF theSysSettings SysSettings
+{
+}
+
+DEF theScreenSaver ScreenSaver
+{
+    function OnStart()
+    {
+        theScreen.brightness = 0.1;
+    }
+
+    function OnEnd()
+    {
+        theScreen.brightness = 1;
+    }
 }
 
 DEF theStorage Storage
@@ -1551,6 +1587,7 @@ function ShowPage(page, how)
     PageFocus(first);
     PageEnter();
     PageHeader();
+    SysEnter();
 }
 
 function ClosePage()
@@ -1564,6 +1601,11 @@ function ClosePage()
 function PageBack()
 {
     var parent;
+    if (sPage == "page_keep")
+    {
+        KeepRevert();
+        return 1;
+    }
     if (sPage == "page_confirm")
         parent = sConfirmBack;
     else if (sPage == "page_notice")
@@ -1587,6 +1629,8 @@ function PageFocus(id)
     var s;
     var r;
     s = PageMeta(sPage, id);
+    if (s == "@")
+        s = SysMeta(id);
     thePage.SetData("metaPanelScene", 4, s);   // metaScene_1line's Pane_txtCurrentSetting
     thePage.SetText("txt_Meta", s);
     thePage.SetText("txt_MetaTitle", PageItemName(sPage, id));
@@ -1947,6 +1991,9 @@ function initialize()
     theHub.GoTo();
     padLibrary.Play("", "Intro");
     theOverlay.SetText("word", "%(word_library)s");
+    SysInit();
+    if (bKeepAtStart)
+        GoPad(2);       // a new resolution on trial: its question first
 }
 '''
 
@@ -1958,6 +2005,581 @@ function initialize()
 # copy, move and delete of a save or a title's data run through
 # theStorage with the dashboard's confirmations.  (The script language
 # has no &&, || or unary minus, and a var declared in a block ends with it.)
+SETTINGS_SCRIPT = r"""
+// ---- Console Settings (sokky, 2026-10-25) -------------------------------
+// The Xbox's own settings through the dashboard's Config node (the EEPROM
+// games read); the Sion's (the TV's mode, the screen saver, which xbcompat
+// runs games, the clock sync, System Info) through theSysSettings and
+// frolick-store.  A new resolution is set between titles (xbox-av), so
+// Frolick starts again in it and asks to keep it; 15 s without an answer
+// goes back to the old one.
+
+var aZones;         // the Xbox's time zones (xapp/timezone.h), by index
+var aLangs;         // XC_LANGUAGE 1..9
+var aRes;           // the resolutions, as settings.txt names them
+var nKeepLeft;      // seconds the new resolution waits for Keep (0: none)
+var bKeepAtStart;   // Frolick started in a resolution on trial
+var sSwitchTo;      // a resolution waiting for the helper before the relaunch
+var nSwitchWait;
+var nSysTick;
+
+function SysInit()
+{
+    aLangs = new Array("English", "Japanese", "German", "French", "Spanish", "Italian", "Korean",
+        "Chinese", "Portuguese");
+    aRes = new Array("480i", "480p", "720p", "1080p");
+    aZones = new Array(
+        "GMT-12 Tokelau",
+        "GMT-11 Samoa",
+        "GMT-10 Hawaii",
+        "GMT-09 Alaska",
+        "GMT-08 Pacific",
+        "GMT-07 Arizona",
+        "GMT-07 Mountain",
+        "GMT-06 Central America",
+        "GMT-06 Central",
+        "GMT-06 Mexico City",
+        "GMT-06 Saskatchewan",
+        "GMT-05 Eastern",
+        "GMT-05 Indiana",
+        "GMT-05 Bogota",
+        "GMT-04 Atlantic",
+        "GMT-04 Caracas",
+        "GMT-04 Santiago",
+        "GMT-03:30 Newfoundland",
+        "GMT-03 Brasilia",
+        "GMT-03 Buenos Aires",
+        "GMT-03 Greenland",
+        "GMT-02 Mid-Atlantic",
+        "GMT-01 Azores",
+        "GMT-01 Cape Verde Is.",
+        "GMT+00 Casablanca",
+        "GMT+00 London",
+        "GMT+01 Berlin",
+        "GMT+01 Belgrade",
+        "GMT+01 Paris",
+        "GMT+01 Sarajevo",
+        "GMT+01 W. Central Africa",
+        "GMT+02 Athens",
+        "GMT+02 Bucharest",
+        "GMT+02 Cairo",
+        "GMT+02 Pretoria",
+        "GMT+02 Helsinki",
+        "GMT+02 Jerusalem",
+        "GMT+03 Baghdad",
+        "GMT+03 Kuwait",
+        "GMT+03 Moscow",
+        "GMT+03 Nairobi",
+        "GMT+03:30 Tehran",
+        "GMT+04 Abu Dhabi",
+        "GMT+04 Baku",
+        "GMT+04:30 Kabul",
+        "GMT+05 Ekaterinburg",
+        "GMT+05 Islamabad",
+        "GMT+05:30 New Delhi",
+        "GMT+05:45 Kathmandu",
+        "GMT+06 Almaty",
+        "GMT+06 Dhaka",
+        "GMT+06 Sri Lanka",
+        "GMT+06:30 Yangon",
+        "GMT+07 Bangkok",
+        "GMT+07 Krasnoyarsk",
+        "GMT+08 Beijing",
+        "GMT+08 Irkutsk",
+        "GMT+08 Singapore",
+        "GMT+08 Perth",
+        "GMT+08 Taipei",
+        "GMT+09 Tokyo",
+        "GMT+09 Seoul",
+        "GMT+09 Yakutsk",
+        "GMT+09:30 Adelaide",
+        "GMT+09:30 Darwin",
+        "GMT+10 Brisbane",
+        "GMT+10 Sydney",
+        "GMT+10 Guam",
+        "GMT+10 Hobart",
+        "GMT+10 Vladivostok",
+        "GMT+11 Solomon Islands",
+        "GMT+12 Auckland",
+        "GMT+12 Fiji Islands",
+        "GMT+13 Nuku'alofa",
+        "GMT+14 Kiribati");
+    nKeepLeft = 0;
+    sSwitchTo = "";
+    nSwitchWait = 0;
+    nSysTick = 0;
+    if (theSysSettings.GetValue("screensaver") == "0")
+        theScreenSaver.enabled = false;
+    else
+        theScreenSaver.enabled = true;
+    bKeepAtStart = false;
+    if (theSysSettings.GetValue("keep") == "0")
+    {
+        if (theSysSettings.GetValue("display") != "")
+            bKeepAtStart = true;
+    }
+}
+
+// the resolution in use (settings.txt, else the helper's word, else 480p)
+function SysRes()
+{
+    var r = theSysSettings.GetValue("display");
+    if (r == "")
+        r = theSysSettings.GetSys("display.1");
+    if (r == "")
+        r = "480p";
+    return r;
+}
+
+function SysFormat()
+{
+    if (theConfig.GetVideoMode() == 2)
+        return "Widescreen (16:9)";
+    return "Normal (4:3)";
+}
+
+function SysAudio()
+{
+    if (theConfig.GetDolbyDigitalSupport() == 1)
+        return 2;
+    if (theConfig.GetAudioMode() == 0)
+        return 0;
+    return 1;
+}
+
+function SysGpu()
+{
+    var g = theSysSettings.GetSys("gpu.1");
+    if (g == "")
+        g = theSysSettings.GetValue("gpu");
+    if (g == "1")
+        return 1;
+    return 0;
+}
+
+function Two(n)
+{
+    if (n < 10)
+        return "0" + n;
+    return "" + n;
+}
+
+function SysTime()
+{
+    var d = new Date();
+    var h = d.getHours();
+    var ap = "AM";
+    if (h >= 12)
+        ap = "PM";
+    if (h > 12)
+        h = h - 12;     // (the script has no %%)
+    if (h == 0)
+        h = 12;
+    return h + ":" + Two(d.getMinutes()) + " " + ap;
+}
+
+function SysZone()
+{
+    var z = theConfig.GetTimeZone();
+    if (z < 0)
+        return "";
+    if (z >= 75)
+        return "";
+    return aZones[z];
+}
+
+function SysDST()
+{
+    if (theConfig.GetDSTAllowed() == 0)
+        return "Not used in this time zone";
+    if (theConfig.GetDST() == 1)
+        return "On";
+    return "Off";
+}
+
+function SysSync()
+{
+    var st = theSysSettings.GetSys("sync.2");
+    if (theSysSettings.HasSys() == 0)
+        return "The console service isn't running.";
+    if (st == "running")
+        return "Setting the clock from the Internet...";
+    if (st == "ok")
+        return theSysSettings.GetSys("sync.3");
+    if (st == "failed")
+        return theSysSettings.GetSys("sync.3");
+    return "";
+}
+
+// the console list's "Current Setting" for a row
+function SysMeta(id)
+{
+    if (id == "btnDisplay")
+        return SysRes() + ", " + SysFormat();
+    if (id == "btnHD")
+        return SysRes();
+    if (id == "btnScreenFormat")
+        return SysFormat();
+    if (id == "btnAudio")
+        return OptName("page_audio", SysAudio());
+    if (id == "btnLanguage")
+        return OptName("page_language", theConfig.GetLanguage() - 1);
+    if (id == "btnClock")
+        return SysTime();
+    if (id == "btnAutoOff")
+        return "Coming in a later update";
+    if (id == "btnRemote")
+        return "Coming in a later update";
+    if (id == "btnScreensaver")
+    {
+        if (theScreenSaver.enabled)
+            return "On";
+        return "Off";
+    }
+    if (id == "btnPolicy")
+        return "Sion, Frolick %(frolick_rev)s";
+    if (id == "btnDeveloper")
+        return "Games run on " + OptName("page_developer", SysGpu());
+    return "";
+}
+
+// ---- the option lists ----------------------------------------------------
+
+function OptCount(page)
+{
+    if (page == "page_display_hd")
+        return 4;
+    if (page == "page_audio")
+        return 3;
+    if (page == "page_language")
+        return 9;
+    if (page == "page_timezone")
+        return 75;
+    if (page == "page_developer")
+        return 2;
+    return 0;
+}
+
+function OptName(page, i)
+{
+    if (i < 0)
+        return "";
+    if (page == "page_display_hd")
+        return aRes[i];
+    if (page == "page_audio")
+    {
+        if (i == 0)
+            return "Mono";
+        if (i == 1)
+            return "Stereo";
+        return "Dolby Digital 5.1";
+    }
+    if (page == "page_language")
+        return aLangs[i];
+    if (page == "page_timezone")
+        return aZones[i];
+    if (page == "page_developer")
+    {
+        if (i == 0)
+            return "xbcompat";
+        return "xbcompat-gpu (xemu GPU)";
+    }
+    return "";
+}
+
+function OptCurrent(page)
+{
+    var r;
+    var i;
+    if (page == "page_display_hd")
+    {
+        r = SysRes();
+        for (i = 0; i < 4; i = i + 1)
+        {
+            if (aRes[i] == r)
+                return i;
+        }
+        return 1;
+    }
+    if (page == "page_audio")
+        return SysAudio();
+    if (page == "page_language")
+        return theConfig.GetLanguage() - 1;
+    if (page == "page_timezone")
+        return theConfig.GetTimeZone();
+    if (page == "page_developer")
+        return SysGpu();
+    return 0;
+}
+
+// the games' HDTV flags follow the resolution: a game uses the modes up to it
+function SysHDFlags(r)
+{
+    theConfig.Set480Support(0);
+    theConfig.Set720Support(0);
+    theConfig.Set1080Support(0);
+    if (r == "480i")
+        return;
+    theConfig.Set480Support(1);
+    if (r == "480p")
+        return;
+    theConfig.Set720Support(1);
+    if (r == "720p")
+        return;
+    theConfig.Set1080Support(1);
+}
+
+function OptSelect(page, i)
+{
+    var r;
+    var have;
+    if (page == "page_display_hd")
+    {
+        r = aRes[i];
+        if (r == SysRes())
+            return;
+        have = theSysSettings.GetSys("display.2");
+        if (theSysSettings.HasSys() == 0)
+        {
+            Notice("The console service isn't running.", "page_display_hd");
+            return;
+        }
+        if (have.indexOf(r) < 0)
+        {
+            Notice("Your TV doesn't take " + r + ".", "page_display_hd");
+            return;
+        }
+        theSysSettings.SetValue("display_old", SysRes());
+        theSysSettings.SetValue("display", r);
+        theSysSettings.SetValue("keep", "0");
+        SysHDFlags(r);
+        SysSwitch(r);
+        return;
+    }
+    if (page == "page_audio")
+    {
+        if (i == 0)
+            theConfig.SetAudioMode(0);
+        else
+            theConfig.SetAudioMode(1);
+        if (i == 2)
+            theConfig.SetDolbyDigitalSupport(1);
+        else
+            theConfig.SetDolbyDigitalSupport(0);
+    }
+    if (page == "page_language")
+        theConfig.SetLanguage(i + 1);
+    if (page == "page_timezone")
+        theConfig.SetTimeZone(i);
+    if (page == "page_developer")
+    {
+        if (i == 1)
+        {
+            if (theSysSettings.GetSys("gpu.2") == "0")
+            {
+                Notice("xbcompat-gpu isn't installed on this console.", "page_developer");
+                return;
+            }
+        }
+        theSysSettings.SetValue("gpu", "" + i);
+    }
+    SysRefresh();
+}
+
+// ---- a new resolution ---------------------------------------------------
+
+// Frolick starts again once the helper has the new mode for xbox-av (or
+// after 5 s without word from it).
+function SysSwitch(r)
+{
+    sSwitchTo = r;
+    nSwitchWait = 0;
+    bBusy = true;
+    SetHeader("Switching to " + r + "...");
+}
+
+function KeepNow()
+{
+    nKeepLeft = 0;
+    theSysSettings.SetValue("keep", "1");
+    theSysSettings.SetValue("display_old", "");
+    SndSelect();
+    ShowPage("page_display_hd", "Fade");
+}
+
+function KeepRevert()
+{
+    var old = theSysSettings.GetValue("display_old");
+    nKeepLeft = 0;
+    if (old == "")
+        old = "480p";
+    theSysSettings.SetValue("display", old);
+    theSysSettings.SetValue("keep", "1");
+    SysHDFlags(old);
+    SndBack();
+    ShowPage("page_display_hd", "Fade");
+    SysSwitch(old);
+}
+
+// ---- the pages ----------------------------------------------------------
+
+// the current setting on the page that shows one, and its texts
+function SysRefresh()
+{
+    var i;
+    var s;
+    var n;
+    if (PageKind(sPage) == "options")
+        thePage.SetText("labCurrentSettings", OptName(sPage, OptCurrent(sPage)));
+    if (sPage == "page_display_format")
+        thePage.SetText("labCurrentSettings", SysFormat());
+    if (sPage == "page_screensaver")
+        thePage.SetText("labCurrentSettings", SysMeta("btnScreensaver"));
+    if (sPage == "page_clock")
+    {
+        thePage.SetText("labCurrentSettings", SysTime());
+        thePage.SetText("labMetaBody", "Time zone: " + SysZone() + "\nDaylight saving: " + SysDST() + "\n\n" + SysSync());
+    }
+    if (sPage == "page_sysinfo")
+    {
+        s = "Frolick: %(frolick_rev)s\n";
+        n = theSysSettings.GetInfoCount();
+        if (n == 0)
+            s = s + "\nThe console service isn't running, so there is nothing more to show.";
+        for (i = 0; i < n; i = i + 1)
+            s = s + theSysSettings.GetInfoLabel(i) + ": " + theSysSettings.GetInfoValue(i) + "\n";
+        thePage.SetText("edInfo", s);
+    }
+}
+
+// a page just shown
+function SysEnter()
+{
+    var c;
+    if (PageKind(sPage) == "options")
+    {
+        // the current option focused, scrolled into view
+        c = OptCurrent(sPage);
+        if (c < 0)
+            c = 0;
+        if (c >= nRows)
+            nScroll = c - nRows + 1;
+        nSel = c;
+        FillPage();
+        thePage.SetFocus(RowId(c - nScroll));
+    }
+    if (sPage == "page_keep")
+    {
+        nKeepLeft = 15;
+        SetHeader("Keep " + SysRes() + "? 15");
+    }
+    SysRefresh();
+}
+
+// A on the settings pages: 1 when it was theirs
+function SysSpecial(id)
+{
+    var stamp;
+    var d;
+    if (PageKind(sPage) == "options")
+    {
+        SndSelect();
+        OptSelect(sPage, nSel);
+        return 1;
+    }
+    if (sPage == "page_display_format")
+    {
+        if (id == "btnWide")
+            theConfig.SetVideoMode(2);
+        else
+            theConfig.SetVideoMode(0);
+        SndSelect();
+        SysRefresh();
+        return 1;
+    }
+    if (sPage == "page_screensaver")
+    {
+        if (id == "btnOn")
+        {
+            theSysSettings.SetValue("screensaver", "1");
+            theScreenSaver.enabled = true;
+        }
+        else
+        {
+            theSysSettings.SetValue("screensaver", "0");
+            theScreenSaver.enabled = false;
+        }
+        SndSelect();
+        SysRefresh();
+        return 1;
+    }
+    if (sPage == "page_clock")
+    {
+        if (id == "btnOption1")
+        {
+            d = new Date();
+            stamp = d.getHours() + "." + d.getMinutes() + "." + d.getSeconds() + "." + d.getMilliseconds();
+            theSysSettings.SetValue("sync", stamp);
+            SndSelect();
+            SysRefresh();
+            return 1;
+        }
+        if (id == "btnOption3")
+        {
+            if (theConfig.GetDSTAllowed() == 1)
+                theConfig.SetDST(1 - theConfig.GetDST());
+            SndSelect();
+            SysRefresh();
+            return 1;
+        }
+        return 0;
+    }
+    if (sPage == "page_keep")
+    {
+        if (id == "btnKeep")
+            KeepNow();
+        else
+            KeepRevert();
+        return 1;
+    }
+    return 0;
+}
+
+// once a second while a page is open (the level's loop)
+function SysTick()
+{
+    if (sSwitchTo != "")
+    {
+        nSwitchWait = nSwitchWait + 1;
+        if (theSysSettings.GetSys("display.1") == sSwitchTo)
+            nSwitchWait = 6;
+        if (nSwitchWait >= 6)
+        {
+            sSwitchTo = "";
+            theSysSettings.Relaunch();
+        }
+        return;
+    }
+    if (sPage == "page_keep")
+    {
+        if (nKeepLeft > 0)
+        {
+            nKeepLeft = nKeepLeft - 1;
+            if (nKeepLeft == 0)
+                KeepRevert();
+            else
+                SetHeader("Keep " + SysRes() + "? " + nKeepLeft);
+        }
+        return;
+    }
+    if (sPage == "page_clock")
+        SysRefresh();
+    if (sPage == "page_console")
+        PageFocus(thePage.GetFocus());
+}
+"""
+
+
 MEMORY_SCRIPT = r"""
 var nScroll;        // the first row's item
 var nRows;          // rows on the page (0: not a list page)
@@ -2054,6 +2676,8 @@ function ListCount()
         return DlListCount();
     if (k == "spotlight")
         return theStore.GetCount(nTab);
+    if (k == "options")
+        return OptCount(sPage);
     return 0;
 }
 
@@ -2100,6 +2724,11 @@ function FillRow(r)
     else if (k == "downloads")
     {
         DlFillRow(id, i);
+        return;
+    }
+    else if (k == "options")
+    {
+        thePage.SetText(id, OptName(sPage, i));
         return;
     }
     else if (k == "spotlight")
@@ -2290,6 +2919,8 @@ function Notice(text, back)
 function PageSpecial(id)
 {
     var k = PageKind(sPage);
+    if (SysSpecial(id) == 1)
+        return 1;
     if (k == "devices")
     {
         nDev = DeviceAt(nSel, 0 - 1);
@@ -2744,7 +3375,12 @@ def main():
     vals["belt_count"] = len(CAROUSEL_GAMES)
     vals["belt_icons"] = ";".join(icon for _, icon in BELT_RESERVED)
     vals["belt_start"] = BELT_START
-    vals["memory_script"] = MEMORY_SCRIPT
+    try:
+        rev = subprocess.check_output(["git", "-C", os.path.dirname(os.path.abspath(__file__)), "rev-parse", "--short=8", "HEAD"], text=True).strip()
+    except (OSError, subprocess.CalledProcessError):
+        rev = "dev"
+    rev += ", built " + time.strftime("%Y-%m-%d", time.gmtime())
+    vals["memory_script"] = MEMORY_SCRIPT + SETTINGS_SCRIPT % {"frolick_rev": rev}
     vals["pin_fade_out"] = "%g" % PIN_FADE_OUT
     vals["pin_fade_in"] = "%g" % PIN_FADE_IN
     vals["pin_pulse_dy"] = "%g" % PIN_PULSE_DY

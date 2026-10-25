@@ -976,6 +976,7 @@ func main() {
 		}
 		watchSession()
 		watchPlay(ctx)
+		watchSettings()
 		select {
 		case err := <-catDone:
 			if err != nil {

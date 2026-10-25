@@ -1,0 +1,162 @@
+<XuiCanvas>
+<Properties>
+ <Width>1120</Width>
+ <Height>770</Height>
+</Properties>
+<XuiScene>
+<Properties>
+ <Id>scClockSettings</Id>
+ <Width>1120</Width>
+ <Height>770</Height>
+ <ClassOverride>dashClockSettings_Menu</ClassOverride>
+ <TransFrom>FadeOut</TransFrom>
+ <TransTo>FadeIn</TransTo>
+ <TransBackFrom>FadeOut</TransBackFrom>
+ <TransBackTo>FadeIn</TransBackTo>
+</Properties>
+<XuiNavButton>
+<Properties>
+ <Id>btnOption1</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>144,153,0</Position>
+ <NavDown>btnOption2</NavDown>
+ <Text>Date and Time</Text>
+ <PressPath>dashSysCslSetClockTime.xur</PressPath>
+</Properties>
+</XuiNavButton>
+<XuiNavButton>
+<Properties>
+ <Id>btnOption2</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>144,198,0</Position>
+ <NavUp>btnOption1</NavUp>
+ <NavDown>btnOption3</NavDown>
+ <Text>Time Format</Text>
+ <PressPath>dashSysCslSetClockFormat.xur</PressPath>
+</Properties>
+</XuiNavButton>
+<XuiNavButton>
+<Properties>
+ <Id>btnOption3</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>144,243,0</Position>
+ <NavUp>btnOption2</NavUp>
+ <NavDown>btnOption4</NavDown>
+ <Text>Time Zone</Text>
+ <PressPath>dashSysCslSetClockTimeZone.xur</PressPath>
+</Properties>
+</XuiNavButton>
+<XuiNavButton>
+<Properties>
+ <Id>btnOption4</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>144,289,0</Position>
+ <NavUp>btnOption3</NavUp>
+ <Text>Daylight Saving</Text>
+ <PressPath>dashSysCslSetClockDaylightSavings.xur</PressPath>
+</Properties>
+</XuiNavButton>
+<XuiNavButton>
+<Properties>
+ <Id>legend_y</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>165,611,0</Position>
+ <Visual>legend_Y</Visual>
+ <Enabled>false</Enabled>
+ <PressKey>22531</PressKey>
+</Properties>
+</XuiNavButton>
+<XuiNavButton>
+<Properties>
+ <Id>legend_x</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>146,639,0</Position>
+ <Visual>legend_X</Visual>
+ <Enabled>false</Enabled>
+ <PressKey>22530</PressKey>
+</Properties>
+</XuiNavButton>
+<XuiNavButton>
+<Properties>
+ <Id>legend_a</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>573,639,0</Position>
+ <Visual>legend_A</Visual>
+ <Text>Select</Text>
+</Properties>
+</XuiNavButton>
+<XuiBackButton>
+<Properties>
+ <Id>legend_b</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>555,611,0</Position>
+ <Visual>legend_B</Visual>
+ <UnfocusedInput>true</UnfocusedInput>
+ <Text>Back</Text>
+ <PressKey>22593</PressKey>
+</Properties>
+</XuiBackButton>
+<XuiLabel>
+<Properties>
+ <Id>labHeader</Id>
+ <Width>855</Width>
+ <Height>47</Height>
+ <Position>156,96,0</Position>
+ <Visual>Label_Head</Visual>
+ <Text>Clock Settings</Text>
+</Properties>
+</XuiLabel>
+<XuiScene>
+<Properties>
+ <Id>metaPanelScene</Id>
+ <Width>420</Width>
+ <Height>450</Height>
+ <Position>579,153,0</Position>
+ <ClassOverride>MetaPanelScene</ClassOverride>
+ <Visual>metaScene_1line</Visual>
+</Properties>
+</XuiScene>
+<XuiLabel>
+<Properties>
+ <Id>labCurrentSettingsText</Id>
+ <Width>414</Width>
+ <Height>47</Height>
+ <Position>579,155,0</Position>
+ <Visual>Label_MetaHead_1line</Visual>
+ <Text>Current Setting</Text>
+</Properties>
+</XuiLabel>
+<XuiLabel>
+<Properties>
+ <Id>labMetaBody</Id>
+ <Width>420</Width>
+ <Height>330</Height>
+ <Position>579,275,0</Position>
+ <Text>Set your:
+
+• Date and time
+• Time format (12-hour or 24-hour)
+• Time zone
+• Daylight saving time</Text>
+</Properties>
+</XuiLabel>
+<XuiLabel>
+<Properties>
+ <Id>labCurrentSettings</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>579,192,0</Position>
+ <Visual>Label_Body_1line</Visual>
+ <Text>&lt;setting&gt;</Text>
+</Properties>
+</XuiLabel>
+</XuiScene>
+</XuiCanvas>
