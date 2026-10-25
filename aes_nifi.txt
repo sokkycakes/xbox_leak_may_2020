@@ -1,0 +1,8 @@
+nwmBeaconKey=26e4423f4b3f69f2ee94195b49ff6959
+
+slot0x2DKeyX=b98e95ceca3e4d171f76a94de934c053
+slot0x2DKeyY=80c4e824f2fa5fd515cc2d96f44a2681
+slot0x2DKeyN=3ed6f5cf2cc37c54655000b7c8b52e0d
+
+dlpChecksumModIv=fe449ac13ae3b4095011d18944107833
+slot0x39KeyX=b529221cddb5db5a1bf26eff2041e875

@@ -1,0 +1,10 @@
+config BR2_PACKAGE_UNICORN
+	bool "unicorn"
+	depends on BR2_TOOLCHAIN_HAS_THREADS
+	depends on BR2_USE_MMU
+	help
+	  Unicorn, QEMU's CPU emulator packaged as a library. Built
+	  with only its x86 core, as a static library for xbcompat,
+	  which runs Xbox code with it on hosts that aren't x86.
+
+	  https://www.unicorn-engine.org/

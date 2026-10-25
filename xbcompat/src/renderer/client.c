@@ -1,0 +1,184 @@
+/* Guest half of the native renderer: D3D export stubs and the runtime
+   services the renderer calls back for.  Two builds:
+   - the i386 client under Box86, where the renderer is an ARM library
+     (libxbcompat_renderer.so.1) and only these stubs stay translated;
+   - XBC_RENDERER_STATIC, a translated build (xlat) with the renderer's
+     objects linked in (their hidden symbols made local), so the same
+     render worker draws on its own thread there too. */
+#include "../xbcompat.h"
+#include "../cpu.h"
+#include "../hle/hle.h"
+#include "bridge.h"
+#include <dlfcn.h>
+#include <stdlib.h>
+#include <stdatomic.h>
+#if !defined(XBC_NATIVE) && !defined(XBC_RENDERER_STATIC)
+#error The native renderer client is the i386/Box86 runtime or a translated build linking the renderer in
+#endif
+extern int g_screenshot_frame, g_exit_after_frames;
+extern const char *g_screenshot_path;
+SIZE_T NTAPI MmQueryAllocationSize(PVOID p);
+LONG NTAPI KeSetEvent(KEVENT *event, LONG increment, BOOLEAN wait);
+static pthread_once_t once = PTHREAD_ONCE_INIT;
+static atomic_bool backend_ready;
+static int (*backend_init)(uint32_t, xbr_host_fn);
+static const char *(*backend_name)(uint32_t);
+static void (*backend_invoke)(uint32_t, struct xbr_call *);
+static void (*backend_control)(uint32_t, uint32_t *);
+
+/* Same thread, including reentrant callbacks. ARM must never directly call
+ * an x86 function pointer: the Box86 wrapper bridges this service callback. */
+static void host_service(uint32_t op, uint32_t *a)
+{
+    switch (op) {
+    case XBR_LOG: xlog("%s", (const char *)a[0]); break;
+    case XBR_FATAL: fatal("%s", (const char *)a[0]); break;
+    case XBR_EXIT: xbc_exit(a[0]); break;
+    case XBR_LOOKUP: a[0] = hle_lookup((const char *)a[0]); break;
+    case XBR_LOOKUP_PREFIX: a[0] = hle_lookup_prefix((const char *)a[0]); break;
+    case XBR_POOL_ALLOC: a[0] = (uint32_t)pool_alloc(a[0]); break;
+    case XBR_POOL_FREE: pool_free((void *)a[0]); break;
+    case XBR_POOL_OWNS: a[0] = pool_owns((void *)a[0]); break;
+    case XBR_ARENA_ALLOC: a[0] = (uint32_t)arena_alloc(a[0], a[1]); break;
+    case XBR_CONTIG_ALLOC:
+        a[0] = (uint32_t)MmAllocateContiguousMemoryEx(a[0], a[1], a[2], a[3], a[4]); break;
+    case XBR_CONTIG_FREE: MmFreeContiguousMemory((void *)a[0]); break;
+    case XBR_ALLOC_SIZE: a[0] = MmQueryAllocationSize((void *)a[0]); break;
+    case XBR_FRAME_PRESENTED: ke_frame_presented(); a[0] = g_guest_traps; break;
+    case XBR_SET_EVENT: a[0] = KeSetEvent((KEVENT *)a[0], (LONG)a[1], (BOOLEAN)a[2]); break;
+    case XBR_RESET_COMBO: xinput_check_reset_combo(); break;
+    case XBR_RESET_CHECK: reset_check(); break;
+    case XBR_FAULT_HANDLERS: install_fault_handlers(); break;
+    case XBR_AV_START: av_title_starting(); break;
+    case XBR_AV_HANDOVER: av_hand_over(); break;
+    case XBR_AV_PERSIST: av_persist((void *)a[0], a[1], a[2]); break;
+    case XBR_GUEST_CALL: {
+        /* Current d3d8.c callbacks are both void cdecl(one argument).
+         * Fail explicitly if a future renderer adds a different signature. */
+        if (a[1] != CONV_CDECL || a[2] != 1)
+            fatal("native renderer: unsupported callback convention/count %u/%u", a[1], a[2]);
+        const uint32_t *args = (const uint32_t *)a[3];
+#ifdef XBC_NATIVE
+        ((void (CDECLAPI *)(uint32_t))a[0])(args[0]);
+        a[4] = a[5] = 0;
+#else
+        uint64_t r = cpu_call(a[0], CONV_CDECL, 1, args);
+        a[4] = (uint32_t)r;
+        a[5] = (uint32_t)(r >> 32);
+#endif
+        break;
+    }
+    default: fatal("native renderer: unknown host service %u", op);
+    }
+}
+static void load_backend(void)
+{
+#ifdef XBC_RENDERER_STATIC
+    const char *path = "linked in";
+    backend_init = xbr_init;
+    backend_name = xbr_name;
+    backend_invoke = xbr_invoke;
+    backend_control = xbr_control;
+#else
+    const char *path = getenv("XBCOMPAT_RENDERER_LIBRARY");
+    if (!path || !*path) path = "libxbcompat_renderer.so.1";
+    void *lib = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    if (!lib) fatal("native renderer: cannot load %s: %s", path, dlerror());
+#define LOAD(name) do { *(void **)(&backend_##name) = dlsym(lib, "xbr_" #name); \
+    if (!backend_##name) fatal("native renderer: missing xbr_" #name); } while (0)
+    LOAD(init); LOAD(name); LOAD(invoke); LOAD(control);
+#undef LOAD
+#endif
+    int rc = backend_init(XBR_ABI, host_service);
+    if (rc) fatal("native renderer: incompatible backend/adapter table (%d)", rc);
+    uint32_t i;
+    for (i = 0; d3d8_funcs[i].name; i++) {
+        const char *name = backend_name(i);
+        if (!name || strcmp(name, d3d8_funcs[i].name))
+            fatal("native renderer: export mismatch at %u", i);
+    }
+    if (backend_name(i)) fatal("native renderer: backend has extra exports");
+    xlog("D3D: native renderer bridge ABI %u, %u exports, %s", XBR_ABI, i, path);
+    atomic_store_explicit(&backend_ready, true, memory_order_release);
+}
+static void ensure_backend(void)
+{
+    if (!atomic_load_explicit(&backend_ready, memory_order_acquire))
+        pthread_once(&once, load_backend);
+}
+struct xbr_result { uint32_t lo, hi, fret_lo, fret_hi, fp, pop_bytes; };
+_Static_assert(sizeof(struct xbr_result) == 24, "assembly result layout");
+_Static_assert(offsetof(struct xbr_result, fp) == 16, "assembly fp offset");
+_Static_assert(offsetof(struct xbr_result, pop_bytes) == 20, "assembly pop offset");
+#ifdef XBC_NATIVE
+void xbr_do_call(uint32_t index, const uint32_t *stack, uint32_t ecx, uint32_t edx,
+                 struct xbr_result *out)
+{
+    ensure_backend();
+    struct xbr_call call = {.stack = (uint32_t)stack, .ecx = ecx, .edx = edx};
+    backend_invoke(index, &call);
+    *out = (struct xbr_result){call.lo, call.hi, call.fret_lo, call.fret_hi, call.fp, call.pop_bytes};
+}
+#else
+/* The adapter of export index's stub (tools/gen_renderer_stubs.py
+   --translated): the guest's frame goes to the renderer as it is, and its
+   adapter there reads the arguments and says how many stack bytes the
+   callee pops. */
+uint64_t xbr_forward(uint32_t index, int conv, struct xa_frame *f);
+uint64_t xbr_forward(uint32_t index, int conv, struct xa_frame *f)
+{
+    ensure_backend();
+    struct xbr_call call = {.stack = (uint32_t)(uintptr_t)f->stack, .ecx = f->ecx, .edx = f->edx};
+    if (conv == CONV_FAST && !f->fast) {   /* a regs= thunk: every argument is in f->stack */
+        call.ecx = f->stack[0];
+        call.edx = f->stack[1];
+        call.stack += 8;
+    }
+    backend_invoke(index, &call);
+    if (call.fp) {
+        f->fp = 1;
+        memcpy(&f->fret, &call.fret_lo, sizeof(f->fret));
+    }
+    f->used = call.pop_bytes / 4;
+    return call.lo | (uint64_t)call.hi << 32;
+}
+void xbr_stub_called(uint32_t index) __attribute__((noreturn));
+void xbr_stub_called(uint32_t index)
+{
+    fatal("native renderer: host code called the stub of %s directly", d3d8_funcs[index].name);
+}
+#endif
+/* The kernel owns an x86 function pointer; never publish an ARM address.
+ * No bridge lock is held: vblank can call the guest and reenter D3D. */
+static void native_vblank(void)
+{
+    backend_control(XBR_VBLANK, NULL);
+}
+static void native_drain(void)
+{
+    backend_control(XBR_DRAIN, NULL);
+}
+extern void (*g_render_drain)(void) __attribute__((weak));
+void d3d_bind_globals(void)
+{
+    ensure_backend();
+    struct xbr_config config = {g_trace, g_screenshot_frame, g_exit_after_frames,
+                                (uint32_t)g_screenshot_path};
+    backend_control(XBR_CONFIG, (uint32_t *)&config);
+    backend_control(XBR_BIND_GLOBALS, NULL);
+    __atomic_store_n(&g_vblank_hook, native_vblank, __ATOMIC_RELEASE);
+    if (&g_render_drain) __atomic_store_n(&g_render_drain, native_drain, __ATOMIC_RELEASE);
+}
+/* dsound.c's mixer hands each block's voices to the native library. */
+struct dsmix_job;
+void ds_native_mix(struct dsmix_job *job);
+void ds_native_mix(struct dsmix_job *job)
+{
+    ensure_backend();
+    backend_control(XBR_DS_MIX, (uint32_t *)job);
+}
+ULONG d3d_frame_count(void)
+{
+    ensure_backend();
+    uint32_t a[1] = {0}; backend_control(XBR_FRAME_COUNT, a); return a[0];
+}

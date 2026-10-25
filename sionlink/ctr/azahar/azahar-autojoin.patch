@@ -1,0 +1,33 @@
+diff --git a/src/citra_qt/citra_qt.cpp b/src/citra_qt/citra_qt.cpp
+index 91ef8c1..9962a1f 100644
+--- a/src/citra_qt/citra_qt.cpp
++++ b/src/citra_qt/citra_qt.cpp
+@@ -76,6 +76,8 @@
+ #include "citra_qt/movie/movie_play_dialog.h"
+ #include "citra_qt/movie/movie_record_dialog.h"
+ #include "citra_qt/multiplayer/state.h"
++#include "core/hle/service/cfg/cfg.h"
++#include "network/network.h"
+ #include "citra_qt/qt_image_interface.h"
+ #include "citra_qt/qt_swizzle.h"
+ #include "citra_qt/uisettings.h"
+@@ -1485,6 +1487,19 @@ void GMainWindow::BootGame(const QString& filename) {
+         ShutdownGame();
+     }
+ 
++    // Sion Link test harness: AZAHAR_ROOM=host:port joins that room at boot
++    if (const char* room = std::getenv("AZAHAR_ROOM")) {
++        std::string r{room};
++        const auto colon = r.rfind(':');
++        const std::string host = r.substr(0, colon);
++        const u16 port = static_cast<u16>(std::stoi(r.substr(colon + 1)));
++        const char* nick = std::getenv("AZAHAR_NICK");
++        if (auto member = Network::GetRoomMember().lock()) {
++            member->Join(nick ? nick : "azahar", Service::CFG::GetConsoleIdHash(system),
++                         host.c_str(), port, 0, Network::NoPreferredMac, "");
++        }
++    }
++
+     // NOTE: We could make this not hardcoded, but it's a temp thing anyway so probs not worth. -OS
+     if (Settings::values.graphics_api.GetValue() == Settings::GraphicsAPI::Vulkan &&
+         Settings::values.texture_filter.GetValue() == Settings::TextureFilter::Anime4K) {

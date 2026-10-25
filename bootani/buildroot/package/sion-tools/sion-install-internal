@@ -1,0 +1,305 @@
+#!/bin/sh
+#
+# sion-install-internal: installs the running Sion system on an internal disk
+# (the Chromebox's SSD), from the stick it booted from. Run it as
+#   sion install-internal /dev/sda --wipe
+#
+# The target gets the stick's layout: SIONBOOT (EFI partition, 1 GiB) and
+# SIONDATA (ext4, the rest). The stick's EFI partition (current and previous
+# image, sion/ settings and keys, theseus/) and all of /data are copied over,
+# and a "Sion" boot entry for the target goes first in the boot order.
+#
+# Unless --no-backup is given, the whole target disk is first copied, byte
+# for byte, into a new SIONBACKUP partition in the stick's free space;
+#   sion install-internal /dev/sda --restore-backup
+# writes it back (for example to get the OS that was there before back).
+#
+# Options:
+#   --wipe            required: everything on the target disk is erased
+#   --no-backup       don't keep a copy of the target disk on the stick
+#   --keep-entries    don't remove other OSes' boot entries for the target
+#   --no-efi          don't touch UEFI boot entries (for tests)
+#   --reboot          reboot into the target when done
+#
+
+. /usr/lib/sion/sion-lib.sh
+
+BACKUP_NAME=SIONBACKUP
+ESP_SECTORS=2097152	# 1 GiB
+
+die() {
+	echo "sion install-internal: $*" >&2
+	log "install-internal: $*"
+	exit 1
+}
+
+say() {
+	echo "$*"
+	log "install-internal: $*"
+}
+
+# /dev/sda + 2 -> /dev/sda2, /dev/nvme0n1 + 2 -> /dev/nvme0n1p2
+part_dev() {
+	case "$1" in
+		*[0-9]) echo "${1}p$2" ;;
+		*) echo "$1$2" ;;
+	esac
+}
+
+sectors() {
+	cat "/sys/class/block/${1##*/}/size"
+}
+
+# A partition with this GPT name on the disk, as a /dev path.
+part_named() {
+	sfdisk -d "$1" 2>/dev/null | sed -n "s|^\(/dev/[^ ]*\) :.*name=\"$2\".*|\1|p" | head -n1
+}
+
+# The first sector after the disk's last partition.
+used_end() {
+	end=2048
+	for p in /sys/class/block/"${1##*/}"/*/partition; do
+		[ -e "$p" ] || continue
+		d=${p%/partition}
+		e=$(( $(cat "$d/start") + $(cat "$d/size") ))
+		[ "$e" -gt "$end" ] && end=$e
+	done
+	echo "$end"
+}
+
+reread() {
+	partx -u "$1" > /dev/null 2>&1 || partx -a "$1" > /dev/null 2>&1
+	blockdev --rereadpt "$1" > /dev/null 2>&1
+	sleep 1
+	mdev -s > /dev/null 2>&1
+	udevadm settle > /dev/null 2>&1
+	return 0
+}
+
+wait_dev() {
+	for _ in $(seq 1 50); do
+		[ -b "$1" ] && return 0
+		sleep 0.2
+	done
+	return 1
+}
+
+# Copies a whole disk or partition to another and checks the copy.
+copy_blocks() {
+	src=$1 dst=$2 n=$3
+	# 4 MiB blocks; n is in 512-byte sectors and always a multiple of 8192
+	# for disks, so round up and cap with count.
+	count=$(( (n + 8191) / 8192 ))
+	dd if="$src" of="$dst" bs=4M count="$count" conv=fsync 2>> "$SION_LOG" || return 1
+	sync
+	echo 3 > /proc/sys/vm/drop_caches
+	a=$(dd if="$src" bs=4M count="$count" 2>/dev/null | head -c $(( n * 512 )) | sha256sum | cut -d' ' -f1)
+	b=$(dd if="$dst" bs=4M count="$count" 2>/dev/null | head -c $(( n * 512 )) | sha256sum | cut -d' ' -f1)
+	[ "$a" = "$b" ] || return 1
+	echo "$a"
+}
+
+stop_writers() {
+	say "stopping the dashboard and games"
+	for s in /etc/init.d/S99theseus /etc/init.d/S98xbox; do
+		[ -x "$s" ] && "$s" stop > /dev/null 2>&1
+	done
+	for p in xbcompat theseus; do
+		pidof "$p" > /dev/null && killall -TERM "$p" 2>/dev/null
+	done
+	sleep 2
+	for p in xbcompat theseus; do
+		pidof "$p" > /dev/null && killall -KILL "$p" 2>/dev/null
+	done
+	sync
+}
+
+backup() {
+	target=$1 stick=$2
+	n=$(sectors "$target")
+	old=$(part_named "$stick" "$BACKUP_NAME")
+	if [ -n "$old" ]; then
+		[ "$(sectors "$old")" -ge "$n" ] || die "$old is too small for a copy of $target"
+		say "reusing $old for the copy of $target"
+		dev=$old
+	else
+		start=$(( ( $(used_end "$stick") + 2047 ) / 2048 * 2048 ))
+		free=$(( $(sectors "$stick") - 34 - start ))
+		[ "$free" -ge "$n" ] || die "the stick has $((free / 2048)) MiB free after its partitions, $((n / 2048)) MiB needed for the copy; use --no-backup to go without"
+		say "adding a $((n / 2048)) MiB $BACKUP_NAME partition to the stick"
+		echo "start=$start, size=$n, type=L, name=$BACKUP_NAME" | \
+			sfdisk -q --append --no-reread "$stick" >> "$SION_LOG" 2>&1 || die "adding the backup partition failed"
+		reread "$stick"
+		dev=$(part_named "$stick" "$BACKUP_NAME")
+		[ -n "$dev" ] && wait_dev "$dev" || die "the backup partition didn't show up"
+		[ "$(sectors "$dev")" -ge "$n" ] || die "$dev came out too small"
+	fi
+	say "copying all of $target ($((n / 2048)) MiB) to $dev; this takes a while"
+	sha=$(copy_blocks "$target" "$dev" "$n") || die "the copy of $target on $dev doesn't match; nothing was erased"
+	printf 'DISK=%s\nMODEL="%s"\nSECTORS=%s\nSHA256=%s\nSAVED="%s"\n' "$target" \
+		"$(cat "/sys/block/${target##*/}/device/model" 2>/dev/null | sed 's/ *$//')" \
+		"$n" "$sha" "$(date '+%F %T')" > "$SION_DATA/sion/internal-backup.txt"
+	sfdisk -d "$target" > "$SION_DATA/sion/internal-backup.sfdisk" 2>/dev/null
+	sync
+	say "copy of $target kept in $dev (sha256 $sha)"
+}
+
+restore() {
+	target=$1 stick=$2
+	dev=$(part_named "$stick" "$BACKUP_NAME")
+	[ -n "$dev" ] || die "no $BACKUP_NAME partition on $stick"
+	info=$SION_DATA/sion/internal-backup.txt
+	[ -r "$info" ] || die "no $info: don't know the copy's size"
+	. "$info"
+	[ "$SECTORS" = "$(sectors "$target")" ] || die "$target isn't the size of the saved disk"
+	for p in /sys/class/block/"${target##*/}"/*/partition; do
+		[ -e "$p" ] || continue
+		d=${p%/partition}
+		grep -q "^/dev/${d##*/} " /proc/mounts && die "/dev/${d##*/} is mounted"
+	done
+	say "writing the saved copy back to $target"
+	sha=$(copy_blocks "$dev" "$target" "$SECTORS") || die "writing the copy back failed"
+	[ "$sha" = "$SHA256" ] || die "the restored disk doesn't match the saved copy"
+	reread "$target"
+	say "$target restored ($SAVED copy); pick it in the firmware's boot menu"
+}
+
+install() {
+	target=$1
+	boot=$(part_dev "$target" 1)
+	data=$(part_dev "$target" 2)
+
+	say "partitioning $target"
+	printf 'label: gpt\nstart=2048, size=%s, type=U, name="boot"\ntype=L, name="data"\n' "$ESP_SECTORS" | \
+		sfdisk -q --wipe always --wipe-partitions always "$target" >> "$SION_LOG" 2>&1 || die "partitioning $target failed"
+	reread "$target"
+	wait_dev "$boot" && wait_dev "$data" || die "the new partitions didn't show up"
+
+	say "formatting"
+	if command -v mkfs.vfat > /dev/null; then
+		mkfs.vfat -F 32 -n SIONBOOT "$boot" >> "$SION_LOG" 2>&1
+	elif command -v mkdosfs > /dev/null; then
+		mkdosfs -n SIONBOOT "$boot" >> "$SION_LOG" 2>&1
+	else
+		busybox mkdosfs -n SIONBOOT "$boot" >> "$SION_LOG" 2>&1
+	fi || die "formatting $boot failed"
+	mkfs.ext4 -q -F -L SIONDATA -b 4096 "$data" >> "$SION_LOG" 2>&1 || die "formatting $data failed"
+
+	say "copying the boot partition"
+	src=$(esp_mount) || die "can't mount the stick's EFI partition"
+	dst=$(esp_mount_dev "$boot") || { esp_umount "$src"; die "can't mount $boot"; }
+	trap 'esp_umount "$src"; esp_umount "$dst"' EXIT
+	# FAT keeps no owners; a trial in progress stays behind on the stick.
+	(cd "$src" && find . -type d) | while read -r d; do mkdir -p "$dst/$d"; done
+	(cd "$src" && find . -type f ! -path './EFI/sion/trial.*' ! -path './EFI/sion/*.tmp') | while read -r f; do
+		cp "$src/$f" "$dst/$f" || exit 1
+	done || die "copying the boot partition failed"
+	sync
+	echo 3 > /proc/sys/vm/drop_caches
+	for f in EFI/BOOT/BOOTX64.EFI EFI/sion/previous.efi; do
+		[ -e "$src/$f" ] || continue
+		[ "$(sha256sum < "$src/$f")" = "$(sha256sum < "$dst/$f")" ] || die "$f didn't copy correctly"
+	done
+	echo "$(date '+%F %T') installed from the stick to $target" | sed 's/$/\r/' >> "$dst/sion/logs/update.txt" 2>/dev/null
+	esp_umount "$dst"
+	esp_umount "$src"
+	trap - EXIT
+
+	say "copying /data ($(du -sh "$SION_DATA" 2>/dev/null | cut -f1))"
+	m=$(mktemp -d "$SION_RUN/data.XXXXXX")
+	mount -t ext4 -o noatime "$data" "$m" || die "can't mount $data"
+	trap 'sync; umount "$m"; rmdir "$m"' EXIT
+	cp -a "$SION_DATA/." "$m/" || die "copying /data failed"
+	sync
+	a=$(cd "$SION_DATA" && find . ! -path './lost+found*' | wc -l)
+	b=$(cd "$m" && find . ! -path './lost+found*' | wc -l)
+	[ "$a" = "$b" ] || die "/data copy has $b entries, the stick has $a"
+	sync
+	umount "$m" && rmdir "$m"
+	trap - EXIT
+	say "/data copied ($a files and folders)"
+}
+
+partuuid_exists() {
+	for dev in $(partitions); do
+		[ "$(blkid -p -s PART_ENTRY_UUID -o value "$dev" 2>/dev/null | tr 'A-F' 'a-f')" = "$1" ] && return 0
+	done
+	return 1
+}
+
+boot_entries() {
+	target=$1 keep=$2
+	mount_efivars || die "no UEFI variables"
+	puuid=$(blkid -s PARTUUID -o value "$(part_dev "$target" 1)" | tr 'A-F' 'a-f')
+	efibootmgr -v 2>/dev/null | while read -r line; do
+		e=$(echo "$line" | sed -n 's/^Boot\([0-9A-Fa-f]\{4\}\).*/\1/p')
+		[ -n "$e" ] || continue
+		case "$line" in
+			*"HD("*",GPT,"*)
+				u=$(echo "$line" | sed -n 's/.*HD([0-9]*,GPT,\([0-9a-fA-F-]*\),.*/\1/p' | tr 'A-F' 'a-f')
+				# Entries for "Sion" and "Sion trial" on any disk, and (unless
+				# kept) entries whose partition no longer exists, like the
+				# erased OS's.
+				if echo "$line" | grep -q "^Boot$e\*\{0,1\} Sion\( trial\)\{0,1\}	"; then
+					efibootmgr -q -b "$e" -B
+				elif [ -z "$keep" ] && [ "$u" != "$puuid" ] && ! partuuid_exists "$u"; then
+					log "install-internal: removing dead boot entry $line"
+					efibootmgr -q -b "$e" -B
+				fi
+				;;
+		esac
+	done
+	# -c puts the new entry first in BootOrder.
+	efibootmgr -q -c -d "$target" -p 1 -L "$BOOT_LABEL" -l '\EFI\BOOT\BOOTX64.EFI' || die "creating the boot entry failed"
+	efibootmgr -q -N 2>/dev/null
+	say "boot order: $(efibootmgr | sed -n 's/^BootOrder: //p')"
+}
+
+BOOT_LABEL=Sion
+target= wipe= nobackup= keep= noefi= rebootafter= restoremode=
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--wipe) wipe=yes ;;
+		--no-backup) nobackup=yes ;;
+		--keep-entries) keep=yes ;;
+		--no-efi) noefi=yes ;;
+		--reboot) rebootafter=yes ;;
+		--restore-backup) restoremode=yes ;;
+		/dev/*) target=$1 ;;
+		*) die "unknown argument $1" ;;
+	esac
+	shift
+done
+[ -n "$target" ] || die "name the internal disk, e.g. sion install-internal /dev/sda --wipe"
+[ -b "$target" ] && [ -e "/sys/block/${target##*/}" ] || die "$target is not a whole disk"
+
+esp=$(find_esp) || die "can't find the disk this system booted from"
+stick=$(part_disk "$esp")
+[ "$stick" != "$target" ] || die "$target is the disk this system is running from"
+mountpoint -q "$SION_DATA" || die "/data isn't mounted"
+[ "$(part_disk "$(awk -v d="$SION_DATA" '$2 == d { print $1 }' /proc/mounts)")" = "$stick" ] || die "/data isn't on the boot stick"
+
+if [ -n "$restoremode" ]; then
+	restore "$target" "$stick"
+	exit 0
+fi
+
+[ "$(cat "/sys/block/${target##*/}/removable")" = 0 ] || die "$target is a removable disk, not an internal one"
+[ -n "$wipe" ] || die "this erases everything on $target; add --wipe to go ahead"
+grep -q "^$target" /proc/mounts && die "something on $target is mounted"
+grep -q "^$target" /proc/swaps && die "$target has swap in use"
+n=$(sectors "$target")
+[ "$n" -gt $(( ESP_SECTORS + 4 * 1024 * 2048 )) ] || die "$target is too small"
+need=$(du -sk "$SION_DATA" | cut -f1)
+[ $(( (n - ESP_SECTORS) / 2 )) -gt $(( need + 262144 )) ] || die "/data won't fit on $target"
+
+say "installing to $target ($(cat "/sys/block/${target##*/}/device/model" 2>/dev/null | sed 's/ *$//'), $((n / 2048)) MiB) from $stick"
+stop_writers
+[ -n "$nobackup" ] || backup "$target" "$stick"
+install "$target"
+[ -n "$noefi" ] || boot_entries "$target" "$keep"
+sync
+say "done: $target boots the Sion; unplug the stick for everyday use"
+if [ -n "$rebootafter" ]; then
+	( sleep 1; reboot ) > /dev/null 2>&1 &
+fi

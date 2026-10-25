@@ -1,0 +1,342 @@
+diff --git a/mkspecs/common/gcc-base.conf b/mkspecs/common/gcc-base.conf
+index 0e906663..47b69394 100644
+--- a/mkspecs/common/gcc-base.conf
++++ b/mkspecs/common/gcc-base.conf
+@@ -43,6 +43,7 @@ QMAKE_CFLAGS_YACC           += -Wno-unused -Wno-parentheses
+ QMAKE_CFLAGS_HIDESYMS       += -fvisibility=hidden
+ 
+ QMAKE_CXXFLAGS            += $$QMAKE_CFLAGS
++QMAKE_CXXFLAGS            += -std=gnu++98 -fno-lifetime-dse -fno-delete-null-pointer-checks -Wno-deprecated-copy -Wno-class-memaccess
+ QMAKE_CXXFLAGS_DEPS       += $$QMAKE_CFLAGS_DEPS
+ QMAKE_CXXFLAGS_WARN_ON    += $$QMAKE_CFLAGS_WARN_ON
+ QMAKE_CXXFLAGS_WARN_OFF   += $$QMAKE_CFLAGS_WARN_OFF
+diff --git a/mkspecs/linux-g++/qmake.conf b/mkspecs/linux-g++/qmake.conf
+index c3ce7775..528b3559 100644
+--- a/mkspecs/linux-g++/qmake.conf
++++ b/mkspecs/linux-g++/qmake.conf
+@@ -123,6 +123,7 @@ QMAKE_CFLAGS_YACC           += -Wno-unused -Wno-parentheses
+ QMAKE_CFLAGS_HIDESYMS       += -fvisibility=hidden
+ 
+ QMAKE_CXXFLAGS            += $$QMAKE_CFLAGS
++QMAKE_CXXFLAGS            += -std=gnu++98 -fno-lifetime-dse -fno-delete-null-pointer-checks -Wno-deprecated-copy -Wno-class-memaccess
+ QMAKE_CXXFLAGS_DEPS       += $$QMAKE_CFLAGS_DEPS
+ QMAKE_CXXFLAGS_WARN_ON    += $$QMAKE_CFLAGS_WARN_ON
+ QMAKE_CXXFLAGS_WARN_OFF   += $$QMAKE_CFLAGS_WARN_OFF
+diff --git a/src/3rdparty/javascriptcore/JavaScriptCore/wtf/Platform.h b/src/3rdparty/javascriptcore/JavaScriptCore/wtf/Platform.h
+index d930ed77..0bbceb66 100644
+--- a/src/3rdparty/javascriptcore/JavaScriptCore/wtf/Platform.h
++++ b/src/3rdparty/javascriptcore/JavaScriptCore/wtf/Platform.h
+@@ -204,6 +204,11 @@
+ #define WTF_CPU_X86_64 1
+ #endif
+ 
++/* CPU(AARCH64) - 64-bit ARM; interpreter only, no JIT */
++#if defined(__aarch64__)
++#define WTF_CPU_AARCH64 1
++#endif
++
+ /* 64-bit mode on AIX */
+ #ifdef __64BIT__
+ #define WTF_CPU_AIX64 1
+@@ -884,7 +889,7 @@
+ #endif
+ 
+ #if !defined(WTF_USE_JSVALUE64) && !defined(WTF_USE_JSVALUE32) && !defined(WTF_USE_JSVALUE32_64)
+-#if (CPU(X86_64) && (OS(UNIX) || OS(WINDOWS) || OS(SOLARIS) || OS(HPUX))) || (CPU(IA64) && !CPU(IA64_32)) || CPU(ALPHA) || CPU(AIX64) || CPU(SPARC64)
++#if (CPU(X86_64) && (OS(UNIX) || OS(WINDOWS) || OS(SOLARIS) || OS(HPUX))) || (CPU(IA64) && !CPU(IA64_32)) || CPU(ALPHA) || CPU(AIX64) || CPU(SPARC64) || CPU(AARCH64)
+ #define WTF_USE_JSVALUE64 1
+ #elif CPU(ARM) || CPU(PPC64)
+ #define WTF_USE_JSVALUE32 1
+diff --git a/src/corelib/arch/aarch64/arch.pri b/src/corelib/arch/aarch64/arch.pri
+new file mode 100644
+index 00000000..ab8ae2dd
+--- /dev/null
++++ b/src/corelib/arch/aarch64/arch.pri
+@@ -0,0 +1,3 @@
++#
++# AArch64 architecture: atomics are inline GCC __atomic builtins
++#
+diff --git a/src/corelib/arch/arch.pri b/src/corelib/arch/arch.pri
+index cd23e5e8..daf4ca02 100644
+--- a/src/corelib/arch/arch.pri
++++ b/src/corelib/arch/arch.pri
+@@ -14,7 +14,8 @@ vxworks:HEADERS += arch/qatomic_vxworks.h
+ 
+ integrity:HEADERS += arch/qatomic_integrity.h
+ 
+-!wince*:!win32:!mac:!symbian:HEADERS += arch/qatomic_alpha.h \
++!wince*:!win32:!mac:!symbian:HEADERS += arch/qatomic_aarch64.h \
++                       arch/qatomic_alpha.h \
+                        arch/qatomic_avr32.h \
+                        arch/qatomic_ia64.h \
+                        arch/qatomic_parisc.h \
+diff --git a/src/corelib/arch/qatomic_aarch64.h b/src/corelib/arch/qatomic_aarch64.h
+new file mode 100644
+index 00000000..660565db
+--- /dev/null
++++ b/src/corelib/arch/qatomic_aarch64.h
+@@ -0,0 +1,193 @@
++/****************************************************************************
++**
++** Copyright (C) 2012 Nokia Corporation and/or its subsidiary(-ies).
++** Contact: http://www.qt-project.org/
++**
++** This file is part of the QtCore module of the Qt Toolkit.
++**
++** $QT_BEGIN_LICENSE:LGPL$
++** GNU Lesser General Public License Usage
++** This file may be used under the terms of the GNU Lesser General Public
++** License version 2.1 as published by the Free Software Foundation and
++** appearing in the file LICENSE.LGPL included in the packaging of this
++** file. Please review the following information to ensure the GNU Lesser
++** General Public License version 2.1 requirements will be met:
++** http://www.gnu.org/licenses/old-licenses/lgpl-2.1.html.
++**
++** In addition, as a special exception, Nokia gives you certain additional
++** rights. These rights are described in the Nokia Qt LGPL Exception
++** version 1.1, included in the file LGPL_EXCEPTION.txt in this package.
++**
++** GNU General Public License Usage
++** Alternatively, this file may be used under the terms of the GNU General
++** Public License version 3.0 as published by the Free Software Foundation
++** and appearing in the file LICENSE.GPL included in the packaging of this
++** file. Please review the following information to ensure the GNU General
++** Public License version 3.0 requirements will be met:
++** http://www.gnu.org/copyleft/gpl.html.
++**
++** Other Usage
++** Alternatively, this file may be used in accordance with the terms and
++** conditions contained in a signed written agreement between you and Nokia.
++**
++**
++**
++**
++**
++**
++** $QT_END_LICENSE$
++**
++****************************************************************************/
++
++#ifndef QATOMIC_AARCH64_H
++#define QATOMIC_AARCH64_H
++
++QT_BEGIN_HEADER
++
++QT_BEGIN_NAMESPACE
++
++#define Q_ATOMIC_INT_REFERENCE_COUNTING_IS_ALWAYS_NATIVE
++#define Q_ATOMIC_INT_REFERENCE_COUNTING_IS_WAIT_FREE
++
++inline bool QBasicAtomicInt::isReferenceCountingNative()
++{ return true; }
++inline bool QBasicAtomicInt::isReferenceCountingWaitFree()
++{ return true; }
++
++#define Q_ATOMIC_INT_TEST_AND_SET_IS_ALWAYS_NATIVE
++#define Q_ATOMIC_INT_TEST_AND_SET_IS_WAIT_FREE
++
++inline bool QBasicAtomicInt::isTestAndSetNative()
++{ return true; }
++inline bool QBasicAtomicInt::isTestAndSetWaitFree()
++{ return true; }
++
++#define Q_ATOMIC_INT_FETCH_AND_STORE_IS_ALWAYS_NATIVE
++#define Q_ATOMIC_INT_FETCH_AND_STORE_IS_WAIT_FREE
++
++inline bool QBasicAtomicInt::isFetchAndStoreNative()
++{ return true; }
++inline bool QBasicAtomicInt::isFetchAndStoreWaitFree()
++{ return true; }
++
++#define Q_ATOMIC_INT_FETCH_AND_ADD_IS_ALWAYS_NATIVE
++#define Q_ATOMIC_INT_FETCH_AND_ADD_IS_WAIT_FREE
++
++inline bool QBasicAtomicInt::isFetchAndAddNative()
++{ return true; }
++inline bool QBasicAtomicInt::isFetchAndAddWaitFree()
++{ return true; }
++
++#define Q_ATOMIC_POINTER_TEST_AND_SET_IS_ALWAYS_NATIVE
++#define Q_ATOMIC_POINTER_TEST_AND_SET_IS_WAIT_FREE
++
++template <typename T>
++Q_INLINE_TEMPLATE bool QBasicAtomicPointer<T>::isTestAndSetNative()
++{ return true; }
++template <typename T>
++Q_INLINE_TEMPLATE bool QBasicAtomicPointer<T>::isTestAndSetWaitFree()
++{ return true; }
++
++#define Q_ATOMIC_POINTER_FETCH_AND_STORE_IS_ALWAYS_NATIVE
++#define Q_ATOMIC_POINTER_FETCH_AND_STORE_IS_WAIT_FREE
++
++template <typename T>
++Q_INLINE_TEMPLATE bool QBasicAtomicPointer<T>::isFetchAndStoreNative()
++{ return true; }
++template <typename T>
++Q_INLINE_TEMPLATE bool QBasicAtomicPointer<T>::isFetchAndStoreWaitFree()
++{ return true; }
++
++#define Q_ATOMIC_POINTER_FETCH_AND_ADD_IS_ALWAYS_NATIVE
++#define Q_ATOMIC_POINTER_FETCH_AND_ADD_IS_WAIT_FREE
++
++template <typename T>
++Q_INLINE_TEMPLATE bool QBasicAtomicPointer<T>::isFetchAndAddNative()
++{ return true; }
++template <typename T>
++Q_INLINE_TEMPLATE bool QBasicAtomicPointer<T>::isFetchAndAddWaitFree()
++{ return true; }
++
++// GCC/Clang __atomic builtins; LSE or LL/SC is the compiler's choice.
++#define QT_A64_TAS(order, fail) \
++    return __atomic_compare_exchange_n(&_q_value, &expectedValue, newValue, false, order, fail)
++
++inline bool QBasicAtomicInt::ref()
++{ return __atomic_add_fetch(&_q_value, 1, __ATOMIC_ACQ_REL) != 0; }
++
++inline bool QBasicAtomicInt::deref()
++{ return __atomic_sub_fetch(&_q_value, 1, __ATOMIC_ACQ_REL) != 0; }
++
++inline bool QBasicAtomicInt::testAndSetRelaxed(int expectedValue, int newValue)
++{ QT_A64_TAS(__ATOMIC_RELAXED, __ATOMIC_RELAXED); }
++inline bool QBasicAtomicInt::testAndSetAcquire(int expectedValue, int newValue)
++{ QT_A64_TAS(__ATOMIC_ACQUIRE, __ATOMIC_ACQUIRE); }
++inline bool QBasicAtomicInt::testAndSetRelease(int expectedValue, int newValue)
++{ QT_A64_TAS(__ATOMIC_RELEASE, __ATOMIC_RELAXED); }
++inline bool QBasicAtomicInt::testAndSetOrdered(int expectedValue, int newValue)
++{ QT_A64_TAS(__ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE); }
++
++inline int QBasicAtomicInt::fetchAndStoreRelaxed(int newValue)
++{ return __atomic_exchange_n(&_q_value, newValue, __ATOMIC_RELAXED); }
++inline int QBasicAtomicInt::fetchAndStoreAcquire(int newValue)
++{ return __atomic_exchange_n(&_q_value, newValue, __ATOMIC_ACQUIRE); }
++inline int QBasicAtomicInt::fetchAndStoreRelease(int newValue)
++{ return __atomic_exchange_n(&_q_value, newValue, __ATOMIC_RELEASE); }
++inline int QBasicAtomicInt::fetchAndStoreOrdered(int newValue)
++{ return __atomic_exchange_n(&_q_value, newValue, __ATOMIC_ACQ_REL); }
++
++inline int QBasicAtomicInt::fetchAndAddRelaxed(int valueToAdd)
++{ return __atomic_fetch_add(&_q_value, valueToAdd, __ATOMIC_RELAXED); }
++inline int QBasicAtomicInt::fetchAndAddAcquire(int valueToAdd)
++{ return __atomic_fetch_add(&_q_value, valueToAdd, __ATOMIC_ACQUIRE); }
++inline int QBasicAtomicInt::fetchAndAddRelease(int valueToAdd)
++{ return __atomic_fetch_add(&_q_value, valueToAdd, __ATOMIC_RELEASE); }
++inline int QBasicAtomicInt::fetchAndAddOrdered(int valueToAdd)
++{ return __atomic_fetch_add(&_q_value, valueToAdd, __ATOMIC_ACQ_REL); }
++
++template <typename T>
++Q_INLINE_TEMPLATE bool QBasicAtomicPointer<T>::testAndSetRelaxed(T *expectedValue, T *newValue)
++{ QT_A64_TAS(__ATOMIC_RELAXED, __ATOMIC_RELAXED); }
++template <typename T>
++Q_INLINE_TEMPLATE bool QBasicAtomicPointer<T>::testAndSetAcquire(T *expectedValue, T *newValue)
++{ QT_A64_TAS(__ATOMIC_ACQUIRE, __ATOMIC_ACQUIRE); }
++template <typename T>
++Q_INLINE_TEMPLATE bool QBasicAtomicPointer<T>::testAndSetRelease(T *expectedValue, T *newValue)
++{ QT_A64_TAS(__ATOMIC_RELEASE, __ATOMIC_RELAXED); }
++template <typename T>
++Q_INLINE_TEMPLATE bool QBasicAtomicPointer<T>::testAndSetOrdered(T *expectedValue, T *newValue)
++{ QT_A64_TAS(__ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE); }
++
++template <typename T>
++Q_INLINE_TEMPLATE T *QBasicAtomicPointer<T>::fetchAndStoreRelaxed(T *newValue)
++{ return __atomic_exchange_n(&_q_value, newValue, __ATOMIC_RELAXED); }
++template <typename T>
++Q_INLINE_TEMPLATE T *QBasicAtomicPointer<T>::fetchAndStoreAcquire(T *newValue)
++{ return __atomic_exchange_n(&_q_value, newValue, __ATOMIC_ACQUIRE); }
++template <typename T>
++Q_INLINE_TEMPLATE T *QBasicAtomicPointer<T>::fetchAndStoreRelease(T *newValue)
++{ return __atomic_exchange_n(&_q_value, newValue, __ATOMIC_RELEASE); }
++template <typename T>
++Q_INLINE_TEMPLATE T *QBasicAtomicPointer<T>::fetchAndStoreOrdered(T *newValue)
++{ return __atomic_exchange_n(&_q_value, newValue, __ATOMIC_ACQ_REL); }
++
++template <typename T>
++Q_INLINE_TEMPLATE T *QBasicAtomicPointer<T>::fetchAndAddRelaxed(qptrdiff valueToAdd)
++{ return __atomic_fetch_add(&_q_value, valueToAdd * sizeof(T), __ATOMIC_RELAXED); }
++template <typename T>
++Q_INLINE_TEMPLATE T *QBasicAtomicPointer<T>::fetchAndAddAcquire(qptrdiff valueToAdd)
++{ return __atomic_fetch_add(&_q_value, valueToAdd * sizeof(T), __ATOMIC_ACQUIRE); }
++template <typename T>
++Q_INLINE_TEMPLATE T *QBasicAtomicPointer<T>::fetchAndAddRelease(qptrdiff valueToAdd)
++{ return __atomic_fetch_add(&_q_value, valueToAdd * sizeof(T), __ATOMIC_RELEASE); }
++template <typename T>
++Q_INLINE_TEMPLATE T *QBasicAtomicPointer<T>::fetchAndAddOrdered(qptrdiff valueToAdd)
++{ return __atomic_fetch_add(&_q_value, valueToAdd * sizeof(T), __ATOMIC_ACQ_REL); }
++
++#undef QT_A64_TAS
++
++QT_END_NAMESPACE
++
++QT_END_HEADER
++
++#endif // QATOMIC_AARCH64_H
+diff --git a/src/corelib/arch/qatomic_arch.h b/src/corelib/arch/qatomic_arch.h
+index 0e41a308..8d022554 100644
+--- a/src/corelib/arch/qatomic_arch.h
++++ b/src/corelib/arch/qatomic_arch.h
+@@ -50,6 +50,8 @@ QT_BEGIN_HEADER
+ #  include "QtCore/qatomic_integrity.h"
+ #elif defined(QT_ARCH_VXWORKS)
+ #  include "QtCore/qatomic_vxworks.h"
++#elif defined(QT_ARCH_AARCH64)
++#  include "QtCore/qatomic_aarch64.h"
+ #elif defined(QT_ARCH_ALPHA)
+ #  include "QtCore/qatomic_alpha.h"
+ #elif defined(QT_ARCH_ARM)
+diff --git a/src/corelib/global/qglobal.h b/src/corelib/global/qglobal.h
+index b3d4852f..f8a69651 100644
+--- a/src/corelib/global/qglobal.h
++++ b/src/corelib/global/qglobal.h
+@@ -2359,20 +2359,22 @@ typedef uint Flags;
+ 
+ #if defined(Q_CC_GNU) && !defined(Q_CC_INTEL) && !defined(Q_CC_RVCT)
+ /* make use of typeof-extension */
++// GCC 9+ no longer lets a break inside a statement expression end the inner
++// loop, so use the Qt 4.8.7 form, which needs no statement expressions.
+ template <typename T>
+ class QForeachContainer {
+ public:
+-    inline QForeachContainer(const T& t) : c(t), brk(0), i(c.begin()), e(c.end()) { }
++    inline QForeachContainer(const T& t) : c(t), i(c.begin()), e(c.end()), control(1) { }
+     const T c;
+-    int brk;
+     typename T::const_iterator i, e;
++    int control;
+ };
+ 
+ #define Q_FOREACH(variable, container)                                \
+ for (QForeachContainer<__typeof__(container)> _container_(container); \
+-     !_container_.brk && _container_.i != _container_.e;              \
+-     __extension__  ({ ++_container_.brk; ++_container_.i; }))                       \
+-    for (variable = *_container_.i;; __extension__ ({--_container_.brk; break;}))
++     _container_.control && _container_.i != _container_.e;           \
++     ++_container_.i, _container_.control ^= 1)                       \
++    for (variable = *_container_.i; _container_.control; _container_.control = 0)
+ 
+ #else
+ 
+diff --git a/src/dbus/qdbusconnection.cpp b/src/dbus/qdbusconnection.cpp
+index 6f1c7735..a1160295 100644
+--- a/src/dbus/qdbusconnection.cpp
++++ b/src/dbus/qdbusconnection.cpp
+@@ -937,7 +937,7 @@ QObject *QDBusConnection::objectRegisteredAt(const QString &path) const
+     Q_ASSERT_X(QDBusUtil::isValidObjectPath(path), "QDBusConnection::registeredObject",
+                "Invalid object path given");
+     if (!d || !d->connection || !QDBusUtil::isValidObjectPath(path))
+-        return false;
++        return 0;
+ 
+     QStringList pathComponents = path.split(QLatin1Char('/'));
+     if (pathComponents.last().isEmpty())
+diff --git a/tools/linguist/linguist/messagemodel.cpp b/tools/linguist/linguist/messagemodel.cpp
+index 815038b1..a72b36d4 100644
+--- a/tools/linguist/linguist/messagemodel.cpp
++++ b/tools/linguist/linguist/messagemodel.cpp
+@@ -183,7 +183,7 @@ static int calcMergeScore(const DataModel *one, const DataModel *two)
+         if (ContextItem *c = one->findContext(oc->context())) {
+             for (int j = 0; j < oc->messageCount(); ++j) {
+                 MessageItem *m = oc->messageItem(j);
+-                if (c->findMessage(m->text(), m->comment()) >= 0)
++                if (c->findMessage(m->text(), m->comment()))
+                     ++inBoth;
+             }
+         }

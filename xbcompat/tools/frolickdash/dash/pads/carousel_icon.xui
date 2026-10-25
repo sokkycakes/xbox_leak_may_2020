@@ -1,0 +1,26 @@
+<XuiCanvas version="000c">
+<Properties>
+ <Id>canvas</Id>
+ <Width>512</Width>
+ <Height>352</Height>
+</Properties>
+<XuiScene>
+<Properties>
+ <Id>CarouselIcon</Id>
+ <Width>512</Width>
+ <Height>352</Height>
+ <Position>0,0,0</Position>
+ <Pivot>256,176,0</Pivot>
+</Properties>
+<XuiImage>
+<Properties>
+ <Id>icon</Id>
+ <Width>150</Width>
+ <Height>150</Height>
+ <Position>181,101,0</Position>
+ <ImagePath></ImagePath>
+ <SizeMode>4</SizeMode>
+</Properties>
+</XuiImage>
+</XuiScene>
+</XuiCanvas>

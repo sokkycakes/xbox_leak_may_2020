@@ -1,0 +1,24 @@
+# DS-only access point for Sion Link. sion-dslink fills in @IF@, @CH@ and
+# @VE@ (the Nintendo vendor element from `sionlinkd --vendor-element`).
+interface=@IF@
+driver=nl80211
+ctrl_interface=/run/sionlink/hostapd
+ssid=Sion
+hw_mode=b
+channel=@CH@
+beacon_int=100
+dtim_period=1
+# The DS radio only does 1 and 2 Mbit/s
+supported_rates=10 20
+basic_rates=10 20
+auth_algs=1
+wmm_enabled=0
+max_num_sta=15
+# The Intel radio reaches a DS with broadcasts only (see common/slproto.h):
+# the DS never acknowledges our auth/assoc replies, joins anyway, and can't
+# answer inactivity polls. Our hostapd patch adds ignore_unacked_join.
+ignore_unacked_join=1
+skip_inactivity_poll=1
+ap_max_inactivity=600
+disassoc_low_ack=0
+vendor_elements=@VE@

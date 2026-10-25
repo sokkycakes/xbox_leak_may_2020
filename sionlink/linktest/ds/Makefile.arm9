@@ -1,0 +1,6 @@
+SOURCEDIRS	:= source ../../dslib
+INCLUDEDIRS	:= .. ../../common ../../dslib
+LIBS		:= -ldswifi9_noip -lnds9
+LIBDIRS		:= $(CURDIR)/../../ds/build/dswifi
+
+include $(BLOCKSDS)/sys/default_makefiles/rom_arm9arm7/Makefile.arm9

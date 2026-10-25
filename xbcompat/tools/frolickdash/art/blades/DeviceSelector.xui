@@ -1,0 +1,123 @@
+<XuiCanvas>
+<Properties>
+ <Width>1120</Width>
+ <Height>770</Height>
+</Properties>
+<XuiScene>
+<Properties>
+ <Id>scnDeviceSelector</Id>
+ <Width>1120</Width>
+ <Height>770</Height>
+ <ClassOverride>DeviceSelectorScene</ClassOverride>
+ <TransFrom>FadeOut</TransFrom>
+ <TransTo>FadeIn</TransTo>
+ <TransBackFrom>FadeOut</TransBackFrom>
+ <TransBackTo>FadeIn</TransBackTo>
+</Properties>
+<XuiList>
+<Properties>
+ <Id>list_devices</Id>
+ <Width>855</Width>
+ <Height>450</Height>
+ <Position>143.5,153,0</Position>
+ <ClassOverride>DeviceSelectorList</ClassOverride>
+ <Visual>List_3Line_Icon_prgbr</Visual>
+</Properties>
+</XuiList>
+<XuiNavButton>
+<Properties>
+ <Id>legend_x</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>146,639,0</Position>
+ <Visual>legend_X</Visual>
+ <Enabled>false</Enabled>
+ <NavUp>legend_y</NavUp>
+ <PressKey>22530</PressKey>
+</Properties>
+</XuiNavButton>
+<XuiNavButton>
+<Properties>
+ <Id>legend_y</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>165,611,0</Position>
+ <Visual>legend_Y</Visual>
+ <UnfocusedInput>true</UnfocusedInput>
+ <Text>Device Options</Text>
+ <PressKey>22531</PressKey>
+</Properties>
+</XuiNavButton>
+<XuiBackButton>
+<Properties>
+ <Id>legend_b</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>555,611,0</Position>
+ <Visual>legend_B</Visual>
+ <UnfocusedInput>true</UnfocusedInput>
+ <Text>Back</Text>
+ <PressKey>22593</PressKey>
+</Properties>
+</XuiBackButton>
+<XuiNavButton>
+<Properties>
+ <Id>legend_a</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>573,639,0</Position>
+ <Visual>legend_A</Visual>
+ <Text>Select</Text>
+</Properties>
+</XuiNavButton>
+<XuiLabel>
+<Properties>
+ <Id>labelHeading</Id>
+ <Width>855</Width>
+ <Height>47</Height>
+ <Position>156,96,0</Position>
+ <Visual>Label_Head</Visual>
+ <Text>Storage Devices</Text>
+</Properties>
+</XuiLabel>
+<XuiLabel>
+<Properties>
+ <Id>txt_Directions</Id>
+ <Width>855</Width>
+ <Height>47</Height>
+ <Position>144,153,0</Position>
+ <Show>false</Show>
+ <Text>Select a storage device.</Text>
+</Properties>
+</XuiLabel>
+<XuiLabel>
+<Properties>
+ <Id>labTotal</Id>
+ <Width>420</Width>
+ <Height>40</Height>
+ <Position>155,573,0</Position>
+ <Visual>Label_Sub</Visual>
+ <Text>&lt;#&gt; of &lt;Total #&gt;</Text>
+</Properties>
+</XuiLabel>
+<XuiLabel>
+<Properties>
+ <Id>txt_EmptyList</Id>
+ <Width>855</Width>
+ <Height>50</Height>
+ <Position>144,339,0</Position>
+ <Visual>XuiLabelCenterJustify</Visual>
+ <Text>No storage devices found.</Text>
+</Properties>
+</XuiLabel>
+<XuiLabel>
+<Properties>
+ <Id>labDots</Id>
+ <Width>121</Width>
+ <Height>104</Height>
+ <Position>522,320,0</Position>
+ <Visual>Loading_Large</Visual>
+</Properties>
+</XuiLabel>
+</XuiScene>
+</XuiCanvas>

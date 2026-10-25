@@ -1,0 +1,19 @@
+diff --git a/makerom/src/user_settings.c b/makerom/src/user_settings.c
+index c0d78f9..e5b84ca 100644
+--- a/makerom/src/user_settings.c
++++ b/makerom/src/user_settings.c
+@@ -231,6 +231,14 @@ int SetArgument(int argc, int i, char *argv[], user_settings *set)
+ 		}
+ 		return 2;
+ 	}
++	else if (strcmp(argv[i], "-ncchfixedkey") == 0) {
++		if (ParamNum) {
++			PrintNoNeedParam(argv[i]);
++			return USR_UNK_ARG;
++		}
++		set->ncch.useSecCrypto = false;
++		return 1;
++	}
+ 	else if (strcmp(argv[i], "-showkeys") == 0) {
+ 		if (ParamNum) {
+ 			PrintNoNeedParam(argv[i]);

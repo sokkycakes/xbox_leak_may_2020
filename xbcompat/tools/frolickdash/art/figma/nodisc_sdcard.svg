@@ -1,0 +1,10 @@
+<svg preserveAspectRatio="none" overflow="visible" style="display: block;" width="45" height="45" viewBox="0 0 45 45" fill="none" xmlns="http://www.w3.org/2000/svg">
+<g id="sd_card" opacity="0.5">
+<mask id="mask0_0_4" style="mask-type:alpha" maskUnits="userSpaceOnUse" x="0" y="0" width="45" height="45">
+<rect id="Bounding box" width="45" height="45" fill="#D9D9D9"/>
+</mask>
+<g mask="url(#mask0_0_4)">
+<path id="sd_card_2" d="M11.7188 43.4063C9.97719 43.4063 8.47938 42.79 7.22531 41.5575C5.97094 40.325 5.34375 38.8163 5.34375 37.0312V14.1094L17.8594 1.59375H33.2813C35.0225 1.59375 36.5203 2.21 37.7747 3.4425C39.0291 4.67469 39.6563 6.18344 39.6563 7.96875V37.0312C39.6563 38.8163 39.0291 40.325 37.7747 41.5575C36.5203 42.79 35.0225 43.4063 33.2813 43.4063H11.7188ZM16.875 21.2813H20.625V13.4531H16.875V21.2813ZM22.3594 21.2813H26.1094V13.4531H22.3594V21.2813ZM27.7969 21.2813H31.5469V13.4531H27.7969V21.2813Z" fill="#A4A4A4"/>
+</g>
+</g>
+</svg>

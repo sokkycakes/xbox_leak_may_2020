@@ -1,0 +1,38 @@
+image boot.vfat {
+	vfat {
+		label = "XBOXBOOT"
+		files = {
+#BOOT_FILES#
+		}
+	}
+	size = 128M
+}
+
+image data.ext4 {
+	ext4 {
+		label = "XBOXDATA"
+		use-mke2fs = true
+	}
+	size = 512M
+}
+
+image sdcard.img {
+	hdimage {
+	}
+
+	partition boot {
+		partition-type = 0xC
+		bootable = "true"
+		image = "boot.vfat"
+	}
+
+	partition rootfs {
+		partition-type = 0x83
+		image = "rootfs.ext4"
+	}
+
+	partition data {
+		partition-type = 0x83
+		image = "data.ext4"
+	}
+}

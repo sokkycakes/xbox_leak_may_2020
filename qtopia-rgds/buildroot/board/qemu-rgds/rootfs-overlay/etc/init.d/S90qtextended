@@ -1,0 +1,40 @@
+#!/bin/sh
+# Start Qt Extended straight on KMS (no X11, no Wayland, no fbdev).
+# Settings come from /etc/qtextended.conf when present.
+
+QPEDIR=/opt/qtmoko
+[ -x $QPEDIR/bin/qpe ] || exit 0
+
+export QPEDIR QTDIR=$QPEDIR
+export LD_LIBRARY_PATH=$QPEDIR/lib
+export PATH=$QPEDIR/bin:$PATH
+export HOME=/root USER=root
+export QT_PLUGIN_PATH=$QPEDIR/qt_plugins
+# Two 640x480 panels: connector 0 on top, connector 1 below it.
+export QWS_DISPLAY="Multi: kms:connector=0:0 kms:connector=1:offset=0,480:1 :0"
+export QWS_SIZE=640x960
+export QWS_KEYBOARD="LinuxInput:/dev/input/event0"
+# One touch device per panel; screen=N ties it to that panel of the Multi display.
+export QWS_MOUSE_PROTO="LinuxInput:/dev/input/event1:screen=0 LinuxInput:/dev/input/event2:screen=1"
+[ -f /etc/qtextended.conf ] && . /etc/qtextended.conf
+
+run_qpe() {
+    while :; do
+        echo "--- qpe start $(date)" >> /tmp/qtextended/qpe.log
+        $QPEDIR/bin/qpe -qws >> /tmp/qtextended/qpe.log 2>&1
+        echo "--- qpe exit $?" >> /tmp/qtextended/qpe.log
+        sleep 2
+    done
+}
+
+case "$1" in
+start)
+    mkdir -p /tmp/qtextended
+    run_qpe &
+    echo $! > /var/run/qtextended.pid
+    ;;
+stop)
+    [ -f /var/run/qtextended.pid ] && kill $(cat /var/run/qtextended.pid)
+    killall qpe 2>/dev/null
+    ;;
+esac

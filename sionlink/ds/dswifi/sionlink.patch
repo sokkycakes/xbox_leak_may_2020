@@ -1,0 +1,134 @@
+diff --git a/source/arm7/ntr/tx_queue.c b/source/arm7/ntr/tx_queue.c
+index d37ee99..478ab9b 100644
+--- a/source/arm7/ntr/tx_queue.c
++++ b/source/arm7/ntr/tx_queue.c
+@@ -167,6 +167,17 @@ static int Wifi_TxArm9QueueCopyFirstData(s32 macbase, u32 buffer_end)
+     size_t size = read_u32(txbufData + read_idx) & WFLAG_SEND_SIZE_MASK;
+     read_idx += sizeof(uint32_t);
+ 
++    // Sion Link: a size that runs past the end of the ring means the ring is
++    // out of step (seen on hardware under heavy traffic). Drop everything
++    // queued instead of asserting; the protocol above resends.
++    if (read_idx + round_up_32(size) > (WIFI_TXBUFFER_SIZE - sizeof(u32)))
++    {
++        WifiData->stats[WSTAT_TXQUEUEDREJECTED]++;
++        WifiData->txbufRead = WifiData->txbufWrite;
++        leaveCriticalSection(oldIME);
++        return 0;
++    }
++
+     if (size <= buffer_end) // The ARM9 includes the space required by the FCS
+     {
+         const u16 *source = (const u16 *)(txbufData + read_idx);
+@@ -195,6 +206,7 @@ static int Wifi_TxArm9QueueCopyFirstData(s32 macbase, u32 buffer_end)
+     else
+     {
+         WifiData->stats[WSTAT_TXQUEUEDREJECTED]++;
++        read_idx += round_up_32(size); // skip the packet, not just its size
+     }
+ 
+     assert(read_idx <= (WIFI_TXBUFFER_SIZE - sizeof(u32)));
+diff --git a/source/arm7/ntr/update.c b/source/arm7/ntr/update.c
+index ddac61f..c90acae 100644
+--- a/source/arm7/ntr/update.c
++++ b/source/arm7/ntr/update.c
+@@ -393,6 +393,38 @@ void Wifi_NTR_Update(void)
+                 break;
+             }
+ 
++            // Sion Link: some access points (Intel cards in AP mode) reach the
++            // DS with broadcasts only, so their auth and assoc replies never
++            // arrive. In multiplayer client mode, don't wait for them: after a
++            // short pause, go on as if they had arrived. The host accepts the
++            // DS without hearing it acknowledge those replies.
++            if ((WifiData->curLibraryMode == DSWIFI_MULTIPLAYER_CLIENT) &&
++                ((W_US_COUNT1 - WifiData->counter7) > 3)) // about 200 ms
++            {
++                WifiData->counter7 = W_US_COUNT1;
++
++                if (WifiData->authlevel == WIFI_AUTHLEVEL_DISCONNECTED)
++                {
++                    WLOG_PUTS("W: No auth reply, going on\n");
++                    WifiData->authlevel = WIFI_AUTHLEVEL_AUTHENTICATED;
++                    WifiData->realRates = true;
++                    Wifi_SendAssocPacket();
++                }
++                else if (WifiData->authlevel == WIFI_AUTHLEVEL_AUTHENTICATED)
++                {
++                    WLOG_PUTS("W: No assoc reply, going on\n");
++                    // We never learn the AID the host gave us. With AID 0 the
++                    // hardware keeps ignoring data from the host, so use 1:
++                    // the AID only picks a reply slot in CMD/REPLY exchanges,
++                    // which the Sion doesn't use.
++                    Wifi_NTR_SetAssociationID(1);
++                    Wifi_NTR_SetupTransferOptions(WIFI_TRANSFER_RATE_2MBPS, false);
++                    WifiData->authlevel = WIFI_AUTHLEVEL_ASSOCIATED;
++                    WifiData->authctr   = 0;
++                }
++                break;
++            }
++
+             // If the process stops (for example, because we don't receive a
+             // packet) retry manually every now and then.
+             if ((W_US_COUNT1 - WifiData->counter7) > 20) // 20 units is 1 sec aprox
+@@ -538,6 +570,39 @@ void Wifi_NTR_Update(void)
+         }
+     }
+ 
++    // Sion Link: in promiscuous mode, also open the hardware RX filters so
++    // that every frame on the channel is received, whatever its BSSID or
++    // direction. Restore the filters of the current mode when it ends.
++    static bool rx_all = false;
++    void Wifi_Intr_CntOverflow(void); // interrupts.c
++    if (WifiData->reqFlags & WFLAG_REQ_PROMISC)
++    {
++        // Not RXFILTER_UPDATE_WRCSR: it moves the RX write pointer before a
++        // frame is complete, and the RX queue then reads half-written frames.
++        W_RXFILTER  = RXFILTER_ALL & ~RXFILTER_UPDATE_WRCSR;
++        W_RXFILTER2 = 0;
++        rx_all = true;
++
++        // Also collect the hardware RX/TX statistics counters every update,
++        // not only when one is about to overflow, so they can be watched live
++        Wifi_Intr_CntOverflow();
++    }
++    else if (rx_all)
++    {
++        rx_all = false;
++        if (WifiData->curMode == WIFIMODE_SCAN)
++            Wifi_SetupFilterMode(WIFI_FILTERMODE_SCAN);
++        else if (WifiData->curMode == WIFIMODE_ACCESSPOINT)
++            Wifi_SetupFilterMode(WIFI_FILTERMODE_MULTIPLAYER_HOST);
++        else if ((WifiData->curMode == WIFIMODE_CONNECTING) ||
++                 (WifiData->curMode == WIFIMODE_CONNECTED))
++            Wifi_SetupFilterMode(
++                (WifiData->curLibraryMode == DSWIFI_MULTIPLAYER_CLIENT) ?
++                WIFI_FILTERMODE_MULTIPLAYER_CLIENT : WIFI_FILTERMODE_INTERNET);
++        else
++            Wifi_SetupFilterMode(WIFI_FILTERMODE_IDLE);
++    }
++
+     // First, check if we have received anything and handle it
+     Wifi_RxQueueFlush();
+ 
+diff --git a/source/arm9/wifi_arm9.c b/source/arm9/wifi_arm9.c
+index c9176de..37c0504 100644
+--- a/source/arm9/wifi_arm9.c
++++ b/source/arm9/wifi_arm9.c
+@@ -50,6 +50,16 @@ static void Wifi_NTR_Update(void)
+         }
+         read_idx += sizeof(uint32_t);
+ 
++        // Sion Link: a size that runs past the end of the ring means the ring
++        // is out of step (seen on hardware under heavy traffic). This runs in
++        // an IRQ, where a failed assert can't even be reported, so drop what
++        // is queued instead.
++        if (read_idx + round_up_32(size) > (WIFI_RXBUFFER_SIZE - sizeof(u32)))
++        {
++            WifiData->rxbufRead = WifiData->rxbufWrite;
++            return;
++        }
++
+ #ifdef DSWIFI_ENABLE_LWIP
+         if (wifi_lwip_enabled)
+         {
