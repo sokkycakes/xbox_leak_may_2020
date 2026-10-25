@@ -88,7 +88,9 @@ static void crash_handler(int sig, siginfo_t *si, void *uc_)
 {
     ucontext_t *uc = uc_;
     greg_t *r = uc->uc_mcontext.gregs;
-    if (sig == SIGSEGV && (read_tsc(r) || debug_service(r) || privileged_insn(r))) { g_guest_traps++; return; }
+    /* A jump to unmapped code faults on the fetch: nothing to decode there. */
+    bool fetch = sig == SIGSEGV && (greg_t)si->si_addr == r[REG_EIP];
+    if (sig == SIGSEGV && !fetch && (read_tsc(r) || debug_service(r) || privileged_insn(r))) { g_guest_traps++; return; }
     if (sig == SIGSEGV && nic_trap_fault(si->si_addr, uc)) return;
     if (sig == SIGTRAP && nic_trap_step(uc)) return;
 #ifdef XBC_GPU

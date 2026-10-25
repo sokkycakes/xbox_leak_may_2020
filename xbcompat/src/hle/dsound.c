@@ -2034,7 +2034,7 @@ struct ds_filexmo {
 };
 
 static void *wave_vtbl[11];
-static void *file_vtbl[9];
+static void *file_vtbl[10];
 
 static void xmo_accept(const XMEDIAPACKET *p)
 {
@@ -2259,6 +2259,8 @@ static HRESULT NTAPI File_GetLength(struct ds_filexmo *f, DWORD *len)
     *len = (DWORD)xfile_size(&f->f);
     return DS_OK;
 }
+
+static HRESULT NTAPI File_DoWork(struct ds_filexmo *f) { (void)f; return DS_OK; }
 
 static HRESULT NTAPI XFileCreateMediaObject(const char *name, DWORD access, DWORD share, DWORD disp, DWORD attrs,
                                             void **ppxmo)
@@ -3183,9 +3185,11 @@ static void *wave_vtbl[11] = {
     (void *)Wave_GetFormat, (void *)Wave_GetLoopRegion,
 };
 
-static void *file_vtbl[9] = {
+/* Later XDKs add DoWork to XFileMediaObject for XFileCreateMediaObjectAsync
+   objects (MechAssault calls it while loading); ours complete at once. */
+static void *file_vtbl[10] = {
     (void *)File_AddRef, (void *)File_Release, (void *)File_GetInfo, (void *)File_GetStatus, (void *)File_Process,
-    (void *)File_Discontinuity, (void *)File_Flush, (void *)File_Seek, (void *)File_GetLength,
+    (void *)File_Discontinuity, (void *)File_Flush, (void *)File_Seek, (void *)File_GetLength, (void *)File_DoWork,
 };
 
 /* The guest calls these objects' methods through the vtables: give it
@@ -3195,7 +3199,7 @@ static void guest_vtbls_once(void)
     cpu_guest_table(refhdr_vtbl, 3);
     cpu_guest_table(stream_vtbl, 7);
     cpu_guest_table(wave_vtbl, 11);
-    cpu_guest_table(file_vtbl, 9);
+    cpu_guest_table(file_vtbl, 10);
 }
 
 static void guest_vtbls(void)
