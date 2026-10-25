@@ -72,6 +72,9 @@ name=$(key Name)
 id=$(key Id)
 exec_=$(key Exec)
 runtime=$(key Runtime)
+# DS carts go to Sion Link's runner (its install-title.sh adds this line to an
+# installed copy too).
+case $runtime in nds*) exec sh /opt/sionlink/dscart-run "$kzi" --title-id "$tid" ;; esac
 base=${kzi##*/}
 base=${base%.*}
 [ -n "$id" ] || id=$base
@@ -81,10 +84,34 @@ card=$(cd "$(dirname "$kzi")" && pwd)
 cartdir=$card/$base
 [ -d "$cartdir" ] || cartdir=$card
 tid=$(echo "${tid:-4B5A0000}" | tr 'A-F' 'a-f')
+# The cart's icon (Icon=, beside the .kzi as Kazeta has it, else in the
+# cart's folder) as the chroot sees the card (/media), for the Guide.
+icon=$(key Icon)
+icon_in=
+case $icon in
+''|*..*) ;;
+*)	if [ -f "$card/$icon" ]; then icon_in=/media/$icon
+	elif [ -f "$cartdir/$icon" ]; then icon_in=/media${cartdir#"$card"}/$icon
+	fi ;;
+esac
 
+# One run at a time: a second one would take the display and, on its way
+# out, kill the first one's game.
+if [ -s "$RUN/gamescope.pid" ] && kill -0 "$(cat "$RUN/gamescope.pid")" 2>/dev/null; then
+	echo "wincart-run: a Windows game is already running (gamescope $(cat "$RUN/gamescope.pid")): not starting" >&2
+	exit 75
+fi
 state=$CARTS/$id
 mkdir -p "$state/logs" "$state/overrides" "$RUN"
-[ -n "$prefix" ] || prefix=$state/pfx
+# WINCART_PROTON=DIR: run with that Proton build's Wine (DIR/files/bin/wine,
+# e.g. /data/proton/GE-Proton11-11) instead of Conty's, in its own prefix
+# (pfx-<build name>), for tests.
+proton=
+if [ -n "${WINCART_PROTON:-}" ]; then
+	if [ -x "$WINCART_PROTON/files/bin/wine" ]; then proton=$WINCART_PROTON
+	else echo "WINCART_PROTON=$WINCART_PROTON has no files/bin/wine: using Conty's Wine"; fi
+fi
+[ -n "$prefix" ] || { if [ -n "$proton" ]; then prefix=$state/pfx-${proton##*/}; else prefix=$state/pfx; fi; }
 LOG=$state/logs/run.log
 [ -e "$LOG" ] && mv "$LOG" "$LOG.1"
 exec >> "$LOG" 2>&1
@@ -192,10 +219,25 @@ cleanup() {
 		for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$gspid" 2>/dev/null || break; sleep 0.3; done
 	fi
 	# Whatever is still running from the chroot (wine, Xwayland, the Guide).
-	for p in /proc/[0-9]*; do
-		[ "$(readlink "$p/root" 2>/dev/null)" = "$R" ] || continue
-		pid=${p#/proc/}
-		[ "$pid" = "$$" ] || kill -9 "$pid" 2>/dev/null
+	# A process whose leader is already a zombie has no readable root, but
+	# its threads still do (and can hold the sound device): check every task
+	# and kill its whole thread group.
+	for _ in 1 2 3; do
+		left=
+		for t in /proc/[0-9]*/task/[0-9]*; do
+			[ "$(readlink "$t/root" 2>/dev/null)" = "$R" ] || continue
+			pid=${t#/proc/}
+			pid=${pid%%/*}
+			[ "$pid" = "$$" ] && continue
+			# drmkeep's holder keeps gamescope's last frame on screen
+			# until xbox-av has the display back (below).
+			[ "$(cat "/proc/$pid/comm" 2>/dev/null)" = drmkeep-hold ] && continue
+			kill -9 "$pid" 2>/dev/null
+			kill -9 "${t##*/}" 2>/dev/null
+			left=1
+		done
+		[ -n "$left" ] || break
+		sleep 0.3
 	done
 	[ -n "$seatdpid" ] && kill "$seatdpid" 2>/dev/null
 	for m in $mounted; do umount -l "$m" 2>/dev/null; done
@@ -203,6 +245,9 @@ cleanup() {
 	sync
 	# Give the display back to xbox-av (black), if we took it.
 	[ -n "$avpid" ] && kill "$avpid" 2>/dev/null && wait "$avpid" 2>/dev/null
+	for p in /proc/[0-9]*; do
+		[ "$(cat "$p/comm" 2>/dev/null)" = drmkeep-hold ] && kill "${p#/proc/}" 2>/dev/null
+	done
 	echo "$(date '+%F %T') done, status $status"
 	exit "$status"
 }
@@ -234,9 +279,13 @@ bindm "$state" $R/srv
 [ "$prefix" != "$state/pfx" ] && { mkdir -p "$state/pfx"; bindm "$prefix" $R/srv/pfx; }
 bindm -o ro $X $R/opt
 bindm $HDD $R/mnt
+[ -n "$proton" ] && { mkdir -p $R/run/proton; bindm -o ro "$proton" $R/run/proton; }
 
 # Sound: the output xbox-env picked, mixed (dmix) so the Guide's sounds play
-# over the game, with a volume control (Wincart) the Guide's slider sets.
+# over the game.  The title plays through a volume control (Wincart: the
+# Guide's slider, and its ducking while open), the Guide through wincart_ui.
+# dmix's own buffer is set small (40 ms): left unset it is half a second,
+# which the game's sound lags by.
 dev=${AUDIODEV:-hdmi:CARD=PCH,DEV=0}
 case $dev in
 hdmi:CARD=PCH,DEV=0) dev=hw:PCH,3 ;;
@@ -244,16 +293,25 @@ hdmi:CARD=PCH,DEV=1) dev=hw:PCH,7 ;;
 hdmi:CARD=PCH,DEV=2) dev=hw:PCH,8 ;;
 esac
 cat > $R/root/.asoundrc << EOF
-pcm.wincart_out { type dmix ipc_key 50503 ipc_perm 0666 slave { pcm "$dev" rate 48000 } }
-pcm.wincart_vol { type softvol slave.pcm "wincart_out" control { name "Wincart" card 0 } }
+pcm.wincart_out { type dmix ipc_key 50503 ipc_perm 0666 slave { pcm "$dev" rate 48000 period_size ${WINCART_PERIOD:-480} buffer_size ${WINCART_BUFFER:-1920} } }
+pcm.wincart_vol { type softvol slave.pcm "wincart_out" control { name "Wincart" card 0 } min_dB -51.0 max_dB 0.0 resolution 256 }
+pcm.wincart_ui { type plug slave.pcm "wincart_out" }
 pcm.!default { type plug slave.pcm "wincart_vol" }
 ctl.!default { type hw card 0 }
 EOF
+# volume GAIN: the title's volume, a linear gain from 0 to 1, set in decibels
+# (Wincart's steps are linear in dB: a percentage would put 0.3 at -36 dB).
 cat > $R/root/volume << 'EOF'
 #!/bin/sh
-exec amixer -q -c 0 sset Wincart "$1%"
+db=$(awk -v g="$1" 'BEGIN { if (g + 0 <= 0.0029) print "mute"; else if (g + 0 >= 1) print "0"; else printf "%.1f", 20 * log(g) / log(10) }')
+if [ "$db" = mute ]; then exec amixer -q -c 0 sset Wincart 0
+else exec amixer -q -c 0 sset Wincart -- "${db}dB"; fi
 EOF
 chmod 755 $R/root/volume
+# softvol makes its control when the PCM is first opened; open it once now
+# so the Guide's volume applies from the start.
+chroot $R /usr/bin/env -i PATH=/usr/bin:/bin HOME=/root /bin/sh -c \
+	'head -c 7680 /dev/zero | aplay -q -D wincart_vol -t raw -f S16_LE -r 48000 -c 2' 2>/dev/null || echo "could not open wincart_vol"
 
 # ---- the display -----------------------------------------------------------
 # xbox-av holds DRM between titles; 'T' makes it let go.
@@ -263,7 +321,10 @@ if [ "${WINCART_AV:-1}" != 0 ] && [ -S "${XBOX_AV_SOCKET:-/var/run/xbox-av.sock}
 	sleep 0.3
 fi
 
-chroot $R /usr/bin/env -i PATH=/usr/bin XDG_RUNTIME_DIR=/run /usr/bin/seatd -g root > "$state/logs/seatd.log" 2>&1 &
+# SEATD_VTBOUND=0: seatd leaves the VT alone. Bound to it, seatd puts it back
+# in text mode when the run ends, and the console takes the screen (the tty and
+# a mode change) before xbox-av gets the display back.
+chroot $R /usr/bin/env -i PATH=/usr/bin XDG_RUNTIME_DIR=/run SEATD_VTBOUND=${WINCART_SEATD_VTBOUND:-0} /usr/bin/seatd -g root > "$state/logs/seatd.log" 2>&1 &
 seatdpid=$!
 for _ in 1 2 3 4 5 6 7 8 9 10; do [ -S $R/run/seatd.sock ] && break; sleep 0.2; done
 
@@ -276,20 +337,35 @@ ow=${mode%x*}
 oh=${mode#*x}
 case "$ow$oh" in *[!0-9]*|'') ow=720; oh=480 ;; esac
 
+# INTEL_DEBUG=noccs: no render compression (CCS) on the HD 610. With it,
+# buffers passed between Wine, Xwayland and gamescope showed blocky,
+# miscoloured tiles in motion. WINCART_INTEL_DEBUG= (empty) turns it back on.
 # Wine sees only the Guide's uinput pad (an Xbox 360 pad, over evdev).
 padenv="SDL_GAMECONTROLLERCONFIG_FILE=/opt/share/gamecontrollerdb.txt SDL_JOYSTICK_HIDAPI=0 SDL_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT=0x045e/0x028e ${WINCART_PAD_ENV:-}"
-wenv="PATH=/usr/bin:/bin HOME=/root XDG_RUNTIME_DIR=/run LC_ALL=C WINEPREFIX=/srv/pfx WINEDEBUG=err+all,fixme-all"
+wpath=/usr/bin:/bin
+[ -n "$proton" ] && wpath=/run/proton/files/bin:$wpath
+wenv="PATH=$wpath HOME=/root XDG_RUNTIME_DIR=/run LC_ALL=C WINEPREFIX=/srv/pfx WINEDEBUG=err+all,fixme-all"
 wdll="dinput8=b;winepulse.drv=d"
 
 # Once per prefix: winebus reads pads only through SDL (not hidraw/evdev).
-if [ ! -e "$state/.winebus" ]; then
+if [ ! -e "$prefix/.winebus" ]; then
 	# shellcheck disable=SC2086
 	chroot $R /usr/bin/env -i $wenv WINEDLLOVERRIDES="$wdll" /bin/sh -c '
 		k="HKLM\\System\\CurrentControlSet\\Services\\winebus"
 		wine reg add "$k" /v DisableHidraw /t REG_DWORD /d 1 /f
 		wine reg add "$k" /v DisableInput /t REG_DWORD /d 1 /f
 		wine reg add "$k" /v "Enable SDL" /t REG_DWORD /d 1 /f
-		wineserver -w' >> "$state/logs/game.log" 2>&1 && touch "$state/.winebus"
+		wineserver -w' >> "$state/logs/game.log" 2>&1 && touch "$prefix/.winebus"
+fi
+
+# Proton builds load wined3d's vkd3d DLLs from the prefix (proton's own
+# script copies them in): do the same, every run (cheap, idempotent).
+if [ -n "$proton" ]; then
+	for a in x86_64-windows:system32 i386-windows:syswow64; do
+		src=$proton/files/lib/vkd3d/${a%%:*}
+		dst=$prefix/drive_c/windows/${a#*:}
+		[ -d "$src" ] && [ -d "$dst" ] && cp -f "$src"/*.dll "$dst"/ 2>/dev/null
+	done
 fi
 
 case $exec_ in
@@ -297,10 +373,28 @@ case $exec_ in
 *) cmd="wine \"$exec_\"" ;;
 esac
 
+# drmkeep.so (in gamescope only): hides the TV's other modes of the size
+# xbox-av is showing, so gamescope takes over the display in the mode already
+# on screen instead of modesetting (colour bars on the HDMI-to-AV box).
+# WINCART_DRMKEEP=0 turns it off.
+# WINCART_DRMKEEP_SO: another build to test, under /opt/xbcompat or the
+# cart's state folder.
+keep=
+so=${WINCART_DRMKEEP_SO:-$X/tools/drmkeep.so}
+case $so in
+"$X"/*) so_in=/opt${so#"$X"} ;;
+"$state"/*) so_in=/srv${so#"$state"} ;;
+*) so=$X/tools/drmkeep.so; so_in=/opt/tools/drmkeep.so ;;
+esac
+if [ "${WINCART_DRMKEEP:-1}" != 0 ] && [ -r "$so" ]; then
+	keep="env LD_PRELOAD=$so_in"
+	cmd="env -u LD_PRELOAD $cmd"
+fi
+
 # shellcheck disable=SC2086
 chroot $R /usr/bin/env -i $wenv LIBSEAT_BACKEND=seatd WLR_LIBINPUT_NO_DEVICES=1 \
-	WINEDLLOVERRIDES="$wdll" $padenv \
-	/bin/sh -c "cd /srv/game && exec gamescope --backend drm -W $ow -H $oh -w 1024 -h 768 -S stretch -f -- $cmd" \
+	WINEDLLOVERRIDES="$wdll" $padenv INTEL_DEBUG=${WINCART_INTEL_DEBUG-noccs} ${WINCART_GAME_ENV:-} \
+	/bin/sh -c "cd /srv/game && exec $keep gamescope --backend drm -W $ow -H $oh -w 1024 -h 768 -S stretch -f ${WINCART_GAMESCOPE_ARGS:-} -- $cmd" \
 	> "$state/logs/game.log" 2>&1 &
 gspid=$!
 echo "$gspid" > "$RUN/gamescope.pid"
@@ -322,15 +416,23 @@ start_guide() {
 	(
 		chroot $R /usr/bin/env -i PATH=/usr/bin:/bin HOME=/root XDG_RUNTIME_DIR=/run LC_ALL=C DISPLAY="$display" \
 			XBCOMPAT_GUIDE_DIR=/opt/bin/guide XBCOMPAT_HDD=/mnt SDL_GAMECONTROLLERCONFIG_FILE=/opt/share/gamecontrollerdb.txt \
-			SDL_AUDIODRIVER=alsa AUDIODEV=wincart_out KAZETA_VOLUME_CMD=/root/volume \
-			KAZETA_TITLE_ID="$tid" KAZETA_TITLE_NAME="$name" KAZETA_GUIDE_W="$ow" KAZETA_GUIDE_H="$oh" \
-			/opt/bin/kazeta-guide >> "$state/logs/guide.log" 2>&1
+			KAZETA_SOUND_PCM=wincart_ui KAZETA_VOLUME_CMD=/root/volume ${WINCART_GUIDE_ENV:-} \
+			KAZETA_TITLE_ID="$tid" KAZETA_TITLE_NAME="$name" KAZETA_TITLE_ICON="$icon_in" KAZETA_GUIDE_W="$ow" KAZETA_GUIDE_H="$oh" \
+			"$guide_in" >> "$state/logs/guide.log" 2>&1
 		echo $? > "$RUN/guide.status"
 	) &
 	gdpid=$!
 }
 guide_starts=0
-if [ -n "$display" ] && [ -x $X/bin/kazeta-guide ]; then
+# KAZETA_GUIDE_BIN: another Guide host to test, under /opt/xbcompat or the
+# cart's state folder (the chroot sees those as /opt and /srv).
+guide_bin=${KAZETA_GUIDE_BIN:-$X/bin/kazeta-guide}
+case $guide_bin in
+"$X"/*) guide_in=/opt${guide_bin#"$X"} ;;
+"$state"/*) guide_in=/srv${guide_bin#"$state"} ;;
+*) guide_in=/opt/bin/kazeta-guide; guide_bin=$X/bin/kazeta-guide ;;
+esac
+if [ -n "$display" ] && [ -x "$guide_bin" ]; then
 	: > "$state/logs/guide.log"
 	start_guide
 	guide_starts=1
