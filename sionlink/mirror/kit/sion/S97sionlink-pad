@@ -1,0 +1,23 @@
+#!/bin/sh
+# Sion Link's DS pad (dspad): a DS running Sion Link on its DSpico is an Xbox 360 pad for
+# the dashboard, Frolick and games while no DS game is mirrored; a DS title's mirror takes
+# the DS over and gives it back when it ends. Log: /var/log/sionlink-pad.log.
+BIN=/opt/sionlink/dspad
+PID=/var/run/sionlink-pad.pid
+case "$1" in
+start)
+	[ -x "$BIN" ] || exit 0
+	[ -f "$PID" ] && kill -0 "$(cat "$PID")" 2>/dev/null && exit 0
+	"$BIN" >>/var/log/sionlink-pad.log 2>&1 &
+	echo $! >"$PID"
+	;;
+stop)
+	[ -f "$PID" ] && kill "$(cat "$PID")" 2>/dev/null
+	rm -f "$PID"
+	;;
+restart)
+	"$0" stop
+	sleep 1
+	"$0" start
+	;;
+esac

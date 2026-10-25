@@ -1,0 +1,16 @@
+# frame keys: held from that frame until the next line. Avoids START/SELECT (they exit demos).
+20 LEFT
+60 UP
+100 RIGHT+A
+140 DOWN
+180 L+LEFT
+220 R+UP
+260 X+RIGHT
+300 B+DOWN
+340 Y+LEFT
+370 A
+375 -
+385 B
+390 -
+400 A
+405 -

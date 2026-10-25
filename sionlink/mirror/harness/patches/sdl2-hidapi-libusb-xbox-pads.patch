@@ -1,0 +1,25 @@
+From: Claude <noreply@anthropic.com>
+Subject: hidapi: let libusb reach Xbox 360 / Xbox One pads
+
+The libusb whitelist (on whenever hidraw is available) only lets the
+GameCube adapter through, so SDL's Xbox 360 and Xbox One drivers never see
+wired pads on Linux: those interfaces are vendor class (0xff), have no
+hidraw node, and libusb is the only way to them. Pads such as the 8BitDo
+Ultimate 2C wait for the player-LED command these drivers send, and stay
+silent on a kernel whose xpad has no LED support. HID-class devices keep
+going through hidraw as before.
+
+--- a/src/hidapi/SDL_hidapi.c
++++ b/src/hidapi/SDL_hidapi.c
+@@ -1274,7 +1274,10 @@
+ #endif
+         for (usb_dev = usb_devs; usb_dev; usb_dev = usb_dev->next) {
+             if (use_libusb_whitelist) {
+-                if (!IsInWhitelist(usb_dev->vendor_id, usb_dev->product_id)) {
++                /* Xbox 360 and Xbox One interfaces (vendor class) have no
++                   hidraw node, so libusb is the only way SDL reaches them. */
++                if (!IsInWhitelist(usb_dev->vendor_id, usb_dev->product_id) &&
++                    usb_dev->interface_class != 0xff) {
+ #ifdef DEBUG_HIDAPI
+                     SDL_Log("Device was not in libusb whitelist: %ls %ls 0x%.4hx 0x%.4hx",
+                             usb_dev->manufacturer_string, usb_dev->product_string,

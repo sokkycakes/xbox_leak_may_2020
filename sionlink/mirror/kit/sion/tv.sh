@@ -1,0 +1,104 @@
+#!/bin/sh
+# Sion Link live mirror with the game on the TV as well (run 14): both screens stacked on
+# the TV in the mode it is already in (no resync), the game's sound on the TV's HDMI, and
+# the same picture mirrored to the DS, whose pad plays it.
+#   sh tv.sh /path/to/game.nds [GAMECODE] [60] [soft]   start (it carries on in the background)
+#   sh tv.sh stop                                        stop; the dashboard comes back
+# The game starts at once; start sion-link-live.nds on the DS and plug the DSpico's USB
+# into the Sion whenever, and unplug it whenever. The Xbox dashboard stops while the
+# mirror has the TV.
+# GAMECODE: AMKE for the Mario Kart DS kiosk demo. The DS shows 30 frames a second
+# (the TV all 60); add 60 for every frame on the DS too. The game's 3D is drawn with the
+# Sion's GPU (OpenGL, mirrorrun-gl: run 16 held 57-60 fps where software dipped to 53);
+# soft draws it with the CPU (mirrorrun) instead. The DS gets the same either way.
+# The Sion's own pads play too (right stick and trigger: the stylus). The save goes next
+# to the game (GAME.sav). Holding Back (or Select on the DS) for 1.5 s opens the game's menu:
+# screen layout, quick save and load (GAME.state), reset, back to the dashboard. To have a
+# game as an Xbox title instead, see install-title.sh.
+# Log: /tmp/sionlink-tv.log
+case $1 in /*|stop|'') ;; *) set -- "$PWD/$1" "$2" "$3" "$4" ;; esac   # the game's path from here
+cd "$(dirname "$0")" || exit 1
+SELF=$PWD/$(basename "$0")
+LOG=/tmp/sionlink-tv.log
+PIDFILE=/var/run/xbox.pid
+
+if [ "$1" = stop ]; then
+	pidof mirrorrun mirrorrun-gl > /dev/null || { echo "the mirror isn't running"; exit 0; }
+	killall -q mirrorrun mirrorrun-gl
+	for _ in $(seq 1 25); do
+		pidof mirrorrun mirrorrun-gl > /dev/null || break
+		sleep 0.2
+	done
+	killall -q -9 mirrorrun mirrorrun-gl
+	echo "stopped; the dashboard is coming back"
+	exit 0
+fi
+
+ROM=$1
+[ -n "$ROM" ] || { echo "usage: sh tv.sh GAME.nds [GAMECODE] [60] [soft] | sh tv.sh stop"; exit 1; }
+[ -r "$ROM" ] || { echo "no $ROM"; exit 1; }
+HALF="--half 1" CODE= RUN=./mirrorrun-gl RENDER="--renderer gl"
+for a in "$2" "$3" "$4"; do
+	case $a in
+	'') ;;
+	60) HALF= ;;
+	gl) ;;
+	soft) RUN=./mirrorrun RENDER= ;;
+	*) CODE="--gamecode $a" ;;
+	esac
+done
+
+if [ -z "$SIONLINK_TV_BG" ]; then
+	pidof mirrorrun mirrorrun-gl > /dev/null && { echo "the mirror is already running (sh tv.sh stop)"; exit 1; }
+	# never over a game: the dashboard is xbcompat running xboxdash.xbe; a game it starts
+	# replaces it in the same process, and Windows games run under gamescope
+	playing=
+	for p in $(pidof xbcompat); do
+		tr '\0' ' ' < "/proc/$p/cmdline" | grep -q xboxdash.xbe || playing=xbcompat
+	done
+	pidof gamescope kazeta-guide > /dev/null && playing=wincart
+	if [ -n "$playing" ]; then
+		echo "a game is running ($playing): not taking the TV"
+		exit 1
+	fi
+	# the rest runs on its own, so it outlives this shell and brings the dashboard back
+	SIONLINK_TV_BG=1 setsid sh "$SELF" "$@" > "$LOG" 2>&1 < /dev/null &
+	echo "started; log in $LOG"
+	exit 0
+fi
+
+chmod +x mirrorrun mirrorrun-gl 2>/dev/null
+
+# the sound device and display socket the dashboard uses
+eval "$(. /usr/lib/xbox/xbox-env > /dev/null 2>&1
+	echo "AUDIODEV='$AUDIODEV' KMS_MODE='$KMS_MODE' XBOX_AV_SOCKET='$XBOX_AV_SOCKET'")"
+export AUDIODEV KMS_MODE XBOX_AV_SOCKET
+echo "$(date '+%F %T') sound device ${AUDIODEV:-default}, display socket ${XBOX_AV_SOCKET:-none}"
+
+# The dashboard lets go of the TV and the sound: its session loop first, so it doesn't
+# start the dashboard again, then xbcompat (as S98xbox stop does). xbox-av stays: it
+# keeps the picture and hands the display over.
+session=
+if [ -r "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2> /dev/null; then
+	session=1
+	start-stop-daemon -K -q -p "$PIDFILE"
+	rm -f "$PIDFILE"
+fi
+killall -q xbcompat
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+	pidof xbcompat > /dev/null || break
+	sleep 0.3
+done
+killall -q -9 xbcompat
+echo "$(date '+%F %T') dashboard stopped${session:+ (session loop too)}"
+
+# shellcheck disable=SC2086
+$RUN "$ROM" 0 --serve usb --hotplug 1 --realtime 1 --gxdelta 1 --jit 1 --threaded 1 $RENDER \
+	$HALF $CODE --tv drm --sound alsa --pads 1 --save "${ROM%.*}.sav"
+echo "$(date '+%F %T') mirror exited with $?"
+
+if [ -n "$session" ]; then
+	start-stop-daemon -S -q -b -m -p "$PIDFILE" -x /bin/sh \
+		-- -c "exec /usr/libexec/xbox-session >>/var/log/xbox-session.log 2>&1"
+	echo "$(date '+%F %T') dashboard started again"
+fi

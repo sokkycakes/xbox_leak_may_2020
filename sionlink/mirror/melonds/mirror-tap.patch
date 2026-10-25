@@ -1,0 +1,233 @@
+diff --git a/src/ARMJIT_Memory.cpp b/src/ARMJIT_Memory.cpp
+index c64bad1..675eceb 100644
+--- a/src/ARMJIT_Memory.cpp
++++ b/src/ARMJIT_Memory.cpp
+@@ -44,6 +44,7 @@
+ #include "DSi.h"
+ #include "GPU.h"
+ #include "GPU3D.h"
++#include "MirrorTap.h"
+ #include "Wifi.h"
+ #include "NDSCart.h"
+ #include "SPU.h"
+@@ -1519,7 +1520,8 @@ void* ARMJIT_Memory::GetFuncForAddr(ARM* cpu, u32 addr, bool store, int size) co
+ 
+                 though GPU3D registers are accessed much more intensive
+             */
+-            if (addr >= 0x04000320 && addr < 0x040006A4)
++            // with a mirror tap, 3D stores go through ARM9IOWrite so the tap sees them
++            if (addr >= 0x04000320 && addr < 0x040006A4 && !(store && gMirrorTap))
+             {
+                 switch (size | store)
+                 {
+diff --git a/src/GPU.cpp b/src/GPU.cpp
+index b695ee9..db46e01 100644
+--- a/src/GPU.cpp
++++ b/src/GPU.cpp
+@@ -19,6 +19,7 @@
+ #include <string.h>
+ #include "NDS.h"
+ #include "GPU.h"
++#include "MirrorTap.h"
+ 
+ #include "ARMJIT.h"
+ 
+@@ -1248,6 +1249,8 @@ void GPU::StartScanline(u32 line) noexcept
+         VCount &= 0x1FF;
+     }
+ 
++    if (gMirrorTap) gMirrorTap->Scanline(VCount);
++
+     GPU2D_A.UpdateWindows(VCount);
+     GPU2D_B.UpdateWindows(VCount);
+ 
+diff --git a/src/GPU.h b/src/GPU.h
+index b0e1faf..4f7fbf6 100644
+--- a/src/GPU.h
++++ b/src/GPU.h
+@@ -65,6 +65,13 @@ public:
+     void DoSavestate(Savestate* file) noexcept;
+ 
+     void SetRenderer(std::unique_ptr<Renderer>&& renderer) noexcept;
++    // Sion Link mirror: with the OpenGL renderer, captured pixels stay on the GPU until
++    // something reads them; the mirror sends VRAM, so it brings them back first
++    void MirrorSyncCaptures() { SyncAllVRAMCaptures(); }
++    // and is told whenever a capture comes back into VRAM (whatever made it), with the
++    // capture's bank, first 32 KB block and size (0: 128x128, else that many blocks)
++    void (*MirrorCaptureSynced)(void* ctx, u32 bank, u32 start, u32 len) = nullptr;
++    void* MirrorCaptureCtx = nullptr;
+     const Renderer& GetRenderer() const noexcept { return *Rend; }
+     Renderer& GetRenderer() noexcept { return *Rend; }
+ 
+diff --git a/src/GPU_OpenGL.cpp b/src/GPU_OpenGL.cpp
+index 4853369..8474d97 100644
+--- a/src/GPU_OpenGL.cpp
++++ b/src/GPU_OpenGL.cpp
+@@ -909,6 +909,8 @@ void GLRenderer::SyncVRAMCapture(u32 bank, u32 start, u32 len, bool complete)
+             pos &= 3;
+         }
+     }
++
++    if (GPU.MirrorCaptureSynced) GPU.MirrorCaptureSynced(GPU.MirrorCaptureCtx, bank, start, len);
+ }
+ 
+ 
+diff --git a/src/MirrorTap.h b/src/MirrorTap.h
+new file mode 100644
+index 0000000..173214b
+--- /dev/null
++++ b/src/MirrorTap.h
+@@ -0,0 +1,39 @@
++// Sion Link screen mirroring: lets an outside recorder see every ARM9 I/O
++// write and each scanline start. Null when nothing is recording.
++#ifndef MIRRORTAP_H
++#define MIRRORTAP_H
++
++#include "types.h"
++
++namespace melonDS
++{
++class NDS;
++
++class MirrorTap
++{
++public:
++    virtual ~MirrorTap() {}
++    virtual void IOWrite(u32 addr, u32 val, int size) = 0;
++    virtual void Scanline(u32 vcount) = 0;
++};
++
++extern MirrorTap* gMirrorTap;
++
++// Lets an outside model answer some game card commands, for cart features
++// melonDS doesn't emulate (the DSpico's USB port). Null when unused.
++class CardHook
++{
++public:
++    virtual ~CardHook() {}
++    // a ROM transfer starts: cmd is the 8 command bytes, len the data length;
++    // return true to take the whole transfer
++    virtual bool Start(const u8* cmd, u32 len) = 0;
++    virtual u32 Receive() = 0;          // card -> DS word
++    virtual void Transmit(u32 val) = 0; // DS -> card word
++    virtual void Finish() = 0;
++};
++
++extern CardHook* gCardHook;
++}
++
++#endif
+diff --git a/src/NDS.cpp b/src/NDS.cpp
+index c6dc85f..b041613 100644
+--- a/src/NDS.cpp
++++ b/src/NDS.cpp
+@@ -21,6 +21,7 @@
+ #include <string.h>
+ #include <inttypes.h>
+ #include "NDS.h"
++#include "MirrorTap.h"
+ #include "ARM.h"
+ #include "NDSCart.h"
+ #include "GBACart.h"
+@@ -47,6 +48,8 @@
+ 
+ namespace melonDS
+ {
++MirrorTap* gMirrorTap = nullptr;
++CardHook* gCardHook = nullptr;
+ using namespace Platform;
+ 
+ const s32 kMaxIterationCycles = 64;
+@@ -3152,6 +3155,7 @@ u32 NDS::ARM9IORead32(u32 addr)
+ 
+ void NDS::ARM9IOWrite8(u32 addr, u8 val)
+ {
++    if (gMirrorTap) gMirrorTap->IOWrite(addr, val, 1);
+     switch (addr)
+     {
+     case 0x04000004: GPU.SetDispStat(0, val, 0x00FF); return;
+@@ -3271,6 +3275,7 @@ void NDS::ARM9IOWrite8(u32 addr, u8 val)
+ 
+ void NDS::ARM9IOWrite16(u32 addr, u16 val)
+ {
++    if (gMirrorTap) gMirrorTap->IOWrite(addr, val, 2);
+     switch (addr)
+     {
+     case 0x04000004: GPU.SetDispStat(0, val, 0xFFFF); return;
+@@ -3448,6 +3453,7 @@ void NDS::ARM9IOWrite16(u32 addr, u16 val)
+ 
+ void NDS::ARM9IOWrite32(u32 addr, u32 val)
+ {
++    if (gMirrorTap) gMirrorTap->IOWrite(addr, val, 4);
+     switch (addr)
+     {
+     case 0x04000004:
+diff --git a/src/NDSCart.cpp b/src/NDSCart.cpp
+index 35394c9..28dbd18 100644
+--- a/src/NDSCart.cpp
++++ b/src/NDSCart.cpp
+@@ -22,6 +22,7 @@
+ #include "NDS.h"
+ #include "DSi.h"
+ #include "NDSCart.h"
++#include "MirrorTap.h"
+ #include "CRC32.h"
+ #include "Platform.h"
+ #include "ROMList.h"
+@@ -794,7 +795,8 @@ void NDSCartSlot::Interface::WriteROMCnt(u32 val, u32 mask)
+            ROMCommand[4], ROMCommand[5], ROMCommand[6], ROMCommand[7],
+            datasize);*/
+ 
+-    if (Parent.CartActive && Parent.CPUSelect == Num)
++    HookActive = gCardHook && Parent.CartActive && Parent.CPUSelect == Num && gCardHook->Start(ROMCommand, datasize);
++    if (!HookActive && Parent.CartActive && Parent.CPUSelect == Num)
+         Parent.Cart->ROMCommandStart(Parent, ROMCommand);
+ 
+     // reset the FIFO
+@@ -853,7 +855,9 @@ void NDSCartSlot::Interface::ROMReceiveData(u32 param)
+     u32 data = 0;
+     if (Parent.CartActive)
+     {
+-        if (Parent.CPUSelect == Num)
++        if (HookActive)
++            data = gCardHook->Receive();
++        else if (Parent.CPUSelect == Num)
+             data = Parent.Cart->ROMCommandReceive();
+         else
+             data = 0xFFFFFFFF;
+@@ -909,7 +913,8 @@ void NDSCartSlot::Interface::ROMSendData(u32 param)
+     if (Parent.CartActive && Parent.CPUSelect == Num)
+     {
+         u32 data = ROMData[ROMDataPosCart];
+-        Parent.Cart->ROMCommandTransmit(data);
++        if (HookActive) gCardHook->Transmit(data);
++        else Parent.Cart->ROMCommandTransmit(data);
+     }
+ 
+     ROMDataPosCart ^= 1;
+@@ -950,7 +955,12 @@ void NDSCartSlot::Interface::ROMEndTransfer(u32 param)
+     if (SPICnt & (1<<14))
+         Parent.NDS.SetIRQ(Num, Parent.TransferIRQ);
+ 
+-    if (Parent.CartActive && Parent.CPUSelect == Num)
++    if (HookActive)
++    {
++        HookActive = false;
++        gCardHook->Finish();
++    }
++    else if (Parent.CartActive && Parent.CPUSelect == Num)
+         Parent.Cart->ROMCommandFinish();
+ }
+ 
+diff --git a/src/NDSCart.h b/src/NDSCart.h
+index d61806f..2c4be87 100644
+--- a/src/NDSCart.h
++++ b/src/NDSCart.h
+@@ -206,6 +206,7 @@ private:
+         u32 ROMDataPosCart = 0;
+         u32 ROMDataCount = 0;
+         bool ROMDataLate = false;
++        bool HookActive = false;   // the transfer is answered by gCardHook
+ 
+         bool SPISelected = false;
+ 
