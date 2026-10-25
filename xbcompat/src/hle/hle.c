@@ -163,6 +163,18 @@ const struct hle_func *hle_find(const char *name)
 
 static bool replaced_library_api(const char *name)
 {
+#ifdef XBC_GPU
+    /* xbcompat-gpu: Direct3D runs as linked, on the emulated GPU */
+    static const char *d3d_prefixes[] = {
+        "_D3DDevice_", "@D3DDevice_", "_D3DResource_", "_D3DVertexBuffer_", "_D3DIndexBuffer_",
+        "_D3DTexture_", "_D3DSurface_", "_D3DBaseTexture_", "_D3DCubeTexture_", "_D3DVolumeTexture_",
+        "_D3DPalette_", "_D3DPushBuffer_", "_D3DFixup_", "_Direct3D", "_D3D_", "@D3D_", "_D3DPERF_", "_XMETAL_",
+        "_IDirect3DVertexBuffer8_", "_D3DRDI_", "_PerfGet", "_Get2DSurfaceDesc@", "_Lock2DSurface@", "_Lock3DSurface@",
+        "?Get2DSurfaceDesc@PixelJar@D3D@@", "?Lock2DSurface@PixelJar@D3D@@",
+    };
+    for (unsigned i = 0; i < sizeof(d3d_prefixes) / sizeof(d3d_prefixes[0]); i++)
+        if (!strncmp(name, d3d_prefixes[i], strlen(d3d_prefixes[i]))) return false;
+#endif
     static const char *prefixes[] = {
         /* d3d8 */
         "_D3DDevice_", "@D3DDevice_", "_D3DResource_", "_D3DVertexBuffer_", "_D3DIndexBuffer_",

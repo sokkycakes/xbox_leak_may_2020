@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <unistd.h>
 
 #include "xbcompat.h"
 
@@ -49,7 +50,27 @@ void mem_init(void)
     /* The image region is mapped by the loader; reserve the rest up front so
        host allocations (malloc, SDL, GL) can never land inside them. */
     reserve_fixed(ARENA_BASE, ARENA_END - ARENA_BASE, PROT_NONE);
+#ifdef XBC_GPU
+    /* The release XDK's Direct3D reaches contiguous memory through the
+       write-combined view at 0xF0000000 (XMETAL_MapToContiguousAddress) as
+       well as the cached one at 0x80000000: both map the same pages.  Only
+       the first 64 MB get the second view; the host's shared libraries sit
+       just below 0xF8000000. */
+    int fd = memfd_create("xbox-ram", 0);
+    if (fd < 0 || ftruncate(fd, CONTIG_SIZE)) fatal("memfd for guest RAM: %s", strerror(errno));
+    if (mmap((void *)CONTIG_BASE, CONTIG_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC,
+             MAP_SHARED | MAP_FIXED_NOREPLACE, fd, 0) != (void *)CONTIG_BASE ||
+        mmap((void *)0xF0000000u, 0x04000000u, PROT_READ | PROT_WRITE | PROT_EXEC,
+             MAP_SHARED | MAP_FIXED_NOREPLACE, fd, 0) != (void *)0xF0000000u)
+        fatal("cannot map guest RAM at %#x and 0xF0000000: %s", CONTIG_BASE, strerror(errno));
+    close(fd);
+    /* The NV2A's instance memory: the retail kernel keeps physical pages
+       0x3FE0-0x3FFF for it and the PFN database (MmClaimGpuInstanceMemory). */
+    for (unsigned i = 0x3FE0; i < 0x4000; i++)
+        contig_used[i] = 1;
+#else
     reserve_fixed(CONTIG_BASE, CONTIG_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC);
+#endif
     /* The network library pokes the MCP NIC's registers at 0xFEF00000
        directly.  Back them with plain memory: every register reads zero,
        which the driver sees as a NIC with no link. */
@@ -487,6 +508,13 @@ ULONG NTAPI MmFreeSystemMemory(PVOID BaseAddress, SIZE_T NumberOfBytes)
 
 PVOID NTAPI MmClaimGpuInstanceMemory(SIZE_T NumberOfBytes, SIZE_T *NumberOfPaddingBytes)
 {
+#ifdef XBC_GPU
+    /* As the retail kernel: 64 KB of padding above the instance memory,
+       which ends at physical 0x3FF0000. */
+    (void)NumberOfBytes;
+    if (NumberOfPaddingBytes) *NumberOfPaddingBytes = 0x10000;
+    return (PVOID)(CONTIG_BASE + 0x3FF0000);
+#endif
     /* The GPU instance memory sits at the top of physical memory. */
     if (NumberOfPaddingBytes) *NumberOfPaddingBytes = 0;
     return (PVOID)(CONTIG_BASE + CONTIG_SIZE - NumberOfBytes);

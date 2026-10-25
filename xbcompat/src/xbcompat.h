@@ -283,7 +283,17 @@ const char *kernel_export_name(unsigned ordinal);
 /* ---- HLE -------------------------------------------------------------- */
 
 void hle_patch(xbe_image *img, const char *sigdir);
-ULONG d3d_frame_count(void);   /* frames presented so far (hle/d3d8.c) */
+ULONG d3d_frame_count(void);
+#ifdef XBC_GPU
+/* gpu/gpu_glue.c: the emulated NV2A of the xbcompat-gpu build */
+void gpu_init(void);
+void gpu_display_loop(void) __attribute__((noreturn));
+bool gpu_trap_fault(void *addr, void *ucv);
+bool gpu_trap_step(void *ucv);
+bool gpu_interrupt_init(PVOID Interrupt, PVOID ServiceRoutine, PVOID ServiceContext, ULONG Vector);
+bool gpu_interrupt_connect(PVOID Interrupt, bool connect);
+void gpu_av_set_display_mode(ULONG Mode, ULONG Format, ULONG Pitch, ULONG FrameBuffer);
+#endif   /* frames presented so far (hle/d3d8.c) */
 void video_init(int width, int height);
 void video_present(void);
 

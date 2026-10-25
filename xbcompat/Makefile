@@ -5,6 +5,12 @@
 # translator, and timing it against native, on a PC).
 # CPU=xlat replaces Unicorn with xbcompat's own translator (src/xlat).
 RENDERER ?= builtin
+# GPU=1 builds xbcompat-gpu, a separate test executable: titles keep their own
+# Direct3D, which drives an emulated NV2A (xemu's model, in src/gpu/xemu;
+# GPL, so it never goes into the main xbcompat binary).
+ifeq ($(GPU),1)
+BUILD ?= build-gpu
+endif
 ifeq ($(RENDERER),native)
 ifeq ($(TARGET)$(CPU),armhfxlat)
 BUILD ?= build-armhf-xlat-native
@@ -87,14 +93,20 @@ override CFLAGS += -Isrc
 LDLIBS += -ldl
 endif
 endif
+ifeq ($(GPU),1)
+HLESRC := $(filter-out src/hle/d3d8.c src/hle/vsh.c src/hle/vsh_interp.c src/hle/psh.c,$(HLESRC))
+override CFLAGS += -DXBC_GPU
+endif
 SRC      = src/main.c src/probe.c src/log.c src/prof.c src/loader.c src/xbeimage.c src/memory.c src/thread.c $(KERNSRC) $(HLESRC)
 OBJ      = $(SRC:%.c=$(BUILD)/%.o)
 # The Guide overlay (src/guide, C++98 with no C++ library) on the frolickdash
 # XUI runtime; the native renderer builds leave it out (d3d8.c's hook is weak).
 XUIDIR   = tools/frolickdash/xui
-ifneq ($(RENDERER),native)
+ifneq ($(RENDERER)$(GPU),native)
+ifneq ($(GPU),1)
 GUIDESRC = src/guide/guide.cpp $(XUIDIR)/xui_parse.cpp $(XUIDIR)/xui_scene.cpp $(XUIDIR)/xui_draw.cpp $(XUIDIR)/xui_classes.cpp
 OBJ     += $(GUIDESRC:%.cpp=$(BUILD)/%.o)
+endif
 endif
 ifeq ($(TARGET),armhf)
 CXX      = $(CROSS)g++
@@ -176,7 +188,27 @@ $(BUILD)/src/xlat/%.o: src/xlat/%.c src/xlat/xlat.h src/xlat/arm.h src/cpu.h src
 endif
 
 .DEFAULT_GOAL := all
+ifeq ($(GPU),1)
+# xemu's NV2A and the QEMU stand-ins it needs (src/gpu/shim), plus the glue.
+GPUSRC   = $(shell find src/gpu -name '*.c' -not -path '*/pgraph/null/*' -not -path '*/pgraph/vk/*')
+GPUOBJ   = $(GPUSRC:%.c=$(BUILD)/%.o)
+GPUPKGS  = glib-2.0 epoxy sdl2 libxxhash
+GPUFLAGS = -m32 -O2 -g -std=gnu11 -w -fno-pie -mstackrealign -D_FILE_OFFSET_BITS=64 -DXBC_GPU \
+           -Isrc/gpu/shim -Isrc/gpu/xemu -Isrc/gpu/xemu/include -Isrc/gpu/vsh_cpu \
+           -Isrc/gpu/xemu/hw/xbox/nv2a/pgraph/thirdparty/gloffscreen -Isrc/gpu/xemu/hw/xbox/nv2a/pgraph/thirdparty \
+           $(shell $(PKGCFG) --cflags $(GPUPKGS))
+$(BUILD)/src/gpu/gpu_glue.o: src/gpu/gpu_glue.c src/gpu/gpu_host.h src/xbcompat.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c -o $@ $<
+$(BUILD)/src/gpu/%.o: src/gpu/%.c $(wildcard src/gpu/shim/*/*.h) src/gpu/gpu_host.h
+	@mkdir -p $(dir $@)
+	$(CC) $(GPUFLAGS) -c -o $@ $<
+all: $(BUILD)/xbcompat-gpu
+$(BUILD)/xbcompat-gpu: $(OBJ) $(GPUOBJ)
+	$(CXX) $(LDFLAGS) -o $@ $^ $(LDLIBS) $(shell $(PKGCFG) --libs $(GPUPKGS)) -lGL -ldl
+else
 all: $(BUILD)/xbcompat $(BUILD)/glslcheck
+endif
 
 $(BUILD)/xbcompat: $(OBJ)
 	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)

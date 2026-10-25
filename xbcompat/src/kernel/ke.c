@@ -1309,11 +1309,28 @@ void NTAPI KeInitializeInterrupt(PVOID Interrupt, PVOID ServiceRoutine, PVOID Se
                                  ULONG Vector, KIRQL Irql, ULONG InterruptMode, BOOLEAN ShareVector)
 {
     (void)Irql; (void)InterruptMode; (void)ShareVector;
+#ifdef XBC_GPU
+    if (gpu_interrupt_init(Interrupt, ServiceRoutine, ServiceContext, Vector)) return;
+#endif
     nic_interrupt_init(Interrupt, ServiceRoutine, ServiceContext, Vector);   /* the only device delivered */
 }
 
-BOOLEAN NTAPI KeConnectInterrupt(PVOID Interrupt) { nic_interrupt_connect(Interrupt, true); return 1; }
-BOOLEAN NTAPI KeDisconnectInterrupt(PVOID Interrupt) { nic_interrupt_connect(Interrupt, false); return 1; }
+BOOLEAN NTAPI KeConnectInterrupt(PVOID Interrupt)
+{
+#ifdef XBC_GPU
+    if (gpu_interrupt_connect(Interrupt, true)) return 1;
+#endif
+    nic_interrupt_connect(Interrupt, true);
+    return 1;
+}
+BOOLEAN NTAPI KeDisconnectInterrupt(PVOID Interrupt)
+{
+#ifdef XBC_GPU
+    if (gpu_interrupt_connect(Interrupt, false)) return 1;
+#endif
+    nic_interrupt_connect(Interrupt, false);
+    return 1;
+}
 
 BOOLEAN NTAPI KeSynchronizeExecution(PVOID Interrupt, BOOLEAN (NTAPI *Routine)(PVOID), PVOID Context)
 {

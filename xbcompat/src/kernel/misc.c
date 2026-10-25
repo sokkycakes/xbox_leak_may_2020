@@ -413,6 +413,9 @@ ULONG NTAPI AvSetDisplayMode(PVOID RegisterBase, ULONG Step, ULONG Mode, ULONG F
     (void)RegisterBase;
     TRACE("AvSetDisplayMode(step %u, mode %#x, format %#x, pitch %u, fb %#x)", Step, Mode, Format, Pitch,
           FrameBuffer);
+#ifdef XBC_GPU
+    gpu_av_set_display_mode(Mode, Format, Pitch, FrameBuffer);
+#endif
     return 0;
 }
 

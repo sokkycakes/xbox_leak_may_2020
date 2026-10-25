@@ -1,0 +1,317 @@
+/*
+ * QEMU Geforce NV2A implementation
+ *
+ * Copyright (c) 2012 espes
+ * Copyright (c) 2015 Jannik Vogel
+ * Copyright (c) 2018-2025 Matt Borgerson
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, see <http://www.gnu.org/licenses/>.
+ */
+
+#include "hw/xbox/nv2a/nv2a_int.h"
+#include "qemu/main-loop.h"
+
+void nv2a_update_irq(NV2AState *d)
+{
+    /* PFIFO */
+    if (d->pfifo.pending_interrupts & d->pfifo.enabled_interrupts) {
+        d->pmc.pending_interrupts |= NV_PMC_INTR_0_PFIFO;
+    } else {
+        d->pmc.pending_interrupts &= ~NV_PMC_INTR_0_PFIFO;
+    }
+
+    /* PCRTC */
+    if (d->pcrtc.pending_interrupts & d->pcrtc.enabled_interrupts) {
+        d->pmc.pending_interrupts |= NV_PMC_INTR_0_PCRTC;
+    } else {
+        d->pmc.pending_interrupts &= ~NV_PMC_INTR_0_PCRTC;
+    }
+
+    /* PGRAPH */
+    if (d->pgraph.pending_interrupts & d->pgraph.enabled_interrupts) {
+        d->pmc.pending_interrupts |= NV_PMC_INTR_0_PGRAPH;
+    } else {
+        d->pmc.pending_interrupts &= ~NV_PMC_INTR_0_PGRAPH;
+    }
+
+    /* PTIMER */
+    if (d->ptimer.pending_interrupts & d->ptimer.enabled_interrupts) {
+        d->pmc.pending_interrupts |= NV_PMC_INTR_0_PTIMER;
+    } else {
+        d->pmc.pending_interrupts &= ~NV_PMC_INTR_0_PTIMER;
+    }
+
+    if (d->pmc.pending_interrupts && d->pmc.enabled_interrupts) {
+        trace_nv2a_irq(d->pmc.pending_interrupts);
+        nv2a_host_set_irq(d, true);
+    } else {
+        nv2a_host_set_irq(d, false);
+    }
+}
+
+DMAObject nv_dma_load(NV2AState *d, hwaddr dma_obj_address)
+{
+    assert(dma_obj_address < memory_region_size(&d->ramin));
+
+    uint32_t *dma_obj = (uint32_t *)(d->ramin_ptr + dma_obj_address);
+    uint32_t flags = ldl_le_p(dma_obj);
+    uint32_t limit = ldl_le_p(dma_obj + 1);
+    uint32_t frame = ldl_le_p(dma_obj + 2);
+
+    return (DMAObject){
+        .dma_class  = GET_MASK(flags, NV_DMA_CLASS),
+        .dma_target = GET_MASK(flags, NV_DMA_TARGET),
+        .address    = (frame & NV_DMA_ADDRESS) | GET_MASK(flags, NV_DMA_ADJUST),
+        .limit      = limit,
+    };
+}
+
+void *nv_dma_map(NV2AState *d, hwaddr dma_obj_address, hwaddr *len)
+{
+    DMAObject dma = nv_dma_load(d, dma_obj_address);
+
+    /* TODO: Handle targets and classes properly */
+    trace_nv2a_dma_map(dma_obj_address, dma.dma_class, dma.dma_target,
+                       dma.address, dma.limit);
+    dma.address &= 0x07FFFFFF;
+
+    assert(dma.address < memory_region_size(d->vram));
+    // assert(dma.address + dma.limit < memory_region_size(d->vram));
+    *len = dma.limit;
+    return d->vram_ptr + dma.address;
+}
+
+hwaddr nv_clip_gpu_tile_blit(NV2AState *d, hwaddr blit_base_address, hwaddr len)
+{
+    const uint32_t *regs = d->pfb.regs;
+    hwaddr blit_end = blit_base_address + len;
+    for (int i = 0; i < NV_NUM_GPU_TILES; ++i) {
+        uint32_t base_and_flags = regs[NV_PFB_TILE_BASE_ADDRESS_AND_FLAGS(i)];
+        if (!(base_and_flags & NV_PFB_TILE_FLAGS_VALID)) {
+            continue;
+        }
+
+        uint32_t limit = regs[NV_PFB_TILE_LIMIT(i)];
+
+        if (blit_base_address < limit && blit_end > limit) {
+            // TODO: Determine HW behavior if tiles are consecutive.
+            return limit + 1 - blit_base_address;
+        }
+    }
+
+    return len;
+}
+
+const NV2ABlockInfo blocktable[NV_NUM_BLOCKS] = {
+    #define ENTRY(NAME, LNAME, OFFSET, SIZE) [NV_##NAME] = {            \
+        .name   = #NAME,                                                \
+        .offset = OFFSET,                                               \
+        .size   = SIZE,                                                 \
+        .ops    = { .read = LNAME ## _read, .write = LNAME ## _write }, \
+    }
+    ENTRY(PMC,      pmc,      0x000000, 0x001000),
+    ENTRY(PBUS,     pbus,     0x001000, 0x001000),
+    ENTRY(PFIFO,    pfifo,    0x002000, 0x002000),
+    ENTRY(PRMA,     prma,     0x007000, 0x001000),
+    ENTRY(PVIDEO,   pvideo,   0x008000, 0x001000),
+    ENTRY(PTIMER,   ptimer,   0x009000, 0x001000),
+    ENTRY(PCOUNTER, pcounter, 0x00a000, 0x001000),
+    ENTRY(PVPE,     pvpe,     0x00b000, 0x001000),
+    ENTRY(PTV,      ptv,      0x00d000, 0x001000),
+    ENTRY(PRMFB,    prmfb,    0x0a0000, 0x020000),
+    ENTRY(PRMVIO,   prmvio,   0x0c0000, 0x001000),
+    ENTRY(PFB,      pfb,      0x100000, 0x001000),
+    ENTRY(PSTRAPS,  pstraps,  0x101000, 0x001000),
+    ENTRY(PGRAPH,   pgraph,   0x400000, 0x002000),
+    ENTRY(PCRTC,    pcrtc,    0x600000, 0x001000),
+    ENTRY(PRMCIO,   prmcio,   0x601000, 0x001000),
+    ENTRY(PRAMDAC,  pramdac,  0x680000, 0x001000),
+    ENTRY(PRMDIO,   prmdio,   0x681000, 0x001000),
+    // ENTRY(PRAMIN,   pramin,   0x700000, 0x100000),
+    ENTRY(USER,     user,     0x800000, 0x800000),
+};
+#undef ENTRY
+
+static int nv2a_get_bpp(VGACommonState *s)
+{
+    NV2AState *d = container_of(s, NV2AState, vga);
+
+    int depth = s->cr[0x28] & 3;
+
+    int bpp;
+    switch (depth) {
+    case 0:
+        /* FIXME: This case is sometimes hit during early Xbox startup.
+         *        Presumably a race-condition where VGA isn't initialized, yet.
+         *        `bpp = 0` mimics old code that did `bpp = depth * 8;`.
+         *        This works around the issue of this mode being unhandled.
+         *        However, QEMU VGA uses a 4bpp mode if `bpp = 0`.
+         *        We don't know if Xbox hardware would do the same. */
+        bpp = 0;
+        break;
+    case 2:
+        bpp = d->pramdac.general_control &
+              NV_PRAMDAC_GENERAL_CONTROL_ALT_MODE_SEL ? 16 : 15;
+        break;
+    case 3:
+        bpp = 32;
+        break;
+    default:
+        /* This is only a fallback path */
+        bpp = depth * 8;
+        fprintf(stderr, "Unknown VGA depth: %d\n", depth);
+        assert(!"Unknown VGA depth - check logs for depth value");
+        break;
+    }
+
+    return bpp;
+}
+
+static void nv2a_get_params(VGACommonState *s, VGADisplayParams *params)
+{
+    NV2AState *d = container_of(s, NV2AState, vga);
+    params->line_offset = (s->cr[0x13] | ((s->cr[0x19] & 0xe0) << 3) |
+                           ((s->cr[0x25] & 0x20) << 6))
+                          << 3;
+    params->start_addr = d->pcrtc.start / 4;
+    params->line_compare = s->cr[VGA_CRTC_LINE_COMPARE] |
+                           ((s->cr[VGA_CRTC_OVERFLOW] & 0x10) << 4) |
+                           ((s->cr[VGA_CRTC_MAX_SCAN] & 0x40) << 3);
+}
+
+const uint8_t *nv2a_get_dac_palette(void)
+{
+    return g_nv2a->puserdac.palette;
+}
+
+int nv2a_get_screen_off(void)
+{
+    return g_nv2a->vga.sr[VGA_SEQ_CLOCK_MODE] & VGA_SR01_SCREEN_OFF;
+}
+
+static void nv2a_lock_fifo(NV2AState *d)
+{
+    qemu_mutex_lock(&d->pfifo.lock);
+    qemu_cond_broadcast(&d->pfifo.fifo_cond);
+    bql_unlock();
+    qemu_cond_wait(&d->pfifo.fifo_idle_cond, &d->pfifo.lock);
+    bql_lock();
+    qemu_mutex_lock(&d->pgraph.lock);
+}
+
+static void nv2a_unlock_fifo(NV2AState *d)
+{
+    pfifo_kick(d);
+    qemu_mutex_unlock(&d->pgraph.lock);
+    qemu_mutex_unlock(&d->pfifo.lock);
+}
+
+static void nv2a_reset(NV2AState *d)
+{
+    nv2a_lock_fifo(d);
+    bool halted = qatomic_read(&d->pfifo.halt);
+    if (!halted) {
+        qatomic_set(&d->pfifo.halt, true);
+    }
+    qemu_event_reset(&d->pgraph.flush_complete);
+    qatomic_set(&d->pgraph.flush_pending, true);
+    nv2a_unlock_fifo(d);
+    bql_unlock();
+    qemu_event_wait(&d->pgraph.flush_complete);
+    bql_lock();
+    nv2a_lock_fifo(d);
+    if (!halted) {
+        qatomic_set(&d->pfifo.halt, false);
+    }
+
+    memset(d->pfifo.regs, 0, sizeof(d->pfifo.regs));
+    memset(d->pgraph.regs_, 0, sizeof(d->pgraph.regs_));
+    memset(d->pvideo.regs, 0, sizeof(d->pvideo.regs));
+
+    d->pcrtc.start = 0;
+    d->pramdac.core_clock_coeff = 0x00011C01; /* 189MHz...? */
+    d->pramdac.core_clock_freq = 233333324;
+    d->pramdac.memory_clock_coeff = 0;
+    d->pramdac.video_clock_coeff = 0x0003C20D; /* 25182Khz...? */
+
+    d->pfifo.regs[NV_PFIFO_CACHE1_STATUS] |= NV_PFIFO_CACHE1_STATUS_LOW_MARK;
+
+    vga_common_reset(&d->vga);
+    /* seems to start in color mode */
+    d->vga.msr = VGA_MIS_COLOR;
+
+    d->pgraph.waiting_for_nop = false;
+    d->pgraph.waiting_for_flip = false;
+    d->pgraph.waiting_for_context_switch = false;
+
+    d->pgraph.vsh_carry_fog[0] = 0.0f;
+    d->pgraph.vsh_carry_fog[1] = 0.0f;
+    d->pgraph.vsh_carry_fog[2] = 0.0f;
+    d->pgraph.vsh_carry_fog[3] = 1.0f;
+
+    d->pmc.pending_interrupts = 0;
+    d->pfifo.pending_interrupts = 0;
+    d->ptimer.pending_interrupts = 0;
+    ptimer_reset(d);
+    d->pcrtc.pending_interrupts = 0;
+
+    for (int i = 0; i < 256; i++) {
+        d->puserdac.palette[i*3]   = i;
+        d->puserdac.palette[i*3+1] = i;
+        d->puserdac.palette[i*3+2] = i;
+    }
+
+    nv2a_unlock_fifo(d);
+}
+
+/* xbcompat-gpu: the parts of QEMU's device realize/reset that matter
+   without a PCI bus.  RAM is xbcompat's contiguous window and RAMIN is the
+   PRAMIN aperture, both mapped by nv2a_host.c. */
+void nv2a_host_vblank(NV2AState *d)
+{
+    d->pcrtc.pending_interrupts |= NV_PCRTC_INTR_0_VBLANK;
+    d->pcrtc.raster = 0;
+    nv2a_update_irq(d);
+}
+
+void nv2a_init(NV2AState *d, uint8_t *ram, uint64_t ram_size, uint8_t *ramin, uint64_t ramin_size)
+{
+    static MemoryRegion vram;
+    vram.ptr = ram;
+    vram.size = ram_size;
+    d->vram = &vram;
+    d->vram_ptr = ram;
+    d->ramin.ptr = ramin;
+    d->ramin.size = ramin_size;
+    d->ramin_ptr = ramin;
+    d->vga.vram_size_mb = ram_size / MiB;
+    d->vga.get_bpp = nv2a_get_bpp;
+    d->vga.get_params = nv2a_get_params;
+    d->vga.get_resolution = nv2a_host_get_resolution;
+
+    qemu_mutex_init(&d->pfifo.lock);
+    qemu_cond_init(&d->pfifo.fifo_cond);
+    qemu_cond_init(&d->pfifo.fifo_idle_cond);
+
+    memory_region_set_dirty(d->vram, 0, memory_region_size(d->vram));
+
+    pgraph_init(d);
+    ptimer_init(d);
+
+    /* fire up pfifo */
+    qemu_thread_create(&d->pfifo.thread, "nv2a.pfifo_thread",
+                       pfifo_thread, d, QEMU_THREAD_JOINABLE);
+
+    nv2a_reset(d);
+}

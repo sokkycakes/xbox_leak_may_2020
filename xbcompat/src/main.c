@@ -57,6 +57,16 @@ static bool privileged_insn(greg_t *r)
     const uint8_t *ip = (const uint8_t *)r[REG_EIP];
     if (ip[0] == 0x0F && (ip[1] == 0x08 || ip[1] == 0x09)) { r[REG_EIP] += 2; return true; }   /* invd, wbinvd */
     if (ip[0] == 0xFA || ip[0] == 0xFB) { r[REG_EIP] += 1; return true; }                    /* cli, sti */
+    /* Port I/O: reads all ones, writes go nowhere. */
+    int o16 = ip[0] == 0x66, op = ip[o16];
+    if (op == 0xEE || op == 0xEF) { r[REG_EIP] += 1 + o16; return true; }                    /* out dx, al/ax/eax */
+    if (op == 0xE6 || op == 0xE7) { r[REG_EIP] += 2 + o16; return true; }                    /* out imm8, ... */
+    if (op == 0xEC || op == 0xED || op == 0xE4 || op == 0xE5) {                               /* in ... */
+        uint32_t keep = op & 1 ? (o16 ? 0xFFFF0000u : 0) : 0xFFFFFF00u;
+        r[REG_EAX] = (r[REG_EAX] & keep) | ~keep;
+        r[REG_EIP] += (op <= 0xE5 ? 2 : 1) + o16;
+        return true;
+    }
     return false;
 }
 
@@ -81,6 +91,10 @@ static void crash_handler(int sig, siginfo_t *si, void *uc_)
     if (sig == SIGSEGV && (read_tsc(r) || debug_service(r) || privileged_insn(r))) { g_guest_traps++; return; }
     if (sig == SIGSEGV && nic_trap_fault(si->si_addr, uc)) return;
     if (sig == SIGTRAP && nic_trap_step(uc)) return;
+#ifdef XBC_GPU
+    if (sig == SIGSEGV && gpu_trap_fault(si->si_addr, uc)) return;
+    if (sig == SIGTRAP && gpu_trap_step(uc)) return;
+#endif
     if (sig == SIGTRAP && probe_trap(uc)) return;
     if (sig == SIGTRAP) {
         /* int 3 (DbgBreakPoint and friends): nobody is listening, carry on. */
@@ -258,6 +272,9 @@ int main(int argc, char **argv)
     prof_init();
 
     mem_init();
+#ifdef XBC_GPU
+    gpu_init();
+#endif
 #ifdef XBC_TRANSLATED
     cpu_init();
 #endif
@@ -278,5 +295,8 @@ int main(int argc, char **argv)
 
     thread_create(img.header->SizeOfStackCommit, 0, NULL, (PVOID)run_entry_point,
                   (PVOID)img.entry, false);
+#ifdef XBC_GPU
+    gpu_display_loop();   /* the window belongs to this thread */
+#endif
     for (;;) pause();
 }
