@@ -35,3 +35,11 @@ EGL_BAD_MATCH (every swap failed, black screen): SDL re-picks the EGL config
 when it rebuilds the KMSDRM surface at the first swap, and by then
 gloffscreen had changed the GL attributes (8888, depth 24, stencil 8). The
 display window now asks for the same attributes up front.
+
+2026-10-25 fix 5 (Doom 3 crash leaving the title screen): DirectSoundDownloadEffectsImage
+now returns a descriptor whose state/Y/code/scratch pointers point into stand-in DSP
+memory (state block copied from the image), as real DSound relocates them. Doom 3 reads
+mixbin addresses out of its effect state segment and crashed on the raw offset. Also in
+the normal build's dsound.c. Cloud: menus, new game, Mars City render. pfifo now logs
+GET/PUT/len before its "Dma value is out of range" abort (seen once, not reproducible).
+doom3-input-script.txt: the XBCOMPAT_INPUT_SCRIPT used for the test.
