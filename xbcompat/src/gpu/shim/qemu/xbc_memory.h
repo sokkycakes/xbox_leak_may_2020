@@ -12,7 +12,8 @@ typedef struct MemoryRegion {
 } MemoryRegion;
 
 enum { DIRTY_MEMORY_VGA = 0, DIRTY_MEMORY_CODE = 1, DIRTY_MEMORY_MIGRATION = 2,
-       DIRTY_MEMORY_NV2A = 3, DIRTY_MEMORY_NV2A_TEX = 4, DIRTY_MEMORY_NUM = 5 };
+       DIRTY_MEMORY_NV2A = 3, DIRTY_MEMORY_NV2A_TEX = 4, DIRTY_MEMORY_NUM = 5,
+       DIRTY_MEMORY_XBC_VERTEX = 6 /* xbcompat: always dirty */ };
 
 static inline uint64_t memory_region_size(MemoryRegion *mr) { return mr->size; }
 static inline void *memory_region_get_ram_ptr(MemoryRegion *mr) { return mr->ptr; }

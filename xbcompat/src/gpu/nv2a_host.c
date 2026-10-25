@@ -210,22 +210,36 @@ bool timer_pending(QEMUTimer *t) { return t->expire >= 0; }
 /* ---- dirty memory ------------------------------------------------------- */
 
 /* Without hardware dirty logging, guest RAM written by the CPU can't be
-   told apart from unchanged RAM.  Textures and vertex data are always
-   treated as possibly changed (xemu then compares content hashes); a
+   told apart from unchanged RAM.  Vertex data is always refetched.
+   Texture pages count as possibly changed once per displayed frame (or
+   on every draw with XBCOMPAT_GPU_TEXCHECK=draw); xemu then compares
+   content hashes, so an unchanged texture is not uploaded again.  A
    surface's memory only counts as changed when the GPU side marked it,
    so a render target is never overwritten by stale RAM.  Pages the GPU
    wrote are tracked per client so the VGA client still sees them. */
 #define DIRTY_PAGES (128u << 20 >> 12)
 static uint8_t dirty_map[DIRTY_PAGES];   /* bit per client */
+static uint32_t tex_epoch[DIRTY_PAGES];  /* frame a page was last checked + 1 */
+static int tex_check_every_draw = -1;
+static volatile uint32_t crtc_start_writes;
 
 bool memory_region_test_and_clear_dirty(MemoryRegion *mr, uint64_t addr, uint64_t size, unsigned client)
 {
     (void)mr;
-    if (client == DIRTY_MEMORY_NV2A_TEX) return true;
+    if (client == DIRTY_MEMORY_XBC_VERTEX) return true;
+    if (client == DIRTY_MEMORY_NV2A_TEX) {
+        if (tex_check_every_draw < 0) {
+            const char *e = getenv("XBCOMPAT_GPU_TEXCHECK");
+            tex_check_every_draw = e && !strcmp(e, "draw");
+        }
+        if (tex_check_every_draw) return true;
+    }
+    uint32_t epoch = crtc_start_writes + 1;
     bool dirty = false;
     uint64_t end = addr + size;
     for (uint64_t p = addr >> 12; p < DIRTY_PAGES && (p << 12) < end; p++) {
         if (dirty_map[p] & (1u << client)) { dirty = true; dirty_map[p] &= ~(1u << client); }
+        if (client == DIRTY_MEMORY_NV2A_TEX && tex_epoch[p] != epoch) { dirty = true; tex_epoch[p] = epoch; }
     }
     return dirty;
 }
@@ -371,7 +385,6 @@ uint32_t gpu_mmio_read(uint32_t off, unsigned size)
     return (uint32_t)v;
 }
 
-static volatile uint32_t crtc_start_writes;
 uint32_t gpu_crtc_start_writes(void) { return crtc_start_writes; }
 
 void gpu_mmio_write(uint32_t off, uint32_t val, unsigned size)

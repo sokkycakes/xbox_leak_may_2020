@@ -47,7 +47,7 @@ static void update_memory_buffer(NV2AState *d, hwaddr addr, hwaddr size,
     size = end - addr;
     /* xbcompat-gpu: no CPU dirty logging, vertex data always refetched */
     if (memory_region_test_and_clear_dirty(d->vram, addr, size,
-                                           DIRTY_MEMORY_NV2A_TEX)) {
+                                           DIRTY_MEMORY_XBC_VERTEX)) {
         glBufferSubData(GL_ARRAY_BUFFER, addr, size,
                         d->vram_ptr + addr);
         nv2a_profile_inc_counter(NV2A_PROF_GEOM_BUFFER_UPDATE_1);
