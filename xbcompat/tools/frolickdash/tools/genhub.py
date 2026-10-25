@@ -2516,7 +2516,10 @@ function StorageFailed(text)
 // virtual item v is download v - nDlOff (nDlOff 1 when nothing is
 // active, the blank row).  A starts a pending download now or pauses /
 // resumes the active one, X removes the focused one (asking first when
-// it is under way), the legend's A names what it does.
+// it is under way), the legend's A names what it does.  Streaming
+// Downloads still coming in are listed too (the one filling is the
+// active item when the queue has none): A fills a pending one first, X
+// deletes its game; the filling one can't be paused.
 
 function DlOff()
 {
@@ -2575,6 +2578,8 @@ function DlLegend()
     var d = nSel - DlOff();
     if (d < 0)
         thePage.SetText("legend_a", "");
+    else if (theDownloads.ItemStream(d) == 2)
+        thePage.SetText("legend_a", "");      // filling: no pause
     else if (d > 0)
         thePage.SetText("legend_a", "Start Now");
     else if (theDownloads.HasActive() == 0)
@@ -2620,12 +2625,18 @@ function DlRefresh()
 // the whole list when a download finished (the queue moved up)
 function DlTick()
 {
+    var v;
     if (nRows == 0)
         return;
     if (DlListCount() != nListCount)
         DlRefresh();
-    else if (theDownloads.HasActive() == 1)
-        DlFillRow(RowId(0), 0);
+    else
+    {
+        // progress on every row: Streaming Downloads come in while they pend
+        for (v = 0; v < nListCount; v = v + 1)
+            DlFillRow(RowId(v), v);
+        DlLegend();
+    }
 }
 
 function DlPress()
@@ -2633,7 +2644,18 @@ function DlPress()
     var d = nSel - DlOff();
     if (d < 0)
         return;
-    if (d == 0)
+    if (theDownloads.ItemStream(d) == 2)
+        return;
+    if (theDownloads.ItemStream(d) == 1)
+    {
+        // it fills first; listed as the active item unless the queue has one
+        if (theDownloads.HasActive() == 0)
+            nSel = 0;
+        else if (theDownloads.ItemStream(0) != 0)
+            nSel = 0;
+        theDownloads.StartNow(d);
+    }
+    else if (d == 0)
     {
         if (theDownloads.HasActive() == 1)
             theDownloads.TogglePause();

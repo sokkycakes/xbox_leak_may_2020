@@ -21,19 +21,29 @@
 //                                       ready: detail = its E:\Games folder)
 //                  installed <identifier> <folder>
 //                                      (a Streaming Download in E:\Games)
+//                  streaming <identifier> <in> <bytes> <1|0> <title>
+//                                      (a Streaming Download still coming
+//                                       in; 1: the one filling now, the
+//                                       others only fetch what they read)
 //   history.txt  written here: what finished (Download History)
 //                  h <identifier> <MB> <kind> <title>
 //   play.txt     written here: the Streaming Download item to play now
 //                  p <identifier>      (none when the dashboard starts)
+//                  f <identifier>      fill this one first (Start Now)
+//                  x <identifier>      remove this one (until the helper
+//                                      no longer lists it)
 //
 // A finished item leaves the queue for the history and the next pending
-// item starts, as a queue does.  The helper rewrites status.txt every
+// item starts, as a queue does.  Streaming Downloads still coming in are
+// listed with the queue (sokky, 2026-10-25): the one filling is the
+// active item when the queue has none, the others pend after the queue
+// (their games play all the same).  The helper rewrites status.txt every
 // second; when it stops changing, the service is taken to be down.
 //
 //   DEF theDownloads Downloads { }
 //
 // Items are listed active first (index 0 when HasActive() is 1), then
-// the pending queue in order.  Functions:
+// the pending queue in order, then the Streaming Downloads.  Functions:
 //   GetCount()        items, the active one included
 //   HasActive()       1 when item 0 is the active download (downloading
 //                     or paused), 0 when the queue only pends
@@ -45,12 +55,16 @@
 //   GetProgress(i)    0..1
 //   GetIcon(i)        the Blades' 64x icon for the kind
 //   IsPaused()        the active download is paused
+//   ItemStream(i)     0 a queued download, 1 a Streaming Download,
+//                     2 the Streaming Download filling now (no pause)
 //   StartNow(i)       a pending item becomes the active download; the one
 //                     that was active goes back to the top of the queue
-//                     (resumes where it was when started again)
+//                     (resumes where it was when started again); a
+//                     Streaming Download is filled before the others
 //   TogglePause()     pause or resume the active download
 //   Remove(i)         drop an item, active or pending (the helper deletes
-//                     what it had); removing the active one starts the next
+//                     what it had); removing the active one starts the next;
+//                     a Streaming Download's game is deleted
 //   Queue(t, i)       queue Store item i of tab t: 1 queued, 0 already
 //                     queued or downloaded, -1 the queue is full
 //   Has(id)           0, 1 queued, 2 downloaded
@@ -106,6 +120,21 @@ static CHAR c_szStreamDetail[64];
 #define INST_MAX 32
 static CHAR c_rgszInstalled[INST_MAX][DL_ID];
 static int c_nInstalled;
+// Streaming Downloads still coming in, from status.txt
+struct STREAMITEM
+{
+    CHAR szId[DL_ID];
+    CHAR szName[DL_NAME];
+    __int64 qwIn;
+    __int64 qwBytes;
+    int bFill;
+};
+#define STREAM_MAX 16
+static STREAMITEM c_rgStream[STREAM_MAX];
+static int c_nStreams;
+static CHAR c_szFirstId[DL_ID];                 // Start Now on a stream
+static CHAR c_rgszRemove[STREAM_MAX][DL_ID];    // removed, until unlisted
+static int c_nRemove;
 
 const CHAR* StoreServiceState()
 {
@@ -139,6 +168,7 @@ public:
     float GetProgress(int i);
     CStrObject* GetIcon(int i);
     int IsPaused();
+    int ItemStream(int i);
     void StartNow(int i);
     void TogglePause();
     void Remove(int i);
@@ -152,6 +182,9 @@ public:
 protected:
     void SavePlay();
     bool OK(int i) { return i >= 0 && i < m_nCount; }
+    bool QueueActive() { return m_nCount > 0 && m_rg[0].nState != dlPending; }
+    int StreamActive();
+    int Item(int i, STREAMITEM** pps);
     int Find(const CHAR* szId);
     void StartNext();
     void Finish(int i);
@@ -189,6 +222,7 @@ START_NODE_FUN(CDownloads, CNode)
     NODE_FUN_NI(GetProgress)
     NODE_FUN_SI(GetIcon)
     NODE_FUN_IV(IsPaused)
+    NODE_FUN_II(ItemStream)
     NODE_FUN_VI(StartNow)
     NODE_FUN_VV(TogglePause)
     NODE_FUN_VI(Remove)
@@ -352,6 +386,8 @@ void CDownloads::ReadStatus()
     c_szActiveDetail[0] = 0;
     c_szStreamId[0] = 0;
     c_nInstalled = 0;
+    c_nStreams = 0;
+    bool rgbListed[STREAM_MAX] = { false };    // removed ones still listed
     bool bChanged = false;
     CHAR* line = p;
     while (line && *line)
@@ -364,7 +400,26 @@ void CDownloads::ReadStatus()
             line[n - 1] = 0;
         CHAR* f[6];
         int k = StoreSplit(line, f, 6);
-        if (strcmp(f[0], "online") == 0 && k >= 3)
+        if (strcmp(f[0], "streaming") == 0 && k >= 6 && c_nStreams < STREAM_MAX)
+        {
+            bool bRemoved = false;
+            for (int r = 0; r < c_nRemove; r++)
+            {
+                if (strcmp(c_rgszRemove[r], f[1]) == 0)
+                    bRemoved = rgbListed[r] = true;
+            }
+            if (!bRemoved)
+            {
+                // the title is the last field, tabs and all
+                STREAMITEM* s = &c_rgStream[c_nStreams++];
+                Copy(s->szId, f[1], DL_ID);
+                s->qwIn = _atoi64(f[2]);
+                s->qwBytes = _atoi64(f[3]);
+                s->bFill = atoi(f[4]);
+                Copy(s->szName, f[5], DL_NAME);
+            }
+        }
+        else if (strcmp(f[0], "online") == 0 && k >= 3)
         {
             c_nOnline = atoi(f[1]);
             Copy(c_szOnline, f[2], sizeof c_szOnline);
@@ -434,6 +489,32 @@ void CDownloads::ReadStatus()
     delete [] p;
     if (bChanged)
         SaveQueue();
+    // what the helper no longer lists: removed, or finished
+    bool bPlay = false;
+    int nKeep = 0;
+    for (int r = 0; r < c_nRemove; r++)
+    {
+        if (rgbListed[r])
+            strcpy(c_rgszRemove[nKeep++], c_rgszRemove[r]);
+    }
+    if (nKeep != c_nRemove)
+    {
+        c_nRemove = nKeep;
+        bPlay = true;
+    }
+    if (c_szFirstId[0])
+    {
+        bool bThere = false;
+        for (int s = 0; s < c_nStreams; s++)
+            bThere = bThere || strcmp(c_rgStream[s].szId, c_szFirstId) == 0;
+        if (!bThere)
+        {
+            c_szFirstId[0] = 0;
+            bPlay = true;
+        }
+    }
+    if (bPlay)
+        SavePlay();
 }
 
 void CDownloads::Advance(float nSeconds)
@@ -528,6 +609,18 @@ void CDownloads::SavePlay()
         sz[sizeof sz - 1] = 0;
         Put(h, sz);
     }
+    if (c_szFirstId[0])
+    {
+        _snprintf(sz, sizeof sz - 1, "f\t%s\n", c_szFirstId);
+        sz[sizeof sz - 1] = 0;
+        Put(h, sz);
+    }
+    for (int r = 0; r < c_nRemove; r++)
+    {
+        _snprintf(sz, sizeof sz - 1, "x\t%s\n", c_rgszRemove[r]);
+        sz[sizeof sz - 1] = 0;
+        Put(h, sz);
+    }
     Put(h, "end\n");
     CloseHandle(h);
 }
@@ -578,33 +671,109 @@ void CDownloads::StartNext()
         m_rg[0].nState = dlDownloading;
 }
 
+// The Streaming Download filling now, when the queue has no active item:
+// it is listed as the active one.
+int CDownloads::StreamActive()
+{
+    if (QueueActive())
+        return -1;
+    for (int k = 0; k < c_nStreams; k++)
+        if (c_rgStream[k].bFill)
+            return k;
+    return -1;
+}
+
+// Item i of the list: the queue's index, or -1 with *pps the stream.
+int CDownloads::Item(int i, STREAMITEM** pps)
+{
+    *pps = NULL;
+    int a = StreamActive();
+    if (a >= 0)
+    {
+        if (i == 0)
+        {
+            *pps = &c_rgStream[a];
+            return -1;
+        }
+        i--;
+    }
+    if (i >= 0 && i < m_nCount)
+        return i;
+    i -= m_nCount;
+    for (int k = 0; k < c_nStreams; k++)
+    {
+        if (k == a)
+            continue;
+        if (i-- == 0)
+        {
+            *pps = &c_rgStream[k];
+            return -1;
+        }
+    }
+    return -1;
+}
+
+static int StreamMB(__int64 qw)
+{
+    return (int)(qw / (1024 * 1024));
+}
+
 int CDownloads::GetCount()
 {
-    return m_nCount;
+    return m_nCount + c_nStreams;
 }
 
 int CDownloads::HasActive()
 {
-    return m_nCount > 0 && m_rg[0].nState != dlPending ? 1 : 0;
+    return QueueActive() || StreamActive() >= 0 ? 1 : 0;
+}
+
+int CDownloads::ItemStream(int i)
+{
+    STREAMITEM* ps;
+    Item(i, &ps);
+    if (ps == NULL)
+        return 0;
+    return ps->bFill ? 2 : 1;
 }
 
 CStrObject* CDownloads::GetName(int i)
 {
-    return StoreStr(OK(i) ? m_rg[i].szName : "");
+    STREAMITEM* ps;
+    int q = Item(i, &ps);
+    if (ps)
+        return StoreStr(ps->szName);
+    return StoreStr(q >= 0 ? m_rg[q].szName : "");
 }
 
 CStrObject* CDownloads::GetKind(int i)
 {
-    return StoreStr(OK(i) ? m_rg[i].szKind : "");
+    STREAMITEM* ps;
+    int q = Item(i, &ps);
+    if (ps)
+        return StoreStr("Streaming Download");
+    return StoreStr(q >= 0 ? m_rg[q].szKind : "");
 }
 
 CStrObject* CDownloads::GetStatus(int i)
 {
-    if (!OK(i))
+    STREAMITEM* ps;
+    int q = Item(i, &ps);
+    if (ps)
+    {
+        if (!ps->bFill)
+            return new CStrObject(_T("Pending"));
+        if (c_nOnline < 0)
+            return new CStrObject(_T("Waiting"));
+        if (ps->qwIn >= ps->qwBytes)
+            return new CStrObject(_T("Checking"));
+        return new CStrObject(_T("Downloading"));
+    }
+    if (q < 0)
         return new CStrObject;
-    if (m_rg[i].nState == dlPaused)
+    if (m_rg[q].nState == dlPaused)
         return new CStrObject(_T("Paused"));
-    if (m_rg[i].nState == dlPending)
+    if (m_rg[q].nState == dlPending)
         return new CStrObject(_T("Pending"));
     // the active one: what the helper says about it
     if (c_nOnline < 0)
@@ -621,29 +790,52 @@ CStrObject* CDownloads::GetStatus(int i)
 CStrObject* CDownloads::GetDetail(int i)
 {
     CHAR sz[64], szDone[24], szSize[24];
-    if (!OK(i))
+    STREAMITEM* ps;
+    int q = Item(i, &ps);
+    if (ps)
+    {
+        StoreFormatMB(szSize, StreamMB(ps->qwBytes));
+        StoreFormatMB(szDone, StreamMB(ps->qwIn));
+        sprintf(sz, "%s of %s", szDone, szSize);
+        return StoreStr(sz);
+    }
+    if (q < 0)
         return new CStrObject;
-    StoreFormatMB(szSize, m_rg[i].nSizeMB);
-    if (i == 0 && c_szActiveDetail[0] && m_rg[0].nState == dlDownloading)
+    StoreFormatMB(szSize, m_rg[q].nSizeMB);
+    if (q == 0 && c_szActiveDetail[0] && m_rg[0].nState == dlDownloading)
         return StoreStr(c_szActiveDetail);
-    if (m_rg[i].nState == dlPending && m_rg[i].nDoneMB <= 0.0f)
+    if (m_rg[q].nState == dlPending && m_rg[q].nDoneMB <= 0.0f)
         return StoreStr(szSize);
-    StoreFormatMB(szDone, (int)m_rg[i].nDoneMB);
+    StoreFormatMB(szDone, (int)m_rg[q].nDoneMB);
     sprintf(sz, "%s of %s", szDone, szSize);
     return StoreStr(sz);
 }
 
 float CDownloads::GetProgress(int i)
 {
-    if (!OK(i) || m_rg[i].nSizeMB <= 0)
-        return 0.0f;
-    float f = m_rg[i].nDoneMB / (float)m_rg[i].nSizeMB;
+    STREAMITEM* ps;
+    int q = Item(i, &ps);
+    float f;
+    if (ps)
+    {
+        if (ps->qwBytes <= 0)
+            return 0.0f;
+        f = (float)((double)ps->qwIn / (double)ps->qwBytes);
+    }
+    else
+    {
+        if (q < 0 || m_rg[q].nSizeMB <= 0)
+            return 0.0f;
+        f = m_rg[q].nDoneMB / (float)m_rg[q].nSizeMB;
+    }
     return f < 0.0f ? 0.0f : f > 1.0f ? 1.0f : f;
 }
 
 CStrObject* CDownloads::GetIcon(int i)
 {
-    if (OK(i) && strcmp(m_rg[i].szKind, "Theme") == 0)
+    STREAMITEM* ps;
+    int q = Item(i, &ps);
+    if (q >= 0 && strcmp(m_rg[q].szKind, "Theme") == 0)
         return new CStrObject(_T("ico_64x_Themes.png"));
     return new CStrObject(_T("ico_64x_GameDownloads.png"));
 }
@@ -655,20 +847,31 @@ int CDownloads::IsPaused()
 
 // A pending item jumps the queue: it becomes the active download and
 // the one that was active waits again at the top (the helper keeps what
-// it had and resumes from there).
+// it had and resumes from there).  A Streaming Download is filled before
+// the others (the queue's own download goes on beside it).
 void CDownloads::StartNow(int i)
 {
-    if (!OK(i))
+    STREAMITEM* ps;
+    int q = Item(i, &ps);
+    if (ps)
+    {
+        Copy(c_szFirstId, ps->szId, sizeof c_szFirstId);
+        for (int k = 0; k < c_nStreams; k++)
+            c_rgStream[k].bFill = &c_rgStream[k] == ps;     // until the helper says
+        SavePlay();
         return;
-    if (i == 0)
+    }
+    if (q < 0)
+        return;
+    if (q == 0)
     {
         if (m_rg[0].nState == dlPending)
             m_rg[0].nState = dlDownloading;
         SaveQueue();
         return;
     }
-    DLITEM item = m_rg[i];
-    memmove(&m_rg[1], &m_rg[0], i * sizeof(DLITEM));
+    DLITEM item = m_rg[q];
+    memmove(&m_rg[1], &m_rg[0], q * sizeof(DLITEM));
     m_rg[0] = item;
     m_rg[0].nState = dlDownloading;
     m_rg[1].nState = dlPending;
@@ -677,7 +880,7 @@ void CDownloads::StartNow(int i)
 
 void CDownloads::TogglePause()
 {
-    if (m_nCount == 0)
+    if (!QueueActive())
         return;
     if (m_rg[0].nState == dlDownloading)
         m_rg[0].nState = dlPaused;
@@ -688,11 +891,28 @@ void CDownloads::TogglePause()
 
 void CDownloads::Remove(int i)
 {
-    if (!OK(i))
+    STREAMITEM* ps;
+    int q = Item(i, &ps);
+    if (ps)
+    {
+        // the helper stops it and deletes its game
+        if (c_nRemove < STREAM_MAX)
+            Copy(c_rgszRemove[c_nRemove++], ps->szId, DL_ID);
+        if (strcmp(c_szPlayId, ps->szId) == 0)
+            c_szPlayId[0] = 0;
+        if (strcmp(c_szFirstId, ps->szId) == 0)
+            c_szFirstId[0] = 0;
+        int k = ps - c_rgStream;
+        memmove(&c_rgStream[k], &c_rgStream[k + 1], (c_nStreams - k - 1) * sizeof(STREAMITEM));
+        c_nStreams--;
+        SavePlay();
         return;
-    memmove(&m_rg[i], &m_rg[i + 1], (m_nCount - i - 1) * sizeof(DLITEM));
+    }
+    if (!OK(q))
+        return;
+    memmove(&m_rg[q], &m_rg[q + 1], (m_nCount - q - 1) * sizeof(DLITEM));
     m_nCount--;
-    if (i == 0)
+    if (q == 0)
         StartNext();
     SaveQueue();
 }

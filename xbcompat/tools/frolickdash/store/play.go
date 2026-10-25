@@ -5,7 +5,9 @@ package main
 // in Spotlight writes play.txt in the store folder:
 //
 //	frolick-play 1
-//	p <id>
+//	p <id>          play this one
+//	f <id>          fill this one before the others (Downloads, Start Now)
+//	x <id>          remove this one and its game (Downloads, Remove)
 //	end
 //
 // (an empty one when nothing is to be played; the dashboard writes that
@@ -22,10 +24,18 @@ package main
 // whole disc is in and checked (md5, sha1); then the stream files go and it
 // is an ordinary installed game. Deleting it on a Memory screen removes it
 // all (the helper stops filling it). An image left unfinished (a reboot)
-// is filled again in the background. Status lines in status.txt:
+// is filled again in the background.
+//
+// Every unfinished game has its own streamer and socket
+// (/tmp/frolick-stream-<hash>.sock, named in its default.iso.stream), so a
+// game always reads from its own; one of them fills at a time (the game
+// asked to play, else the one Start Now picked, else the one filling,
+// else the oldest), the others serve their game's reads only. Status
+// lines in status.txt:
 //
 //	stream <id> <starting|ready|error> <bytes in> <bytes> <detail>
 //	        (ready: the detail is the game's folder name in E:\Games)
+//	streaming <id> <bytes in> <bytes> <1 filling|0> <title>
 //	installed <id> <folder>
 
 import (
@@ -37,6 +47,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -49,29 +60,36 @@ var (
 	streamsDir = flag.String("streams", "/data/frolick/stream", "the streamer's state and logs for each streamed game")
 )
 
-const (
-	playSock   = "/tmp/frolick-stream.sock"
-	streamFile = "frolick-stream.txt"
-)
+const streamFile = "frolick-stream.txt"
 
-// readPlay is what play.txt asks for: an id, "" for nothing, and whether
-// the file was whole.
-func readPlay() (string, bool) {
+// streamerBin runs the streamers instead of this program (tests).
+var streamerBin string
+
+// readPlay is what play.txt asks for, and whether the file was whole.
+func readPlay() (playReq, bool) {
+	var req playReq
 	b, err := os.ReadFile(filepath.Join(*storeDir, "play.txt"))
 	if err != nil {
-		return "", os.IsNotExist(err)
+		return req, os.IsNotExist(err)
 	}
-	id := ""
 	for _, line := range strings.Split(strings.ReplaceAll(string(b), "\r", ""), "\n") {
 		f := strings.Split(line, "\t")
 		if f[0] == "end" {
-			return id, true
+			return req, true
 		}
-		if f[0] == "p" && len(f) >= 2 {
-			id = f[1]
+		if len(f) < 2 {
+			continue
+		}
+		switch f[0] {
+		case "p":
+			req.play = f[1]
+		case "f":
+			req.first = f[1]
+		case "x":
+			req.remove = append(req.remove, f[1])
 		}
 	}
-	return "", false
+	return playReq{}, false
 }
 
 // gameFolder is a streamed game's folder name in E:\Games: its title, kept
@@ -149,81 +167,161 @@ func streamedGames() map[string]streamRec {
 	return out
 }
 
-type player struct {
-	mu     sync.Mutex
-	id     string // the game being filled ("" none)
-	dir    string // its folder in E:\Games
-	cmd    *exec.Cmd
-	exited chan struct{}
-	want   string // what play.txt asks for
-	state  string
-	detail string
-	retry  time.Time
+// A streamer for each streamed game not yet all in, each on its own
+// socket, so every game can be played (its reads served) at any time. Only
+// one fills its disc front to back at a time (its -fill file is there):
+// the game last asked to play, else the one the Downloads page put first,
+// else the oldest; the others only fetch what their game reads.
+type streamProc struct {
+	id, dir string
+	cmd     *exec.Cmd
+	exited  chan struct{}
+	retry   time.Time
 }
 
-var play player
+type players struct {
+	mu     sync.Mutex
+	procs  map[string]*streamProc
+	want   string // what play.txt asks to play
+	first  string // what the Downloads page asks to fill first
+	state  string // the game asked to play: starting, ready or error
+	detail string
+	filler string // the one filling now
+}
+
+var play = players{procs: map[string]*streamProc{}}
+
+// playReq is play.txt: p the game to play, f the one to fill first, x
+// the ones to remove (their games are deleted).
+type playReq struct {
+	play, first string
+	remove      []string
+}
 
 // watchPlay is called every second by the main loop.
 func watchPlay(ctx context.Context) {
-	want, ok := readPlay()
+	req, ok := readPlay()
 	p := &play
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if ok {
-		if want != p.want {
-			p.state, p.detail, p.retry = "starting", "", time.Time{}
+		if req.play != p.want {
+			p.state, p.detail = "starting", ""
 		}
-		p.want = want
-	}
-	// the game being filled was deleted (a Memory screen): stop
-	if p.id != "" && p.cmd != nil {
-		if _, err := os.Stat(filepath.Join(p.dir, streamFile)); err != nil {
-			log.Printf("play %s: deleted; stopping", p.id)
-			p.stop()
-			os.RemoveAll(stateDir(p.id))
-			p.id = ""
+		p.want, p.first = req.play, req.first
+		for _, id := range req.remove {
+			p.remove(id)
 		}
 	}
-	// what to fill: the game asked for, else one left unfinished
-	next := p.want
-	if next == "" {
-		next = p.id
+	// the streamed games not yet all in, and the one asked for
+	todo := map[string]string{}
+	for folder, r := range streamedGames() {
+		if r.State != "complete" {
+			todo[r.ID] = filepath.Join(*gamesDir, folder)
+		}
 	}
-	if next == "" {
-		for _, r := range streamedGames() {
-			if r.State != "complete" {
-				next = r.ID
-				break
+	if p.want != "" {
+		dir := filepath.Join(*gamesDir, gameFolder(p.want))
+		if r, have := readRec(dir); !have || r.State != "complete" {
+			todo[p.want] = dir
+		}
+	}
+	// deleted (a Memory screen) or done: stop
+	for id, sp := range p.procs {
+		if _, ok := todo[id]; !ok {
+			if _, err := os.Stat(filepath.Join(sp.dir, streamFile)); err != nil {
+				log.Printf("play %s: deleted; stopping", id)
+				os.RemoveAll(stateDir(id))
+			}
+			sp.stop()
+			delete(p.procs, id)
+		}
+	}
+	for id, dir := range todo {
+		sp := p.procs[id]
+		if sp == nil {
+			sp = &streamProc{id: id, dir: dir}
+			p.procs[id] = sp
+		}
+		r, have := readRec(sp.dir)
+		if sp.cmd == nil && time.Now().After(sp.retry) {
+			if err := sp.start(ctx, r, have); err != nil {
+				log.Printf("play %s: %v", id, err)
+				if p.want == id {
+					p.state, p.detail = "error", "Can't reach the Internet Archive"
+				}
+				sp.retry = time.Now().Add(10 * time.Second)
+			}
+		}
+		if sp.cmd != nil && streamVerified(id) != "" {
+			sp.finish()
+		}
+	}
+	p.pickFiller()
+	if want := p.procs[p.want]; want != nil && p.state == "starting" {
+		if st, err := os.Stat(filepath.Join(want.dir, "default.xbe")); err == nil && st.Size() > 0 {
+			if _, have := readRec(want.dir); have {
+				p.state, p.detail = "ready", gameFolder(p.want)
+				log.Printf("play %s: ready in %s", p.want, want.dir)
+			}
+		}
+	} else if p.want != "" && p.state == "starting" && p.procs[p.want] == nil {
+		// asked to play a game that is all in already
+		p.state, p.detail = "ready", gameFolder(p.want)
+	}
+}
+
+// pickFiller gives the -fill file to one streamer.
+func (p *players) pickFiller() {
+	f := ""
+	for _, id := range []string{p.want, p.first, p.filler} {
+		if id != "" && p.procs[id] != nil {
+			f = id
+			break
+		}
+	}
+	if f == "" {
+		var oldest time.Time
+		for id, sp := range p.procs {
+			st, err := os.Stat(filepath.Join(sp.dir, streamFile))
+			if err == nil && (f == "" || st.ModTime().Before(oldest)) {
+				f, oldest = id, st.ModTime()
 			}
 		}
 	}
-	if next != p.id {
-		p.stop()
-		p.id, p.dir = next, filepath.Join(*gamesDir, gameFolder(next))
+	if f != p.filler && f != "" {
+		log.Printf("play %s: filling it first", f)
 	}
-	if p.id == "" {
+	p.filler = f
+	for id := range p.procs {
+		fill := filepath.Join(stateDir(id), "fill")
+		if id == f {
+			if !fileExists(fill) {
+				os.WriteFile(fill, nil, 0644)
+			}
+		} else {
+			os.Remove(fill)
+		}
+	}
+}
+
+// remove: the Downloads page removed a streamed game: it is deleted.
+func (p *players) remove(id string) {
+	dir := filepath.Join(*gamesDir, gameFolder(id))
+	r, have := readRec(dir)
+	if !have || r.ID != id || r.State == "complete" {
 		return
 	}
-	r, have := readRec(p.dir)
-	if p.cmd == nil && (!have || r.State != "complete") && time.Now().After(p.retry) {
-		if err := p.start(ctx, r, have); err != nil {
-			log.Printf("play %s: %v", p.id, err)
-			if p.want == p.id {
-				p.state, p.detail = "error", "Can't reach the Internet Archive"
-			}
-			p.retry = time.Now().Add(10 * time.Second)
-		}
+	if sp := p.procs[id]; sp != nil {
+		sp.stop()
+		delete(p.procs, id)
 	}
-	if p.cmd != nil && streamVerified(p.id) != "" {
-		p.finish()
-		r, have = readRec(p.dir)
+	os.RemoveAll(dir)
+	os.RemoveAll(stateDir(id))
+	if p.want == id {
+		p.want, p.state, p.detail = "", "", ""
 	}
-	if p.want == p.id && p.state == "starting" {
-		if st, err := os.Stat(filepath.Join(p.dir, "default.xbe")); err == nil && st.Size() > 0 && have {
-			p.state, p.detail = "ready", gameFolder(p.id)
-			log.Printf("play %s: ready in %s", p.id, p.dir)
-		}
-	}
+	log.Printf("play %s: removed from the Downloads page; deleted %s", id, dir)
 }
 
 // streamVerified is the stats file's "verified" line, "" until the whole
@@ -253,39 +351,45 @@ func readStats(id string) map[string]string {
 
 // finish: the whole disc is in. Checked ok, it becomes a plain installed
 // game (no stream files); otherwise the image starts over.
-func (p *player) finish() {
-	v := streamVerified(p.id)
-	p.stop()
-	r, _ := readRec(p.dir)
-	img := filepath.Join(p.dir, "default.iso")
+func (sp *streamProc) finish() {
+	v := streamVerified(sp.id)
+	sp.stop()
+	r, _ := readRec(sp.dir)
+	img := filepath.Join(sp.dir, "default.iso")
 	if v == "ok" || v == "unchecked" {
 		for _, ext := range []string{".stream", ".map", ".trace"} {
 			os.Remove(img + ext)
 		}
 		r.State = "complete"
-		writeRec(p.dir, r)
-		log.Printf("play %s: the whole disc is in (%s)", p.id, v)
+		writeRec(sp.dir, r)
+		log.Printf("play %s: the whole disc is in (%s)", sp.id, v)
 	} else {
-		log.Printf("play %s: the disc didn't check out (%s); fetching it again", p.id, v)
+		log.Printf("play %s: the disc didn't check out (%s); fetching it again", sp.id, v)
 		os.Remove(img + ".map")
 		os.Truncate(img, 0)
 	}
-	os.Remove(filepath.Join(stateDir(p.id), "stats"))
+	os.Remove(filepath.Join(stateDir(sp.id), "stats"))
 }
 
-func (p *player) stop() {
-	if p.cmd != nil {
-		p.cmd.Process.Kill()
-		<-p.exited
-		p.cmd = nil
+func (sp *streamProc) stop() {
+	if sp.cmd != nil {
+		sp.cmd.Process.Kill()
+		<-sp.exited
+		sp.cmd = nil
 	}
+	os.Remove(sockPath(sp.id)) // nothing answers there now
 }
 
-// start runs the streamer for p.id into its folder, making the folder and
+// sockPath is a game's streamer socket (named in its default.iso.stream).
+func sockPath(id string) string {
+	return "/tmp/frolick-stream-" + strings.TrimSuffix(tileName(id), ".png") + ".sock"
+}
+
+// start runs the streamer for sp.id into its folder, making the folder and
 // its record first (hashes from the Archive).
-func (p *player) start(ctx context.Context, r streamRec, have bool) error {
+func (sp *streamProc) start(ctx context.Context, r streamRec, have bool) error {
 	if !have {
-		ident, file, ok := strings.Cut(p.id, "/")
+		ident, file, ok := strings.Cut(sp.id, "/")
 		if !ok {
 			return fmt.Errorf("not a disc image")
 		}
@@ -295,16 +399,16 @@ func (p *player) start(ctx context.Context, r streamRec, have bool) error {
 		if err != nil {
 			return err
 		}
-		if err := os.MkdirAll(p.dir, 0755); err != nil {
+		if err := os.MkdirAll(sp.dir, 0755); err != nil {
 			return err
 		}
-		r = streamRec{ID: p.id, URL: fileURL(ident, file), MD5: md5, SHA1: sha1, State: "streaming"}
-		if err := writeRec(p.dir, r); err != nil {
+		r = streamRec{ID: sp.id, URL: fileURL(ident, file), MD5: md5, SHA1: sha1, State: "streaming"}
+		if err := writeRec(sp.dir, r); err != nil {
 			return err
 		}
-		log.Printf("play %s: installing in %s", p.id, p.dir)
+		log.Printf("play %s: installing in %s", sp.id, sp.dir)
 	}
-	sd := stateDir(p.id)
+	sd := stateDir(sp.id)
 	if err := os.MkdirAll(sd, 0755); err != nil {
 		return err
 	}
@@ -315,36 +419,56 @@ func (p *player) start(ctx context.Context, r streamRec, have bool) error {
 	}
 	// the gate writes default.xbe beside the image once it's in (again
 	// each time: the same bytes)
-	self, _ := os.Executable()
-	cmd := exec.Command(self, "-stream", r.URL, "-image", filepath.Join(p.dir, "default.iso"),
-		"-socket", playSock, "-xbe", filepath.Join(p.dir, "default.xbe"), "-stats", filepath.Join(sd, "stats"),
-		"-md5", r.MD5, "-sha1", r.SHA1)
+	self := streamerBin
+	if self == "" {
+		self, _ = os.Executable()
+	}
+	cmd := exec.Command(self, "-stream", r.URL, "-image", filepath.Join(sp.dir, "default.iso"),
+		"-socket", sockPath(sp.id), "-xbe", filepath.Join(sp.dir, "default.xbe"), "-stats", filepath.Join(sd, "stats"),
+		"-fill", filepath.Join(sd, "fill"), "-md5", r.MD5, "-sha1", r.SHA1)
 	cmd.Stdout, cmd.Stderr = logf, logf
 	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL} // never outlives the helper
 	if err := cmd.Start(); err != nil {
 		logf.Close()
 		return err
 	}
-	log.Printf("play %s: streaming into %s", p.id, p.dir)
-	p.cmd = cmd
+	log.Printf("play %s: streaming into %s", sp.id, sp.dir)
+	sp.cmd = cmd
 	exited := make(chan struct{})
-	p.exited = exited
+	sp.exited = exited
 	go func() {
 		cmd.Wait()
 		logf.Close()
 		close(exited)
-		p.mu.Lock()
-		if p.cmd == cmd {
-			log.Printf("play %s: the streamer stopped; again shortly", p.id)
-			p.cmd = nil
-			p.retry = time.Now().Add(5 * time.Second)
+		play.mu.Lock()
+		if sp.cmd == cmd {
+			log.Printf("play %s: the streamer stopped; again shortly", sp.id)
+			sp.cmd = nil
+			sp.retry = time.Now().Add(5 * time.Second)
 		}
-		p.mu.Unlock()
+		play.mu.Unlock()
 	}()
 	return nil
 }
 
-// playStatus is the status.txt lines for streamed games.
+// streamIn is how much of a streamed game's disc is in, and its size.
+func streamIn(sp *streamProc) (int64, int64) {
+	st := readStats(sp.id)
+	size, _ := strconv.ParseInt(st["size"], 10, 64)
+	chunks, _ := strconv.ParseInt(st["chunks"], 10, 64)
+	have, _ := strconv.ParseInt(st["have"], 10, 64)
+	var in int64
+	if chunks > 0 {
+		in = min(size, have*((size+chunks-1)/chunks))
+	}
+	return in, size
+}
+
+// playStatus is the status.txt lines for streamed games:
+//
+//	installed <id> <folder>
+//	streaming <id> <bytes in> <bytes> <1 filling | 0 only what it reads> <title>
+//	stream <id> <state> <bytes in> <bytes> <detail>   (the game asked to play)
 func playStatus() string {
 	var out strings.Builder
 	for folder, r := range streamedGames() {
@@ -353,23 +477,31 @@ func playStatus() string {
 	p := &play
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	ids := make([]string, 0, len(p.procs))
+	for id := range p.procs {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		sp := p.procs[id]
+		in, size := streamIn(sp)
+		if size == 0 {
+			continue // its streamer hasn't said yet
+		}
+		fill := 0
+		if id == p.filler {
+			fill = 1
+		}
+		fmt.Fprintf(&out, "streaming\t%s\t%d\t%d\t%d\t%s\n", id, in, size, fill, clean(gameFolder(id)))
+	}
 	if p.want == "" {
 		return out.String()
 	}
 	var in, size int64
-	if p.want == p.id {
-		st := readStats(p.id)
-		size, _ = strconv.ParseInt(st["size"], 10, 64)
-		chunks, _ := strconv.ParseInt(st["chunks"], 10, 64)
-		have, _ := strconv.ParseInt(st["have"], 10, 64)
-		if chunks > 0 {
-			in = min(size, have*((size+chunks-1)/chunks))
-		}
-		if r, ok := readRec(p.dir); ok && r.State == "complete" {
-			if fi, err := os.Stat(filepath.Join(p.dir, "default.iso")); err == nil {
-				in, size = fi.Size(), fi.Size()
-			}
-		}
+	if sp := p.procs[p.want]; sp != nil {
+		in, size = streamIn(sp)
+	} else if fi, err := os.Stat(filepath.Join(*gamesDir, gameFolder(p.want), "default.iso")); err == nil {
+		in, size = fi.Size(), fi.Size()
 	}
 	fmt.Fprintf(&out, "stream\t%s\t%s\t%d\t%d\t%s\n", p.want, p.state, in, size, clean(p.detail))
 	return out.String()

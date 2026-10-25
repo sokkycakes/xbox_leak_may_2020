@@ -46,6 +46,7 @@ var (
 	streamSHA1  = flag.String("sha1", "", "-stream: the image's sha1, checked once it is all in")
 	streamXBE   = flag.String("xbe", "", "-stream: write the disc's default.xbe here once its directory and the XBE are in")
 	streamStats = flag.String("stats", "", "-stream: a status file, rewritten four times a second")
+	streamFill  = flag.String("fill", "", "-stream: fill the image front to back only while this file is there (demand reads are always served)")
 )
 
 const xgd1Base = 0x18300000 // a pressed disc's game partition
@@ -71,6 +72,7 @@ type streamer struct {
 	fetched, misses int64
 	readyAt         time.Duration
 	verified        string
+	filling         bool // -fill's file is there (or no -fill)
 }
 
 func runStream(ctx context.Context) {
@@ -93,6 +95,21 @@ func runStream(ctx context.Context) {
 	log.Printf("stream: %s, %d bytes, %d of %d chunks here", s.url, s.size, s.nhave, s.n)
 	if err := s.serve(); err != nil {
 		log.Fatal(err)
+	}
+	s.filling = *streamFill == ""
+	if *streamFill != "" {
+		go func() {
+			for {
+				_, err := os.Stat(*streamFill)
+				s.mu.Lock()
+				if f := err == nil; f != s.filling {
+					s.filling = f
+					s.cond.Broadcast()
+				}
+				s.mu.Unlock()
+				time.Sleep(time.Second)
+			}
+		}()
 	}
 	if *streamStats != "" {
 		go func() {
@@ -259,7 +276,7 @@ func (s *streamer) pick(demandOnly bool) int {
 			return n
 		}
 	}
-	if demandOnly {
+	if demandOnly || !s.filling {
 		return -1
 	}
 	for ; s.next < s.n; s.next++ {
