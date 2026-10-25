@@ -946,22 +946,34 @@ void dl_remove(int i) {
     save_downloads();
 }
 
-// play.txt for the helper: the game to play (p, Frolick's, kept), the
-// stream to fill first (f) and the streams removed (x).
+// The Guide's own line for a stream: its f, x, z or r.
+bool play_ours(const char* id) {
+    if (!strcmp(id, streamFirst)) return true;
+    for (int r = 0; r < nstreamGone; r++) if (!strcmp(id, streamGone[r])) return true;
+    for (int c = 0; c < npauses; c++) if (!strcmp(id, pauses[c].id)) return true;
+    return false;
+}
+
+// play.txt for the helper: the stream to fill first (f), the streams
+// removed (x), paused (z) and resumed (r).  The lines Frolick left (its p,
+// the game to play, and its commands for other streams) are kept.
 void save_play() {
     char path[1100];
     if (!store_path("play.txt", path, sizeof path)) return;
-    char play[200] = "";
+    char kept[16][200]; int nkept = 0;
     if (char* text = read_file(path, 0)) {
         char* p = text;
-        while (char* line = next_line(&p))
-            if (!strncmp(line, "p\t", 2)) snprintf(play, sizeof play, "%s", line);
+        while (char* line = next_line(&p)) {
+            if (nkept == 16 || strlen(line) < 3 || line[1] != '\t' || !strchr("pfxzr", line[0])) continue;
+            if (line[0] == 'f' ? streamFirst[0] != 0 : line[0] != 'p' && play_ours(line + 2)) continue;
+            snprintf(kept[nkept++], sizeof kept[0], "%s", line);
+        }
         delete[] text;
     }
     char tmp[1110]; snprintf(tmp, sizeof tmp, "%s.new", path);
     FILE* f = fopen(tmp, "w");
     if (!f) return;
-    if (play[0]) fprintf(f, "%s\n", play);
+    for (int k = 0; k < nkept; k++) fprintf(f, "%s\n", kept[k]);
     if (streamFirst[0]) fprintf(f, "f\t%s\n", streamFirst);
     for (int r = 0; r < nstreamGone; r++) fprintf(f, "x\t%s\n", streamGone[r]);
     for (int c = 0; c < npauses; c++) fprintf(f, "%c\t%s\n", pauses[c].pause ? 'z' : 'r', pauses[c].id);
