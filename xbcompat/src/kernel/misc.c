@@ -1,6 +1,7 @@
 /* Hal, Av, Dbg, Ex settings, Xe section loading and the kernel's data exports. */
 #define _GNU_SOURCE
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <errno.h>
 #include <stdarg.h>
 #include <stdlib.h>
