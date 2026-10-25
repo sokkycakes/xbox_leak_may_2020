@@ -18,3 +18,9 @@ Off: rm /data/xbox/use-gpu. Undo fully: put xbcompat.pre-gpu back.
 before SDL_Init, like the normal build's CreateDevice. Without it every game
 failed with "SDL_Init: kmsdrm not available". Only xbcompat-gpu changed; swap it
 in and the next game launch uses it.
+
+2026-10-25 fix 2: on KMSDRM the second window xemu's offscreen GL layer opens
+can't exist ("glo_context_create: Failed to create window"), so its contexts
+are now made against the display window and run surfaceless.
+XBCOMPAT_GPU_SURFACELESS=1 forces that path elsewhere (tested in the cloud
+with SDL_VIDEO_X11_FORCE_EGL=1: tut02 and Doom 3 render).

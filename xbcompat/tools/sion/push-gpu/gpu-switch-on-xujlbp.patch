@@ -37,6 +37,46 @@ index 90cd2f0a..95f0760d 100644
      if (SDL_Init(SDL_INIT_VIDEO) != 0) gpu_fatal("SDL_Init: %s", SDL_GetError());
      SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
      SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+diff --git a/xbcompat/src/gpu/xemu/hw/xbox/nv2a/pgraph/thirdparty/gloffscreen/sdl.c b/xbcompat/src/gpu/xemu/hw/xbox/nv2a/pgraph/thirdparty/gloffscreen/sdl.c
+index 4ee78e13..bbec53b8 100644
+--- a/xbcompat/src/gpu/xemu/hw/xbox/nv2a/pgraph/thirdparty/gloffscreen/sdl.c
++++ b/xbcompat/src/gpu/xemu/hw/xbox/nv2a/pgraph/thirdparty/gloffscreen/sdl.c
+@@ -24,6 +24,7 @@
+ #include <stdlib.h>
+ #include <stdio.h>
+ #include <string.h>
++#include <strings.h>
+ #include <assert.h>
+ 
+ #include "gloffscreen.h"
+@@ -56,6 +57,27 @@ GloContext *glo_context_create(void)
+         SDL_GL_CONTEXT_PROFILE_MASK,
+         SDL_GL_CONTEXT_PROFILE_CORE);
+ 
++    /* xbcompat: KMSDRM has one window, the display's, so there the contexts
++       are made against it and then run surfaceless (EGL_KHR_surfaceless_context;
++       xemu draws into FBOs only). XBCOMPAT_GPU_SURFACELESS=1 forces this. */
++    static SDL_Window *host_window;
++    const char *driver = SDL_GetCurrentVideoDriver();
++    const char *force = getenv("XBCOMPAT_GPU_SURFACELESS");
++    if (!host_window) host_window = SDL_GL_GetCurrentWindow();
++    if (host_window && ((driver && !strcasecmp(driver, "kmsdrm")) || (force && *force == '1'))) {
++        context->window = NULL;
++        context->gl_context = SDL_GL_CreateContext(host_window);
++        if (context->gl_context == NULL ||
++            SDL_GL_MakeCurrent(NULL, context->gl_context) != 0) {
++            fprintf(stderr, "%s: surfaceless GL context: %s\n", __func__, SDL_GetError());
++            SDL_Quit();
++            exit(1);
++        }
++        static int said;
++        if (!said++) fprintf(stderr, "glo: surfaceless contexts on the display window\n");
++        return context;
++    }
++
+     // Create main window
+     context->window = SDL_CreateWindow(
+         "SDL Offscreen Window", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
 diff --git a/xbcompat/src/main.c b/xbcompat/src/main.c
 index fd4f48ee..7338e229 100644
 --- a/xbcompat/src/main.c
