@@ -8,6 +8,7 @@ SION_TOOLS_DEPENDENCIES = openssh avahi wpa_supplicant efibootmgr e2fsprogs util
 
 define SION_TOOLS_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(SION_TOOLS_PKGDIR)/sion $(TARGET_DIR)/usr/sbin/sion
+	$(INSTALL) -D -m 0755 $(SION_TOOLS_PKGDIR)/sion-install-internal $(TARGET_DIR)/usr/sbin/sion-install-internal
 	$(INSTALL) -D -m 0644 $(SION_TOOLS_PKGDIR)/sion-lib.sh $(TARGET_DIR)/usr/lib/sion/sion-lib.sh
 	$(INSTALL) -D -m 0755 $(SION_TOOLS_PKGDIR)/sion-netd $(TARGET_DIR)/usr/libexec/sion-netd
 	$(INSTALL) -D -m 0600 $(SION_TOOLS_PKGDIR)/sshd_config $(TARGET_DIR)/etc/ssh/sshd_config
