@@ -102,6 +102,9 @@ void identity_set_mac(const UCHAR mac[6]) { memcpy(id_mac, mac, 6); }
    xbcompat consoles share.  The signature keys stay zero either way: saves
    already made are signed with those. */
 #define XBE_CERT_LAN_KEY 0xB0   /* offset of LANKey in the certificate */
+static bool lan_key_known;
+
+bool title_lan_key_known(void) { return lan_key_known; }
 
 void title_keys_init(const char *hdd, const XBE_CERTIFICATE *cert)
 {
@@ -123,6 +126,7 @@ void title_keys_init(const char *hdd, const XBE_CERTIFICATE *cert)
     UCHAR digest[20];
     XcHMAC(keys + 16, 16, (const UCHAR *)cert + XBE_CERT_LAN_KEY, 16, NULL, 0, digest);
     memcpy(XboxLANKey, digest, 16);
+    lan_key_known = true;
     xlog("keys: the LAN key from %s's CERT key", path);
 }
 

@@ -18,7 +18,9 @@
  * console on the LAN is found by its Ethernet address alone.  So they go raw
  * onto the host's LAN through a packet socket (root or CAP_NET_RAW), on the
  * default route's interface or $XBCOMPAT_SYSLINK ("off" for none), and other
- * consoles' come back the same way.  On Ethernet the console keeps its own
+ * consoles' come back the same way.  Only real consoles need that, and they
+ * can read the frames only with the title's real LAN key (keys.bin, misc.c),
+ * so without one it stays off unless $XBCOMPAT_SYSLINK names an interface.  On Ethernet the console keeps its own
  * address, which the interface is told to accept.  Wi-Fi carries frames only
  * from the station's own address, so there the console takes the interface's.
  *
@@ -408,6 +410,10 @@ static void syslink_init(uint8_t mac[6])
     const char *want = getenv("XBCOMPAT_SYSLINK");
     char ifname[IF_NAMESIZE + 1];
     if (want && !strcmp(want, "off")) return;
+    if (!(want && *want) && !title_lan_key_known()) {
+        xlog("net: System Link stays off the LAN: without keys.bin real consoles couldn't read it");
+        return;
+    }
     if (want && *want) snprintf(ifname, sizeof ifname, "%s", want);
     else if (!default_route_if(ifname, sizeof ifname)) {
         xlog("net: System Link off: no default route to find the LAN by (XBCOMPAT_SYSLINK=IFNAME names it)");
