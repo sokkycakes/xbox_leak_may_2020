@@ -40,6 +40,12 @@ spine_h     = 31;    // spine length on the left edge, measured down from the to
 spine_back  = 0;     // how far the label also wraps onto the back, 0 = stops at the edge
 label_r     = 2.5;
 
+/* [Print layout] */
+// "one"  = single piece, cavity roof bridges across the card (no supports)
+// "tray" = two-piece fallback, bottom half: back + walls, open on top
+// "lid"  = two-piece fallback, top skin, printed label face down; glue onto the tray
+part        = "one";
+
 $fn = 48;
 
 pw     = sd_w + 2*clear_xy;
@@ -116,13 +122,22 @@ module label_cuts() {
         translate([-1, spine_y0, -1]) cube([1 + spine_back, spine_h, 1 + label_depth]);
 }
 
-union() {
-    difference() {
-        rplate(case_w, case_h, case_t, corner_r);
-        pocket();
-        grip();
-        if (detent) tongue_cut();
-        if (labels) label_cuts();
+module case() {
+    union() {
+        difference() {
+            rplate(case_w, case_h, case_t, corner_r);
+            pocket();
+            grip();
+            if (detent) tongue_cut();
+            if (labels) label_cuts();
+        }
+        if (detent) bump();
     }
-    if (detent) bump();
 }
+
+split_z = floor_t + pocket_t;   // top of the card cavity
+if (part == "one") case();
+if (part == "tray") intersection() { case(); translate([-5, -5, -1]) cube([case_w + 10, case_h + 10, split_z + 1]); }
+if (part == "lid")  // flipped so the label face prints on the bed
+    translate([0, case_h, case_t]) rotate([180, 0, 0])
+        intersection() { case(); translate([-5, -5, split_z]) cube([case_w + 10, case_h + 10, case_t]); }
