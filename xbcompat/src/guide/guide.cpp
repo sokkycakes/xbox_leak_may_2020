@@ -696,7 +696,7 @@ void row_image(char* out, int n, const char* name, unsigned char* px, int w, int
 // included).  Listed are the games those keys name that are here now, the
 // hard disk's E:\Games folders and the game card, newest first, the game
 // being played left out.
-struct Game { char name[96], ntdir[600], img[100]; bool windows; };
+struct Game { char name[96], ntdir[600], img[100]; const char* platform; };
 Game games[20]; int ngames;
 
 void scan_recent() {
@@ -742,10 +742,21 @@ void scan_recent() {
             Game& gm = games[ngames++];
             snprintf(gm.name, sizeof gm.name, "%s", here[i].name);
             snprintf(gm.ntdir, sizeof gm.ntdir, "%s", here[i].ntdir);
-            // a Windows card's stub XBE has its .wincart beside it (wincart.c)
+            // a Kazeta cart's stub XBE (a Windows card's, wincart.c, or a DS
+            // cart's in E:\Games, dstitle.py) has its .wincart beside it,
+            // naming the cart's runtime
             char dir[1024], wc[1100]; snprintf(dir, sizeof dir, "%s", here[i].xbe);
             if (char* sl = strrchr(dir, '/')) *sl = 0;
-            gm.windows = ci_path(dir, ".wincart", wc, sizeof wc);
+            gm.platform = "Xbox";
+            if (ci_path(dir, ".wincart", wc, sizeof wc)) {
+                gm.platform = "Windows";
+                if (char* text = read_file(wc, 0)) {
+                    char* p = text;
+                    while (char* line = next_line(&p))
+                        if (!strncasecmp(line, "runtime=", 8) && !strncasecmp(line + 8, "nds", 3)) gm.platform = "Nintendo DS";
+                    delete[] text;
+                }
+            }
             unsigned char* px = 0; int w = 0, h = 0;
             char nm[64]; snprintf(nm, sizeof nm, "game_%08lx.xtx", (unsigned long)tid);
             if (!xbe_image_read || !xbe_image_read(here[i].xbe, "$$XTIMAGE", &px, &w, &h)) px = 0;
@@ -761,11 +772,20 @@ void scan_recent() {
 // the active download first ("q id go|pause bytes kind title"), and its
 // helper (frolick-store, running beside the game) reports in status.txt;
 // the page reads both, and A / X change the queue as Frolick's page does.
+// Streaming Downloads still coming in are listed too, as Frolick's page
+// lists them (its d00cfd0d): status.txt's "streaming id in bytes 1|0
+// title" lines; the one filling (1) is the active item when the queue has
+// none, the others pend after the queue.  Start Now and Remove on one go
+// to the helper through play.txt (f / x), its p line kept.
 struct Download { char id[96], name[128], kind[32]; long long bytes; int sizeMB; float doneMB; int state; };
 enum { DlPending, DlDownloading, DlPaused };
 Download dls[16]; int ndl;
 int dlOnline;              // -1 the helper isn't running
 char dlActiveState[16], dlActiveDetail[64];
+struct Stream { char id[96], name[128]; long long in, bytes; int fill; };
+Stream streams[16]; int nstreams;
+char streamFirst[96];          // Start Now on a stream, until the helper drops it
+char streamGone[16][96]; int nstreamGone;  // removed, until no longer listed
 
 bool store_path(const char* file, char* out, int n) {
     char dir[1024];
@@ -774,8 +794,11 @@ bool store_path(const char* file, char* out, int n) {
     return true;
 }
 
+void save_play();
+
 void load_downloads() {
-    ndl = 0; dlOnline = -1; dlActiveState[0] = dlActiveDetail[0] = 0;
+    ndl = 0; nstreams = 0; dlOnline = -1; dlActiveState[0] = dlActiveDetail[0] = 0;
+    bool listed[16] = { false };  // removed streams the helper still lists
     char path[1100];
     char* text = store_path("queue.txt", path, sizeof path) ? read_file(path, 0) : 0;
     if (text && strstr(text, "\nend")) {
@@ -805,7 +828,18 @@ void load_downloads() {
             int k = split_tabs(line, f, 6);
             int i = -1;
             if (k >= 2) for (int j = 0; j < ndl; j++) if (!strcmp(dls[j].id, f[1])) i = j;
-            if (!strcmp(f[0], "online") && k >= 2) dlOnline = atoi(f[1]);
+            if (!strcmp(f[0], "streaming") && k >= 6 && nstreams < 16) {
+                bool gone = false;
+                for (int r = 0; r < nstreamGone; r++)
+                    if (!strcmp(streamGone[r], f[1])) { gone = true; listed[r] = true; }
+                if (!gone) {
+                    Stream& sm = streams[nstreams++];
+                    snprintf(sm.id, sizeof sm.id, "%s", f[1]);
+                    sm.in = atoll(f[2]); sm.bytes = atoll(f[3]); sm.fill = atoi(f[4]);
+                    snprintf(sm.name, sizeof sm.name, "%s", f[5]);
+                }
+            }
+            else if (!strcmp(f[0], "online") && k >= 2) dlOnline = atoi(f[1]);
             else if (!strcmp(f[0], "active") && k >= 5 && i >= 0) {
                 long long total = atoll(f[4]);
                 if (total > 0) { dls[i].bytes = total; dls[i].sizeMB = (int)(total / (1024 * 1024)); }
@@ -823,6 +857,20 @@ void load_downloads() {
                 if (i == 0 && ndl && dls[0].state == DlPending) dls[0].state = DlDownloading;
             }
         }
+        // what the helper no longer lists is removed, or finished
+        int keep = 0;
+        for (int r = 0; r < nstreamGone; r++)
+            if (listed[r]) snprintf(streamGone[keep++], sizeof streamGone[0], "%s", streamGone[r]);
+        bool changed = keep != nstreamGone;
+        nstreamGone = keep;
+        if (streamFirst[0]) {
+            bool there = false;
+            for (int k = 0; k < nstreams; k++) there = there || !strcmp(streams[k].id, streamFirst);
+            if (!there) { streamFirst[0] = 0; changed = true; }
+            // until the helper says, the one asked for fills
+            else for (int k = 0; k < nstreams; k++) streams[k].fill = !strcmp(streams[k].id, streamFirst);
+        }
+        if (changed) save_play();
     }
     delete[] text;
 }
@@ -878,6 +926,102 @@ void dl_remove(int i) {
     ndl--;
     if (i == 0 && ndl && dls[0].state == DlPending) dls[0].state = DlDownloading;
     save_downloads();
+}
+
+// play.txt for the helper: the game to play (p, Frolick's, kept), the
+// stream to fill first (f) and the streams removed (x).
+void save_play() {
+    char path[1100];
+    if (!store_path("play.txt", path, sizeof path)) return;
+    char play[200] = "";
+    if (char* text = read_file(path, 0)) {
+        char* p = text;
+        while (char* line = next_line(&p))
+            if (!strncmp(line, "p\t", 2)) snprintf(play, sizeof play, "%s", line);
+        delete[] text;
+    }
+    char tmp[1110]; snprintf(tmp, sizeof tmp, "%s.new", path);
+    FILE* f = fopen(tmp, "w");
+    if (!f) return;
+    if (play[0]) fprintf(f, "%s\n", play);
+    if (streamFirst[0]) fprintf(f, "f\t%s\n", streamFirst);
+    for (int r = 0; r < nstreamGone; r++) fprintf(f, "x\t%s\n", streamGone[r]);
+    fprintf(f, "end\n");
+    fclose(f);
+    rename(tmp, path);
+}
+
+// The page's items, as Frolick lists them: the active one first (the
+// queue's, else the stream filling), then the queue, then the streams.
+// An item is a queue index (q >= 0) or a stream index (s >= 0).
+struct DlItem { int q, s; };
+bool queue_active() { return ndl && dls[0].state != DlPending; }
+int stream_active() {
+    if (queue_active()) return -1;
+    for (int k = 0; k < nstreams; k++) if (streams[k].fill) return k;
+    return -1;
+}
+bool dl_has_active() { return queue_active() || stream_active() >= 0; }
+int dl_count() { return ndl + nstreams; }
+DlItem dl_item(int i) {
+    DlItem it = { -1, -1 };
+    int a = stream_active();
+    if (a >= 0) { if (i == 0) { it.s = a; return it; } i--; }
+    if (i >= 0 && i < ndl) { it.q = i; return it; }
+    i -= ndl;
+    for (int k = 0; k < nstreams; k++) {
+        if (k == a) continue;
+        if (i-- == 0) { it.s = k; return it; }
+    }
+    return it;
+}
+
+void dl_item_text(int i, char* name, int nn, char* line, int nl, const char** status, float* progress, bool* theme) {
+    DlItem it = dl_item(i);
+    *theme = false;
+    if (it.s >= 0) {
+        Stream& sm = streams[it.s];
+        char done[24], size[24];
+        format_mb(done, sizeof done, (int)(sm.in / (1024 * 1024)));
+        format_mb(size, sizeof size, (int)(sm.bytes / (1024 * 1024)));
+        snprintf(name, nn, "%s", sm.name);
+        snprintf(line, nl, "Streaming Download   %s of %s", done, size);
+        *status = !sm.fill ? "Pending" : dlOnline < 0 ? "Waiting" : sm.in >= sm.bytes ? "Checking" : "Downloading";
+        *progress = sm.bytes > 0 ? (float)((double)sm.in / (double)sm.bytes) : 0;
+        return;
+    }
+    int d = it.q < 0 ? 0 : it.q;
+    char detail[96];
+    dl_detail(d, detail, sizeof detail);
+    snprintf(name, nn, "%s", dls[d].name);
+    snprintf(line, nl, "%s   %s", dls[d].kind, detail);
+    *status = dl_status(d);
+    *progress = dls[d].sizeMB > 0 ? dls[d].doneMB / dls[d].sizeMB : 0;
+    *theme = !strcmp(dls[d].kind, "Theme");
+}
+
+// A on an item: the queue's active one pauses / resumes, a pending one
+// starts now; a pending stream fills first (the one filling has no pause,
+// as on Frolick's page).  False when A does nothing.
+bool dl_press(int i) {
+    DlItem it = dl_item(i);
+    if (it.q >= 0) { dl_start(it.q); return true; }
+    if (it.s < 0 || streams[it.s].fill) return false;
+    snprintf(streamFirst, sizeof streamFirst, "%s", streams[it.s].id);
+    for (int k = 0; k < nstreams; k++) streams[k].fill = k == it.s;
+    save_play();
+    return true;
+}
+
+void dl_remove_item(int i) {
+    DlItem it = dl_item(i);
+    if (it.q >= 0) { dl_remove(it.q); return; }
+    if (it.s < 0 || nstreamGone == 16) return;
+    snprintf(streamGone[nstreamGone++], sizeof streamGone[0], "%s", streams[it.s].id);
+    if (!strcmp(streamFirst, streams[it.s].id)) streamFirst[0] = 0;
+    save_play();
+    memmove(&streams[it.s], &streams[it.s + 1], (nstreams - it.s - 1) * sizeof streams[0]);
+    nstreams--;
 }
 
 // -- Game Storage: the title's saved games ---------------------------------
@@ -990,13 +1134,14 @@ List lRecent = { 6, 0, 0, 0 }, lDownloads = { 5, 0, 0, 0 }, lSaves = { 6, 0, 0, 
 // the confirm page's question and what Yes does
 enum { AskNone, AskDeleteSave, AskRemoveDownload };
 int ask; xui::Scene* askFrom;
+char askId[96];  // the download asked about
 
 List* list_of(xui::Scene* m) {
     return m == g.recent ? &lRecent : m == g.downloads ? &lDownloads : m == g.saves ? &lSaves : 0;
 }
 
 // Downloads: row 0 is the active download, hidden when there is none
-int dl_off() { return ndl && dls[0].state != DlPending ? 0 : 1; }
+int dl_off() { return dl_has_active() ? 0 : 1; }
 
 void row_id(char* out, int n, int r) { snprintf(out, n, "list_items_%d", r); }
 
@@ -1005,20 +1150,18 @@ void fill_row(xui::Scene* m, int r, int i) {
     snprintf(sub, sizeof sub, "%s_icon", id);
     if (m == g.downloads) {
         int d = r - dl_off();
-        set_show(m, id, d >= 0 && d < ndl);
-        if (d < 0 || d >= ndl) return;
-        char detail[96], line[160];
-        dl_detail(d, detail, sizeof detail);
-        snprintf(line, sizeof line, "%s   %s", dls[d].kind, detail);
-        set_text(m, id, dls[d].name);
+        bool on = d >= 0 && d < dl_count();
+        set_show(m, id, on);
+        if (!on) return;
+        char name[128], line[160]; const char* status; float f; bool theme;
+        dl_item_text(d, name, sizeof name, line, sizeof line, &status, &f, &theme);
+        set_text(m, id, name);
         set_str(m, id, "Data1", line);
-        set_str(m, id, "Data3", dl_status(d));
-        set_image(m, sub, !strcmp(dls[d].kind, "Theme") ? "frolick_ico_64x_Themes.png" : "frolick_ico_64x_GameDownloads.png");
+        set_str(m, id, "Data3", status);
+        set_image(m, sub, theme ? "frolick_ico_64x_Themes.png" : "frolick_ico_64x_GameDownloads.png");
         char bar[48]; snprintf(bar, sizeof bar, "%s_bar", id);
-        bool on = d == 0 && dls[0].state != DlPending;
-        set_show(m, bar, on);
+        set_show(m, bar, d == 0 && dl_has_active());
         if (xui::Node* b = m->find(bar)) {
-            float f = dls[d].sizeMB > 0 ? dls[d].doneMB / dls[d].sizeMB : 0;
             xui::Value& v = b->props.set("Value"); v.free(); v.type = xui::TFloat; v.f = f < 0 ? 0 : f > 1 ? 1 : f;
             b->setBarValue();
         }
@@ -1029,7 +1172,7 @@ void fill_row(xui::Scene* m, int r, int i) {
     if (i >= l->count) return;
     if (m == g.recent) {
         set_text(m, id, games[i].name);
-        set_str(m, id, "Data1", games[i].windows ? "Windows" : "Xbox");
+        set_str(m, id, "Data1", games[i].platform);
         set_image(m, sub, games[i].img);
     } else {
         set_text(m, id, saves[i].name);
@@ -1047,9 +1190,10 @@ void list_legends() {
     const char* a = 0, *x = 0, *y = 0;
     if (g.menu == g.recent && l->count) a = guide_launch ? "Play" : 0;
     else if (g.menu == g.saves && l->count) y = "Delete";  // Frolick's Y
-    else if (g.menu == g.downloads && ndl) {
-        int d = l->sel - dl_off();
-        a = d == 0 ? (dls[0].state == DlPaused ? "Resume" : "Pause") : "Start Now";
+    else if (g.menu == g.downloads && dl_count() && l->sel - dl_off() >= 0) {
+        DlItem it = dl_item(l->sel - dl_off());
+        if (it.q == 0 && queue_active()) a = dls[0].state == DlPaused ? "Resume" : "Pause";
+        else if (it.q >= 0 || (it.s >= 0 && !streams[it.s].fill)) a = "Start Now";
         x = "Remove";
     }
     else if (g.menu == g.confirm) a = "Select";
@@ -1062,7 +1206,7 @@ void fill_list(xui::Scene* m) {
     List* l = list_of(m);
     if (!l) return;
     if (m == g.downloads) {
-        l->count = ndl + dl_off(); if (l->count > l->rows) l->count = l->rows;
+        l->count = dl_count() + dl_off(); if (l->count > l->rows) l->count = l->rows;
         if (l->sel < dl_off()) l->sel = dl_off();
         if (l->sel >= l->count) l->sel = l->count - 1;
         l->scroll = 0;
@@ -1073,12 +1217,12 @@ void fill_list(xui::Scene* m) {
         if (l->sel >= l->scroll + l->rows) l->scroll = l->sel - l->rows + 1;
     }
     for (int r = 0; r < l->rows; r++) fill_row(m, r, l->scroll + r);
-    bool empty = m == g.downloads ? ndl == 0 : l->count == 0;
+    bool empty = m == g.downloads ? dl_count() == 0 : l->count == 0;
     set_show(m, "txt_EmptyList", empty);
     char total[32] = "";
     if (m == g.downloads) {
-        if (ndl && l->sel - dl_off() >= 0) snprintf(total, sizeof total, "%d of %d", l->sel - dl_off() + 1, ndl);
-        else if (ndl) snprintf(total, sizeof total, "%d waiting", ndl);
+        if (dl_count() && l->sel - dl_off() >= 0) snprintf(total, sizeof total, "%d of %d", l->sel - dl_off() + 1, dl_count());
+        else if (dl_count()) snprintf(total, sizeof total, "%d waiting", dl_count());
     } else if (l->count) snprintf(total, sizeof total, "%d of %d", l->sel + 1, l->count);
     set_text(m, "labTotal", total);
     char id[32]; row_id(id, sizeof id, l->sel - l->scroll);
@@ -1478,7 +1622,10 @@ bool press(const char* id) {
             leave();
             g.launchDir = games[l->sel].ntdir;
         }
-        else if (g.menu == g.downloads) { dl_start(l->sel - dl_off()); fill_list(g.downloads); }
+        else if (g.menu == g.downloads) {
+            if (!dl_press(l->sel - dl_off())) return false;
+            fill_list(g.downloads);
+        }
         else return false;  // a save: Y deletes it
     }
     else if (!strcmp(id, "btnYes") || !strcmp(id, "btnNo")) {
@@ -1489,7 +1636,15 @@ bool press(const char* id) {
             scan_saves(); lSaves.count = nsaves;
             game_page();  // its saved games count
         }
-        if (yes && ask == AskRemoveDownload) { load_downloads(); dl_remove(lDownloads.sel - dl_off()); }
+        if (yes && ask == AskRemoveDownload) {
+            // the item asked about, wherever it is now
+            load_downloads();
+            for (int i = 0; i < dl_count(); i++) {
+                DlItem it = dl_item(i);
+                const char* did = it.q >= 0 ? dls[it.q].id : it.s >= 0 ? streams[it.s].id : "";
+                if (!strcmp(did, askId)) { dl_remove_item(i); break; }
+            }
+        }
         page_back();
     }
     else if (!strcmp(id, "btnOnlineStatus")) { settings_text(); show_menu(g.volume, "sliderVolume"); }
@@ -1553,9 +1708,13 @@ void step(double t) {
             ask_confirm(AskDeleteSave, q);
             break;
         }
-        if ((down & GUIDE_X) && g.menu == g.downloads && ndl && lDownloads.sel - dl_off() >= 0) {
+        if ((down & GUIDE_X) && g.menu == g.downloads && dl_count() && lDownloads.sel - dl_off() >= 0) {
             play(SndSelect);
-            char q[200]; snprintf(q, sizeof q, "Remove %s from Downloads?", dls[lDownloads.sel - dl_off()].name);
+            DlItem it = dl_item(lDownloads.sel - dl_off());
+            const char* name = it.q >= 0 ? dls[it.q].name : it.s >= 0 ? streams[it.s].name : "";
+            snprintf(askId, sizeof askId, "%s", it.q >= 0 ? dls[it.q].id : it.s >= 0 ? streams[it.s].id : "");
+            // a Streaming Download's game goes with it (Frolick's Remove)
+            char q[200]; snprintf(q, sizeof q, it.s >= 0 ? "Remove %s and delete its game?" : "Remove %s from Downloads?", name);
             ask_confirm(AskRemoveDownload, q);
             break;
         }
