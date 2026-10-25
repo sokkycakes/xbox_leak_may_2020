@@ -48,3 +48,11 @@ doom3-input-script.txt: the XBCOMPAT_INPUT_SCRIPT used for the test.
 checked at D3D's Present (HLE), which the GPU build doesn't run. The display
 loop on the main thread now checks both every vblank, so the reset also works
 while a game thread is stuck (e.g. a streamed disc read waiting on archive.org).
+
+2026-10-25 fix 7 (Counter-Strike): (a) a file read that fails at once (past the end of
+a disc file) no longer writes the caller's I/O status block, as IopCompleteRequest; CS's
+cache closed its file through GetOverlappedResult and stopped with a fatal "Cache" error
+on STATUS_END_OF_FILE. (b) IdexChannelObject's DeviceQueue list (+0x28) starts empty;
+XAPI's CancelIo walks it and crashed when Training loaded. Cloud: intros, menus, Training
+in-game. Also merged gudfcx c0706480 (System Link bridge + LAN key; inert until
+/data/xbox/hdd/keys.bin exists). The patch file is now the full diff from xujlbp de9d94a9.

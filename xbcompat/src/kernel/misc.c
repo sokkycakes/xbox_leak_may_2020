@@ -26,6 +26,15 @@ ULONG HalBootSMCVideoMode = 0;
 BOOLEAN KdDebuggerEnabled = 0, KdDebuggerNotPresent = 1;
 PVOID LaunchDataPage = NULL;
 ULONG IdexChannelObject[32];
+#ifndef XBC_TRANSLATED
+/* IDE_CHANNEL_OBJECT's DeviceQueue.DeviceListHead (+0x28) starts empty:
+   XAPI's CancelIo walks it for the file's queued IRPs (Counter-Strike
+   cancels its reads when a level loads). */
+__attribute__((constructor)) static void idex_channel_init(void)
+{
+    IdexChannelObject[10] = IdexChannelObject[11] = (ULONG)(uintptr_t)&IdexChannelObject[10];
+}
+#endif
 UCHAR XboxEEPROMKey[16], XboxHDKey[16], XboxSignatureKey[16], XboxLANKey[16];
 UCHAR XboxAlternateSignatureKeys[16][16];
 UCHAR XePublicKeyData[284];

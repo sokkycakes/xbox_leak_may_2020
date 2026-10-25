@@ -595,6 +595,14 @@ static void bind_miniport(ULONG *dev)
         if (regs != MAP_FAILED) dev[0x1c28 / 4] = (ULONG)regs;
         device_layout_5849 = true;
         sync_device_surfaces();
+    } else if (build >= 5600 && build < 5849 && off == 0x1db4) {
+        /* 5659 (Counter-Strike) has its miniport where 5849 does; its
+           inlined code reads the render target at device+0x1a04 and the
+           fence times at +0x2c/+0x30 too. */
+        d3d.cpu_time = dev + 0x2c / 4;
+        dev[0x30 / 4] = (ULONG)d3d.cpu_time;
+        device_layout_5849 = true;
+        sync_device_surfaces();
     }
     /* Library code that still runs reads the current vertex shader's flags
        through the device; give it a quiet, empty one. */
