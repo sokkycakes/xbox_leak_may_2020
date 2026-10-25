@@ -19,7 +19,9 @@
 #include <errno.h>
 #include <math.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "../xbcompat.h"
@@ -28,6 +30,7 @@
 #include "nv2a_shaders.h"
 #include "dxt_decode.h"
 #include "ff_vsh.h"
+#include "ff_combiner.h"
 #include "shader_diagnostics.h"
 #include "cpu_compare_audit.h"
 static unsigned shader_diag_draw;   /* draws seen, for XBCOMPAT_SHADER_DIAGNOSTICS */
@@ -168,6 +171,8 @@ typedef struct d3d_state {
     float target_zmax;           /* largest value of the current depth buffer's format */
     float host_zmax;             /* the same for the GL depth buffer actually backing it */
     ULONG fbo;                   /* framebuffer object for texture targets */
+    ULONG bb_proxy_tex;          /* the back buffer's stand-in while it pairs with a depth texture */
+    bool bb_proxy;               /* d3d.fbo draws into bb_proxy_tex for the back buffer */
     struct { ULONG count; ULONG exclusive; D3DRECT rects[8]; } scissors;
     float screen_offset[2];
     float backbuffer_scale[2];
@@ -193,6 +198,11 @@ typedef struct d3d_state {
     bool stipple_on;             /* NV097_SET_STIPPLE_CONTROL: polygon stipple */
     bool stipple_dirty;          /* the pattern changed since GL last got it */
     ULONG stipple[32];           /* NV097_SET_STIPPLE_PATTERN: one row of 32 pixels each */
+    /* Set[VertexBlend]ModelView: matrices given to the hardware directly in
+       place of the ones derived from the transforms (the library's
+       D3DDIRTYFLAG_DIRECT_MODELVIEW, m_ModelViewTransform and
+       m_ProjectionViewport).  `composite` maps to the viewport's pixels. */
+    struct { bool on, blend, has_inv; ULONG count; D3DMATRIX mv[4], inv[4], composite, proj_vp; } direct_mv;
 } d3d_state;
 
 /* The device state.  With XBCOMPAT_ASYNC_DRAWS the title's threads set
@@ -250,7 +260,7 @@ enum {
     OP_RS = 1, OP_TSS, OP_VS_CONST, OP_VERTEX_SHADER, OP_TEXTURE, OP_STREAM, OP_INDICES, OP_TRANSFORM,
     OP_VIEWPORT, OP_DRAW, OP_DRAW_INDEXED, OP_DRAW_UP, OP_DRAW_INDEXED_UP, OP_BEGIN_END, OP_PIXEL_SHADER,
     OP_PS_CONST, OP_VS_INPUT, OP_RENDER_TARGET, OP_PALETTE, OP_RUN, OP_CLEAR, OP_LIGHT, OP_LIGHT_ENABLE,
-    OP_MATERIAL, OP_RAW,
+    OP_MATERIAL, OP_RAW, OP_NOP, OP_VIS_BEGIN, OP_VIS_END, OP_MODELVIEW, OP_BLEND_MODELVIEW, OP_SCISSORS,
 };
 
 /* An Xbox surface: a pixel container plus the texture it belongs to. */
@@ -273,6 +283,12 @@ static unsigned char rs_xlat[D3DRS_MAX];
 #define TSS(stage, i) (d3d.texture_state[(stage) * 32 + (i)])
 static float rs_float(ULONG i) { float f; memcpy(&f, &RS(i), 4); return f; }
 static float tss_float(int s, ULONG i) { float f; memcpy(&f, &d3d.texture_state[s * 32 + i], 4); return f; }
+/* Fixed-function stages that need a fragment program: bump env mapping
+   (ff_combiner.h).  Everything else stays on GL's texture environment. */
+static bool ff_fragment_program(void)
+{
+    return !d3d.pixel_shader && ff_combiner_needs_program(d3d.texture_state, RS(D3DRS_POINTSPRITEENABLE) != 0);
+}
 
 enum {
     D3DTSS_ADDRESSU = 0, D3DTSS_ADDRESSV = 1, D3DTSS_ADDRESSW = 2, D3DTSS_MAGFILTER = 3, D3DTSS_MINFILTER = 4,
@@ -297,16 +313,138 @@ static void backbuffer_read_begin(GLbitfield mask);
 static void backbuffer_read_end(void);
 static void hud_batch_flush(void), hud_profile_log(double frames);   /* fvf_batch.h */
 static GLuint cur_program;   /* the GL program bound for draws (see use_program) */
+/* Set from /tmp/xbcompat-trace-boot (a frame count; the file is removed):
+   the next title to create its device is traced from there until that frame,
+   for catching what it shows before its first videos. */
+static unsigned long trace_boot_frames;
+
 static bool ff_lighting_candidate, ff_primary_present, ff_secondary_present;
 static unsigned ff_texture_units, ff_weight_components;
 static bool ff_pretransformed;
 static void program_off(void);
+static const float *vertex_diffuse(void);
 static GLuint backbuffer_copy_texture(ULONG data, ULONG w, ULONG h);
+static void swap_cpu_backbuffer(void);
+static void front_buffer_update(void);
+static void front_buffer_memory(void);
+static void front_buffer_overlay(void);
+static void front_snap_take(void);
+/* GetBackBuffer(-1): see front_buffer_update.  snap holds its memory as
+   xbcompat last left it (see front_buffer_overlay). */
+static struct { struct D3DSurface *s; GLuint tex; volatile bool used; bool memory_stale; uint8_t *snap; } front;
+static void persisted_first_present(void);
 static void run_callbacks(void);
 static void pusher_drain(void);
 static void pusher_init(ULONG *dev);
 static void sync_device_surfaces(void);
 static bool device_layout_5849;   /* d3d.device is laid out like the 5849 CDevice */
+
+/* ---- the GL context across guest threads -------------------------------- */
+
+/* Each guest thread is a host thread, and the GL context is current on one
+   thread at a time.  On the Xbox any thread may draw, so long as the title
+   takes turns (D3D isn't thread safe there either): Splinter Cell draws its
+   loading bar and Swaps from a thread of its own while the first thread
+   loads, and those draws reached no context (black loading screens, no
+   bar).  So a thread that draws while another holds the context asks for it
+   (gl_require), and the holder lets it go at its next kernel call (a wait, a
+   sleep, a file read: xbc_gl_yield) or when it exits, never inside a D3D
+   call.  Threads that only set state or lock resources never ask.  With
+   queued drawing the render worker owns the context and none of this
+   applies. */
+static pthread_mutex_t gl_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t gl_cond XBC_COND_ALIGN = PTHREAD_COND_INITIALIZER;
+static bool gl_held;               /* current on some thread (under gl_lock) */
+static __thread bool gl_mine;      /* current on this thread */
+static __thread int gl_no_yield;   /* running a title callback from inside D3D: keep it */
+static volatile int gl_wanted;     /* threads waiting in gl_require */
+static pthread_t gl_creator;       /* made the window, and reads its events */
+/* Textures a thread without the context let go of, for the next holder. */
+static GLuint gl_deferred_deletes[256];
+static unsigned gl_deferred_count;
+void ke_wake_waiters(void) __attribute__((weak));   /* kernel/ke.c */
+
+static bool gl_lost(void) { return d3d.gl && !async_on && !gl_mine; }
+
+/* False when it couldn't get the context (GL calls then go nowhere, as
+   before any of this). */
+static bool gl_require(void)
+{
+    if (gl_mine || !d3d.gl || async_on) return true;
+    cpu_block();   /* translated builds: the holder needs the guest CPU to get to a kernel call */
+    pthread_mutex_lock(&gl_lock);
+    struct timespec give_up;
+    clock_gettime(CLOCK_REALTIME, &give_up);
+    give_up.tv_sec += 2;
+    __atomic_add_fetch(&gl_wanted, 1, __ATOMIC_SEQ_CST);
+    while (gl_held) {
+        /* A holder blocked in a kernel wait looks again. */
+        pthread_mutex_unlock(&gl_lock);
+        if (ke_wake_waiters) ke_wake_waiters();
+        pthread_mutex_lock(&gl_lock);
+        if (!gl_held) break;
+        struct timespec t;
+        clock_gettime(CLOCK_REALTIME, &t);
+        if (t.tv_sec > give_up.tv_sec || (t.tv_sec == give_up.tv_sec && t.tv_nsec >= give_up.tv_nsec)) break;
+        t.tv_nsec += 50000000;
+        if (t.tv_nsec >= 1000000000) { t.tv_sec++; t.tv_nsec -= 1000000000; }
+        pthread_cond_timedwait(&gl_cond, &gl_lock, &t);
+    }
+    __atomic_sub_fetch(&gl_wanted, 1, __ATOMIC_SEQ_CST);
+    if (gl_held || SDL_GL_MakeCurrent(d3d.window, d3d.gl) != 0) {
+        static unsigned warned;
+        if (warned++ < 4)
+            xlog("D3D: a thread draws without the GL context (%s)",
+                 gl_held ? "the thread holding it made no kernel call for 2 s" : SDL_GetError());
+        pthread_mutex_unlock(&gl_lock);
+        return false;
+    }
+    gl_held = gl_mine = true;
+    if (gl_deferred_count) glDeleteTextures(gl_deferred_count, gl_deferred_deletes);
+    gl_deferred_count = 0;
+    pthread_mutex_unlock(&gl_lock);
+    gc_reset();   /* anything set without the context never reached GL */
+    static unsigned handoffs;
+    if (handoffs++ < 8)
+        xlog("D3D: the GL context goes to host thread %#lx, which draws now (frame %lu)",
+             (unsigned long)pthread_self(), (unsigned long)d3d.frame);
+    return true;
+}
+
+static void gl_delete_texture(GLuint id)
+{
+    if (!gl_lost()) { glDeleteTextures(1, &id); return; }
+    pthread_mutex_lock(&gl_lock);
+    if (gl_deferred_count < sizeof(gl_deferred_deletes) / sizeof(gl_deferred_deletes[0]))
+        gl_deferred_deletes[gl_deferred_count++] = id;
+    pthread_mutex_unlock(&gl_lock);
+}
+
+static void gl_release(void)
+{
+    pthread_mutex_lock(&gl_lock);
+    SDL_GL_MakeCurrent(d3d.window, NULL);
+    gl_held = gl_mine = false;
+    pthread_cond_broadcast(&gl_cond);
+    pthread_mutex_unlock(&gl_lock);
+}
+
+/* From kernel calls: true while this thread holds the context another
+   thread waits for. */
+bool xbc_gl_yield_due(void)
+{
+    return gl_mine && !gl_no_yield && __atomic_load_n(&gl_wanted, __ATOMIC_RELAXED);
+}
+
+void xbc_gl_yield(void)
+{
+    if (xbc_gl_yield_due()) gl_release();
+}
+
+void xbc_gl_thread_exit(void)
+{
+    if (gl_mine) gl_release();
+}
 
 static ULONG direct3d_object[4];
 
@@ -411,7 +549,9 @@ void d3d_bind_globals(void)
     d3d.device_ptr = (ULONG *)hle_lookup_prefix("?g_pDevice@D3D@@");
     d3d.rs_count = D3DRS_MAX;
     bind_render_state_layout();
-    xlog("D3D: render states at %p, device at %p", (void *)d3d.render_state, (void *)d3d.device);
+    xlog("D3D: render states at %p, texture stage states at %p%s, device at %p", (void *)d3d.render_state,
+         (void *)d3d.texture_state, d3d.texture_state == d3d.texture_state_fallback ? " (not the title's)" : "",
+         (void *)d3d.device);
 }
 
 /* The D3D build the title links (its XBE library version table). */
@@ -532,6 +672,19 @@ static LONG NTAPI Direct3D_CreateDevice(UINT_ Adapter, ULONG DeviceType, PVOID p
          pp->BackBufferFormat, pp->EnableAutoDepthStencil ? "yes" : "no", pp->MultiSampleType);
 
     av_title_starting();
+    const char *boot_path = "/tmp/xbcompat-trace-boot";
+    FILE *boot = fopen(boot_path, "r");
+    if (!boot) boot = fopen(boot_path = "/data/xbox/xbcompat-trace-boot", "r");
+    if (boot) {
+        unsigned long n = 0;
+        if (fscanf(boot, "%lu", &n) != 1 || !n) n = 30;
+        fclose(boot);
+        if (!unlink(boot_path)) {
+            trace_boot_frames = d3d.frame + n;
+            g_trace = 1;
+            xlog("D3D: tracing from device creation to frame %lu", trace_boot_frames);
+        }
+    }
     if (SDL_Init(SDL_INIT_VIDEO) != 0) fatal("SDL_Init: %s", SDL_GetError());
     install_fault_handlers();
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
@@ -551,6 +704,8 @@ static LONG NTAPI Direct3D_CreateDevice(UINT_ Adapter, ULONG DeviceType, PVOID p
     if (!d3d.window) fatal("SDL_CreateWindow: %s", SDL_GetError());
     d3d.gl = SDL_GL_CreateContext(d3d.window);
     if (!d3d.gl) fatal("SDL_GL_CreateContext: %s", SDL_GetError());
+    gl_held = gl_mine = true;
+    gl_creator = pthread_self();
     shader_diagnostics_init();
     gc_reset();
     glGetIntegerv(GL_MAX_VERTEX_ATTRIBS, &host_vertex_attribs);
@@ -580,6 +735,7 @@ static LONG NTAPI Direct3D_CreateDevice(UINT_ Adapter, ULONG DeviceType, PVOID p
     load_fbo_functions();
     if (!create_window_framebuffer()) {
         SDL_GL_DeleteContext(d3d.gl); d3d.gl = NULL;
+        gl_held = gl_mine = false;
         SDL_DestroyWindow(d3d.window); d3d.window = NULL;
         if (ppDevice) *ppDevice = NULL;
         return D3DERR_NOTAVAILABLE;
@@ -678,11 +834,44 @@ static Uint64 prof_draw_begin(void)
 static unsigned long depth_gpu_writes;
 /* The depth memory's hash and depth_gpu_writes when they last agreed. */
 static struct { uint64_t hash; unsigned long writes; } zsync;
+/* The back buffer's memory as it was when it last matched GL (an upload of
+   CPU writes, or a read back): sampled, since views of the back buffer are
+   made several times a frame. */
+static void container_size(const D3DPixelContainer *t, ULONG *w, ULONG *h, ULONG *pitch);
+static struct { ULONG data; uint64_t hash; } bbsync;
+static uint64_t backbuffer_memory_hash(void)
+{
+    ULONG w, h, pitch;
+    container_size((D3DPixelContainer *)d3d.backbuffer, &w, &h, &pitch);
+    if (w > (ULONG)d3d.width) w = d3d.width;
+    if (h > (ULONG)d3d.height) h = d3d.height;
+    const uint8_t *px = (const uint8_t *)(d3d.backbuffer->Data | CONTIG_BASE);
+    uint64_t x = 0xcbf29ce484222325ull;
+    for (ULONG y = 0; y < h; y += 2) {
+        const uint64_t *row = (const uint64_t *)(px + y * pitch);
+        for (ULONG i = y & 6; i < w * 4 / 8; i += 8) x = (x ^ row[i]) * 0x100000001b3ull;
+    }
+    return x;
+}
+static void backbuffer_synced(void)
+{
+    if (!d3d.backbuffer) return;
+    bbsync.data = d3d.backbuffer->Data;
+    bbsync.hash = backbuffer_memory_hash();
+}
 
+static unsigned long draw_serial;   /* every draw: see swap_cpu_backbuffer */
 static void debug_dump_draw(void)
 {
     stats.draws++;
-    if (d3d.target_depth && d3d.target_depth == d3d.depth) depth_gpu_writes++;
+    draw_serial++;
+    /* Only draws that can write depth or stencil count: Splinter Cell draws
+       its loading picture (decoded into this memory) and progress bar with
+       z writes off, and counting those read the GPU's depth back over the
+       picture, so no level's loading screen showed. */
+    if (d3d.target_depth && d3d.target_depth == d3d.depth &&
+        ((RS(D3DRS_ZENABLE) && RS(D3DRS_ZWRITEENABLE)) || RS(D3DRS_STENCILENABLE)))
+        depth_gpu_writes++;
     static const char *dir; static int checked, n; static ULONG frame;
     if (!checked) {
         dir = getenv("XBCOMPAT_DUMP_DRAWS");
@@ -738,13 +927,19 @@ static void flush_cpu_backbuffer(void)
     for (ULONG y = 0; y < h; y++) memcpy(tmp + (h - 1 - y) * w * bytes, px + y * pitch, w * bytes);
     draw_window_pixels_format(tmp, format, type);
     free(tmp);
+    backbuffer_synced();
 }
 
 /* Replace the window's color buffer with BGRA pixels, bottom row first. */
 static void draw_window_pixels(const uint8_t *tmp)
 { draw_window_pixels_format(tmp, GL_BGRA, GL_UNSIGNED_BYTE); }
 
+static void draw_window_pixels_masked(const uint8_t *tmp, GLenum format, GLenum type, bool masked);
 static void draw_window_pixels_format(const uint8_t *tmp, GLenum format, GLenum type)
+{ draw_window_pixels_masked(tmp, format, type, false); }
+
+/* masked: only pixels with alpha above 0 are drawn. */
+static void draw_window_pixels_masked(const uint8_t *tmp, GLenum format, GLenum type, bool masked)
 {
     shader_diagnostics_mark(d3d.frame, ++shader_diag_draw, 0, 0, 0, "cpu-pixels");
     if (!p_glWindowPos2i) p_glWindowPos2i = SDL_GL_GetProcAddress("glWindowPos2i");
@@ -760,6 +955,7 @@ static void draw_window_pixels_format(const uint8_t *tmp, GLenum format, GLenum 
     glDisable(GL_STENCIL_TEST); glDisable(GL_SCISSOR_TEST); glDisable(GL_LIGHTING);
     glDisable(GL_DITHER); glDisable(GL_POLYGON_STIPPLE);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    if (masked) { glEnable(GL_ALPHA_TEST); glAlphaFunc(GL_GREATER, 0.0f); }
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     if (p_glBindFramebuffer) p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
     p_glWindowPos2i(0, 0);
@@ -1014,6 +1210,7 @@ static void swap_begin_frame(void)
 {
     d3d.frame++;
     __atomic_store_n(&published_frame_count, d3d.frame, __ATOMIC_RELEASE);
+    if (d3d.frame == 1) xlog("D3D: first Present");
     {
         /* Debug aid: XBCOMPAT_TRACE_FRAME=n turns --trace on for frame n only. */
         static long trace_frame = -2;
@@ -1023,6 +1220,11 @@ static void swap_begin_frame(void)
            for catching a frame in the middle of play. */
         static int traced_by_file;
         if (traced_by_file) { g_trace = 0; traced_by_file = 0; }
+        if (trace_boot_frames && d3d.frame >= trace_boot_frames) {
+            trace_boot_frames = 0;
+            g_trace = 0;
+            xlog("D3D: boot trace ends at frame %lu", (unsigned long)d3d.frame);
+        }
         if (trace_frame < 0 && !access("/tmp/xbcompat-trace-frame", F_OK) && !unlink("/tmp/xbcompat-trace-frame")) {
             g_trace = 1;
             traced_by_file = 1;
@@ -1032,9 +1234,11 @@ static void swap_begin_frame(void)
 }
 
 /* The GPU's part: the frame goes to the screen. */
+static void guide_overlay(void);
+
 static void swap_present(void)
 {
-    TIMED_CPU(t_present, c_present, present_window_framebuffer(); cpu_block(); DETAIL_TIMED(t_swap, SDL_GL_SwapWindow(d3d.window));
+    TIMED_CPU(t_present, c_present, present_window_framebuffer(); guide_overlay(); cpu_block(); DETAIL_TIMED(t_swap, SDL_GL_SwapWindow(d3d.window));
           DETAIL_TIMED(t_restore, restore_window_framebuffer()));
     restore_overlay();
     pace_present();
@@ -1087,11 +1291,14 @@ static void swap_gpu_frame_end(void)
     cpu_compare_audit_frame(d3d.frame);
 }
 
-/* Window events; true when the window was closed. */
+/* Window events; true when the window was closed.  Only the thread that
+   made the window reads them (SDL wants that); another thread's Swap leaves
+   them for the next. */
 static bool swap_window_events(void)
 {
     SDL_Event e;
     bool quit = false;
+    if (!pthread_equal(pthread_self(), gl_creator)) return false;
     while (SDL_PollEvent(&e))
         if (e.type == SDL_QUIT) quit = true;
     return quit;
@@ -1108,11 +1315,13 @@ static void swap_finish(void)
         ULONG vb = d3dv.vblank_count, missed = vb - d3dv.vblank_at_swap > 1 ? vb - d3dv.vblank_at_swap - 1 : 0;
         ULONG data[5] = { d3d.frame, vb, missed, 0, 16667 };
         d3dv.vblank_at_swap = vb;
+        gl_no_yield++;
 #ifdef XBC_TRANSLATED
         CPU_CALL(swap_cb, CONV_CDECL, (uint32_t)data);
 #else
         ((void (CDECLAPI *)(ULONG *))swap_cb)(data);
 #endif
+        gl_no_yield--;
     }
 }
 
@@ -1141,21 +1350,115 @@ static void swap_exit_check(void)
 
 static ULONG NTAPI D3DDevice_Swap(ULONG Flags)
 {
+    gl_require();
     (void)Flags;
     if (async_front()) return async_swap();
     pusher_drain();
     hud_batch_flush();
+    swap_cpu_backbuffer();
     flush_cpu_backbuffer();
+    front_buffer_overlay();
+    front_buffer_update();
     swap_begin_frame();
     swap_gpu_frame_end();
     ke_frame_presented();
     run_callbacks();
     swap_screenshot();
     swap_present();
+    persisted_first_present();
     swap_finish();
     swap_checks(swap_window_events());
     swap_exit_check();
     return d3d.frame;
+}
+
+/* The window clip (SetScissors) as GL scissor boxes: none (n < 0) with no
+   rectangles set, which leaves the viewport; else disjoint boxes covering
+   the union of the rectangles (inclusive) or the target outside all of them
+   (exclusive).  GL has one scissor box, so a draw runs once per box
+   (scissor_pass); the boxes don't overlap, so blending sees each pixel once. */
+#define SCISSOR_BOXES (17 * 17)
+static struct { int n; GLint box[SCISSOR_BOXES][4]; } scissor_boxes = { -1, { { 0 } } };
+
+static int long_cmp(const void *a, const void *b)
+{
+    LONG x = *(const LONG *)a, y = *(const LONG *)b;
+    return x < y ? -1 : x > y;
+}
+
+static void scissor_box_add(LONG x1, LONG y1, LONG x2, LONG y2)
+{
+    /* Grow a box from the band above when it spans the same columns. */
+    for (int i = 0; i < scissor_boxes.n; i++) {
+        GLint *b = scissor_boxes.box[i];
+        if (b[0] == x1 && b[2] == x2 - x1 && b[1] + b[3] == y1) { b[3] = y2 - b[1]; return; }
+    }
+    if (scissor_boxes.n == SCISSOR_BOXES) return;
+    GLint *b = scissor_boxes.box[scissor_boxes.n++];
+    b[0] = x1; b[1] = y1; b[2] = x2 - x1; b[3] = y2 - y1;
+}
+
+static void scissor_build(void)
+{
+    ULONG count = d3d.scissors.count > 8 ? 8 : d3d.scissors.count;
+    const D3DRECT *r = d3d.scissors.rects;
+    scissor_boxes.n = -1;
+    if (!count) return;
+    scissor_boxes.n = 0;
+    if (count == 1 && !d3d.scissors.exclusive) {
+        scissor_boxes.n = 1;
+        GLint *b = scissor_boxes.box[0];
+        b[0] = r->x1; b[1] = r->y1; b[2] = r->x2 - r->x1; b[3] = r->y2 - r->y1;
+    } else {
+        /* Cut the target along every rectangle edge; each cell is wholly
+           inside or outside each rectangle.  Rows of wanted cells become
+           spans, and spans repeating down the bands one box. */
+        LONG w = d3d.rt_width, h = d3d.rt_height, xs[18], ys[18];
+        unsigned nx = 0, ny = 0;
+        xs[nx++] = 0; xs[nx++] = w; ys[ny++] = 0; ys[ny++] = h;
+        for (ULONG i = 0; i < count; i++) {
+            xs[nx++] = r[i].x1 < 0 ? 0 : r[i].x1 > w ? w : r[i].x1;
+            xs[nx++] = r[i].x2 < 0 ? 0 : r[i].x2 > w ? w : r[i].x2;
+            ys[ny++] = r[i].y1 < 0 ? 0 : r[i].y1 > h ? h : r[i].y1;
+            ys[ny++] = r[i].y2 < 0 ? 0 : r[i].y2 > h ? h : r[i].y2;
+        }
+        qsort(xs, nx, sizeof xs[0], long_cmp);
+        qsort(ys, ny, sizeof ys[0], long_cmp);
+        for (unsigned j = 0; j + 1 < ny; j++) {
+            if (ys[j] == ys[j + 1]) continue;
+            LONG start = -1;
+            for (unsigned i = 0; i + 1 < nx; i++) {
+                if (xs[i] == xs[i + 1]) continue;
+                bool inside = false;
+                for (ULONG k = 0; k < count && !inside; k++)
+                    inside = xs[i] >= r[k].x1 && xs[i + 1] <= r[k].x2 && ys[j] >= r[k].y1 && ys[j + 1] <= r[k].y2;
+                bool want = inside != (d3d.scissors.exclusive != 0);
+                if (want && start < 0) start = xs[i];
+                if (!want && start >= 0) {
+                    scissor_box_add(start, ys[j], xs[i], ys[j + 1]);
+                    start = -1;
+                }
+            }
+            if (start >= 0) scissor_box_add(start, ys[j], xs[nx - 1], ys[j + 1]);
+        }
+    }
+    /* To GL's window coordinates (rows bottom-up) unless drawing into a
+       texture, which is stored flipped. */
+    if (!d3d.rt_texture)
+        for (int i = 0; i < scissor_boxes.n; i++) {
+            GLint *b = scissor_boxes.box[i];
+            b[1] = d3d.rt_height - (b[1] + b[3]);
+        }
+}
+
+/* Before each GL draw call: false once the draw has gone to every box. */
+static bool scissor_pass(unsigned pass)
+{
+    if (scissor_boxes.n < 0) return pass == 0;
+    if ((int)pass >= scissor_boxes.n) return false;
+    const GLint *b = scissor_boxes.box[pass];
+    glScissor(b[0], b[1], b[2], b[3]);
+    return true;
 }
 
 static void apply_viewport(void)
@@ -1167,20 +1470,61 @@ static void apply_viewport(void)
     if (d3d.rt_texture) glViewport(v->X, v->Y, v->Width, v->Height);
     else glViewport(v->X, d3d.rt_height - (v->Y + v->Height), v->Width, v->Height);
     glDepthRange(v->MinZ, v->MaxZ);
-    if (d3d.scissors.count && !d3d.scissors.exclusive) {
-        const D3DRECT *r = &d3d.scissors.rects[0];
+    scissor_build();
+    if (scissor_boxes.n >= 0) {
         glEnable(GL_SCISSOR_TEST);
-        if (d3d.rt_texture) glScissor(r->x1, r->y1, r->x2 - r->x1, r->y2 - r->y1);
-        else glScissor(r->x1, d3d.rt_height - r->y2, r->x2 - r->x1, r->y2 - r->y1);
+        scissor_pass(0);
     } else {
         glDisable(GL_SCISSOR_TEST);
     }
 }
 
 static unsigned clear_serial;   /* bumped per Clear: see backbuffer_copy_texture */
+
+/* A frame with no draws or clears whose back buffer memory changed since it
+   last matched GL: the CPU wrote it through a pointer kept from an earlier
+   lock, and the hardware would show that.  Splinter Cell presents for
+   seconds without drawing while a level loads. */
+static bool frame_idle;   /* this Swap's frame had no draws or clears */
+
+/* Every byte of the back buffer's memory, for runs of frames with no draws:
+   the sampled hash can miss a few rows of progress bar. */
+static uint64_t backbuffer_memory_hash_full(void)
+{
+    ULONG w, h, pitch;
+    container_size((D3DPixelContainer *)d3d.backbuffer, &w, &h, &pitch);
+    if (h > (ULONG)d3d.height) h = d3d.height;
+    const uint64_t *q = (const uint64_t *)(d3d.backbuffer->Data | CONTIG_BASE);
+    uint64_t x = 0xcbf29ce484222325ull;
+    for (size_t i = 0, n = (size_t)pitch * h / 8; i < n; i++) x = (x ^ q[i]) * 0x100000001b3ull;
+    return x;
+}
+
+static void swap_cpu_backbuffer(void)
+{
+    static unsigned long draws;
+    static unsigned clears;
+    static bool was_idle;
+    static uint64_t idle_hash;
+    bool idle = draws == draw_serial && clears == clear_serial;
+    draws = draw_serial;
+    clears = clear_serial;
+    /* Idle for the front buffer copy too, unless CPU writes go out. */
+    frame_idle = idle && !d3d.bb_cpu_dirty;
+    bool prev_idle = was_idle;
+    was_idle = false;
+    if (!idle || d3d.bb_cpu_dirty || !d3d.backbuffer || d3d.backbuffer->Data != bbsync.data) return;
+    uint64_t full = backbuffer_memory_hash_full();
+    bool changed = backbuffer_memory_hash() != bbsync.hash || (prev_idle && full != idle_hash);
+    was_idle = true;
+    idle_hash = full;
+    TRACE_ALL("D3D: frame with no draws, back buffer memory %s", changed ? "written by the CPU, shown" : "unchanged");
+    if (changed) d3d.bb_cpu_dirty = true, frame_idle = false;
+}
 static void NTAPI D3DDevice_Clear(ULONG Count, const D3DRECT *pRects, ULONG Flags, ULONG Color, float Z,
                                   ULONG Stencil)
 {
+    gl_require();
     pusher_drain();
     if (async_front()) { async_clear(Count, pRects, Flags, Color, Z, Stencil); return; }
     hud_batch_flush();
@@ -1204,18 +1548,31 @@ static void NTAPI D3DDevice_Clear(ULONG Count, const D3DRECT *pRects, ULONG Flag
     }
     if (Flags & 1) { glClearDepth(Z); glDepthMask(GL_TRUE); mask |= GL_DEPTH_BUFFER_BIT; }
     if (Flags & 2) { glClearStencil(Stencil); glStencilMask(0xFF); mask |= GL_STENCIL_BUFFER_BIT; }
-    if (Count && pRects) {
-        glEnable(GL_SCISSOR_TEST);
-        for (ULONG i = 0; i < Count; i++) {
-            const D3DRECT *r = &pRects[i];
-            if (d3d.rt_texture) glScissor(r->x1, r->y1, r->x2 - r->x1, r->y2 - r->y1);
-            else glScissor(r->x1, d3d.rt_height - r->y2, r->x2 - r->x1, r->y2 - r->y1);
-            glClear(mask);
+    /* The library clips each rectangle, and the whole-target clear without
+       any, to the viewport; the scissors play no part.  GL's clear ignores
+       the viewport, so without this a clear of one viewport (a shadow
+       buffer tile, a split screen) wiped the whole target, and a clear
+       after a draw kept that draw's scissor. */
+    const D3DVIEWPORT8 *v = &d3d.viewport;
+    D3DRECT whole = { (LONG)v->X, (LONG)v->Y, (LONG)(v->X + v->Width), (LONG)(v->Y + v->Height) };
+    if (!Count || !pRects) { Count = 1; pRects = &whole; }
+    for (ULONG i = 0; i < Count; i++) {
+        D3DRECT r = pRects[i];
+        if (r.x1 < whole.x1) r.x1 = whole.x1;
+        if (r.y1 < whole.y1) r.y1 = whole.y1;
+        if (r.x2 > whole.x2) r.x2 = whole.x2;
+        if (r.y2 > whole.y2) r.y2 = whole.y2;
+        if (r.x1 >= r.x2 || r.y1 >= r.y2) continue;
+        if (r.x1 <= 0 && r.y1 <= 0 && r.x2 >= (LONG)d3d.rt_width && r.y2 >= (LONG)d3d.rt_height) {
+            glDisable(GL_SCISSOR_TEST);   /* the whole target: a plain (fast) clear */
+        } else {
+            glEnable(GL_SCISSOR_TEST);
+            if (d3d.rt_texture) glScissor(r.x1, r.y1, r.x2 - r.x1, r.y2 - r.y1);
+            else glScissor(r.x1, d3d.rt_height - r.y2, r.x2 - r.x1, r.y2 - r.y1);
         }
-        glDisable(GL_SCISSOR_TEST);
-    } else {
         glClear(mask);
     }
+    glDisable(GL_SCISSOR_TEST);
     glColorMask(1, 1, 1, 1);
 }
 
@@ -1244,10 +1601,14 @@ static LONG NTAPI D3DDevice_CreateVertexBuffer(UINT_ Length, ULONG Usage, ULONG 
     return D3D_OK;
 }
 
+static void note_vb_lock(const UCHAR *p, size_t len);
+
 static void NTAPI D3DVertexBuffer_Lock(D3DResource *vb, UINT_ Offset, UINT_ Size, PVOID *ppbData, ULONG Flags)
 {
-    (void)Size; (void)Flags;
     *ppbData = (UCHAR *)resource_data(vb) + Offset;
+    /* Size 0 locks to the end of the buffer.  The cached GL copies of what
+       a write lock covers are compared in full at their next draw. */
+    if (!(Flags & 0x80 /* D3DLOCK_READONLY */)) note_vb_lock(*ppbData, Size);
 }
 
 static ULONG NTAPI D3DResource_AddRef(D3DResource *r)
@@ -1376,12 +1737,33 @@ static void NTAPI D3D_FreeContiguousMemory(PVOID p)
     MmFreeContiguousMemory(p);
 }
 
+/* Texture data registered again, for the next texture lookup (on the GL
+   thread: titles load bundles on threads of their own) to drop the GL
+   copies of. */
+#define TEX_STALE 4096
+static ULONG tex_stale[TEX_STALE];
+static unsigned tex_stale_put, tex_stale_got;
+
+static void tex_stale_note(ULONG data)
+{
+    unsigned n = __atomic_load_n(&tex_stale_put, __ATOMIC_RELAXED);
+    tex_stale[n % TEX_STALE] = data;
+    __atomic_store_n(&tex_stale_put, n + 1, __ATOMIC_RELEASE);
+}
+
+static void tex_stale_drop(void);
+
 static void NTAPI D3DResource_Register(D3DResource *r, PVOID base)
 {
     ULONG mem = (ULONG)base + r->Data, type = r->Common & D3DCOMMON_TYPE_MASK;
     /* Push and index buffers keep a virtual address (the CPU reads them);
        everything else a GPU (physical) one. */
     r->Data = type == D3DCOMMON_TYPE_PUSHBUFFER || type == D3DCOMMON_TYPE_INDEXBUFFER ? mem : (mem & 0x7FFFFFFF);
+    /* A bundle (XPR) loaded again into the same memory registers the same
+       addresses over new contents: the GL copies made from the old ones go. */
+    if (type == D3DCOMMON_TYPE_TEXTURE || type == D3DCOMMON_TYPE_SURFACE) tex_stale_note(r->Data);
+    else if (type == D3DCOMMON_TYPE_VERTEXBUFFER || type == D3DCOMMON_TYPE_INDEXBUFFER)
+        note_vb_lock((const UCHAR *)resource_data(r), 0);
 }
 
 /* ---- textures ---------------------------------------------------------- */
@@ -1431,7 +1813,7 @@ static void tex_invalidate(ULONG data)
     while (*pp) {
         tex_entry *e = *pp;
         if (e->data == data) {
-            glDeleteTextures(1, &e->id);
+            gl_delete_texture(e->id);
             *pp = e->next;
             free(e);
         } else {
@@ -1583,11 +1965,18 @@ static void upload_image3(GLenum target, GLint level, ULONG fmt, ULONG w, ULONG 
         return;
     }
     /* conv: 1 = V8U8 (bump), 2 = L6V5U5 (bump), both expanded to RGBA8 with
-       du/dv as the signed bytes' bit patterns in r/g and luminance in b;
+       du/dv in r/g as signed bytes + 128 and luminance in b: the hardware
+       filters these channels as signed values (the bump stage forces
+       D3DTSIGN_GSIGNED | BSIGNED), and with the bias GL's unsigned
+       filtering interpolates them the same way (psh bump_biased);
        3 = YUY2 and 4 = UYVY (video frames), converted to RGB with BT.601;
        5 = A8, which the NV2A samples as white with that alpha;
        6 = AL8, one byte that is both luminance and alpha;
-       7 = P8, an index into the stage's palette of A8R8G8B8 colors. */
+       7 = P8, an index into the stage's palette of A8R8G8B8 colors;
+       8 = V16U16, kept to its high bytes and stored like V8U8;
+       9 = R8B8, red in the high byte and blue in the low one (the XDK's
+       pixel descriptions, e.g. xfont's g_Formats and the D3D test
+       framework's masks 0xFF00 / 0x00FF): no green, and opaque. */
     struct { ULONG fmt; int bpp; bool swizzled; GLenum gl_fmt, gl_type; bool force_alpha; int conv; } table[] = {
         { 0x3A, 4, true,  GL_RGBA, GL_UNSIGNED_BYTE, false, 0 },               /* A8B8G8R8 / Q8W8V8U8 */
         { 0x3F, 4, false, GL_RGBA, GL_UNSIGNED_BYTE, false, 0 },               /* LIN_A8B8G8R8 */
@@ -1605,6 +1994,8 @@ static void upload_image3(GLenum target, GLint level, ULONG fmt, ULONG w, ULONG 
         { 0x17, 2, false, GL_RGBA, GL_UNSIGNED_BYTE, false, 1 },            /* LIN_V8U8 / LIN_G8B8 */
         { 0x27, 2, true,  GL_RGBA, GL_UNSIGNED_BYTE, false, 2 },            /* L6V5U5 / R6G5B5 */
         { 0x37, 2, false, GL_RGBA, GL_UNSIGNED_BYTE, false, 2 },            /* LIN_L6V5U5 */
+        { 0x33, 4, true,  GL_RGBA, GL_UNSIGNED_BYTE, false, 8 },            /* V16U16 */
+        { 0x36, 4, false, GL_RGBA, GL_UNSIGNED_BYTE, false, 8 },            /* LIN_V16U16 */
         { 0x06, 4, true,  GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, false, 0 },   /* A8R8G8B8 */
         { 0x07, 4, true,  GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, true, 0 },    /* X8R8G8B8 */
         { 0x12, 4, false, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, false, 0 },   /* LIN_A8R8G8B8 */
@@ -1626,6 +2017,8 @@ static void upload_image3(GLenum target, GLint level, ULONG fmt, ULONG w, ULONG 
         { 0x1B, 1, false, GL_RGBA, GL_UNSIGNED_BYTE, false, 6 },              /* LIN_AL8 */
         { 0x1A, 2, true,  GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE, false, 0 },   /* A8L8 */
         { 0x20, 2, false, GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE, false, 0 },   /* LIN_A8L8 */
+        { 0x29, 2, true,  GL_RGBA, GL_UNSIGNED_BYTE, false, 9 },            /* R8B8 */
+        { 0x16, 2, false, GL_RGBA, GL_UNSIGNED_BYTE, false, 9 },            /* LIN_R8B8 */
         { 0x24, 2, false, GL_RGBA, GL_UNSIGNED_BYTE, false, 3 },            /* YUY2 */
         { 0x25, 2, false, GL_RGBA, GL_UNSIGNED_BYTE, false, 4 },            /* UYVY */
     };
@@ -1681,7 +2074,21 @@ static void upload_image3(GLenum target, GLint level, ULONG fmt, ULONG w, ULONG 
     }
     if (table[i].force_alpha && bpp == 4)
         for (ULONG k = 0; k < w * h * d; k++) px[k * 4 + 3] = 0xFF;
-    if (table[i].conv == 7) {
+    if (table[i].conv == 8) {
+        for (ULONG k = 0; k < w * h * d; k++) {
+            uint8_t *o = px + k * 4;
+            o[0] = o[1] ^ 0x80; o[1] = o[3] ^ 0x80; o[2] = o[3] = 0xFF;
+        }
+    } else if (table[i].conv == 9) {
+        uint8_t *rgba = malloc(w * h * d * 4);
+        for (ULONG k = 0; k < w * h * d; k++) {
+            uint8_t *o = rgba + k * 4;
+            o[0] = px[k * 2 + 1]; o[1] = 0; o[2] = px[k * 2]; o[3] = 0xFF;
+        }
+        free(px);
+        px = rgba;
+        bpp = 4;
+    } else if (table[i].conv == 7) {
         uint8_t *bgra = malloc(w * h * d * 4);
         for (ULONG k = 0; k < w * h * d; k++) {
             uint32_t c = tex_palette && px[k] < tex_palette_count ? tex_palette[px[k]] : 0xFFFF00FF;
@@ -1721,11 +2128,11 @@ static void upload_image3(GLenum target, GLint level, ULONG fmt, ULONG w, ULONG 
             uint16_t v = px[k * 2] | px[k * 2 + 1] << 8;
             uint8_t *o = rgba + k * 4;
             if (table[i].conv == 1) {
-                o[0] = v & 0xFF; o[1] = v >> 8; o[2] = 0xFF;
+                o[0] = (v & 0xFF) ^ 0x80; o[1] = (v >> 8) ^ 0x80; o[2] = 0xFF;
             } else {
                 int du = (int)(v << 27) >> 27, dv = (int)((v >> 5) << 27) >> 27;   /* signed 5-bit */
-                o[0] = (uint8_t)(int8_t)(du * 127 / 15 < -128 ? -128 : du * 127 / 15);
-                o[1] = (uint8_t)(int8_t)(dv * 127 / 15 < -128 ? -128 : dv * 127 / 15);
+                o[0] = (uint8_t)(128 + (du * 127 / 15 < -128 ? -128 : du * 127 / 15));
+                o[1] = (uint8_t)(128 + (dv * 127 / 15 < -128 ? -128 : dv * 127 / 15));
                 o[2] = (uint8_t)(((v >> 10) & 0x3F) * 255 / 63);
             }
             o[3] = 0xFF;
@@ -1779,6 +2186,8 @@ static void readback_surface(D3DSurface *s, bool depth)
     free(tmp);
 }
 
+static void upload_depth_memory(void);
+
 /* FNV-1a over the device depth buffer's visible rows. */
 static uint64_t depth_memory_hash(void)
 {
@@ -1795,8 +2204,22 @@ static uint64_t depth_memory_hash(void)
     return x;
 }
 
+static void tex_stale_drop(void)
+{
+    unsigned put = __atomic_load_n(&tex_stale_put, __ATOMIC_ACQUIRE);
+    if (put == tex_stale_got) return;
+    if (put - tex_stale_got > TEX_STALE) {
+        xlog("D3D: %u textures registered again at once; the oldest %u keep their GL copies",
+             put - tex_stale_got, put - tex_stale_got - TEX_STALE);
+        tex_stale_got = put - TEX_STALE;
+    }
+    for (unsigned i = tex_stale_got; i != put; i++) tex_invalidate(tex_stale[i % TEX_STALE]);
+    tex_stale_got = put;
+}
+
 static GLuint texture_for(D3DPixelContainer *t)
 {
+    tex_stale_drop();
     if (hud_packet_active)   /* a captured HUD packet bound its textures already */
         for (int s = 0; s < 4; s++)
             if (d3d.textures[s] == (D3DResource *)t) return hud_packet_texture_id[s];
@@ -1807,7 +2230,29 @@ static GLuint texture_for(D3DPixelContainer *t)
     bool on_color = d3d.backbuffer && va == (d3d.backbuffer->Data | CONTIG_BASE) && t != (D3DPixelContainer *)d3d.backbuffer;
     bool on_depth = d3d.depth && va == (d3d.depth->Data | CONTIG_BASE) && t != (D3DPixelContainer *)d3d.depth;
     if (on_color || on_depth) hud_batch_flush();   /* queued draws land in the frame first */
+    if (front.s && va == (front.s->Data | CONTIG_BASE) && t != (D3DPixelContainer *)front.s) {
+        ULONG fmt = (t->Format >> 8) & 0xFF;
+        if (!front.tex) front_buffer_update();   /* asked for before a Swap: the frame so far */
+        if (front.tex && (fmt == 0x12 || fmt == 0x1E)) {
+            TRACE_ALL("D3D: view of the front buffer at %#x", (unsigned)t->res.Data);
+            return front.tex;
+        }
+        front_buffer_memory();
+    }
     if (on_color && (whatif == WHATIF_NO_BBVIEW || whatif == WHATIF_BOTH)) { whatif_skip_draw = true; return 0; }
+    if (on_color && d3d.backbuffer->Data == bbsync.data && (d3d.bb_cpu_dirty || backbuffer_memory_hash() != bbsync.hash)) {
+        /* The CPU wrote the back buffer's memory, locked or through a
+           pointer kept from an earlier lock: Splinter Cell copies each
+           loading and menu picture in that way and cross-fades from a view
+           of it, which sampled GL's stale frame (all white after the boot
+           quad).  Load the memory into the frame first. */
+        GLuint program = cur_program;
+        d3d.bb_cpu_dirty = true;
+        flush_cpu_backbuffer();
+        gc_reset();
+        if (program) { p_glUseProgram(program); cur_program = program; }
+        TRACE_ALL("D3D: back buffer memory written by the CPU loaded before a view of it");
+    }
     if (on_color) {
         /* A 32-bit view of the back buffer (Phantom Dust filters the frame
            through three every frame): copy it on the GPU, no readback. */
@@ -1818,6 +2263,7 @@ static GLuint texture_for(D3DPixelContainer *t)
     }
     if (on_color) {
         readback_surface(d3d.backbuffer, false);
+        backbuffer_synced();
         tex_invalidate(t->res.Data);
     }
     if (on_depth) {
@@ -1829,7 +2275,11 @@ static GLuint texture_for(D3DPixelContainer *t)
            drawn into it since the last sync and the CPU has not changed the
            memory since then. */
         uint64_t h = depth_memory_hash();
+        TRACE_ALL("D3D: depth view %#x: memory %s, gpu writes %lu (synced at %lu)%s", (unsigned)t->res.Data,
+                  h != zsync.hash ? "changed by the CPU" : "unchanged", depth_gpu_writes, zsync.writes,
+                  h == zsync.hash && zsync.writes != depth_gpu_writes ? ", reading the GPU's depth back" : "");
         if (h != zsync.hash) {
+            upload_depth_memory();
             zsync.hash = h;
             zsync.writes = depth_gpu_writes;
             tex_invalidate(t->res.Data);
@@ -1892,6 +2342,7 @@ static GLuint texture_for(D3DPixelContainer *t)
 static void NTAPI D3DDevice_SetTexture(ULONG Stage, D3DResource *t)
 {
     if (d3d.recording) { ULONG a[2] = { Stage, (ULONG)t }; pb_record(OP_TEXTURE, a, sizeof(a)); }
+    TRACE_ALL("D3D: SetTexture(%u, %p) data %#x", Stage, (void *)t, t ? (unsigned)t->Data : 0);
     if (Stage < 4) d3d.textures[Stage] = t;
 }
 
@@ -1956,8 +2407,9 @@ static void combine_arg(bool alpha, int n, ULONG arg, bool use_alpha, bool inver
     glTexEnvi(GL_TEXTURE_ENV, alpha ? op_a[n] : op_rgb[n], operand);
 }
 
-/* Map one D3D texture op onto GL_COMBINE for either RGB or alpha. */
-static void combine(bool alpha, ULONG op, ULONG arg0, ULONG arg1, ULONG arg2)
+/* Map one D3D texture op onto GL_COMBINE for either RGB or alpha.
+   `no_texture`: the stage has no texture set. */
+static void combine(bool alpha, ULONG op, ULONG arg0, ULONG arg1, ULONG arg2, bool no_texture)
 {
     GLenum mode_p = alpha ? GL_COMBINE_ALPHA : GL_COMBINE_RGB;
     GLenum scale = alpha ? GL_ALPHA_SCALE : GL_RGB_SCALE;
@@ -2015,6 +2467,16 @@ static void combine(bool alpha, ULONG op, ULONG arg0, ULONG arg1, ULONG arg2)
         default:
             mode = GL_MODULATE;
         }
+    }
+    if (no_texture) {
+        /* A stage reading a texture it doesn't have selects CURRENT instead
+           (combiner.cpp, TSS_USES_NULL_TEXTURE): the diffuse colour in stage
+           0.  Splinter Cell draws its loading bar through its fade's stages
+           with the textures taken away; a white stand-in texture made the
+           bar white and the fade's last frame white. */
+        unsigned used = mode == GL_REPLACE ? 1 : mode == GL_INTERPOLATE || mode == GL_MODULATE_ADD_ATI ? 3 : 2;
+        for (unsigned n = 0; n < used; n++)
+            if ((a[n] & 0xF) == 2 /* D3DTA_TEXTURE */) { mode = GL_REPLACE; a[0] = 1; s = 1; break; }
     }
     glTexEnvi(GL_TEXTURE_ENV, mode_p, mode);
     for (int n = 0; n < 3; n++) combine_arg(alpha, n, a[n], ua[n], inv[n]);
@@ -2186,8 +2648,8 @@ static unsigned apply_textures(void)
         float tf[4];
         color4(tf, RS(D3DRS_TEXTUREFACTOR));
         glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, tf);
-        combine(false, TSS(s, D3DTSS_COLOROP), TSS(s, D3DTSS_COLORARG0), TSS(s, D3DTSS_COLORARG1), TSS(s, D3DTSS_COLORARG2));
-        combine(true, TSS(s, D3DTSS_ALPHAOP), TSS(s, D3DTSS_ALPHAARG0), TSS(s, D3DTSS_ALPHAARG1), TSS(s, D3DTSS_ALPHAARG2));
+        combine(false, TSS(s, D3DTSS_COLOROP), TSS(s, D3DTSS_COLORARG0), TSS(s, D3DTSS_COLORARG1), TSS(s, D3DTSS_COLORARG2), !t);
+        combine(true, TSS(s, D3DTSS_ALPHAOP), TSS(s, D3DTSS_ALPHAARG0), TSS(s, D3DTSS_ALPHAARG1), TSS(s, D3DTSS_ALPHAARG2), !t);
         mask |= 1u << s;
     }
     p_glActiveTexture(GL_TEXTURE0);
@@ -2259,7 +2721,7 @@ static void apply_texture_transforms(unsigned units, const int tsize[4])
             }
         }
         D3DPixelContainer *t = (D3DPixelContainer *)d3d.textures[u];
-        if (on && t && t->Size && !d3d.pixel_shader) {
+        if (on && t && t->Size && !d3d.pixel_shader && !ff_fragment_program()) {
             /* Only legacy fragment sampling needs vertex-side normalization.
                Pixel shaders normalize at the texture instruction instead. */
             ULONG w, h, pitch;
@@ -2274,12 +2736,122 @@ static void apply_texture_transforms(unsigned units, const int tsize[4])
     p_glActiveTexture(GL_TEXTURE0);
 }
 
+/* --trace detail for a draw: what each stage samples and how, and the
+   vertices of a small pre-transformed draw (full-screen passes). */
+/* On a traced frame with the dump flag set: each stage's texture as GL holds
+   it for this draw (.ppm, GL row 0 first) and the guest memory behind it
+   (.raw, pitch x height bytes), at most 32 a frame and each image once. */
+static void trace_dump_sampled(void)
+{
+    static unsigned long frame;
+    static unsigned n;
+    static ULONG seen[32];
+    if (access("/data/xbox/xbcompat-dump-targets", F_OK) && access("/tmp/xbcompat-dump-targets", F_OK)) return;
+    if (frame != d3d.frame) { frame = d3d.frame; n = 0; }
+    GLint active;
+    glGetIntegerv(GL_ACTIVE_TEXTURE, &active);
+    for (int s = 0; s < 4 && n < 32; s++) {
+        D3DPixelContainer *t = (D3DPixelContainer *)d3d.textures[s];
+        if (!t) continue;
+        unsigned i = 0;
+        while (i < n && seen[i] != t->res.Data) i++;
+        if (i < n) continue;
+        seen[n++] = t->res.Data;
+        p_glActiveTexture(GL_TEXTURE0 + s);
+        GLint id = 0, gw = 0, gh = 0;
+        glGetIntegerv(GL_TEXTURE_BINDING_2D, &id);
+        if (id) {
+            glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &gw);
+            glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &gh);
+        }
+        ULONG w = 0, h = 0, pitch = 0;
+        container_size(t, &w, &h, &pitch);
+        mkdir("/tmp/xbc-dump", 0755);
+        char path[128];
+        if (id && gw > 0 && gh > 0 && gw <= 2048 && gh <= 2048) {
+            uint8_t *px = malloc((size_t)gw * gh * 4);
+            if (px) {
+                glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
+                snprintf(path, sizeof path, "/tmp/xbc-dump/%lu-s%d-%08x-%dx%d-gl.ppm", frame, s,
+                         (unsigned)t->res.Data, gw, gh);
+                FILE *f = fopen(path, "wb");
+                if (f) {
+                    fprintf(f, "P6 %d %d 255\n", gw, gh);
+                    for (long k = 0; k < (long)gw * gh; k++) fwrite(px + k * 4, 1, 3, f);
+                    fclose(f);
+                }
+                free(px);
+            }
+        }
+        ULONG bytes = pitch * h;
+        if (bytes && bytes <= (4u << 20)) {
+            snprintf(path, sizeof path, "/tmp/xbc-dump/%lu-s%d-%08x-%ux%u-p%u-f%02x.raw", frame, s,
+                     (unsigned)t->res.Data, (unsigned)w, (unsigned)h, (unsigned)pitch,
+                     (unsigned)((t->Format >> 8) & 0xFF));
+            FILE *f = fopen(path, "wb");
+            if (f) { fwrite((const void *)(uintptr_t)(t->res.Data | CONTIG_BASE), 1, bytes, f); fclose(f); }
+        }
+        xlog("D3D:   dumped stage %d data %#x (gl texture %d, %dx%d)", s, (unsigned)t->res.Data, id, gw, gh);
+    }
+    p_glActiveTexture(active);
+}
+
+static void trace_draw_detail(const uint8_t *base, ULONG stride, ULONG count, bool rhw)
+{
+    if (g_trace != 1) return;
+    for (int s = 0; s < 4; s++) {
+        D3DPixelContainer *t = (D3DPixelContainer *)d3d.textures[s];
+        if (!t) continue;
+        ULONG w = 0, h = 0, pitch = 0;
+        container_size(t, &w, &h, &pitch);
+        xlog("D3D:   stage %d tex %p data %#x fmt %#x %ux%u pitch %u size %#x addr %u/%u filt %u/%u/%u border %#x%s%s",
+             s, (void *)t, (unsigned)t->res.Data, (unsigned)((t->Format >> 8) & 0xFF), (unsigned)w, (unsigned)h,
+             (unsigned)pitch, (unsigned)t->Size, TSS(s, D3DTSS_ADDRESSU), TSS(s, D3DTSS_ADDRESSV),
+             TSS(s, D3DTSS_MAGFILTER), TSS(s, D3DTSS_MINFILTER), TSS(s, D3DTSS_MIPFILTER), TSS(s, D3DTSS_BORDERCOLOR),
+             d3d.backbuffer && (t->res.Data | CONTIG_BASE) == (d3d.backbuffer->Data | CONTIG_BASE) ? " backbuffer" : "",
+             d3d.depth && (t->res.Data | CONTIG_BASE) == (d3d.depth->Data | CONTIG_BASE) ? " depth" : "");
+    }
+    trace_dump_sampled();
+    if (d3d.target) {
+        ULONG w = 0, h = 0, pitch = 0;
+        container_size((D3DPixelContainer *)d3d.target, &w, &h, &pitch);
+        xlog("D3D:   target data %#x fmt %#x %ux%u blend %u %u/%u op %u alpha %u/%u viewport %u,%u %ux%u rt %dx%d"
+             " scissors %d vs %#x", (unsigned)d3d.target->Data,
+             (unsigned)((d3d.target->Format >> 8) & 0xFF), (unsigned)w, (unsigned)h, RS(D3DRS_ALPHABLENDENABLE),
+             RS(D3DRS_SRCBLEND), RS(D3DRS_DESTBLEND), RS(D3DRS_BLENDOP), RS(D3DRS_ALPHATESTENABLE), RS(D3DRS_ALPHAREF),
+             (unsigned)d3d.viewport.X, (unsigned)d3d.viewport.Y, (unsigned)d3d.viewport.Width,
+             (unsigned)d3d.viewport.Height, d3d.rt_width, d3d.rt_height, d3d.scissors.count, (unsigned)d3d.vertex_shader);
+    }
+    if (rhw && base && count <= 6 && stride >= 16 && stride <= 64) {
+        for (ULONG v = 0; v < count; v++) {
+            const float *f = (const float *)(base + v * stride);
+            char line[256];
+            int n = 0;
+            for (ULONG i = 0; i < stride / 4 && n < (int)sizeof(line) - 16; i++)
+                n += snprintf(line + n, sizeof(line) - n, " %g", f[i]);
+            xlog("D3D:   v%u%s", (unsigned)v, line);
+        }
+    }
+}
+
 /* ---- state setters ----------------------------------------------------- */
+
+/* SetVertexShaderInput's state (with the vertex shader objects below). */
+static bool vs_direct_input(void);
+static void vs_set_aside_stream(UINT_ Stream, D3DResource *vb, ULONG Stride);
+static void vs_set_program_ext(ULONG Handle);
+static void vs_note_slot0(ULONG Handle);
 
 static void NTAPI D3DDevice_SetStreamSource(UINT_ Stream, D3DResource *vb, UINT_ Stride)
 {
     if (d3d.recording) { ULONG a[3] = { Stream, (ULONG)vb, Stride }; pb_record(OP_STREAM, a, sizeof(a)); }
     if (Stream >= 16) return;
+    if (vs_direct_input()) {
+        /* SetVertexShaderInput's streams stand until it is turned off. */
+        vs_set_aside_stream(Stream, vb, Stride);
+        return;
+    }
     d3d.streams[Stream].vb = vb;
     d3d.streams[Stream].stride = Stride;
 }
@@ -2287,7 +2859,10 @@ static void NTAPI D3DDevice_SetStreamSource(UINT_ Stream, D3DResource *vb, UINT_
 static void NTAPI D3DDevice_SetVertexShader(ULONG Handle)
 {
     if (d3d.recording) pb_record(OP_VERTEX_SHADER, &Handle, 4);
+    if (vs_direct_input()) { vs_set_program_ext(Handle); return; }
     d3d.vertex_shader = Handle;
+    /* A program goes to slot 0 of program memory (see vp_flush_pending). */
+    if (Handle & 1) vs_note_slot0(Handle);
 }
 
 static void NTAPI D3DDevice_SetTransform(ULONG State, const D3DMATRIX *m)
@@ -2312,8 +2887,12 @@ static void viewport_constants(float vp[2][4])
     const D3DVIEWPORT8 *v = &d3d.viewport;
     float sx = 0.5f * v->Width, sy = -0.5f * v->Height;
     vp[0][0] = sx; vp[0][1] = sy; vp[0][2] = d3d.zscale * (v->MaxZ - v->MinZ); vp[0][3] = 0;
-    vp[1][0] = v->X + sx + d3d.screen_offset[0];
-    vp[1][1] = v->Y - sy + d3d.screen_offset[1];
+    /* The library's m_ScreenSpaceOffset carries KELVIN_BORDER (0.53125):
+       CommonSetViewport writes it into the reserved constants, and a
+       program that builds oPos from them lands half a pixel further right
+       and down than one that doesn't add it. */
+    vp[1][0] = v->X + sx + d3d.screen_offset[0] + 0.53125f;
+    vp[1][1] = v->Y - sy + d3d.screen_offset[1] + 0.53125f;
     vp[1][2] = d3d.zscale * v->MinZ; vp[1][3] = 0;
 }
 
@@ -2323,6 +2902,26 @@ static void NTAPI D3DDevice_SetViewport(const D3DVIEWPORT8 *v)
     if (v) d3d.viewport = *v;
     else d3d.viewport = (D3DVIEWPORT8){ 0, 0, d3d.width, d3d.height, 0, 1 };
     d3d.scissors.count = 0;   /* the library's SetViewport ends with SetScissors(0, 0, NULL) */
+    if (!(d3d.constant_mode & 0x10)) {   /* D3DSCM_NORESERVEDCONSTANTS */
+        float vp[2][4];
+        viewport_constants(vp);
+        memcpy(d3d.vs_const[58], vp, sizeof(vp));
+        if (async_front()) { async_vs_touch(58); async_vs_touch(59); }
+    }
+}
+
+/* The end of the library's SetRenderTarget: the depth scale (m_ZScale)
+   follows the new depth buffer, kept when there is none, and SetViewport
+   over the whole w x h target resets the scissors and rewrites the reserved
+   viewport constants.  Without this a scissor set for a pass on the back
+   buffer stayed on into the next target: a shadow buffer rendered (and
+   cleared) after a per-light scissor kept only that rectangle, which moves
+   with the camera. */
+static void target_viewport_reset(D3DSurface *z, ULONG w, ULONG h)
+{
+    if (z) d3d.zscale = depth_format_max((z->Format >> 8) & 0xFF);
+    d3d.viewport = (D3DVIEWPORT8){ 0, 0, w, h, 0, 1 };
+    d3d.scissors.count = 0;
     if (!(d3d.constant_mode & 0x10)) {   /* D3DSCM_NORESERVEDCONSTANTS */
         float vp[2][4];
         viewport_constants(vp);
@@ -2509,6 +3108,77 @@ static void mat_mul(D3DMATRIX *out, const D3DMATRIX *a, const D3DMATRIX *b)
             r.m[i][j] = a->m[i][0] * b->m[0][j] + a->m[i][1] * b->m[1][j] +
                         a->m[i][2] * b->m[2][j] + a->m[i][3] * b->m[3][j];
     *out = r;
+}
+
+/* UpdateProjectionViewportTransform's viewport matrix: clip space to the
+   viewport's pixels and the depth buffer's range, all of it scaled by
+   zscale / wfar with D3DZB_USEW (the library then w-buffers). */
+static void viewport_transform(D3DMATRIX *vp)
+{
+    const D3DVIEWPORT8 *v = &d3d.viewport;
+    const D3DMATRIX *p = &d3d.transforms[1];
+    float s = 1;
+    if (RS(D3DRS_ZENABLE) == 2 /* D3DZB_USEW */) {
+        float wfar = p->m[2][2] == p->m[2][3] || p->m[2][2] == 0 ? 1
+                     : (p->m[3][3] - p->m[3][2]) / (p->m[2][2] - p->m[2][3]) * p->m[2][3] + p->m[3][3];
+        if (wfar != 0) s = d3d.zscale / wfar;
+    }
+    memset(vp, 0, sizeof(*vp));
+    vp->m[0][0] = vp->m[3][0] = 0.5f * v->Width * s;
+    vp->m[1][1] = -0.5f * v->Height * s;
+    vp->m[3][1] = 0.5f * v->Height * s;
+    vp->m[2][2] = d3d.zscale * (v->MaxZ - v->MinZ) * s;
+    vp->m[3][2] = d3d.zscale * v->MinZ * s;
+    vp->m[3][3] = s;
+}
+
+/* The inverse of a general 4x4 matrix; false when it is singular. */
+static bool mat_inverse(D3DMATRIX *out, const D3DMATRIX *m)
+{
+    const float *a = &m->m[0][0];
+    float inv[16];
+    inv[0] = a[5]*a[10]*a[15] - a[5]*a[11]*a[14] - a[9]*a[6]*a[15] + a[9]*a[7]*a[14] + a[13]*a[6]*a[11] - a[13]*a[7]*a[10];
+    inv[4] = -a[4]*a[10]*a[15] + a[4]*a[11]*a[14] + a[8]*a[6]*a[15] - a[8]*a[7]*a[14] - a[12]*a[6]*a[11] + a[12]*a[7]*a[10];
+    inv[8] = a[4]*a[9]*a[15] - a[4]*a[11]*a[13] - a[8]*a[5]*a[15] + a[8]*a[7]*a[13] + a[12]*a[5]*a[11] - a[12]*a[7]*a[9];
+    inv[12] = -a[4]*a[9]*a[14] + a[4]*a[10]*a[13] + a[8]*a[5]*a[14] - a[8]*a[6]*a[13] - a[12]*a[5]*a[10] + a[12]*a[6]*a[9];
+    inv[1] = -a[1]*a[10]*a[15] + a[1]*a[11]*a[14] + a[9]*a[2]*a[15] - a[9]*a[3]*a[14] - a[13]*a[2]*a[11] + a[13]*a[3]*a[10];
+    inv[5] = a[0]*a[10]*a[15] - a[0]*a[11]*a[14] - a[8]*a[2]*a[15] + a[8]*a[3]*a[14] + a[12]*a[2]*a[11] - a[12]*a[3]*a[10];
+    inv[9] = -a[0]*a[9]*a[15] + a[0]*a[11]*a[13] + a[8]*a[1]*a[15] - a[8]*a[3]*a[13] - a[12]*a[1]*a[11] + a[12]*a[3]*a[9];
+    inv[13] = a[0]*a[9]*a[14] - a[0]*a[10]*a[13] - a[8]*a[1]*a[14] + a[8]*a[2]*a[13] + a[12]*a[1]*a[10] - a[12]*a[2]*a[9];
+    inv[2] = a[1]*a[6]*a[15] - a[1]*a[7]*a[14] - a[5]*a[2]*a[15] + a[5]*a[3]*a[14] + a[13]*a[2]*a[7] - a[13]*a[3]*a[6];
+    inv[6] = -a[0]*a[6]*a[15] + a[0]*a[7]*a[14] + a[4]*a[2]*a[15] - a[4]*a[3]*a[14] - a[12]*a[2]*a[7] + a[12]*a[3]*a[6];
+    inv[10] = a[0]*a[5]*a[15] - a[0]*a[7]*a[13] - a[4]*a[1]*a[15] + a[4]*a[3]*a[13] + a[12]*a[1]*a[7] - a[12]*a[3]*a[5];
+    inv[14] = -a[0]*a[5]*a[14] + a[0]*a[6]*a[13] + a[4]*a[1]*a[14] - a[4]*a[2]*a[13] - a[12]*a[1]*a[6] + a[12]*a[2]*a[5];
+    inv[3] = -a[1]*a[6]*a[11] + a[1]*a[7]*a[10] + a[5]*a[2]*a[11] - a[5]*a[3]*a[10] - a[9]*a[2]*a[7] + a[9]*a[3]*a[6];
+    inv[7] = a[0]*a[6]*a[11] - a[0]*a[7]*a[10] - a[4]*a[2]*a[11] + a[4]*a[3]*a[10] + a[8]*a[2]*a[7] - a[8]*a[3]*a[6];
+    inv[11] = -a[0]*a[5]*a[11] + a[0]*a[7]*a[9] + a[4]*a[1]*a[11] - a[4]*a[3]*a[9] - a[8]*a[1]*a[7] + a[8]*a[3]*a[5];
+    inv[15] = a[0]*a[5]*a[10] - a[0]*a[6]*a[9] - a[4]*a[1]*a[10] + a[4]*a[2]*a[9] + a[8]*a[1]*a[6] - a[8]*a[2]*a[5];
+    float det = a[0] * inv[0] + a[1] * inv[4] + a[2] * inv[8] + a[3] * inv[12];
+    if (det == 0 || !isfinite(det)) return false;
+    for (int i = 0; i < 16; i++) (&out->m[0][0])[i] = inv[i] / det;
+    return true;
+}
+
+/* With Set[VertexBlend]ModelView in effect: the modelview and the D3D clip
+   space projection that reproduce its matrices.  The hardware takes
+   positions straight to the viewport's pixels with the composite matrix
+   (with skinning, the blended eye position times it); undoing the viewport
+   transform gives the projection, and undoing the modelview too what GL
+   applies after its modelview. */
+static bool direct_modelview(D3DMATRIX *modelview, D3DMATRIX *proj)
+{
+    if (!d3d.direct_mv.on) return false;
+    D3DMATRIX vp, unview;
+    viewport_transform(&vp);
+    if (!mat_inverse(&unview, &vp)) return false;
+    *modelview = d3d.direct_mv.mv[0];
+    mat_mul(proj, &d3d.direct_mv.composite, &unview);
+    if (!d3d.direct_mv.blend) {
+        D3DMATRIX unmodel;
+        if (!mat_inverse(&unmodel, modelview)) return false;
+        mat_mul(proj, &unmodel, proj);
+    }
+    return true;
 }
 
 static GLenum gl_primitive(ULONG type)
@@ -2732,8 +3402,13 @@ static void apply_render_states(bool pretransformed, bool has_normal)
         float w = d3d.viewport.Width, h = d3d.viewport.Height, top = d3d.rt_texture ? h : 0, bottom = h - top;
         float ortho[16] = { 2 / w, 0, 0, 0,  0, 2 / (top - bottom), 0, 0,  0, 0, 2, 0,
                             -1, -(top + bottom) / (top - bottom), -1, 1 };
+        /* The NV2A puts pixel centres on whole screen positions (the
+           library's 0.53125 border), GL on halves: without the half pixel a
+           full-target quad from -0.5 to w-0.5 missed its last column and
+           row and sampled half a texel up and left, so Splinter Cell's
+           blur chain left stale bright edges and crept to the top left. */
         float move[16] = { 1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,
-                           -(float)d3d.viewport.X, -(float)d3d.viewport.Y, 0, 1 };
+                           0.5f - (float)d3d.viewport.X, 0.5f - (float)d3d.viewport.Y, 0, 1 };
         glMatrixMode(GL_PROJECTION);
         glLoadMatrixf(ortho);
         glMatrixMode(GL_MODELVIEW);
@@ -2742,10 +3417,25 @@ static void apply_render_states(bool pretransformed, bool has_normal)
         /* D3D row-vector matrices loaded as-is are the GL column-vector
            transforms.  D3D clip space has z in [0,w]; GL wants [-w,w]. */
         static const D3DMATRIX zfix = { { { 1, 0, 0, 0 }, { 0, 1, 0, 0 }, { 0, 0, 2, 0 }, { 0, 0, -1, 1 } } };
-        D3DMATRIX proj, modelview;
-        mat_mul(&proj, &d3d.transforms[1], &zfix);
+        D3DMATRIX proj, modelview, clip;
+        if (direct_modelview(&modelview, &clip)) {
+            mat_mul(&proj, &clip, &zfix);
+        } else {
+            mat_mul(&proj, &d3d.transforms[1], &zfix);
+            mat_mul(&modelview, &d3d.transforms[6], &d3d.transforms[0]);
+        }
+        /* The half pixel of the pretransformed path, in clip space: the
+           library's fixed-function viewport offset carries KELVIN_BORDER
+           too.  Splinter Cell's glow pass draws its full-target quad
+           through the transforms. */
+        if (d3d.viewport.Width && d3d.viewport.Height) {
+            float kx = 1.0f / d3d.viewport.Width, ky = -1.0f / d3d.viewport.Height;
+            for (int i = 0; i < 4; i++) {
+                proj.m[i][0] += kx * proj.m[i][3];
+                proj.m[i][1] += ky * proj.m[i][3];
+            }
+        }
         if (d3d.rt_texture) for (int i = 0; i < 4; i++) proj.m[i][1] = -proj.m[i][1];
-        mat_mul(&modelview, &d3d.transforms[6], &d3d.transforms[0]);
         glMatrixMode(GL_PROJECTION);
         glLoadMatrixf(&proj.m[0][0]);
         glMatrixMode(GL_MODELVIEW);
@@ -2892,7 +3582,11 @@ typedef struct {
     bool vs_z_attempted;     /* the variant was tried (it may not compile) */
     ULONG stream_mask;
     int tess_normal_in, tess_normal_out, tess_uv_out;   /* tessellator outputs, -1 if unused */
+    ULONG user_handle;       /* vs_compose: the handle GetVertexShader reports (0: this one) */
 } vshader;
+
+static vshader *vp_slot0_pending;
+static void vp_flush_pending(void);
 
 /* D3DVSDT: high nibble = component count (7 = FLOAT2H), low nibble = NV2A type. */
 static bool decode_vsdt(ULONG t, vattr *a)
@@ -2995,7 +3689,8 @@ typedef struct program_entry {
     GLuint vs, fs, prog;
     GLint attr[16];          /* the location of each v<n> input, -1 if unused */
     unsigned attr_mask;      /* the locations in attr */
-    GLint loc_ff_lighting, loc_fog_vertex_mode, loc_ff_transform, loc_ff_texcount;
+    GLint loc_ff_lighting, loc_fog_vertex_mode, loc_ff_transform, loc_ff_texcount, loc_zw_scale;
+    GLint loc_shadow_func, loc_shadow_dim;
     GLint loc_c, loc_flip_y, loc_vp_scale, loc_vp_offset, loc_wdepth;
     GLint loc_tex[4], loc_cube[4], loc_vol[4], loc_tex_scale, loc_c0, loc_c1, loc_fc0, loc_fc1,
           loc_bump_env, loc_bump_lum, loc_eye_vector, loc_key_color;
@@ -3060,7 +3755,9 @@ static program_entry *program_lookup[256];
 static void NTAPI D3DDevice_DeleteVertexShader(ULONG handle)
 {
     if (!(handle & 1)) return;
+    gl_require();
     vshader *sh = (vshader *)(handle & ~1u);
+    if (vp_slot0_pending == sh) vp_flush_pending();   /* program memory keeps its copy */
     if (sh->vs || sh->vs_z) {
         /* GL reuses the names, so programs linked with them must go too. */
         for (program_entry **pp = &programs; *pp;) {
@@ -3128,12 +3825,94 @@ static LONG NTAPI D3DDevice_GetVertexShaderFunction(ULONG h, void *data, ULONG *
    for SelectVertexShader(NULL, address); ordinary programs are compiled from
    their own copy of the microcode. */
 static uint32_t vp_mem[136][4];
+/* SetVertexShader loads its program at slot 0, as the library does; the
+   copy is made only when program memory is next read or written. */
+static void vp_flush_pending(void)
+{
+    vshader *sh = vp_slot0_pending;
+    vp_slot0_pending = NULL;
+    if (sh && sh->code) memcpy(vp_mem[0], sh->code, (sh->ninstr < 136 ? sh->ninstr : 136) * 16);
+}
 
 static void vp_load(const uint32_t *code, unsigned n, ULONG address)
 {
+    vp_flush_pending();
     if (address >= 136) return;
     if (n > 136 - address) n = 136 - address;
     memcpy(vp_mem[address], code, n * 16);
+}
+
+/* Instructions from `address` through the one marked final (NV2A word 3 bit 0). */
+static unsigned vp_program_length(ULONG address)
+{
+    vp_flush_pending();
+    unsigned n = 0;
+    while (address + n < 136) if (vp_mem[address + n++][3] & 1) break;
+    return n;
+}
+
+/* Vertex shader objects made by combining one shader's attribute layout
+   with another's (or program memory's) microcode: SelectVertexShader runs
+   the program at an address with the handle's declaration, and
+   SetVertexShaderInput reads the vertex arrays with its handle's layout
+   while the current program runs.  Kept for the life of the title (a title
+   has a handful), found again by content. */
+static vshader **vs_composed;
+static unsigned vs_ncomposed;
+
+static bool vs_same_layout(const vshader *a, const vshader *b)
+{
+    return !memcmp(a->attr, b->attr, sizeof a->attr) && a->tess_normal_in == b->tess_normal_in &&
+           a->tess_normal_out == b->tess_normal_out && a->tess_uv_out == b->tess_uv_out;
+}
+
+/* A handle drawing with `layout`'s attributes and `code` (ninstr
+   instructions, NULL for none), with `program`'s declared constants;
+   GetVertexShader reports `user`. */
+static ULONG vs_compose(const vshader *layout, const uint32_t *code, unsigned ninstr, const vshader *program, ULONG user)
+{
+    if (layout == program && program && program->code == code) return (ULONG)program | 1;
+    if (program && program->code == code && program->ninstr == ninstr && vs_same_layout(layout, program))
+        return (ULONG)program | 1;
+    unsigned nconsts = program ? program->nconsts : 0;
+    for (unsigned i = 0; i < vs_ncomposed; i++) {
+        vshader *c = vs_composed[i];
+        if (c->user_handle == user && c->ninstr == ninstr && vs_same_layout(c, layout) &&
+            (!ninstr || !memcmp(c->code, code, ninstr * 16)) && c->nconsts == nconsts &&
+            (!nconsts || (!memcmp(c->consts, program->consts, nconsts * 16) &&
+                          !memcmp(c->const_slots, program->const_slots, nconsts * sizeof(int)))))
+            return (ULONG)c | 1;
+    }
+    vshader *c = calloc(1, sizeof(*c));
+    if (!c) return user;
+    memcpy(c->attr, layout->attr, sizeof c->attr);
+    c->stream_mask = layout->stream_mask;
+    c->tess_normal_in = layout->tess_normal_in;
+    c->tess_normal_out = layout->tess_normal_out;
+    c->tess_uv_out = layout->tess_uv_out;
+    if (ninstr) {
+        c->code = malloc(ninstr * 16);
+        memcpy(c->code, code, ninstr * 16);
+        c->ninstr = ninstr;
+        c->header = ninstr << 16;
+    }
+    if (nconsts) {   /* the declaration's constants, which the program's draws apply */
+        c->consts = malloc(nconsts * 16);
+        c->const_slots = malloc(nconsts * sizeof(int));
+        if (c->consts && c->const_slots) {
+            memcpy(c->consts, program->consts, nconsts * 16);
+            memcpy(c->const_slots, program->const_slots, nconsts * sizeof(int));
+            c->nconsts = nconsts;
+        }
+    }
+    c->user_handle = user;
+    vshader **n = realloc(vs_composed, (vs_ncomposed + 1) * sizeof(*n));
+    if (!n) { free(c->code); free(c); return user; }
+    vs_composed = n;
+    vs_composed[vs_ncomposed++] = c;
+    if (vs_ncomposed == 256 || vs_ncomposed == 4096)
+        xlog("D3D: %u combined vertex shader layouts/programs", vs_ncomposed);
+    return (ULONG)c | 1;
 }
 
 static void NTAPI D3DDevice_LoadVertexShader(ULONG handle, ULONG address)
@@ -3147,27 +3926,210 @@ static void NTAPI D3DDevice_LoadVertexShaderProgram(const ULONG *func, ULONG add
 {
     if (func) vp_load(func + 1, func[0] >> 16, address);
 }
+
+/* SetVertexShaderInput state: the layout the vertex arrays follow (0: the
+   current shader's, from SetStreamSource), the streams it set, and the
+   SetStreamSource bindings it set aside. */
+static ULONG vs_input_handle;
+static UINT_ vs_input_count;
+static ULONG vs_input_streams[16][3];
+static struct { D3DResource *vb; ULONG stride; } vs_saved_streams[16];
+static ULONG vs_program;   /* while vs_input_handle is set: the shader draws would use without it */
+
+/* The handle draws use for `prog` with the direct input layout, if any. */
+static ULONG vs_with_input(ULONG prog)
+{
+    if (!vs_input_handle || !(prog & 1)) return prog;
+    vshader *p = (vshader *)(prog & ~1u), *in = (vshader *)(vs_input_handle & ~1u);
+    return vs_compose(in, p->code, p->ninstr, p, p->user_handle ? p->user_handle : prog);
+}
+
+/* Make `h` the current shader, under the direct input layout if one is set. */
+static void vs_set_program(ULONG h)
+{
+    if (vs_input_handle) {
+        vs_program = h;
+        d3d.vertex_shader = (h & 1) ? vs_with_input(h) : vs_input_handle;
+    } else {
+        d3d.vertex_shader = h;
+    }
+}
+
 static void NTAPI D3DDevice_SelectVertexShader(ULONG handle, ULONG address)
 {
-    if (d3d.recording && handle) pb_record(OP_VERTEX_SHADER, &handle, 4);
-    /* The shader was loaded into program memory earlier; just use it. */
-    if (handle) d3d.vertex_shader = handle;
+    /* With a handle, its own program runs (the program it was loaded with
+       is at `address`); xbcompat's program memory copy is not exact enough
+       to trust over it: Splinter Cell's models vanished when the program
+       was read back from there.  With no handle, the program at `address`
+       runs with the current shader's declaration. */
+    if (handle) {
+        vs_set_program(handle);
+        if (d3d.recording) pb_record(OP_VERTEX_SHADER, &d3d.vertex_shader, 4);
+        return;
+    }
+    ULONG layout_h = vs_input_handle ? vs_program : d3d.vertex_shader;
+    if (layout_h & 1) {
+        vshader *layout = (vshader *)(layout_h & ~1u);
+        ULONG user = layout->user_handle ? layout->user_handle : layout_h;
+        const vshader *program = layout->user_handle ? (const vshader *)(layout->user_handle & ~1u) : layout;
+        unsigned n = address < 136 ? vp_program_length(address) : 0;
+        ULONG h;
+        if (program->code && program->ninstr == n && !memcmp(vp_mem[address], program->code, n * 16))
+            h = (ULONG)program | 1;   /* its own program: the usual case */
+        else if (n)
+            h = vs_compose(program, vp_mem[address], n, program, user);
+        else
+            h = layout_h;
+        vs_set_program(h);
+    }
+    if (d3d.recording && d3d.vertex_shader) pb_record(OP_VERTEX_SHADER, &d3d.vertex_shader, 4);
 }
 static void NTAPI D3DDevice_RunVertexStateShader(ULONG address, const float *data)
 {
+    vp_flush_pending();
     if (address >= 136) return;
     vsh_run_state(vp_mem[address], 136 - address, data, d3d.vs_const);
+}
+
+/* A shim vertex buffer per (buffer, offset) pair: SetVertexShaderInput's
+   offset moves where the stream starts, and draws read stream data through
+   the resource's Data.  Kept (not reused) so queued drawing never sees one
+   change under it. */
+static D3DResource *vs_input_shim(D3DResource *vb, ULONG offset)
+{
+    static struct shim { D3DResource *vb; ULONG data, offset; D3DResource r; } *shims;
+    static unsigned nshims;
+    if (!vb || !offset) return vb;
+    for (unsigned i = 0; i < nshims; i++)
+        if (shims[i].vb == vb && shims[i].data == vb->Data && shims[i].offset == offset) return &shims[i].r;
+    if (nshims % 64 == 0) {
+        /* Grow by a fresh block: pointers into older blocks stay valid. */
+        struct shim *blk = calloc(64, sizeof(*blk));
+        if (!blk) return vb;
+        static struct shim **blocks;
+        static unsigned nblocks;
+        struct shim **nb = realloc(blocks, (nblocks + 1) * sizeof(*nb));
+        if (!nb) { free(blk); return vb; }
+        blocks = nb;
+        blocks[nblocks++] = blk;
+        shims = blk;
+        nshims = 0;
+    }
+    struct shim *s = &shims[nshims++];
+    s->vb = vb;
+    s->data = vb->Data;
+    s->offset = offset;
+    s->r = *vb;
+    s->r.Data = vb->Data + offset;
+    return &s->r;
 }
 
 static void NTAPI D3DDevice_SetVertexShaderInput(ULONG handle, UINT_ count, const ULONG *inputs)
 {
     if (d3d.recording) { ULONG h[2] = { handle, count }; pb_record2(OP_VS_INPUT, h, 8, inputs, count * 12); }
+    if (!handle) {
+        /* Back to the streams SetStreamSource set and the shader's own layout. */
+        if (vs_input_handle) {
+            for (int i = 0; i < 16; i++) {
+                d3d.streams[i].vb = vs_saved_streams[i].vb;
+                d3d.streams[i].stride = vs_saved_streams[i].stride;
+            }
+            d3d.vertex_shader = vs_program;
+        }
+        vs_input_handle = 0;
+        vs_input_count = 0;
+        return;
+    }
+    if (!vs_input_handle) {
+        for (int i = 0; i < 16; i++) {
+            vs_saved_streams[i].vb = d3d.streams[i].vb;
+            vs_saved_streams[i].stride = d3d.streams[i].stride;
+        }
+        vs_program = d3d.vertex_shader;
+    }
+    vs_input_handle = handle;
+    vs_input_count = count > 15 ? 15 : count;
+    memcpy(vs_input_streams, inputs, vs_input_count * 12);
     /* D3DSTREAM_INPUT: VertexBuffer, Stride, Offset */
     for (UINT_ i = 0; i < count && i < 16; i++) {
-        d3d.streams[i].vb = (D3DResource *)inputs[i * 3];
+        d3d.streams[i].vb = vs_input_shim((D3DResource *)inputs[i * 3], inputs[i * 3 + 2]);
         d3d.streams[i].stride = inputs[i * 3 + 1];
     }
-    if (handle) d3d.vertex_shader = handle;
+    /* The current program reads the arrays with the handle's layout (with
+       a fixed-function shader current, the handle is drawn as before). */
+    d3d.vertex_shader = (vs_program & 1) ? vs_with_input(vs_program) : handle;
+}
+
+static bool vs_direct_input(void) { return vs_input_handle != 0; }
+
+static void vs_set_aside_stream(UINT_ Stream, D3DResource *vb, ULONG Stride)
+{
+    vs_saved_streams[Stream].vb = vb;
+    vs_saved_streams[Stream].stride = Stride;
+}
+
+static void vs_note_slot0(ULONG Handle)
+{
+    vshader *sh = (vshader *)(Handle & ~1u);
+    if (sh->code) vp_slot0_pending = sh;
+}
+
+static void vs_set_program_ext(ULONG Handle)
+{
+    if (Handle & 1) vs_note_slot0(Handle);
+    vs_set_program(Handle);
+}
+
+static LONG NTAPI D3DDevice_GetVertexShaderInput(ULONG *pHandle, UINT_ *pCount, ULONG *pInputs)
+{
+    if (pCount) *pCount = vs_input_count;
+    if (pHandle) *pHandle = vs_input_handle;
+    if (pInputs) memcpy(pInputs, vs_input_streams, vs_input_count * 12);
+    return vs_input_handle ? D3D_OK : 1 /* S_FALSE */;
+}
+
+/* The ...Direct forms take a D3DVERTEXATTRIBUTEFORMAT (16 D3DVERTEXSHADERINPUTs:
+   StreamIndex, Offset, Format, TessType, TessSource) in place of a handle. */
+static ULONG direct_layout_handle(const ULONG *vaf)
+{
+    static vshader **cache;
+    static unsigned n;
+    vshader tmp;
+    memset(&tmp, 0, sizeof(tmp));
+    tmp.tess_normal_in = tmp.tess_normal_out = tmp.tess_uv_out = -1;
+    for (int r = 0; r < 16; r++) {
+        const ULONG *in = vaf + r * 4;
+        tmp.attr[r].stream = -1;
+        UCHAR tess_type = in[3] & 0xFF, tess_src = (in[3] >> 8) & 0xFF;
+        if (tess_type == 1) { tmp.tess_normal_in = tess_src; tmp.tess_normal_out = r; }
+        else if (tess_type == 2) tmp.tess_uv_out = r;
+        vattr a;
+        memset(&a, 0, sizeof(a));
+        if (in[2] == 0x02 || !decode_vsdt(in[2] & 0xFF, &a)) continue;   /* D3DVSDT_NONE */
+        a.stream = in[0] & 0xF;
+        a.offset = in[1];
+        tmp.attr[r] = a;
+        tmp.stream_mask |= 1u << a.stream;
+    }
+    for (unsigned i = 0; i < n; i++)
+        if (vs_same_layout(cache[i], &tmp)) return (ULONG)cache[i] | 1;
+    vshader *sh = malloc(sizeof(*sh));
+    vshader **nc = sh ? realloc(cache, (n + 1) * sizeof(*nc)) : NULL;
+    if (!nc) { free(sh); return 0; }
+    *sh = tmp;
+    cache = nc;
+    cache[n++] = sh;
+    return (ULONG)sh | 1;
+}
+
+static void NTAPI D3DDevice_SetVertexShaderInputDirect(const ULONG *vaf, UINT_ count, const ULONG *inputs)
+{
+    D3DDevice_SetVertexShaderInput(vaf ? direct_layout_handle(vaf) : 0, count, inputs);
+}
+
+static void NTAPI D3DDevice_SelectVertexShaderDirect(const ULONG *vaf, ULONG address)
+{
+    D3DDevice_SelectVertexShader(vaf ? direct_layout_handle(vaf) : 0, address);
 }
 
 
@@ -3313,6 +4275,9 @@ static program_entry *program_for(GLuint vs, GLuint fs)
         e->loc_ff_transform = U("ff_transform");
         e->loc_ff_texcount = U("ff_texcount");
         e->loc_fog_vertex_mode = U("fog_vertex_mode");
+        e->loc_zw_scale = U("zw_scale");
+        e->loc_shadow_func = U("shadow_func");
+        e->loc_shadow_dim = U("shadow_dim");
         e->loc_eye_vector = U("eye_vector");
         e->loc_key_color = U("key_color");
 #undef U
@@ -3360,9 +4325,13 @@ static ULONG adjusted_texture_modes(void)
         if (!t && m != 0x04 && m != 0x05 && m != 0x0A && m != 0x11)
             m = 0;
         else if (t && m >= 0x01 && m <= 0x03) {
-            /* A 2D depth image still needs PROJECT3D to supply reference r/q. */
-            if (!(m == 0x02 && target == GL_TEXTURE_2D && is_depth_format((t->Format >> 8) & 0xFF)))
-                m = target == GL_TEXTURE_CUBE_MAP ? 0x03 : target == GL_TEXTURE_3D ? 0x02 : 0x01;
+            /* A depth image (a shadow buffer) becomes PROJECT3D, as a volume
+               does, so the compare gets its reference from r/q: the library
+               picks PROJECT3D for every depth color format here.  Kept as
+               PROJECT2D, the compare used a zero reference and the ATG
+               ShadowBuffer sample (a "tex t1" shader) drew no shadow. */
+            bool depth = target == GL_TEXTURE_2D && is_depth_format((t->Format >> 8) & 0xFF);
+            m = target == GL_TEXTURE_CUBE_MAP ? 0x03 : target == GL_TEXTURE_3D || depth ? 0x02 : 0x01;
         }
         else if (t && (m == 0x0D || m == 0x0E))
             m = target == GL_TEXTURE_CUBE_MAP ? 0x0E : 0x0D;
@@ -3396,31 +4365,60 @@ static psh_options fragment_shader_options(void)
         /* X8L8V8U8 aliases X8R8G8B8: preserve ordinary RGB sampling, but
            tell bump stages where U, V and luminance landed in that upload. */
         if (fmt == 0x07 || fmt == 0x1E) o.bump_bgra |= 1u << i;
+        if (fmt == 0x28 || fmt == 0x17 || fmt == 0x27 || fmt == 0x37 || fmt == 0x33 || fmt == 0x36)
+            o.bump_biased |= 1u << i;
     }
     return o;
 }
 
-static void fshader_key(uint32_t *key, const psh_options *o)
+/* Fixed-function stages as the combiner state the library would load
+   (ff_combiner.h): ps[] gets the D3DRS_PS* words, the texture modes are
+   returned. */
+static ULONG ff_fragment_state(uint32_t *ps)
+{
+    int kind[4];
+    for (int s = 0; s < 4; s++) {
+        const D3DPixelContainer *t = (const D3DPixelContainer *)d3d.textures[s];
+        GLenum target = t ? tex_target(t) : 0;
+        kind[s] = !t ? FFC_TEX_NONE : target == GL_TEXTURE_CUBE_MAP ? FFC_TEX_CUBE
+                : target == GL_TEXTURE_3D ? FFC_TEX_3D : FFC_TEX_2D;
+    }
+    uint32_t rs[D3DRS_MAX];
+    ff_combiner_state(rs, d3d.texture_state, kind, RS(D3DRS_POINTSPRITEENABLE) != 0);
+    memcpy(ps, rs, D3DRS_PS_MAX * 4);
+    return rs[D3DRS_PSTEXTUREMODES];
+}
+
+static void fshader_key(uint32_t *key, const psh_options *o, const uint32_t *ps, ULONG modes)
 {
     memset(key, 0, 64 * 4);
-    memcpy(key, d3d.render_state, D3DRS_PS_MAX * 4);
+    memcpy(key, ps, D3DRS_PS_MAX * 4);
     for (int i = D3DRS_PSCONSTANT0_0; i <= D3DRS_PSCONSTANT1_7; i++) key[i] = 0;
     key[D3DRS_PSFINALCOMBINERCONSTANT0] = key[D3DRS_PSFINALCOMBINERCONSTANT1] = 0;
-    key[57] = adjusted_texture_modes();
+    key[57] = modes;
     key[58] = RS(D3DRS_FOGENABLE);
     key[59] = RS(D3DRS_FOGTABLEMODE);
     key[60] = shadow_stages();
     key[61] = RS(D3DRS_SPECULARENABLE) != 0;
     key[62] = o->alpha_kill;
-    key[63] = (o->color_key_ignore_alpha << 8) | (o->bump_bgra << 12);
+    key[63] = (o->color_key_ignore_alpha << 8) | (o->bump_bgra << 12) | (o->bump_biased << 16);
     for (int i = 0; i < 4; i++) key[63] |= o->color_key[i] << (i * 2);
 }
 
 static GLuint fragment_shader_object(void)
 {
-    uint32_t key[64];
+    uint32_t key[64], ps[D3DRS_PS_MAX];
+    ULONG modes;
+    /* A fixed-function draw gets here only for stages GL's texture
+       environment cannot express (ff_fragment_program). */
+    if (d3d.pixel_shader) {
+        memcpy(ps, d3d.render_state, sizeof(ps));
+        modes = adjusted_texture_modes();
+    } else {
+        modes = ff_fragment_state(ps);
+    }
     psh_options options = fragment_shader_options();
-    fshader_key(key, &options);
+    fshader_key(key, &options, ps, modes);
     uint32_t hash = fshader_hash(key);
     fshader_entry **slot = &fshader_lookup[(hash ^ hash >> 16) & 255];
     if (*slot && (*slot)->hash == hash && gc_same((*slot)->key, key, 64)) return (*slot)->fs;
@@ -3430,13 +4428,12 @@ static GLuint fragment_shader_object(void)
     memcpy(e->key, key, sizeof(key));
     e->hash = hash;
     *slot = e;
-    ULONG modes = RS(D3DRS_PSTEXTUREMODES);
-    RS(D3DRS_PSTEXTUREMODES) = key[57];
     ULONG rs[D3DRS_MAX];   /* psh.c reads 4400 numbering */
     for (int i = 0; i < D3DRS_MAX; i++) rs[i] = RS(i);
+    memcpy(rs, ps, sizeof(ps));
+    rs[D3DRS_PSTEXTUREMODES] = modes;
     psh_shadow_stages = key[60];
     char *src = psh_translate_ex(rs, &options);
-    RS(D3DRS_PSTEXTUREMODES) = modes;
     if (!src) {
         xlog("D3D: pixel shader %#x could not be translated", d3d.pixel_shader);
     } else {
@@ -3454,7 +4451,7 @@ static GLuint fragment_shader_object(void)
    and point its samplers at them. */
 static void apply_shader_textures(program_entry *e)
 {
-    float scale[4][4];
+    float scale[4][4], shadow_func[4][4] = { { 0 } }, shadow_dim[4][4] = { { 0 } };
     for (int s = 0; s < 4; s++) {
         scale[s][0] = scale[s][1] = scale[s][2] = scale[s][3] = 1;
         p_glActiveTexture(GL_TEXTURE0 + s);
@@ -3484,6 +4481,20 @@ static void apply_shader_textures(program_entry *e)
         }
         if (is_depth_format((t->Format >> 8) & 0xFF))   /* r/q is in depth buffer steps */
             scale[s][2] = 1.0f / depth_format_max((t->Format >> 8) & 0xFF);
+        if (e->loc_shadow_func >= 0 && target == GL_TEXTURE_2D && is_depth_format((t->Format >> 8) & 0xFF)) {
+            /* The program compares whole depth steps itself (psh.c
+               shadow_lookup): it reads the raw texels, and filters the
+               compares rather than the depths. */
+            ULONG w, h, pitch, func = RS(D3DRS_SHADOWFUNC) & 7;
+            container_size(t, &w, &h, &pitch);
+            sampler_i(target, s, GL_TEXTURE_COMPARE_MODE, GL_NONE);
+            sampler_i(target, s, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            sampler_i(target, s, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            shadow_func[s][0] = func & 1; shadow_func[s][1] = (func >> 1) & 1; shadow_func[s][2] = (func >> 2) & 1;
+            shadow_func[s][3] = depth_format_max((t->Format >> 8) & 0xFF);
+            shadow_dim[s][0] = w; shadow_dim[s][1] = h;
+            shadow_dim[s][2] = TSS(s, D3DTSS_MAGFILTER) != 1 /* D3DTEXF_POINT */;
+        }
         /* The program declares at most one sampler per stage, of the type its
            texture mode wants; point it at unit s whatever is bound there. */
         if (e->loc_tex[s] >= 0) program_uniform1i(e, e->loc_tex[s], s);
@@ -3492,6 +4503,13 @@ static void apply_shader_textures(program_entry *e)
     }
     p_glActiveTexture(GL_TEXTURE0);
     program_uniform4fv(e, e->loc_tex_scale, 4, &scale[0][0]);
+    /* DOT_ZW writes depth in steps of the target's depth format. */
+    if (e->loc_zw_scale >= 0) program_uniform1f(e, e->loc_zw_scale, d3d.target_zmax);
+    if (e->loc_shadow_func >= 0) program_uniform4fv(e, e->loc_shadow_func, 4, &shadow_func[0][0]);
+    if (e->loc_shadow_dim >= 0) program_uniform4fv(e, e->loc_shadow_dim, 4, &shadow_dim[0][0]);
+    /* shadow_centre reads flip_y too, also under fixed-function vertices. */
+    if (e->loc_shadow_func >= 0 && e->loc_flip_y >= 0)
+        program_uniform1f(e, e->loc_flip_y, d3d.rt_texture ? -1.0f : 1.0f);
 }
 
 
@@ -3508,36 +4526,71 @@ static void upload_ps_uniforms(program_entry *e)
         for (int i = 0; i < 8; i++) color4(c[i], RS(D3DRS_PSCONSTANT0_0 + i));
         program_uniform4fv(e, e->loc_c0, 8, &c[0][0]);
     }
+    /* A fixed-function program (ff_combiner.h) reads TFACTOR as C1, and
+       a bump lookup in unit s uses the BUMPENV states of D3D stage s - 1. */
+    bool ff = !d3d.pixel_shader;
     if (e->loc_c1 >= 0) {
-        for (int i = 0; i < 8; i++) color4(c[i], RS(D3DRS_PSCONSTANT1_0 + i));
+        for (int i = 0; i < 8; i++) color4(c[i], RS(ff ? D3DRS_TEXTUREFACTOR : D3DRS_PSCONSTANT1_0 + i));
         program_uniform4fv(e, e->loc_c1, 8, &c[0][0]);
     }
     if (e->loc_fc0 >= 0) { color4(c[0], RS(D3DRS_PSFINALCOMBINERCONSTANT0)); program_uniform4fv(e, e->loc_fc0, 1, c[0]); }
     if (e->loc_fc1 >= 0) { color4(c[0], RS(D3DRS_PSFINALCOMBINERCONSTANT1)); program_uniform4fv(e, e->loc_fc1, 1, c[0]); }
     if (e->loc_bump_env >= 0) {
         for (int s = 0; s < 4; s++) {
-            c[s][0] = tss_float(s, D3DTSS_BUMPENVMAT00);
-            c[s][1] = tss_float(s, D3DTSS_BUMPENVMAT01);
-            c[s][2] = tss_float(s, D3DTSS_BUMPENVMAT10);
-            c[s][3] = tss_float(s, D3DTSS_BUMPENVMAT11);
+            int from = ff ? (s ? s - 1 : 0) : s;
+            c[s][0] = tss_float(from, D3DTSS_BUMPENVMAT00);
+            c[s][1] = tss_float(from, D3DTSS_BUMPENVMAT01);
+            c[s][2] = tss_float(from, D3DTSS_BUMPENVMAT10);
+            c[s][3] = tss_float(from, D3DTSS_BUMPENVMAT11);
         }
         program_uniform4fv(e, e->loc_bump_env, 4, &c[0][0]);
     }
     if (e->loc_bump_lum >= 0) {
         float lum[4][2];
         for (int s = 0; s < 4; s++) {
-            lum[s][0] = tss_float(s, D3DTSS_BUMPENVLSCALE);
-            lum[s][1] = tss_float(s, D3DTSS_BUMPENVLOFFSET);
+            int from = ff ? (s ? s - 1 : 0) : s;
+            lum[s][0] = tss_float(from, D3DTSS_BUMPENVLSCALE);
+            lum[s][1] = tss_float(from, D3DTSS_BUMPENVLOFFSET);
         }
         program_uniform2fv(e, e->loc_bump_lum, 4, &lum[0][0]);
     }
-    /* Fog parameters reach the program through gl_Fog. */
-    color4(c[0], RS(D3DRS_FOGCOLOR));
-    glFogfv(GL_FOG_COLOR, c[0]);
-    glFogf(GL_FOG_START, rs_float(D3DRS_FOGSTART));
-    glFogf(GL_FOG_END, rs_float(D3DRS_FOGEND));
-    glFogf(GL_FOG_DENSITY, rs_float(D3DRS_FOGDENSITY));
     DETAIL_TIMED(t_textures, apply_shader_textures(e));
+}
+
+/* Fog parameters, read through gl_Fog by translated shaders and by GL's
+   own fog stage.  LazySetSpecFogCombiner programs linear fog as
+   (end - z) * scale with scale = 1 / (end - start), and with
+   MAX_FOG_SCALE (8192) when the endpoints are equal: a hard step at end.
+   GL derives gl_Fog.scale from start and end itself, so move start just
+   below end to get that steep scale instead of an infinite one. */
+static void apply_fog_params(void)
+{
+    float c[4];
+    color4(c, RS(D3DRS_FOGCOLOR));
+    glFogfv(GL_FOG_COLOR, c);
+    float start = rs_float(D3DRS_FOGSTART), end = rs_float(D3DRS_FOGEND);
+    if (start == end) start = end - fmaxf(1.0f / 8192.0f, fabsf(end) * (1.0f / 1048576.0f));
+    glFogf(GL_FOG_START, start);
+    glFogf(GL_FOG_END, end);
+    glFogf(GL_FOG_DENSITY, rs_float(D3DRS_FOGDENSITY));
+}
+
+/* Fog for draws GL's fixed fragment stage colors (no fragment program):
+   the fog table mode applies to the eye distance, or to oFog of a vertex
+   program.  D3DFOG_NONE takes the factor itself from oFog, which linear
+   fog from 1 to 0 passes through; without a vertex program it would be
+   the specular alpha, which the GL stage cannot read, so that stays off. */
+static void apply_fixed_fog(bool programmable_vertex)
+{
+    ULONG mode = RS(D3DRS_FOGTABLEMODE);
+    bool on = RS(D3DRS_FOGENABLE) && mode <= 3 && (mode || programmable_vertex);
+    gc_enable(GL_FOG, on);
+    if (!on) return;
+    static GLint last_mode;
+    GLint gl_mode = mode == 1 ? GL_EXP : mode == 2 ? GL_EXP2 : GL_LINEAR;
+    if (gl_mode != last_mode) { glFogi(GL_FOG_MODE, gl_mode); last_mode = gl_mode; }
+    apply_fog_params();
+    if (!mode) { glFogf(GL_FOG_START, 1.0f); glFogf(GL_FOG_END, 0.0f); }
 }
 
 /* Fixed-function GL work (draws without shaders, glDrawPixels) needs
@@ -3620,10 +4673,20 @@ static void upload_fixed_lighting(program_entry *e)
     for (int i = 0; i < 4; i++) state[8][i] = TSS(i, D3DTSS_TEXCOORDINDEX) >> 16;
     if (blend && e->loc_ff_transform >= 0) {
         float transform[28][4] = {{0}};
+        /* SetVertexBlendModelView's matrices, else world i * view. */
+        bool direct = d3d.direct_mv.on && d3d.direct_mv.blend;
         for (unsigned i = 0; i < 4; i++) {
             D3DMATRIX mv;
-            mat_mul(&mv, &d3d.transforms[6+i], &d3d.transforms[0]);
+            if (direct) mv = d3d.direct_mv.mv[i];
+            else mat_mul(&mv, &d3d.transforms[6+i], &d3d.transforms[0]);
             memcpy(transform + 7*i, &mv, sizeof mv);
+            if (direct && d3d.direct_mv.has_inv && i < d3d.direct_mv.count) {
+                /* The title's inverse: normals go through its transpose. */
+                for (int row = 0; row < 3; row++)
+                    for (int col = 0; col < 3; col++)
+                        transform[7*i+4+row][col] = d3d.direct_mv.inv[i].m[col][row];
+                continue;
+            }
             /* Cofactor(M)/det(M) is the inverse transpose for row-vector
                normal transforms. Translation never participates. */
             float cofactor[3][3];
@@ -3686,7 +4749,7 @@ static bool use_program(GLuint vs, program_entry **out)
 {
     *out = NULL;
     GLuint fs = 0;
-    if (d3d.pixel_shader) {
+    if (d3d.pixel_shader || ff_fragment_program()) {
         DETAIL_TIMED(t_fshader, fs = fragment_shader_object());
         if (!fs) return false;
     }
@@ -3698,6 +4761,8 @@ static bool use_program(GLuint vs, program_entry **out)
     if (vs && RS(D3DRS_POINTSCALEENABLE)) glEnable(GL_VERTEX_PROGRAM_POINT_SIZE);
     else glDisable(GL_VERTEX_PROGRAM_POINT_SIZE);
     bool programmable_vertex = vs != 0;
+    if (fs) apply_fog_params();
+    else apply_fixed_fog(programmable_vertex);
     if (fs && (whatif == WHATIF_FLAT_FS || whatif == WHATIF_BOTH)) {
         static GLuint flat;
         if (!flat)
@@ -3719,10 +4784,9 @@ static bool use_program(GLuint vs, program_entry **out)
         ULONG mode = RS(D3DRS_FOGTABLEMODE);
         /* Only paired programmable stages share the factor convention.
            Legacy vertex/fragment stages retain their coordinate convention.
-           Equal linear endpoints still require a parameter-generation oracle. */
+           Equal linear endpoints get a finite scale from apply_fog_params. */
         bool factor = programmable_vertex && fs && RS(D3DRS_FOGENABLE)
-            && mode >= 1 && mode <= 3
-            && (mode != 3 || rs_float(D3DRS_FOGSTART) != rs_float(D3DRS_FOGEND));
+            && mode >= 1 && mode <= 3;
         program_uniform1f(e, e->loc_fog_vertex_mode, factor ? mode : 0);
     }
     upload_fixed_lighting(e);
@@ -3749,7 +4813,12 @@ typedef struct { ULONG lo, hi; } vrange;
    dashboard reads about 3 MB a frame), so a draw compares 33 samples spread
    over the data and the whole copy is compared every CONV_FULL_EVERY frames:
    a rewritten buffer is caught at once, a small edit to one within that
-   many frames. */
+   many frames.  That delay is too long for data the title is known to
+   rewrite, so two cases are compared in full on every use: index lists
+   (small next to the vertices, and rebuilt in place per view: a batch of
+   the same length with a few triangles swapped kept drawing the old ones),
+   and vertex data in a range locked for writing since the entry last
+   looked (see conv_locked). */
 #define CONV_FULL_EVERY 16
 enum { CONV_RANGE, CONV_NORMPACKED3, CONV_RGBA, CONV_VBO };
 typedef struct {
@@ -3765,7 +4834,39 @@ typedef struct {
     size_t span;                 /* CONV_VBO: bytes from vertex 0 in buf and raw */
     unsigned verified;           /* draw serial of the last check against the source */
     size_t verified_to;          /* CONV_VBO: bytes from vertex 0 that check covered */
+    unsigned lock_seen;          /* vb_lock_serial when the entry last looked at the locks */
 } conv_entry;
+
+/* Vertex buffer ranges locked for writing, the last VB_LOCKS of them.  A
+   lock is the title saying it rewrites those bytes (a dynamic buffer
+   refilled each frame, lighting colors or projector coordinates computed on
+   the CPU), which the sampled compare can miss for CONV_FULL_EVERY frames.
+   The title's thread adds them and the draws (maybe on the worker) read
+   them; a lost race only falls back to sampling. */
+#define VB_LOCKS 64
+static struct { uintptr_t lo, hi; } vb_locks[VB_LOCKS];
+static unsigned vb_lock_serial;
+
+static void note_vb_lock(const UCHAR *p, size_t len)
+{
+    unsigned n = __atomic_load_n(&vb_lock_serial, __ATOMIC_RELAXED);
+    vb_locks[n % VB_LOCKS].lo = (uintptr_t)p;
+    vb_locks[n % VB_LOCKS].hi = len ? (uintptr_t)p + len : UINTPTR_MAX;
+    __atomic_store_n(&vb_lock_serial, n + 1, __ATOMIC_RELEASE);
+}
+
+/* Whether bytes lo to hi - 1, which `e` copied, were locked for writing
+   since the entry last asked (the caller then compares the whole entry). */
+static bool conv_locked(conv_entry *e, uintptr_t lo, uintptr_t hi)
+{
+    unsigned now = __atomic_load_n(&vb_lock_serial, __ATOMIC_ACQUIRE), seen = e->lock_seen;
+    if (now == seen) return false;
+    e->lock_seen = now;
+    if (now - seen > VB_LOCKS) return true;   /* some fell out of the ring: assume so */
+    for (unsigned i = seen; i != now; i++)
+        if (vb_locks[i % VB_LOCKS].lo < hi && vb_locks[i % VB_LOCKS].hi > lo) return true;
+    return false;
+}
 
 #define CONV_SLOTS 1024
 static conv_entry conv_cache[CONV_SLOTS];
@@ -3796,7 +4897,8 @@ static conv_entry *conv_find(const UCHAR *src, ULONG stride, ULONG kind, ULONG c
     free(victim->raw);
     free(victim->out);
     if (victim->buf) { p_glDeleteBuffers(1, &victim->buf); gc_forget_buffer(victim->buf); }
-    *victim = (conv_entry){ src, stride, kind, count, 0, 0, NULL, 0, NULL, 0, d3d.frame, 0, 0, 0, 0 };
+    *victim = (conv_entry){ src, stride, kind, count, 0, 0, NULL, 0, NULL, 0, d3d.frame, 0, 0, 0, 0,
+                            __atomic_load_n(&vb_lock_serial, __ATOMIC_ACQUIRE) };
     return victim;
 }
 
@@ -3854,10 +4956,7 @@ static conv_entry *index_entry(const USHORT *ix, ULONG count, bool upload)
     /* A draw looks its indices up twice (the range, the buffer); the source
        cannot change in between. */
     if (e->raw && e->verified == conv_serial) same = true;
-    else if (e->raw) {
-        if (conv_full_due(e)) same = !memcmp(e->raw, ix, count * 2);
-        else same = conv_sampled_same(e->raw, (const UCHAR *)ix, count * 2, 2, 2) || !memcmp(e->raw, ix, count * 2);
-    }
+    else if (e->raw) same = !memcmp(e->raw, ix, count * 2);   /* in full: see CONV_FULL_EVERY */
     if (upload && (!same || !e->buf)) {
         if (!e->buf) p_glGenBuffers(1, &e->buf);
         gc_bind_buffer(GL_ELEMENT_ARRAY_BUFFER, e->buf);
@@ -3912,7 +5011,7 @@ static GLuint stream_buffer(const UCHAR *base, ULONG stride, vrange r, size_t ne
     e->verified = conv_serial;
     if (e->buf && need <= e->span) {
         size_t from = (size_t)r.lo * stride, to = need;
-        if (conv_full_due(e)) from = 0, to = e->span;
+        if (conv_locked(e, (uintptr_t)base, (uintptr_t)base + e->span) | conv_full_due(e)) from = 0, to = e->span;
         e->verified_to = to;
         if (to == need && conv_sampled_same(e->raw + from, base + from, to - from, stride, 4)) return e->buf;
         if (!conv_refresh(e->raw + from, base + from, to - from)) return e->buf;
@@ -3956,7 +5055,8 @@ static const void *convert_cached(const UCHAR *src, ULONG stride, vrange r, ULON
     e->used = conv_serial;
     if (e->out && r.lo >= e->lo && r.hi <= e->hi) {
         ULONG lo = r.lo, hi = r.hi;
-        if (conv_full_due(e)) {
+        if (conv_locked(e, (uintptr_t)(src + (size_t)e->lo * stride), (uintptr_t)(src + (size_t)e->hi * stride))
+            | conv_full_due(e)) {
             lo = e->lo, hi = e->hi;
         } else {
             size_t len = (size_t)(hi - lo - 1) * stride + 4;   /* each vertex reads 4 bytes */
@@ -4147,7 +5247,16 @@ static void upload_constants(const vshader *sh, program_entry *e)
 uploaded:
     if (e->loc_flip_y >= 0) program_uniform1f(e, e->loc_flip_y, d3d.rt_texture ? -1.0f : 1.0f);
     if (e->loc_vp_scale >= 0) program_uniform4fv(e, e->loc_vp_scale, 1, vp[0]);
-    if (e->loc_vp_offset >= 0) program_uniform4fv(e, e->loc_vp_offset, 1, vp[1]);
+    if (e->loc_vp_offset >= 0) {
+        /* Hardware screen position h is D3D position h - 0.53125, which we
+           draw at the GL pixel centre (+0.5), as the pretransformed path
+           does: without it Splinter Cell's glow quad (from the reserved
+           constants) missed its target's last column and row, which kept
+           the clear colour and bled green up the screen's right and bottom
+           edges. */
+        float off[4] = { vp[1][0] - 0.5f, vp[1][1] - 0.5f, vp[1][2], vp[1][3] };
+        program_uniform4fv(e, e->loc_vp_offset, 1, off);
+    }
     if (e->loc_wdepth >= 0) {
         /* D3DZB_USEW: the NV2A depth-tests w and ignores oPos.z, which
            W-buffered titles leave unscaled (Splinter Cell's z/w is 0..1, not
@@ -4245,9 +5354,10 @@ static void draw_programmable_(vshader *sh, ULONG PrimitiveType, const UCHAR *up
                             "programmable");
     if (whatif_skip_draw || whatif == WHATIF_NO_DRAWS) return;
     if (detail_on) t_gl0 = now_ns();
-    TIMED(t_gl, if (ix) glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, NULL);
-                else if (indices) glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, indices + first);
-                else glDrawArrays(gl_primitive(PrimitiveType), first, count));
+    for (unsigned pass = 0; scissor_pass(pass); pass++)
+        TIMED(t_gl, if (ix) glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, NULL);
+                    else if (indices) glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, indices + first);
+                    else glDrawArrays(gl_primitive(PrimitiveType), first, count));
     frame_draws++;
     if (flush_every && last_frame_draws >= FLUSH_MIN_DRAWS && !d3d.rt_texture && ++flush_count >= flush_every) {
         flush_count = 0;
@@ -4362,7 +5472,7 @@ static void draw_declared_(const vshader *sh, ULONG PrimitiveType, const UCHAR *
     } else {
         glDisableClientState(GL_COLOR_ARRAY);
         glDisable(GL_COLOR_MATERIAL);
-        glColor4f(1, 1, 1, 1);
+        glColor4fv(vertex_diffuse());
     }
     if (sh->attr[4].stream >= 0) {
         const UCHAR *b; ULONG s;
@@ -4406,10 +5516,12 @@ static void draw_declared_(const vshader *sh, ULONG PrimitiveType, const UCHAR *
     if (!use_program(0, &e)) return;
     TRACE_ALL("D3D: draw(declared) prim %u count %u stride %u indices %p shader %#x", PrimitiveType, count, stride,
           indices ? indices + first : NULL, d3d.vertex_shader);
+    trace_draw_detail(indices ? NULL : base + first * stride, stride, count, !indices);
     shader_diagnostics_mark(d3d.frame, ++shader_diag_draw, d3d.vertex_shader, d3d.pixel_shader, cur_program,
                             "declared");
-    TIMED(t_gl, if (indices) glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, indices + first);
-                else glDrawArrays(gl_primitive(PrimitiveType), first, count));
+    for (unsigned pass = 0; scissor_pass(pass); pass++)
+        TIMED(t_gl, if (indices) glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, indices + first);
+                    else glDrawArrays(gl_primitive(PrimitiveType), first, count));
     end_program(e);
 }
 
@@ -4572,7 +5684,7 @@ static void draw_fvf(ULONG PrimitiveType, const UCHAR *base, ULONG stride, ULONG
     } else {
         glDisableClientState(GL_COLOR_ARRAY);
         glDisable(GL_COLOR_MATERIAL);
-        glColor4f(1, 1, 1, 1);
+        glColor4fv(vertex_diffuse());
     }
     if (rgba_vertex_colors && l.specular_off >= 0)
         secondary_color(lit, rgba_colors(base + l.specular_off, stride, vertex_range(first, count, indices), NULL), 3,
@@ -4607,6 +5719,7 @@ static void draw_fvf(ULONG PrimitiveType, const UCHAR *base, ULONG stride, ULONG
     if ((PrimitiveType == 8 || PrimitiveType == 5) && hud_shader_supported()) hud_shader_bind();
     TRACE_ALL("D3D: draw prim %u count %u base %p stride %u indices %p fvf %#x", PrimitiveType, count, base, stride,
           indices ? indices + first : NULL, d3d.vertex_shader);
+    trace_draw_detail(base + (indices ? 0 : first * stride), stride, count, !indices && (d3d.vertex_shader & 0x0E) == 0x04);
     batch_key.units = units;
     batch_key.program = cur_program;
     bool batched = batchable && !e && hud_batch_append(&batch_key, base, first, count);
@@ -4614,8 +5727,9 @@ static void draw_fvf(ULONG PrimitiveType, const UCHAR *base, ULONG stride, ULONG
         hud_batch_flush();
         shader_diagnostics_mark(d3d.frame, ++shader_diag_draw, d3d.vertex_shader, d3d.pixel_shader, cur_program,
                                 "fvf");
-        TIMED(t_gl, if (indices) glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, indices + first);
-                    else glDrawArrays(gl_primitive(PrimitiveType), first, count));
+        for (unsigned pass = 0; scissor_pass(pass); pass++)
+            TIMED(t_gl, if (indices) glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, indices + first);
+                        else glDrawArrays(gl_primitive(PrimitiveType), first, count));
     }
     if (eligible && !e) {
         memcpy(&fvf_plan.key, &key, sizeof(key)); fvf_plan.epoch = gc_epoch;
@@ -4809,6 +5923,7 @@ static void draw_patch_mesh(vshader *layout, vshader *real, const float (*verts)
 
 static LONG NTAPI D3DDevice_DrawRectPatch(UINT_ Handle, const float *pNumSegs, const ULONG *info)
 {
+    gl_require();
     pusher_drain();
     patch_entry *pe = NULL;
     if (Handle) {
@@ -4912,6 +6027,7 @@ static LONG NTAPI D3DDevice_DrawRectPatch(UINT_ Handle, const float *pNumSegs, c
    higher orders take their first three control points as the corners. */
 static LONG NTAPI D3DDevice_DrawTriPatch(UINT_ Handle, const float *pNumSegs, const ULONG *info)
 {
+    gl_require();
     pusher_drain();
     patch_entry *pe = NULL;
     if (Handle) {
@@ -4976,6 +6092,7 @@ static void NTAPI D3DDevice_DeletePatch(UINT_ Handle)
 
 static void NTAPI D3DDevice_DrawVertices(ULONG PrimitiveType, UINT_ StartVertex, UINT_ VertexCount)
 {
+    gl_require();
     pusher_drain();
     if (async_front()) { async_draw(PrimitiveType, StartVertex, VertexCount); return; }
     if (d3d.recording) { ULONG a[3] = { PrimitiveType, StartVertex, VertexCount }; pb_record(OP_DRAW, a, sizeof(a)); return; }
@@ -4987,6 +6104,7 @@ static void NTAPI D3DDevice_DrawVertices(ULONG PrimitiveType, UINT_ StartVertex,
 static void NTAPI D3DDevice_DrawVerticesUP(ULONG PrimitiveType, UINT_ VertexCount, const void *pData,
                                            UINT_ Stride)
 {
+    gl_require();
     pusher_drain();
     if (async_front()) { async_draw_up(PrimitiveType, VertexCount, pData, Stride); return; }
     if (d3d.recording) {
@@ -4999,6 +6117,7 @@ static void NTAPI D3DDevice_DrawVerticesUP(ULONG PrimitiveType, UINT_ VertexCoun
 
 static void NTAPI D3DDevice_DrawIndexedVertices(ULONG PrimitiveType, UINT_ VertexCount, const USHORT *pIndexData)
 {
+    gl_require();
     pusher_drain();
     if (async_front()) { async_draw_indexed(PrimitiveType, VertexCount, pIndexData); return; }
     if (d3d.recording) {
@@ -5015,6 +6134,7 @@ static void NTAPI D3DDevice_DrawIndexedVertices(ULONG PrimitiveType, UINT_ Verte
 static void NTAPI D3DDevice_DrawIndexedVerticesUP(ULONG PrimitiveType, UINT_ VertexCount, const USHORT *pIndexData,
                                                   const void *pVertexData, UINT_ Stride)
 {
+    gl_require();
     pusher_drain();
     if (async_front()) { async_draw_indexed_up(PrimitiveType, VertexCount, pIndexData, pVertexData, Stride); return; }
     if (d3d.recording) {
@@ -5113,6 +6233,51 @@ static struct {
     void (APIENTRY *bind)(GLenum, GLuint);
     void (APIENTRY *blit)(GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield, GLenum);
 } window_fb;
+
+/* The reverse of readback_surface for the device depth buffer: the CPU
+   wrote its memory, so the GPU's depth becomes those bytes, as on the NV2A
+   where the memory is the depth buffer.  A later readback then keeps them
+   wherever the GPU did not draw since. */
+static void upload_depth_memory(void)
+{
+    if (!window_fb.fbo || window_fb.depth_storage != 0x88F0 /* GL_DEPTH24_STENCIL8 */) return;
+    if (!p_glWindowPos2i) p_glWindowPos2i = SDL_GL_GetProcAddress("glWindowPos2i");
+    if (!p_glWindowPos2i) return;
+    hud_batch_flush();
+    ULONG w, h, pitch;
+    container_size((D3DPixelContainer *)d3d.depth, &w, &h, &pitch);
+    if (w > (ULONG)d3d.width) w = d3d.width;
+    if (h > (ULONG)d3d.height) h = d3d.height;
+    const uint8_t *px = (const uint8_t *)(d3d.depth->Data | CONTIG_BASE);
+    uint8_t *tmp = malloc(w * h * 4);
+    if (!tmp) return;
+    ULONG row = pitch < w * 4 ? pitch : w * 4;
+    for (ULONG y = 0; y < h; y++) memcpy(tmp + (h - 1 - y) * w * 4, px + y * pitch, row);
+    /* Called while a draw binds its textures: its program comes back after. */
+    GLuint program = cur_program;
+    p_glUseProgram(0);
+    glPushAttrib(GL_ALL_ATTRIB_BITS);
+    for (int u = 3; u >= 0; u--) {
+        p_glActiveTexture(GL_TEXTURE0 + u);
+        glDisable(GL_TEXTURE_2D); glDisable(GL_TEXTURE_3D); glDisable(GL_TEXTURE_CUBE_MAP);
+    }
+    glDisable(GL_SCISSOR_TEST); glDisable(GL_ALPHA_TEST); glDisable(GL_STENCIL_TEST);
+    glEnable(GL_DEPTH_TEST);   /* glDrawPixels writes depth only with the test on */
+    glDepthFunc(GL_ALWAYS);
+    glDepthMask(GL_TRUE);
+    glStencilMask(0xFF);
+    glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    if (p_glBindFramebuffer) p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    p_glWindowPos2i(0, 0);
+    glDrawPixels(w, h, 0x84F9 /* GL_DEPTH_STENCIL */, 0x84FA /* GL_UNSIGNED_INT_24_8 */, tmp);
+    if (p_glBindFramebuffer) p_glBindFramebuffer(GL_FRAMEBUFFER, d3d.rt_texture ? d3d.fbo : 0);
+    glPopAttrib();
+    gc_reset();   /* the cached GL state no longer matches */
+    if (program) p_glUseProgram(program);
+    free(tmp);
+    TRACE_ALL("D3D: depth memory written by the CPU loaded into the depth buffer");
+}
 
 /* The back buffer keeps the title's formats where GL has them: R5G6B5
    stays 16-bit (its banding and its blending are the title's), X8R8G8B8
@@ -5348,10 +6513,79 @@ static void resolve_window_framebuffer(GLbitfield mask)
     if (scissor) glEnable(GL_SCISSOR_TEST);
 }
 
+/* The back buffer paired with a depth texture (SetRenderTarget(NULL, z) for
+   a depth peel or shadow pass): GL can't attach the window framebuffer's
+   color to the FBO holding the texture, and the texture's rows run top-down
+   while the window's run bottom-up, so the pass draws into a texture
+   standing in for the back buffer, filled from the window when the pair is
+   set and copied back, flipped, when it is left or the frame is shown.
+   Rendering into the window's own depth instead put every pass of the
+   ATG NoSortAlphaBlend sample into the main depth buffer and left its
+   peel textures empty. */
+static void backbuffer_proxy_blit(bool to_window)
+{
+    GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
+    glDisable(GL_SCISSOR_TEST);
+    int w = (int)d3d.width, h = (int)d3d.height;
+    if (to_window) {
+        window_fb.bind(GL_READ_FRAMEBUFFER, d3d.fbo);
+        window_fb.bind(GL_DRAW_FRAMEBUFFER, window_fb.fbo);
+    } else {
+        resolve_window_framebuffer(GL_COLOR_BUFFER_BIT);
+        window_fb.bind(GL_READ_FRAMEBUFFER, window_fb.resolve ? window_fb.resolve : window_fb.fbo);
+        window_fb.bind(GL_DRAW_FRAMEBUFFER, d3d.fbo);
+    }
+    window_fb.blit(0, 0, w, h, 0, h, w, 0, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    window_fb.bind(GL_FRAMEBUFFER, d3d.rt_texture ? d3d.fbo : window_fb.fbo);
+    if (scissor) glEnable(GL_SCISSOR_TEST);
+}
+
+/* Bring the window up to date with what the pass drew.  A multisampled
+   window can't be the target of a flipping blit: its color from such a pass
+   is lost (depth-only passes, the usual case, don't mind). */
+static void backbuffer_proxy_sync(void)
+{
+    if (!d3d.bb_proxy) return;
+    if (window_fb.resolve) {
+        static bool warned;
+        if (!warned) xlog("D3D: color drawn with a depth texture over a multisampled back buffer is dropped");
+        warned = true;
+        return;
+    }
+    backbuffer_proxy_blit(true);
+}
+
+static void backbuffer_proxy_end(void)
+{
+    if (!d3d.bb_proxy) return;
+    backbuffer_proxy_sync();
+    d3d.bb_proxy = false;
+}
+
+/* The stand-in texture, in the window's color format, attached by the
+   caller to d3d.fbo before backbuffer_proxy_blit(false) fills it. */
+static GLuint backbuffer_proxy_texture(void)
+{
+    if (!d3d.bb_proxy_tex) {
+        GLuint id;
+        glGenTextures(1, &id);
+        glBindTexture(GL_TEXTURE_2D, id);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+        glTexImage2D(GL_TEXTURE_2D, 0, window_fb.color_storage, d3d.width, d3d.height, 0,
+                     window_fb.color_storage == GL_RGB565 ? GL_RGB : GL_BGRA,
+                     window_fb.color_storage == GL_RGB565 ? GL_UNSIGNED_SHORT_5_6_5 : GL_UNSIGNED_BYTE, NULL);
+        d3d.bb_proxy_tex = id;
+    }
+    return d3d.bb_proxy_tex;
+}
+
 /* Point GL_READ_FRAMEBUFFER at the back buffer's pixels for glReadPixels
    (GL can't read a multisampled buffer directly). */
 static void backbuffer_read_begin(GLbitfield mask)
 {
+    backbuffer_proxy_sync();
     if (!window_fb.fbo) {
         if (p_glBindFramebuffer) p_glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
         return;
@@ -5368,10 +6602,28 @@ static void backbuffer_read_end(void)
 /* A GL texture holding the back buffer's current pixels, top row first like
    an upload of its memory would, for a linear 32-bit texture header over
    it.  0 when the window has no framebuffer object to blit from. */
+/* Copy the back buffer's top-left w x h into a 2D texture, top row first. */
+static void backbuffer_blit_to_texture(GLuint tex, ULONG w, ULONG h)
+{
+    static GLuint fb;
+    if (!fb) p_glGenFramebuffers(1, &fb);
+    GLint draw = 0;
+    glGetIntegerv(0x8CA6 /* GL_DRAW_FRAMEBUFFER_BINDING */, &draw);
+    backbuffer_read_begin(GL_COLOR_BUFFER_BIT);
+    window_fb.bind(0x8CA9 /* GL_DRAW_FRAMEBUFFER */, fb);
+    p_glFramebufferTexture2D(0x8CA9, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+    GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
+    glDisable(GL_SCISSOR_TEST);
+    window_fb.blit(0, 0, w, h, 0, h, w, 0, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    if (scissor) glEnable(GL_SCISSOR_TEST);
+    window_fb.bind(0x8CA9, draw);
+    backbuffer_read_end();
+    stats.readbacks++;
+}
+
 static GLuint backbuffer_copy_texture(ULONG data, ULONG w, ULONG h)
 {
     static struct { ULONG data, w, h; GLuint tex; } slot[8];
-    static GLuint fb;
     if (!window_fb.fbo || !window_fb.blit || w > (ULONG)d3d.width || h > (ULONG)d3d.height) return 0;
     unsigned i = 0;
     while (i < 8 && slot[i].tex && !(slot[i].data == data && slot[i].w == w && slot[i].h == h)) i++;
@@ -5394,23 +6646,222 @@ static GLuint backbuffer_copy_texture(ULONG data, ULONG w, ULONG h)
         if (!slot[i].tex) glGenTextures(1, &slot[i].tex);
         glBindTexture(GL_TEXTURE_2D, slot[i].tex);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_BGRA, GL_UNSIGNED_BYTE, NULL);
+        /* One level: a stage with a mip filter (FocusBlur's blur passes)
+           would otherwise find the texture incomplete and sample black. */
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
         slot[i].data = data; slot[i].w = w; slot[i].h = h;
     }
-    if (!fb) p_glGenFramebuffers(1, &fb);
-    GLint draw = 0;
-    glGetIntegerv(0x8CA6 /* GL_DRAW_FRAMEBUFFER_BINDING */, &draw);
-    backbuffer_read_begin(GL_COLOR_BUFFER_BIT);
-    window_fb.bind(0x8CA9 /* GL_DRAW_FRAMEBUFFER */, fb);
-    p_glFramebufferTexture2D(0x8CA9, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, slot[i].tex, 0);
-    GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
-    glDisable(GL_SCISSOR_TEST);
-    window_fb.blit(0, 0, w, h, 0, h, w, 0, GL_COLOR_BUFFER_BIT, GL_NEAREST);
-    if (scissor) glEnable(GL_SCISSOR_TEST);
-    window_fb.bind(0x8CA9, draw);
-    backbuffer_read_end();
-    stats.readbacks++;
+    backbuffer_blit_to_texture(slot[i].tex, w, h);
     TRACE_ALL("D3D: back buffer copied for a view at %#x, %ux%u (slot %u)", data, w, h, i);
     return slot[i].tex;
+}
+
+/* ---- the front buffer and the persisted frame ----
+
+   GetBackBuffer(-1) is the frame on screen.  The host draws into one
+   frame, so the front buffer gets memory of its own, and once a title has
+   asked for it each Swap copies the frame it shows into a texture: a view
+   of it samples that, a lock or a copy reads it into the memory.  Splinter
+   Cell cross-fades from it; handing out the back buffer instead faded from
+   whatever was drawn since (white at boot, the new frame into gameplay). */
+
+/* Traced frames: the average colour of the frame going out, so a trace shows
+   which frame first turned a colour. */
+static void trace_presented_colour(void)
+{
+    if (g_trace != 1 || !d3d.backbuffer) return;
+    ULONG w = d3d.width, h = d3d.height;
+    uint8_t *px = malloc((size_t)w * h * 4);
+    if (!px) return;
+    backbuffer_read_begin(GL_COLOR_BUFFER_BIT);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    while (glGetError() != GL_NO_ERROR) {}
+    glReadPixels(0, 0, w, h, GL_BGRA, GL_UNSIGNED_BYTE, px);
+    GLenum err = glGetError();
+    GLint rfb = 0;
+    glGetIntegerv(0x8CAA /* GL_READ_FRAMEBUFFER_BINDING */, &rfb);
+    backbuffer_read_end();
+    if (err) xlog("D3D: reading frame %lu back failed (GL error %#x, read framebuffer %d)", (unsigned long)d3d.frame, err, rfb);
+    unsigned long long sum[3] = { 0, 0, 0 };
+    for (size_t i = 0; i < (size_t)w * h; i++)
+        for (int c = 0; c < 3; c++) sum[c] += px[i * 4 + c];
+    size_t n = (size_t)w * h;
+    xlog("D3D: frame %lu goes out with average colour %02llx%02llx%02llx", (unsigned long)d3d.frame,
+         sum[2] / n, sum[1] / n, sum[0] / n);
+    free(px);
+}
+
+static void front_buffer_update(void)
+{
+    trace_presented_colour();
+    if (!front.used || !front.s || !window_fb.fbo || !window_fb.blit) return;
+    /* Nothing drawn: the frame on screen stays what it was.  Splinter Cell's
+       title picture sat through 38 such frames that read back black here, and
+       its cross-fade into the menu then faded from that. */
+    if (frame_idle && front.tex) return;
+    ULONG w = d3d.width, h = d3d.height;
+    if (!front.tex) {
+        glGenTextures(1, &front.tex);
+        glBindTexture(GL_TEXTURE_2D, front.tex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_BGRA, GL_UNSIGNED_BYTE, NULL);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+    }
+    backbuffer_blit_to_texture(front.tex, w, h);
+    front.memory_stale = true;
+}
+
+/* front.snap: the front buffer's memory as xbcompat last left it. */
+static void front_snap_take(void)
+{
+    ULONG w, h, pitch;
+    container_size((D3DPixelContainer *)front.s, &w, &h, &pitch);
+    uint8_t *snap = realloc(front.snap, (size_t)pitch * h);
+    if (!snap) return;
+    memcpy(snap, (const void *)(front.s->Data | CONTIG_BASE), (size_t)pitch * h);
+    front.snap = snap;
+}
+
+/* The CPU wrote the front buffer, through a lock (TrueTypeFont's XFONT
+   text) or a texture header over its memory: the hardware shows that on the
+   frame on screen.  Here the frame on screen is already out, so put the
+   pixels the CPU changed over the one being presented. */
+static void front_buffer_overlay(void)
+{
+    if (!front.s || !front.snap) return;
+    ULONG fmt = (front.s->Format >> 8) & 0xFF, w, h, pitch;
+    container_size((D3DPixelContainer *)front.s, &w, &h, &pitch);
+    if (!memcmp(front.snap, (const void *)(front.s->Data | CONTIG_BASE), (size_t)pitch * h)) return;
+    if (fmt != 0x12 && fmt != 0x1E) { front_snap_take(); return; }
+    if (w > (ULONG)d3d.width) w = d3d.width;
+    if (h > (ULONG)d3d.height) h = d3d.height;
+    const uint32_t *now = (const uint32_t *)(front.s->Data | CONTIG_BASE), *was = (const uint32_t *)front.snap;
+    uint32_t *px = calloc((size_t)d3d.width * d3d.height, 4);
+    if (!px) return;
+    unsigned changed = 0;
+    for (ULONG y = 0; y < h; y++)
+        for (ULONG x = 0; x < w; x++) {
+            uint32_t v = now[y * pitch / 4 + x];
+            if (v != was[y * pitch / 4 + x]) px[(h - 1 - y) * d3d.width + x] = v | 0xFF000000u, changed++;
+        }
+    if (changed) draw_window_pixels_masked((const uint8_t *)px, GL_BGRA, GL_UNSIGNED_BYTE, true);
+    TRACE_ALL("D3D: %u front buffer pixels written by the CPU put over the frame", changed);
+    free(px);
+    front_snap_take();
+}
+
+/* Bring the front buffer's memory up to date for the CPU or a copy. */
+static void front_buffer_memory(void)
+{
+    if (!front.memory_stale || !front.tex) return;
+    gl_require();
+    front.memory_stale = false;
+    ULONG w, h, pitch;
+    container_size((D3DPixelContainer *)front.s, &w, &h, &pitch);
+    if (w > (ULONG)d3d.width) w = d3d.width;
+    if (h > (ULONG)d3d.height) h = d3d.height;
+    GLenum format, type;
+    unsigned bytes;
+    if (!surface_color_transfer((front.s->Format >> 8) & 0xFF, &format, &type, &bytes)) return;
+    uint8_t *tmp = malloc((size_t)d3d.width * d3d.height * bytes);
+    if (!tmp) return;
+    glBindTexture(GL_TEXTURE_2D, front.tex);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glGetTexImage(GL_TEXTURE_2D, 0, format, type, tmp);
+    uint8_t *px = (uint8_t *)(front.s->Data | CONTIG_BASE);
+    for (ULONG y = 0; y < h; y++) memcpy(px + y * pitch, tmp + (size_t)y * d3d.width * bytes, w * bytes);
+    free(tmp);
+    tex_invalidate(front.s->Data);
+    front_snap_take();
+}
+
+/* PersistDisplay's frame for the next title, which is its own process:
+   <hdd>/.persisted holds its size and BGRA rows, top first.  Within a title
+   the library keeps its copy at AvGetSavedDataAddress too, until the next
+   PersistDisplay replaces it or the first Present after CreateDevice or
+   Reset frees it (present.cpp SwapFirstFlip).  Splinter Cell persists each
+   loading picture and fades the next one in from that copy. */
+static struct { D3DSurface *s, *own; bool loaded, presented, first_flip; } persisted;
+void NTAPI AvSetSavedDataAddress(PVOID p);
+
+static D3DSurface *new_linear_surface(ULONG fmt, ULONG w, ULONG h);
+static void persisted_path(char *path, size_t n) { snprintf(path, n, "%s/.persisted", fs_hdd_root()); }
+
+static void persisted_save(void)
+{
+    ULONG w = d3d.width, h = d3d.height;
+    uint8_t *px = malloc((size_t)w * h * 4);
+    if (!px) return;
+    backbuffer_read_begin(GL_COLOR_BUFFER_BIT);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(0, 0, w, h, GL_BGRA, GL_UNSIGNED_BYTE, px);
+    backbuffer_read_end();
+    char path[600];
+    persisted_path(path, sizeof path);
+    FILE *f = fopen(path, "wb");
+    if (f) {
+        uint32_t hdr[2] = { w, h };
+        fwrite(hdr, sizeof hdr, 1, f);
+        for (ULONG y = h; y-- > 0;) fwrite(px + (size_t)y * w * 4, w * 4, 1, f);
+        fclose(f);
+    }
+    /* The library's own copy, which replaces the last one. */
+    ULONG ow = 0, oh = 0, pitch = 0;
+    if (persisted.own) container_size((D3DPixelContainer *)persisted.own, &ow, &oh, &pitch);
+    if (!persisted.own || ow != w || oh != h) persisted.own = new_linear_surface(0x1E /* LIN_X8R8G8B8 */, w, h);
+    if (persisted.own) {
+        container_size((D3DPixelContainer *)persisted.own, &ow, &oh, &pitch);
+        uint8_t *dst = (uint8_t *)(persisted.own->Data | CONTIG_BASE);
+        for (ULONG y = 0; y < h; y++) memcpy(dst + y * pitch, px + (size_t)(h - 1 - y) * w * 4, w * 4);
+        tex_invalidate(persisted.own->Data);
+        AvSetSavedDataAddress(persisted.own);
+    }
+    free(px);
+}
+
+static void persisted_load(void)
+{
+    persisted.loaded = true;
+    char path[600];
+    persisted_path(path, sizeof path);
+    struct stat st;
+    /* Left by a title that ran a while ago (a crash, a hand-run title): not ours. */
+    if (stat(path, &st) || time(NULL) - st.st_mtime > 120) return;
+    FILE *f = fopen(path, "rb");
+    uint32_t hdr[2];
+    if (!f || fread(hdr, sizeof hdr, 1, f) != 1 || !hdr[0] || !hdr[1] || hdr[0] > 4096 || hdr[1] > 4096) {
+        if (f) fclose(f);
+        return;
+    }
+    persisted.s = new_linear_surface(0x1E /* LIN_X8R8G8B8 */, hdr[0], hdr[1]);
+    if (persisted.s) {
+        ULONG w, h, pitch;
+        container_size((D3DPixelContainer *)persisted.s, &w, &h, &pitch);
+        uint8_t *px = (uint8_t *)(persisted.s->Data | CONTIG_BASE);
+        for (ULONG y = 0; y < hdr[1]; y++)
+            if (fread(px + y * pitch, hdr[0] * 4, 1, f) != 1) break;
+        xlog("D3D: the last title's persisted %ux%u frame is the persisted surface", hdr[0], hdr[1]);
+    }
+    fclose(f);
+}
+
+PVOID NTAPI AvGetSavedDataAddress(void);
+static void persisted_first_present(void)
+{
+    if (persisted.first_flip) {
+        persisted.first_flip = false;
+        if (AvGetSavedDataAddress()) {
+            AvSetSavedDataAddress(NULL);   /* the library frees it here */
+            TRACE_ALL("D3D: the first Present since the device was set up lets the persisted frame go");
+        }
+    }
+    if (persisted.presented) return;
+    persisted.presented = true;
+    if (!persisted.loaded) {
+        persisted.loaded = true;
+        char path[600];
+        persisted_path(path, sizeof path);
+        unlink(path);
+    }
 }
 
 static const char present_vs[] =
@@ -5463,6 +6914,7 @@ ready:
 static void present_window_framebuffer(void)
 {
     if (!window_fb.fbo) return;
+    backbuffer_proxy_sync();
     DETAIL_TIMED(t_resolve, resolve_window_framebuffer(GL_COLOR_BUFFER_BIT));
     uint64_t filter_start = detail_on ? now_ns() : 0;
     static int flicker_override = -2;
@@ -5547,6 +6999,28 @@ static void present_window_framebuffer(void)
     p_glUseProgram(prev_prog);
     glPopAttrib();
     if (filter_start) t_filter += now_ns() - filter_start;
+}
+
+/* The Guide (src/guide) draws over the finished frame, in window pixels,
+   just before the swap.  Weak: builds without it (the native renderer
+   library) skip it. */
+__attribute__((weak)) bool guide_frame(int w, int h);
+__attribute__((weak)) void guide_draw(int w, int h);
+
+static void guide_overlay(void)
+{
+    if (!guide_frame || !guide_frame(window_fb.w, window_fb.h)) return;
+    glPushAttrib(GL_ALL_ATTRIB_BITS);
+    window_fb.bind(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, window_fb.w, window_fb.h);
+    p_glActiveTexture(GL_TEXTURE0);
+    GLuint samplers[2] = { bound_sampler[0], bound_sampler[1] };
+    if (separate_samplers) bind_stage_sampler(0, 0);
+    p_glUseProgram(0);
+    guide_draw(window_fb.w, window_fb.h);
+    if (separate_samplers) bind_stage_sampler(0, samplers[0]), bind_stage_sampler(1, samplers[1]);
+    glPopAttrib();
+    p_glUseProgram(cur_program);
 }
 
 static void restore_window_framebuffer(void)
@@ -5699,10 +7173,23 @@ static void create_device_surfaces(ULONG format, ULONG depth_format)
 {
     d3d.backbuffer = new_linear_surface(format, d3d.width, d3d.height);
     d3d.depth = new_linear_surface(depth_format ? depth_format : 0x2A, d3d.width, d3d.height);
+    if (!front.s && (front.s = new_linear_surface(format, d3d.width, d3d.height))) front_snap_take();
+#ifndef XBC_TRANSLATED
+    /* Copy every presented frame from the start, so the first ask for it
+       finds the frame on screen rather than whatever is drawn by then.  Not
+       on the Pi, where each copy is a GPU job of its own. */
+    front.used = true;
+#endif
+    if (!persisted.loaded && !persisted.presented) {
+        persisted_load();
+        if (persisted.s) AvSetSavedDataAddress(persisted.s);
+    }
+    persisted.first_flip = true;
     d3d.zscale = depth_format == 0x2C || depth_format == 0x2D || depth_format == 0x30 || depth_format == 0x31
                      ? 65535.0f : 16777215.0f;
     zsync.hash = depth_memory_hash();
     zsync.writes = depth_gpu_writes;
+    backbuffer_synced();
     d3d.target = d3d.backbuffer;
     d3d.target_depth = d3d.depth;
     internal_addref_surface(d3d.target);
@@ -5716,9 +7203,20 @@ static void create_device_surfaces(ULONG format, ULONG depth_format)
 
 static void NTAPI D3DDevice_GetBackBuffer(LONG BackBuffer, ULONG Type, D3DSurface **pp)
 {
-    (void)BackBuffer; (void)Type;
-    d3d.backbuffer->Common++;
-    *pp = d3d.backbuffer;
+    (void)Type;
+    TRACE_ALL("D3D: GetBackBuffer(%d)", (int)BackBuffer);
+    /* -1 is the frame on screen (see front_buffer_update). */
+    D3DSurface *s = BackBuffer == -1 && front.s && window_fb.fbo ? front.s : d3d.backbuffer;
+    if (s == front.s) {
+        front.used = true;
+        /* Its memory holds the frame on screen, as the hardware's does:
+           Splinter Cell builds texture headers over it (XGSetTextureHeader)
+           and copies from it with D3DX on the CPU.  The lock-free state call
+           of queued drawing has no GL to read it with; a lock still does. */
+        if (!async_front()) front_buffer_memory();
+    }
+    s->Common++;
+    *pp = s;
 }
 
 static LONG NTAPI D3DDevice_GetDepthStencilSurface(D3DSurface **pp)
@@ -5845,6 +7343,12 @@ static bool readback_rt_surface(D3DSurface *s)
 {
     hud_batch_flush();
     if (s == d3d.backbuffer) return false;
+    /* A colour header over the depth buffer's memory (Splinter Cell locks
+       one to decode its loading pictures there): the GL texture under that
+       address is only a copy made from memory when it was last sampled, not
+       a render target, and reading it back put the previous picture (black
+       at first) over what the CPU had written since through its pointer. */
+    if (d3d.depth && (s->Data | CONTIG_BASE) == (d3d.depth->Data | CONTIG_BASE)) return false;
     ULONG fmt = (s->Format >> 8) & 0xFF, level;
     GLenum transfer_format, transfer_type;
     unsigned bytes;
@@ -5852,6 +7356,9 @@ static bool readback_rt_surface(D3DSurface *s)
     GLenum face;
     tex_entry *e = surface_image(s, &face, &level);
     if (!e) return false;
+    if (gl_lost()) {   /* the holder may drop the copy meanwhile: look again once ours */
+        if (!gl_require() || !(e = surface_image(s, &face, &level))) return false;
+    }
     ULONG w, h, pitch;
     container_size((D3DPixelContainer *)s, &w, &h, &pitch);
     if (!w || !h || w > SIZE_MAX / h / bytes) return false;
@@ -5868,13 +7375,60 @@ static bool readback_rt_surface(D3DSurface *s)
     }
     free(tmp);
     stats.readbacks++;
+    TRACE_ALL("D3D: surface %p at %#x read back from GL texture %u", (void *)s, (unsigned)s->Data, e->id);
     return true;
+}
+
+/* --trace aid: while /data/xbox/xbcompat-dump-targets exists, a traced
+   frame writes each texture render target it leaves to
+   /tmp/xbc-dump/F-N-DATA-WxH.ppm (top row first) for looking at offline. */
+static void trace_dump_target(D3DSurface *s)
+{
+    static unsigned seq;
+    static unsigned long seq_frame;
+    if (g_trace != 1 || !s || s == d3d.backbuffer || !d3d.rt_texture) return;
+    if (access("/data/xbox/xbcompat-dump-targets", F_OK) && access("/tmp/xbcompat-dump-targets", F_OK)) return;
+    GLenum face;
+    ULONG level;
+    tex_entry *e = s->Parent ? surface_image(s, &face, &level) : NULL;
+    if (!s->Parent) {
+        for (e = *tex_bucket(s->Data); e; e = e->next)
+            if (e->data == s->Data && e->format == s->Format && e->size == s->Size) break;
+        face = GL_TEXTURE_2D; level = 0;
+    }
+    if (!e) return;
+    hud_batch_flush();
+    ULONG w, h, pitch;
+    container_size((D3DPixelContainer *)s, &w, &h, &pitch);
+    if (!w || !h || w > 2048 || h > 2048) return;
+    uint8_t *px = malloc(w * h * 4);
+    if (!px) return;
+    glBindTexture(e->target, e->id);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glGetTexImage(face, level, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    mkdir("/tmp/xbc-dump", 0755);
+    if (seq_frame != d3d.frame) { seq_frame = d3d.frame; seq = 0; }
+    char path[128];
+    snprintf(path, sizeof path, "/tmp/xbc-dump/%lu-%02u-%08x-%ux%u.ppm", (unsigned long)d3d.frame, seq++,
+             (unsigned)s->Data, (unsigned)w, (unsigned)h);
+    FILE *f = fopen(path, "wb");
+    if (f) {
+        fprintf(f, "P6 %u %u 255\n", (unsigned)w, (unsigned)h);
+        for (ULONG i = 0; i < w * h; i++) fwrite(px + i * 4, 1, 3, f);
+        fclose(f);
+        xlog("D3D:   dumped %s", path);
+    }
+    free(px);
+    gc_reset();   /* the texture binding changed behind the cache */
 }
 
 static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
 {
+    gl_require();
+    trace_dump_target(d3d.target);
     pusher_drain();
     if (async_front()) { async_target(target, z); return; }
+    TRACE_ALL("D3D: SetRenderTarget %#x, depth %#x", target ? (unsigned)target->Data : 0, z ? (unsigned)z->Data : 0);
     if (async_replaying) {
         /* The front took the references and told the title's device. */
         d3d.target = target;
@@ -5890,10 +7444,19 @@ static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
     if (d3d.target_depth) internal_release_surface(d3d.target_depth);
     d3d.target = target;
     d3d.target_depth = z;
+    d3d.scissors.count = 0;   /* via the library's SetViewport */
     sync_device_surfaces();
     }
     TRACE_ALL("D3D: render target %p (parent %p) depth %p", (void *)target, (void *)target->Parent, (void *)z);
-    if (target == d3d.backbuffer || (!target->Parent && !p_glGenFramebuffers)) {
+    backbuffer_proxy_end();
+    /* Depth surfaces with an image of their own: a depth texture's level, or
+       a standalone integer depth surface (kept like one). */
+    bool z_image = z && ((z->Parent && tex_target(z->Parent) == GL_TEXTURE_2D)
+                         || (!z->Parent && (((z->Format >> 8) & 0xFF) == 0x2E
+                                          || ((z->Format >> 8) & 0xFF) == 0x30)));
+    bool bb_proxy = target == d3d.backbuffer && z_image && z != d3d.depth && window_fb.fbo && window_fb.blit
+                    && p_glGenFramebuffers;
+    if (!bb_proxy && (target == d3d.backbuffer || (!target->Parent && !p_glGenFramebuffers))) {
         if (target != d3d.backbuffer)
             xlog("D3D: no framebuffer objects, rendering a standalone surface into the back buffer");
         if (p_glBindFramebuffer) p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -5917,7 +7480,7 @@ static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
         d3d.rt_texture = false;
         d3d.target_zmax = z ? depth_format_max((z->Format >> 8) & 0xFF) : d3d.zscale;
         d3d.host_zmax = window_fb.depth_storage == 0x81A5 /* GL_DEPTH_COMPONENT16 */ ? 65535.0f : 16777215.0f;
-        d3d.viewport = (D3DVIEWPORT8){ 0, 0, d3d.rt_width, d3d.rt_height, 0, 1 };
+        target_viewport_reset(z, d3d.rt_width, d3d.rt_height);
         return;
     }
     if (!p_glGenFramebuffers) {
@@ -5930,20 +7493,19 @@ static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
     p_glBindFramebuffer(GL_FRAMEBUFFER, d3d.fbo);
     /* A standalone surface (CreateRenderTarget) renders into a GL texture of
        its own; CopyRects reads it back. */
-    GLuint tex = target->Parent ? texture_for(target->Parent) : surface_rt_texture(target, w, h);
+    GLuint tex = bb_proxy ? backbuffer_proxy_texture()
+                 : target->Parent ? texture_for(target->Parent) : surface_rt_texture(target, w, h);
     GLenum face_target = GL_TEXTURE_2D;
     ULONG target_level = 0;
     /* Surface dimensions and offsets identify the actual mip, including a
        mip within a cube face. The parent's level zero is not this view. */
-    if (target->Parent && !surface_image(target, &face_target, &target_level)) {
+    if (!bb_proxy && target->Parent && !surface_image(target, &face_target, &target_level)) {
         xlog("D3D: cannot resolve render target subresource");
         return;
     }
     p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, face_target, tex, target_level);
     d3d.target_zmax = z ? depth_format_max((z->Format >> 8) & 0xFF) : d3d.zscale;
-    if (z && ((z->Parent && tex_target(z->Parent) == GL_TEXTURE_2D)
-              || (!z->Parent && (((z->Format >> 8) & 0xFF) == 0x2E
-                               || ((z->Format >> 8) & 0xFF) == 0x30)))) {
+    if (z_image) {
         /* Give standalone integer depth surfaces their own persistent image,
            just like texture views. A shared scratch renderbuffer loses data
            when targets alternate and cannot be copied or locked back. */
@@ -5957,7 +7519,10 @@ static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
             return;
         }
         bool d24 = depth_format_max((z->Format >> 8) & 0xFF) > 65535.0f;
-        d3d.host_zmax = d24 ? 16777215.0f : 65535.0f;
+        /* upload_image3 stores D16 images as GL_DEPTH_COMPONENT24 too, so
+           GL's polygon offset unit is 2^-24 for both: with 65535 here a D16
+           shadow buffer got 1/256 of its D3DRS_POLYGONOFFSETZOFFSET. */
+        d3d.host_zmax = 16777215.0f;
         p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, 0);
         p_glFramebufferTexture2D(GL_FRAMEBUFFER, d24 ? GL_DEPTH_STENCIL_ATTACHMENT : GL_DEPTH_ATTACHMENT,
                                  depth_face, dt, depth_level);
@@ -5966,7 +7531,11 @@ static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
         d3d.rt_width = w;
         d3d.rt_height = h;
         d3d.rt_texture = true;
-        d3d.viewport = (D3DVIEWPORT8){ 0, 0, w, h, 0, 1 };
+        if (bb_proxy && st == GL_FRAMEBUFFER_COMPLETE) {
+            backbuffer_proxy_blit(false);
+            d3d.bb_proxy = true;
+        }
+        target_viewport_reset(z, w, h);
         return;
     }
     /* Any other depth surface gets a scratch renderbuffer in its own format;
@@ -5992,7 +7561,7 @@ static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
     d3d.rt_width = w;
     d3d.rt_height = h;
     d3d.rt_texture = true;
-    d3d.viewport = (D3DVIEWPORT8){ 0, 0, w, h, 0, 1 };
+    target_viewport_reset(z, w, h);
 }
 
 static void NTAPI D3DSurface_GetDesc(D3DSurface *s, ULONG *desc)
@@ -6014,7 +7583,9 @@ static void NTAPI D3DSurface_LockRect(D3DSurface *s, ULONG *locked, const LONG *
 {
     ULONG w, h, pitch;
     container_size((D3DPixelContainer *)s, &w, &h, &pitch);
-    if (s == d3d.backbuffer && !d3d.bb_cpu_dirty) {
+    TRACE_ALL("D3D: LockRect surface %p data %#x %ux%u flags %#x%s%s", (void *)s, (unsigned)s->Data, (unsigned)w,
+              (unsigned)h, (unsigned)flags, s == d3d.backbuffer ? " backbuffer" : "", s == d3d.depth ? " depth" : "");
+    if (s == d3d.backbuffer && !d3d.bb_cpu_dirty && gl_require()) {
         /* Hand out the real pixels: read the frame back.  Not while memory
            holds writes from an earlier lock: GL hasn't seen them yet (a draw
            flushes them first), so memory is already the newest frame, and
@@ -6033,8 +7604,10 @@ static void NTAPI D3DSurface_LockRect(D3DSurface *s, ULONG *locked, const LONG *
         backbuffer_read_end();
         for (ULONG y = 0; y < h; y++) memcpy(px + y * pitch, tmp + (h - 1 - y) * w * bytes, w * bytes);
         free(tmp);
+        backbuffer_synced();
     }
-    if (s != d3d.backbuffer) readback_rt_surface(s);
+    if (s == front.s) front_buffer_memory();
+    else if (s != d3d.backbuffer) readback_rt_surface(s);
     if (s == d3d.backbuffer && !(flags & 0x80 /* D3DLOCK_READONLY */)) d3d.bb_cpu_dirty = true;
     if (s->Parent && !(flags & 0x80)) tex_invalidate(s->Parent->res.Data);
     ULONG fmt = (s->Format >> 8) & 0xFF;
@@ -6127,10 +7700,13 @@ static void copy_compressed_surface(D3DSurface *src, const LONG *rects, UINT_ n,
 static void NTAPI D3DDevice_CopyRects(D3DSurface *src, const LONG *rects, UINT_ n, D3DSurface *dst,
                                       const LONG *points)
 {
+    gl_require();
     pusher_drain();
     ULONG sw, sh, sp, dw, dh, dp;
     container_size((D3DPixelContainer *)src, &sw, &sh, &sp);
     container_size((D3DPixelContainer *)dst, &dw, &dh, &dp);
+    TRACE_ALL("D3D: CopyRects %p data %#x %ux%u -> %p data %#x %ux%u, %u rects", (void *)src, (unsigned)src->Data,
+              (unsigned)sw, (unsigned)sh, (void *)dst, (unsigned)dst->Data, (unsigned)dw, (unsigned)dh, (unsigned)n);
     bool lin;
     ULONG src_fmt = (src->Format >> 8) & 0xFF, dst_fmt = (dst->Format >> 8) & 0xFF;
     if (src_fmt == 0x0C || src_fmt == 0x0E || src_fmt == 0x0F ||
@@ -6148,6 +7724,8 @@ static void NTAPI D3DDevice_CopyRects(D3DSurface *src, const LONG *rects, UINT_ 
     if (src == d3d.backbuffer) {
         ULONG locked[2];
         D3DSurface_LockRect(src, locked, NULL, 0x80);   /* refresh its pixels */
+    } else if (src == front.s) {
+        front_buffer_memory();
     } else {
         readback_rt_surface(src);
     }
@@ -6374,6 +7952,8 @@ static void lock_level(D3DPixelContainer *t, ULONG face, ULONG level, ULONG *loc
 
 static void NTAPI D3DTexture_LockRect(D3DPixelContainer *t, UINT_ level, ULONG *locked, const LONG *rect, ULONG flags)
 {
+    TRACE_ALL("D3D: LockRect texture %p data %#x level %u flags %#x", (void *)t, (unsigned)t->res.Data, (unsigned)level,
+              (unsigned)flags);
     lock_level(t, 0, level, locked, rect, flags);
 }
 
@@ -6593,7 +8173,13 @@ static void NTAPI D3DDevice_GetLight(ULONG Index, D3DLIGHT8 *l)
 
 static void NTAPI D3DDevice_GetLightEnable(ULONG Index, ULONG *on) { *on = Index < 8 && d3d.lights[Index].enabled; }
 
-static void NTAPI D3DDevice_GetVertexShader(ULONG *h) { *h = d3d.vertex_shader; }
+static void NTAPI D3DDevice_GetVertexShader(ULONG *h)
+{
+    /* A layout or program combined for SelectVertexShader/SetVertexShaderInput
+       answers with the handle the title set. */
+    ULONG v = d3d.vertex_shader;
+    *h = (v & 1) && ((vshader *)(v & ~1u))->user_handle ? ((vshader *)(v & ~1u))->user_handle : v;
+}
 
 /* Constants are numbered -96..95 by the title (D3DSCM_96CONSTANTS puts 0..95
    at hardware slots 96..191; D3DSCM_192CONSTANTS exposes all of them). */
@@ -6633,6 +8219,10 @@ static void NTAPI D3DDevice_GetShaderConstantMode(ULONG *mode) { *mode = d3d.con
 
 static void NTAPI D3DDevice_GetProjectionViewportMatrix(D3DMATRIX *out)
 {
+    /* Not viewport_transform(): with D3DZB_USEW its zscale / wfar scaling
+       made Splinter Cell (4928) build model matrices that put every model
+       out of view.  Titles combine this with their own vertex programs, and
+       xbcompat's program epilogue expects the plain viewport matrix. */
     D3DVIEWPORT8 *v = &d3d.viewport;
     D3DMATRIX vp;
     identity(&vp);
@@ -6701,25 +8291,40 @@ static LONG NTAPI Direct3D_GetAdapterIdentifier(UINT_ a, ULONG flags, char *id)
     return D3D_OK;
 }
 
+/* The library keeps no rectangles as one inclusive rectangle over the
+   viewport (and SetViewport sets that); here a count of 0 stands for it,
+   so draws need no scissor, and GetScissors reports it as the library does. */
 static void NTAPI D3DDevice_SetScissors(ULONG Count, BOOLEAN Exclusive, const D3DRECT *rects)
 {
     if (Count > 8) Count = 8;
+    if (!rects) Count = 0;
+    if (!Count) Exclusive = 0;
+    if (d3d.recording) { ULONG h[2] = { Count, Exclusive }; pb_record2(OP_SCISSORS, h, 8, rects, Count * sizeof(D3DRECT)); }
     d3d.scissors.count = Count;
     d3d.scissors.exclusive = Exclusive;
     if (Count) memcpy(d3d.scissors.rects, rects, Count * sizeof(D3DRECT));
+    TRACE_ALL("D3D: SetScissors(%u, %u) first %d,%d-%d,%d", Count, Exclusive, Count ? (int)rects[0].x1 : 0,
+              Count ? (int)rects[0].y1 : 0, Count ? (int)rects[0].x2 : 0, Count ? (int)rects[0].y2 : 0);
 }
 
 static void NTAPI D3DDevice_GetScissors(ULONG *Count, ULONG *Exclusive, D3DRECT *rects)
 {
-    *Count = d3d.scissors.count;
-    *Exclusive = d3d.scissors.exclusive;
-    if (rects) memcpy(rects, d3d.scissors.rects, d3d.scissors.count * sizeof(D3DRECT));
+    const D3DVIEWPORT8 *v = &d3d.viewport;
+    D3DRECT whole = { (LONG)v->X, (LONG)v->Y, (LONG)(v->X + v->Width), (LONG)(v->Y + v->Height) };
+    ULONG n = d3d.scissors.count;
+    if (Count) *Count = n ? n : 1;
+    if (Exclusive) *Exclusive = n ? d3d.scissors.exclusive : 0;
+    if (rects) {
+        if (n) memcpy(rects, d3d.scissors.rects, n * sizeof(D3DRECT));
+        else rects[0] = whole;
+    }
 }
 
 /* Callbacks run "when the GPU gets there": we run them at the next sync point. */
 static void run_callbacks(void)
 {
     hud_batch_flush();
+    gl_no_yield++;
     for (unsigned i = 0; i < d3d.ncallbacks; i++) {
 #ifdef XBC_TRANSLATED
         CPU_CALL(d3d.callbacks[i].fn, CONV_CDECL, (uint32_t)d3d.callbacks[i].ctx);
@@ -6728,6 +8333,7 @@ static void run_callbacks(void)
         fn(d3d.callbacks[i].ctx);
 #endif
     }
+    gl_no_yield--;
     d3d.ncallbacks = 0;
 }
 
@@ -6746,9 +8352,70 @@ static void NTAPI D3DDevice_GetDisplayFieldStatus(ULONG *st) { st[0] = 3; st[1] 
 static void NTAPI D3DDevice_SetScreenSpaceOffset(float x, float y) { d3d.screen_offset[0] = x; d3d.screen_offset[1] = y; }
 static void NTAPI D3DDevice_SetBackBufferScale(float x, float y) { d3d.backbuffer_scale[0] = x; d3d.backbuffer_scale[1] = y; }
 static void NTAPI D3DDevice_GetBackBufferScale(float *x, float *y) { *x = d3d.backbuffer_scale[0]; *y = d3d.backbuffer_scale[1]; }
-static void NTAPI D3DDevice_SetDebugMarker(ULONG v) { (void)v; }
-static void NTAPI D3DDevice_SetTile(ULONG i, const void *t) { (void)i; (void)t; }
-static void NTAPI D3DDevice_GetTile(ULONG i, ULONG *t) { (void)i; memset(t, 0, 24); }
+/* The marker is only recorded (the library keeps it for its debug dumps):
+   SetDebugMarker returns the previous one. */
+static ULONG debug_marker;
+static ULONG NTAPI D3DDevice_SetDebugMarker(ULONG v) { ULONG old = debug_marker; debug_marker = v; return old; }
+static ULONG NTAPI D3DDevice_GetDebugMarker(void) { return debug_marker; }
+/* Tiles (D3DTILE: Flags, pMemory, Size, Pitch, ZStartTag, ZOffset) only set
+   how the NV2A lays out and compresses memory; GetTile returns what SetTile
+   set, as the library does. */
+static ULONG d3d_tiles[8][6];
+static void NTAPI D3DDevice_SetTile(ULONG i, const void *t)
+{
+    if (i >= 8) return;
+    if (t) memcpy(d3d_tiles[i], t, sizeof d3d_tiles[i]);
+    else memset(d3d_tiles[i], 0, sizeof d3d_tiles[i]);
+}
+static void NTAPI D3DDevice_GetTile(ULONG i, ULONG *t) { if (i < 8) memcpy(t, d3d_tiles[i], sizeof d3d_tiles[i]); else memset(t, 0, 24); }
+/* No Z compression: no tag is ever set. */
+static void NTAPI D3DDevice_SetTileCompressionTagBits(ULONG part, ULONG addr, const ULONG *data, ULONG n)
+{
+    (void)part; (void)addr; (void)data; (void)n;
+}
+static void NTAPI D3DDevice_GetTileCompressionTagBits(ULONG part, ULONG addr, ULONG *data, ULONG n)
+{
+    (void)part; (void)addr;
+    if (data) memset(data, 0, n * 4);
+}
+static ULONG NTAPI D3DDevice_GetTileCompressionTags(ULONG start, ULONG end) { (void)start; (void)end; return 0; }
+
+/* CopyRects' blit engine state (D3DCOPYRECTSTATE, 8 dwords, and
+   D3DCOPYRECTROPSTATE, 8).  CopyRects copies as D3DCOPYRECT_SRCCOPY with
+   the default color format; anything else is kept for GetCopyRectsState
+   and noted once. */
+static ULONG copyrect_state[8] = { 0, 3 /* D3DCOPYRECT_SRCCOPY */ }, copyrect_rop[8];
+static void NTAPI D3DDevice_SetCopyRectsState(const ULONG *state, const ULONG *rop)
+{
+    if (state) memcpy(copyrect_state, state, sizeof copyrect_state);
+    if (rop) memcpy(copyrect_rop, rop, sizeof copyrect_rop);
+    static bool noted;
+    if (state && (state[1] != 3 || state[0] || state[2] || state[7]) && !noted) {
+        noted = true;
+        xlog("D3D: SetCopyRectsState(format %u, operation %u, color key %u, clip %#x) is not emulated; "
+             "CopyRects copies", state[0], state[1], state[2], state[7]);
+    }
+}
+static void NTAPI D3DDevice_GetCopyRectsState(ULONG *state, ULONG *rop)
+{
+    if (state) memcpy(state, copyrect_state, sizeof copyrect_state);
+    if (rop) { memcpy(rop, copyrect_rop, sizeof copyrect_rop); rop[7] = 0; /* ColorPattern: not kept */ }
+}
+
+/* The video encoder's border color (no border is drawn here). */
+static ULONG overscan_color;
+static void NTAPI D3DDevice_SetOverscanColor(ULONG c) { overscan_color = c; }
+static ULONG NTAPI D3DDevice_GetOverscanColor(void) { return overscan_color; }
+
+/* Closed captions go to the TV encoder; there is none.  GetCCStatus
+   reports both fields free for more data. */
+static void NTAPI D3DDevice_EnableCC(ULONG on) { (void)on; }
+static void NTAPI D3DDevice_SendCC(ULONG field, ULONG cc1, ULONG cc2) { (void)field; (void)cc1; (void)cc2; }
+static void NTAPI D3DDevice_GetCCStatus(ULONG *f1, ULONG *f2) { if (f1) *f1 = 1; if (f2) *f2 = 1; }
+
+/* Resume(Reset) re-sends all device state after the title drove the push
+   buffer itself; the state here never left the device. */
+static void NTAPI D3DDevice_Resume(ULONG reset) { (void)reset; pusher_drain(); }
 static void NTAPI D3DDevice_KickPushBuffer(void) { pusher_drain(); }
 /* A fence: drawing that waits has passed it at once, queued drawing when
    the worker gets there (calls that wait for one drain the queue first). */
@@ -7021,6 +8688,21 @@ static struct {
 
 /* The vertex registers persist across Begin/End; they start out as the
    hardware defaults. */
+/* SetVertexData outside Begin/End sets the diffuse register for draws
+   whose vertices carry none (the library's SetVertexShader resets it to
+   white for such a shader, so it holds until the shader changes).
+   Splinter Cell fades its loading and menu pictures with it: a
+   BLENDDIFFUSEALPHA stage between the new picture and the old one, the
+   alpha going from 1 to 0.  Always white, every fade stayed on the old
+   picture (black for the first load, the menu over a level's briefing). */
+static struct { bool on; ULONG vs; } persistent_diffuse;
+static const float *vertex_diffuse(void)
+{
+    static const float white[4] = { 1, 1, 1, 1 };
+    if (persistent_diffuse.on && d3d.vertex_shader != persistent_diffuse.vs) persistent_diffuse.on = false;
+    return persistent_diffuse.on ? imm.reg[3] : white;
+}
+
 static void imm_init(void)
 {
     static bool done;
@@ -7046,6 +8728,11 @@ static void imm_set(LONG reg, float a, float b, float c, float d)
     if (reg < 0 || reg > 15) return;
     imm.reg[reg][0] = a; imm.reg[reg][1] = b; imm.reg[reg][2] = c; imm.reg[reg][3] = d;
     imm.used[reg] = true;
+    if (reg == 3 && !imm.active) {
+        persistent_diffuse.on = true;
+        persistent_diffuse.vs = d3d.vertex_shader;
+        TRACE_ALL("D3D: persistent diffuse %g %g %g %g", a, b, c, d);
+    }
     if (reg == 0 && imm.active) {
         if (imm.n == imm.cap) {
             imm.cap = imm.cap ? imm.cap * 2 : 256;
@@ -7074,6 +8761,8 @@ static void NTAPI D3DDevice_SetVertexDataColor(LONG r, ULONG color)
 static void imm_flush(ULONG prim)
 {
     if (!imm.n) return;
+    gl_require();
+    hud_batch_flush();   /* batched draws made before this one land first */
     vshader *sh = (d3d.vertex_shader & 1) ? (vshader *)(d3d.vertex_shader & ~1u) : NULL;
     if (sh && sh->code) {
         /* Feed the vertex registers to the program as 16 float4 attributes.
@@ -7104,20 +8793,30 @@ static void imm_flush(ULONG prim)
     if (!sh) { static const int two[4] = { 2, 2, 2, 2 }; apply_texture_transforms(units, two); }
     program_entry *e;
     if (!use_program(0, &e)) return;
-    glBegin(gl_primitive(prim));
-    for (unsigned i = 0; i < imm.n; i++) {
-        float (*v)[4] = imm.verts[i];
-        for (int u = 0; u < 4; u++) {
-            if (!((units >> u) & 1)) continue;
-            ULONG tci = TSS(u, D3DTSS_TEXCOORDINDEX) & 0xFFFF;
-            p_glMultiTexCoord4fv(GL_TEXTURE0 + u, v[9 + (tci < 4 ? tci : 0)]);
+    TRACE_ALL("D3D: immediate draw prim %u, %u vertices, vs %#x%s, colour %s, first at %g %g %g %g colour %g %g %g %g",
+              prim, imm.n, d3d.vertex_shader, pretransformed ? " (screen space)" : "",
+              imm.used[3] ? "per vertex" : "none", imm.verts[0][0][0], imm.verts[0][0][1], imm.verts[0][0][2],
+              imm.verts[0][0][3], imm.verts[0][3][0], imm.verts[0][3][1], imm.verts[0][3][2], imm.verts[0][3][3]);
+    shader_diagnostics_mark(d3d.frame, ++shader_diag_draw, d3d.vertex_shader, d3d.pixel_shader, cur_program, "immediate");
+    for (unsigned pass = 0; scissor_pass(pass); pass++) {
+        glBegin(gl_primitive(prim));
+        for (unsigned i = 0; i < imm.n; i++) {
+            float (*v)[4] = imm.verts[i];
+            for (int u = 0; u < 4; u++) {
+                if (!((units >> u) & 1)) continue;
+                ULONG tci = TSS(u, D3DTSS_TEXCOORDINDEX) & 0xFFFF;
+                p_glMultiTexCoord4fv(GL_TEXTURE0 + u, v[9 + (tci < 4 ? tci : 0)]);
+            }
+            if (imm.used[3]) glColor4fv(v[3]);
+            if (imm.used[2]) glNormal3fv(v[2]);
+            if (pretransformed) glVertex3f(v[0][0], v[0][1], v[0][2]);
+            else glVertex4fv(v[0]);
         }
-        if (imm.used[3]) glColor4fv(v[3]);
-        if (imm.used[2]) glNormal3fv(v[2]);
-        if (pretransformed) glVertex3f(v[0][0], v[0][1], v[0][2]);
-        else glVertex4fv(v[0]);
+        glEnd();
     }
-    glEnd();
+    /* A draw like any other (Splinter Cell's loading bar is one of these;
+       uncounted, its frames read as frames with nothing drawn). */
+    debug_dump_draw();
     end_program(e);
 }
 
@@ -7194,6 +8893,8 @@ static struct {
     float vs_const[192][4], ps_const[16][4], eye_vector[4];
     D3DPalette *palettes[4];
     D3DSurface *target, *target_depth;
+    typeof(d3d.scissors) scissors;
+    typeof(d3d.direct_mv) direct_mv;
 } pb_saved;
 static ULONG pb_rs[D3DRS_MAX], pb_tss[4 * 32];   /* the state last written to the stream */
 
@@ -7294,10 +8995,13 @@ static void NTAPI D3DDevice_BeginPushBuffer(D3DPushBuffer *pb)
     memcpy(pb_saved.palettes, d3d.palettes, sizeof(pb_saved.palettes));
     pb_saved.target = d3d.target;
     pb_saved.target_depth = d3d.target_depth;
+    pb_saved.scissors = d3d.scissors;
+    pb_saved.direct_mv = d3d.direct_mv;
 }
 
 static LONG NTAPI D3DDevice_EndPushBuffer(void)
 {
+    gl_require();
     D3DPushBuffer *pb = d3d.recording;
     if (!pb) return D3DERR_INVALIDCALL;
     pb_flush_state();
@@ -7322,6 +9026,8 @@ static LONG NTAPI D3DDevice_EndPushBuffer(void)
     memcpy(d3d.palettes, pb_saved.palettes, sizeof(pb_saved.palettes));
     if (d3d.target != pb_saved.target || d3d.target_depth != pb_saved.target_depth)
         D3DDevice_SetRenderTarget(pb_saved.target, pb_saved.target_depth);
+    d3d.scissors = pb_saved.scissors;   /* after SetRenderTarget, which resets them */
+    d3d.direct_mv = pb_saved.direct_mv;
     TRACE_ALL("D3D: recorded push buffer %p: %u dwords", (void *)pb, pb_stream_of(pb, true)->n);
     return D3D_OK;
 }
@@ -7374,11 +9080,25 @@ static LONG NTAPI D3DPushBuffer_EndFixup(D3DPushBuffer *pb)
     return D3D_OK;
 }
 
+/* Render and texture stage states the title set between GetPushBufferOffset
+   and the call it means to fix up are recorded ahead of that call: the
+   offset of the op of kind `op` at or just past those, as recorded. */
+static ULONG pb_op_offset(D3DPushBuffer *b, ULONG offset, unsigned op)
+{
+    pb_stream *pb = pb_stream_of(b, false);
+    unsigned i = offset / 4;
+    while (pb && pb->ops && i < pb->n && (pb->ops[i] & 0xFF) != op
+           && ((pb->ops[i] & 0xFF) == OP_RS || (pb->ops[i] & 0xFF) == OP_TSS))
+        i += pb->ops[i] >> 8;
+    return i * 4;
+}
+
 /* The op recorded at `offset`, or NULL (with one complaint) when there is
    no op of that kind there. */
 static ULONG *pb_op_at(D3DPushBuffer *b, ULONG offset, unsigned op)
 {
     pb_stream *pb = pb_stream_of(b, false);
+    offset = pb_op_offset(b, offset, op);
     if (pb && pb->ops && offset / 4 < pb->n && (pb->ops[offset / 4] & 0xFF) == op) return pb->ops + offset / 4 + 1;
     static bool warned;
     if (!warned) {
@@ -7401,7 +9121,7 @@ static ULONG *fixup_payload(D3DPushBuffer *pb, ULONG offset, unsigned op, unsign
         if (fx->Next > fx->Size) return NULL;
         ULONG *e = (ULONG *)(fx->Data + at);
         e[0] = size;
-        e[1] = offset;
+        e[1] = pb_op_offset(pb, offset, op);
         e[2] = op;
         return e + 3;
     }
@@ -7458,10 +9178,57 @@ static void NTAPI D3DPushBuffer_SetVertexShaderInput(D3DPushBuffer *pb, ULONG Of
     if (p) { p[0] = Handle; p[1] = count; memcpy(p + 2, inputs, count * 12); }
 }
 
+static void NTAPI D3DPushBuffer_SetVertexShaderInputDirect(D3DPushBuffer *pb, ULONG Offset, const ULONG *vaf,
+                                                           UINT_ count, const ULONG *inputs)
+{
+    D3DPushBuffer_SetVertexShaderInput(pb, Offset, vaf ? direct_layout_handle(vaf) : 0, count, inputs);
+}
+
 static void NTAPI D3DPushBuffer_RunPushBuffer(D3DPushBuffer *pb, ULONG Offset, D3DPushBuffer *dest, D3DFixup *fx)
 {
     ULONG *p = fixup_payload(pb, Offset, OP_RUN, 8);
     if (p) { p[0] = (ULONG)dest; p[1] = (ULONG)fx; }
+}
+
+/* Offset holds a recorded Nop (or an earlier jump): running the buffer then
+   goes on at DestinationOffset of the same buffer, or past the Nop when the
+   two offsets are equal. */
+static void NTAPI D3DPushBuffer_Jump(D3DPushBuffer *pb, ULONG Offset, ULONG DestinationOffset)
+{
+    ULONG *p = fixup_payload(pb, Offset, OP_NOP, 8);
+    if (p) { p[0] = Offset != DestinationOffset; p[1] = DestinationOffset; }
+}
+
+static void NTAPI D3DPushBuffer_SetModelView(D3DPushBuffer *pb, ULONG Offset, const D3DMATRIX *mv,
+                                             const D3DMATRIX *inv, const D3DMATRIX *composite)
+{
+    ULONG *p = fixup_payload(pb, Offset, OP_MODELVIEW, 4 + 3 * sizeof(D3DMATRIX));
+    if (!p) return;
+    p[0] = (mv && composite) | (inv != NULL) << 1;
+    if (mv) memcpy(p + 1, mv, sizeof(D3DMATRIX));
+    if (inv) memcpy(p + 17, inv, sizeof(D3DMATRIX));
+    if (composite) memcpy(p + 33, composite, sizeof(D3DMATRIX));
+}
+
+static void NTAPI D3DPushBuffer_SetVertexBlendModelView(D3DPushBuffer *pb, ULONG Offset, UINT_ count,
+                                                        const D3DMATRIX *mv, const D3DMATRIX *inv,
+                                                        const D3DMATRIX *proj_vp)
+{
+    ULONG *p = fixup_payload(pb, Offset, OP_BLEND_MODELVIEW, 8 + 9 * sizeof(D3DMATRIX));
+    if (!p) return;
+    if (count > 4) count = 4;
+    p[0] = mv ? count : 0;
+    p[1] = (mv != NULL) | (inv != NULL) << 1 | (proj_vp != NULL) << 2;
+    if (mv) memcpy(p + 2, mv, count * sizeof(D3DMATRIX));
+    if (inv) memcpy(p + 2 + 64, inv, count * sizeof(D3DMATRIX));
+    if (proj_vp) memcpy(p + 2 + 128, proj_vp, sizeof(D3DMATRIX));
+}
+
+static LONG NTAPI D3DPushBuffer_EndVisibilityTest(D3DPushBuffer *pb, ULONG Offset, ULONG Index)
+{
+    ULONG *p = fixup_payload(pb, Offset, OP_VIS_END, 4);
+    if (p) p[0] = Index;
+    return D3D_OK;
 }
 
 static void NTAPI D3DPushBuffer_Verify(D3DPushBuffer *pb, ULONG StampResources) { (void)pb; (void)StampResources; }
@@ -7471,10 +9238,26 @@ static void NTAPI D3DPushBuffer_Verify(D3DPushBuffer *pb, ULONG StampResources) 
 static void pb_interpret(const ULONG *p, unsigned n);
 static void pb_run(D3DPushBuffer *b, D3DFixup *fx, int depth);
 
+static void NTAPI D3DDevice_BeginVisibilityTest(void);
+static LONG NTAPI D3DDevice_EndVisibilityTest(ULONG index);
+static void NTAPI D3DDevice_SetModelView(const D3DMATRIX *mv, const D3DMATRIX *inv, const D3DMATRIX *composite);
+static void NTAPI D3DDevice_SetVertexBlendModelView(UINT_ count, const D3DMATRIX *mv, const D3DMATRIX *inv,
+                                                    const D3DMATRIX *proj_vp);
+static void NTAPI D3DDevice_SetScissors(ULONG Count, BOOLEAN Exclusive, const D3DRECT *rects);
+
+/* Whether `i` (in dwords) starts a recorded op: a jump may only go there. */
+static bool pb_op_boundary(const pb_stream *pb, unsigned i)
+{
+    unsigned k = 0;
+    while (k < i && k < pb->n) k += pb->ops[k] >> 8;
+    return k == i;
+}
+
 static void pb_run_body(D3DPushBuffer *b, D3DFixup *fx, int depth)
 {
     pb_stream *pb = pb_stream_of(b, false);
     if (!pb || !pb->ops || depth > 8) return;
+    unsigned jumps = 0;
     for (unsigned i = 0; i < pb->n;) {
         const ULONG *p = pb->ops + i;
         unsigned op = p[0] & 0xFF, len = p[0] >> 8;
@@ -7527,6 +9310,29 @@ static void pb_run_body(D3DPushBuffer *b, D3DFixup *fx, int depth)
         case OP_LIGHT_ENABLE: D3DDevice_LightEnable(a[0], a[1]); break;
         case OP_MATERIAL: D3DDevice_SetMaterial((const float *)a); break;
         case OP_RAW: pb_interpret(a + 1, a[0]); break;
+        case OP_NOP:
+            if (!a[0]) break;
+            /* A jump: a title loops only as long as some other agent (a DPC,
+               a fixup between runs) changes it; give up on one that won't end. */
+            if (a[1] / 4 > pb->n || !pb_op_boundary(pb, a[1] / 4) || ++jumps > 1u << 16) {
+                xlog("D3D: push buffer jump from %u to %u abandoned", i * 4, a[1]);
+                return;
+            }
+            i = a[1] / 4;
+            continue;
+        case OP_VIS_BEGIN: D3DDevice_BeginVisibilityTest(); break;
+        case OP_VIS_END: D3DDevice_EndVisibilityTest(a[0]); break;
+        case OP_MODELVIEW:
+            D3DDevice_SetModelView(a[0] & 1 ? (const D3DMATRIX *)(a + 1) : NULL,
+                                   a[0] & 2 ? (const D3DMATRIX *)(a + 17) : NULL,
+                                   a[0] & 1 ? (const D3DMATRIX *)(a + 33) : NULL);
+            break;
+        case OP_BLEND_MODELVIEW:
+            D3DDevice_SetVertexBlendModelView(a[0], a[1] & 1 ? (const D3DMATRIX *)(a + 2) : NULL,
+                                              a[1] & 2 ? (const D3DMATRIX *)(a + 2 + 64) : NULL,
+                                              a[1] & 4 ? (const D3DMATRIX *)(a + 2 + 128) : NULL);
+            break;
+        case OP_SCISSORS: D3DDevice_SetScissors(a[0], (BOOLEAN)a[1], a[0] ? (const D3DRECT *)(a + 2) : NULL); break;
         default: xlog("D3D: bad push buffer op %u", op); return;
         }
         i += len;
@@ -7544,6 +9350,7 @@ static void pb_run(D3DPushBuffer *b, D3DFixup *fx, int depth)
 
 static void NTAPI D3DDevice_RunPushBuffer(D3DPushBuffer *pb, D3DFixup *fx)
 {
+    gl_require();
     pusher_drain();
     if (d3d.recording) {
         ULONG a[2] = { (ULONG)pb, (ULONG)fx };
@@ -7752,6 +9559,7 @@ static void pb_interpret(const ULONG *p, unsigned n)
 
 static void NTAPI D3DDevice_EndPush(ULONG *end)
 {
+    gl_require();
     unsigned n = end - push_scratch;
     if (!push_scratch || n > push_scratch_cap) return;
     if (d3d.recording) {
@@ -7806,6 +9614,7 @@ static void pusher_drain(void)
         ULONG h = n;
         pb_record2(OP_RAW, &h, 4, pusher_buf, n * 4);
     } else {
+        if (!pb_state_only(pusher_buf, n)) gl_require();
         Uint64 t0 = prof_draw_begin();
         pb_interpret(pusher_buf, n);
         if (t0) prof.drain += SDL_GetPerformanceCounter() - t0;
@@ -7845,7 +9654,11 @@ static void NTAPI CDevice_SetStateVB(PVOID self, ULONG x) { (void)self; (void)x;
 static void NTAPI CDevice_SetStateUP(PVOID self) { (void)self; pusher_drain(); }
 static void NTAPI CDevice_KickOff(PVOID self) { (void)self; pusher_drain(); }
 
-static void NTAPI D3DDevice_Nop(void) {}
+/* Recorded, a Nop holds the place of a later D3DPushBuffer_Jump. */
+static void NTAPI D3DDevice_Nop(void)
+{
+    if (d3d.recording) { ULONG a[2] = { 0, 0 }; pb_record(OP_NOP, a, sizeof(a)); }
+}
 
 /* ---- odds and ends ----------------------------------------------------- */
 
@@ -7859,9 +9672,11 @@ static void NTAPI D3DDevice_GetDirect3D(PVOID *pp) { *pp = direct3d_object; }
    persists it). */
 static LONG NTAPI D3DDevice_PersistDisplay(void)
 {
+    gl_require();
     pusher_drain();
     if (!d3d.window) return D3DERR_INVALIDCALL;
     flush_cpu_backbuffer();
+    persisted_save();
     int w = window_fb.fbo ? window_fb.w : (int)d3d.width, h = window_fb.fbo ? window_fb.h : (int)d3d.height;
     uint8_t *px = malloc((size_t)w * h * 4), *flipped = malloc((size_t)w * h * 4);
     if (!px || !flipped) { free(px); free(flipped); return D3DERR_INVALIDCALL; }
@@ -7877,18 +9692,28 @@ static LONG NTAPI D3DDevice_PersistDisplay(void)
     else backbuffer_read_end();
     for (int y = 0; y < h; y++) memcpy(flipped + (size_t)y * w * 4, px + (size_t)(h - 1 - y) * w * 4, (size_t)w * 4);
     av_persist(flipped, w, h);
+    unsigned long long sum[3] = { 0, 0, 0 };
+    for (size_t i = 0; i < (size_t)w * h; i++)
+        for (int c = 0; c < 3; c++) sum[c] += flipped[i * 4 + c];
+    unsigned long long n = (unsigned long long)w * h ? (unsigned long long)w * h : 1;
     free(px);
     free(flipped);
-    xlog("D3D: PersistDisplay kept a %dx%d frame", w, h);
+    xlog("D3D: PersistDisplay kept a %dx%d frame, average colour %02llx%02llx%02llx", w, h,
+         sum[2] / n, sum[1] / n, sum[0] / n);
     return D3D_OK;
 }
 
-/* Nothing survives a reboot here; hand out the back buffer so the title has a surface to read. */
+/* The last title's PersistDisplay frame until the first Present, else NULL
+   (the library's own answer; it doesn't count references either). */
 static LONG NTAPI D3DDevice_GetPersistedSurface(D3DSurface **pp)
 {
-    *pp = d3d.backbuffer;
-    if (d3d.backbuffer) d3d.backbuffer->Common++;
-    return d3d.backbuffer ? D3D_OK : D3DERR_INVALIDCALL;
+    if (!persisted.loaded && !persisted.presented) {
+        persisted_load();
+        if (persisted.s) AvSetSavedDataAddress(persisted.s);
+    }
+    *pp = (D3DSurface *)AvGetSavedDataAddress();
+    TRACE_ALL("D3D: GetPersistedSurface: %s", !*pp ? "none" : *pp == persisted.own ? "this title's" : "the last title's frame");
+    return *pp ? D3D_OK : D3DERR_INVALIDCALL;
 }
 
 static void NTAPI D3DDevice_SetBackMaterial(const float *m)
@@ -7903,14 +9728,22 @@ static void NTAPI D3DDevice_GetBackMaterial(float *m)
     m[16] = d3d.back_material_power;
 }
 
-/* Visibility tests are GL occlusion queries, one per index the title uses. */
-#define VIS_SLOTS 256
+/* Visibility tests are GL occlusion queries, one per index the title uses.
+   Indices run to D3DVISIBILITY_TEST_MAX (4096) and each keeps its own
+   report, as the library's do.  With 256 slots, index i and i + 256 shared
+   one: the later EndVisibilityTest dropped the earlier query, whose result
+   then read as "nothing drawn" (D3DERR_INVALIDCALL, 0 pixels), so whatever
+   the title culls on that result vanished depending on which tests the
+   view happened to issue. */
+#define VIS_SLOTS 4096
 static struct { ULONG index; GLuint query; bool used; } vis[VIS_SLOTS];
 static GLuint vis_active;
 
 static void NTAPI D3DDevice_BeginVisibilityTest(void)
 {
+    gl_require();
     pusher_drain();
+    if (d3d.recording) { ULONG a = 0; pb_record(OP_VIS_BEGIN, &a, 4); return; }
     if (async_front()) { async_vis_begin(); return; }
     hud_batch_flush();
     if (!p_glGenQueries || vis_active) return;
@@ -7921,7 +9754,9 @@ static void NTAPI D3DDevice_BeginVisibilityTest(void)
 
 static LONG NTAPI D3DDevice_EndVisibilityTest(ULONG index)
 {
+    gl_require();
     pusher_drain();
+    if (d3d.recording) { pb_record(OP_VIS_END, &index, 4); return D3D_OK; }
     if (async_front()) { async_vis_end(index); return D3D_OK; }
     hud_batch_flush();
     if (!vis_active) return D3DERR_INVALIDCALL;
@@ -7942,6 +9777,7 @@ static LONG NTAPI D3DDevice_EndVisibilityTest(ULONG index)
 
 static LONG NTAPI D3DDevice_GetVisibilityTestResult(ULONG index, UINT_ *result, ULONGLONG *stamp)
 {
+    gl_require();
     unsigned slot = index % VIS_SLOTS;
     if (stamp) *stamp = d3d.frame;
     if (async_front()) return async_vis_result(index, result);
@@ -8213,6 +10049,80 @@ static void NTAPI D3DVertexBuffer_GetDesc(D3DResource *vb, ULONG *desc)
     desc[5] = 0;
 }
 
+/* D3DINDEXBUFFER_DESC: Format, Type (the library fills only these). */
+static void NTAPI D3DIndexBuffer_GetDesc(D3DResource *ib, ULONG *desc)
+{
+    (void)ib;
+    desc[0] = 101;   /* D3DFMT_INDEX16 */
+    desc[1] = 7;     /* D3DRTYPE_INDEXBUFFER */
+}
+
+/* D3DPALETTESIZE, as CreatePalette put it in Common's top bits. */
+static ULONG NTAPI D3DPalette_GetSize(D3DPalette *p) { return p->Common >> 30; }
+
+static void NTAPI D3DDevice_GetPalette(ULONG Stage, D3DPalette **pp)
+{
+    D3DPalette *p = Stage < 4 ? d3d.palettes[Stage] : NULL;
+    if (p) D3DResource_AddRef((D3DResource *)p);
+    *pp = p;
+}
+
+/* The texture a surface level belongs to, with a reference. */
+static LONG NTAPI D3DSurface_GetContainer(D3DSurface *s, D3DPixelContainer **pp)
+{
+    *pp = s->Parent;
+    if (!s->Parent) return (LONG)0x80004005;   /* E_FAIL */
+    D3DResource_AddRef(&s->Parent->res);
+    return D3D_OK;
+}
+
+static void NTAPI D3DCubeTexture_GetLevelDesc(D3DPixelContainer *t, UINT_ level, ULONG *desc)
+{
+    D3DTexture_GetLevelDesc(t, level, desc);
+}
+
+static void NTAPI D3DSurface_UnlockRect(D3DSurface *s) { (void)s; }
+
+static void NTAPI D3DDevice_GetScreenSpaceOffset(float *x, float *y)
+{
+    *x = d3d.screen_offset[0];
+    *y = d3d.screen_offset[1];
+}
+
+/* SetVertexBlendModelView gives the skinning matrices and the projection
+   (with the viewport) directly, in place of the ones the fixed-function
+   pipeline derives from the world, view and projection transforms, until
+   it is called with NULL (apply_direct_modelview draws with them). */
+static void NTAPI D3DDevice_SetVertexBlendModelView(UINT_ count, const D3DMATRIX *mv, const D3DMATRIX *inv,
+                                                    const D3DMATRIX *proj_vp)
+{
+    if (d3d.recording) {
+        static ULONG rec[2 + 9 * 16];
+        memset(rec, 0, sizeof(rec));
+        ULONG n = count > 4 ? 4 : count;
+        rec[0] = mv ? n : 0;
+        rec[1] = (mv != NULL) | (inv != NULL) << 1 | (proj_vp != NULL) << 2;
+        if (mv) memcpy(rec + 2, mv, n * sizeof(D3DMATRIX));
+        if (inv) memcpy(rec + 2 + 64, inv, n * sizeof(D3DMATRIX));
+        if (proj_vp) memcpy(rec + 2 + 128, proj_vp, sizeof(D3DMATRIX));
+        pb_record(OP_BLEND_MODELVIEW, rec, sizeof(rec));
+    }
+    d3d.direct_mv.on = mv != NULL;
+    if (!mv) return;
+    d3d.direct_mv.blend = true;
+    d3d.direct_mv.count = count > 4 ? 4 : count;
+    d3d.direct_mv.has_inv = inv != NULL;
+    memcpy(d3d.direct_mv.mv, mv, d3d.direct_mv.count * sizeof(D3DMATRIX));
+    if (inv) memcpy(d3d.direct_mv.inv, inv, d3d.direct_mv.count * sizeof(D3DMATRIX));
+    if (proj_vp) d3d.direct_mv.composite = d3d.direct_mv.proj_vp = *proj_vp;
+}
+static LONG NTAPI D3DDevice_GetVertexBlendModelView(UINT_ count, D3DMATRIX *mv, D3DMATRIX *proj_vp)
+{
+    if (mv) memcpy(mv, d3d.direct_mv.mv, (count > 4 ? 4 : count) * sizeof(D3DMATRIX));
+    if (proj_vp) *proj_vp = d3d.direct_mv.proj_vp;
+    return d3d.direct_mv.on ? D3D_OK : 1 /* S_FALSE */;
+}
+
 /* The inline Release in 5xxx headers drops the count itself and calls this
    on the last reference, after releasing a surface's parent itself. */
 static void NTAPI D3D_DestroyResource(D3DResource *r)
@@ -8228,16 +10138,37 @@ static void NTAPI D3DDevice_MultiplyTransform(ULONG State, const D3DMATRIX *m)
     D3DDevice_SetTransform(State, &r);
 }
 
-static void NTAPI D3DDevice_GetModelView(D3DMATRIX *m)
+/* The modelview SetModelView or SetVertexBlendModelView last gave, and
+   whether one is in effect (S_OK) or not (S_FALSE), as the library has it. */
+static LONG NTAPI D3DDevice_GetModelView(D3DMATRIX *m)
 {
-    mat_mul(m, &d3d.transforms[6], &d3d.transforms[0]);
+    if (m) *m = d3d.direct_mv.mv[0];
+    return d3d.direct_mv.on ? D3D_OK : 1 /* S_FALSE */;
 }
 
+/* SetModelView gives the modelview, its inverse (optional) and the
+   composite matrix (modelview * projection * viewport) directly, in place
+   of world * view and the projection transform, until it is called with
+   NULL (apply_direct_modelview draws with them). */
 static void NTAPI D3DDevice_SetModelView(const D3DMATRIX *mv, const D3DMATRIX *inv, const D3DMATRIX *composite)
 {
-    (void)inv; (void)composite;
-    static bool warned;
-    if (mv && !warned) { xlog("D3D: SetModelView overrides are ignored"); warned = true; }
+    if (d3d.recording) {
+        static ULONG rec[1 + 3 * 16];
+        memset(rec, 0, sizeof(rec));
+        rec[0] = (mv && composite) | (inv != NULL) << 1;
+        if (mv) memcpy(rec + 1, mv, sizeof(D3DMATRIX));
+        if (inv) memcpy(rec + 17, inv, sizeof(D3DMATRIX));
+        if (composite) memcpy(rec + 33, composite, sizeof(D3DMATRIX));
+        pb_record(OP_MODELVIEW, rec, sizeof(rec));
+    }
+    d3d.direct_mv.on = mv && composite;
+    if (!d3d.direct_mv.on) return;
+    d3d.direct_mv.blend = false;
+    d3d.direct_mv.count = 1;
+    d3d.direct_mv.has_inv = inv != NULL;
+    d3d.direct_mv.mv[0] = *mv;
+    if (inv) d3d.direct_mv.inv[0] = *inv;
+    d3d.direct_mv.composite = *composite;
 }
 
 static void NTAPI D3DDevice_GetViewportOffsetAndScale(float *offset, float *scale)
@@ -8245,7 +10176,7 @@ static void NTAPI D3DDevice_GetViewportOffsetAndScale(float *offset, float *scal
     /* The screen-space transform the hardware applies after projection
        (CDevice::GetViewportOffsetAndScale): pixel centres at +0.53125 and
        z scaled to the depth buffer's range. */
-    float zscale = d3d.depth ? (((d3d.depth->Format >> 8) & 0xFF) == 0x2C ? 65535.0f : 16777215.0f) : 1.0f;
+    float zscale = d3d.zscale;   /* the library's m_ZScale, from the last depth buffer set */
     const D3DVIEWPORT8 *v = &d3d.viewport;
     scale[0] = v->Width * 0.5f;
     scale[1] = -(v->Height * 0.5f);
@@ -8259,6 +10190,7 @@ static void NTAPI D3DDevice_GetViewportOffsetAndScale(float *offset, float *scal
 
 static void NTAPI D3DDevice_SetRenderTargetFast(D3DSurface *target, D3DSurface *z, ULONG Flags)
 {
+    gl_require();
     pusher_drain();
     (void)Flags;
     D3DDevice_SetRenderTarget(target, z);
@@ -8322,13 +10254,65 @@ static void NTAPI D3D_Nop4(ULONG a) { (void)a; }
 static void NTAPI D3D_Nop8(ULONG a, ULONG b) { (void)a; (void)b; }
 static void NTAPI D3D_Nop12(ULONG a, ULONG b, ULONG c) { (void)a; (void)b; (void)c; }
 static void FASTCALL D3D_FastNop(ULONG a, ULONG b) { (void)a; (void)b; }
-static LONG NTAPI D3DDevice_Reset(PVOID pp) { (void)pp; return D3D_OK; }
+static LONG NTAPI D3DDevice_Reset(PVOID pp)
+{
+    (void)pp;
+    persisted.first_flip = true;   /* the mode is set again: the next Present frees the persisted frame */
+    return D3D_OK;
+}
 static void NTAPI SetRenderState_SampleAlpha(ULONG Value) { (void)Value; }
 
 static ULONG NTAPI D3D_GetAdapterModeCount2(UINT_ Adapter, ULONG Format)
 {
     (void)Format;
     return Direct3D_GetAdapterModeCount(Adapter);
+}
+
+/* ---- more 5xxx entry points: internals LTCG titles call, renamed APIs -- */
+
+/* The library's texture constructor, which the Create*Texture APIs wrap
+   (d3dbase.cpp); LTCG titles call it themselves, isVolume a byte in dl. */
+static LONG NTAPI D3D_CreateTexture(UINT_ w, UINT_ h, UINT_ depth, UINT_ levels, ULONG usage, ULONG fmt,
+                                    ULONG cube, ULONG volume, D3DPixelContainer **pp)
+{
+    (void)usage;
+    bool is_cube = (cube & 0xFF) != 0, is_volume = (volume & 0xFF) != 0;
+    *pp = alloc_texture(w, is_cube ? w : h, is_volume ? depth : 1, levels, fmt, is_cube);
+    return *pp ? D3D_OK : 0x8007000E;
+}
+
+static D3DSurface *NTAPI D3DDevice_GetPersistedSurface2(void)
+{
+    D3DSurface *s = NULL;
+    D3DDevice_GetPersistedSurface(&s);
+    return s;
+}
+
+/* The headers make Present a Swap(0); some libraries keep a body for it. */
+static LONG NTAPI D3DDevice_Present(const void *src, const void *dst, PVOID unused1, PVOID unused2)
+{
+    gl_require();
+    (void)src; (void)dst; (void)unused1; (void)unused2;
+    D3DDevice_Swap(0);
+    return D3D_OK;
+}
+
+/* SetVertexShaderConstantNotInline with every argument in a register
+   (slot in ebx, data in edx, dwords in eax): the same slot and dword count. */
+static void NTAPI SetVertexShaderConstantNotInline_LTCG(LONG Register, const float *data, ULONG dwords)
+{
+    SetVertexShaderConstantNotInline(Register, data, dwords);
+}
+
+static void FASTCALL D3D_BlockOnResourceFast(D3DResource *r) { D3D_BlockOnResource(r); }
+
+/* EnableOverlay with its argument folded in: which way is not known, and
+   UpdateOverlay decides what is shown. */
+static void NTAPI D3DDevice_EnableOverlay_LTCG(void)
+{
+    static bool said;
+    if (!said) xlog("D3D: EnableOverlay (LTCG, argument folded in) ignored");
+    said = true;
 }
 
 #include "async_draws.h"
@@ -8482,6 +10466,22 @@ const struct hle_func d3d8_funcs[] = {
     F("_Lock3DSurface@20", Lock3DSurface),
     F("_Direct3D_CreateDevice_LTCG@12", Direct3D_CreateDevice_LTCG),
     F("_D3D_CommonSetMultiSampleModeAndScale@8", D3D_Nop8),
+    F("@D3D_CommonSetMultiSampleModeAndScale@8", D3D_FastNop),
+    F("@D3D_BlockOnResource@4", D3D_BlockOnResourceFast),
+    F("_D3D_CreateTexture@36", D3D_CreateTexture),
+    /* _D3D_CreateStandAloneSurface@16 and _D3D_CommonSetRenderTarget@12 stay
+       guest code: the library's own internal callers (Splinter Cell, 4928)
+       pass surfaces the host can't resolve, and every model vanished; their
+       push buffer output is interpreted fine. */
+    F("_D3DDevice_GetPersistedSurface2@0", D3DDevice_GetPersistedSurface2),
+    F("_D3DDevice_Present@16", D3DDevice_Present),
+    F("_D3DDevice_BeginStateBig@4", D3DDevice_BeginPushLTCG),
+    F("_D3DDevice_SetTextureStageStateNotInline2@12", D3DDevice_SetTextureStageStateNotInline),
+    F("_D3D_CDevice_SetTextureStageStateNotInline@12", D3DDevice_SetTextureStageStateNotInline),
+    F("_D3DDevice_SetVertexShaderConstantNotInline_LTCG@12", SetVertexShaderConstantNotInline_LTCG),
+    F("_D3DDevice_EnableOverlay_LTCG@0", D3DDevice_EnableOverlay_LTCG),
+    F("_D3DDevice_SetSoftDisplayFilter_LTCG@0", D3D_Nop0),
+    F("_IDirect3DVertexBuffer8_Lock@20", D3DVertexBuffer_Lock),
     F("_D3D_KickOffAndWaitForIdle2@8", D3D_Nop8),
     F("@D3DDevice_SetVertexShaderConstantNotInline@12", SetVertexShaderConstantNotInline),
     F("@D3DDevice_SetVertexShaderConstant1@8", SetVertexShaderConstant1),
@@ -8632,6 +10632,37 @@ const struct hle_func d3d8_funcs[] = {
     F("_D3DDevice_SelectVertexShader@8", D3DDevice_SelectVertexShader),
     F("_D3DDevice_RunVertexStateShader@8", D3DDevice_RunVertexStateShader),
     F("_D3DDevice_SetVertexShaderInput@12", D3DDevice_SetVertexShaderInput),
+    F("_D3DDevice_SetVertexShaderInputDirect@12", D3DDevice_SetVertexShaderInputDirect),
+    F("_D3DDevice_GetVertexShaderInput@12", D3DDevice_GetVertexShaderInput),
+    F("_D3DDevice_SelectVertexShaderDirect@8", D3DDevice_SelectVertexShaderDirect),
+    F("_D3DPushBuffer_SetVertexShaderInputDirect@20", D3DPushBuffer_SetVertexShaderInputDirect),
+    F("_D3DPushBuffer_Jump@12", D3DPushBuffer_Jump),
+    F("_D3DPushBuffer_SetModelView@20", D3DPushBuffer_SetModelView),
+    F("_D3DPushBuffer_SetVertexBlendModelView@24", D3DPushBuffer_SetVertexBlendModelView),
+    F("_D3DPushBuffer_EndVisibilityTest@12", D3DPushBuffer_EndVisibilityTest),
+    F("_D3DDevice_GetDebugMarker@0", D3DDevice_GetDebugMarker),
+    F("_D3DDevice_SetTileCompressionTagBits@16", D3DDevice_SetTileCompressionTagBits),
+    F("_D3DDevice_GetTileCompressionTagBits@16", D3DDevice_GetTileCompressionTagBits),
+    F("_D3DDevice_GetTileCompressionTags@8", D3DDevice_GetTileCompressionTags),
+    F("_D3DDevice_SetCopyRectsState@8", D3DDevice_SetCopyRectsState),
+    F("_D3DDevice_GetCopyRectsState@8", D3DDevice_GetCopyRectsState),
+    F("_D3DDevice_SetOverscanColor@4", D3DDevice_SetOverscanColor),
+    F("_D3DDevice_GetOverscanColor@0", D3DDevice_GetOverscanColor),
+    F("_D3DDevice_EnableCC@4", D3DDevice_EnableCC),
+    F("_D3DDevice_SendCC@12", D3DDevice_SendCC),
+    F("_D3DDevice_GetCCStatus@8", D3DDevice_GetCCStatus),
+    F("_D3DDevice_Resume@4", D3DDevice_Resume),
+    F("_D3DIndexBuffer_GetDesc@8", D3DIndexBuffer_GetDesc),
+    F("_D3DPalette_GetSize@4", D3DPalette_GetSize),
+    F("_D3DDevice_GetPalette@8", D3DDevice_GetPalette),
+    F("_D3DSurface_GetContainer@8", D3DSurface_GetContainer),
+    F("_D3DCubeTexture_GetLevelDesc@12", D3DCubeTexture_GetLevelDesc),
+    F("_D3DSurface_UnlockRect@4", D3DSurface_UnlockRect),
+    F("_D3DDevice_GetScreenSpaceOffset@8", D3DDevice_GetScreenSpaceOffset),
+    F("_D3DDevice_SetVertexBlendModelView@16", D3DDevice_SetVertexBlendModelView),
+    F("_D3DDevice_GetVertexBlendModelView@12", D3DDevice_GetVertexBlendModelView),
+    F("_D3DDevice_SetTextureStageState@12", D3DDevice_SetTextureStageStateNotInline),
+    F("@D3DDevice_SwitchTexture_Fast@12", D3DDevice_SwitchTexture),
     F("_D3DDevice_Begin@4", D3DDevice_Begin),
     F("_D3DDevice_End@0", D3DDevice_End),
     F("_D3DDevice_SetVertexData2f@12", D3DDevice_SetVertexData2f),

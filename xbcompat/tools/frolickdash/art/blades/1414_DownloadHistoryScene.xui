@@ -1,0 +1,124 @@
+<XuiCanvas>
+<Properties>
+ <Width>1120</Width>
+ <Height>770</Height>
+</Properties>
+<XuiScene>
+<Properties>
+ <Id>scnDownloadHistory</Id>
+ <Width>1120</Width>
+ <Height>770</Height>
+ <Position>1,0,0</Position>
+ <ClassOverride>CDownloadHistoryScene</ClassOverride>
+ <DefaultFocus>lstDownloadHistory</DefaultFocus>
+ <TransFrom>FadeOut</TransFrom>
+ <TransTo>FadeIn</TransTo>
+ <TransBackFrom>FadeOut</TransBackFrom>
+ <TransBackTo>FadeIn</TransBackTo>
+</Properties>
+<XuiControl>
+<Properties>
+ <Id>figBackground</Id>
+ <Width>855</Width>
+ <Height>570</Height>
+ <Position>144,100,0</Position>
+ <Visual>back panel</Visual>
+</Properties>
+</XuiControl>
+<XuiNavButton>
+<Properties>
+ <Id>btnY</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>165,611,0</Position>
+ <Visual>legend_Y</Visual>
+ <Enabled>false</Enabled>
+ <UnfocusedInput>true</UnfocusedInput>
+ <PressKey>22531</PressKey>
+</Properties>
+</XuiNavButton>
+<XuiNavButton>
+<Properties>
+ <Id>btnX</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>146,639,0</Position>
+ <Visual>legend_X</Visual>
+ <UnfocusedInput>true</UnfocusedInput>
+ <Text>Add Microsoft Points</Text>
+ <PressKey>22530</PressKey>
+</Properties>
+</XuiNavButton>
+<XuiBackButton>
+<Properties>
+ <Id>btnB</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>555,611,0</Position>
+ <Visual>legend_B</Visual>
+ <UnfocusedInput>true</UnfocusedInput>
+ <Text>Back</Text>
+ <PressKey>22593</PressKey>
+</Properties>
+</XuiBackButton>
+<XuiButton>
+<Properties>
+ <Id>btnA</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>573,639,0</Position>
+ <Visual>legend_A</Visual>
+ <UnfocusedInput>true</UnfocusedInput>
+ <Text>Select</Text>
+</Properties>
+</XuiButton>
+<XuiList>
+<Properties>
+ <Id>lstDownloadHistory</Id>
+ <Width>855</Width>
+ <Height>450</Height>
+ <Position>144,153,0</Position>
+ <ClassOverride>CDownloadHistoryList</ClassOverride>
+ <Visual>List_Fullwidth_3Icon_4string</Visual>
+</Properties>
+</XuiList>
+<XuiLabel>
+<Properties>
+ <Id>labSceneTitle</Id>
+ <Width>855</Width>
+ <Height>47</Height>
+ <Position>156,96,0</Position>
+ <Visual>Label_Head</Visual>
+ <Text>Download History</Text>
+</Properties>
+</XuiLabel>
+<XuiControl>
+<Properties>
+ <Id>ctlLoading</Id>
+ <Width>100</Width>
+ <Height>100</Height>
+ <Position>522,320,0</Position>
+ <Visual>Loading_Large</Visual>
+</Properties>
+</XuiControl>
+<XuiLabel>
+<Properties>
+ <Id>labEmpty</Id>
+ <Width>855</Width>
+ <Height>75</Height>
+ <Position>144,347.5,0</Position>
+ <Visual>XuiLabelCenterJustify</Visual>
+ <Text>You haven't downloaded any content yet.</Text>
+</Properties>
+</XuiLabel>
+<XuiLabel>
+<Properties>
+ <Id>labItemCount</Id>
+ <Width>344</Width>
+ <Height>47</Height>
+ <Position>544,576,0</Position>
+ <Visual>Label_SubRight</Visual>
+</Properties>
+</XuiLabel>
+</XuiScene>
+</XuiCanvas>

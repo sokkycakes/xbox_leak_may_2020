@@ -20,7 +20,7 @@ static bool fvf_plan_capture(fvf_plan_key *key, const fvf_layout *l)
 {
     /* Only the plain case: fixed function, no fog, vertex blending, point
        scaling, stencil or texture transforms, and no CPU writes to the frame. */
-    if (!l->pretransformed || d3d.pixel_shader || d3d.bb_cpu_dirty || RS(118 /* VERTEXBLEND */)
+    if (!l->pretransformed || d3d.pixel_shader || ff_fragment_program() || d3d.bb_cpu_dirty || RS(118 /* VERTEXBLEND */)
         || RS(D3DRS_FOGENABLE) || RS(D3DRS_POINTSCALEENABLE)
         || RS(D3DRS_STENCILENABLE)) return false;
     for (int s = 0; s < 4; s++)

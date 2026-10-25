@@ -104,6 +104,7 @@ static inline uint32_t page_of(uint32_t a) { return (a - ARENA_BASE) / PAGE_SIZE
 NTSTATUS NTAPI NtAllocateVirtualMemory(PVOID *BaseAddress, ULONG_PTR ZeroBits,
                                        SIZE_T *RegionSize, ULONG AllocationType, ULONG Protect)
 {
+    gl_yield_point();
     (void)ZeroBits;
     uint32_t base = (uint32_t)*BaseAddress, size = *RegionSize;
     NTSTATUS st = STATUS_SUCCESS;
@@ -161,6 +162,7 @@ static void render_drain(void)
 
 NTSTATUS NTAPI NtFreeVirtualMemory(PVOID *BaseAddress, SIZE_T *RegionSize, ULONG FreeType)
 {
+    gl_yield_point();
     uint32_t base = (uint32_t)*BaseAddress & ~(PAGE_SIZE - 1), size = *RegionSize;
     TRACE_ALL("NtFreeVirtualMemory(%#x, %#x, %#x)", base, size, FreeType);
     if (!in_arena(base))
@@ -352,6 +354,25 @@ ULONG NTAPI ExQueryPoolBlockSize(PVOID p) { return pool_size(p); }
 
 /* ---- contiguous memory ----------------------------------------------- */
 
+/* The highest page the kernel hands out as contiguous memory
+   (MM_CONTIGUOUS_MEMORY_LIMIT, retail and development kernels alike): the
+   pages above it in the first 64 MB hold the NV2A instance memory and the
+   PFN database. */
+#define CONTIG_RETAIL_LIMIT 0x3FDFu
+
+static long contig_find(uint32_t pages, uint32_t align, uint32_t lo, uint32_t hi)
+{
+    if (hi + 1 < pages) return -1;
+    long start = (long)(hi + 1 - pages);
+    start -= start % align;
+    for (; start >= (long)lo; start -= align) {
+        uint32_t i = 0;
+        while (i < pages && !contig_used[start + i]) i++;
+        if (i == pages) return start;
+    }
+    return -1;
+}
+
 PVOID NTAPI MmAllocateContiguousMemoryEx(SIZE_T NumberOfBytes, ULONG_PTR Lowest,
                                          ULONG_PTR Highest, ULONG_PTR Alignment, ULONG Protect)
 {
@@ -365,18 +386,27 @@ PVOID NTAPI MmAllocateContiguousMemoryEx(SIZE_T NumberOfBytes, ULONG_PTR Lowest,
 
     pthread_mutex_lock(&mem_lock);
     /* Top-down, like the kernel, so low physical memory stays available for
-       callers that ask for it explicitly. */
-    long start = (long)(hi + 1 - pages);
-    start -= start % align;
-    for (; start >= (long)lo; start -= align) {
-        uint32_t i = 0;
-        while (i < pages && !contig_used[start + i]) i++;
-        if (i == pages) {
-            memset(&contig_used[start], 1, pages);
-            contig_len[start] = pages;
-            result = (PVOID)(CONTIG_BASE + start * PAGE_SIZE);
-            break;
+       callers that ask for it explicitly.  The console never hands out
+       contiguous memory above 64 MB, and title code may keep physical
+       addresses in 26 bits, so that is tried first; the rest of the 128 MB
+       is a reserve for when it runs out (the host libraries use some of
+       the same memory the title's budget assumes is its own). */
+    long start = -1;
+    if (lo <= CONTIG_RETAIL_LIMIT)
+        start = contig_find(pages, align, lo, hi < CONTIG_RETAIL_LIMIT ? hi : CONTIG_RETAIL_LIMIT);
+    if (start < 0 && hi > CONTIG_RETAIL_LIMIT) {
+        static bool noted;
+        start = contig_find(pages, align, lo, hi);
+        if (start >= 0 && !noted && lo <= CONTIG_RETAIL_LIMIT) {
+            noted = true;
+            xlog("MmAllocateContiguousMemoryEx(%#x): the first 64 MB are used up; allocating above them",
+                 (unsigned)NumberOfBytes);
         }
+    }
+    if (start >= 0) {
+        memset(&contig_used[start], 1, pages);
+        contig_len[start] = pages;
+        result = (PVOID)(CONTIG_BASE + start * PAGE_SIZE);
     }
     pthread_mutex_unlock(&mem_lock);
     if (result)
@@ -477,10 +507,15 @@ typedef struct {
 NTSTATUS NTAPI MmQueryStatistics(MM_STATISTICS *s)
 {
     if (s->Length != sizeof(*s)) return STATUS_INVALID_PARAMETER;
-    uint32_t free_pages = 0;
-    for (uint32_t i = 0; i < CONTIG_PAGES; i++) free_pages += !contig_used[i];
+    /* A title marked XINIT_LIMIT_DEVKIT_MEMORY (retail builds) sees the
+       64 MB of a retail console; the development kit's extra memory is
+       only reported to titles that ask for it. */
+    const XBE_HEADER *h = (const XBE_HEADER *)XBE_BASE;
+    bool retail = (h->InitFlags & 4 /* XINIT_LIMIT_DEVKIT_MEMORY */) != 0;
+    uint32_t total = retail ? 16384 : CONTIG_PAGES, free_pages = 0;
+    for (uint32_t i = 0; i < (retail ? CONTIG_RETAIL_LIMIT + 1 : CONTIG_PAGES); i++) free_pages += !contig_used[i];
     memset((char *)s + 4, 0, sizeof(*s) - 4);
-    s->TotalPhysicalPages = CONTIG_PAGES;
+    s->TotalPhysicalPages = total;
     s->AvailablePages = free_pages;
     return STATUS_SUCCESS;
 }

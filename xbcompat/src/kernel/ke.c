@@ -119,6 +119,15 @@ void disp_signal_all(void)
     for (struct disp_waiter *w = disp_waiters; w; w = w->next) pthread_cond_signal(&w->cv);
 }
 
+/* A thread waits for the GL context (hle/d3d8.c): one blocked here may hold
+   it, and lets it go when it looks again. */
+void ke_wake_waiters(void)
+{
+    pthread_mutex_lock(&g_disp_lock);
+    disp_signal_all();
+    pthread_mutex_unlock(&g_disp_lock);
+}
+
 /* ---- time ------------------------------------------------------------- */
 
 #define EPOCH_DIFF_100NS 116444736000000000ULL   /* 1601 -> 1970 */
@@ -146,6 +155,25 @@ static ULONGLONG mono_100ns(void)
 
 volatile ULONG KeTickCount;
 static ULONGLONG boot_mono;
+
+/* KeSystemTime and KeInterruptTime: KSYSTEM_TIMEs titles may read directly,
+   kept current by the DPC thread every millisecond.  The writer stores
+   High2Time, then LowPart, then High1Time; a reader takes High1Time,
+   LowPart and High2Time and retries until the two high parts agree. */
+volatile KSYSTEM_TIME KeSystemTime, KeInterruptTime;
+
+static void ksystem_time_store(volatile KSYSTEM_TIME *t, ULONGLONG v)
+{
+    __atomic_store_n(&t->High2Time, (LONG)(v >> 32), __ATOMIC_RELEASE);
+    __atomic_store_n(&t->LowPart, (ULONG)v, __ATOMIC_RELEASE);
+    __atomic_store_n(&t->High1Time, (LONG)(v >> 32), __ATOMIC_RELEASE);
+}
+
+static void ke_update_clocks(ULONGLONG mono)
+{
+    ksystem_time_store(&KeSystemTime, system_time_now());
+    ksystem_time_store(&KeInterruptTime, mono - boot_mono);
+}
 
 void NTAPI KeQuerySystemTime(LARGE_INTEGER *t)
 {
@@ -480,6 +508,11 @@ NTSTATUS wait_objects(ULONG count, PVOID objects[], int wait_any, KPROCESSOR_MOD
         goto done;
     }
     for (;;) {
+        if (xbc_gl_yield_due && xbc_gl_yield_due()) {
+            pthread_mutex_unlock(&g_disp_lock);
+            xbc_gl_yield();
+            pthread_mutex_lock(&g_disp_lock);
+        }
         if (xt && xt->apc_head) apc_drain(xt, false);
         if (wait_any) {
             for (ULONG i = 0; i < count; i++) {
@@ -551,7 +584,10 @@ NTSTATUS NTAPI KeWaitForSingleObject(PVOID Object, ULONG WaitReason, KPROCESSOR_
                                      BOOLEAN Alertable, LARGE_INTEGER *Timeout)
 {
     (void)WaitReason;
-    return wait_objects(1, &Object, 1, WaitMode, Alertable, Timeout);
+    bool held = !(Timeout && Timeout->QuadPart == 0) && ke_dispatch_release_for_wait();
+    NTSTATUS st = wait_objects(1, &Object, 1, WaitMode, Alertable, Timeout);
+    ke_dispatch_reacquire(held);
+    return st;
 }
 
 NTSTATUS NTAPI KeWaitForMultipleObjects(ULONG Count, PVOID Object[], ULONG WaitType,
@@ -560,7 +596,10 @@ NTSTATUS NTAPI KeWaitForMultipleObjects(ULONG Count, PVOID Object[], ULONG WaitT
                                         KWAIT_BLOCK *WaitBlockArray)
 {
     (void)WaitReason; (void)WaitBlockArray;
-    return wait_objects(Count, Object, WaitType == 1 /* WaitAny */, WaitMode, Alertable, Timeout);
+    bool held = !(Timeout && Timeout->QuadPart == 0) && ke_dispatch_release_for_wait();
+    NTSTATUS st = wait_objects(Count, Object, WaitType == 1 /* WaitAny */, WaitMode, Alertable, Timeout);
+    ke_dispatch_reacquire(held);
+    return st;
 }
 
 NTSTATUS NTAPI KeDelayExecutionThread(KPROCESSOR_MODE WaitMode, BOOLEAN Alertable,
@@ -572,6 +611,7 @@ NTSTATUS NTAPI KeDelayExecutionThread(KPROCESSOR_MODE WaitMode, BOOLEAN Alertabl
         NTSTATUS st = wait_objects(0, NULL, 1, WaitMode, Alertable, Interval);
         return st == STATUS_TIMEOUT ? STATUS_SUCCESS : st;
     }
+    gl_yield_point();
     LONGLONG t = Interval->QuadPart;
     ULONGLONG rel = t < 0 ? (ULONGLONG)-t : (t > (LONGLONG)system_time_now() ? t - system_time_now() : 0);
     uint64_t prof_start = prof_wait_begin();
@@ -692,6 +732,89 @@ LONG NTAPI KeReleaseMutant(KMUTANT *Mutant, LONG Increment, BOOLEAN Abandoned, B
     return old;
 }
 
+/* ---- queues (ke/queueobj.c) ------------------------------------------
+   SignalState counts the queued entries.  A remover takes the head entry
+   under the dispatcher lock, so a wake that loses the race to another
+   remover just waits again.  The concurrency limit (MaximumCount) is kept
+   but not enforced: threads here are not scheduled by the kernel. */
+
+void NTAPI KeInitializeQueue(KQUEUE *Queue, ULONG Count)
+{
+    init_header(&Queue->Header, QueueObject, sizeof(KQUEUE) / 4, 0);
+    Queue->EntryListHead.Flink = Queue->EntryListHead.Blink = &Queue->EntryListHead;
+    Queue->ThreadListHead.Flink = Queue->ThreadListHead.Blink = &Queue->ThreadListHead;
+    Queue->CurrentCount = 0;
+    Queue->MaximumCount = Count ? Count : 1;
+}
+
+static LONG queue_insert(KQUEUE *q, LIST_ENTRY *e, bool head)
+{
+    pthread_mutex_lock(&g_disp_lock);
+    LONG old = q->Header.SignalState;
+    LIST_ENTRY *h = &q->EntryListHead;
+    if (head) {
+        e->Flink = h->Flink; e->Blink = h;
+        h->Flink->Blink = e; h->Flink = e;
+    } else {
+        e->Flink = h; e->Blink = h->Blink;
+        h->Blink->Flink = e; h->Blink = e;
+    }
+    q->Header.SignalState++;
+    disp_signal(q);
+    pthread_mutex_unlock(&g_disp_lock);
+    return old;
+}
+
+LONG NTAPI KeInsertQueue(KQUEUE *Queue, LIST_ENTRY *Entry) { return queue_insert(Queue, Entry, false); }
+LONG NTAPI KeInsertHeadQueue(KQUEUE *Queue, LIST_ENTRY *Entry) { return queue_insert(Queue, Entry, true); }
+
+/* The head entry, or STATUS_TIMEOUT / STATUS_USER_APC cast to a pointer. */
+LIST_ENTRY *NTAPI KeRemoveQueue(KQUEUE *Queue, KPROCESSOR_MODE WaitMode, LARGE_INTEGER *Timeout)
+{
+    /* A relative timeout counts from the first call, not from each retry. */
+    LARGE_INTEGER abs, *to = Timeout;
+    if (Timeout && Timeout->QuadPart < 0) {
+        abs.QuadPart = (LONGLONG)(system_time_now() - (ULONGLONG)Timeout->QuadPart);
+        to = &abs;
+    }
+    xthread *xt = thread_current();
+    if (xt) xt->ethread.Tcb.Queue = Queue;
+    for (;;) {
+        pthread_mutex_lock(&g_disp_lock);
+        LIST_ENTRY *h = &Queue->EntryListHead, *e = h->Flink;
+        if (Queue->Header.SignalState > 0 && e != h) {
+            h->Flink = e->Flink;
+            e->Flink->Blink = h;
+            Queue->Header.SignalState--;
+            pthread_mutex_unlock(&g_disp_lock);
+            return e;
+        }
+        pthread_mutex_unlock(&g_disp_lock);
+        PVOID obj = Queue;
+        NTSTATUS st = wait_objects(1, &obj, 1, WaitMode, WaitMode == 1, to);
+        if (st == STATUS_TIMEOUT || st == STATUS_USER_APC)
+            return (LIST_ENTRY *)(ULONG_PTR)st;
+    }
+}
+
+/* Empties the queue: its first entry, the rest still linked to it as a
+   ring, or NULL when it was empty. */
+LIST_ENTRY *NTAPI KeRundownQueue(KQUEUE *Queue)
+{
+    pthread_mutex_lock(&g_disp_lock);
+    LIST_ENTRY *h = &Queue->EntryListHead, *first = h->Flink;
+    if (first == h) first = NULL;
+    else {
+        /* Unlink the head, leaving the entries as a ring. */
+        first->Blink = h->Blink;
+        h->Blink->Flink = first;
+        h->Flink = h->Blink = h;
+    }
+    Queue->Header.SignalState = 0;
+    pthread_mutex_unlock(&g_disp_lock);
+    return first;
+}
+
 /* ---- IRQL ------------------------------------------------------------- */
 
 #ifdef XBC_NATIVE
@@ -721,8 +844,64 @@ static inline void set_irql(KIRQL v)
 #endif
 
 KIRQL NTAPI KeGetCurrentIrql(void) { return get_irql(); }
-KIRQL FASTCALL KfRaiseIrql(KIRQL NewIrql) { KIRQL o = get_irql(); set_irql(NewIrql); return o; }
-void FASTCALL KfLowerIrql(KIRQL NewIrql) { set_irql(NewIrql); }
+/* On the console one processor runs everything, so code at DISPATCH_LEVEL
+   excludes DPCs and other raised code.  The network stack depends on that
+   (its state is touched from title threads at raised IRQL, from its DPC and
+   from the NIC's ISR), so once a NIC driver connects its interrupt, raising
+   to DISPATCH_LEVEL takes a lock that DPCs and the ISR also run under.
+   Titles without networking keep the lock-free behavior. */
+static pthread_mutex_t dispatch_lock = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
+static bool dispatch_exclusive;
+static __thread bool dispatch_held;
+
+void ke_dispatch_exclusive(void) { __atomic_store_n(&dispatch_exclusive, true, __ATOMIC_RELEASE); }
+
+static inline void irql_changed(KIRQL from, KIRQL to)
+{
+    if (!__atomic_load_n(&dispatch_exclusive, __ATOMIC_ACQUIRE)) return;
+    if (from < 2 && to >= 2 && !dispatch_held) {
+        pthread_mutex_lock(&dispatch_lock);
+        dispatch_held = true;
+    } else if (to < 2 && dispatch_held) {
+        dispatch_held = false;
+        pthread_mutex_unlock(&dispatch_lock);
+    }
+}
+
+/* Run a DPC or an ISR as the only raised code (a no-op until exclusive). */
+void ke_dispatch_enter(KIRQL irql)
+{
+    (void)irql;
+    if (__atomic_load_n(&dispatch_exclusive, __ATOMIC_ACQUIRE)) pthread_mutex_lock(&dispatch_lock);
+}
+
+void ke_dispatch_leave(void)
+{
+    if (__atomic_load_n(&dispatch_exclusive, __ATOMIC_ACQUIRE)) pthread_mutex_unlock(&dispatch_lock);
+}
+
+/* A thread blocking at raised IRQL (which the console forbids) must not keep
+   DPCs out while it sleeps. */
+bool ke_dispatch_release_for_wait(void)
+{
+    if (!dispatch_held) return false;
+    dispatch_held = false;
+    pthread_mutex_unlock(&dispatch_lock);
+    return true;
+}
+
+void ke_dispatch_reacquire(bool was_held)
+{
+    if (!was_held) return;
+    pthread_mutex_lock(&dispatch_lock);
+    dispatch_held = true;
+}
+
+KIRQL FASTCALL KfRaiseIrql(KIRQL NewIrql) { KIRQL o = get_irql(); irql_changed(o, NewIrql); set_irql(NewIrql); return o; }
+void FASTCALL KfLowerIrql(KIRQL NewIrql) { KIRQL o = get_irql(); set_irql(NewIrql); irql_changed(o, NewIrql); }
+/* KiLockDispatcherDatabase is KeRaiseIrqlToDpcLevel in guest code; with
+   no context switch to make here, unlocking is lowering the IRQL. */
+void FASTCALL KiUnlockDispatcherDatabase(KIRQL OldIrql) { KfLowerIrql(OldIrql); }
 KIRQL NTAPI KeRaiseIrqlToDpcLevel(void) { return KfRaiseIrql(2); }
 KIRQL NTAPI KeRaiseIrqlToSynchLevel(void) { return KfRaiseIrql(2); }
 
@@ -736,8 +915,8 @@ KTHREAD *NTAPI KeGetCurrentThread(void)
    code on real hardware is uniprocessor, but our threads are truly parallel,
    so take a real lock. */
 static pthread_mutex_t spin_lock = PTHREAD_MUTEX_INITIALIZER;
-KIRQL FASTCALL KfAcquireSpinLock(ULONG *SpinLock) { (void)SpinLock; pthread_mutex_lock(&spin_lock); return KfRaiseIrql(2); }
-void FASTCALL KfReleaseSpinLock(ULONG *SpinLock, KIRQL OldIrql) { (void)SpinLock; KfLowerIrql(OldIrql); pthread_mutex_unlock(&spin_lock); }
+KIRQL FASTCALL KfAcquireSpinLock(ULONG *SpinLock) { (void)SpinLock; KIRQL o = KfRaiseIrql(2); pthread_mutex_lock(&spin_lock); return o; }
+void FASTCALL KfReleaseSpinLock(ULONG *SpinLock, KIRQL OldIrql) { (void)SpinLock; pthread_mutex_unlock(&spin_lock); KfLowerIrql(OldIrql); }
 void FASTCALL KefAcquireSpinLockAtDpcLevel(ULONG *SpinLock) { (void)SpinLock; pthread_mutex_lock(&spin_lock); }
 void FASTCALL KefReleaseSpinLockFromDpcLevel(ULONG *SpinLock) { (void)SpinLock; pthread_mutex_unlock(&spin_lock); }
 
@@ -995,6 +1174,7 @@ static void *dpc_thread(void *arg)
     for (;;) {
         ULONGLONG now = mono_100ns();
         KeTickCount = (ULONG)((now - boot_mono) / 10000);
+        ke_update_clocks(now);
         if (g_apu_sample_counter) *g_apu_sample_counter = (ULONG)((now - boot_mono) * 48 / 10000);
 
         /* Expire timers. */
@@ -1071,7 +1251,9 @@ static void *dpc_thread(void *arg)
             CPU_CALL(d->DeferredRoutine, CONV_STD, (uint32_t)d, (uint32_t)d->DeferredContext,
                      (uint32_t)d->SystemArgument1, (uint32_t)d->SystemArgument2);
 #else
+            ke_dispatch_enter(2);
             ((dpc_fn)d->DeferredRoutine)(d, d->DeferredContext, d->SystemArgument1, d->SystemArgument2);
+            ke_dispatch_leave();
 #endif
             pthread_mutex_lock(&dpc_lock);
         }
@@ -1108,6 +1290,7 @@ void timers_init(void)
     pthread_cond_init(&dpc_cond, &ca);
     pthread_condattr_destroy(&ca);
     boot_mono = mono_100ns();
+    ke_update_clocks(boot_mono);
     tsc_init();
     pthread_t t;
     pthread_create(&t, NULL, dpc_thread, NULL);
@@ -1125,12 +1308,12 @@ ULONG NTAPI HalGetInterruptVector(ULONG BusInterruptLevel, KIRQL *Irql)
 void NTAPI KeInitializeInterrupt(PVOID Interrupt, PVOID ServiceRoutine, PVOID ServiceContext,
                                  ULONG Vector, KIRQL Irql, ULONG InterruptMode, BOOLEAN ShareVector)
 {
-    (void)Interrupt; (void)ServiceRoutine; (void)ServiceContext; (void)Vector;
     (void)Irql; (void)InterruptMode; (void)ShareVector;
+    nic_interrupt_init(Interrupt, ServiceRoutine, ServiceContext, Vector);   /* the only device delivered */
 }
 
-BOOLEAN NTAPI KeConnectInterrupt(PVOID Interrupt) { (void)Interrupt; return 1; }
-BOOLEAN NTAPI KeDisconnectInterrupt(PVOID Interrupt) { (void)Interrupt; return 1; }
+BOOLEAN NTAPI KeConnectInterrupt(PVOID Interrupt) { nic_interrupt_connect(Interrupt, true); return 1; }
+BOOLEAN NTAPI KeDisconnectInterrupt(PVOID Interrupt) { nic_interrupt_connect(Interrupt, false); return 1; }
 
 BOOLEAN NTAPI KeSynchronizeExecution(PVOID Interrupt, BOOLEAN (NTAPI *Routine)(PVOID), PVOID Context)
 {
@@ -1138,7 +1321,10 @@ BOOLEAN NTAPI KeSynchronizeExecution(PVOID Interrupt, BOOLEAN (NTAPI *Routine)(P
 #ifdef XBC_TRANSLATED
     return (BOOLEAN)CPU_CALL(Routine, CONV_STD, (uint32_t)Context);
 #else
-    return Routine(Context);
+    ke_dispatch_enter(26);
+    BOOLEAN r = Routine(Context);
+    ke_dispatch_leave();
+    return r;
 #endif
 }
 
@@ -1219,4 +1405,65 @@ void NTAPI KeStallExecutionProcessor(ULONG MicroSeconds)
     struct timespec ts = { MicroSeconds / 1000000, (MicroSeconds % 1000000) * 1000 };
     cpu_block();
     nanosleep(&ts, NULL);
+}
+
+/* Time left on a timer, for NtQueryTimer: negative once it is due. */
+LONGLONG ke_timer_remaining(KTIMER *t)
+{
+    return (LONGLONG)(t->DueTime.QuadPart - mono_100ns());
+}
+
+/* ---- more thread and process controls ------------------------------- */
+
+extern void thread_resume(xthread *t);
+
+static xthread *xthread_of(KTHREAD *t)
+{
+    return (xthread *)((char *)t - offsetof(xthread, ethread.Tcb));
+}
+
+ULONG NTAPI KeSuspendThread(KTHREAD *Thread)
+{
+    return thread_suspend(xthread_of(Thread));
+}
+
+ULONG NTAPI KeResumeThread(KTHREAD *Thread)
+{
+    ULONG prev = (UCHAR)Thread->SuspendCount;
+    thread_resume(xthread_of(Thread));
+    return prev;
+}
+
+/* Alerts and resumes; there is no alerted state to set here, so a resume. */
+ULONG NTAPI KeAlertResumeThread(KTHREAD *Thread)
+{
+    return KeResumeThread(Thread);
+}
+
+/* Priority boosts don't exist on the host's scheduler. */
+void NTAPI KeBoostPriorityThread(KTHREAD *Thread, LONG Increment)
+{
+    (void)Thread; (void)Increment;
+}
+
+/* Sets a synchronization event (fast mutex release).  The waiter it wakes
+   isn't known here, so *Thread is left as it is when no one waits. */
+void NTAPI KeSetEventBoostPriority(KEVENT *Event, KTHREAD **Thread)
+{
+    (void)Thread;
+    KeSetEvent(Event, 0, 0);
+}
+
+/* The process's base priority (8 for a title); threads keep their own. */
+static LONG process_base_priority = 8;
+
+LONG NTAPI KeSetPriorityProcess(PVOID Process, LONG BasePriority)
+{
+    (void)Process;
+    return __atomic_exchange_n(&process_base_priority, BasePriority, __ATOMIC_SEQ_CST);
+}
+
+ULONG NTAPI KeIsExecutingDpc(void)
+{
+    return in_dpc_thread;
 }

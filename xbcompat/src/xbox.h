@@ -141,6 +141,20 @@ typedef struct {
     LONG Period;
 } KTIMER;
 
+typedef struct {
+    DISPATCHER_HEADER Header;   /* SignalState: entries queued */
+    LIST_ENTRY EntryListHead;
+    ULONG CurrentCount;
+    ULONG MaximumCount;
+    LIST_ENTRY ThreadListHead;
+} KQUEUE;
+
+typedef struct {
+    ULONG LowPart;
+    LONG High1Time;
+    LONG High2Time;
+} KSYSTEM_TIME;
+
 typedef struct KWAIT_BLOCK {
     LIST_ENTRY WaitListEntry;
     KTHREAD *Thread;
@@ -342,6 +356,7 @@ typedef struct {
 #define STATUS_TIMEOUT                  ((NTSTATUS)0x00000102)
 #define STATUS_PENDING                  ((NTSTATUS)0x00000103)
 #define STATUS_OBJECT_NAME_EXISTS       ((NTSTATUS)0x40000000)
+#define STATUS_BUFFER_OVERFLOW          ((NTSTATUS)0x80000005)
 #define STATUS_NO_MORE_FILES            ((NTSTATUS)0x80000006)
 #define STATUS_UNSUCCESSFUL             ((NTSTATUS)0xC0000001)
 #define STATUS_NOT_IMPLEMENTED          ((NTSTATUS)0xC0000002)

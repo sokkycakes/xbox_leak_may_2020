@@ -20,6 +20,7 @@
 #include <sys/stat.h>
 
 #include "nv2a_shaders.h"
+#include "ff_combiner.h"
 
 /* ---- the SDK macros (d3d8types.h) ---- */
 #define PS_TEXTUREMODES(t0, t1, t2, t3) (((t3) << 15) | ((t2) << 10) | ((t1) << 5) | (t0))
@@ -265,7 +266,7 @@ static void test_texture_modes(void)
     rs_from_def(rs, def, 0, 0);
     src = check("tm_dot_zw", rs, 0);
     expect("tm_dot_zw", src, "dotmap_hilo_1(t1)", 1);
-    expect("tm_dot_zw", src, "gl_FragDepth = zw3 / 16777215.0;", 1);
+    expect("tm_dot_zw", src, "gl_FragDepth = floor(zw3 + 0.5) / zw_scale;", 1);
     expect("tm_dot_zw", src, "float zw3 = dot2 / dot3;", 1);
     free(src);
 
@@ -374,6 +375,75 @@ static void test_texture_controls(void)
         psh_shadow_stages = 0;
         free(src);
     }
+}
+
+static void expect_word(const char *name, uint32_t got, uint32_t want)
+{
+    if (got != want) {
+        printf("FAIL %-28s %#010x, expected %#010x\n", name, got, want);
+        failures++;
+    }
+}
+
+/* Fixed-function stages turned into combiner state (ff_combiner.h), as
+   the library's LazySetCombiners / LazySetShaderStageProgram would. */
+static void test_ff_combiner(void)
+{
+    uint32_t tss[4 * 32], rs[128];
+    int kind[4] = { FFC_TEX_2D, FFC_TEX_2D, FFC_TEX_2D, FFC_TEX_NONE };
+#define ST(s, i) tss[(s) * 32 + (i)]
+    memset(tss, 0, sizeof tss);
+    for (int s = 0; s < 4; s++) { ST(s, 12) = ST(s, 16) = 1; ST(s, 20) = 1; }
+    /* The D3D bumpduv1 test: base texture, V8U8 bump map, then an
+       environment map perturbed by it and modulated with the base. */
+    ST(0, 12) = 2; ST(0, 14) = 2; ST(0, 16) = 2; ST(0, 18) = 2;   /* SELECTARG1 TEXTURE */
+    ST(1, 12) = 25; ST(1, 14) = 2; ST(1, 15) = 1;                 /* BUMPENVMAP */
+    ST(2, 12) = 4; ST(2, 14) = 2; ST(2, 15) = 1;                  /* MODULATE TEXTURE, CURRENT */
+    memset(rs, 0, sizeof rs);
+    ff_combiner_state(rs, tss, kind, 0);
+    expect_word("ff_bump count", rs[53], 3);
+    expect_word("ff_bump modes", rs[117], PS_TEXTUREMODES(TM_PROJECT2D, TM_PROJECT2D, TM_BUMPENVMAP, TM_NONE));
+    expect_word("ff_bump inputtex", rs[56], PS_INPUTTEXTURE(0, 0, 1, 2));
+    expect_word("ff_bump rgb0", rs[34], 0x08200000);    /* T0 * 1 */
+    expect_word("ff_bump alpha0", rs[0], 0x18200000);   /* T0.a * 1 */
+    expect_word("ff_bump out0", rs[45], 0xC00);         /* sum to R0 */
+    expect_word("ff_bump rgb1", rs[35], 0x0C200000);    /* passes R0 on */
+    expect_word("ff_bump alpha1", rs[27], 0);           /* ALPHAOP DISABLE: off */
+    expect_word("ff_bump rgb2", rs[36], 0x0A0C0000);    /* T2 * R0 */
+    psh_options options = {0};
+    options.bump_biased = 2;
+    rs[82] = 1; rs[83] = 3;   /* linear fog through the synthesized final combiner */
+    char *src = check_ex("ff_bumpenvmap", rs, &options, 0);
+    expect("ff_bumpenvmap", src, "vec2 dsdt2 = vec2(snorm8_d3d(t1.r), snorm8_d3d(t1.g));", 1);
+    expect("ff_bumpenvmap", src, "texture2D(tex2, (gl_TexCoord[2].xy + vec2(dot(bump_env[2].xz, dsdt2)", 1);
+    free(src);
+
+    /* DOTPRODUCT3 takes the whole stage: dot into R0 with blue to alpha. */
+    memset(tss, 0, sizeof tss);
+    for (int s = 0; s < 4; s++) { ST(s, 12) = ST(s, 16) = 1; ST(s, 20) = 1; }
+    ST(0, 12) = 22; ST(0, 14) = 2; ST(0, 15) = 0; ST(0, 16) = 2; ST(0, 18) = 2;
+    ff_combiner_state(rs, tss, kind, 0);
+    expect_word("ff_dot3 rgb", rs[34], 0x48440000);
+    expect_word("ff_dot3 out", rs[45], 0x820C0);
+    expect_word("ff_dot3 alpha", rs[0] | rs[26], 0);
+    expect_word("ff_dot3 modes", rs[117], PS_TEXTUREMODES(TM_PROJECT2D, TM_PROJECT2D, TM_PROJECT2D, TM_NONE));
+
+    /* A texture argument without a texture selects the current color;
+       SUBTRACT, ADDSIGNED2X and a TEMP result keep their words. */
+    kind[0] = FFC_TEX_NONE;
+    ST(0, 12) = 4; ST(0, 14) = 2; ST(0, 15) = 0;
+    ST(1, 12) = 10; ST(1, 14) = 3; ST(1, 15) = 1; ST(1, 20) = 5;
+    ST(2, 12) = 9; ST(2, 14) = 5; ST(2, 15) = 0x11;
+    ff_combiner_state(rs, tss, kind, 0);
+    expect_word("ff_missing rgb", rs[34], 0x04200000);              /* V0 * 1 */
+    expect_word("ff_subtract rgb", rs[35], 0x0120400C);              /* C1 * 1 + -1 * R0 */
+    expect_word("ff_subtract out", rs[46], 0xD00);                   /* into R1 (TEMP) */
+    expect_word("ff_addsigned2x rgb", rs[36], 0x0D20202C);           /* R1 + (1 - R0) */
+    expect_word("ff_addsigned2x out", rs[47], 0xC00 | (3u << 15));
+    expect_word("ff_needs_program", ff_combiner_needs_program(tss, 0), 0);
+    ST(1, 12) = 26;
+    expect_word("ff_needs_program lum", ff_combiner_needs_program(tss, 0), 1);
+#undef ST
 }
 
 static void test_combiners(void)
@@ -675,6 +745,7 @@ int main(int argc, char **argv)
     else puts("Synthetic-only run: sample XPU files were not tested");
     test_texture_modes();
     test_texture_controls();
+    test_ff_combiner();
     test_combiners();
     test_final_combiner();
     test_modify_pixel_shader();

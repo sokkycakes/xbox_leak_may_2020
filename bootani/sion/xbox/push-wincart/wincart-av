@@ -1,0 +1,20 @@
+#!/bin/sh
+# wincart-av SOCKET: take the display from xbox-av for a title that isn't an
+# xbcompat process ('T', as xbcompat does at a title's start), hold it until
+# SIGTERM, then give it back black ('S' 0 0).  See tools/sion/av/xbox-av.c.
+X=/opt/xbcompat
+exec env LD_LIBRARY_PATH=$X/lib PYTHONHOME=$X PYTHONDONTWRITEBYTECODE=1 $X/bin/python3 -c '
+import signal, socket, struct, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.settimeout(5)
+s.connect(sys.argv[1])
+s.sendall(b"T")
+print("wincart-av: T ->", s.recv(1), flush=True)
+done = []
+signal.signal(signal.SIGTERM, lambda *a: done.append(1))
+signal.signal(signal.SIGINT, lambda *a: done.append(1))
+while not done:
+    signal.pause()
+s.sendall(b"S" + struct.pack("<II", 0, 0))
+print("wincart-av: S ->", s.recv(1), flush=True)
+' "$1"

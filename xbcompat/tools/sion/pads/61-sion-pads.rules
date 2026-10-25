@@ -1,0 +1,2 @@
+# A pad xpad just took moves to xpad_leds, which sets its player light.
+ACTION=="bind", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_interface", DRIVER=="xpad", RUN+="/usr/sbin/sion-pads rebind %k"

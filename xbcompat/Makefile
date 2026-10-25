@@ -65,8 +65,9 @@ override CFLAGS += $(shell $(PKGCFG) --cflags sdl2 $(GL))
 LDLIBS  += $(shell $(PKGCFG) --libs sdl2 $(GL)) -lpthread -lm
 
 LEAK    ?= ../xbox_leak_may_2020/xbox trunk/xbox
-KERNSRC  = src/kernel/ke.c src/kernel/ob.c src/kernel/io.c src/kernel/rtl.c src/kernel/misc.c src/kernel/dvd.c \
-           src/kernel/kernel.c src/kernel/av.c src/kernel/reset.c src/kernel/exports.gen.c
+KERNSRC  = src/kernel/ke.c src/kernel/ob.c src/kernel/io.c src/kernel/rtl.c src/kernel/misc.c src/kernel/xcrypt.c src/kernel/dvd.c \
+           src/kernel/kernel.c src/kernel/av.c src/kernel/reset.c src/kernel/irp.c src/kernel/nic.c src/kernel/net.c \
+           src/kernel/exports.gen.c src/kernel/wincart.c
 HLESRC   = src/hle/hle.c src/hle/d3d8.c src/hle/vsh.c src/hle/vsh_interp.c src/hle/psh.c src/hle/xinput.c src/hle/dsound.c
 ifeq ($(RENDERER),native)
 HLESRC := $(filter-out src/hle/d3d8.c src/hle/vsh.c src/hle/vsh_interp.c src/hle/psh.c,$(HLESRC)) src/renderer/client.c
@@ -86,8 +87,28 @@ override CFLAGS += -Isrc
 LDLIBS += -ldl
 endif
 endif
-SRC      = src/main.c src/log.c src/prof.c src/loader.c src/memory.c src/thread.c $(KERNSRC) $(HLESRC)
+SRC      = src/main.c src/probe.c src/log.c src/prof.c src/loader.c src/xbeimage.c src/memory.c src/thread.c $(KERNSRC) $(HLESRC)
 OBJ      = $(SRC:%.c=$(BUILD)/%.o)
+# The Guide overlay (src/guide, C++98 with no C++ library) on the frolickdash
+# XUI runtime; the native renderer builds leave it out (d3d8.c's hook is weak).
+XUIDIR   = tools/frolickdash/xui
+ifneq ($(RENDERER),native)
+GUIDESRC = src/guide/guide.cpp $(XUIDIR)/xui_parse.cpp $(XUIDIR)/xui_scene.cpp $(XUIDIR)/xui_draw.cpp $(XUIDIR)/xui_classes.cpp
+OBJ     += $(GUIDESRC:%.cpp=$(BUILD)/%.o)
+endif
+ifeq ($(TARGET),armhf)
+CXX      = $(CROSS)g++
+CXXARCH  = -fsigned-char -mfpu=vfpv4
+else
+CXX      = g++
+CXXARCH  = -m32 -mstackrealign
+endif
+CXXFLAGS = $(CXXARCH) -O2 -g -std=c++98 -fno-exceptions -fno-rtti -fno-threadsafe-statics -fno-pie -fno-omit-frame-pointer \
+           -D_snprintf=snprintf -Wno-misleading-indentation -I$(XUIDIR) -Isrc \
+           $(shell $(PKGCFG) --cflags sdl2 $(GL))
+$(BUILD)/%.o: %.cpp $(XUIDIR)/xui.h
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
 ifeq ($(RENDERER),native)
 ifeq ($(TARGET)$(CPU),armhfxlat)
 RBUILD = $(BUILD)/renderer
@@ -164,11 +185,16 @@ $(BUILD)/%.o: %.c src/xbcompat.h src/xbox.h src/hle/hle.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+$(BUILD)/src/kernel/ob.o $(BUILD)/src/kernel/irp.o: src/kernel/driver.h
 $(BUILD)/src/hle/d3d8.o: src/hle/ff_vsh.h src/hle/dxt_decode.h src/hle/nv2a_shaders.h src/hle/async_draws.h
 
 $(BUILD)/glslcheck: tools/glslcheck.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $< $(LDLIBS)
+
+# Renders a Guide scene to a .ppm with xbcompat's own XUI code (tools/guide).
+$(BUILD)/guideview: tools/guide/guideview.cpp src/guide/guide.cpp $(filter-out $(BUILD)/src/guide/guide.o,$(GUIDESRC:%.cpp=$(BUILD)/%.o)) $(BUILD)/src/xbeimage.o
+	$(CXX) $(CXXFLAGS) -o $@ $< $(filter %.o,$^) $(LDLIBS)
 
 src/kernel/exports.gen.c: tools/gen_exports.py
 	python3 tools/gen_exports.py "$(LEAK)/private/ntos/init/ntoskrnl.src" $@

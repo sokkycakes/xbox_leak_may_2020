@@ -56,6 +56,9 @@ def probe_stack(read, va, choices):
 # Argument lists XbSymbolDatabase gets wrong: these take every argument on the
 # stack (the function overwrites the register it names before reading it).
 ARGS_FIX = {
+    # The register holding Enable is not known (the OOVPA says "unk"); the
+    # host ignores the display filter anyway, so take no arguments.
+    "D3DDevice_SetSoftDisplayFilter_0__LTCG_unk1": "",
     "D3DDevice_DrawIndexedVertices": "psh PrimitiveType, psh VertexCount, psh pIndexData",
     "D3DDevice_DrawIndexedVerticesUP": "psh PrimitiveType, psh VertexCount, psh pIndexData, "
                                        "psh pVertexStreamZeroData, psh VertexStreamZeroStride",
@@ -203,14 +206,16 @@ def arg_spec(s):
     out = []
     for a in filter(None, (x.strip() for x in (s or "").split(","))):
         kind = a.split()[0]
-        out.append({"psh": "s", "psh2": "s2"}.get(kind, kind))
+        # A byte argument in dl (LTCG D3D_CreateTexture's isVolume): the
+        # host function gets all of edx and reads only the low byte.
+        out.append({"psh": "s", "psh2": "s2", "dl": "edx"}.get(kind, kind))
     return out
 
 
 def base_name(name):
     """The API name under an LTCG build's internal entry point:
     D3DDevice_SetTransform_0__LTCG_eax1_edx2 -> D3DDevice_SetTransform."""
-    return re.sub(r"(_\d+)?__LTCG_\w*$", "", name)
+    return re.sub(r"(_\d+)?__LTCG(_\w*)?$", "", name)
 
 
 def main():
@@ -240,16 +245,25 @@ def main():
             found.setdefault(name, (kind, conv, args, int(va, 16), lib))
 
     lines, skipped = [], []
-    for name in sorted(host_names(a.binary)):
+    # A host name _X@n also takes a symbol the database names X_n (its
+    # STACK() suffix: D3D_MakeRequestedSpace_8 is _D3D_MakeRequestedSpace@8);
+    # both are mapped when the scanner finds both.
+    hosts = host_names(a.binary)
+    pairs = []
+    for name in sorted(hosts):
         k = host_key(name)
-        if not k or k[0] not in found:
+        if not k:
             continue
+        for cand in (k[0], f"{k[0]}_{k[2]}" if k[2] is not None else None):
+            if cand in found and (cand == k[0] or f"_{cand}@{k[2]}" not in hosts):
+                pairs.append((name, k, cand))
+    for name, k, cand in pairs:
         key, conv, nbytes = k
-        kind, fconv, args, va, _ = found[key]
+        kind, fconv, args, va, _ = found[cand]
         stack, regs = parse_args_list(args)
-        stack = STACK_FIX.get(key, stack)
-        if key in STACK_PROBE:
-            stack = probe_stack(xbe_reader(a.xbe), va, STACK_PROBE[key]) or stack
+        stack = STACK_FIX.get(cand, stack)
+        if cand in STACK_PROBE:
+            stack = probe_stack(xbe_reader(a.xbe), va, STACK_PROBE[cand]) or stack
         if fconv == "thiscall" and conv == "stdcall" and nbytes is None:
             # A C++ __stdcall member pushes `this`; the scanner names it a thiscall
             # only when the library passes it in ecx.
@@ -266,7 +280,6 @@ def main():
     # convention, so the loader traps them (with that name) instead of letting
     # code that drives the NV2A or the APU run.
     mapped_va = {int(l.split()[1], 16) for l in lines}
-    hosts = host_names(a.binary)
     for name, (kind, fconv, args, va, lib) in sorted(found.items()):
         if kind != "FUN" or va in mapped_va or not lib.startswith(("D3D8", "DSOUND")):
             continue
@@ -285,7 +298,12 @@ def main():
             lines.append(f"{host} {va:#x} regs={','.join(spec)}")
             continue
         if fconv == "fastcall":
-            lines.append(f"@{name}@{stack + 4 * len(regs)} {va:#x}")
+            lines.append(f"@{base_name(name)}@{stack + 4 * len(regs)} {va:#x}")
+        elif "__LTCG" in name and not regs:
+            # An LTCG entry point that takes nothing in registers (the
+            # argument was folded into it, or EnableOverlay_0__LTCG's).
+            host = f"_{base_name(name)}_LTCG@{stack}"
+            lines.append(f"{host if host in hosts else f'_{base_name(name)}@{stack}'} {va:#x}")
         elif name.startswith("CDevice_") and fconv == "stdcall":
             # Device internals an LTCG title calls itself (SetStateVB flushes
             # lazy state into the push buffer from the real CDevice).

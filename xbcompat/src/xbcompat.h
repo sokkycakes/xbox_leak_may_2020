@@ -115,8 +115,36 @@ NTSTATUS wait_objects(ULONG count, PVOID objects[], int wait_any, KPROCESSOR_MOD
 void apc_queue(xthread *t, PVOID routine, PVOID ctx, PVOID arg1, PVOID arg2, KAPC *kapc);
 ULONG NTAPI RtlNtStatusToDosError(NTSTATUS st);
 void timers_init(void);
+/* Uniprocessor IRQL semantics once networking is up (ke.c). */
+void ke_dispatch_exclusive(void);
+void ke_dispatch_enter(KIRQL irql);
+void ke_dispatch_leave(void);
+bool ke_dispatch_release_for_wait(void);
+void ke_dispatch_reacquire(bool was_held);
+/* The console identity in the hard disk directory (misc.c). */
+/* probe.c: XBCOMPAT_PROBE address tracing */
+void probe_init(void);
+bool probe_trap(void *ucontext);
+void identity_init(const char *hdd);
+const UCHAR *identity_mac(void);
+void identity_set_mac(const UCHAR mac[6]);
+void title_keys_init(const char *hdd, const XBE_CERTIFICATE *cert);
+bool title_lan_key_known(void);   /* from keys.bin: System Link meets real consoles */
+/* The emulated Ethernet controller (nic.c). */
+extern bool g_nic_enabled;
+void nic_interrupt_init(PVOID Interrupt, PVOID ServiceRoutine, PVOID ServiceContext, ULONG Vector);
+bool nic_interrupt_connect(PVOID Interrupt, bool connect);
 extern void (*g_vblank_hook)(void);   /* run 60 times a second on the DPC thread */
 extern void (*g_render_drain)(void);  /* before freeing guest memory queued drawing may still read */
+/* hle/d3d8.c: the GL context goes between the title's threads that draw.
+   The thread holding it lets it go at kernel calls while another waits for
+   it (gl_yield_point), and when it exits.  Weak: builds whose renderer is a
+   library of its own have none of this. */
+bool xbc_gl_yield_due(void) __attribute__((weak));
+void xbc_gl_yield(void) __attribute__((weak));
+void xbc_gl_thread_exit(void) __attribute__((weak));
+static inline void gl_yield_point(void) { if (xbc_gl_yield) xbc_gl_yield(); }
+void ke_wake_waiters(void);   /* every thread in a kernel wait looks again */
 void ke_frame_presented(void);   /* XBCOMPAT_FIXED_FPS clock step */
 ULONGLONG system_time_now(void);   /* 100 ns units since 1601 */
 ULONGLONG ke_guest_tsc(void);      /* what a guest rdtsc reads */
@@ -127,7 +155,8 @@ void thread_untrap_tsc(void);      /* back to the host's counter, before exec */
 /* ---- handles ---------------------------------------------------------- */
 
 enum obj_kind { OBJ_NONE, OBJ_EVENT, OBJ_SEMAPHORE, OBJ_MUTANT, OBJ_TIMER, OBJ_THREAD,
-                OBJ_FILE, OBJ_SYMLINK, OBJ_DEVICE };
+                OBJ_FILE, OBJ_SYMLINK, OBJ_DEVICE, OBJ_IOCOMPLETION,
+                OBJ_OB };   /* made by ObCreateObject: body behind an OBJECT_HEADER (kernel/driver.h) */
 
 typedef struct xobject {
     enum obj_kind kind;
@@ -138,10 +167,14 @@ typedef struct xobject {
         KSEMAPHORE semaphore;
         KMUTANT mutant;
         KTIMER timer;
-    } u;                        /* dispatcher body lives here for NtCreate* objects */
+        KQUEUE queue;           /* an I/O completion port */
+    } u;                       /* dispatcher body lives here for NtCreate* objects */
     xthread *thread;
     struct xfile *file;
     char *link_target;
+    PVOID body;                /* OBJ_OB: the object body */
+    PVOID ob_base;             /* OBJ_OB: the allocation holding header and body */
+    struct xobject *ob_next;   /* OBJ_OB: every live one, under ob.c's lock */
 } xobject;
 
 HANDLE handle_insert(xobject *obj);
@@ -149,6 +182,8 @@ xobject *handle_lookup(HANDLE h);
 NTSTATUS handle_close(HANDLE h);
 xobject *object_new(enum obj_kind kind);
 void object_release(xobject *obj);
+/* Queue a completion packet on an I/O completion port (ob.c). */
+NTSTATUS iocp_post(xobject *port, PVOID key, PVOID apc_context, NTSTATUS status, ULONG_PTR info);
 
 /* ---- files ------------------------------------------------------------ */
 
@@ -207,6 +242,25 @@ bool reset_enabled(void);
 void reset_request(const char *why);
 void reset_check(void);
 void xinput_check_reset_combo(void);
+/* The Guide overlay (src/guide): xinput_guide_read() gives the pads' combined
+   state as GUIDE_* bits plus the port that pressed last; xinput_guide_mask()
+   hides the pads from the title while the Guide is open (and until every
+   button is let go after it closes). */
+#define GUIDE_A 0x100
+#define GUIDE_B 0x200
+#define GUIDE_X 0x400
+#define GUIDE_Y 0x800
+#define GUIDE_LT 0x1000
+#define GUIDE_RT 0x2000
+#define GUIDE_HOME 0x4000
+unsigned xinput_guide_read(int *port);
+void xinput_guide_mask(bool on);
+void ds_set_duck(float gain);
+void ds_set_volume(float gain);
+void ds_play_ui(const float *pcm, int frames);
+unsigned xinput_guide_ports(void);
+void xinput_guide_vibration(bool on);
+void reset_request_always(const char *why);
 
 /* ---- loader ----------------------------------------------------------- */
 
@@ -218,7 +272,12 @@ typedef struct {
 } xbe_image;
 
 void xbe_load(const char *path, xbe_image *img);
+void wincart_exec(const char *xbe);          /* kernel/wincart.c */
+ULONG wincart_title_id(const char *id);
 ULONG xbe_title_id(void);
+const char *xbe_title_name(void);
+const char *xbe_file_path(void);
+bool xbe_image_read(const char *xbe, const char *section, uint8_t **bgra, int *w, int *h);
 void xbe_reload_section(ULONG va, ULONG raw_offset, ULONG raw_size, ULONG virtual_size);
 void kernel_resolve_imports(xbe_image *img);
 void kernel_init(void);

@@ -210,6 +210,7 @@ static void *thread_main(void *arg)
 #endif
         t->ethread.ExitStatus = STATUS_SUCCESS;
     }
+    if (xbc_gl_thread_exit) xbc_gl_thread_exit();   /* a thread that drew last lets the GL context go */
     /* Returned or PsTerminateSystemThread'ed: signal the thread object. */
     TRACE("thread %u exited with %#x", (unsigned)(ULONG_PTR)t->ethread.UniqueThread,
           t->ethread.ExitStatus);

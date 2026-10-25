@@ -76,6 +76,7 @@ static const struct { unsigned short off, size, group; } async_fields[] = {
     AF(constant_mode, G_OTHER), AF(vs_const, G_VSC), AF(ps_const, G_PSC), AF(eye_vector, G_OTHER),
     AF(pixel_shader, G_RS), AF(zscale, G_OTHER), AF(cpu_time, G_OTHER), AF(callbacks, G_OTHER),
     AF(ncallbacks, G_OTHER), AF(palettes, G_TEX), AF(stipple_on, G_RS), AF(stipple, G_RS),
+    AF(direct_mv, G_XFORM),
 };
 #undef AF
 
@@ -305,7 +306,7 @@ static void async_target_state(D3DSurface *target, D3DSurface *z)
         d3d.rt_height = d3d.height;
         d3d.rt_texture = false;
         d3d.target_zmax = z ? depth_format_max((z->Format >> 8) & 0xFF) : d3d.zscale;
-        d3d.viewport = (D3DVIEWPORT8){ 0, 0, d3d.rt_width, d3d.rt_height, 0, 1 };
+        target_viewport_reset(z, d3d.rt_width, d3d.rt_height);
         return;
     }
     if (!p_glGenFramebuffers) return;
@@ -315,7 +316,7 @@ static void async_target_state(D3DSurface *target, D3DSurface *z)
     d3d.rt_width = w;
     d3d.rt_height = h;
     d3d.rt_texture = true;
-    d3d.viewport = (D3DVIEWPORT8){ 0, 0, w, h, 0, 1 };
+    target_viewport_reset(z, w, h);
 }
 
 static void async_target(D3DSurface *target, D3DSurface *z)
@@ -463,10 +464,14 @@ void d3d_async_run(const uint32_t *buf, unsigned n)
         case AS_VIS_END: D3DDevice_EndVisibilityTest(a[0]); break;
         case AS_SWAP:
             hud_batch_flush();
+            swap_cpu_backbuffer();
             flush_cpu_backbuffer();
+            front_buffer_overlay();
+            front_buffer_update();
             swap_gpu_frame_end();
             swap_screenshot();
             swap_present();
+            persisted_first_present();
             if (swap_window_events()) async_quit = true;
             /* The title's thread sees it when this batch is done. */
             __atomic_store_n(&async_frames_done, back->frame, __ATOMIC_RELEASE);

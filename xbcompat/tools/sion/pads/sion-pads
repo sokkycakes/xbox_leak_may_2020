@@ -1,0 +1,44 @@
+#!/bin/sh
+# Controller drivers the Sion's kernel lacks (see Makefile).
+#   sion-pads start          load them and move pads already on xpad over
+#   sion-pads rebind IFACE   move one USB interface from xpad to xpad_leds
+#                            (udev runs this when xpad binds a new pad)
+#   sion-pads stop           put every pad back on the built-in xpad
+M=/opt/sion-pads
+X=/sys/bus/usb/drivers
+
+loaded() { grep -q "^$1 " /proc/modules; }
+
+rebind() {
+	[ -d $X/xpad_leds ] || return 0
+	echo "$1" > $X/xpad/unbind 2>/dev/null || return 0
+	echo "$1" > $X/xpad_leds/bind 2>/dev/null || echo "$1" > $X/xpad/bind
+}
+
+case "$1" in
+start)
+	loaded xpad_leds || insmod $M/xpad_leds.ko || exit 1
+	# Switch Pro-mode pads go through SDL's own Switch driver on hidraw;
+	# hid-nintendo would fight it for the pad, so it is only loaded by hand
+	# (insmod $M/hid-nintendo.ko, with SDL_JOYSTICK_HIDAPI_SWITCH=0 for SDL).
+	for i in $X/xpad/*:*; do
+		[ -e "$i" ] && rebind "${i##*/}"
+	done
+	;;
+rebind)
+	[ -n "$2" ] && rebind "$2"
+	;;
+stop)
+	for i in $X/xpad_leds/*:*; do
+		[ -e "$i" ] || continue
+		echo "${i##*/}" > $X/xpad_leds/unbind && echo "${i##*/}" > $X/xpad/bind
+	done
+	loaded xpad_leds && rmmod xpad_leds
+	loaded hid_nintendo && rmmod hid_nintendo
+	;;
+*)
+	echo "usage: $0 start|stop|rebind IFACE" >&2
+	exit 1
+	;;
+esac
+exit 0
