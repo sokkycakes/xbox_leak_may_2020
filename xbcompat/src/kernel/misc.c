@@ -89,6 +89,42 @@ void identity_init(const char *hdd)
 }
 
 const UCHAR *identity_mac(void) { return id_mac; }
+void identity_set_mac(const UCHAR mac[6]) { memcpy(id_mac, mac, 6); }
+
+/* The title's LAN key, made as the console's loader makes it: the first 16
+   bytes of HMAC-SHA1(CERT key, the certificate's LAN key).  XNet derives
+   System Link's encryption from it, so it has to match a real console's for
+   the two to see each other.  The CERT key is the same in every retail
+   console's boot ROM and isn't part of xbcompat: it comes from keys.bin in
+   the hard disk directory (or $XBCOMPAT_KEYS), 32 bytes, the EEPROM key and
+   then the CERT key, in the order the boot loader hands them to the kernel
+   (XboxCryptKeys).  Without it the LAN key stays zero, which only other
+   xbcompat consoles share.  The signature keys stay zero either way: saves
+   already made are signed with those. */
+#define XBE_CERT_LAN_KEY 0xB0   /* offset of LANKey in the certificate */
+
+void title_keys_init(const char *hdd, const XBE_CERTIFICATE *cert)
+{
+    char path[4096];
+    const char *env = getenv("XBCOMPAT_KEYS");
+    if (env && *env) snprintf(path, sizeof path, "%s", env);
+    else snprintf(path, sizeof path, "%s/keys.bin", hdd);
+    UCHAR keys[32];
+    FILE *f = fopen(path, "rb");
+    if (!f) return;
+    size_t got = fread(keys, 1, sizeof keys, f);
+    fclose(f);
+    if (got != sizeof keys) {
+        xlog("keys: %s isn't 32 bytes; the LAN key stays zero", path);
+        return;
+    }
+    if (cert->SizeOfCertificate < XBE_CERT_LAN_KEY + 16) return;
+    extern void NTAPI XcHMAC(const UCHAR *, ULONG, const UCHAR *, ULONG, const UCHAR *, ULONG, UCHAR *);
+    UCHAR digest[20];
+    XcHMAC(keys + 16, 16, (const UCHAR *)cert + XBE_CERT_LAN_KEY, 16, NULL, 0, digest);
+    memcpy(XboxLANKey, digest, 16);
+    xlog("keys: the LAN key from %s's CERT key", path);
+}
 
 void misc_init(void)
 {

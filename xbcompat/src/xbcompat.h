@@ -127,6 +127,8 @@ void probe_init(void);
 bool probe_trap(void *ucontext);
 void identity_init(const char *hdd);
 const UCHAR *identity_mac(void);
+void identity_set_mac(const UCHAR mac[6]);
+void title_keys_init(const char *hdd, const XBE_CERTIFICATE *cert);
 /* The emulated Ethernet controller (nic.c). */
 extern bool g_nic_enabled;
 void nic_interrupt_init(PVOID Interrupt, PVOID ServiceRoutine, PVOID ServiceContext, ULONG Vector);

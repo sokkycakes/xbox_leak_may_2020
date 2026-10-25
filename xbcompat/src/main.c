@@ -196,9 +196,9 @@ static void usage(void)
             "  --dvd-drive DEV  an optical drive whose disc is the tray while the drive is\n"
             "               plugged in (discs can go in and out while titles run)\n"
             "  --net nat|tunnel:HOST:PORT[:LOCALPORT]|none\n"
-            "               emulate the Ethernet controller: NAT to the host's network, or\n"
-            "               frames in UDP to another xbcompat (System Link); default none\n"
-            "               (or XBCOMPAT_NET)\n"
+            "               emulate the Ethernet controller: NAT to the host's network\n"
+            "               with System Link straight onto its LAN (XBCOMPAT_SYSLINK=IF|off),\n"
+            "               or frames in UDP to another xbcompat; default none (or XBCOMPAT_NET)\n"
             "  --card DIR   the game card (Kazeta cart media); default: the first card\n"
             "               with a .kzi or .kzp under /media or /run/media\n"
             "  --d-path P, --xbe-path P, --launch-data FILE\n"
@@ -269,6 +269,7 @@ int main(int argc, char **argv)
     xbe_load(xbe, &img);
     fs_init(xbe, hdd, g_dvd_root, g_dvd_drive);
     identity_init(hdd);
+    title_keys_init(hdd, (const XBE_CERTIFICATE *)img.header->Certificate);
     nic_init(net, identity_mac());
     launch_init(argc, argv, d_path, launch_data, xbe_rel);
     kernel_resolve_imports(&img);

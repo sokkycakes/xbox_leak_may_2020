@@ -6,8 +6,9 @@
 #define NET_MAX_FRAME 1536
 
 /* Backend spec: "nat" (the default when networking is on), or
-   "tunnel:HOST:PORT[:LOCALPORT]" (raw frames in UDP to another xbcompat). */
-bool net_init(const char *spec, const uint8_t mac[6]);
+   "tunnel:HOST:PORT[:LOCALPORT]" (raw frames in UDP to another xbcompat).
+   mac may change: System Link on the LAN uses the host interface's. */
+bool net_init(const char *spec, uint8_t mac[6]);
 /* A frame the title transmitted (Ethernet header included, no FCS). */
 void net_send(const uint8_t *frame, unsigned len);
 

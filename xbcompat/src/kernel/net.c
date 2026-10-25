@@ -12,6 +12,16 @@
  * console's own port number when it can (3074 for Xbox Live).  Xbox Live runs
  * entirely over UDP; TCP connections are refused with a reset.
  *
+ * System Link frames skip the NAT.  XNet sends them from 0.0.0.1, UDP port
+ * 3074 to 3074: broadcasts to 255.255.255.255, and unicasts to the other
+ * console's Ethernet address with 0.0.0.1 as the destination too, because a
+ * console on the LAN is found by its Ethernet address alone.  So they go raw
+ * onto the host's LAN through a packet socket (root or CAP_NET_RAW), on the
+ * default route's interface or $XBCOMPAT_SYSLINK ("off" for none), and other
+ * consoles' come back the same way.  On Ethernet the console keeps its own
+ * address, which the interface is told to accept.  Wi-Fi carries frames only
+ * from the station's own address, so there the console takes the interface's.
+ *
  * "tunnel:HOST:PORT[:LOCALPORT]" sends every frame, raw, in a UDP datagram to
  * another xbcompat (or anything that speaks the same), which makes the two
  * one Ethernet segment: System Link across the internet.
@@ -20,6 +30,11 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/filter.h>
+#include <linux/if_ether.h>
+#include <linux/if_packet.h>
+#include <net/if.h>
+#include <net/if_arp.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <poll.h>
@@ -27,6 +42,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -359,6 +375,120 @@ static void nat_arp(const uint8_t *a, unsigned len)
     deliver(f, sizeof f);
 }
 
+/* ---- System Link ------------------------------------------------------- */
+
+static int syslink_fd = -1;
+
+/* IPv4 from XNet's secure address range, 0.x.x.x (but not 0.0.0.0, which
+   DHCP uses): System Link. */
+static bool is_syslink(const uint8_t *f, unsigned len)
+{
+    return len >= 14 + 20 + 8 && rd16(f + 12) == 0x0800 && f[14 + 9] == 17 && f[14 + 12] == 0 && rd32(f + 14 + 12);
+}
+
+static bool default_route_if(char *name, size_t n)
+{
+    FILE *f = fopen("/proc/net/route", "r");
+    if (!f) return false;
+    char line[256], ifn[IF_NAMESIZE + 1];
+    unsigned dest, gw, flags;
+    bool found = false;
+    while (!found && fgets(line, sizeof line, f))
+        if (sscanf(line, "%16s %x %x %x", ifn, &dest, &gw, &flags) == 4 && dest == 0 && (flags & 1)) {
+            snprintf(name, n, "%s", ifn);
+            found = true;
+        }
+    fclose(f);
+    return found;
+}
+
+/* Opens the LAN interface for System Link; on Wi-Fi mac becomes its address. */
+static void syslink_init(uint8_t mac[6])
+{
+    const char *want = getenv("XBCOMPAT_SYSLINK");
+    char ifname[IF_NAMESIZE + 1];
+    if (want && !strcmp(want, "off")) return;
+    if (want && *want) snprintf(ifname, sizeof ifname, "%s", want);
+    else if (!default_route_if(ifname, sizeof ifname)) {
+        xlog("net: System Link off: no default route to find the LAN by (XBCOMPAT_SYSLINK=IFNAME names it)");
+        return;
+    }
+    int fd = socket(AF_PACKET, SOCK_RAW | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    if (fd < 0) {
+        xlog("net: System Link off: no packet socket (%s; it needs root or CAP_NET_RAW)", strerror(errno));
+        return;
+    }
+    struct ifreq ifr = { 0 };
+    snprintf(ifr.ifr_name, sizeof ifr.ifr_name, "%s", ifname);
+    if (ioctl(fd, SIOCGIFINDEX, &ifr) < 0) {
+        xlog("net: System Link off: no interface %s", ifname);
+        close(fd);
+        return;
+    }
+    int index = ifr.ifr_ifindex;
+    if (ioctl(fd, SIOCGIFHWADDR, &ifr) < 0 || ifr.ifr_hwaddr.sa_family != ARPHRD_ETHER) {
+        xlog("net: System Link off: %s isn't Ethernet or Wi-Fi", ifname);
+        close(fd);
+        return;
+    }
+    /* Only other consoles' System Link: IPv4 UDP from 0.x.x.x. */
+    struct sock_filter code[] = {
+        BPF_STMT(BPF_LD | BPF_H | BPF_ABS, 12), BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0x0800, 0, 5),
+        BPF_STMT(BPF_LD | BPF_B | BPF_ABS, 23), BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 17, 0, 3),
+        BPF_STMT(BPF_LD | BPF_B | BPF_ABS, 26), BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, 0xFFFF),
+        BPF_STMT(BPF_RET | BPF_K, 0),
+    };
+    struct sock_fprog prog = { .len = sizeof code / sizeof code[0], .filter = code };
+    struct sockaddr_ll a = { .sll_family = AF_PACKET, .sll_protocol = htons(ETH_P_IP), .sll_ifindex = index };
+    if (setsockopt(fd, SOL_SOCKET, SO_ATTACH_FILTER, &prog, sizeof prog) < 0 ||
+        bind(fd, (struct sockaddr *)&a, sizeof a) < 0) {
+        xlog("net: System Link off: %s: %s", ifname, strerror(errno));
+        close(fd);
+        return;
+    }
+    char sys[64 + IF_NAMESIZE];
+    snprintf(sys, sizeof sys, "/sys/class/net/%s/phy80211", ifname);
+    bool wifi = access(sys, F_OK) == 0;
+    snprintf(sys, sizeof sys, "/sys/class/net/%s/wireless", ifname);
+    wifi = wifi || access(sys, F_OK) == 0;
+    if (wifi) {
+        memcpy(mac, ifr.ifr_hwaddr.sa_data, 6);
+    } else {
+        struct packet_mreq mr = { .mr_ifindex = index, .mr_type = PACKET_MR_UNICAST, .mr_alen = 6 };
+        memcpy(mr.mr_address, mac, 6);
+        if (setsockopt(fd, SOL_PACKET, PACKET_ADD_MEMBERSHIP, &mr, sizeof mr) < 0) {
+            mr.mr_type = PACKET_MR_PROMISC;
+            if (setsockopt(fd, SOL_PACKET, PACKET_ADD_MEMBERSHIP, &mr, sizeof mr) < 0)
+                xlog("net: System Link: %s won't take frames for the console's address: %s", ifname, strerror(errno));
+        }
+    }
+    memcpy(guest_mac, mac, 6);
+    syslink_fd = fd;
+    xlog("net: System Link on %s (%s); the console's Ethernet address is %02x:%02x:%02x:%02x:%02x:%02x", ifname,
+         wifi ? "Wi-Fi: the interface's own" : "Ethernet", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+}
+
+static void syslink_send(const uint8_t *frame, unsigned len)
+{
+    if (send(syslink_fd, frame, len, 0) < 0) TRACE("net: System Link send: %s", strerror(errno));
+}
+
+/* A frame from the LAN: one for this console, or a broadcast. */
+static void syslink_receive(void)
+{
+    static uint8_t buf[2048];
+    for (;;) {
+        struct sockaddr_ll from;
+        socklen_t fl = sizeof from;
+        ssize_t got = recvfrom(syslink_fd, buf, sizeof buf, MSG_DONTWAIT, (struct sockaddr *)&from, &fl);
+        if (got < 0) return;
+        if (from.sll_pkttype == PACKET_OUTGOING || !is_syslink(buf, (unsigned)got)) continue;
+        if (!(buf[0] & 1) && memcmp(buf, guest_mac, 6)) continue;
+        deliver(buf, (unsigned)got);
+    }
+}
+
 /* ---- tunnel ------------------------------------------------------------ */
 
 static int tunnel_fd = -1;
@@ -371,6 +501,10 @@ void net_send(const uint8_t *frame, unsigned len)
         return;
     }
     if (len < 14) return;
+    if (syslink_fd >= 0 && is_syslink(frame, len)) {
+        syslink_send(frame, len);
+        return;
+    }
     memcpy(guest_mac, frame + 6, 6);
     switch (rd16(frame + 12)) {
     case 0x0806: nat_arp(frame + 14, len - 14); break;
@@ -392,12 +526,17 @@ static void *net_thread(void *arg)
         pfd[n].fd = wake_pipe[0]; pfd[n].events = POLLIN; ports[n++] = 0;
         pthread_mutex_lock(&net_lock);
         if (backend == BACKEND_TUNNEL) { pfd[n].fd = tunnel_fd; pfd[n].events = POLLIN; ports[n++] = 0; }
+        if (syslink_fd >= 0) { pfd[n].fd = syslink_fd; pfd[n].events = POLLIN; ports[n++] = 0; }
         for (int i = 0; i < nflows; i++) { pfd[n].fd = flows[i].fd; pfd[n].events = POLLIN; ports[n++] = flows[i].guest_port; }
         pthread_mutex_unlock(&net_lock);
         if (poll(pfd, n, 1000) <= 0) continue;
         if (pfd[0].revents) { char c[64]; (void)!read(wake_pipe[0], c, sizeof c); }
         for (int i = 1; i < n; i++) {
             if (!(pfd[i].revents & POLLIN)) continue;
+            if (pfd[i].fd == syslink_fd) {
+                syslink_receive();
+                continue;
+            }
             for (;;) {
                 struct sockaddr_in from;
                 socklen_t fl = sizeof from;
@@ -409,6 +548,9 @@ static void *net_thread(void *arg)
                 }
                 uint32_t src = ntohl(from.sin_addr.s_addr);
                 uint16_t sport = ntohs(from.sin_port);
+                /* A System Link broadcast the host's own stack took in as
+                   well: it reaches the console raw, above. */
+                if ((src >> 24) == 0) continue;
                 if (from.sin_addr.s_addr == dns_server.sin_addr.s_addr && from.sin_port == dns_server.sin_port)
                     src = NET_DNS, sport = 53;
                 else if (src == INADDR_LOOPBACK)
@@ -445,7 +587,7 @@ static void find_dns(void)
     fclose(f);
 }
 
-bool net_init(const char *spec, const uint8_t mac[6])
+bool net_init(const char *spec, uint8_t mac[6])
 {
     memcpy(guest_mac, mac, 6);
     frame_log = getenv("XBCOMPAT_NET_LOG") != NULL;
@@ -454,6 +596,7 @@ bool net_init(const char *spec, const uint8_t mac[6])
         backend = BACKEND_NAT;
         find_dns();
         xlog("net: NAT on 10.0.2.0/24, DNS forwarded to %s:%u", inet_ntoa(dns_server.sin_addr), ntohs(dns_server.sin_port));
+        syslink_init(mac);
     } else if (!strncmp(spec, "tunnel:", 7)) {
         char host[256];
         unsigned port = 0, lport = 0;

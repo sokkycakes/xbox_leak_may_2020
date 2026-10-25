@@ -400,6 +400,7 @@ void nic_init(const char *spec, const uint8_t hwaddr[6])
 #else
     if (!spec || !strcmp(spec, "none")) return;
     if (!net_init(spec, mac)) return;
+    if (memcmp(mac, hwaddr, 6)) identity_set_mac(mac);
     void *p = mmap((void *)NIC_BASE, 0x1000, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
     if (p != (void *)NIC_BASE) { xlog("nic: cannot map the register page: %s", strerror(errno)); return; }
     g_nic_enabled = true;
