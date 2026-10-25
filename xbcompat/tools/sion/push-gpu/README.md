@@ -24,3 +24,8 @@ can't exist ("glo_context_create: Failed to create window"), so its contexts
 are now made against the display window and run surfaceless.
 XBCOMPAT_GPU_SURFACELESS=1 forces that path elsewhere (tested in the cloud
 with SDL_VIDEO_X11_FORCE_EGL=1: tut02 and Doom 3 render).
+
+2026-10-25 fix 3: SDL's KMSDRM console keyboard installs its own SIGSEGV
+handler at SDL_Init, which broke the NV2A MMIO trap (the game "crashed" on
+its first GPU register access). gpu_display_init now re-installs xbcompat's
+fault handlers after creating the window, as the normal build does.
