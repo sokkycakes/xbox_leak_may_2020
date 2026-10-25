@@ -1,0 +1,239 @@
+diff --git a/src/3rdparty/libraries/tar/encode.c b/src/3rdparty/libraries/tar/encode.c
+index 99ef6be9..9aae9e2e 100644
+--- a/src/3rdparty/libraries/tar/encode.c
++++ b/src/3rdparty/libraries/tar/encode.c
+@@ -12,6 +12,7 @@
+ 
+ #include <libtar.h>
+ 
++#include <sys/sysmacros.h>
+ #include <stdio.h>
+ #include <pwd.h>
+ #include <grp.h>
+diff --git a/src/3rdparty/libraries/tar/extract.c b/src/3rdparty/libraries/tar/extract.c
+index 6e6cfafb..a282378c 100644
+--- a/src/3rdparty/libraries/tar/extract.c
++++ b/src/3rdparty/libraries/tar/extract.c
+@@ -12,6 +12,7 @@
+ 
+ #include <libtar.h>
+ 
++#include <sys/sysmacros.h>
+ #include <stdio.h>
+ #include <sys/param.h>
+ #include <sys/types.h>
+diff --git a/src/build/bin/configure b/src/build/bin/configure
+index 9743ba1f..679236ef 100755
+--- a/src/build/bin/configure
++++ b/src/build/bin/configure
+@@ -4809,6 +4809,12 @@ END
+ 
+ sub bootstrap_qt
+ {
++    # The host Qt must not see the target sysroot through pkg-config.
++    local $ENV{PKG_CONFIG_PATH} = "";
++    local $ENV{PKG_CONFIG_LIBDIR};
++    delete $ENV{PKG_CONFIG_LIBDIR};
++    local $ENV{PKG_CONFIG_SYSROOT_DIR};
++    delete $ENV{PKG_CONFIG_SYSROOT_DIR};
+     print "\nBuilding Qt...\n";
+ 
+     my $qt_platform;
+@@ -4977,7 +4983,7 @@ sub setup_dqt_config
+     return if ( opt("dqt_config") );
+ 
+     my $args = "-platform $qt_platform ".
+-               "-no-stl -no-exceptions -no-webkit -no-xmlpatterns -no-phonon -fast ".
++               "-no-stl -no-exceptions -no-webkit -no-xmlpatterns -no-phonon -no-glib -fast ".
+                "-confirm-license -opensource";
+     if ( $qtVersionStr[1] >= 5 ) {
+         $args .= " -no-gtkstyle";
+diff --git a/src/libraries/qtopia/qdocumentproperties.cpp b/src/libraries/qtopia/qdocumentproperties.cpp
+index a69f2f31..2e7f438f 100644
+--- a/src/libraries/qtopia/qdocumentproperties.cpp
++++ b/src/libraries/qtopia/qdocumentproperties.cpp
+@@ -274,7 +274,7 @@ void QDocumentPropertiesWidget::applyChanges()
+         cfg.beginGroup("AppLoading");
+         QStringList apps = cfg.value("PreloadApps").toStringList();
+         QString exe = lnk.executableName();
+-        if ( (apps.contains(exe) > 0) != d->fastLoad->isChecked() ) {
++        if ( (bool(apps.contains(exe))) != d->fastLoad->isChecked() ) {
+             if ( d->fastLoad->isChecked() ) {
+                 apps.append(exe);
+                 QtopiaIpcEnvelope e("QPE/Application/"+exe,
+diff --git a/src/libraries/qtopiabase/qvaluespace.h b/src/libraries/qtopiabase/qvaluespace.h
+index 086c0f17..45bb7fa3 100644
+--- a/src/libraries/qtopiabase/qvaluespace.h
++++ b/src/libraries/qtopiabase/qvaluespace.h
+@@ -32,7 +32,7 @@ class QTOPIAIL_EXPORT IValueSpaceLayer : public QObject
+ {
+ Q_OBJECT
+ public:
+-#ifdef QT_ARCH_X86_64
++#if QT_POINTER_SIZE == 8
+     typedef unsigned long HANDLE;
+     static const HANDLE InvalidHandle = 0xFFFFFFFFFFFFFFFF;
+ #else
+diff --git a/src/libraries/qtopiamail/qmailstore.h b/src/libraries/qtopiamail/qmailstore.h
+index 5497367e..99dece45 100644
+--- a/src/libraries/qtopiamail/qmailstore.h
++++ b/src/libraries/qtopiamail/qmailstore.h
+@@ -162,8 +162,11 @@ signals:
+     void messageRemovalRecordsAdded(const QMailAccountIdList& ids);
+     void messageRemovalRecordsRemoved(const QMailAccountIdList& ids);
+ 
+-private:
++public:
++    // Public so the free helper templates in qmailstore.cpp can name it (GCC 9+).
+     enum AttemptResult { Success = 0, Failure, DatabaseFailure };
++
++private:
+     
+     QMailStore();
+ 
+diff --git a/src/libraries/qtopiamedia/qmedialist.cpp b/src/libraries/qtopiamedia/qmedialist.cpp
+index beb520da..c33ecdda 100644
+--- a/src/libraries/qtopiamedia/qmedialist.cpp
++++ b/src/libraries/qtopiamedia/qmedialist.cpp
+@@ -532,7 +532,7 @@ void QMediaList::refreshData()
+         if(d->filterState & QMediaList::MimeType) {
+             bool check = false;
+             foreach( const QString &mimeType, d->mimeTypes ) {
+-                if(d->mediaPlaylist.content(d->mediaPlaylist.index(i,0)).type().contains(mimeType) > 0) {
++                if(d->mediaPlaylist.content(d->mediaPlaylist.index(i,0)).type().contains(mimeType)) {
+                     check = true;
+                 }
+             }
+@@ -574,7 +574,7 @@ void QMediaList::refreshData()
+                         d->mediaPlaylist.data(d->mediaPlaylist.index(i,0),d->displayRole).toString().length()) {
+                     if((d->count != 0) && !check) {
+                         if(d->mediaPlaylist.data(d->map[k],d->displayRole).toString().contains(
+-                                    d->mediaPlaylist.data(d->mediaPlaylist.index(i,0),d->displayRole).toString()) > 0) {
++                                    d->mediaPlaylist.data(d->mediaPlaylist.index(i,0),d->displayRole).toString())) {
+                             check = true;
+                         }
+                     } else
+diff --git a/src/libraries/qtopiawhereabouts/qbuild.pro b/src/libraries/qtopiawhereabouts/qbuild.pro
+index 71920b65..644bcf97 100644
+--- a/src/libraries/qtopiawhereabouts/qbuild.pro
++++ b/src/libraries/qtopiawhereabouts/qbuild.pro
+@@ -4,7 +4,6 @@ MODULE_NAME=qtopiawhereabouts
+ VERSION=4.0.0
+ 
+ CONFIG+=qtopia hide_symbols singleexec
+-LIBS += -lgps
+ 
+ STRING_LANGUAGE=en_US
+ AVAILABLE_LANGUAGES=$$QTOPIA_AVAILABLE_LANGUAGES
+@@ -26,7 +25,6 @@ HEADERS=\
+     qwhereaboutsfactory.h\
+     qwhereaboutsplugin.h\
+     qnmeawhereabouts.h\
+-    qgpsdwhereabouts.h\
+ 
+ PRIVATE_HEADERS=\
+     qnmeawhereabouts_p.h
+@@ -37,7 +35,6 @@ SOURCES=\
+     qwhereaboutsupdate.cpp\
+     qwhereaboutsfactory.cpp\
+     qwhereaboutsplugin.cpp\
+-    gpsdwhereabouts.cpp\
+     qnmeawhereabouts.cpp
+ 
+ settings [
+@@ -46,3 +43,11 @@ settings [
+     path=/etc/default/Trolltech
+ ]
+ 
++
++# gpsd (old libgps API) only where a device enables it
++enable_gpsd {
++    HEADERS+=qgpsdwhereabouts.h
++    SOURCES+=gpsdwhereabouts.cpp
++    DEFINES+=QTOPIA_HAVE_GPSD
++    LIBS+=-lgps
++}
+diff --git a/src/libraries/qtopiawhereabouts/qwhereaboutsfactory.cpp b/src/libraries/qtopiawhereabouts/qwhereaboutsfactory.cpp
+index f16f702c..4c7219fe 100644
+--- a/src/libraries/qtopiawhereabouts/qwhereaboutsfactory.cpp
++++ b/src/libraries/qtopiawhereabouts/qwhereaboutsfactory.cpp
+@@ -19,7 +19,9 @@
+ 
+ #include "qwhereaboutsfactory.h"
+ #include "qwhereaboutsplugin.h"
++#ifdef QTOPIA_HAVE_GPSD
+ #include "qgpsdwhereabouts.h"
++#endif
+ 
+ #include <QPluginManager>
+ #include <QSettings>
+@@ -82,6 +84,7 @@ QWhereabouts *QWhereaboutsFactory::create(const QString &key, const QString &sou
+         return QWhereaboutsFactory::create(plugin);
+     }
+ 
++#ifdef QTOPIA_HAVE_GPSD
+     if (key.toLower() == "gpsd") {
+         if (source.trimmed().isEmpty())
+             return new QGpsdWhereabouts;
+@@ -90,6 +93,7 @@ QWhereabouts *QWhereaboutsFactory::create(const QString &key, const QString &sou
+         quint16 port = args.value(1).toUInt();
+         return new QGpsdWhereabouts(0, QHostAddress(args.value(0)), port);
+     }
++#endif
+ 
+     QWhereaboutsPlugin *interface =
+             qobject_cast<QWhereaboutsPlugin *>(pluginManager()->instance(key.toLower()));
+@@ -105,6 +109,8 @@ QWhereabouts *QWhereaboutsFactory::create(const QString &key, const QString &sou
+ QStringList QWhereaboutsFactory::keys()
+ {
+     QStringList keys = pluginManager()->list();
++#ifdef QTOPIA_HAVE_GPSD
+     keys << "gpsd";
++#endif
+     return keys;
+ }
+diff --git a/src/server/core_server/timeupdateservice.cpp b/src/server/core_server/timeupdateservice.cpp
+index d7432e47..74f389da 100644
+--- a/src/server/core_server/timeupdateservice.cpp
++++ b/src/server/core_server/timeupdateservice.cpp
+@@ -277,7 +277,7 @@ void TimeUpdateService::updateFromExternalSources(bool autotz, bool autotm, bool
+     connect(updater,SIGNAL(changeSystemTime(uint,QString)),
+                this,SLOT(changeSystemTime(uint,QString)));
+ 
+-    if ( ask_time && abs(externalTime-externalTimeTimeStamp) < maxtimejitter )
++    if ( ask_time && qAbs(int(externalTime-externalTimeTimeStamp)) < maxtimejitter )
+         ask_time = false;
+ 
+     if ( ask_tz && tzchanged || ask_time && tchanged )
+diff --git a/src/server/ui/launcherviews/appview/applicationlauncherview.cpp b/src/server/ui/launcherviews/appview/applicationlauncherview.cpp
+index 00376411..03ae62c1 100644
+--- a/src/server/ui/launcherviews/appview/applicationlauncherview.cpp
++++ b/src/server/ui/launcherviews/appview/applicationlauncherview.cpp
+@@ -113,7 +113,7 @@ void ApplicationLauncherView::properties()
+         QStringList apps = cfg.value("PreloadApps").toStringList();
+         QString exe = doc.executableName();
+ 
+-        if ( (apps.contains(exe) > 0) != prop->isChecked() ) {
++        if ( bool(apps.contains(exe)) != prop->isChecked() ) {
+             if ( prop->isChecked() ) {
+                 apps.append(exe);
+                 QtopiaIpcEnvelope e("QPE/Application/"+exe,
+diff --git a/src/tools/messageserver/messageserver.cpp b/src/tools/messageserver/messageserver.cpp
+index 5163c71e..58e4acef 100644
+--- a/src/tools/messageserver/messageserver.cpp
++++ b/src/tools/messageserver/messageserver.cpp
+@@ -242,10 +242,14 @@ MessageServer::MessageServer(QObject *parent)
+         QtopiaIpcAdaptor::connect(this, SIGNAL(messageCountUpdated()),
+                                   &messageCountUpdate, MESSAGE(changeValue()));
+ 
++#ifndef QTOPIA_NO_SMS
+         if (handler->isSimReady()) {
+             simReady(handler->isSimReady());
+             handler->synchroniseClients();
+         }
++#else
++        handler->synchroniseClients();
++#endif
+         initIntervalChecking();
+     }
+ }
