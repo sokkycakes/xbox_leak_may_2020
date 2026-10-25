@@ -29,3 +29,9 @@ with SDL_VIDEO_X11_FORCE_EGL=1: tut02 and Doom 3 render).
 handler at SDL_Init, which broke the NV2A MMIO trap (the game "crashed" on
 its first GPU register access). gpu_display_init now re-installs xbcompat's
 fault handlers after creating the window, as the normal build does.
+
+2026-10-25 fix 4: on the Sion the display window's surface came back
+EGL_BAD_MATCH (every swap failed, black screen): SDL re-picks the EGL config
+when it rebuilds the KMSDRM surface at the first swap, and by then
+gloffscreen had changed the GL attributes (8888, depth 24, stencil 8). The
+display window now asks for the same attributes up front.

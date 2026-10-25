@@ -27,10 +27,10 @@ index 49370424..44ccbabf 100644
  bool gpu_display_frame(uint8_t *pixels, int *pw, int *ph);
  bool gpu_poll_events(void);
 diff --git a/xbcompat/src/gpu/nv2a_host.c b/xbcompat/src/gpu/nv2a_host.c
-index 90cd2f0a..2c4c5004 100644
+index 90cd2f0a..15513530 100644
 --- a/xbcompat/src/gpu/nv2a_host.c
 +++ b/xbcompat/src/gpu/nv2a_host.c
-@@ -438,6 +438,8 @@ static GLuint compile(GLenum type, const char *src)
+@@ -438,16 +438,29 @@ static GLuint compile(GLenum type, const char *src)
  
  void gpu_display_init(int width, int height, bool fullscreen)
  {
@@ -39,7 +39,19 @@ index 90cd2f0a..2c4c5004 100644
      if (SDL_Init(SDL_INIT_VIDEO) != 0) gpu_fatal("SDL_Init: %s", SDL_GetError());
      SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
      SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
-@@ -448,6 +450,8 @@ void gpu_display_init(int width, int height, bool fullscreen)
+     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
++    /* The same config gloffscreen asks for: on KMSDRM SDL picks the EGL config
++       again when it rebuilds the window surface at the first swap, and a
++       config unlike window_gl's makes that surface EGL_BAD_MATCH. */
++    SDL_GL_SetAttribute(SDL_GL_RED_SIZE, 8);
++    SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE, 8);
++    SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE, 8);
++    SDL_GL_SetAttribute(SDL_GL_ALPHA_SIZE, 8);
++    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
++    SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
+     Uint32 flags = SDL_WINDOW_OPENGL;
+     const char *driver = SDL_GetCurrentVideoDriver();
      if (fullscreen || (driver && !strcasecmp(driver, "kmsdrm"))) flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
      window = SDL_CreateWindow("xbcompat-gpu", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, width, height, flags);
      if (!window) gpu_fatal("SDL_CreateWindow: %s", SDL_GetError());
@@ -48,7 +60,7 @@ index 90cd2f0a..2c4c5004 100644
      window_gl = SDL_GL_CreateContext(window);
      if (!window_gl) gpu_fatal("SDL_GL_CreateContext (OpenGL 4.0 core): %s", SDL_GetError());
      SDL_GL_MakeCurrent(window, window_gl);
-@@ -479,7 +483,10 @@ void gpu_display_init(int width, int height, bool fullscreen)
+@@ -479,7 +492,10 @@ void gpu_display_init(int width, int height, bool fullscreen)
      glGenVertexArrays(1, &quad_vao);
      glClearColor(0, 0, 0, 1);
      glClear(GL_COLOR_BUFFER_BIT);
