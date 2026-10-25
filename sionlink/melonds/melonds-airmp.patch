@@ -1,0 +1,149 @@
+diff --git a/src/net/AirMP.cpp b/src/net/AirMP.cpp
+new file mode 100644
+index 0000000..720e4bd
+--- /dev/null
++++ b/src/net/AirMP.cpp
+@@ -0,0 +1,55 @@
++#include "AirMP.h"
++
++#include <string>
++#include <string.h>
++#include <arpa/inet.h>
++#include <fcntl.h>
++#include <netinet/in.h>
++#include <sys/socket.h>
++#include <unistd.h>
++
++namespace melonDS
++{
++
++AirMP::AirMP(const char* peer) noexcept
++{
++    std::string s(peer);
++    size_t colon = s.rfind(':');
++    std::string host = colon == std::string::npos ? "127.0.0.1" : s.substr(0, colon);
++    int port = atoi(colon == std::string::npos ? s.c_str() : s.c_str() + colon + 1);
++
++    sockaddr_in sin = {};
++    sin.sin_family = AF_INET;
++    sin.sin_port = htons(port);
++    inet_pton(AF_INET, host.c_str(), &sin.sin_addr);
++    memcpy(Peer, &sin, sizeof(sin));
++    PeerLen = sizeof(sin);
++
++    Sock = socket(AF_INET, SOCK_DGRAM, 0);
++    fcntl(Sock, F_SETFL, O_NONBLOCK);
++    // Say hello so the peer learns our port before we transmit anything.
++    sendto(Sock, "", 0, 0, (sockaddr*)Peer, PeerLen);
++}
++
++AirMP::~AirMP() noexcept
++{
++    if (Sock >= 0) close(Sock);
++}
++
++int AirMP::Send(u8* data, int len)
++{
++    if (Sock < 0 || !data || len <= 0) return 0;
++    sendto(Sock, data, len, 0, (sockaddr*)Peer, PeerLen);
++    return len;
++}
++
++int AirMP::RecvPacket(int inst, u8* data, u64* timestamp)
++{
++    if (Sock < 0) return 0;
++    // Timestamp 0 keeps melonDS out of its instance-sync MP client mode.
++    *timestamp = 0;
++    int n = recv(Sock, data, 2048, 0);
++    return n > 0 ? n : 0;
++}
++
++}
+diff --git a/src/net/AirMP.h b/src/net/AirMP.h
+new file mode 100644
+index 0000000..49c58ea
+--- /dev/null
++++ b/src/net/AirMP.h
+@@ -0,0 +1,43 @@
++/*
++    Sion Link test bridge: carries the emulated DS radio's frames to and from
++    a UDP peer (a software access point such as sionlinkd --melon), so a
++    non-DS host can be tested against real DS code. Enabled with
++    MELONDS_AIR=host:port. Frames keep melonDS's 12-byte TX/RX header.
++*/
++
++#ifndef AIRMP_H
++#define AIRMP_H
++
++#include "MPInterface.h"
++
++namespace melonDS
++{
++
++class AirMP : public MPInterface
++{
++public:
++    AirMP(const char* peer) noexcept;
++    ~AirMP() noexcept override;
++
++    void Process() override {}
++    void Begin(int inst) override {}
++    void End(int inst) override {}
++
++    int SendPacket(int inst, u8* data, int len, u64 timestamp) override { return Send(data, len); }
++    int RecvPacket(int inst, u8* data, u64* timestamp) override;
++    int SendCmd(int inst, u8* data, int len, u64 timestamp) override { return Send(data, len); }
++    int SendReply(int inst, u8* data, int len, u64 timestamp, u16 aid) override { return data ? Send(data, len) : 0; }
++    int SendAck(int inst, u8* data, int len, u64 timestamp) override { return Send(data, len); }
++    int RecvHostPacket(int inst, u8* data, u64* timestamp) override { return RecvPacket(inst, data, timestamp); }
++    u16 RecvReplies(int inst, u8* data, u64 timestamp, u16 aidmask) override { return 0; }
++
++private:
++    int Send(u8* data, int len);
++    int Sock = -1;
++    unsigned char Peer[32] = {};
++    int PeerLen = 0;
++};
++
++}
++
++#endif
+diff --git a/src/net/CMakeLists.txt b/src/net/CMakeLists.txt
+index 657aa9f..066b029 100644
+--- a/src/net/CMakeLists.txt
++++ b/src/net/CMakeLists.txt
+@@ -7,6 +7,7 @@ add_library(net-utils STATIC
+     PacketDispatcher.cpp
+     LocalMP.cpp
+     LAN.cpp
++    AirMP.cpp
+     Netplay.cpp
+     MPInterface.cpp
+ )
+diff --git a/src/net/MPInterface.cpp b/src/net/MPInterface.cpp
+index 1d679fb..6e45b65 100644
+--- a/src/net/MPInterface.cpp
++++ b/src/net/MPInterface.cpp
+@@ -19,6 +19,8 @@
+ #include "MPInterface.h"
+ #include "LocalMP.h"
+ #include "LAN.h"
++#include "AirMP.h"
++#include <stdlib.h>
+ 
+ namespace melonDS
+ {
+@@ -47,6 +49,13 @@ MPInterfaceType MPInterface::CurrentType = MPInterface_Dummy;
+ 
+ void MPInterface::Set(MPInterfaceType type)
+ {
++    if (const char* air = getenv("MELONDS_AIR"))
++    {
++        Current = std::make_unique<AirMP>(air);
++        CurrentType = type;
++        return;
++    }
++
+     switch (type)
+     {
+     case MPInterface_Local:

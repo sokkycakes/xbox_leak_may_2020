@@ -1,0 +1,6 @@
+# The Link Test client's ARM7: libnds services plus the Sion Link DSWifi build
+SOURCEDIRS	:= ../../linktest/ds/arm7/source
+LIBS		:= -ldswifi7 -lnds7
+LIBDIRS		:= $(CURDIR)/../../ds/build/dswifi
+
+include $(BLOCKSDS)/sys/default_makefiles/rom_arm9arm7/Makefile.arm7

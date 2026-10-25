@@ -1,0 +1,74 @@
+--- a/rt2500usb.c
++++ b/rt2500usb.c
+@@ -30,6 +30,27 @@
+ MODULE_PARM_DESC(nohwcrypt, "Disable hardware encryption.");
+ 
+ /*
++ * Sion Link: writing a beacon (a 1-byte guardian URB and then the beacon)
++ * wedges the bulk-out endpoint of the Nintendo Wi-Fi USB Connector on the
++ * Sion's xHCI controller, and every later frame waits forever. With
++ * hwbeacon=0 the chip never beacons; sionlinkd sends the beacons instead.
++ */
++static bool modparam_hwbeacon;
++module_param_named(hwbeacon, modparam_hwbeacon, bool, 0444);
++MODULE_PARM_DESC(hwbeacon, "Let the chip send beacons (wedges TX on some hosts).");
++
++/*
++ * Sion Link: rt2500usb has no link tuner, so BBP R17 (receiver gain) stays at
++ * the EEPROM value. On the Nintendo Wi-Fi USB Connector that is 0x3a, which
++ * gives ~6000 false CCA alarms a second: the chip thinks the channel is busy
++ * and sends a few frames a second. 0x60 measured ~0 false alarms and full
++ * speed. vgc=0 keeps the EEPROM value.
++ */
++static int modparam_vgc = 0x60;
++module_param_named(vgc, modparam_vgc, int, 0444);
++MODULE_PARM_DESC(vgc, "BBP R17 receiver gain (0 = EEPROM value).");
++
++/*
+  * Register access.
+  * All access to the CSR registers will go through the methods
+  * rt2500usb_register_read and rt2500usb_register_write.
+@@ -453,7 +474,9 @@
+ 		rt2500usb_register_write(rt2x00dev, TXRX_CSR18, reg);
+ 
+ 		reg = rt2500usb_register_read(rt2x00dev, TXRX_CSR19);
+-		rt2x00_set_field16(&reg, TXRX_CSR19_TSF_SYNC, conf->sync);
++		/* Without chip beacons, AP sync mode holds the TX queues back */
++		rt2x00_set_field16(&reg, TXRX_CSR19_TSF_SYNC,
++				   modparam_hwbeacon ? conf->sync : 0);
+ 		rt2500usb_register_write(rt2x00dev, TXRX_CSR19, reg);
+ 	}
+ 
+@@ -706,6 +729,8 @@
+ 
+ 	eeprom = rt2x00_eeprom_read(rt2x00dev, EEPROM_BBPTUNE_VGC);
+ 	value = rt2x00_get_field16(eeprom, EEPROM_BBPTUNE_VGCUPPER);
++	if (modparam_vgc > 0 && modparam_vgc < 0x80)
++		value = modparam_vgc;
+ 	rt2500usb_bbp_write(rt2x00dev, 17, value);
+ 
+ 	qual->vgc_level = value;
+@@ -728,8 +753,8 @@
+ 	case QID_BEACON:
+ 		reg = rt2500usb_register_read(rt2x00dev, TXRX_CSR19);
+ 		rt2x00_set_field16(&reg, TXRX_CSR19_TSF_COUNT, 1);
+-		rt2x00_set_field16(&reg, TXRX_CSR19_TBCN, 1);
+-		rt2x00_set_field16(&reg, TXRX_CSR19_BEACON_GEN, 1);
++		rt2x00_set_field16(&reg, TXRX_CSR19_TBCN, modparam_hwbeacon);
++		rt2x00_set_field16(&reg, TXRX_CSR19_BEACON_GEN, modparam_hwbeacon);
+ 		rt2500usb_register_write(rt2x00dev, TXRX_CSR19, reg);
+ 		break;
+ 	default:
+@@ -1125,6 +1150,12 @@
+ 	int length;
+ 	u16 reg, reg0;
+ 
++	if (!modparam_hwbeacon) {
++		dev_kfree_skb(entry->skb);
++		entry->skb = NULL;
++		return;
++	}
++
+ 	/*
+ 	 * Disable beaconing while we are reloading the beacon data,
+ 	 * otherwise we might be sending out invalid data.

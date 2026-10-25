@@ -1,0 +1,44 @@
+// ARM7 side of the Link Test client: the stock libnds services plus the
+// Sion Link DSWifi build.
+
+#include <dswifi7.h>
+#include <nds.h>
+
+static volatile bool exit_loop = false;
+
+static void PowerButton(void)
+{
+    exit_loop = true;
+}
+
+static void VBlank(void)
+{
+    inputGetAndSend();
+    Wifi_Update();
+}
+
+int main(int argc, char *argv[])
+{
+    enableSound();
+    readUserSettings();
+    ledBlink(LED_ALWAYS_ON);
+    touchInit();
+
+    irqInit();
+    fifoInit();
+
+    installWifiFIFO();
+    installSoundFIFO();
+    installSystemFIFO();
+
+    setPowerButtonCB(PowerButton);
+    initClockIRQTimer(LIBNDS_DEFAULT_TIMER_RTC);
+
+    irqSet(IRQ_VBLANK, VBlank);
+    irqEnable(IRQ_VBLANK);
+
+    while (!exit_loop)
+        swiWaitForVBlank();
+
+    return 0;
+}
