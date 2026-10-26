@@ -8596,7 +8596,11 @@ static void NTAPI D3DDevice_InsertCallback(ULONG Type, PVOID fn, ULONG Context)
 
 static void NTAPI D3DDevice_SetVerticalBlankCallback(PVOID fn) { d3dv.vblank_callback = fn; }
 static void NTAPI D3DDevice_SetSwapCallback(PVOID fn) { d3dv.swap_callback = fn; }
-static void NTAPI D3DDevice_GetDisplayFieldStatus(ULONG *st) { st[0] = 3; st[1] = d3d.frame; }
+/* D3DFIELD_STATUS: the field and the vertical blank count.  The count runs
+   with the display, not with Swap: the XMV movie player in Chamber of
+   Secrets waits for it to pass a frame's time before it presents, and with
+   the Swap count it waited forever. */
+static void NTAPI D3DDevice_GetDisplayFieldStatus(ULONG *st) { st[0] = 3; st[1] = d3dv.vblank_count; }
 static void NTAPI D3DDevice_SetScreenSpaceOffset(float x, float y) { d3d.screen_offset[0] = x; d3d.screen_offset[1] = y; }
 static void NTAPI D3DDevice_SetBackBufferScale(float x, float y) { d3d.backbuffer_scale[0] = x; d3d.backbuffer_scale[1] = y; }
 static void NTAPI D3DDevice_GetBackBufferScale(float *x, float *y) { *x = d3d.backbuffer_scale[0]; *y = d3d.backbuffer_scale[1]; }
