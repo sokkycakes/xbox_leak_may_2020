@@ -374,6 +374,7 @@ static void run_callbacks(void);
 static void pusher_drain(void);
 static void pusher_init(ULONG *dev);
 static void sync_device_surfaces(void);
+static void device_visibility_reports(ULONG *dev);
 static bool device_layout_5849;   /* d3d.device is laid out like the 5849 CDevice */
 /* Where the CDevice keeps its render target (then the depth buffer, and
    three frame buffers at +0x10..+0x18); 0 when unknown. */
@@ -706,6 +707,7 @@ static void bind_miniport(ULONG *dev)
         device_layout_5849 = true;
         device_surfaces_off = 0x1a04;
         sync_device_surfaces();
+        device_visibility_reports(dev);
     } else if (build >= 5600 && build < 5849 && off == 0x1db4) {
         /* 5659 (Counter-Strike) has its miniport where 5849 does; its
            inlined code reads the render target at device+0x1a04 and the
@@ -715,6 +717,7 @@ static void bind_miniport(ULONG *dev)
         device_layout_5849 = true;
         device_surfaces_off = 0x1a04;
         sync_device_surfaces();
+        device_visibility_reports(dev);
     } else if (off && build >= 4831 && build < 5600 && off >= 0x400) {
         /* 4831 LTCG: miniport at +0x254c, and inlined GetRenderTarget and
            GetDepthStencilSurface read +0x21b4 and +0x21b8 (Superman, The
@@ -740,6 +743,26 @@ static void bind_miniport(ULONG *dev)
     ev->Header.SignalState = 1;
     ev->Header.WaitListHead.Flink = ev->Header.WaitListHead.Blink = &ev->Header.WaitListHead;
     xlog("D3D: D3D build %u, miniport callbacks at device+%#x", build, off);
+}
+
+/* The 5659/5849 CDevice's visibility reports: +0x7D4 holds 16 pointers to
+   tables of 256 16-byte entries {time, -, pixel count, state}, state -1
+   while the GPU has not written it.  Titles inline GetVisibilityTestResult
+   and read them (Beyond Good & Evil, Halo 2, Ninja Gaiden).  xbcompat's
+   tests are GL queries, so every entry reads as finished with the whole
+   screen visible: the conservative answer for what a title culls on it. */
+static void device_visibility_reports(ULONG *dev)
+{
+    if (dev[0x7D4 / 4]) return;
+    ULONG *t = pool_alloc(16 * 256 * 16);
+    if (!t) return;
+    for (unsigned i = 0; i < 16 * 256; i++) {
+        t[i * 4 + 0] = 0;
+        t[i * 4 + 1] = 0;
+        t[i * 4 + 2] = 640 * 480;
+        t[i * 4 + 3] = 0;
+    }
+    for (unsigned i = 0; i < 16; i++) dev[0x7D4 / 4 + i] = (ULONG)(t + i * 256 * 4);
 }
 
 /* Where the 5849 CDevice keeps its surfaces (GetRenderTarget2 and friends
@@ -2580,6 +2603,9 @@ static void NTAPI D3DDevice_SetTexture(ULONG Stage, D3DResource *t)
     if (d3d.recording) { ULONG a[2] = { Stage, (ULONG)t }; pb_record(OP_TEXTURE, a, sizeof(a)); }
     TRACE_ALL("D3D: SetTexture(%u, %p) data %#x", Stage, (void *)t, t ? (unsigned)t->Data : 0);
     if (Stage < 4) d3d.textures[Stage] = t;
+    /* 5659 and 5849 CDevice keep the stage textures at +0xF88; inlined
+       GetTexture reads them there (Beyond Good & Evil, GTA Vice City). */
+    if (Stage < 4 && device_layout_5849 && d3d.device) ((ULONG *)d3d.device)[0xF88 / 4 + Stage] = (ULONG)t;
 }
 
 static void NTAPI D3DDevice_SetTextureStageStateNotInline(ULONG Stage, ULONG Type, ULONG Value)

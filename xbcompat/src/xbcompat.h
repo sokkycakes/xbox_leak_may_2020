@@ -57,6 +57,7 @@ void arena_free(void *p);
 void *pool_alloc(size_t size);
 void pool_free(void *p);
 bool pool_owns(const void *p);
+bool guest_writable(const void *p);
 size_t pool_size(void *p);
 
 NTSTATUS NTAPI NtAllocateVirtualMemory(PVOID *BaseAddress, ULONG_PTR ZeroBits,

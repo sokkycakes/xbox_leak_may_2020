@@ -1041,8 +1041,10 @@ static void deliver(const struct ds_done *list, DWORD n)
     extern NTSTATUS NTAPI NtSetEvent(HANDLE, LONG *);
     for (DWORD i = 0; i < n; i++) {
         const struct ds_done *d = &list[i];
-        if (d->xmp.pdwCompletedSize) *d->xmp.pdwCompletedSize = d->xmp.dwMaxSize;
-        if (d->xmp.pdwStatus) *d->xmp.pdwStatus = d->status;
+        /* Delivery is deferred (to DoWork or the notify thread), so the title
+           may already have freed the packet's status words. */
+        if (d->xmp.pdwCompletedSize && guest_writable(d->xmp.pdwCompletedSize)) *d->xmp.pdwCompletedSize = d->xmp.dwMaxSize;
+        if (d->xmp.pdwStatus && guest_writable(d->xmp.pdwStatus)) *d->xmp.pdwStatus = d->status;
 #ifdef XBC_TRANSLATED
         if (d->cb) CPU_CALL(d->cb, CONV_STD, (uint32_t)d->ctx, (uint32_t)d->xmp.pContext, d->status);
 #else

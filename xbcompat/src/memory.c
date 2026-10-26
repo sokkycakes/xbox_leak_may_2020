@@ -127,6 +127,15 @@ static void arena_set(uint32_t first, uint32_t pages, uint8_t state, uint32_t ba
 static inline bool in_arena(uint32_t a) { return a >= ARENA_BASE && a < ARENA_END; }
 static inline uint32_t page_of(uint32_t a) { return (a - ARENA_BASE) / PAGE_SIZE; }
 
+/* Whether a guest dword at a is still committed: deferred completions
+   (DSound packet status words) can name memory the title has since freed. */
+bool guest_writable(const void *p)
+{
+    uint32_t a = (uint32_t)p;
+    if (!in_arena(a)) return true;
+    return arena_state[page_of(a)] == PG_COMMITTED && arena_state[page_of(a + 3)] == PG_COMMITTED;
+}
+
 NTSTATUS NTAPI NtAllocateVirtualMemory(PVOID *BaseAddress, ULONG_PTR ZeroBits,
                                        SIZE_T *RegionSize, ULONG AllocationType, ULONG Protect)
 {
