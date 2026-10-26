@@ -17,6 +17,7 @@ set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 SION=${SION:-sion}
 R=$HERE/../../../buildroot/package/sion-tools
+[ -f "$HERE/sion-video" ] && R=$HERE   # the copy in the project files carries its own
 
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
