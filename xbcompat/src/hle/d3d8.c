@@ -1881,7 +1881,23 @@ typedef struct tex_entry {
     GLuint id;
     GLenum target;
     struct tex_entry *next;
+    uint64_t hash;       /* watched textures: memory_sample_hash() at upload */
+    ULONG checked;       /* the frame the hash was last compared in */
+    bool watch;
 } tex_entry;
+
+/* A sparse FNV-1a over a texture's memory: one word per 64 bytes.  Titles
+   that build texture headers over their own memory (XGSetTextureHeader,
+   Register) and write it with the CPU never lock it: the movie player in
+   The Return of the King decodes each frame into the same three planes. */
+static uint64_t memory_sample_hash(const uint8_t *p, ULONG bytes)
+{
+    uint64_t x = 0xcbf29ce484222325ull;
+    for (ULONG o = 0; o + 8 <= bytes; o += 64) x = (x ^ *(const uint64_t *)(p + o)) * 0x100000001b3ull;
+    return x;
+}
+
+static ULONG watched_bytes(const D3DPixelContainer *t);
 
 /* Kept in buckets by data address: a draw looks up each stage's texture,
    and walking one list of every texture a level loaded (hundreds) per stage
@@ -2402,7 +2418,15 @@ static GLuint texture_for(D3DPixelContainer *t)
     ULONG fmt = (t->Format >> 8) & 0xFF, w, h, pitch;
     ULONG pal = fmt == 0x0B ? palette_hash() : 0;
     for (tex_entry *e = *tex_bucket(t->res.Data); e; e = e->next)
-        if (e->data == t->res.Data && e->format == t->Format && e->size == t->Size && e->pal == pal) return e->id;
+        if (e->data == t->res.Data && e->format == t->Format && e->size == t->Size && e->pal == pal) {
+            if (!e->watch || e->checked == d3d.frame) return e->id;
+            e->checked = d3d.frame;
+            if (memory_sample_hash((const uint8_t *)(t->res.Data | CONTIG_BASE), watched_bytes(t)) == e->hash)
+                return e->id;
+            TRACE_ALL("D3D: texture memory at %#x changed without a lock, uploaded again", (unsigned)t->res.Data);
+            tex_invalidate(t->res.Data);
+            break;
+        }
 
     hud_batch_flush();   /* uploading rebinds texture units a queued draw uses */
     container_size(t, &w, &h, &pitch);
@@ -2439,10 +2463,23 @@ static GLuint texture_for(D3DPixelContainer *t)
     debug_dump_texture(target, t->res.Data, fmt, w, h);
 
     tex_entry *e = malloc(sizeof(*e));
-    *e = (tex_entry){ t->res.Data, t->Format, t->Size, pal, id, target, *tex_bucket(t->res.Data) };
+    *e = (tex_entry){ t->res.Data, t->Format, t->Size, pal, id, target, *tex_bucket(t->res.Data), 0, 0, false };
+    /* Linear textures over the title's own memory are watched for CPU writes. */
+    e->watch = t->Size && !(t->res.Common & D3DCOMMON_D3DCREATED) && target == GL_TEXTURE_2D;
+    if (e->watch) {
+        e->hash = memory_sample_hash(src, watched_bytes(t));
+        e->checked = d3d.frame;
+    }
     *tex_bucket(t->res.Data) = e;
     tex_cache_version++;
     return id;
+}
+
+static ULONG watched_bytes(const D3DPixelContainer *t)
+{
+    ULONG w, h, pitch;
+    container_size((D3DPixelContainer *)t, &w, &h, &pitch);
+    return pitch * h;
 }
 
 static void NTAPI D3DDevice_SetTexture(ULONG Stage, D3DResource *t)
@@ -7490,7 +7527,7 @@ static GLuint surface_rt_texture(D3DSurface *s, ULONG w, ULONG h)
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_BGRA, GL_UNSIGNED_BYTE, NULL);
     }
     tex_entry *e = malloc(sizeof(*e));
-    *e = (tex_entry){ s->Data, s->Format, s->Size, 0, id, GL_TEXTURE_2D, *tex_bucket(s->Data) };
+    *e = (tex_entry){ s->Data, s->Format, s->Size, 0, id, GL_TEXTURE_2D, *tex_bucket(s->Data), 0, 0, false };
     *tex_bucket(s->Data) = e;
     tex_cache_version++;
     return id;
