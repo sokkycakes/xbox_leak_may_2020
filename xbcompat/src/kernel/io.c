@@ -581,6 +581,14 @@ static NTSTATUS complete(HANDLE Event, PVOID ApcRoutine, PVOID ApcContext, IO_ST
 static NTSTATUS fcomplete(xfile *f, HANDLE Event, PVOID ApcRoutine, PVOID ApcContext, IO_STATUS_BLOCK *iosb,
                           NTSTATUS st, ULONG info)
 {
+    /* A request that fails at once leaves the caller's status block alone
+       (IopCompleteRequest copies it only for success or a pended error).
+       XAPI's overlapped ReadFile primes OVERLAPPED.Internal with
+       STATUS_PENDING, so GetOverlappedResult on a read that hit the end of
+       a file still succeeds with 0 bytes: Counter-Strike's file cache
+       closes its files that way and stops with a fatal "Cache" error when
+       it sees STATUS_END_OF_FILE there. */
+    if (NT_ERROR(st)) return st;
     NTSTATUS r = complete(Event, ApcRoutine, ApcContext, iosb, st, info);
     if (f && f->port && !NT_ERROR(st) && !ApcRoutine && ApcContext)
         iocp_post(f->port, f->port_key, ApcContext, st, info);

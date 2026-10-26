@@ -319,6 +319,7 @@ struct ds_object {
     struct ds_listener listener, listener_def;
     int ldef_dirty;
     DWORD fx_count; DSEFFECTIMAGEDESC *fx_desc; uint8_t **fx_state; DWORD *fx_state_size;
+    uint8_t *fx_mem;   /* stand-in GP DSP X/Y/P memory and FX scratch the descriptor points into */
     DSEFFECTIMAGELOC fx_loc;
 };
 _Static_assert(offsetof(struct ds_object, iface) == 0x10, "dsound layout");
@@ -1444,8 +1445,8 @@ static void ds_release_ref_locked(struct ds_object *d)
     if (--d->hdr.refs) return;
     registry_remove(d);
     if (g.ds == d) g.ds = NULL;
-    for (DWORD i = 0; i < d->fx_count; i++) free(d->fx_state[i]);
     free(d->fx_state); free(d->fx_state_size); free(d->fx_desc);
+    free(d->fx_mem);
     pool_free(d);
     xlog("DSound: DirectSound object destroyed");
 }
@@ -1881,19 +1882,47 @@ static HRESULT fx_download_locked(struct ds_object *d, const void *pv, DWORD siz
         count = src->dwEffectCount;
         if (count > 256 || off + 8 + 32ull * count > size) { count = 0; src = NULL; }
     }
-    for (DWORD i = 0; i < d->fx_count; i++) free(d->fx_state[i]);
     free(d->fx_state); free(d->fx_state_size); free(d->fx_desc);
+    free(d->fx_mem); d->fx_mem = NULL;
     size_t dsize = 8 + 32 * (size_t)count;
     d->fx_desc = calloc(1, dsize < sizeof(DSEFFECTIMAGEDESC) ? sizeof(DSEFFECTIMAGEDESC) : dsize);
     if (src) memcpy(d->fx_desc, src, dsize);
     d->fx_count = count;
     d->fx_state = calloc(count ? count : 1, sizeof(*d->fx_state));
     d->fx_state_size = calloc(count ? count : 1, sizeof(*d->fx_state_size));
+    /* Real DSound turns the descriptor's image-relative offsets into pointers
+       (GP X/Y/P memory in the APU's register space, FX scratch in RAM), and
+       titles read and write effect state through them directly (Doom 3 reads
+       mixbin addresses out of a state segment). Point them into stand-in
+       memory instead: X memory starts with the image's state block at the FX
+       state base (128 words), as the DSP loader leaves it. */
+    enum { XMEM = 0x6000, YMEM = 0x4000, PMEM = 0x4000, STATE_BASE = 128 * 4, CMD = 2048 + 24 };
+    DWORD scratch = count && src->dwTotalScratchSize < (16u << 20) ? src->dwTotalScratchSize : 0;
+    d->fx_mem = calloc(1, XMEM + YMEM + PMEM + scratch + 4);
+    uint8_t *xmem = d->fx_mem, *ymem = xmem + XMEM, *pmem = ymem + YMEM, *smem = pmem + PMEM;
+    uint64_t code = (uint64_t)cmd[1] * 4, state = (uint64_t)cmd[3] * 4;
+    if (CMD + code + state <= size && STATE_BASE + state <= XMEM)
+        memcpy(xmem + STATE_BASE, img + CMD + code, state);
+    DWORD smin = ~0u;
+    for (DWORD i = 0; i < count; i++) { DWORD v = (DWORD)(uintptr_t)d->fx_desc->aEffectMaps[i].lpvScratchSegment; if (v < smin) smin = v; }
     for (DWORD i = 0; i < count; i++) {
-        DWORD sz = d->fx_desc->aEffectMaps[i].dwStateSize * 4;
-        if (sz > (1u << 20)) sz = 1u << 20;
-        d->fx_state[i] = calloc(1, sz ? sz : 4);
-        d->fx_state_size[i] = sz;
+        DSEFFECTMAP *m = &d->fx_desc->aEffectMaps[i];
+        DWORD sz = m->dwStateSize * 4;
+        uint64_t x = STATE_BASE + (uint64_t)(DWORD)(uintptr_t)m->lpvStateSegment - CMD - code;
+        if ((DWORD)(uintptr_t)m->lpvStateSegment >= CMD + code && x + sz <= XMEM) {
+            d->fx_state[i] = xmem + x;
+            d->fx_state_size[i] = sz;
+            m->lpvStateSegment = xmem + x;
+        } else {
+            d->fx_state[i] = NULL;
+            d->fx_state_size[i] = 0;
+            m->lpvStateSegment = xmem + STATE_BASE;
+        }
+        DWORD y = (DWORD)(uintptr_t)m->lpvYMemorySegment, c = (DWORD)(uintptr_t)m->lpvCodeSegment;
+        m->lpvYMemorySegment = ymem + (y < YMEM ? y : 0);
+        m->lpvCodeSegment = pmem + (c >= CMD && c - CMD < PMEM ? c - CMD : 0);
+        DWORD so = (DWORD)(uintptr_t)m->lpvScratchSegment - smin;
+        m->lpvScratchSegment = smem + (so < scratch ? so : 0);
     }
     if (loc) d->fx_loc = *loc;
     if (ppDesc) *ppDesc = d->fx_desc;
