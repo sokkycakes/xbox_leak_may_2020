@@ -769,8 +769,47 @@ static void voice_init(struct ds_voice *v, int kind, void *owner, DWORD flags, c
     eg_default(&v->eg[DSEG_IDX_AMP], 1);
 }
 
+/* The DSOUND build from the XBE's library table (0 if absent). */
+static unsigned dsound_build(void)
+{
+    static int build = -1;
+    if (build < 0) {
+        const uint8_t *h = (const uint8_t *)XBE_BASE;
+        ULONG n = *(const ULONG *)(h + 0x160), libs = *(const ULONG *)(h + 0x164);
+        build = 0;
+        for (ULONG i = 0; i < n && libs; i++) {
+            const uint8_t *e = (const uint8_t *)(libs + i * 16);
+            if (!memcmp(e, "DSOUND\0", 7)) build = *(const uint16_t *)(e + 12);
+        }
+    }
+    return (unsigned)build;
+}
+
+/* Libraries before 4039 take a DWORD mask of bins (bit n = bin n) wherever
+   later ones take a DSMIXBINS pointer.  A value below the XBE base can't be
+   a pointer either, which covers mixed-up builds. */
+static bool mixbins_is_mask(const void *p)
+{
+    unsigned b = dsound_build();
+    return (p && (uintptr_t)p < XBE_BASE) || (b && b < 4039);
+}
+
+static DSMIXBINS *mask_mixbins(DWORD mask, DSMIXBINS *out, DSMIXBINVOLUMEPAIR *pairs, const LONG *vols)
+{
+    out->dwMixBinCount = 0; out->lpMixBinVolumePairs = pairs;
+    for (DWORD b = 0; b < DSMIXBIN_COUNT; b++)
+        if (mask & (1u << b)) {
+            pairs[out->dwMixBinCount].dwMixBin = b;
+            pairs[out->dwMixBinCount].lVolume = vols ? vols[out->dwMixBinCount] : 0;
+            out->dwMixBinCount++;
+        }
+    return out;
+}
+
 static HRESULT voice_set_mixbins(struct ds_voice *v, const DSMIXBINS *p)
 {
+    DSMIXBINS m; DSMIXBINVOLUMEPAIR pairs[32];
+    if (mixbins_is_mask(p)) p = (uintptr_t)p ? mask_mixbins((DWORD)(uintptr_t)p, &m, pairs, NULL) : NULL;
     if (!p) { voice_default_bins(v); voice_keep_submix_bin(v); v->dirty = 1; return DS_OK; }
     if (p->dwMixBinCount > DSMIXBIN_ASSIGNMENT_MAX || (p->dwMixBinCount && !p->lpMixBinVolumePairs))
         return DSERR_INVALIDPARAM;
@@ -2739,6 +2778,16 @@ static HRESULT NTAPI Voice_SetMixBins(void *self, const DSMIXBINS *p)
     VOICE_RETURN(voice_set_mixbins(v, p));
 }
 
+static HRESULT NTAPI Voice_SetMixBinVolumes(void *self, const DSMIXBINS *p);
+
+/* Pre-4039: SetMixBinVolumes(mask, volumes), one volume per set bit. */
+static HRESULT NTAPI Voice_SetMixBinVolumes_Mask(void *self, DWORD mask, const LONG *vols)
+{
+    DSMIXBINS m; DSMIXBINVOLUMEPAIR pairs[32];
+    if (!vols) return DSERR_INVALIDPARAM;
+    return Voice_SetMixBinVolumes(self, mask_mixbins(mask, &m, pairs, vols));
+}
+
 static HRESULT NTAPI Voice_SetMixBinVolumes(void *self, const DSMIXBINS *p)
 {
     if (!p || (p->dwMixBinCount && !p->lpMixBinVolumePairs)) return DSERR_INVALIDPARAM;
@@ -3506,6 +3555,9 @@ const struct hle_func dsound_funcs[] = {
     VOICE_CPP("SetMixBins", "JPBU_DSMIXBINS@@@Z", Voice_SetMixBins),
     VOICE_SET("SetMixBinVolumes", "8", Voice_SetMixBinVolumes),
     VOICE_CPP("SetMixBinVolumes", "JPBU_DSMIXBINS@@@Z", Voice_SetMixBinVolumes),
+    VOICE_SET("SetMixBinVolumes", "12", Voice_SetMixBinVolumes_Mask),
+    VOICE_CPP("SetMixBinVolumes", "JKPBJ@Z", Voice_SetMixBinVolumes_Mask),
+    VOICE_CPP("SetMixBins", "JK@Z", Voice_SetMixBins),
     VOICE_SET("SetAllParameters", "12", Voice_SetAllParameters),
     VOICE_CPP("SetAllParameters", "JPBU_DS3DBUFFER@@K@Z", Voice_SetAllParameters),
     VOICE_SET("SetConeAngles", "16", Voice_SetConeAngles),

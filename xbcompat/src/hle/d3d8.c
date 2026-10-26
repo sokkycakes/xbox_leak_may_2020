@@ -3085,6 +3085,16 @@ static void NTAPI SetRenderStateNotInline(ULONG State, ULONG Value)
     if (State < d3d.rs_count) d3d.render_state[State] = Value;
 }
 
+static void FASTCALL SetRenderState_Deferred(ULONG State, ULONG Value)
+{
+    SetRenderStateNotInline(State, Value);
+}
+
+static void FASTCALL SetTextureState_Deferred(ULONG Stage, ULONG Type, ULONG Value)
+{
+    D3DDevice_SetTextureStageStateNotInline(Stage, Type, Value);
+}
+
 #define COMPLEX_STATE(name, index) \
     static void NTAPI SetRenderState_##name(ULONG Value) { RS(index) = Value; }
 COMPLEX_STATE(ZEnable, D3DRS_ZENABLE)
@@ -7744,6 +7754,15 @@ static LONG NTAPI D3DDevice_CreateImageSurface(UINT_ w, UINT_ h, ULONG fmt, D3DS
     return *pp ? D3D_OK : 0x8007000E;
 }
 
+/* D3D::CreateStandAloneSurface.  Later libraries take (w, h, format, pp)
+   and return an HRESULT; 4831 takes (w, h, scratch, format) and returns the
+   surface.  A format is a small number, a pointer never is. */
+static ULONG NTAPI D3D_CreateStandAloneSurface(UINT_ w, UINT_ h, ULONG a3, ULONG a4)
+{
+    if (a4 >= XBE_BASE) return (ULONG)D3DDevice_CreateImageSurface(w, h, a3, (D3DSurface **)a4);
+    return (ULONG)(uintptr_t)new_linear_surface(a4, w, h);
+}
+
 static LONG NTAPI D3DDevice_CreateRenderTarget(UINT_ w, UINT_ h, ULONG fmt, ULONG ms, BOOLEAN lockable,
                                                D3DSurface **pp)
 {
@@ -8393,13 +8412,30 @@ static LONG NTAPI Direct3D_CheckDeviceFormat(UINT_ a, ULONG b, ULONG c, ULONG d,
 static LONG NTAPI Direct3D_CheckDeviceType(UINT_ a, ULONG b, ULONG c, ULONG d, BOOLEAN e) { return D3D_OK; }
 static LONG NTAPI Direct3D_CheckDeviceMultiSampleType(UINT_ a, ULONG b, ULONG c, BOOLEAN d, ULONG e) { return D3D_OK; }
 static LONG NTAPI Direct3D_CheckDepthStencilMatch(UINT_ a, ULONG b, ULONG c, ULONG d, ULONG e) { return D3D_OK; }
-static UINT_ NTAPI Direct3D_GetAdapterModeCount(UINT_ a) { return 1; }
+/* The modes an NTSC-M component pack without widescreen or 720p offers:
+   480p, then 480i and its 240-line field modes, each in four formats.
+   Titles (RenderWare among them) search this list for the mode they want
+   and give up when it is missing. */
+static const struct { USHORT w, h; ULONG flags; } adapter_modes[] = {
+    { 640, 480, 0x040 }, { 720, 480, 0x040 }, { 640, 480, 0x140 },          /* progressive, 10x11 PAR */
+    { 640, 480, 0x020 }, { 720, 480, 0x020 }, { 640, 240, 0x0A0 }, { 720, 240, 0x0A0 },
+    { 640, 480, 0x120 }, { 640, 240, 0x1A0 },                                /* interlaced, field */
+};
+static const ULONG adapter_formats[4] = { 0x1E, 0x11, 0x1C, 0x12 };   /* LIN_X8R8G8B8, R5G6B5, X1R5G5B5, A8R8G8B8 */
+
+static UINT_ NTAPI Direct3D_GetAdapterModeCount(UINT_ a) { (void)a; return 4 * sizeof(adapter_modes) / sizeof(adapter_modes[0]); }
 static LONG NTAPI Direct3D_GetAdapterDisplayMode(UINT_ a, ULONG *mode)
 {
     mode[0] = 640; mode[1] = 480; mode[2] = 60; mode[3] = 0; mode[4] = 0x1E;
     return D3D_OK;
 }
-static LONG NTAPI Direct3D_EnumAdapterModes(UINT_ a, UINT_ m, ULONG *mode) { return Direct3D_GetAdapterDisplayMode(a, mode); }
+static LONG NTAPI Direct3D_EnumAdapterModes(UINT_ a, UINT_ m, ULONG *mode)
+{
+    if (m >= Direct3D_GetAdapterModeCount(a)) return D3DERR_INVALIDCALL;
+    mode[0] = adapter_modes[m / 4].w; mode[1] = adapter_modes[m / 4].h; mode[2] = 60;
+    mode[3] = adapter_modes[m / 4].flags; mode[4] = adapter_formats[m % 4];
+    return D3D_OK;
+}
 static LONG NTAPI Direct3D_GetAdapterIdentifier(UINT_ a, ULONG flags, char *id)
 {
     memset(id, 0, 1024);
@@ -10512,6 +10548,13 @@ const struct hle_func d3d8_funcs[] = {
     F("_D3DDevice_SetRenderState_MultiSampleAntiAlias@4", SetRenderState_MultiSampleAntiAlias),
     F("_D3DDevice_SetRenderState_MultiSampleMask@4", SetRenderState_MultiSampleMask),
     F("_D3DDevice_SetRenderState_MultiSampleMode@4", SetRenderState_MultiSampleMode),
+    /* The older name of the same state (MULTISAMPLEMODE before 4361's split). */
+    F("_D3DDevice_SetRenderState_MultiSampleType@4", SetRenderState_MultiSampleMode),
+    /* 3925 (Halo, Azurik) sets deferred states through these, with the
+       state and stage in registers; they only store the value, like the
+       NotInline forms. */
+    F("@D3DDevice_SetRenderState_Deferred@8", SetRenderState_Deferred),
+    F("@D3DDevice_SetTextureState_Deferred@12", SetTextureState_Deferred),
     F("_D3DDevice_SetRenderState_MultiSampleRenderTargetMode@4", SetRenderState_MultiSampleRenderTargetMode),
     F("_D3DDevice_SetRenderState_ShadowFunc@4", SetRenderState_ShadowFunc),
     F("_D3DDevice_SetRenderState_LineWidth@4", SetRenderState_LineWidth),
@@ -10532,6 +10575,13 @@ const struct hle_func d3d8_funcs[] = {
     F("_D3DSurface_GetDesc@8", D3DSurface_GetDesc),
     F("_D3DSurface_LockRect@16", D3DSurface_LockRect),
     F("_D3DDevice_CreateImageSurface@16", D3DDevice_CreateImageSurface),
+    /* The library's own helper behind CreateImageSurface and the other
+       Create*Surface calls; 4831 titles (Nightfire, House of the Dead III)
+       call it directly. */
+    F("_D3D_CreateStandAloneSurface@16", D3D_CreateStandAloneSurface),
+    /* SetRenderTarget's body, which SetRenderTarget(Fast) and LTCG titles
+       call with a third argument the host doesn't need. */
+    F("_D3D_CommonSetRenderTarget@12", D3DDevice_SetRenderTargetFast),
     F("_D3DDevice_CreateRenderTarget@24", D3DDevice_CreateRenderTarget),
     F("_D3DDevice_CreateDepthStencilSurface@20", D3DDevice_CreateDepthStencilSurface),
     F("_D3DDevice_CopyRects@20", D3DDevice_CopyRects),

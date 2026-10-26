@@ -373,6 +373,14 @@ void NTAPI HalReturnToFirmware(ULONG Routine)
     av_hand_over();
     if (Routine == 2 && path && path[0]) relaunch(path);
     xlog("HalReturnToFirmware(%u): title asked to reboot or return to the dashboard", Routine);
+    if (LaunchDataPage) {
+        /* Why: XapiBootToDash's LD_LAUNCH_DASHBOARD (reason, context,
+           parameters) sits at the start of the page's launch data. */
+        const ULONG *ld = (const ULONG *)((const char *)LaunchDataPage + 1024);
+        xlog("HalReturnToFirmware: launch data type %u, title %#x, dashboard reason %u context %u "
+             "parameters %#x %#x", *(const ULONG *)LaunchDataPage, ((const ULONG *)LaunchDataPage)[1],
+             ld[0], ld[1], ld[2], ld[3]);
+    }
 #ifdef XBC_TRANSLATED
     if (Routine == 4 /* HalFatalErrorRebootRoutine */) cpu_dump_guest();
 #endif

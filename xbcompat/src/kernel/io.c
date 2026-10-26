@@ -16,6 +16,7 @@
  * is matched case-insensitively against the host directory.
  */
 #define _GNU_SOURCE
+#include <ctype.h>
 #include <dirent.h>
 #include <ftw.h>
 #include <errno.h>
@@ -55,6 +56,21 @@ typedef struct xfile {
     xobject *port;          /* I/O completion port bound by FileCompletionInformation */
     PVOID port_key;
 } xfile;
+
+/* A file's FsContext for titles that read the FCB themselves (xbcompat.h):
+   zeroed, flags clear, and the same made-up physical position as both
+   FATX's FirstCluster and GDFX's FirstSector, so files sort by path. */
+static PVOID stand_in_fcb(const char *xpath)
+{
+    ULONG *fcb = pool_alloc(0x40);
+    memset(fcb, 0, 0x40);
+    uint32_t h = 2166136261u;
+    for (const char *c = xpath ? xpath : ""; *c; c++) h = (h ^ (unsigned char)tolower((unsigned char)*c)) * 16777619u;
+    h = (h & 0x00fffffe) | 2;   /* even, so FATX's flag bit 0 reads clear; never 0 */
+    fcb[0] = h;
+    fcb[0x1c / 4] = h;
+    return fcb;
+}
 
 static char cdrom_dir[PATH_MAX];
 static char hdd_dir[PATH_MAX];
@@ -520,6 +536,7 @@ made:
     {
         xobject *o = object_new(OBJ_FILE);
         o->file = f;
+        o->fs_context = stand_in_fcb(f->xbox);
         *FileHandle = handle_insert(o);
     }
     f = NULL;
