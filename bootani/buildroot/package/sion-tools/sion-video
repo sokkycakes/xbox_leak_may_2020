@@ -22,6 +22,11 @@
 #                                xbox-env and S00bootani, once a boot does the
 #                                work (--force: again)
 #
+# Since the image that sends 480i from the first frame, the kernel loads the
+# same EDID itself (drm.edid_firmware=HDMI-A-1:edid/crimson-480i.edid on its
+# command line, so the console is 15 kHz too and nothing in the boot sends
+# 31 kHz); 480p and the HDMI-to-AV box check take it off again.
+#
 # VIDEO_CONNECTOR in video.conf (HDMI-A-1, DP-1, ...) names the connector
 # when the right one isn't the connected one (an adapter with no EDID shows
 # as disconnected until the override is on). A copy of video.conf goes on
@@ -37,6 +42,8 @@ MODE_480I=2880x480i
 MODE_480P=720x480
 STATE=$SION_RUN/video
 DBG=/sys/kernel/debug
+FW=/sys/module/drm/parameters/edid_firmware
+FW_NAME=edid/crimson-480i.edid
 
 say() {
 	echo "sion-video: $*"
@@ -115,6 +122,21 @@ overridden() {
 	[ -r "$f" ] && cmp -s "$f" "$EDID"
 }
 
+# The EDID the kernel loads itself (drm.edid_firmware): on for one connector,
+# or off ("none:" names no connector; an empty write doesn't reach the kernel).
+fw_on() {
+	[ -w "$FW" ] && printf '%s:%s' "${1#card*-}" "$FW_NAME" > "$FW"
+}
+
+fw_off() {
+	[ -w "$FW" ] && grep -q crimson "$FW" && printf 'none:' > "$FW"
+	return 0
+}
+
+fw_is_on() {
+	[ -r "$FW" ] && grep -q "^${1#card*-}:.*crimson" "$FW"
+}
+
 detect() {
 	echo detect > "/sys/class/drm/$1/status" 2>/dev/null
 }
@@ -123,8 +145,9 @@ detect() {
 real_edid() {
 	c=$1
 	f=$(override_file "$c")
-	if has_data "$f"; then
-		printf reset > "$f"
+	if has_data "$f" || fw_is_on "$c"; then
+		has_data "$f" && printf reset > "$f"
+		fw_off
 		detect "$c"
 	fi
 	if has_data "/sys/class/drm/$c/edid"; then
@@ -188,6 +211,7 @@ cmd_apply() {
 		for o in $(connectors); do
 			[ "$o" != "$c" ] && overridden "$o" && printf reset > "$(override_file "$o")" && detect "$o"
 		done
+		fw_on "$c"
 		if ! overridden "$c"; then
 			cat "$EDID" > "$f" || { say "writing $f failed"; return 1; }
 		fi
@@ -195,6 +219,7 @@ cmd_apply() {
 		mode=$MODE_480I
 	else
 		has_data "$f" && printf reset > "$f"
+		fw_off
 		detect "$c"
 		mode=$MODE_480P
 	fi
@@ -215,7 +240,7 @@ cmd_status() {
 	for c in $(connectors); do
 		s=$(cat "/sys/class/drm/$c/status")
 		o=
-		overridden "$c" && o=", 15 kHz EDID on"
+		{ overridden "$c" || fw_is_on "$c"; } && o=", 15 kHz EDID on"
 		echo "${c#card*-}: $s$o, display $(edid_name "/sys/class/drm/$c/edid"), modes $(sort -u "/sys/class/drm/$c/modes" | tr '\n' ' ')"
 	done
 	# shellcheck source=/dev/null
@@ -230,7 +255,7 @@ cmd_remember_av() {
 	c=$(target) || { say "no connector"; return 1; }
 	sum=$(real_edid "$c")
 	# the override goes back on if it was there
-	[ -r "$STATE" ] && case $(cat "$STATE") in 480i*) cat "$EDID" > "$(override_file "$c")"; detect "$c" ;; esac
+	[ -r "$STATE" ] && case $(cat "$STATE") in 480i*) fw_on "$c"; cat "$EDID" > "$(override_file "$c")"; detect "$c" ;; esac
 	[ -n "$sum" ] || { say "${c#card*-} has no EDID of its own to remember"; return 1; }
 	case " $AV_EDID " in *" $sum "*) ;; *) AV_EDID=${AV_EDID:+$AV_EDID }$sum ;; esac
 	save
@@ -257,5 +282,5 @@ early)
 	}
 	cmd_apply
 	;;
-*) sed -n '3,30p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+*) sed -n '3,35p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

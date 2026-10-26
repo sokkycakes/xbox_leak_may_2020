@@ -3,6 +3,13 @@ CONFIG_DRM_I915=y
 CONFIG_SND_HDA_I915=y
 CONFIG_SND_HDA_CODEC_REALTEK=y
 CONFIG_CMDLINE_BOOL=y
+# The TV signal is 15 kHz 480i from the first frame (sokky's VGA-to-composite
+# transcoder must never get 31 kHz): the kernel loads sion-video's EDID
+# (/lib/firmware/edid, in the built-in initramfs) for HDMI-A-1, and the
+# console takes its preferred mode, 2880x480i. No video= for it: the kernel's
+# own GTF/CVT interlaced modes come out at 31 kHz or 15.1 kHz, never VIC 10.
+# sion-video takes the EDID off again for 480p (the HDMI-to-AV box).
+CONFIG_DRM_LOAD_EDID_FIRMWARE=y
 # Legacy HD Audio driver for the HDMI output (the headphone jack is on an I2S
 # codec that needs the audio DSP, which this image leaves out).
-CONFIG_CMDLINE="console=tty1 quiet loglevel=3 vt.global_cursor_default=0 video=720x480@60 snd_intel_dspcfg.dsp_driver=1 i915.fastboot=1"
+CONFIG_CMDLINE="console=tty1 quiet loglevel=3 vt.global_cursor_default=0 drm.edid_firmware=HDMI-A-1:edid/crimson-480i.edid snd_intel_dspcfg.dsp_driver=1 i915.fastboot=1"

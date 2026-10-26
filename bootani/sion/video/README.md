@@ -53,9 +53,15 @@ mounted. `VIDEO_CONNECTOR=DP-1` there picks another port.
 
 - Image (S00bootani, `sion-video early`): before the boot animation, so the
   whole boot is 15 kHz.
+- Image kernel (board/sion/linux.fragment): `drm.edid_firmware` loads the
+  same EDID (in /lib/firmware/edid) for HDMI-A-1 from the kernel's first
+  frame, so its text console is 2880x480i at VIC 10 too, and nothing in the
+  boot sends 31 kHz. sion-video turns it off for 480p
+  (/sys/module/drm/parameters/edid_firmware).
 - Live push (push-480i, until the next image): xbox-env runs `sion-video
-  apply` when the dashboard starts. The boot animation still plays in 480p
-  (nothing on the transcoder for ~10 s), then the dashboard comes up in 480i.
+  apply` when the dashboard starts. On its own, the boot animation plays in
+  480p and the console stays 720x480p; push-480i-boot adds boot entry
+  options for the current image that make the console and boot 15 kHz too.
 
 ## Tested
 
