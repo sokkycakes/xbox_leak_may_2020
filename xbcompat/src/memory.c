@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <unistd.h>
 
 #include "xbcompat.h"
 
@@ -44,12 +45,37 @@ static void reserve_fixed(uint32_t base, uint32_t size, int prot)
 
 volatile ULONG *g_apu_sample_counter;
 
+/* Contiguous memory is the console's physical memory, which it also shows
+   write-combined at 0xF0000000 + physical address; titles turn a locked
+   resource's address into that view by or-ing 0xF0000000 (Area 51).  Back
+   the range with one shared file so the view can alias its first 64 MB. */
+#define WC_VIEW_BASE 0xF0000000u
+#define WC_VIEW_SIZE 0x04000000u
+static void map_contiguous(void)
+{
+    int fd = memfd_create("xbcompat-contiguous", MFD_CLOEXEC);
+    if (fd < 0 || ftruncate(fd, CONTIG_SIZE) != 0) {
+        if (fd >= 0) close(fd);
+        reserve_fixed(CONTIG_BASE, CONTIG_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC);
+        return;
+    }
+    void *p = mmap((void *)CONTIG_BASE, CONTIG_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC,
+                   MAP_SHARED | MAP_FIXED_NOREPLACE | MAP_NORESERVE, fd, 0);
+    if (p != (void *)CONTIG_BASE)
+        fatal("cannot reserve guest range %#x-%#x: %s (is this a 32-bit build?)",
+              CONTIG_BASE, CONTIG_BASE + CONTIG_SIZE, strerror(errno));
+    void *wc = mmap((void *)WC_VIEW_BASE, WC_VIEW_SIZE, PROT_READ | PROT_WRITE,
+                    MAP_SHARED | MAP_FIXED_NOREPLACE | MAP_NORESERVE, fd, 0);
+    if (wc != (void *)WC_VIEW_BASE) xlog("write-combined view at %#x unavailable: %s", WC_VIEW_BASE, strerror(errno));
+    close(fd);
+}
+
 void mem_init(void)
 {
     /* The image region is mapped by the loader; reserve the rest up front so
        host allocations (malloc, SDL, GL) can never land inside them. */
     reserve_fixed(ARENA_BASE, ARENA_END - ARENA_BASE, PROT_NONE);
-    reserve_fixed(CONTIG_BASE, CONTIG_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC);
+    map_contiguous();
     /* The network library pokes the MCP NIC's registers at 0xFEF00000
        directly.  Back them with plain memory: every register reads zero,
        which the driver sees as a NIC with no link. */
