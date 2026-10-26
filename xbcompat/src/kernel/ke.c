@@ -330,12 +330,18 @@ ULONGLONG ke_guest_tsc(void)
     return t / 10000000ULL * XBOX_TSC_FREQ + t % 10000000ULL * XBOX_TSC_FREQ / 10000000ULL;
 }
 
+/* A year: longer intervals are treated as infinite (deadlines stay inside a 32-bit time_t). */
+#define FOREVER_100NS (365LL * 86400 * 10000000LL)
+
 /* Absolute deadline (CLOCK_REALTIME based timespec) for a Ke timeout. */
 static bool deadline_from(LARGE_INTEGER *timeout, struct timespec *out)
 {
     if (!timeout) return false;
     LONGLONG t = timeout->QuadPart;
     ULONGLONG now = system_time_now();
+    /* Sleep(INFINITE) and friends pass 0x8000000000000000; anything past
+       the 32-bit time_t range is a wait without end. */
+    if (t < -FOREVER_100NS || t > (LONGLONG)(now + FOREVER_100NS)) return false;
     ULONGLONG due = t < 0 ? now + (ULONGLONG)(-t) : (ULONGLONG)t;
     if (due < now) due = now;
     ULONGLONG unix100 = due - EPOCH_DIFF_100NS;
@@ -614,6 +620,7 @@ NTSTATUS NTAPI KeDelayExecutionThread(KPROCESSOR_MODE WaitMode, BOOLEAN Alertabl
     gl_yield_point();
     LONGLONG t = Interval->QuadPart;
     ULONGLONG rel = t < 0 ? (ULONGLONG)-t : (t > (LONGLONG)system_time_now() ? t - system_time_now() : 0);
+    if (t == INT64_MIN || rel > (ULONGLONG)FOREVER_100NS) rel = FOREVER_100NS;   /* Sleep(INFINITE) */
     uint64_t prof_start = prof_wait_begin();
     cpu_block();
     if (rel == 0) {

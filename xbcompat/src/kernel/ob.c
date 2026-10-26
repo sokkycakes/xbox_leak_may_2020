@@ -109,6 +109,7 @@ void object_release(xobject *o)
     if (o->kind == OBJ_FILE) {
         extern void file_close(struct xfile *f);
         file_close(o->file);
+        if (o->fs_context) pool_free(o->fs_context);
     }
     free(o->name);
     free(o->link_target);

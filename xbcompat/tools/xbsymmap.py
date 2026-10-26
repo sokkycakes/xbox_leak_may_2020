@@ -91,6 +91,25 @@ EXTRA_SIGS = [
     # device state xbcompat keeps elsewhere.
     ("_D3D_LazySetState@0",
      rb"\x53\x8b\x1d....\xf6\xc7\x01\x56\x8b\x35....\x74\x05\xe8"),
+    # SetRenderTarget for a target the size and format of the current one
+    # (Halo 2): render target on the stack, depth in ebx, surface offsets only.
+    ("_D3DDevice_SetRenderTargetSameSize@8 regs=s,ebx",
+     rb"\x55\x8b\x6c\x24\x08\x8b\x45\x00\xa9\x00\x00\x78\x00\x56\x57\x8b\x3d....\x75\x19"
+     rb"\x25\x00\x00\x07\x00\x3d\x00\x00\x05\x00\x75\x0d\x8b\x45\x14\x85\xc0\x74\x06"),
+    # SelectVertexShaderDirect with the address in eax and the attribute
+    # format in ecx (Halo 2; XbSymbolDatabase has them as eax, ebx): copies
+    # the format into g_DirectVertexShader, or sets the program start.
+    ("_D3DDevice_SelectVertexShaderDirect@8 regs=ecx,eax",
+     rb"\x53\x56\x8b\xf1\x85\xf6\x8b\xd8\x74.\x57\xb8....\xb9\x40\x00\x00\x00\xbf....\x83\xc8\x01\xf3\xa5"),
+    # GetTexture2 with the stage in esi (GTA Vice City, LTCG 5659): reads the
+    # CDevice's texture array, which xbcompat keeps elsewhere.
+    ("_D3DDevice_GetTexture2@4 regs=esi",
+     rb"\x57\x8b\x3d....\x8b\x8c\xb7..\x00\x00\x85\xc9\x74.\x8b\x01\xa9\xff\xff\x00\x00"),
+    # GetVisibilityTestResult with the index in eax, the time stamp pointer
+    # in edx and the result pointer on the stack (Beyond Good & Evil, LTCG
+    # 5659): reads the CDevice's query array, which xbcompat keeps elsewhere.
+    ("_D3DDevice_GetVisibilityTestResult@12 regs=eax,s,edx",
+     rb"\x8b\x0d....\x56\x8b\xf0\xc1\xee\x08\x25\xff\x00\x00\x00\x57\x8b\xbc\xb1..\x00\x00\xc1\xe0\x04"),
     # BeginPush with the dword count in esi; returns where to write.
     ("_D3DDevice_BeginPushLTCG@4 regs=esi",
      rb"\xa1....\x6a\x00\x50\xe8....\x8b\x0d....\x8b\x01\x8b\x49\x04\x8d\x54\xb0\x04"),
@@ -314,10 +333,14 @@ def main():
     for name, (kind, _, _, va, lib) in sorted(found.items()):
         if kind == "VAR" and name.startswith("D3DRS_"):
             lines.append(f"_{name} {va:#x} data")
-    if "D3DDevice_SetIndices" in found:
-        g = index_data_global(xbe_reader(a.xbe), found["D3DDevice_SetIndices"][3])
-        if g:
-            lines.append(f"_D3D__IndexData {g:#x} data")
+    # The LTCG entry point (D3DDevice_SetIndices_4__LTCG_ebx1, Beyond Good &
+    # Evil) writes it the same way; LTCG callers add StartIndex to it themselves.
+    for name in sorted(found):
+        if name == "D3DDevice_SetIndices" or name.startswith("D3DDevice_SetIndices_"):
+            g = index_data_global(xbe_reader(a.xbe), found[name][3])
+            if g:
+                lines.append(f"_D3D__IndexData {g:#x} data")
+                break
     for key, aliases in DATA_ALIASES.items():
         if key in found:
             for alias in aliases:

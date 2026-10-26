@@ -293,10 +293,26 @@ struct ds_done {
     struct ds_stream *s;
 };
 
+/* Halo (XDK 3925) reaches past the stream into its CMcpxStream: m_pStream at
+   p+0x24, the voice status DWORD at +8 (MCPX_VOICESTATUS_ACTIVE 2) and a
+   two-argument __thiscall stop at vtable slot 4.  The stand-in's methods are
+   guest code that only set fields, which the stream picks up (mcpx_sync). */
+struct ds_mcpx {
+    void **vtbl;                      /* -> code */
+    uint32_t apu;
+    volatile DWORD status;            /* +8 */
+    volatile DWORD stop_req;          /* +0xC: set by the guest-side stop */
+    void *slots[8];
+    uint8_t code[2][20];              /* [0] stop, [1] any other slot: ud2 */
+};
+
 struct ds_stream {
     void **vtbl;                      /* p: IDirectSoundStream / XMediaObject vtable */
     struct ds_refhdr hdr_rel;         /* p+4: release-build CRefCount */
     struct ds_refhdr hdr_dbg;         /* p+0xC: debug-build CRefCount */
+    uint32_t pad[4];
+    struct ds_mcpx *mcpx;             /* p+0x24: 3925 m_pStream */
+    struct ds_mcpx mcpx_obj;
     struct ds_voice v;
     DWORD max_packets;
     struct ds_packet *pk; DWORD head, count;   /* ring of accepted packets */
@@ -307,6 +323,30 @@ struct ds_stream {
 };
 _Static_assert(offsetof(struct ds_stream, hdr_rel) == 4 && offsetof(struct ds_stream, hdr_dbg) == 0xC,
                "stream layout");
+_Static_assert(offsetof(struct ds_stream, mcpx) == 0x24, "stream m_pStream");
+
+static void mcpx_init(struct ds_stream *s)
+{
+    static const uint8_t stop[] = {
+        0xC7, 0x41, 0x08, 0, 0, 0, 0,        /* mov dword [ecx+8], 0 */
+        0xC7, 0x41, 0x0C, 1, 0, 0, 0,        /* mov dword [ecx+0xC], 1 */
+        0xC2, 0x08, 0x00,                    /* ret 8 (eax: the caller ignores it) */
+    };
+    struct ds_mcpx *m = &s->mcpx_obj;
+    memcpy(m->code[0], stop, sizeof(stop));
+    m->code[1][0] = 0x0F; m->code[1][1] = 0x0B;
+    for (int i = 0; i < 8; i++) m->slots[i] = m->code[i == 4 ? 0 : 1];
+    m->vtbl = m->slots;
+    s->mcpx = m;
+}
+
+/* Take a guest-side stop, then publish whether the voice runs. */
+static void mcpx_sync(struct ds_stream *s)
+{
+    struct ds_mcpx *m = &s->mcpx_obj;
+    if (m->stop_req) { m->stop_req = 0; s->active = 0; }
+    m->status = s->active ? 3 : 1;   /* ALLOCATED | ACTIVE */
+}
 
 struct ds_object {
     uint32_t valid_vptr, valid_sig;   /* p-0x10 */
@@ -319,6 +359,7 @@ struct ds_object {
     struct ds_listener listener, listener_def;
     int ldef_dirty;
     DWORD fx_count; DSEFFECTIMAGEDESC *fx_desc; uint8_t **fx_state; DWORD *fx_state_size;
+    uint8_t *fx_mem;   /* stand-in GP DSP X/Y/P memory and FX scratch the descriptor points into */
     DSEFFECTIMAGELOC fx_loc;
 };
 _Static_assert(offsetof(struct ds_object, iface) == 0x10, "dsound layout");
@@ -768,8 +809,47 @@ static void voice_init(struct ds_voice *v, int kind, void *owner, DWORD flags, c
     eg_default(&v->eg[DSEG_IDX_AMP], 1);
 }
 
+/* The DSOUND build from the XBE's library table (0 if absent). */
+static unsigned dsound_build(void)
+{
+    static int build = -1;
+    if (build < 0) {
+        const uint8_t *h = (const uint8_t *)XBE_BASE;
+        ULONG n = *(const ULONG *)(h + 0x160), libs = *(const ULONG *)(h + 0x164);
+        build = 0;
+        for (ULONG i = 0; i < n && libs; i++) {
+            const uint8_t *e = (const uint8_t *)(libs + i * 16);
+            if (!memcmp(e, "DSOUND\0", 7)) build = *(const uint16_t *)(e + 12);
+        }
+    }
+    return (unsigned)build;
+}
+
+/* Libraries before 4039 take a DWORD mask of bins (bit n = bin n) wherever
+   later ones take a DSMIXBINS pointer.  A value below the XBE base can't be
+   a pointer either, which covers mixed-up builds. */
+static bool mixbins_is_mask(const void *p)
+{
+    unsigned b = dsound_build();
+    return (p && (uintptr_t)p < XBE_BASE) || (b && b < 4039);
+}
+
+static DSMIXBINS *mask_mixbins(DWORD mask, DSMIXBINS *out, DSMIXBINVOLUMEPAIR *pairs, const LONG *vols)
+{
+    out->dwMixBinCount = 0; out->lpMixBinVolumePairs = pairs;
+    for (DWORD b = 0; b < DSMIXBIN_COUNT; b++)
+        if (mask & (1u << b)) {
+            pairs[out->dwMixBinCount].dwMixBin = b;
+            pairs[out->dwMixBinCount].lVolume = vols ? vols[out->dwMixBinCount] : 0;
+            out->dwMixBinCount++;
+        }
+    return out;
+}
+
 static HRESULT voice_set_mixbins(struct ds_voice *v, const DSMIXBINS *p)
 {
+    DSMIXBINS m; DSMIXBINVOLUMEPAIR pairs[32];
+    if (mixbins_is_mask(p)) p = (uintptr_t)p ? mask_mixbins((DWORD)(uintptr_t)p, &m, pairs, NULL) : NULL;
     if (!p) { voice_default_bins(v); voice_keep_submix_bin(v); v->dirty = 1; return DS_OK; }
     if (p->dwMixBinCount > DSMIXBIN_ASSIGNMENT_MAX || (p->dwMixBinCount && !p->lpMixBinVolumePairs))
         return DSERR_INVALIDPARAM;
@@ -961,8 +1041,10 @@ static void deliver(const struct ds_done *list, DWORD n)
     extern NTSTATUS NTAPI NtSetEvent(HANDLE, LONG *);
     for (DWORD i = 0; i < n; i++) {
         const struct ds_done *d = &list[i];
-        if (d->xmp.pdwCompletedSize) *d->xmp.pdwCompletedSize = d->xmp.dwMaxSize;
-        if (d->xmp.pdwStatus) *d->xmp.pdwStatus = d->status;
+        /* Delivery is deferred (to DoWork or the notify thread), so the title
+           may already have freed the packet's status words. */
+        if (d->xmp.pdwCompletedSize && guest_writable(d->xmp.pdwCompletedSize)) *d->xmp.pdwCompletedSize = d->xmp.dwMaxSize;
+        if (d->xmp.pdwStatus && guest_writable(d->xmp.pdwStatus)) *d->xmp.pdwStatus = d->status;
 #ifdef XBC_TRANSLATED
         if (d->cb) CPU_CALL(d->cb, CONV_STD, (uint32_t)d->ctx, (uint32_t)d->xmp.pContext, d->status);
 #else
@@ -1001,6 +1083,7 @@ static void flush_locked(struct ds_stream *s, DWORD status)
     s->pos = 0;
     s->active = 0; s->paused = 0; s->starved = 0; s->discontinuity = 0; s->flush_pending = 0;
     s->v.adpcm_block = -1;
+    mcpx_sync(s);
 }
 
 static void *completion_thread(void *arg)
@@ -1095,6 +1178,7 @@ static void buffer_mixed(struct ds_buffer *b, const struct dsmix_voice *j, struc
 /* Describe a running stream for dsmix_run, its queued packets in pk. */
 static bool stream_job(struct ds_stream *s, struct dsmix_voice *j, struct dsmix_packet *pk)
 {
+    mcpx_sync(s);
     if (!s->active || s->paused || s->starved || !s->count) return false;
     voice_job(j, &s->v);
     j->kind = DSMIX_STREAM;
@@ -1121,6 +1205,7 @@ static void stream_mixed(struct ds_stream *s, const struct dsmix_voice *j)
         if (s->discontinuity) { s->active = 0; s->discontinuity = 0; s->pos = 0; }
         else s->starved = 1;
     }
+    mcpx_sync(s);
 }
 
 /* A MIXIN/FXIN buffer is a voice whose input is what the voices routed to it
@@ -1444,8 +1529,8 @@ static void ds_release_ref_locked(struct ds_object *d)
     if (--d->hdr.refs) return;
     registry_remove(d);
     if (g.ds == d) g.ds = NULL;
-    for (DWORD i = 0; i < d->fx_count; i++) free(d->fx_state[i]);
     free(d->fx_state); free(d->fx_state_size); free(d->fx_desc);
+    free(d->fx_mem);
     pool_free(d);
     xlog("DSound: DirectSound object destroyed");
 }
@@ -1623,6 +1708,7 @@ static HRESULT stream_create_locked(const DSSTREAMDESC *desc, uint32_t *pp)
     s->pk = calloc(s->max_packets, sizeof(*s->pk));
     s->callback = desc->lpfnCallback; s->context = desc->lpvContext;
     s->active = 0;   /* the voice starts with the first packet (CMcpxStream::CommitSsl) */
+    mcpx_init(s); mcpx_sync(s);
     if ((desc->dwFlags & DSSTREAMCAPS_ACCURATENOTIFY) && !g.cthread_started && !g_ds_no_audio_thread) {
         pthread_t t;
         g.cthread_started = 1;
@@ -1881,19 +1967,47 @@ static HRESULT fx_download_locked(struct ds_object *d, const void *pv, DWORD siz
         count = src->dwEffectCount;
         if (count > 256 || off + 8 + 32ull * count > size) { count = 0; src = NULL; }
     }
-    for (DWORD i = 0; i < d->fx_count; i++) free(d->fx_state[i]);
     free(d->fx_state); free(d->fx_state_size); free(d->fx_desc);
+    free(d->fx_mem); d->fx_mem = NULL;
     size_t dsize = 8 + 32 * (size_t)count;
     d->fx_desc = calloc(1, dsize < sizeof(DSEFFECTIMAGEDESC) ? sizeof(DSEFFECTIMAGEDESC) : dsize);
     if (src) memcpy(d->fx_desc, src, dsize);
     d->fx_count = count;
     d->fx_state = calloc(count ? count : 1, sizeof(*d->fx_state));
     d->fx_state_size = calloc(count ? count : 1, sizeof(*d->fx_state_size));
+    /* Real DSound turns the descriptor's image-relative offsets into pointers
+       (GP X/Y/P memory in the APU's register space, FX scratch in RAM), and
+       titles read and write effect state through them directly (Doom 3 reads
+       mixbin addresses out of a state segment). Point them into stand-in
+       memory instead: X memory starts with the image's state block at the FX
+       state base (128 words), as the DSP loader leaves it. */
+    enum { XMEM = 0x6000, YMEM = 0x4000, PMEM = 0x4000, STATE_BASE = 128 * 4, CMD = 2048 + 24 };
+    DWORD scratch = count && src->dwTotalScratchSize < (16u << 20) ? src->dwTotalScratchSize : 0;
+    d->fx_mem = calloc(1, XMEM + YMEM + PMEM + scratch + 4);
+    uint8_t *xmem = d->fx_mem, *ymem = xmem + XMEM, *pmem = ymem + YMEM, *smem = pmem + PMEM;
+    uint64_t code = (uint64_t)cmd[1] * 4, state = (uint64_t)cmd[3] * 4;
+    if (CMD + code + state <= size && STATE_BASE + state <= XMEM)
+        memcpy(xmem + STATE_BASE, img + CMD + code, state);
+    DWORD smin = ~0u;
+    for (DWORD i = 0; i < count; i++) { DWORD v = (DWORD)(uintptr_t)d->fx_desc->aEffectMaps[i].lpvScratchSegment; if (v < smin) smin = v; }
     for (DWORD i = 0; i < count; i++) {
-        DWORD sz = d->fx_desc->aEffectMaps[i].dwStateSize * 4;
-        if (sz > (1u << 20)) sz = 1u << 20;
-        d->fx_state[i] = calloc(1, sz ? sz : 4);
-        d->fx_state_size[i] = sz;
+        DSEFFECTMAP *m = &d->fx_desc->aEffectMaps[i];
+        DWORD sz = m->dwStateSize * 4;
+        uint64_t x = STATE_BASE + (uint64_t)(DWORD)(uintptr_t)m->lpvStateSegment - CMD - code;
+        if ((DWORD)(uintptr_t)m->lpvStateSegment >= CMD + code && x + sz <= XMEM) {
+            d->fx_state[i] = xmem + x;
+            d->fx_state_size[i] = sz;
+            m->lpvStateSegment = xmem + x;
+        } else {
+            d->fx_state[i] = NULL;
+            d->fx_state_size[i] = 0;
+            m->lpvStateSegment = xmem + STATE_BASE;
+        }
+        DWORD y = (DWORD)(uintptr_t)m->lpvYMemorySegment, c = (DWORD)(uintptr_t)m->lpvCodeSegment;
+        m->lpvYMemorySegment = ymem + (y < YMEM ? y : 0);
+        m->lpvCodeSegment = pmem + (c >= CMD && c - CMD < PMEM ? c - CMD : 0);
+        DWORD so = (DWORD)(uintptr_t)m->lpvScratchSegment - smin;
+        m->lpvScratchSegment = smem + (so < scratch ? so : 0);
     }
     if (loc) d->fx_loc = *loc;
     if (ppDesc) *ppDesc = d->fx_desc;
@@ -2710,6 +2824,16 @@ static HRESULT NTAPI Voice_SetMixBins(void *self, const DSMIXBINS *p)
     VOICE_RETURN(voice_set_mixbins(v, p));
 }
 
+static HRESULT NTAPI Voice_SetMixBinVolumes(void *self, const DSMIXBINS *p);
+
+/* Pre-4039: SetMixBinVolumes(mask, volumes), one volume per set bit. */
+static HRESULT NTAPI Voice_SetMixBinVolumes_Mask(void *self, DWORD mask, const LONG *vols)
+{
+    DSMIXBINS m; DSMIXBINVOLUMEPAIR pairs[32];
+    if (!vols) return DSERR_INVALIDPARAM;
+    return Voice_SetMixBinVolumes(self, mask_mixbins(mask, &m, pairs, vols));
+}
+
 static HRESULT NTAPI Voice_SetMixBinVolumes(void *self, const DSMIXBINS *p)
 {
     if (!p || (p->dwMixBinCount && !p->lpMixBinVolumePairs)) return DSERR_INVALIDPARAM;
@@ -3085,6 +3209,7 @@ static struct ds_stream *stream_enter(void *self)
 {
     LOCK();
     struct ds_stream *s = find_stream(self);
+    if (s) mcpx_sync(s);
     UNLOCK();
     if (s) stream_drain(s);
     return s;
@@ -3140,6 +3265,7 @@ static HRESULT NTAPI Stream_Process(void *self, const XMEDIAPACKET *src, const X
     s->flush_pending = 0;
     s->starved = 0;
     s->active = 1;
+    mcpx_sync(s);
     VOICE_RETURN(DS_OK);
 }
 
@@ -3179,6 +3305,7 @@ static HRESULT NTAPI Stream_FlushEx(void *self, uint32_t rt_lo, uint32_t rt_hi, 
     STREAM_ENTRY(s, self);
     s->active = 0;
     s->flush_pending = 1;
+    mcpx_sync(s);
     VOICE_RETURN(DS_OK);
 }
 
@@ -3477,6 +3604,9 @@ const struct hle_func dsound_funcs[] = {
     VOICE_CPP("SetMixBins", "JPBU_DSMIXBINS@@@Z", Voice_SetMixBins),
     VOICE_SET("SetMixBinVolumes", "8", Voice_SetMixBinVolumes),
     VOICE_CPP("SetMixBinVolumes", "JPBU_DSMIXBINS@@@Z", Voice_SetMixBinVolumes),
+    VOICE_SET("SetMixBinVolumes", "12", Voice_SetMixBinVolumes_Mask),
+    VOICE_CPP("SetMixBinVolumes", "JKPBJ@Z", Voice_SetMixBinVolumes_Mask),
+    VOICE_CPP("SetMixBins", "JK@Z", Voice_SetMixBins),
     VOICE_SET("SetAllParameters", "12", Voice_SetAllParameters),
     VOICE_CPP("SetAllParameters", "JPBU_DS3DBUFFER@@K@Z", Voice_SetAllParameters),
     VOICE_SET("SetConeAngles", "16", Voice_SetConeAngles),

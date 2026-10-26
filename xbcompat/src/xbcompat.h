@@ -57,6 +57,7 @@ void arena_free(void *p);
 void *pool_alloc(size_t size);
 void pool_free(void *p);
 bool pool_owns(const void *p);
+bool guest_writable(const void *p);
 size_t pool_size(void *p);
 
 NTSTATUS NTAPI NtAllocateVirtualMemory(PVOID *BaseAddress, ULONG_PTR ZeroBits,
@@ -158,6 +159,11 @@ enum obj_kind { OBJ_NONE, OBJ_EVENT, OBJ_SEMAPHORE, OBJ_MUTANT, OBJ_TIMER, OBJ_T
 typedef struct xobject {
     enum obj_kind kind;
     int refs;
+    /* Where a FILE_OBJECT keeps FsContext (+8), since a file's xobject is
+       the file object titles get: 5xxx XAPI's XGetFilePhysicalSortKey reads
+       the file system's FCB through it (FATX's FirstCluster at +0x1c,
+       GDFX's FirstSector at +0).  Files point it at a small stand-in FCB. */
+    PVOID fs_context;
     char *name;
     union {
         KEVENT event;

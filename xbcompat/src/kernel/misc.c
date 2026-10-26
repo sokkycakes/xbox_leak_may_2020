@@ -28,6 +28,15 @@ ULONG HalBootSMCVideoMode = 0;
 BOOLEAN KdDebuggerEnabled = 0, KdDebuggerNotPresent = 1;
 PVOID LaunchDataPage = NULL;
 ULONG IdexChannelObject[32];
+#ifndef XBC_TRANSLATED
+/* IDE_CHANNEL_OBJECT's DeviceQueue.DeviceListHead (+0x28) starts empty:
+   XAPI's CancelIo walks it for the file's queued IRPs (Counter-Strike
+   cancels its reads when a level loads). */
+__attribute__((constructor)) static void idex_channel_init(void)
+{
+    IdexChannelObject[10] = IdexChannelObject[11] = (ULONG)(uintptr_t)&IdexChannelObject[10];
+}
+#endif
 UCHAR XboxEEPROMKey[16], XboxHDKey[16], XboxSignatureKey[16], XboxLANKey[16];
 UCHAR XboxAlternateSignatureKeys[16][16];
 UCHAR XePublicKeyData[284];
@@ -364,6 +373,14 @@ void NTAPI HalReturnToFirmware(ULONG Routine)
     av_hand_over();
     if (Routine == 2 && path && path[0]) relaunch(path);
     xlog("HalReturnToFirmware(%u): title asked to reboot or return to the dashboard", Routine);
+    if (LaunchDataPage) {
+        /* Why: XapiBootToDash's LD_LAUNCH_DASHBOARD (reason, context,
+           parameters) sits at the start of the page's launch data. */
+        const ULONG *ld = (const ULONG *)((const char *)LaunchDataPage + 1024);
+        xlog("HalReturnToFirmware: launch data type %u, title %#x, dashboard reason %u context %u "
+             "parameters %#x %#x", *(const ULONG *)LaunchDataPage, ((const ULONG *)LaunchDataPage)[1],
+             ld[0], ld[1], ld[2], ld[3]);
+    }
 #ifdef XBC_TRANSLATED
     if (Routine == 4 /* HalFatalErrorRebootRoutine */) cpu_dump_guest();
 #endif

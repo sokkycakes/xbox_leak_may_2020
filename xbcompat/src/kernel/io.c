@@ -16,6 +16,7 @@
  * is matched case-insensitively against the host directory.
  */
 #define _GNU_SOURCE
+#include <ctype.h>
 #include <dirent.h>
 #include <ftw.h>
 #include <errno.h>
@@ -55,6 +56,21 @@ typedef struct xfile {
     xobject *port;          /* I/O completion port bound by FileCompletionInformation */
     PVOID port_key;
 } xfile;
+
+/* A file's FsContext for titles that read the FCB themselves (xbcompat.h):
+   zeroed, flags clear, and the same made-up physical position as both
+   FATX's FirstCluster and GDFX's FirstSector, so files sort by path. */
+static PVOID stand_in_fcb(const char *xpath)
+{
+    ULONG *fcb = pool_alloc(0x40);
+    memset(fcb, 0, 0x40);
+    uint32_t h = 2166136261u;
+    for (const char *c = xpath ? xpath : ""; *c; c++) h = (h ^ (unsigned char)tolower((unsigned char)*c)) * 16777619u;
+    h = (h & 0x00fffffe) | 2;   /* even, so FATX's flag bit 0 reads clear; never 0 */
+    fcb[0] = h;
+    fcb[0x1c / 4] = h;
+    return fcb;
+}
 
 static char cdrom_dir[PATH_MAX];
 static char hdd_dir[PATH_MAX];
@@ -520,6 +536,7 @@ made:
     {
         xobject *o = object_new(OBJ_FILE);
         o->file = f;
+        o->fs_context = stand_in_fcb(f->xbox);
         *FileHandle = handle_insert(o);
     }
     f = NULL;
@@ -581,6 +598,14 @@ static NTSTATUS complete(HANDLE Event, PVOID ApcRoutine, PVOID ApcContext, IO_ST
 static NTSTATUS fcomplete(xfile *f, HANDLE Event, PVOID ApcRoutine, PVOID ApcContext, IO_STATUS_BLOCK *iosb,
                           NTSTATUS st, ULONG info)
 {
+    /* A request that fails at once leaves the caller's status block alone
+       (IopCompleteRequest copies it only for success or a pended error).
+       XAPI's overlapped ReadFile primes OVERLAPPED.Internal with
+       STATUS_PENDING, so GetOverlappedResult on a read that hit the end of
+       a file still succeeds with 0 bytes: Counter-Strike's file cache
+       closes its files that way and stops with a fatal "Cache" error when
+       it sees STATUS_END_OF_FILE there. */
+    if (NT_ERROR(st)) return st;
     NTSTATUS r = complete(Event, ApcRoutine, ApcContext, iosb, st, info);
     if (f && f->port && !NT_ERROR(st) && !ApcRoutine && ApcContext)
         iocp_post(f->port, f->port_key, ApcContext, st, info);
@@ -993,6 +1018,7 @@ NTSTATUS NTAPI NtQueryVolumeInformationFile(HANDLE FileHandle, IO_STATUS_BLOCK *
 {
     xfile *f = file_of(FileHandle);
     if (!f) return STATUS_INVALID_HANDLE;
+    TRACE("NtQueryVolumeInformationFile(%s, class %u)", f->host, Class);
     ULONG size = 0;
     struct statvfs vs;
     if (statvfs(f->host, &vs) != 0) memset(&vs, 0, sizeof(vs));
@@ -1026,6 +1052,10 @@ NTSTATUS NTAPI NtQueryVolumeInformationFile(HANDLE FileHandle, IO_STATUS_BLOCK *
             if (free_e < avail) avail = free_e;
         }
         if (avail > total) avail = total;
+        /* Free space stays under 4 GB: titles that multiply it out into a
+           DWORD of bytes (Mercenaries, King Kong) saw 8 GB wrap to 0 and
+           sent the player to the dashboard to free blocks. */
+        if (avail > 0xFFE00000ULL && !frolick_dash()) avail = 0xFFE00000ULL;
         li[0].QuadPart = total / cluster;
         li[1].QuadPart = avail / cluster;
         if (Class == 7) { li[2].QuadPart = li[1].QuadPart; u = (ULONG *)&li[3]; size = 32; }
