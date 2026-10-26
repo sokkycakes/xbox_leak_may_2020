@@ -293,10 +293,26 @@ struct ds_done {
     struct ds_stream *s;
 };
 
+/* Halo (XDK 3925) reaches past the stream into its CMcpxStream: m_pStream at
+   p+0x24, the voice status DWORD at +8 (MCPX_VOICESTATUS_ACTIVE 2) and a
+   two-argument __thiscall stop at vtable slot 4.  The stand-in's methods are
+   guest code that only set fields, which the stream picks up (mcpx_sync). */
+struct ds_mcpx {
+    void **vtbl;                      /* -> code */
+    uint32_t apu;
+    volatile DWORD status;            /* +8 */
+    volatile DWORD stop_req;          /* +0xC: set by the guest-side stop */
+    void *slots[8];
+    uint8_t code[2][20];              /* [0] stop, [1] any other slot: ud2 */
+};
+
 struct ds_stream {
     void **vtbl;                      /* p: IDirectSoundStream / XMediaObject vtable */
     struct ds_refhdr hdr_rel;         /* p+4: release-build CRefCount */
     struct ds_refhdr hdr_dbg;         /* p+0xC: debug-build CRefCount */
+    uint32_t pad[4];
+    struct ds_mcpx *mcpx;             /* p+0x24: 3925 m_pStream */
+    struct ds_mcpx mcpx_obj;
     struct ds_voice v;
     DWORD max_packets;
     struct ds_packet *pk; DWORD head, count;   /* ring of accepted packets */
@@ -307,6 +323,30 @@ struct ds_stream {
 };
 _Static_assert(offsetof(struct ds_stream, hdr_rel) == 4 && offsetof(struct ds_stream, hdr_dbg) == 0xC,
                "stream layout");
+_Static_assert(offsetof(struct ds_stream, mcpx) == 0x24, "stream m_pStream");
+
+static void mcpx_init(struct ds_stream *s)
+{
+    static const uint8_t stop[] = {
+        0xC7, 0x41, 0x08, 0, 0, 0, 0,        /* mov dword [ecx+8], 0 */
+        0xC7, 0x41, 0x0C, 1, 0, 0, 0,        /* mov dword [ecx+0xC], 1 */
+        0xC2, 0x08, 0x00,                    /* ret 8 (eax: the caller ignores it) */
+    };
+    struct ds_mcpx *m = &s->mcpx_obj;
+    memcpy(m->code[0], stop, sizeof(stop));
+    m->code[1][0] = 0x0F; m->code[1][1] = 0x0B;
+    for (int i = 0; i < 8; i++) m->slots[i] = m->code[i == 4 ? 0 : 1];
+    m->vtbl = m->slots;
+    s->mcpx = m;
+}
+
+/* Take a guest-side stop, then publish whether the voice runs. */
+static void mcpx_sync(struct ds_stream *s)
+{
+    struct ds_mcpx *m = &s->mcpx_obj;
+    if (m->stop_req) { m->stop_req = 0; s->active = 0; }
+    m->status = s->active ? 3 : 1;   /* ALLOCATED | ACTIVE */
+}
 
 struct ds_object {
     uint32_t valid_vptr, valid_sig;   /* p-0x10 */
@@ -1041,6 +1081,7 @@ static void flush_locked(struct ds_stream *s, DWORD status)
     s->pos = 0;
     s->active = 0; s->paused = 0; s->starved = 0; s->discontinuity = 0; s->flush_pending = 0;
     s->v.adpcm_block = -1;
+    mcpx_sync(s);
 }
 
 static void *completion_thread(void *arg)
@@ -1135,6 +1176,7 @@ static void buffer_mixed(struct ds_buffer *b, const struct dsmix_voice *j, struc
 /* Describe a running stream for dsmix_run, its queued packets in pk. */
 static bool stream_job(struct ds_stream *s, struct dsmix_voice *j, struct dsmix_packet *pk)
 {
+    mcpx_sync(s);
     if (!s->active || s->paused || s->starved || !s->count) return false;
     voice_job(j, &s->v);
     j->kind = DSMIX_STREAM;
@@ -1161,6 +1203,7 @@ static void stream_mixed(struct ds_stream *s, const struct dsmix_voice *j)
         if (s->discontinuity) { s->active = 0; s->discontinuity = 0; s->pos = 0; }
         else s->starved = 1;
     }
+    mcpx_sync(s);
 }
 
 /* A MIXIN/FXIN buffer is a voice whose input is what the voices routed to it
@@ -1663,6 +1706,7 @@ static HRESULT stream_create_locked(const DSSTREAMDESC *desc, uint32_t *pp)
     s->pk = calloc(s->max_packets, sizeof(*s->pk));
     s->callback = desc->lpfnCallback; s->context = desc->lpvContext;
     s->active = 0;   /* the voice starts with the first packet (CMcpxStream::CommitSsl) */
+    mcpx_init(s); mcpx_sync(s);
     if ((desc->dwFlags & DSSTREAMCAPS_ACCURATENOTIFY) && !g.cthread_started && !g_ds_no_audio_thread) {
         pthread_t t;
         g.cthread_started = 1;
@@ -3163,6 +3207,7 @@ static struct ds_stream *stream_enter(void *self)
 {
     LOCK();
     struct ds_stream *s = find_stream(self);
+    if (s) mcpx_sync(s);
     UNLOCK();
     if (s) stream_drain(s);
     return s;
@@ -3218,6 +3263,7 @@ static HRESULT NTAPI Stream_Process(void *self, const XMEDIAPACKET *src, const X
     s->flush_pending = 0;
     s->starved = 0;
     s->active = 1;
+    mcpx_sync(s);
     VOICE_RETURN(DS_OK);
 }
 
@@ -3257,6 +3303,7 @@ static HRESULT NTAPI Stream_FlushEx(void *self, uint32_t rt_lo, uint32_t rt_hi, 
     STREAM_ENTRY(s, self);
     s->active = 0;
     s->flush_pending = 1;
+    mcpx_sync(s);
     VOICE_RETURN(DS_OK);
 }
 
