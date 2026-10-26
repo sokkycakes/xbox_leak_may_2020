@@ -91,6 +91,16 @@ EXTRA_SIGS = [
     # device state xbcompat keeps elsewhere.
     ("_D3D_LazySetState@0",
      rb"\x53\x8b\x1d....\xf6\xc7\x01\x56\x8b\x35....\x74\x05\xe8"),
+    # SetRenderTarget for a target the size and format of the current one
+    # (Halo 2): render target on the stack, depth in ebx, surface offsets only.
+    ("_D3DDevice_SetRenderTargetSameSize@8 regs=s,ebx",
+     rb"\x55\x8b\x6c\x24\x08\x8b\x45\x00\xa9\x00\x00\x78\x00\x56\x57\x8b\x3d....\x75\x19"
+     rb"\x25\x00\x00\x07\x00\x3d\x00\x00\x05\x00\x75\x0d\x8b\x45\x14\x85\xc0\x74\x06"),
+    # SelectVertexShaderDirect with the address in eax and the attribute
+    # format in ecx (Halo 2; XbSymbolDatabase has them as eax, ebx): copies
+    # the format into g_DirectVertexShader, or sets the program start.
+    ("_D3DDevice_SelectVertexShaderDirect@8 regs=ecx,eax",
+     rb"\x53\x56\x8b\xf1\x85\xf6\x8b\xd8\x74.\x57\xb8....\xb9\x40\x00\x00\x00\xbf....\x83\xc8\x01\xf3\xa5"),
     # BeginPush with the dword count in esi; returns where to write.
     ("_D3DDevice_BeginPushLTCG@4 regs=esi",
      rb"\xa1....\x6a\x00\x50\xe8....\x8b\x0d....\x8b\x01\x8b\x49\x04\x8d\x54\xb0\x04"),

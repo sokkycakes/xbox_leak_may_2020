@@ -4195,8 +4195,23 @@ static void vs_set_program(ULONG h)
     }
 }
 
+/* SelectVertexShaderDirect: the layout `layout_h` describes, running the
+   program loaded at `address` (titles load them with LoadVertexShaderProgram). */
+static void select_direct(ULONG layout_h, ULONG address)
+{
+    unsigned n = address < 136 ? vp_program_length(address) : 0;
+    vs_set_program(n ? vs_compose((const vshader *)(layout_h & ~1u), vp_mem[address], n, NULL, layout_h) : layout_h);
+    if (d3d.recording) pb_record(OP_VERTEX_SHADER, &d3d.vertex_shader, 4);
+}
+
 static void NTAPI D3DDevice_SelectVertexShader(ULONG handle, ULONG address)
 {
+    if ((handle & 1) && ((const vshader *)(handle & ~1u))->magic != VSH_MAGIC) {
+        /* An inlined SelectVertexShaderDirect (Halo 2): the title's
+           VertexShader only carries the layout. */
+        select_direct(own_vertex_shader(handle), address);
+        return;
+    }
     handle = own_vertex_shader(handle);
     /* With a handle, its own program runs (the program it was loaded with
        is at `address`); xbcompat's program memory copy is not exact enough
@@ -4391,7 +4406,8 @@ static void NTAPI D3DDevice_SetVertexShaderInputDirect(const ULONG *vaf, UINT_ c
 
 static void NTAPI D3DDevice_SelectVertexShaderDirect(const ULONG *vaf, ULONG address)
 {
-    D3DDevice_SelectVertexShader(vaf ? direct_layout_handle(vaf) : 0, address);
+    if (vaf) select_direct(direct_layout_handle(vaf), address);
+    else D3DDevice_SelectVertexShader(0, address);
 }
 
 
@@ -4442,7 +4458,7 @@ static GLuint vertex_shader_generic_object(vshader *sh)
             if (sh->attr[r].stream >= 0)
                 n += snprintf(line + n, sizeof line - n, " v%d=s%d+%u:%#x", r, sh->attr[r].stream,
                               sh->attr[r].offset, sh->attr[r].type);
-        xlog("D3D: vertex program %u instructions, inputs%s", sh->ninstr, line);
+        xlog("D3D: vertex program %p: %u instructions, inputs%s", (void *)sh, sh->ninstr, line);
     }
     sh->vs = compile_shader(GL_VERTEX_SHADER, src);
     note_two_side(sh->vs, src);
@@ -8979,7 +8995,11 @@ static void NTAPI D3DDevice_SetPixelShader(ULONG handle)
     if (own_ps_def(handle)) {
         obj = (ULONG *)handle;
         def = own_ps_def(handle);
-    } else if (def && !pool_owns(def) && def[0] < 0x10000 && def[1] <= 1 && def[2] >= 0x10000) {
+    } else if (def && (!pool_owns(def) || (d3d.device && def >= d3d.device && def < d3d.device + 0x1000))
+               && def[0] < 0x10000 && def[1] <= 1 && def[2] >= 0x10000) {
+        /* The device's own object counts too: an inlined
+           SetPixelShaderProgram fills the one in the CDevice (+0x924 in 5849,
+           Halo 2), which xbcompat allocates. */
         obj = (ULONG *)def;
         def = (const ULONG *)def[2];
     }
@@ -9870,6 +9890,11 @@ static void pb_interpret_body(const ULONG *p, unsigned n)
                 unsigned slot = const_load + pos / 4;
                 if (slot < 192) { d3d.vs_const[slot][pos % 4] = f; vsc_touch(slot, 1); }
                 if (k == count - 1) const_load += (pos + 1) / 4;
+            } else if (m >= 0x1500 && m < 0x1528) {   /* NV097_SET_VERTEX3F / SET_VERTEX4F: position, emits */
+                /* SetVertexData4f(D3DVSDE_VERTEX) inlined by LTCG titles. */
+                unsigned c = m < 0x1518 ? (m - 0x1500) / 4 : (m - 0x1518) / 4, last = m < 0x1518 ? 2 : 3;
+                partial[0][c] = f;
+                if (c == last) imm_set(-1, partial[0][0], partial[0][1], partial[0][2], last == 3 ? f : 1);
             } else if (m >= 0x1880 && m < 0x1900) {   /* NV097_SET_VERTEX_DATA2F_M */
                 unsigned slot = (m - 0x1880) / 8, c = ((m - 0x1880) % 8) / 4;
                 partial[slot][c] = f;
@@ -9921,6 +9946,7 @@ static bool pb_state_only(const ULONG *p, unsigned n)
            immediate vertex data all sit in 0x1800..0x1AFF, with the eye
            vector between them. */
         if (last >= 0x17FC && method < 0x1B00 && !(method >= 0x181C && last <= 0x1824)) return false;
+        if (last >= 0x1500 && method < 0x1528) return false;   /* SET_VERTEX3F / 4F */
     }
     return true;
 }
@@ -10577,6 +10603,16 @@ static void NTAPI D3DDevice_SetRenderTargetFast(D3DSurface *target, D3DSurface *
     D3DDevice_SetRenderTarget(target, z);
 }
 
+/* SetRenderTarget's path for a target the same size and format as the
+   current one (5849 LTCG, render target on the stack, depth in ebx): it only
+   swaps the surface offsets, so the viewport the title set stays. */
+static void NTAPI D3DDevice_SetRenderTargetSameSize(D3DSurface *target, D3DSurface *z)
+{
+    D3DVIEWPORT8 v = d3d.viewport;
+    D3DDevice_SetRenderTargetFast(target, z, 0);
+    D3DDevice_SetViewport(&v);
+}
+
 /* SetTexture's fast path when only the image moves (same size and format):
    the method is NV097_SET_TEXTURE_OFFSET(stage).  The stage keeps a copy of
    its texture header pointing at the new data. */
@@ -10896,6 +10932,7 @@ const struct hle_func d3d8_funcs[] = {
     F("_D3DDevice_SetModelView@12", D3DDevice_SetModelView),
     F("_D3DDevice_GetViewportOffsetAndScale@8", D3DDevice_GetViewportOffsetAndScale),
     F("_D3DDevice_SetRenderTargetFast@12", D3DDevice_SetRenderTargetFast),
+    F("_D3DDevice_SetRenderTargetSameSize@8", D3DDevice_SetRenderTargetSameSize),
     F("@D3DDevice_SwitchTexture@12", D3DDevice_SwitchTexture),
     F("_D3DDevice_SetRenderState@8", SetRenderStateNotInline),
     F("_D3DDevice_SetRenderState2@8", SetRenderStateNotInline),
