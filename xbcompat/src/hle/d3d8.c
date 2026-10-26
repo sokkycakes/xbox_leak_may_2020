@@ -1429,10 +1429,35 @@ static void swap_exit_check(void)
     }
 }
 
+/* Swap(D3DSWAP_BYPASSCOPY) ... Swap(D3DSWAP_FINISH): the library points the
+   render target at the next frame buffer and texture stage 0 at the frame
+   just drawn, and the title draws its own copy of it (the EA Harry Potter
+   and Lord of the Rings games filter the frame this way) before FINISH
+   puts the target and the texture back and shows the frame.  One GL frame
+   stands for both buffers here: stage 0 gets a view of the back buffer,
+   which texture_for() copies before the title draws over it. */
+#define D3DSWAP_COPY       1
+#define D3DSWAP_BYPASSCOPY 2
+#define D3DSWAP_FINISH     4
+static void NTAPI D3DDevice_SetTexture(ULONG Stage, D3DResource *t);
+static struct { bool open; D3DResource *saved; struct D3DSurface view; } swap_split;
+
 static ULONG NTAPI D3DDevice_Swap(ULONG Flags)
 {
     gl_require();
-    (void)Flags;
+    if ((Flags & (D3DSWAP_COPY | D3DSWAP_BYPASSCOPY)) && !(Flags & D3DSWAP_FINISH)) {
+        if (!swap_split.open && (Flags & D3DSWAP_BYPASSCOPY) && d3d.backbuffer) {
+            swap_split.saved = d3d.textures[0];
+            swap_split.view = *d3d.backbuffer;
+            D3DDevice_SetTexture(0, (D3DResource *)&swap_split.view);
+        }
+        swap_split.open = true;
+        return d3d.frame;
+    }
+    if (swap_split.open) {
+        if (d3d.textures[0] == (D3DResource *)&swap_split.view) D3DDevice_SetTexture(0, swap_split.saved);
+        swap_split.open = false;
+    }
     if (async_front()) return async_swap();
     pusher_drain();
     hud_batch_flush();
