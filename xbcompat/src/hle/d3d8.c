@@ -1955,6 +1955,11 @@ typedef struct tex_entry {
     uint64_t hash;       /* watched textures: memory_sample_hash() at upload */
     ULONG checked;       /* the frame the hash was last compared in */
     bool watch;
+    /* Small watched textures are compared at every draw for their first
+       frames, and from their first change on: Halo 2 writes glyphs into its
+       font cache between the draws of a frame. */
+    bool per_draw;
+    unsigned char probe_frames;
 } tex_entry;
 
 /* A sparse FNV-1a over a texture's memory: one word per 64 bytes.  Titles
@@ -1963,8 +1968,11 @@ typedef struct tex_entry {
    The Return of the King decodes each frame into the same three planes. */
 static uint64_t memory_sample_hash(const uint8_t *p, ULONG bytes)
 {
+    /* Small images are read whole: a glyph cache (Halo 2's 256x256 font
+       texture) gets a few pixels at a time, which one word in eight missed. */
+    ULONG step = bytes <= 256 * 1024 ? 8 : 64;
     uint64_t x = 0xcbf29ce484222325ull;
-    for (ULONG o = 0; o + 8 <= bytes; o += 64) x = (x ^ *(const uint64_t *)(p + o)) * 0x100000001b3ull;
+    for (ULONG o = 0; o + 8 <= bytes; o += step) x = (x ^ *(const uint64_t *)(p + o)) * 0x100000001b3ull;
     return x;
 }
 
@@ -2488,13 +2496,20 @@ static GLuint texture_for(D3DPixelContainer *t)
     if (nocache) tex_invalidate(t->res.Data);
     ULONG fmt = (t->Format >> 8) & 0xFF, w, h, pitch;
     ULONG pal = fmt == 0x0B ? palette_hash() : 0;
+    bool per_draw = false;
+    unsigned char probe_frames = 0;
     for (tex_entry *e = *tex_bucket(t->res.Data); e; e = e->next)
         if (e->data == t->res.Data && e->format == t->Format && e->size == t->Size && e->pal == pal) {
-            if (!e->watch || e->checked == d3d.frame) return e->id;
+            if (!e->watch) return e->id;
+            bool same_frame = e->checked == d3d.frame;
+            if (same_frame && !(e->per_draw && watched_bytes(t) <= 256 * 1024) && e->probe_frames >= 30) return e->id;
+            if (!same_frame && e->probe_frames < 30) e->probe_frames++;
             e->checked = d3d.frame;
             if (memory_sample_hash((const uint8_t *)(t->res.Data | CONTIG_BASE), watched_bytes(t)) == e->hash)
                 return e->id;
             TRACE_ALL("D3D: texture memory at %#x changed without a lock, uploaded again", (unsigned)t->res.Data);
+            per_draw = true;   /* the CPU writes it: compare at every draw from now on (small ones) */
+            probe_frames = e->probe_frames;
             tex_invalidate(t->res.Data);
             break;
         }
@@ -2535,11 +2550,17 @@ static GLuint texture_for(D3DPixelContainer *t)
 
     tex_entry *e = malloc(sizeof(*e));
     *e = (tex_entry){ t->res.Data, t->Format, t->Size, pal, id, target, *tex_bucket(t->res.Data), 0, 0, false };
-    /* Linear textures over the title's own memory are watched for CPU writes. */
-    e->watch = t->Size && !(t->res.Common & D3DCOMMON_D3DCREATED) && target == GL_TEXTURE_2D;
+    /* Linear textures over the title's own memory are watched for CPU writes,
+       and so are linear textures the title's inlined D3D created (header
+       outside xbcompat's pool): their Lock is inlined too, so nothing tells
+       xbcompat about writes (Halo 2's font cache). */
+    e->watch = t->Size && (!(t->res.Common & D3DCOMMON_D3DCREATED) || !pool_owns(t)) && target == GL_TEXTURE_2D;
     if (e->watch) {
         e->hash = memory_sample_hash(src, watched_bytes(t));
         e->checked = d3d.frame;
+        e->per_draw = per_draw;
+        /* Large ones are compared once a frame from the start. */
+        e->probe_frames = watched_bytes(t) <= 256 * 1024 ? probe_frames : 30;
     }
     *tex_bucket(t->res.Data) = e;
     tex_cache_version++;
@@ -2555,6 +2576,7 @@ static ULONG watched_bytes(const D3DPixelContainer *t)
 
 static void NTAPI D3DDevice_SetTexture(ULONG Stage, D3DResource *t)
 {
+    pusher_drain();   /* draws the title wrote into the push buffer use the texture they were written with */
     if (d3d.recording) { ULONG a[2] = { Stage, (ULONG)t }; pb_record(OP_TEXTURE, a, sizeof(a)); }
     TRACE_ALL("D3D: SetTexture(%u, %p) data %#x", Stage, (void *)t, t ? (unsigned)t->Data : 0);
     if (Stage < 4) d3d.textures[Stage] = t;
@@ -2562,6 +2584,7 @@ static void NTAPI D3DDevice_SetTexture(ULONG Stage, D3DResource *t)
 
 static void NTAPI D3DDevice_SetTextureStageStateNotInline(ULONG Stage, ULONG Type, ULONG Value)
 {
+    pusher_drain();
     if (Stage < 4 && Type < 32) TSS(Stage, Type) = Value;
 }
 
@@ -3073,6 +3096,7 @@ static void NTAPI D3DDevice_SetStreamSource(UINT_ Stream, D3DResource *vb, UINT_
 static ULONG own_vertex_shader(ULONG handle);
 static void NTAPI D3DDevice_SetVertexShader(ULONG Handle)
 {
+    pusher_drain();
     Handle = own_vertex_shader(Handle);
     if (d3d.recording) pb_record(OP_VERTEX_SHADER, &Handle, 4);
     if (vs_direct_input()) { vs_set_program_ext(Handle); return; }
@@ -3169,6 +3193,7 @@ static bool pb_render_state(ULONG m, ULONG d);
 
 static void FASTCALL SetRenderState_Simple(ULONG Method, ULONG Value)
 {
+    pusher_drain();
     /* Inline header code usually stores the value in D3D__RenderState
        itself, but LTCG builds can drop or defer that store; record it from
        the method too. */
@@ -3243,7 +3268,7 @@ static void FASTCALL SetTextureState_Deferred(ULONG Stage, ULONG Type, ULONG Val
 }
 
 #define COMPLEX_STATE(name, index) \
-    static void NTAPI SetRenderState_##name(ULONG Value) { RS(index) = Value; }
+    static void NTAPI SetRenderState_##name(ULONG Value) { pusher_drain(); RS(index) = Value; }
 COMPLEX_STATE(ZEnable, D3DRS_ZENABLE)
 COMPLEX_STATE(CullMode, D3DRS_CULLMODE)
 COMPLEX_STATE(FillMode, D3DRS_FILLMODE)
@@ -4199,6 +4224,7 @@ static void vs_set_program(ULONG h)
    program loaded at `address` (titles load them with LoadVertexShaderProgram). */
 static void select_direct(ULONG layout_h, ULONG address)
 {
+    pusher_drain();
     unsigned n = address < 136 ? vp_program_length(address) : 0;
     vs_set_program(n ? vs_compose((const vshader *)(layout_h & ~1u), vp_mem[address], n, NULL, layout_h) : layout_h);
     if (d3d.recording) pb_record(OP_VERTEX_SHADER, &d3d.vertex_shader, 4);
@@ -4283,6 +4309,7 @@ static D3DResource *vs_input_shim(D3DResource *vb, ULONG offset)
 
 static void NTAPI D3DDevice_SetVertexShaderInput(ULONG handle, UINT_ count, const ULONG *inputs)
 {
+    pusher_drain();
     handle = own_vertex_shader(handle);
     if (d3d.recording) { ULONG h[2] = { handle, count }; pb_record2(OP_VS_INPUT, h, 8, inputs, count * 12); }
     if (!handle) {
@@ -4717,8 +4744,8 @@ static GLuint fragment_shader_object(void)
         xlog("D3D: pixel shader %#x could not be translated", d3d.pixel_shader);
     } else {
         /* Debug aid: XBCOMPAT_PSH_DUMP=1 logs every translated pixel shader. */
-        if (getenv("XBCOMPAT_PSH_DUMP")) xlog("D3D: pixel shader %#x:\n%s", d3d.pixel_shader, src);
         e->fs = compile_shader(GL_FRAGMENT_SHADER, src);
+        if (getenv("XBCOMPAT_PSH_DUMP")) xlog("D3D: pixel shader %#x (fs %u):\n%s", d3d.pixel_shader, e->fs, src);
         free(src);
     }
     e->next = fshaders;
@@ -5669,8 +5696,8 @@ static void draw_programmable_(vshader *sh, ULONG PrimitiveType, const UCHAR *up
     bool ready;
     DETAIL_TIMED(t_program, ready = use_program(vs, &e));
     if (!ready) return;
-    TRACE_ALL("D3D: draw(program %u) prim %u count %u indices %p vs %u ps %#x z %u/%u/%u blend %u %u/%u atest %u cw %#x stencil %u vp %u,%u %ux%u %g-%g",
-          e ? e->prog : 0, PrimitiveType, count, indices ? indices + first : NULL, vs, d3d.pixel_shader,
+    TRACE_ALL("D3D: draw(program %u) prim %u count %u indices %p vs %u ps %#x fs %u z %u/%u/%u blend %u %u/%u atest %u cw %#x stencil %u vp %u,%u %ux%u %g-%g",
+          e ? e->prog : 0, PrimitiveType, count, indices ? indices + first : NULL, vs, d3d.pixel_shader, e ? e->fs : 0,
           RS(D3DRS_ZENABLE), RS(D3DRS_ZFUNC), RS(D3DRS_ZWRITEENABLE), RS(D3DRS_ALPHABLENDENABLE),
           RS(D3DRS_SRCBLEND), RS(D3DRS_DESTBLEND), RS(D3DRS_ALPHATESTENABLE), RS(D3DRS_COLORWRITEENABLE),
           RS(D3DRS_STENCILENABLE), d3d.viewport.X, d3d.viewport.Y, d3d.viewport.Width, d3d.viewport.Height,
@@ -5679,6 +5706,10 @@ static void draw_programmable_(vshader *sh, ULONG PrimitiveType, const UCHAR *up
         xlog("D3D:   ps constants c0 %08x %08x c1 %08x %08x, mapping %08x %08x", RS(D3DRS_PSCONSTANT0_0),
              RS(D3DRS_PSCONSTANT0_0 + 1), RS(D3DRS_PSCONSTANT1_0), RS(D3DRS_PSCONSTANT1_0 + 1),
              ((const ULONG *)d3d.pixel_shader)[57], ((const ULONG *)d3d.pixel_shader)[58]);
+    if (g_trace == 1 && d3d.pixel_shader)
+        xlog("D3D:   ps final %08x %08x, %u stages (%08x), modes %08x, rgb0 in %08x out %08x", d3d.render_state[8],
+             d3d.render_state[9], d3d.render_state[53] & 0xFF, d3d.render_state[53], RS(D3DRS_PSTEXTUREMODES),
+             d3d.render_state[34], d3d.render_state[45]);
     if (g_trace == 1)
         for (int st = 0; st < 4; st++) {
             const D3DPixelContainer *t = (const D3DPixelContainer *)d3d.textures[st];
@@ -8542,6 +8573,7 @@ static int constant_slot(LONG reg)
 
 static void NTAPI D3DDevice_SetVertexShaderConstant(LONG Register, const float *data, ULONG count)
 {
+    pusher_drain();
     if (d3d.recording) { ULONG h[2] = { (ULONG)Register, count }; pb_record2(OP_VS_CONST, h, 8, data, count * 16); }
     TRACE_ALL("D3D: vs constant %d x%u = %g %g %g %g", Register, count, data[0], data[1], data[2], data[3]);
     for (unsigned r = 1; r < count && r < 8; r++)
@@ -8958,6 +8990,10 @@ static void NTAPI D3DDevice_CreatePixelShader(const ULONG *def, ULONG *handle)
    dialog boxes and button glyphs got no color constant and drew nothing. */
 static void set_pixel_shader_def(const ULONG *def, ULONG *obj)
 {
+    /* Combiner registers the title wrote into the push buffer before this
+       call come first, as on the GPU: Halo 2's next pass otherwise ran with
+       the previous pass's leftover combiners over the new definition. */
+    pusher_drain();
     TRACE_ALL("D3D: pixel shader %p", (void *)def);
     if (d3d.recording) { ULONG h = (ULONG)def; pb_record(OP_PIXEL_SHADER, &h, 4); }
     d3d.pixel_shader = (ULONG)def;
