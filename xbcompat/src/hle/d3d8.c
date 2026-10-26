@@ -8705,11 +8705,23 @@ static void NTAPI D3DResource_FreePrivateData(D3DResource *r, const void *g) {}
    last three dwords map D3D constant registers to combiner constants. */
 #define PSDEF_DWORDS 60
 
+/* CreatePixelShader's handle is the library's { RefCount, D3DOwned, pPSDef }
+   object with the definition copied right after it.  Titles rely on that:
+   Mortal Kombat Armageddon, Darkwatch and From Russia with Love search the
+   object for the copy and then for the pointer to it, and read past the
+   end of memory when either is missing. */
+static ULONG *own_ps_def(ULONG handle)
+{
+    ULONG *o = (ULONG *)handle;
+    return o && pool_owns(o) && o[2] == (ULONG)(o + 3) ? o + 3 : NULL;
+}
+
 static void NTAPI D3DDevice_CreatePixelShader(const ULONG *def, ULONG *handle)
 {
-    ULONG *copy = pool_alloc(PSDEF_DWORDS * 4);
-    memcpy(copy, def, PSDEF_DWORDS * 4);
-    *handle = (ULONG)copy;
+    ULONG *obj = pool_alloc((3 + PSDEF_DWORDS) * 4);
+    obj[0] = 1; obj[1] = 1; obj[2] = (ULONG)(obj + 3);
+    memcpy(obj + 3, def, PSDEF_DWORDS * 4);
+    *handle = (ULONG)obj;
     if (getenv("XBCOMPAT_PSH_CATALOG")) {
         /* Debug aid: log every definition a title creates (tests/psh_catalog.py). */
         char line[PSDEF_DWORDS * 9 + 1], *o = line;
@@ -8760,7 +8772,10 @@ static void NTAPI D3DDevice_SetPixelShader(ULONG handle)
     /* A title that builds its own shader objects (LTCG, no CreatePixelShader
        to replace) passes the library's { RefCount, D3DOwned, pPSDef }. */
     ULONG *obj = NULL;
-    if (def && !pool_owns(def) && def[0] < 0x10000 && def[1] <= 1 && def[2] >= 0x10000) {
+    if (own_ps_def(handle)) {
+        obj = (ULONG *)handle;
+        def = own_ps_def(handle);
+    } else if (def && !pool_owns(def) && def[0] < 0x10000 && def[1] <= 1 && def[2] >= 0x10000) {
         obj = (ULONG *)def;
         def = (const ULONG *)def[2];
     }
@@ -8777,16 +8792,23 @@ static void NTAPI D3DDevice_SetPixelShaderProgram(const ULONG *def)
     set_pixel_shader_def(def, NULL);
 }
 
-static void NTAPI D3DDevice_GetPixelShader(ULONG *handle) { *handle = d3d.pixel_shader; }
+static void NTAPI D3DDevice_GetPixelShader(ULONG *handle)
+{
+    ULONG *def = (ULONG *)d3d.pixel_shader;
+    /* our own objects hand back the handle, not the definition inside */
+    *handle = def && own_ps_def((ULONG)(def - 3)) == def ? (ULONG)(def - 3) : d3d.pixel_shader;
+}
 static void NTAPI D3DDevice_DeletePixelShader(ULONG handle)
 {
     if (!handle) return;
-    if (handle == d3d.pixel_shader) d3d.pixel_shader = 0;
+    ULONG *def = own_ps_def(handle);
+    if ((ULONG)def == d3d.pixel_shader || handle == d3d.pixel_shader) d3d.pixel_shader = 0;
     pool_free((void *)handle);
 }
 static void NTAPI D3DDevice_GetPixelShaderFunction(ULONG handle, ULONG *def)
 {
-    if (handle) memcpy(def, (const void *)handle, PSDEF_DWORDS * 4);
+    const ULONG *own = own_ps_def(handle);
+    if (handle) memcpy(def, own ? own : (const ULONG *)handle, PSDEF_DWORDS * 4);
 }
 
 static ULONG float_color(const float *f)
