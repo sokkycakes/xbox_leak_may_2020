@@ -24,6 +24,7 @@ int g_exit_after_frames;
 volatile unsigned g_guest_traps;
 
 #ifdef XBC_NATIVE
+bool rtl_redirect_fault(void *ucontext, int sig, ULONG code, ULONG addr, ULONG write);
 /* int 2Dh is the kernel debugger service (DebugService in the NT CRT):
    eax = service, ecx/edx = arguments, followed by an int 3 that the kernel
    skips when it handles the request.  xapilib's OutputDebugString uses it. */
@@ -88,6 +89,14 @@ static void crash_handler(int sig, siginfo_t *si, void *uc_)
         /* int 3 (DbgBreakPoint and friends): nobody is listening, carry on. */
         xlog("breakpoint at eip=%08x ignored", r[REG_EIP]);
         return;
+    }
+    /* A fault in guest code goes to the title's SEH handlers (rtl.c). */
+    Dl_info gi;
+    if (sig != SIGTRAP && thread_current() && !dladdr((void *)r[REG_EIP], &gi)) {
+        ULONG code = sig == SIGILL ? 0xC000001D
+                   : sig == SIGFPE ? (si->si_code == FPE_INTOVF ? 0xC0000095 : 0xC0000094)
+                   : 0xC0000005;
+        if (rtl_redirect_fault(uc, sig, code, (ULONG)si->si_addr, (r[REG_ERR] & 2) ? 1 : 0)) return;
     }
     xlog("fatal signal %d (%s) at eip=%08x accessing %p", sig, strsignal(sig), r[REG_EIP], si->si_addr);
     xlog("  eax=%08x ebx=%08x ecx=%08x edx=%08x esi=%08x edi=%08x ebp=%08x esp=%08x",
