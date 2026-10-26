@@ -19,11 +19,11 @@ treat any 480- or 576-line mode as a 4:3 TV.
 
 | | pixels | line | clock | lines/field | sync |
 |---|---|---|---|---|---|
-| 2880x480i | 2880 (front 80, sync 248, back 224) | 3432 = 15.734 kHz | 54 MHz | 240 + 22.5 (front 4, sync 3) | both negative |
+| 2880x480i | 2880 (front 76, sync 248, back 228) | 3432 = 15.734 kHz | 54 MHz | 240 + 22.5 (front 4, sync 3) | both negative |
 
-CEA-861's VIC 10 is the same mode with a 76-pixel front porch. Ours is 80 so
-DRM doesn't take it for VIC 10: CEA modes get limited-range RGB (16-235)
-over HDMI, which a VGA DAC would turn into grey blacks.
+These are exactly CEA-861's VIC 10, so i915 sends limited-range RGB
+(16-235), as the HDMI-to-AV box got its 480p. Full range (an 80-pixel front
+porch, so not VIC 10) came out over-saturated through the transcoder.
 
 ## Getting the mode to every program
 

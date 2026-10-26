@@ -22,9 +22,10 @@ edid_override (see sion-video):
            keeps sending sound over HDMI (HDMI-to-VGA adapters with a
            3.5 mm jack take it from there)
 
-The front porch is 80 pixels, not CEA's 76 (VIC 10 is the same mode), so
-DRM doesn't take the mode for VIC 10: CEA modes get limited-range RGB
-(16-235) over HDMI, which a VGA DAC turns into grey blacks.
+The timings are exactly CEA-861's VIC 10, so DRM sends it as a CEA mode
+in limited-range RGB (16-235) over HDMI, as the HDMI-to-AV box got its 480p:
+full range (0-255) came out over-saturated through sokky's transcoder
+(2026-10-26). A front porch of 80 instead of 76 would make it full range.
 
   mkedid.py OUT     write the 256-byte EDID
 """
@@ -32,8 +33,8 @@ import struct
 import sys
 
 CLOCK_KHZ = 54000
-H_ACTIVE, H_FP, H_SYNC, H_TOTAL = 2880, 80, 248, 3432
-# per field: 240 lines, 262 in all (525 a frame with the half line)
+H_ACTIVE, H_FP, H_SYNC, H_TOTAL = 2880, 76, 248, 3432
+# CEA VIC 10; per field: 240 lines, 262 in all (525 a frame with the half line)
 V_ACTIVE, V_FP, V_SYNC, V_TOTAL = 240, 4, 3, 262
 
 
