@@ -374,6 +374,9 @@ static void pusher_drain(void);
 static void pusher_init(ULONG *dev);
 static void sync_device_surfaces(void);
 static bool device_layout_5849;   /* d3d.device is laid out like the 5849 CDevice */
+/* Where the CDevice keeps its render target (then the depth buffer, and
+   three frame buffers at +0x10..+0x18); 0 when unknown. */
+static ULONG device_surfaces_off;
 
 /* ---- the GL context across guest threads -------------------------------- */
 
@@ -630,6 +633,7 @@ static void bind_miniport(ULONG *dev)
         if (!regs) regs = mmap(NULL, 16 << 20, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
         if (regs != MAP_FAILED) dev[0x1c28 / 4] = (ULONG)regs;
         device_layout_5849 = true;
+        device_surfaces_off = 0x1a04;
         sync_device_surfaces();
     } else if (build >= 5600 && build < 5849 && off == 0x1db4) {
         /* 5659 (Counter-Strike) has its miniport where 5849 does; its
@@ -638,6 +642,13 @@ static void bind_miniport(ULONG *dev)
         d3d.cpu_time = dev + 0x2c / 4;
         dev[0x30 / 4] = (ULONG)d3d.cpu_time;
         device_layout_5849 = true;
+        device_surfaces_off = 0x1a04;
+        sync_device_surfaces();
+    } else if (off && build >= 4831 && build < 5600 && off >= 0x400) {
+        /* 4831 LTCG: miniport at +0x254c, and inlined GetRenderTarget and
+           GetDepthStencilSurface read +0x21b4 and +0x21b8 (Superman, The
+           Fellowship of the Ring). */
+        device_surfaces_off = off - (0x254c - 0x21b4);
         sync_device_surfaces();
     }
     /* Library code that still runs reads the current vertex shader's flags
@@ -666,10 +677,11 @@ static void bind_miniport(ULONG *dev)
 static void sync_device_surfaces(void)
 {
     ULONG *dev = d3d.device;
-    if (!dev || !device_layout_5849) return;
-    dev[0x1a04 / 4] = (ULONG)d3d.target;
-    dev[0x1a08 / 4] = (ULONG)d3d.target_depth;
-    dev[0x1a14 / 4] = dev[0x1a18 / 4] = dev[0x1a1c / 4] = (ULONG)d3d.backbuffer;
+    ULONG o = device_surfaces_off / 4;
+    if (!dev || !o) return;
+    dev[o] = (ULONG)d3d.target;
+    dev[o + 1] = (ULONG)d3d.target_depth;
+    dev[o + 4] = dev[o + 5] = dev[o + 6] = (ULONG)d3d.backbuffer;
 }
 
 /* Signalled at each vblank, for BlockUntilVerticalBlank (wait_vblank). */

@@ -986,6 +986,7 @@ NTSTATUS NTAPI NtQueryVolumeInformationFile(HANDLE FileHandle, IO_STATUS_BLOCK *
 {
     xfile *f = file_of(FileHandle);
     if (!f) return STATUS_INVALID_HANDLE;
+    TRACE("NtQueryVolumeInformationFile(%s, class %u)", f->host, Class);
     ULONG size = 0;
     struct statvfs vs;
     if (statvfs(f->host, &vs) != 0) memset(&vs, 0, sizeof(vs));
@@ -1009,6 +1010,10 @@ NTSTATUS NTAPI NtQueryVolumeInformationFile(HANDLE FileHandle, IO_STATUS_BLOCK *
         ULONGLONG total = (ULONGLONG)vs.f_blocks * vs.f_frsize, avail = (ULONGLONG)vs.f_bavail * vs.f_frsize;
         if (total > 8ULL << 30 && !frolick_dash()) total = 8ULL << 30;
         if (avail > total) avail = total;
+        /* Free space stays under 4 GB: titles that multiply it out into a
+           DWORD of bytes (Mercenaries, King Kong) saw 8 GB wrap to 0 and
+           sent the player to the dashboard to free blocks. */
+        if (avail > 0xFFE00000ULL && !frolick_dash()) avail = 0xFFE00000ULL;
         li[0].QuadPart = total / cluster;
         li[1].QuadPart = avail / cluster;
         if (Class == 7) { li[2].QuadPart = li[1].QuadPart; u = (ULONG *)&li[3]; size = 32; }
