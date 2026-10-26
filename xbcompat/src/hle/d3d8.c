@@ -3808,7 +3808,7 @@ typedef struct program_entry {
     unsigned attr_mask;      /* the locations in attr */
     GLint loc_ff_lighting, loc_fog_vertex_mode, loc_ff_transform, loc_ff_texcount, loc_zw_scale;
     GLint loc_shadow_func, loc_shadow_dim;
-    GLint loc_c, loc_flip_y, loc_vp_scale, loc_vp_offset, loc_wdepth;
+    GLint loc_c, loc_flip_y, loc_vp_scale, loc_vp_offset, loc_wdepth, loc_vt_scale;
     GLint loc_tex[4], loc_cube[4], loc_vol[4], loc_tex_scale, loc_c0, loc_c1, loc_fc0, loc_fc1,
           loc_bump_env, loc_bump_lum, loc_eye_vector, loc_key_color;
     struct { GLint location; unsigned words; uint32_t *value; } uniforms[32];   /* last values set */
@@ -4377,6 +4377,7 @@ static program_entry *program_for(GLuint vs, GLuint fs)
         e->loc_vp_scale = U("vp_scale");
         e->loc_vp_offset = U("vp_offset");
         e->loc_wdepth = U("wdepth");
+        e->loc_vt_scale = U("vt_scale");
         static const char *tex[] = { "tex0", "tex1", "tex2", "tex3" }, *cube[] = { "cube0", "cube1", "cube2", "cube3" },
                           *vol[] = { "vol0", "vol1", "vol2", "vol3" };
         for (int i = 0; i < 4; i++) {
@@ -5408,6 +5409,25 @@ static void upload_constants(const vshader *sh, program_entry *e)
     }
 #undef CROW
 uploaded:
+    if (e->loc_vt_scale >= 0) {
+        /* Linear textures are addressed in texels.  A pixel shader scales
+           the coordinates itself (tex_scale); with the fixed-function
+           combiners the program's oT goes to GL as it is, so scale it here
+           (Goblet of Fire copies its frame through a 640x480 view with
+           coordinates 0.5..640.5, which sampled one corner texel). */
+        float sc[4][4];
+        for (int s = 0; s < 4; s++) {
+            sc[s][0] = sc[s][1] = sc[s][2] = sc[s][3] = 1;
+            const D3DPixelContainer *t = (const D3DPixelContainer *)d3d.textures[s];
+            if (!e->fs && t && t->Size) {
+                ULONG w, h, pitch;
+                container_size((D3DPixelContainer *)t, &w, &h, &pitch);
+                sc[s][0] = 1.0f / w;
+                sc[s][1] = 1.0f / h;
+            }
+        }
+        program_uniform4fv(e, e->loc_vt_scale, 4, &sc[0][0]);
+    }
     if (e->loc_flip_y >= 0) program_uniform1f(e, e->loc_flip_y, d3d.rt_texture ? -1.0f : 1.0f);
     if (e->loc_vp_scale >= 0) program_uniform4fv(e, e->loc_vp_scale, 1, vp[0]);
     if (e->loc_vp_offset >= 0) {
@@ -5686,6 +5706,7 @@ static void draw_declared_(const vshader *sh, ULONG PrimitiveType, const UCHAR *
         TIMED(t_gl, if (indices) glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, indices + first);
                     else glDrawArrays(gl_primitive(PrimitiveType), first, count));
     end_program(e);
+    debug_dump_draw();
 }
 
 #include "fvf_plan.h"
