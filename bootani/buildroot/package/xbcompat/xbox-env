@@ -79,6 +79,18 @@ if grep -q 'Raspberry Pi' /proc/device-tree/model 2>/dev/null; then
 	fi
 fi
 
+# A USB sound card, when one is plugged in, takes the sound: the Chromebox's
+# own headphone jack has no driver, and a VGA output carries none.
+if [ -z "$AUDIODEV" ]; then
+	for c in /proc/asound/card[0-9]*; do
+		if [ -e "$c/usbid" ] && [ -e "$c/pcm0p" ]; then
+			AUDIODEV=plughw:CARD=$(cat "$c/id"),DEV=0
+			export AUDIODEV
+			break
+		fi
+	done
+fi
+
 # Same sound output bootani picks: the ALSA default (card 0, device 0) if
 # it exists, otherwise the first HDMI/DisplayPort output of the Intel HD
 # Audio card, the usual case on the Chromebox.

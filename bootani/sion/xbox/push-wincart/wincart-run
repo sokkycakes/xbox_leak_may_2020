@@ -291,6 +291,7 @@ case $dev in
 hdmi:CARD=PCH,DEV=0) dev=hw:PCH,3 ;;
 hdmi:CARD=PCH,DEV=1) dev=hw:PCH,7 ;;
 hdmi:CARD=PCH,DEV=2) dev=hw:PCH,8 ;;
+plughw:CARD=*,DEV=*) c=${dev#plughw:CARD=}; dev=hw:${c%%,*},${dev##*DEV=} ;;   # a USB sound card (xbox-env)
 esac
 cat > $R/root/.asoundrc << EOF
 pcm.wincart_out { type dmix ipc_key 50503 ipc_perm 0666 slave { pcm "$dev" rate 48000 period_size ${WINCART_PERIOD:-480} buffer_size ${WINCART_BUFFER:-1920} } }
