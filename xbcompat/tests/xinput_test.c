@@ -767,6 +767,65 @@ static void test_boot_enumeration(void)
     force_sync();
 }
 
+/* The dashboard's CJoystick::CheckDevice (private/ui/xapp/Joystick.cpp):
+   XGetDevices only, open what appeared, close what left. */
+static HANDLE dash_handles[4];
+static void dash_check(void)
+{
+    ULONG mask = XGetDevices(&fake_gamepad);
+    for (int i = 0; i < 4; i++) {
+        if (!dash_handles[i] && (mask & (1u << i)))
+            dash_handles[i] = XInputOpen(&fake_gamepad, i, XDEVICE_NO_SLOT, NULL);
+        else if (dash_handles[i] && !(mask & (1u << i))) {
+            XInputClose(dash_handles[i]);
+            dash_handles[i] = NULL;
+        }
+    }
+}
+
+/* A pad that sleeps (its dongle drops off USB) and wakes again, with the
+   keyboard pad standing in meanwhile: the dashboard has to end up with a
+   live handle on the pad each time (Sion, 2026-10-26). */
+static void test_pad_sleep(void)
+{
+    reset_hle();
+    setenv("XBCOMPAT_NO_KBD_PAD", "0", 1);
+    CHECK(SDL_InitSubSystem(SDL_INIT_VIDEO) == 0);
+    XInitDevices(0, NULL);
+    memset(dash_handles, 0, sizeof(dash_handles));
+    XINPUT_STATE st;
+
+    force_sync();
+    dash_check();
+    CHECK(xi.port[0].kbd && dash_handles[0] != NULL);
+
+    for (int round = 0; round < 2; round++) {
+        int index = attach_virtual_pad(NULL);
+        CHECK(index >= 0);
+        force_sync();                           /* the keyboard pad leaves... */
+        dash_check();
+        force_sync();                           /* ...and the pad takes port 0 */
+        dash_check();
+        CHECK(xi.port[0].gc != NULL && !xi.port[0].kbd);
+        CHECK(dash_handles[0] != NULL && XInputGetState(dash_handles[0], &st) == ERROR_SUCCESS);
+        CHECK(dash_handles[1] == NULL);
+
+        SDL_JoystickDetachVirtual(index);       /* the pad sleeps */
+        force_sync();
+        CHECK(!xi.port[0].connected);           /* no keyboard pad before the dash sees port 0 empty */
+        dash_check();
+        CHECK(dash_handles[0] == NULL);
+        force_sync();
+        dash_check();
+        CHECK(xi.port[0].kbd && dash_handles[0] != NULL && XInputGetState(dash_handles[0], &st) == ERROR_SUCCESS);
+    }
+    for (int i = 0; i < 4; i++)
+        if (dash_handles[i]) XInputClose(dash_handles[i]);
+    setenv("XBCOMPAT_NO_KBD_PAD", "1", 1);
+    SDL_QuitSubSystem(SDL_INIT_VIDEO);
+    reset_hle();
+}
+
 int main(void)
 {
     make_type_info(fake_gamepad_ti, XID_TYPE_GAMEPAD, 4, &fake_gamepad);
@@ -790,6 +849,7 @@ int main(void)
     test_original_mapping_precedence();
     test_dualsense_mappings();
     test_boot_enumeration();
+    test_pad_sleep();
 
     printf("xinput_test: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
