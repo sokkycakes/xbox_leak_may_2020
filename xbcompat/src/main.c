@@ -25,6 +25,8 @@ volatile unsigned g_guest_traps;
 
 #ifdef XBC_NATIVE
 bool rtl_redirect_fault(void *ucontext, int sig, ULONG code, ULONG addr, ULONG write);
+bool gpu_regs_trap_fault(void *addr, void *ucontext);
+bool gpu_regs_trap_step(void *ucontext);
 /* int 2Dh is the kernel debugger service (DebugService in the NT CRT):
    eax = service, ecx/edx = arguments, followed by an int 3 that the kernel
    skips when it handles the request.  xapilib's OutputDebugString uses it. */
@@ -84,6 +86,8 @@ static void crash_handler(int sig, siginfo_t *si, void *uc_)
     if (sig == SIGSEGV && !fetch && (read_tsc(r) || debug_service(r) || privileged_insn(r))) { g_guest_traps++; return; }
     if (sig == SIGSEGV && nic_trap_fault(si->si_addr, uc)) return;
     if (sig == SIGTRAP && nic_trap_step(uc)) return;
+    if (sig == SIGSEGV && gpu_regs_trap_fault(si->si_addr, uc)) return;
+    if (sig == SIGTRAP && gpu_regs_trap_step(uc)) return;
     if (sig == SIGTRAP && probe_trap(uc)) return;
     if (sig == SIGTRAP) {
         /* int 3 (DbgBreakPoint and friends): nobody is listening, carry on. */

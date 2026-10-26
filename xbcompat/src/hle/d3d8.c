@@ -1,3 +1,4 @@
+#define _GNU_SOURCE   /* REG_EFL (gpu_regs_trap_*) */
 #include <sys/mman.h>
 /*
  * Direct3D 8 (Xbox) on SDL2 + OpenGL.
@@ -615,6 +616,62 @@ static unsigned d3d_build(void)
    worker has got to.  Otherwise the device's GPU time is its CPU time. */
 static volatile ULONG async_gpu_time;
 
+/* The dummy NV2A register window (bind_miniport) is plain memory, but some
+   registers act on a write.  Halo 2's CDevice::KickOff sets NV_PFB_WBC_FLUSH
+   (0x100410 bit 16) and spins until the GPU clears it, then writes the push
+   buffer's put pointer to the FIFO channel (0x800040), whose get pointer
+   (0x800044) the library waits on.  Writes to those two pages trap, run one
+   instruction single-stepped, and then the flush is done and the FIFO has
+   caught up. */
+static uint8_t *gpu_regs;
+#define PFB_PAGE 0x100000u
+#define PFB_WBC 0x410u
+#define PFB_WBC_FLUSH 0x10000u
+#define USER_PAGE 0x800000u
+#define USER_DMA_PUT 0x40u
+#define USER_DMA_GET 0x44u
+
+static bool gpu_regs_trapped(uintptr_t a)
+{
+    uintptr_t b = (uintptr_t)gpu_regs;
+    return gpu_regs && ((a >= b + PFB_PAGE && a < b + PFB_PAGE + 0x1000) || (a >= b + USER_PAGE && a < b + USER_PAGE + 0x1000));
+}
+
+static void gpu_regs_protect(int prot)
+{
+    mprotect(gpu_regs + PFB_PAGE, 0x1000, prot);
+    mprotect(gpu_regs + USER_PAGE, 0x1000, prot);
+}
+#ifdef XBC_NATIVE
+#include <ucontext.h>
+static pthread_mutex_t regs_trap_lock = PTHREAD_MUTEX_INITIALIZER;
+static __thread bool regs_stepping;
+
+bool gpu_regs_trap_fault(void *addr, void *ucv)
+{
+    if (!gpu_regs_trapped((uintptr_t)addr)) return false;
+    greg_t *r = ((ucontext_t *)ucv)->uc_mcontext.gregs;
+    pthread_mutex_lock(&regs_trap_lock);   /* held until the step completes */
+    gpu_regs_protect(PROT_READ | PROT_WRITE);
+    regs_stepping = true;
+    r[REG_EFL] |= 0x100;
+    return true;
+}
+
+bool gpu_regs_trap_step(void *ucv)
+{
+    if (!regs_stepping) return false;
+    greg_t *r = ((ucontext_t *)ucv)->uc_mcontext.gregs;
+    r[REG_EFL] &= ~0x100;
+    regs_stepping = false;
+    *(volatile ULONG *)(gpu_regs + PFB_PAGE + PFB_WBC) &= ~PFB_WBC_FLUSH;   /* the flush is done at once */
+    *(volatile ULONG *)(gpu_regs + USER_PAGE + USER_DMA_GET) = *(volatile ULONG *)(gpu_regs + USER_PAGE + USER_DMA_PUT);
+    gpu_regs_protect(PROT_READ);
+    pthread_mutex_unlock(&regs_trap_lock);
+    return true;
+}
+#endif
+
 static void bind_miniport(ULONG *dev)
 {
     static const struct { unsigned build, swap_cb; } layouts[] = { { 5849, 0x1db4 } };
@@ -629,9 +686,23 @@ static void bind_miniport(ULONG *dev)
         /* The miniport (device+0x1c28) starts with the NV2A register base;
            library code that still pokes registers gets a dummy window
            instead of writing into guest memory near address 0. */
-        static void *regs;
-        if (!regs) regs = mmap(NULL, 16 << 20, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-        if (regs != MAP_FAILED) dev[0x1c28 / 4] = (ULONG)regs;
+        if (!gpu_regs) {
+            void *m = mmap(NULL, 16 << 20, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+            if (m != MAP_FAILED) {
+                gpu_regs = m;
+#ifdef XBC_NATIVE
+                gpu_regs_protect(PROT_READ);
+#endif
+            }
+        }
+        if (gpu_regs) {
+            dev[0x1c28 / 4] = (ULONG)gpu_regs;
+            /* m_pGpuRegisters... the FIFO channel KickOff writes its put pointer to. */
+            if (!dev[0x1c20 / 4]) dev[0x1c20 / 4] = (ULONG)(gpu_regs + USER_PAGE);
+            /* m_NvBase: Halo 2 polls the FIFO and PGRAPH through it to wait for idle
+               (put == get, then NV_PGRAPH_STATUS), which the zeroed window answers. */
+            if (!dev[0x934 / 4]) dev[0x934 / 4] = (ULONG)gpu_regs;
+        }
         device_layout_5849 = true;
         device_surfaces_off = 0x1a04;
         sync_device_surfaces();
@@ -2999,8 +3070,10 @@ static void NTAPI D3DDevice_SetStreamSource(UINT_ Stream, D3DResource *vb, UINT_
     d3d.streams[Stream].stride = Stride;
 }
 
+static ULONG own_vertex_shader(ULONG handle);
 static void NTAPI D3DDevice_SetVertexShader(ULONG Handle)
 {
+    Handle = own_vertex_shader(Handle);
     if (d3d.recording) pb_record(OP_VERTEX_SHADER, &Handle, 4);
     if (vs_direct_input()) { vs_set_program_ext(Handle); return; }
     d3d.vertex_shader = Handle;
@@ -3703,6 +3776,12 @@ static GLuint link_program(GLuint vs, GLuint fs)
         char log[2048];
         p_glGetProgramInfoLog(prog, sizeof(log), NULL, log);
         xlog("D3D: program failed to link:\n%s", log);
+        static int shown;
+        if (shown++ < 2 && p_glGetShaderSource) {
+            static char src[65536];
+            if (vs) { p_glGetShaderSource(vs, sizeof(src), NULL, src); xlog("--- vertex shader ---\n%s", src); }
+            if (fs) { p_glGetShaderSource(fs, sizeof(src), NULL, src); xlog("--- fragment shader ---\n%s", src); }
+        }
         p_glDeleteProgram(prog);
         return 0;
     }
@@ -3721,6 +3800,7 @@ typedef struct {
 } vattr;
 
 typedef struct {
+    ULONG magic;             /* VSH_MAGIC: one of ours, not a title's own VertexShader */
     vattr attr[16];
     uint32_t *code;          /* NV2A microcode, NULL for a fixed-function declaration */
     unsigned ninstr;
@@ -3761,9 +3841,12 @@ static bool decode_vsdt(ULONG t, vattr *a)
     return true;
 }
 
+#define VSH_MAGIC 0x48535658u   /* 'XVSH' */
+
 static vshader *parse_declaration(const ULONG *decl)
 {
     vshader *sh = calloc(1, sizeof(*sh));
+    sh->magic = VSH_MAGIC;
     for (int i = 0; i < 16; i++) sh->attr[i].stream = -1;
     sh->tess_normal_in = sh->tess_normal_out = sh->tess_uv_out = -1;
     int stream = 0;
@@ -3934,6 +4017,7 @@ static void NTAPI D3DDevice_DeleteVertexShader(ULONG handle)
     free(sh->decl);
     free(sh->consts);
     free(sh->const_slots);
+    sh->magic = 0;
     free(sh);
 }
 
@@ -4113,6 +4197,7 @@ static void vs_set_program(ULONG h)
 
 static void NTAPI D3DDevice_SelectVertexShader(ULONG handle, ULONG address)
 {
+    handle = own_vertex_shader(handle);
     /* With a handle, its own program runs (the program it was loaded with
        is at `address`); xbcompat's program memory copy is not exact enough
        to trust over it: Splinter Cell's models vanished when the program
@@ -4183,6 +4268,7 @@ static D3DResource *vs_input_shim(D3DResource *vb, ULONG offset)
 
 static void NTAPI D3DDevice_SetVertexShaderInput(ULONG handle, UINT_ count, const ULONG *inputs)
 {
+    handle = own_vertex_shader(handle);
     if (d3d.recording) { ULONG h[2] = { handle, count }; pb_record2(OP_VS_INPUT, h, 8, inputs, count * 12); }
     if (!handle) {
         /* Back to the streams SetStreamSource set and the shader's own layout. */
@@ -4253,6 +4339,7 @@ static ULONG direct_layout_handle(const ULONG *vaf)
     static unsigned n;
     vshader tmp;
     memset(&tmp, 0, sizeof(tmp));
+    tmp.magic = VSH_MAGIC;
     tmp.tess_normal_in = tmp.tess_normal_out = tmp.tess_uv_out = -1;
     for (int r = 0; r < 16; r++) {
         const ULONG *in = vaf + r * 4;
@@ -4277,6 +4364,24 @@ static ULONG direct_layout_handle(const ULONG *vaf)
     cache = nc;
     cache[n++] = sh;
     return (ULONG)sh | 1;
+}
+
+/* A handle to a VertexShader the title's own D3D code filled: an LTCG build
+   inlines SetVertexShaderInputDirect and SelectVertexShaderDirect, which copy
+   the D3DVERTEXATTRIBUTEFORMAT into the library's g_DirectVertexShader
+   (Slot[] at +0x14, after RefCount, Flags, ProgramSize,
+   ProgramAndConstantsDwords and Dimensionality) and pass that on (Halo 2).
+   Ours carry VSH_MAGIC; a title's becomes the layout it describes. */
+static ULONG own_vertex_shader(ULONG handle)
+{
+    if (!(handle & 1) || ((const vshader *)(handle & ~1u))->magic == VSH_MAGIC) return handle;
+    const ULONG *vs = (const ULONG *)(handle & ~1u);
+    static bool warned;
+    if ((vs[1] & 0x10 /* VERTEXSHADER_PROGRAM */) && !warned) {
+        warned = true;
+        xlog("D3D: title-built vertex shader %#x has a program; drawing with its layout only", handle);
+    }
+    return direct_layout_handle(vs + 5);
 }
 
 static void NTAPI D3DDevice_SetVertexShaderInputDirect(const ULONG *vaf, UINT_ count, const ULONG *inputs)
