@@ -23,6 +23,15 @@ if [ -x /usr/libexec/xbox-boot ] && [ "$BOOT_ANIMATION" != bootani ]; then
 fi
 
 start() {
+	# The signal for the TV (sion-video: 15 kHz 480i for a VGA transcoder,
+	# or 480p): an EDID on the connector and KMS_MODE, before anything
+	# draws.
+	if [ -x /usr/libexec/sion-video ]; then
+		/usr/libexec/sion-video early >> /var/log/sion-video.log 2>&1
+		# shellcheck source=/dev/null
+		. /etc/default/kms
+		export KMS_MODE
+	fi
 	# The Xbox's display keeper (xbox-av, see package/xbcompat) before
 	# anything else: black in the session's mode, and the console never
 	# drawn again. Only for the Xbox animation: bootani needs the display

@@ -335,6 +335,7 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do [ -S $R/run/seatd.sock ] && break; sleep 0.2; 
 mode=${KMS_MODE:-720x480}
 ow=${mode%x*}
 oh=${mode#*x}
+oh=${oh%i}   # 2880x480i: the 15 kHz mode for a VGA transcoder (sion-video)
 case "$ow$oh" in *[!0-9]*|'') ow=720; oh=480 ;; esac
 
 # INTEL_DEBUG=noccs: no render compression (CCS) on the HD 610. With it,

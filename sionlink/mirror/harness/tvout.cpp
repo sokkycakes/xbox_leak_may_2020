@@ -44,6 +44,12 @@ static inline uint32_t Lerp(uint32_t a, uint32_t b, uint32_t f)   // f: 0..256 o
 void TVOut::Layout()
 {
     bool sd = h <= 576;
+    // The 15 kHz mode for a VGA transcoder (2880x480i, sion-video) cuts each line into four
+    // times BT.601's 720 pixels: lay the picture out 720 wide and widen each row as it goes
+    // out, which costs a copy instead of four times the scaling.
+    rep = sd && w > 720 && w % 720 == 0 ? w / 720 : 1;
+    const uint32_t w = this->w / rep;
+    narrow.assign(rep > 1 ? (size_t)w * h : 0, 0);
     double aspect = sd ? 4.0 / 3.0 : (double)w / h;
     par = aspect / ((double)w / h);
     double aw = w * (sd ? 0.9 : 1.0), ah = h * (sd ? 0.9 : 1.0);
@@ -130,7 +136,8 @@ void TVOut::Layout()
         table(p.ys, p.h, 192);
     }
     rowCache.resize(192 * std::max(t.w, b.w));
-    fprintf(stderr, "tv: %ux%u, top screen %ux%u at %u,%u, bottom %ux%u at %u,%u\n", w, h, t.w, t.h, t.x, t.y, b.w, b.h, b.x, b.y);
+    fprintf(stderr, "tv: %ux%u%s, top screen %ux%u at %u,%u, bottom %ux%u at %u,%u\n", this->w, h,
+            rep > 1 ? " (each pixel sent as several)" : "", t.w, t.h, t.x, t.y, b.w, b.h, b.x, b.y);
 }
 
 void TVOut::SetLayout(TVLayout l, bool s)
@@ -150,6 +157,30 @@ void TVOut::SetOverlay(Overlay o)
 }
 
 void TVOut::Compose(uint32_t* dst, uint32_t pitch, const uint32_t* top, const uint32_t* bottom)
+{
+    if (rep == 1)
+    {
+        Draw(dst, pitch, w, top, bottom);
+        return;
+    }
+    // laid out 720 wide, then each pixel sent rep times: all of it when the picture outside
+    // the screens changes, else the screens' rows
+    uint32_t nw = w / rep;
+    bool whole = overlay || clearFrames > 0;
+    Draw(narrow.data(), nw * 4, nw, top, bottom);
+    for (uint32_t y = 0; y < h; y++)
+    {
+        bool in = false;
+        for (const Place& p : place) in |= p.w && y >= p.y && y < p.y + p.h;
+        if (!whole && !in) continue;
+        const uint32_t* a = &narrow[(size_t)y * nw];
+        uint32_t* o = dst + (size_t)y * (pitch / 4);
+        for (uint32_t x = 0; x < nw; x++, o += rep)
+            for (uint32_t k = 0; k < rep; k++) o[k] = a[x];
+    }
+}
+
+void TVOut::Draw(uint32_t* dst, uint32_t pitch, uint32_t w, const uint32_t* top, const uint32_t* bottom)
 {
     if (overlay || clearFrames > 0)
     {
@@ -191,6 +222,8 @@ bool TVOut::Open(const std::string& spec)
     {
         dump = fopen(spec.c_str() + 5, "wb");
         if (!dump) { perror(spec.c_str() + 5); return false; }
+        // MIRROR_TVSIZE=WxH: another TV mode (2880x480 for the 15 kHz one)
+        if (const char* e = getenv("MIRROR_TVSIZE")) sscanf(e, "%ux%u", &w, &h);
         dumpBuf.assign((size_t)w * h, 0);
         if (const char* e = getenv("MIRROR_TVDUMPEVERY")) dumpEvery = std::max(1, atoi(e));
         if (const char* e = getenv("MIRROR_TVDUMPFROM")) dumpFrom = std::max(0, atoi(e));
@@ -303,9 +336,12 @@ bool TVOut::Open(const std::string& spec)
             int ww = 0, wh = 0;
             const char* want = getenv("KMS_MODE");
             int pick = -1;
+            // progressive first; interlaced when that's all there is (2880x480i, 15 kHz)
             if (want && sscanf(want, "%dx%d", &ww, &wh) == 2)
-                for (uint32_t m = 0; m < nmodes && pick < 0; m++)
-                    if (modes[m].hdisplay == ww && modes[m].vdisplay == wh && !(modes[m].flags & DRM_MODE_FLAG_INTERLACE)) pick = m;
+                for (int il = 0; il < 2 && pick < 0; il++)
+                    for (uint32_t m = 0; m < nmodes && pick < 0; m++)
+                        if (modes[m].hdisplay == ww && modes[m].vdisplay == wh &&
+                            !!(modes[m].flags & DRM_MODE_FLAG_INTERLACE) == il) pick = m;
             for (uint32_t m = 0; m < nmodes && pick < 0; m++)
                 if (modes[m].type & DRM_MODE_TYPE_PREFERRED) pick = m;
             mode = modes[pick < 0 ? 0 : pick];

@@ -1,0 +1,261 @@
+#!/bin/sh
+#
+# sion-video: which signal the Sion sends its TV.
+#
+#   480i   15 kHz NTSC for a VGA-to-composite transcoder: 2880x480i at
+#          59.94 fields a second, 15.734 kHz lines (the 720-pixel line drawn
+#          four times as finely, as i915 won't send HDMI below 25 MHz; see
+#          crimson-480i.edid's source, mkedid.py). The connector is given
+#          that EDID through DRM's edid_override, so every program finds
+#          the mode in its list, and KMS_MODE (/etc/default/kms) names it.
+#   480p   720x480 progressive, for the HDMI-to-AV box: the display's own
+#          EDID and modes.
+#   auto   480p when the display is one remembered as the HDMI-to-AV box
+#          (remember-av), 480i otherwise. The default.
+#
+#   sion-video [status]          the setting, the decision and the mode
+#   sion-video 480i|480p|auto    choose (kept in /data/sion/video.conf); takes
+#                                effect at the next dashboard start
+#   sion-video remember-av       the display plugged in now is the
+#                                HDMI-to-AV box (auto picks 480p for it)
+#   sion-video apply             put the setting on the connector; run by
+#                                xbox-env and S00bootani, once a boot does the
+#                                work (--force: again)
+#
+# VIDEO_CONNECTOR in video.conf (HDMI-A-1, DP-1, ...) names the connector
+# when the right one isn't the connected one (an adapter with no EDID shows
+# as disconnected until the override is on). A copy of video.conf goes on
+# the EFI partition (sion/video.conf) for S00bootani, which runs before
+# /data is mounted.
+#
+
+. /usr/lib/sion/sion-lib.sh
+
+CONF=$SION_DATA/sion/video.conf
+EDID=${SION_VIDEO_EDID:-/usr/share/sion/crimson-480i.edid}
+MODE_480I=2880x480i
+MODE_480P=720x480
+STATE=$SION_RUN/video
+DBG=/sys/kernel/debug
+
+say() {
+	echo "sion-video: $*"
+	log "video: $*"
+}
+
+load() {
+	VIDEO=auto VIDEO_CONNECTOR= AV_EDID=
+	for c in "$CONF" "$SION_RUN/video.conf"; do
+		# shellcheck source=/dev/null
+		[ -r "$c" ] && . "$c" && break
+	done
+	case $VIDEO in 480i|480p|auto) ;; *) VIDEO=auto ;; esac
+}
+
+save() {
+	if mountpoint -q "$SION_DATA"; then
+		mkdir -p "$SION_DATA/sion"
+		printf 'VIDEO=%s\nVIDEO_CONNECTOR=%s\nAV_EDID="%s"\n' "$VIDEO" "$VIDEO_CONNECTOR" "$AV_EDID" > "$CONF.new" &&
+			mv "$CONF.new" "$CONF"
+		sync
+	fi
+	# the copy S00bootani reads
+	m=$(esp_mount) || return 0
+	mkdir -p "$m/sion"
+	cmp -s "$CONF" "$m/sion/video.conf" 2>/dev/null || cp "$CONF" "$m/sion/video.conf" 2>/dev/null
+	esp_umount "$m"
+}
+
+debugfs() {
+	[ -d "$DBG/dri" ] || mount -t debugfs debugfs "$DBG" 2>/dev/null
+	[ -d "$DBG/dri" ]
+}
+
+# The external connectors, as cardN-NAME (HDMI and DisplayPort, not the
+# laptop panel kinds or writeback).
+connectors() {
+	for d in /sys/class/drm/card[0-9]*-*; do
+		case ${d##*/} in *-HDMI-*|*-DP-*|*-DVI-*|*-VGA-*) echo "${d##*/}" ;; esac
+	done
+}
+
+# The connector to drive: VIDEO_CONNECTOR, else the connected one, else
+# one already carrying our override, else the first HDMI one.
+target() {
+	if [ -n "$VIDEO_CONNECTOR" ]; then
+		for d in /sys/class/drm/card[0-9]*-"$VIDEO_CONNECTOR"; do
+			[ -e "$d" ] && { echo "${d##*/}"; return 0; }
+		done
+	fi
+	for c in $(connectors); do
+		grep -qx connected "/sys/class/drm/$c/status" && { echo "$c"; return 0; }
+	done
+	for c in $(connectors); do
+		overridden "$c" && { echo "$c"; return 0; }
+	done
+	for c in $(connectors); do
+		case $c in *-HDMI-*) echo "$c"; return 0 ;; esac
+	done
+	return 1
+}
+
+# debugfs and sysfs files show a size of 0: read them to see if they're empty.
+has_data() {
+	[ -n "$(head -c 1 "$1" 2>/dev/null | od -An -tx1)" ]
+}
+
+override_file() {
+	c=$1
+	n=${c%%-*}
+	echo "$DBG/dri/${n#card}/${c#card*-}/edid_override"
+}
+
+overridden() {
+	f=$(override_file "$1")
+	[ -r "$f" ] && cmp -s "$f" "$EDID"
+}
+
+detect() {
+	echo detect > "/sys/class/drm/$1/status" 2>/dev/null
+}
+
+# md5 of the display's own EDID (empty when it has none).
+real_edid() {
+	c=$1
+	f=$(override_file "$c")
+	if has_data "$f"; then
+		printf reset > "$f"
+		detect "$c"
+	fi
+	if has_data "/sys/class/drm/$c/edid"; then
+		md5sum < "/sys/class/drm/$c/edid" | cut -d' ' -f1
+	fi
+}
+
+# The display's name from its EDID (for status and remember-av).
+edid_name() {
+	has_data "$1" || { echo "(no EDID)"; return; }
+	for o in 54 72 90 108; do
+		[ "$(od -An -v -tx1 -j $o -N 5 "$1" | tr -d ' \n')" = 000000fc00 ] || continue
+		dd if="$1" bs=1 skip=$((o + 5)) count=13 2>/dev/null | tr '\n' ' ' | sed 's/ *$//'
+		echo
+		return
+	done
+	echo "(unnamed)"
+}
+
+set_kms_mode() {
+	want=$1
+	cur=
+	# shellcheck source=/dev/null
+	[ -r /etc/default/kms ] && cur=$(. /etc/default/kms; echo "$KMS_MODE")
+	[ "$cur" = "$want" ] && return 0
+	{
+		[ -r /etc/default/kms ] && grep -v '^KMS_MODE=' /etc/default/kms
+		echo "KMS_MODE=\"$want\""
+	} > /etc/default/kms.new && mv /etc/default/kms.new /etc/default/kms
+	# kept for the next boot as Frolick's settings keep it
+	mountpoint -q "$SION_DATA" && sion persist /etc/default/kms > /dev/null 2>&1
+	say "KMS_MODE $cur -> $want"
+}
+
+decide() {
+	c=$1
+	case $VIDEO in
+	480i|480p) echo "$VIDEO"; return ;;
+	esac
+	sum=$(real_edid "$c")
+	for a in $AV_EDID; do
+		[ "$a" = "$sum" ] && { echo 480p; return; }
+	done
+	echo 480i
+}
+
+cmd_apply() {
+	load
+	[ "$1" = --force ] && rm -f "$STATE"
+	if [ -r "$STATE" ]; then
+		cat "$STATE"
+		return 0
+	fi
+	[ -r "$EDID" ] || { say "no $EDID"; return 1; }
+	debugfs || { say "no debugfs: can't set the EDID"; return 1; }
+	c=$(target) || { say "no HDMI or DisplayPort connector"; return 1; }
+	d=$(decide "$c")
+	f=$(override_file "$c")
+	if [ "$d" = 480i ]; then
+		# other connectors lose an override left on them (VIDEO_CONNECTOR changed)
+		for o in $(connectors); do
+			[ "$o" != "$c" ] && overridden "$o" && printf reset > "$(override_file "$o")" && detect "$o"
+		done
+		if ! overridden "$c"; then
+			cat "$EDID" > "$f" || { say "writing $f failed"; return 1; }
+		fi
+		detect "$c"
+		mode=$MODE_480I
+	else
+		has_data "$f" && printf reset > "$f"
+		detect "$c"
+		mode=$MODE_480P
+	fi
+	grep -qx "$mode" "/sys/class/drm/$c/modes" 2>/dev/null ||
+		say "warning: ${c#card*-} doesn't list $mode"
+	set_kms_mode "$mode"
+	echo "$mode" > /run/xbox-av-mode
+	say "${c#card*-}: $d ($VIDEO), $mode"
+	echo "$d $mode ${c#card*-}" > "$STATE"
+	cat "$STATE"
+}
+
+cmd_status() {
+	load
+	echo "setting:   $VIDEO${VIDEO_CONNECTOR:+ on $VIDEO_CONNECTOR}"
+	[ -r "$STATE" ] && echo "this boot: $(cat "$STATE")"
+	debugfs
+	for c in $(connectors); do
+		s=$(cat "/sys/class/drm/$c/status")
+		o=
+		overridden "$c" && o=", 15 kHz EDID on"
+		echo "${c#card*-}: $s$o, display $(edid_name "/sys/class/drm/$c/edid"), modes $(sort -u "/sys/class/drm/$c/modes" | tr '\n' ' ')"
+	done
+	# shellcheck source=/dev/null
+	[ -r /etc/default/kms ] && echo "KMS_MODE:  $(. /etc/default/kms; echo "$KMS_MODE")"
+	[ -n "$AV_EDID" ] && echo "HDMI-to-AV box EDID: $AV_EDID"
+	return 0
+}
+
+cmd_remember_av() {
+	load
+	debugfs || { say "no debugfs"; return 1; }
+	c=$(target) || { say "no connector"; return 1; }
+	sum=$(real_edid "$c")
+	# the override goes back on if it was there
+	[ -r "$STATE" ] && case $(cat "$STATE") in 480i*) cat "$EDID" > "$(override_file "$c")"; detect "$c" ;; esac
+	[ -n "$sum" ] || { say "${c#card*-} has no EDID of its own to remember"; return 1; }
+	case " $AV_EDID " in *" $sum "*) ;; *) AV_EDID=${AV_EDID:+$AV_EDID }$sum ;; esac
+	save
+	say "remembered ${c#card*-}'s display ($sum) as the HDMI-to-AV box"
+}
+
+case ${1:-status} in
+480i|480p|auto)
+	load
+	VIDEO=$1
+	save
+	rm -f "$STATE"
+	say "set to $VIDEO; it takes effect when the dashboard starts again"
+	;;
+apply) shift; cmd_apply "$@" ;;
+status) cmd_status ;;
+remember-av) cmd_remember_av ;;
+early)
+	# S00bootani, before /data is mounted: the EFI partition's copy
+	mount_efivars
+	m=$(esp_mount) && {
+		[ -r "$m/sion/video.conf" ] && tr -d '\r' < "$m/sion/video.conf" > "$SION_RUN/video.conf"
+		esp_umount "$m"
+	}
+	cmd_apply
+	;;
+*) sed -n '3,30p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac

@@ -11,6 +11,8 @@ define SION_TOOLS_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(SION_TOOLS_PKGDIR)/sion-install-internal $(TARGET_DIR)/usr/sbin/sion-install-internal
 	$(INSTALL) -D -m 0644 $(SION_TOOLS_PKGDIR)/sion-lib.sh $(TARGET_DIR)/usr/lib/sion/sion-lib.sh
 	$(INSTALL) -D -m 0755 $(SION_TOOLS_PKGDIR)/sion-netd $(TARGET_DIR)/usr/libexec/sion-netd
+	$(INSTALL) -D -m 0755 $(SION_TOOLS_PKGDIR)/sion-video $(TARGET_DIR)/usr/libexec/sion-video
+	$(INSTALL) -D -m 0644 $(SION_TOOLS_PKGDIR)/crimson-480i.edid $(TARGET_DIR)/usr/share/sion/crimson-480i.edid
 	$(INSTALL) -D -m 0600 $(SION_TOOLS_PKGDIR)/sshd_config $(TARGET_DIR)/etc/ssh/sshd_config
 	$(INSTALL) -D -m 0644 $(SION_TOOLS_PKGDIR)/sion.conf $(TARGET_DIR)/usr/share/sion/sion.conf
 	$(INSTALL) -D -m 0644 $(SION_TOOLS_PKGDIR)/README.txt $(TARGET_DIR)/usr/share/sion/README.txt

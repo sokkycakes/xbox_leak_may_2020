@@ -41,6 +41,8 @@ public:
 private:
     void Layout();
     void Compose(uint32_t* dst, uint32_t pitch, const uint32_t* top, const uint32_t* bottom);
+    // the screens and the overlay into a dst w pixels wide (the TV's, or the laid-out 720)
+    void Draw(uint32_t* dst, uint32_t pitch, uint32_t w, const uint32_t* top, const uint32_t* bottom);
     bool WaitFlip(int ms);
 
     uint32_t w = 720, h = 480;
@@ -55,6 +57,8 @@ private:
         std::vector<uint32_t> xs, ys;  // per output column/row: source index << 9 | weight (of 256)
     } place[2];
     std::vector<uint32_t> rowCache;    // horizontally scaled source rows
+    uint32_t rep = 1;                  // TV pixels per laid-out pixel (4 at 2880x480i)
+    std::vector<uint32_t> narrow;      // the picture laid out 720 wide, when rep > 1
     Overlay overlay;
     int clearFrames = 0;               // pictures still to clear whole (the layout or overlay changed)
 

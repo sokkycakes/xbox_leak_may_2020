@@ -21,6 +21,9 @@ elif [ -x /usr/libexec/xbox-title ]; then
 fi
 
 # The display mode bootani uses (KMS_MODE=WxH), straight through KMSDRM.
+# sion-video sets it first (once a boot): 2880x480i, 15 kHz for a VGA
+# transcoder, or 720x480 for the HDMI-to-AV box.
+[ -x /usr/libexec/sion-video ] && /usr/libexec/sion-video apply >> /var/log/sion-video.log 2>&1
 # shellcheck source=/dev/null
 [ -r /etc/default/kms ] && . /etc/default/kms
 export KMS_MODE
