@@ -949,11 +949,43 @@ NTSTATUS NTAPI NtSetInformationFile(HANDLE FileHandle, IO_STATUS_BLOCK *iosb, PV
     return st;
 }
 
-/* Frolick's dashboard (title FFFE0000; the combined build also checks
-   its name, see tools/frolickdash/dist/stream/xbcompat-gudfcx.patch). */
+/* Frolick, as the dashboard (FFFE0000) or as the game in E:\Games\Frolick
+   (FRLK): its XBE is named "Frolick", or older builds named "Xbox Dashboard"
+   run from a Games/Frolick folder. The stock dashboard is neither. */
 static bool frolick_dash(void)
 {
-    return xbe_title_id() == 0xFFFE0000;
+    const char *name = xbe_title_name(), *path = xbe_file_path();
+    if (name && !strcmp(name, "Frolick")) return true;
+    if (!path) return false;
+    size_t n = strlen(path);
+    const char *tail = "/games/frolick/default.xbe";
+    return n >= strlen(tail) && !strcasecmp(path + n - strlen(tail), tail);
+}
+
+/* What the hidden cache drives (X:, Y:, Z: = partition3-5) and xbcompat's
+   own cache beside the hard disk (<hdd>/../cache) take on disk.  On a
+   console those are fixed partitions apart from E:, so Frolick, which sees
+   the real disk, sees it less a fixed reservation for them, and E:'s used
+   space without what they hold. */
+#define CACHE_RESERVE (3ULL * 750 << 20)
+static ULONGLONG du_total;
+static int du_add(const char *path, const struct stat *sb, int flag, struct FTW *ftw)
+{
+    (void)path; (void)flag; (void)ftw;
+    du_total += (ULONGLONG)sb->st_blocks * 512;
+    return 0;
+}
+static ULONGLONG hidden_cache_bytes(void)
+{
+    char p[PATH_MAX + 16];
+    du_total = 0;
+    for (int i = 3; i <= 5; i++) {
+        snprintf(p, sizeof(p), "%s/partition%d", hdd_dir, i);
+        nftw(p, du_add, 16, FTW_PHYS | FTW_MOUNT);
+    }
+    snprintf(p, sizeof(p), "%s/../cache", hdd_dir);
+    nftw(p, du_add, 16, FTW_PHYS | FTW_MOUNT);
+    return du_total;
 }
 
 NTSTATUS NTAPI NtQueryVolumeInformationFile(HANDLE FileHandle, IO_STATUS_BLOCK *iosb, PVOID Info,
@@ -978,11 +1010,21 @@ NTSTATUS NTAPI NtQueryVolumeInformationFile(HANDLE FileHandle, IO_STATUS_BLOCK *
         ULONG *u;
         /* Report a FATX-like volume with the partition's cluster size (16 KB
            unless formatted otherwise). Titles see it capped to what a console
-           has (8 GB, so 32-bit block math holds); Frolick's dashboard, which
-           counts in 64 bits, sees the disk's real size and free space. */
+           has (8 GB, so 32-bit block math holds); Frolick, which counts in
+           64 bits, sees the disk's real size less the cache drives'
+           reservation, and its free space as if they were apart (never more
+           than is really free). */
         ULONG cluster = f->is_dvd ? 16384 : partition_cluster_bytes(partition_of(f->host));
         ULONGLONG total = (ULONGLONG)vs.f_blocks * vs.f_frsize, avail = (ULONGLONG)vs.f_bavail * vs.f_frsize;
-        if (total > 8ULL << 30 && !frolick_dash()) total = 8ULL << 30;
+        if (!frolick_dash()) {
+            if (total > 8ULL << 30) total = 8ULL << 30;
+        } else if (!f->is_dvd && total > 2 * CACHE_RESERVE) {
+            ULONGLONG used = total - (ULONGLONG)vs.f_bfree * vs.f_frsize, hidden = hidden_cache_bytes();
+            used = used > hidden ? used - hidden : 0;
+            total -= CACHE_RESERVE;
+            ULONGLONG free_e = total > used ? total - used : 0;
+            if (free_e < avail) avail = free_e;
+        }
         if (avail > total) avail = total;
         li[0].QuadPart = total / cluster;
         li[1].QuadPart = avail / cluster;
