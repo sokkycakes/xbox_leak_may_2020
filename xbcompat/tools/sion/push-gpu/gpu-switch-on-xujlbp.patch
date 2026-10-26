@@ -27165,6 +27165,85 @@ index 712a4093..5f7e013a 100644
      static const char *prefixes[] = {
          /* d3d8 */
          "_D3DDevice_", "@D3DDevice_", "_D3DResource_", "_D3DVertexBuffer_", "_D3DIndexBuffer_",
+diff --git a/xbcompat/src/hle/xinput.c b/xbcompat/src/hle/xinput.c
+index 2acef326..4229a214 100644
+--- a/xbcompat/src/hle/xinput.c
++++ b/xbcompat/src/hle/xinput.c
+@@ -221,6 +221,8 @@ typedef struct {
+     bool kbd;                                   /* virtual keyboard pad */
+     UCHAR subtype;
+     ULONG generation;                           /* bumped on every insertion */
++    bool unseen;                                /* removed, and the title hasn't polled since */
++    bool kbd_left;                              /* ...and it was the keyboard pad */
+     xi_handle *open;
+ } xi_port;
+ 
+@@ -378,6 +380,7 @@ static void remove_port(unsigned i)
+     xi_port *p = &xi.port[i];
+     if (!p->connected) return;
+     xlog("XInput: port %u: %s removed", i, p->kbd ? "keyboard pad" : "controller");
++    p->kbd_left = p->kbd;
+     if (p->gc) {
+         SDL_GameControllerRumble(p->gc, 0, 0, 0);
+         SDL_GameControllerClose(p->gc);
+@@ -392,6 +395,24 @@ static void remove_port(unsigned i)
+        that can be opened at once (xid.cpp XID_fRemoveDevice/XID_fOpenDevice). */
+     p->open = NULL;
+     report_insertion_removal(i, false);
++    p->unseen = xi.gamepad != NULL;
++}
++
++/*
++ * A title that polls only XGetDevices (the dashboard's CJoystick::CheckDevice)
++ * never sees a port that empties and fills again between two polls: its bit
++ * stays set, so it keeps the handle of the device that left, which answers
++ * ERROR_DEVICE_NOT_CONNECTED for good.  On a real Xbox a pad's removal and
++ * the next insertion are separate USB events far apart; here the keyboard pad
++ * would take port 0 in the very sync that drops a sleeping pad (and give it
++ * back in the one that brings the pad back), so neither swap happens before
++ * the title has seen port 0 empty in an XGetDevices or XGetDeviceChanges.
++ * A controller replugged into a controller's port is reported as it is.
++ */
++static void seen_by_title(XPP_DEVICE_TYPE *t)
++{
++    if (t != xi.gamepad) return;
++    for (unsigned i = 0; i < XI_PORTS; i++) xi.port[i].unseen = false;
+ }
+ 
+ static int port_of_instance(SDL_JoystickID id)
+@@ -558,6 +579,7 @@ static void sync_devices(bool force)
+         for (unsigned i = 0; i < XI_PORTS && free < 0; i++)
+             if (!xi.port[i].connected) free = (int)i;
+         if (free < 0) break;                    /* more than four: ignored */
++        if (xi.port[free].unseen && xi.port[free].kbd_left) break;   /* once the title has seen it empty */
+         SDL_GameController *gc = SDL_GameControllerOpen(j);
+         if (!gc) {
+             xlog("XInput: SDL_GameControllerOpen(%d): %s", j, SDL_GetError());
+@@ -567,7 +589,7 @@ static void sync_devices(bool force)
+     }
+ 
+     bool want_kbd = !xi.kbd_disabled && !any_controller() && SDL_WasInit(SDL_INIT_VIDEO);
+-    if (want_kbd && !xi.port[0].connected) insert_port(0, NULL, -1, true);
++    if (want_kbd && !xi.port[0].connected && !xi.port[0].unseen) insert_port(0, NULL, -1, true);
+     else if (!want_kbd && xi.port[0].kbd) remove_port(0);
+     if (want_kbd && input_script() && strstr(input_script(), ":p2") && !xi.port[1].connected)
+         insert_port(1, NULL, -1, true);
+@@ -1279,6 +1301,7 @@ static ULONG NTAPI XGetDevices(XPP_DEVICE_TYPE *DeviceType)
+         ret = t->Current;
+         t->Change = 0;
+         t->Previous = t->Current;
++        seen_by_title(t);
+         TRACE_ALL("XInput: XGetDevices(%s) = %#x", table_name(t), ret);
+     }
+     pthread_mutex_unlock(&xi.lock);
+@@ -1301,6 +1324,7 @@ static ULONG NTAPI XGetDeviceChanges(XPP_DEVICE_TYPE *DeviceType, ULONG *pdwInse
+             rem |= reinserted;
+             t->Change = 0;
+             t->Previous = t->Current;
++            seen_by_title(t);
+             xlog("XInput: XGetDeviceChanges(%s): inserted %#x, removed %#x", table_name(t), ins, rem);
+         }
+     }
 diff --git a/xbcompat/src/kernel/io.c b/xbcompat/src/kernel/io.c
 index 2a869fa0..3e6c87a4 100644
 --- a/xbcompat/src/kernel/io.c

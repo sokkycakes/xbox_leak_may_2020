@@ -56,3 +56,7 @@ on STATUS_END_OF_FILE. (b) IdexChannelObject's DeviceQueue list (+0x28) starts e
 XAPI's CancelIo walks it and crashed when Training loaded. Cloud: intros, menus, Training
 in-game. Also merged gudfcx c0706480 (System Link bridge + LAN key; inert until
 /data/xbox/hdd/keys.bin exists). The patch file is now the full diff from xujlbp de9d94a9.
+
+## Fix 8 (2026-10-26, built, not installed yet)
+xinput.c pad-sleep fix from the Frolick thread (8BitDo dongle dropping off USB
+left a dead port 0). Same change as the normal build xujlbp fab6916d.
