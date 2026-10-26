@@ -291,6 +291,7 @@ case $dev in
 hdmi:CARD=PCH,DEV=0) dev=hw:PCH,3 ;;
 hdmi:CARD=PCH,DEV=1) dev=hw:PCH,7 ;;
 hdmi:CARD=PCH,DEV=2) dev=hw:PCH,8 ;;
+plughw:CARD=*,DEV=*) c=${dev#plughw:CARD=}; dev=hw:${c%%,*},${dev##*DEV=} ;;   # a USB sound card (xbox-env)
 esac
 cat > $R/root/.asoundrc << EOF
 pcm.wincart_out { type dmix ipc_key 50503 ipc_perm 0666 slave { pcm "$dev" rate 48000 period_size ${WINCART_PERIOD:-480} buffer_size ${WINCART_BUFFER:-1920} } }
@@ -335,6 +336,11 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do [ -S $R/run/seatd.sock ] && break; sleep 0.2; 
 mode=${KMS_MODE:-720x480}
 ow=${mode%x*}
 oh=${mode#*x}
+oh=${oh%i}   # 2880x480i: the 15 kHz mode for a VGA transcoder (sion-video)
+# Interlaced: i915 can't scale planes there, so gamescope always composites
+# (drmkeep.so also turns framebuffer modifiers off for it).
+gsextra=
+case $mode in *i) gsextra=--force-composition ;; esac
 case "$ow$oh" in *[!0-9]*|'') ow=720; oh=480 ;; esac
 
 # INTEL_DEBUG=noccs: no render compression (CCS) on the HD 610. With it,
@@ -394,7 +400,7 @@ fi
 # shellcheck disable=SC2086
 chroot $R /usr/bin/env -i $wenv LIBSEAT_BACKEND=seatd WLR_LIBINPUT_NO_DEVICES=1 \
 	WINEDLLOVERRIDES="$wdll" $padenv INTEL_DEBUG=${WINCART_INTEL_DEBUG-noccs} ${WINCART_GAME_ENV:-} \
-	/bin/sh -c "cd /srv/game && exec $keep gamescope --backend drm -W $ow -H $oh -w 1024 -h 768 -S stretch -f ${WINCART_GAMESCOPE_ARGS:-} -- $cmd" \
+	/bin/sh -c "cd /srv/game && exec $keep gamescope --backend drm -W $ow -H $oh -w 1024 -h 768 -S stretch -f $gsextra ${WINCART_GAMESCOPE_ARGS:-} -- $cmd" \
 	> "$state/logs/game.log" 2>&1 &
 gspid=$!
 echo "$gspid" > "$RUN/gamescope.pid"

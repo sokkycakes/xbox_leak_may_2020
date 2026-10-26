@@ -95,3 +95,13 @@ weak hook guide-overlay-alpha.patch adds to load_title_image(). xbcompat's
 stub XBE carries the same icon as $$XTIMAGE for the stock dashboard (gudfcx
 push-liveguide ff23b324); install this kit with QUICK=1 so its older xbcompat
 stays out.
+
+480i (2026-10-26): with the Sion's 15 kHz 2880x480i mode (sion-video) gamescope
+died on its first flip (EINVAL): in i915's interlaced IF-ID mode Gen9 scans
+out only linear or X-tiled framebuffers and can't scale planes. drmkeep.so now
+reports no framebuffer modifiers when a CRTC is interlaced (DRMKEEP_MODIFIERS=0/1
+forces it), so gamescope's scan-out buffers are X-tiled, and wincart-run adds
+--force-composition for an interlaced KMS_MODE. It also carries the USB sound
+card and 480i lines from claude/project-thread-rngarv. The installer keeps the
+installed kazeta-guide (it comes with push-liveguide now); GUIDE=1 installs
+this kit's copy.

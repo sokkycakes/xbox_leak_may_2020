@@ -37,4 +37,4 @@ cp -r overrides boot "$K/"
 [ -f ../push-livedash/launch-title ] && cp ../push-livedash/launch-title "$K/"
 
 (cd "$T" && tar -cf - xbox-wincart) | gzip | ssh "$SION" \
-    "rm -rf /tmp/xbox-wincart && gunzip -c | tar -C /tmp -xf - && QUICK=${QUICK:-0} sh /tmp/xbox-wincart/sion-install.sh"
+    "rm -rf /tmp/xbox-wincart && gunzip -c | tar -C /tmp -xf - && QUICK=${QUICK:-0} GUIDE=${GUIDE:-0} sh /tmp/xbox-wincart/sion-install.sh"

@@ -23,6 +23,15 @@
  *    then stops it (SIGTERM; it also gives up after DRMKEEP_HOLD_S, 30 s).
  *    DRMKEEP_HOLD=0 turns this part off.
  *
+ * In an interlaced mode (the Sion's 2880x480i for a 15 kHz transcoder),
+ * i915 on Gen9 scans out only linear or X-tiled framebuffers and can't scale
+ * planes (IF-ID mode), so gamescope's Y-tiled composite buffer fails its
+ * first flip with EINVAL and gamescope aborts. There the shim reports
+ * DRM_CAP_ADDFB2_MODIFIERS as 0: gamescope then allocates its scan-out
+ * buffers without modifiers (X-tiled for display) and composites every
+ * frame, since the game's buffers carry modifiers it can't scan out.
+ * DRMKEEP_MODIFIERS=0 or 1 forces that either way.
+ *
  * DRMKEEP=0 turns it all off. Messages go to stderr with "drmkeep:".
  */
 #define _GNU_SOURCE
@@ -36,6 +45,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <xf86drm.h>
 #include <xf86drmMode.h>
 
 static int same_timing(const drmModeModeInfo *a, const drmModeModeInfo *b)
@@ -97,6 +107,40 @@ drmModeConnectorPtr drmModeGetConnectorCurrent(int fd, uint32_t id)
     drmModeConnectorPtr c = real(fd, id);
     filter(fd, c);
     return c;
+}
+
+/* ---- modifiers ----------------------------------------------------------- */
+
+/* Whether a CRTC is showing an interlaced mode. */
+static int interlaced(int fd)
+{
+    drmModeResPtr res = drmModeGetResources(fd);
+    if (!res) return 0;
+    int yes = 0;
+    for (int i = 0; i < res->count_crtcs && !yes; i++) {
+        drmModeCrtcPtr crtc = drmModeGetCrtc(fd, res->crtcs[i]);
+        if (!crtc) continue;
+        yes = crtc->mode_valid && (crtc->mode.flags & DRM_MODE_FLAG_INTERLACE);
+        drmModeFreeCrtc(crtc);
+    }
+    drmModeFreeResources(res);
+    return yes;
+}
+
+int drmGetCap(int fd, uint64_t capability, uint64_t *value)
+{
+    static int (*real)(int, uint64_t, uint64_t *);
+    if (!real) real = (int (*)(int, uint64_t, uint64_t *))dlsym(RTLD_NEXT, "drmGetCap");
+    int r = real(fd, capability, value);
+    if (r || capability != DRM_CAP_ADDFB2_MODIFIERS || !*value || off()) return r;
+    const char *e = getenv("DRMKEEP_MODIFIERS");
+    int keep = e && *e ? atoi(e) != 0 : !interlaced(fd);
+    if (!keep) {
+        fprintf(stderr, "drmkeep: no framebuffer modifiers (%s): linear or X-tiled scan-out only\n",
+                e && *e ? "DRMKEEP_MODIFIERS=0" : "interlaced mode");
+        *value = 0;
+    }
+    return r;
 }
 
 /* ---- properties ---------------------------------------------------------- */

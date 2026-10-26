@@ -21,7 +21,7 @@ for p in $(pidof xbcompat); do
 	esac
 done
 
-# QUICK=1: only the Windows-cart runner, its helper, the Guide host and the
+# QUICK=1: only the Windows-cart runner, its helpers and the
 # overrides (no xbcompat, no modules, the dashboard keeps running).
 [ "${QUICK:-0}" = 1 ] || /etc/init.d/S98xbox stop > /dev/null 2>&1
 
@@ -31,7 +31,12 @@ for f in wincart-run wincart-av; do
 	cp $K/$f $X/tools/$f.new && chmod 755 $X/tools/$f.new && mv $X/tools/$f.new $X/tools/$f
 done
 cp $K/drmkeep.so $X/tools/drmkeep.so.new && chmod 644 $X/tools/drmkeep.so.new && mv $X/tools/drmkeep.so.new $X/tools/drmkeep.so
-cp $K/kazeta-guide $B/kazeta-guide.new && chmod 755 $B/kazeta-guide.new && mv $B/kazeta-guide.new $B/kazeta-guide
+# The Guide host now comes with the Guide (push-liveguide, built from the
+# Guide's branch); this kit's copy goes in only with GUIDE=1 or when there
+# is none.
+if [ "${GUIDE:-0}" = 1 ] || [ ! -x $B/kazeta-guide ]; then
+	cp $K/kazeta-guide $B/kazeta-guide.new && chmod 755 $B/kazeta-guide.new && mv $B/kazeta-guide.new $B/kazeta-guide
+fi
 mkdir -p $X/share/wincart
 rm -rf $X/share/wincart/overrides
 cp -r $K/overrides $X/share/wincart/overrides
