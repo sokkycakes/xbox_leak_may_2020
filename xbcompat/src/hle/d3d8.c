@@ -361,6 +361,7 @@ static bool ff_pretransformed;
 static void program_off(void);
 static const float *vertex_diffuse(void);
 static GLuint backbuffer_copy_texture(ULONG data, ULONG w, ULONG h);
+static GLuint depth_copy_texture(ULONG w, ULONG h);
 static void swap_cpu_backbuffer(void);
 static void front_buffer_update(void);
 static void front_buffer_memory(void);
@@ -2516,6 +2517,14 @@ static GLuint texture_for(D3DPixelContainer *t)
             zsync.writes = depth_gpu_writes;
             tex_invalidate(t->res.Data);
         } else if (zsync.writes != depth_gpu_writes) {
+            /* An A8R8G8B8 view (Halo 2, every frame) is packed on the GPU.
+               The memory stays behind, so zsync does too. */
+            ULONG zw, zh, zpitch, dw, dh, dpitch;
+            container_size(t, &zw, &zh, &zpitch);
+            container_size((D3DPixelContainer *)d3d.depth, &dw, &dh, &dpitch);
+            GLuint id = ((t->Format >> 8) & 0xFF) == 0x12 && zpitch == zw * 4 && zpitch == dpitch
+                        ? depth_copy_texture(zw, zh) : 0;
+            if (id) return id;
             readback_surface(d3d.depth, true);
             zsync.hash = depth_memory_hash();
             zsync.writes = depth_gpu_writes;
@@ -3302,7 +3311,8 @@ static void FASTCALL SetTextureState_Deferred(ULONG Stage, ULONG Type, ULONG Val
 }
 
 #define COMPLEX_STATE(name, index) \
-    static void NTAPI SetRenderState_##name(ULONG Value) { pusher_drain(); RS(index) = Value; }
+    static void NTAPI SetRenderState_##name(ULONG Value) \
+    { pusher_drain(); RS(index) = Value; TRACE_ALL("D3D: SetRenderState_" #name " %#x", (unsigned)Value); }
 COMPLEX_STATE(ZEnable, D3DRS_ZENABLE)
 COMPLEX_STATE(CullMode, D3DRS_CULLMODE)
 COMPLEX_STATE(FillMode, D3DRS_FILLMODE)
@@ -7328,6 +7338,200 @@ ready:
     window_fb.u_lut = p_glGetUniformLocation(prog, "lut");
     window_fb.u_gamma = p_glGetUniformLocation(prog, "gamma");
     return true;
+}
+
+/* The device depth buffer's bytes as a 32-bit color texture, top row first,
+   for an A8R8G8B8 header over the depth memory: Halo 2 reads its D24S8
+   depth that way every frame, with the depth itself no longer attached.
+   Made on the GPU, where reading the depth back and uploading it again
+   made the CPU wait for the GPU each frame.  The window's depth
+   renderbuffer is blitted into a texture (resolving it when multisampled),
+   a shader packs the depth into bytes the way the memory holds them (G R A
+   its low to high bytes), the stencil test adds each stencil bit into
+   blue, and the result is flipped into the texture handed out.  0 where
+   the window's depth isn't D24S8 or GL lacks something; texture_for reads
+   back then. */
+static GLuint depth_copy_texture(ULONG w, ULONG h)
+{
+    static GLuint src_fb, copy, copy_fb, pack, pack_fb, stencil_fb, out, out_fb, prog_depth, prog_flat;
+    static GLint u_depth, u_texel, u_colour;
+    static GLuint src_rb;
+    static int copy_w, copy_h;
+    static ULONG out_w, out_h;
+    static unsigned long made_writes;
+    static int state;   /* 0 untried, 1 ready, -1 unavailable */
+    GLuint rb = window_fb.depth_rb ? window_fb.depth_rb : window_fb.resolve_depth_rb;
+    if (state < 0 || !window_fb.fbo || !window_fb.blit || window_fb.depth_storage != GL_DEPTH24_STENCIL8 || !rb
+        || !p_glCreateProgram || w > (ULONG)d3d.width || h > (ULONG)d3d.height)
+        return 0;
+    if (!state) {
+        state = -1;
+        if (env_int("XBCOMPAT_DEPTH_VIEW_READBACK", 0)) return 0;
+        static const char depth_fs[] =
+            "#version 120\n"
+            "uniform sampler2D depth; uniform vec2 texel;\n"
+            "void main() {\n"
+            "    float d = texture2D(depth, gl_FragCoord.xy * texel).r;\n"
+            /* From 2^23 up a float holds whole numbers only, and there
+               d * 2^24 is the depth plus one when the driver rounds d to
+               the nearest float (llvmpipe lands one higher: the lowest
+               byte is then one over); below, rounding d * (2^24 - 1)
+               gives it. */
+            "    float z = d >= 0.5 ? d * 16777216.0 - 1.0 : floor(d * 16777215.0 + 0.5);\n"
+            "    float hi = floor(z / 65536.0), mid = floor((z - hi * 65536.0) / 256.0);\n"
+            "    gl_FragColor = vec4(mid, z - hi * 65536.0 - mid * 256.0, 0.0, hi) / 255.0;\n"
+            "}\n";
+        static const char flat_fs[] = "#version 120\nuniform vec4 colour;\nvoid main() { gl_FragColor = colour; }\n";
+        GLuint vs = compile_shader(GL_VERTEX_SHADER, present_vs);
+        GLuint fs1 = compile_shader(GL_FRAGMENT_SHADER, depth_fs), fs2 = compile_shader(GL_FRAGMENT_SHADER, flat_fs);
+        GLint ok1 = 0, ok2 = 0;
+        if (vs && fs1 && fs2) {
+            prog_depth = p_glCreateProgram();
+            p_glAttachShader(prog_depth, vs); p_glAttachShader(prog_depth, fs1);
+            p_glLinkProgram(prog_depth);
+            p_glGetProgramiv(prog_depth, GL_LINK_STATUS, &ok1);
+            prog_flat = p_glCreateProgram();
+            p_glAttachShader(prog_flat, vs); p_glAttachShader(prog_flat, fs2);
+            p_glLinkProgram(prog_flat);
+            p_glGetProgramiv(prog_flat, GL_LINK_STATUS, &ok2);
+        }
+        if (vs) p_glDeleteShader(vs);
+        if (fs1) p_glDeleteShader(fs1);
+        if (fs2) p_glDeleteShader(fs2);
+        if (!ok1 || !ok2) {
+            xlog("D3D: no depth packing programs, views of the depth buffer read it back");
+            return 0;
+        }
+        u_depth = p_glGetUniformLocation(prog_depth, "depth");
+        u_texel = p_glGetUniformLocation(prog_depth, "texel");
+        u_colour = p_glGetUniformLocation(prog_flat, "colour");
+        p_glGenFramebuffers(1, &src_fb);
+        p_glGenFramebuffers(1, &copy_fb);
+        p_glGenFramebuffers(1, &pack_fb);
+        p_glGenFramebuffers(1, &stencil_fb);
+        p_glGenFramebuffers(1, &out_fb);
+        glGenTextures(1, &copy);
+        glGenTextures(1, &pack);
+        glGenTextures(1, &out);
+        state = 1;
+    }
+    GLint draw = 0, read = 0;
+    glGetIntegerv(0x8CA6 /* GL_DRAW_FRAMEBUFFER_BINDING */, &draw);
+    glGetIntegerv(0x8CAA /* GL_READ_FRAMEBUFFER_BINDING */, &read);
+    if (rb != src_rb || copy_w != d3d.width || copy_h != d3d.height) {
+        /* first use, or the window framebuffer was made again */
+        glBindTexture(GL_TEXTURE_2D, copy);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH24_STENCIL8, d3d.width, d3d.height, 0, 0x84F9 /* GL_DEPTH_STENCIL */,
+                     0x84FA /* GL_UNSIGNED_INT_24_8 */, NULL);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+        glTexParameteri(GL_TEXTURE_2D, 0x884C /* GL_TEXTURE_COMPARE_MODE */, GL_NONE);
+        glBindTexture(GL_TEXTURE_2D, pack);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, d3d.width, d3d.height, 0, GL_BGRA, GL_UNSIGNED_BYTE, NULL);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        window_fb.bind(GL_FRAMEBUFFER, src_fb);
+        p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, rb);
+        glDrawBuffer(GL_NONE); glReadBuffer(GL_NONE);
+        GLenum st0 = p_glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        window_fb.bind(GL_FRAMEBUFFER, copy_fb);
+        p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, copy, 0);
+        glDrawBuffer(GL_NONE); glReadBuffer(GL_NONE);
+        GLenum st1 = p_glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        window_fb.bind(GL_FRAMEBUFFER, pack_fb);
+        p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, pack, 0);
+        GLenum st2 = p_glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        /* the stencil passes test the copy: the depth pass samples it, from
+           the framebuffer without it */
+        window_fb.bind(GL_FRAMEBUFFER, stencil_fb);
+        p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, pack, 0);
+        p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, copy, 0);
+        GLenum st3 = p_glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        window_fb.bind(GL_READ_FRAMEBUFFER, read);
+        window_fb.bind(0x8CA9 /* GL_DRAW_FRAMEBUFFER */, draw);
+        if (st0 != GL_FRAMEBUFFER_COMPLETE || st1 != GL_FRAMEBUFFER_COMPLETE || st2 != GL_FRAMEBUFFER_COMPLETE
+            || st3 != GL_FRAMEBUFFER_COMPLETE) {
+            xlog("D3D: depth packing framebuffers incomplete (%#x %#x %#x %#x), views of the depth buffer read it back",
+                 st0, st1, st2, st3);
+            state = -1;
+            return 0;
+        }
+        src_rb = rb; copy_w = d3d.width; copy_h = d3d.height;
+        made_writes = depth_gpu_writes - 1;
+    }
+    if (made_writes == depth_gpu_writes && out_w == w && out_h == h) {
+        TRACE_ALL("D3D: depth view copy reused (%ux%u)", w, h);
+        return out;
+    }
+    if (out_w != w || out_h != h) {
+        glBindTexture(GL_TEXTURE_2D, out);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_BGRA, GL_UNSIGNED_BYTE, NULL);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+        window_fb.bind(GL_FRAMEBUFFER, out_fb);
+        p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, out, 0);
+        out_w = w; out_h = h;
+    }
+
+    GLuint program = cur_program;
+    GLuint saved_sampler = bound_sampler[0];
+    glPushAttrib(GL_ALL_ATTRIB_BITS);
+    glDisable(GL_SCISSOR_TEST);
+    window_fb.bind(GL_READ_FRAMEBUFFER, src_fb);
+    window_fb.bind(0x8CA9 /* GL_DRAW_FRAMEBUFFER */, copy_fb);
+    window_fb.blit(0, 0, d3d.width, d3d.height, 0, 0, d3d.width, d3d.height,
+                   GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT, GL_NEAREST);
+
+    window_fb.bind(GL_FRAMEBUFFER, pack_fb);
+    glViewport(0, 0, w, h);
+    glDisable(GL_DEPTH_TEST); glDisable(GL_BLEND); glDisable(GL_ALPHA_TEST); glDisable(GL_CULL_FACE);
+    glDisable(GL_COLOR_LOGIC_OP); glDisable(GL_POLYGON_STIPPLE); glDisable(GL_STENCIL_TEST); glDisable(GL_DITHER);
+    for (int i = 0; i < 6; i++) glDisable(GL_CLIP_PLANE0 + i);
+    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+    glDepthMask(GL_FALSE);
+    glStencilMask(0);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    p_glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, copy);
+    if (separate_samplers) bind_stage_sampler(0, 0);
+    p_glUseProgram(prog_depth);
+    p_glUniform1i(u_depth, 0);
+    float texel[2] = { 1.0f / d3d.width, 1.0f / d3d.height };
+    p_glUniform2fv(u_texel, 1, texel);
+    glBegin(GL_TRIANGLE_STRIP);
+    glVertex2f(-1, -1); glVertex2f(1, -1); glVertex2f(-1, 1); glVertex2f(1, 1);
+    glEnd();
+    glBindTexture(GL_TEXTURE_2D, 0);
+    /* the stencil into blue: each bit set adds its value */
+    window_fb.bind(GL_FRAMEBUFFER, stencil_fb);
+    p_glUseProgram(prog_flat);
+    glColorMask(GL_FALSE, GL_FALSE, GL_TRUE, GL_FALSE);
+    glEnable(GL_BLEND);
+    if (p_glBlendEquation) p_glBlendEquation(GL_FUNC_ADD);
+    glBlendFunc(GL_ONE, GL_ONE);
+    glEnable(GL_STENCIL_TEST);
+    glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+    for (int bit = 0; bit < 8; bit++) {
+        glStencilFunc(GL_EQUAL, 1 << bit, 1 << bit);
+        float colour[4] = { 0, 0, (float)(1 << bit) / 255.0f, 0 };
+        p_glUniform4fv(u_colour, 1, colour);
+        glBegin(GL_TRIANGLE_STRIP);
+        glVertex2f(-1, -1); glVertex2f(1, -1); glVertex2f(-1, 1); glVertex2f(1, 1);
+        glEnd();
+    }
+    /* GL's rows run bottom-up, the memory's top-down */
+    window_fb.bind(GL_READ_FRAMEBUFFER, pack_fb);
+    window_fb.bind(0x8CA9 /* GL_DRAW_FRAMEBUFFER */, out_fb);
+    window_fb.blit(0, 0, w, h, 0, h, w, 0, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    glPopAttrib();
+    window_fb.bind(GL_READ_FRAMEBUFFER, read);
+    window_fb.bind(0x8CA9 /* GL_DRAW_FRAMEBUFFER */, draw);
+    if (separate_samplers) bind_stage_sampler(0, saved_sampler);
+    gc_reset();   /* the cached GL state no longer matches */
+    if (program) { p_glUseProgram(program); cur_program = program; }
+    made_writes = depth_gpu_writes;
+    TRACE_ALL("D3D: depth packed into a %ux%u texture on the GPU for a view", w, h);
+    return out;
 }
 
 static void present_window_framebuffer(void)
