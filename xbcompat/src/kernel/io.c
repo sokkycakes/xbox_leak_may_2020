@@ -228,9 +228,10 @@ static bool match_component(const char *dir, const char *name, char *out, size_t
 static NTSTATUS translate_path(const char *xpath, char *host, size_t hostlen, int *is_device)
 {
     char path[1024];
-    /* The object manager treats a bare "X:" or "CdRom0:" prefix as a \??\ link. */
-    const char *colon = strchr(xpath, ':'), *bslash = strchr(xpath, '\\');
-    if (xpath[0] != '\\' && colon && (!bslash || colon < bslash))
+    /* A name without a leading backslash ("X:\...", "CdRom0:", or a bare
+       file name) is relative to \??\, as XAPI's CreateFile opens it
+       (fileopcr.c). */
+    if (xpath[0] != '\\')
         snprintf(path, sizeof(path), "\\??\\%s", xpath);
     else
         snprintf(path, sizeof(path), "%s", xpath);
@@ -245,7 +246,11 @@ static NTSTATUS translate_path(const char *xpath, char *host, size_t hostlen, in
         size_t n = rest ? (size_t)(rest - path) : strlen(path);
         snprintf(link, sizeof(link), "%.*s", (int)n, path);
         char *target = symlink_lookup(link);
-        if (!target) return STATUS_OBJECT_PATH_NOT_FOUND;
+        /* Not in \??\: the name itself when it is the last component, as
+           the object manager says.  GTA III calls a missing texture file it
+           tries to open by its bare name a dirty disc when told the path
+           is missing, and loads on when told the file is. */
+        if (!target) return rest ? STATUS_OBJECT_PATH_NOT_FOUND : STATUS_OBJECT_NAME_NOT_FOUND;
         char tmp[1024];
         snprintf(tmp, sizeof(tmp), "%s%s", target, rest ? rest : "");
         free(target);
