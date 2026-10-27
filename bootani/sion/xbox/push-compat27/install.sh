@@ -3,7 +3,8 @@
 # The Sion's combined xbcompat (Guide, Live, Windows game cards, streamed
 # discs, the GPU-build switch: xujlbp f4ae70a1) with the 2026-10-26/27
 # compatibility passes merged in (branch claude/project-thread-di7q3m),
-# 2026-10-27 evening: plus the Hulk intro fix, and the game-matching
+# 2026-10-27 evening: plus the Hulk intro fix, the Halo 2 second-device
+# window fix, and the game-matching
 # signatures (tools/xbsymmap.py) those passes added, which Halo 2 needs.
 # The Guide, kazeta-guide and launch-title are the ones already installed.
 # Refuses while a game is running. Run on the PC:
