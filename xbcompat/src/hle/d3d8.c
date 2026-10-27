@@ -9505,7 +9505,19 @@ static void imm_flush(ULONG prim)
         glDisable(GL_COLOR_MATERIAL);
     }
     unsigned units = d3d.pixel_shader ? 0xF : apply_textures();
-    if (!sh) { static const int two[4] = { 2, 2, 2, 2 }; apply_texture_transforms(units, two); }
+    {
+        /* A declaration without a program is the fixed-function pipeline too:
+           its texture transforms and the texel coordinates of linear
+           textures apply (Hulk draws its intro screens and movies as one
+           640x480 linear texture with coordinates 0..640, 0..480). */
+        int tsize[4];
+        for (int u = 0; u < 4; u++) {
+            ULONG tci = TSS(u, D3DTSS_TEXCOORDINDEX) & 0xFFFF;
+            const vattr *tc = sh ? &sh->attr[9 + (tci < 4 ? tci : 0)] : NULL;
+            tsize[u] = tc && tc->stream >= 0 ? tc->components : 2;
+        }
+        apply_texture_transforms(units, tsize);
+    }
     program_entry *e;
     if (!use_program(0, &e)) return;
     TRACE_ALL("D3D: immediate draw prim %u, %u vertices, vs %#x%s, colour %s, first at %g %g %g %g colour %g %g %g %g",
