@@ -856,42 +856,48 @@ static LONG NTAPI Direct3D_CreateDevice(UINT_ Adapter, ULONG DeviceType, PVOID p
             xlog("D3D: tracing from device creation to frame %lu", trace_boot_frames);
         }
     }
-    if (SDL_Init(SDL_INIT_VIDEO) != 0) fatal("SDL_Init: %s", SDL_GetError());
-    install_fault_handlers();
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
-    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
-    SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
-    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-    /* KMSDRM switches the display to the mode closest to a window's size
-       (640x480 when the display has it). A fullscreen-desktop window keeps
-       the display's own mode (KMS_MODE, e.g. 720x480 NTSC), and the back
-       buffer is stretched over it (create_window_framebuffer). */
-    Uint32 flags = SDL_WINDOW_OPENGL;
-    const char *driver = SDL_GetCurrentVideoDriver();
-    if ((driver && !strcasecmp(driver, "kmsdrm")) || getenv("XBCOMPAT_FULLSCREEN")) flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
-    d3d.window = SDL_CreateWindow("xbcompat", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                                  d3d.width, d3d.height, flags);
-    if (!d3d.window) fatal("SDL_CreateWindow: %s", SDL_GetError());
-    d3d.gl = SDL_GL_CreateContext(d3d.window);
-    if (!d3d.gl) fatal("SDL_GL_CreateContext: %s", SDL_GetError());
-    gl_held = gl_mine = true;
-    gl_creator = pthread_self();
-    shader_diagnostics_init();
-    gc_reset();
-    glGetIntegerv(GL_MAX_VERTEX_ATTRIBS, &host_vertex_attribs);
-    if (host_vertex_attribs > 16) host_vertex_attribs = 16;
-    const char *swap_env = getenv("XBCOMPAT_SWAP_INTERVAL");
-    int swap_interval = swap_env && !strcmp(swap_env, "0") ? 0 : 1;
-    int swap_result = SDL_GL_SetSwapInterval(swap_interval);
-    xlog("D3D: swap interval %d (%s)", swap_interval, swap_result ? SDL_GetError() : "accepted");
-    xlog("D3D: OpenGL %s on %s", glGetString(GL_VERSION), glGetString(GL_RENDERER));
-    /* The Raspberry Pi's VC4 can't fetch B,G,R,A vertex colors; Mesa then
-       converts them on every draw, and that path crashes in vc4 (indexed
-       draws from client arrays). Swizzle them ourselves instead. */
-    const char *renderer = (const char *)glGetString(GL_RENDERER);
-    vc4 = renderer && strstr(renderer, "VC4");
-    rgba_vertex_colors = vc4 || getenv("XBCOMPAT_RGBA_VERTEX_COLORS");
+    /* A second CreateDevice (Halo 2 makes its device twice) keeps the window
+       and its context.  A new window would open under the old one, which
+       keeps the screen (the KMS display, the top of a desktop): the title
+       drew and the screen stayed black. */
+    if (!d3d.window) {
+        if (SDL_Init(SDL_INIT_VIDEO) != 0) fatal("SDL_Init: %s", SDL_GetError());
+        install_fault_handlers();
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
+        SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
+        SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
+        SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+        /* KMSDRM switches the display to the mode closest to a window's size
+           (640x480 when the display has it). A fullscreen-desktop window keeps
+           the display's own mode (KMS_MODE, e.g. 720x480 NTSC), and the back
+           buffer is stretched over it (create_window_framebuffer). */
+        Uint32 flags = SDL_WINDOW_OPENGL;
+        const char *driver = SDL_GetCurrentVideoDriver();
+        if ((driver && !strcasecmp(driver, "kmsdrm")) || getenv("XBCOMPAT_FULLSCREEN")) flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
+        d3d.window = SDL_CreateWindow("xbcompat", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+                                      d3d.width, d3d.height, flags);
+        if (!d3d.window) fatal("SDL_CreateWindow: %s", SDL_GetError());
+        d3d.gl = SDL_GL_CreateContext(d3d.window);
+        if (!d3d.gl) fatal("SDL_GL_CreateContext: %s", SDL_GetError());
+        gl_held = gl_mine = true;
+        gl_creator = pthread_self();
+        shader_diagnostics_init();
+        gc_reset();
+        glGetIntegerv(GL_MAX_VERTEX_ATTRIBS, &host_vertex_attribs);
+        if (host_vertex_attribs > 16) host_vertex_attribs = 16;
+        const char *swap_env = getenv("XBCOMPAT_SWAP_INTERVAL");
+        int swap_interval = swap_env && !strcmp(swap_env, "0") ? 0 : 1;
+        int swap_result = SDL_GL_SetSwapInterval(swap_interval);
+        xlog("D3D: swap interval %d (%s)", swap_interval, swap_result ? SDL_GetError() : "accepted");
+        xlog("D3D: OpenGL %s on %s", glGetString(GL_VERSION), glGetString(GL_RENDERER));
+        /* The Raspberry Pi's VC4 can't fetch B,G,R,A vertex colors; Mesa then
+           converts them on every draw, and that path crashes in vc4 (indexed
+           draws from client arrays). Swizzle them ourselves instead. */
+        const char *renderer = (const char *)glGetString(GL_RENDERER);
+        vc4 = renderer && strstr(renderer, "VC4");
+        rgba_vertex_colors = vc4 || getenv("XBCOMPAT_RGBA_VERTEX_COLORS");
+    }
 
     for (int i = 0; i < 10; i++) identity(&d3d.transforms[i]);
     d3d.viewport = (D3DVIEWPORT8){ 0, 0, d3d.width, d3d.height, 0, 1 };
