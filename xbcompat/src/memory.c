@@ -4,6 +4,7 @@
  */
 #define _GNU_SOURCE
 #include <errno.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -49,6 +50,7 @@ volatile ULONG *g_apu_sample_counter;
    write-combined at 0xF0000000 + physical address; titles turn a locked
    resource's address into that view by or-ing 0xF0000000 (Area 51).  Back
    the range with one shared file so the view can alias its first 64 MB. */
+static int contig_fd = -1;
 #define WC_VIEW_BASE 0xF0000000u
 #define WC_VIEW_SIZE 0x04000000u
 static void map_contiguous(void)
@@ -67,7 +69,7 @@ static void map_contiguous(void)
     void *wc = mmap((void *)WC_VIEW_BASE, WC_VIEW_SIZE, PROT_READ | PROT_WRITE,
                     MAP_SHARED | MAP_FIXED_NOREPLACE | MAP_NORESERVE, fd, 0);
     if (wc != (void *)WC_VIEW_BASE) xlog("write-combined view at %#x unavailable: %s", WC_VIEW_BASE, strerror(errno));
-    close(fd);
+    contig_fd = fd;     /* kept for page tables titles fill in themselves */
 }
 
 void mem_init(void)
@@ -590,4 +592,113 @@ NTSTATUS NTAPI NtProtectVirtualMemory(PVOID *BaseAddress, SIZE_T *RegionSize, UL
     TRACE_ALL("NtProtectVirtualMemory(%p, %#lx, %#x)", *BaseAddress, (unsigned long)*RegionSize, NewProtect);
     if (OldProtect) *OldProtect = 0x04;   /* PAGE_READWRITE */
     return STATUS_SUCCESS;
+}
+
+/* ---- page tables a title edits itself ---------------------------------- */
+
+/* Fable pages its own memory: it reserves a large range, reads CR3, writes
+   page directory and page table entries through the write-combined view of
+   physical memory, and reloads CR3 or runs invlpg after each change (with
+   cli/sti around it).  CR3 reads give the console's page directory page
+   (physical 0xF000, which contiguous memory never hands out); a CR3 load
+   or an invlpg maps what those tables say onto the arena range, backed by
+   the same shared file as contiguous memory, so a page there is the
+   physical page its entry names.  Only the arena is ever remapped. */
+#define PD_PHYS 0xF000u
+
+static pthread_mutex_t pt_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint32_t *pt_shadow[1024];       /* the entries as last mapped, per 4 MB */
+
+static void pt_unmap(uint32_t va, uint32_t len)
+{
+    mmap((void *)va, len, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED | MAP_NORESERVE, -1, 0);
+}
+
+static void pt_sync_pde(unsigned i, int only)
+{
+    uint32_t va0 = (uint32_t)i << 22;
+    if (va0 < ARENA_BASE || va0 + (1u << 22) > ARENA_END || contig_fd < 0) return;
+    const uint32_t *pd = (const uint32_t *)(CONTIG_BASE + PD_PHYS);
+    uint32_t pde = pd[i];
+    const uint32_t *pt = NULL;
+    if ((pde & 1) && !(pde & 0x80) && (pde & ~0xFFFu) < CONTIG_SIZE)
+        pt = (const uint32_t *)(CONTIG_BASE + (pde & ~0xFFFu));
+    if (!pt && !pt_shadow[i]) return;
+    if (!pt_shadow[i]) pt_shadow[i] = calloc(1024, sizeof(uint32_t));
+    uint32_t *sh = pt_shadow[i];
+    for (unsigned j = only >= 0 ? (unsigned)only : 0; j < (only >= 0 ? (unsigned)only + 1 : 1024u); j++) {
+        uint32_t raw = pt ? pt[j] : 0, pte;
+        if (!(raw & 1) || (raw & ~0xFFFu) >= CONTIG_SIZE) pte = 0;
+        else pte = (raw & ~0xFFFu) | 1 | (raw & 0x40 ? 2 : 0);    /* 2: mapped writable */
+        if (pte == sh[j]) continue;
+        uint32_t va = va0 + (j << 12);
+        if (pte) {
+            /* The processor sets an entry's accessed bit on use and its
+               dirty bit on the first write, and a title that pages its
+               memory out writes back only dirty pages.  A page is mapped
+               read-only until its entry is dirty; the first write sets
+               the bit (mem_fault_resync) and maps it writable. */
+            if (pt) ((uint32_t *)pt)[j] = raw | 0x20;
+            int prot = PROT_READ | PROT_EXEC | (pte & 2 ? PROT_WRITE : 0);
+            if (mmap((void *)va, PAGE_SIZE, prot, MAP_SHARED | MAP_FIXED, contig_fd, pte & ~0xFFFu) != (void *)va)
+                xlog("page tables: cannot map %#x to physical %#x: %s", va, pte & ~0xFFFu, strerror(errno));
+        } else {
+            pt_unmap(va, PAGE_SIZE);
+        }
+        sh[j] = pte;
+    }
+}
+
+uint32_t mem_read_cr3(void)
+{
+    return PD_PHYS;
+}
+
+void mem_load_cr3(void)
+{
+    pthread_mutex_lock(&pt_lock);
+    for (unsigned i = 0; i < 1024; i++) pt_sync_pde(i, -1);
+    pthread_mutex_unlock(&pt_lock);
+}
+
+void mem_invlpg(uint32_t va)
+{
+    pthread_mutex_lock(&pt_lock);
+    pt_sync_pde(va >> 22, (va >> 12) & 0x3FF);
+    pthread_mutex_unlock(&pt_lock);
+}
+
+/* A fault on a page whose entry the title made present without a TLB
+   flush, which x86 doesn't need for a page that wasn't present: map it and
+   run the access again. */
+bool mem_fault_resync(uint32_t va, bool write)
+{
+    unsigned i = va >> 22, j = (va >> 12) & 0x3FF;
+    if (!pt_shadow[i]) return false;
+    pthread_mutex_lock(&pt_lock);
+    uint32_t before = pt_shadow[i][j];
+    if (write && before) {
+        /* A write to a page that isn't dirty yet: mark it so. */
+        uint32_t pde = ((const uint32_t *)(CONTIG_BASE + PD_PHYS))[i];
+        if ((pde & 1) && !(pde & 0x80) && (pde & ~0xFFFu) < CONTIG_SIZE) {
+            uint32_t *pt = (uint32_t *)(CONTIG_BASE + (pde & ~0xFFFu));
+            if ((pt[j] & 3) == 3) pt[j] |= 0x60;
+        }
+    }
+    pt_sync_pde(i, j);
+    uint32_t after = pt_shadow[i][j];
+    pthread_mutex_unlock(&pt_lock);
+    return after && (!before || (write && (after & 2) && !(before & 2)));
+}
+
+/* Whether `va` is a page of the title's own tables that they don't map. */
+bool mem_page_absent(uint32_t va)
+{
+    unsigned i = va >> 22;
+    if (!pt_shadow[i]) return false;
+    pthread_mutex_lock(&pt_lock);
+    pt_sync_pde(i, (va >> 12) & 0x3FF);
+    bool absent = !pt_shadow[i][(va >> 12) & 0x3FF];
+    pthread_mutex_unlock(&pt_lock);
+    return absent;
 }

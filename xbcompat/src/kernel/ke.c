@@ -484,6 +484,7 @@ NTSTATUS wait_objects(ULONG count, PVOID objects[], int wait_any, KPROCESSOR_MOD
     uint64_t prof_start = prof_wait_begin();
 
     io_signal_late(true);
+    bool cli_was_held = idt_cli_release();
     if (xt) __atomic_store_n(&xt->in_wait, 1, __ATOMIC_SEQ_CST);
     static __thread struct disp_waiter me;
     static __thread bool me_init;
@@ -584,6 +585,7 @@ done:
     }
     thread_wait_end(xt);
     prof_wait_end(prof_start, count ? ((DISPATCHER_HEADER *)objects[0])->Type : -1, count ? objects[0] : NULL);
+    if (cli_was_held) idt_cli_reacquire();
     return st;
 }
 

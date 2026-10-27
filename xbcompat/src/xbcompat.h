@@ -58,6 +58,15 @@ void *pool_alloc(size_t size);
 void pool_free(void *p);
 bool pool_owns(const void *p);
 bool guest_writable(const void *p);
+uint32_t mem_read_cr3(void);            /* page tables titles edit themselves (memory.c) */
+void mem_load_cr3(void);
+void mem_invlpg(uint32_t va);
+bool mem_fault_resync(uint32_t va, bool write);
+bool mem_page_absent(uint32_t va);
+void guest_page_in(const void *p, size_t len, bool write);   /* main.c */
+void idt_patch_section(uint8_t *p, uint32_t len);   /* main.c */
+bool idt_cli_release(void);
+void idt_cli_reacquire(void);
 void io_signal_late(bool all);   /* kernel/io.c: deferred overlapped-I/O events */
 size_t pool_size(void *p);
 

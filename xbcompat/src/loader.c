@@ -71,6 +71,8 @@ void xbe_load(const char *path, xbe_image *img)
         /* Preloaded sections are in use from the start; the rest count
            XeLoadSection calls, as on the console. */
         if (sec[i].SectionFlags & XBE_SECTION_PRELOAD) sec[i].SectionReferenceCount = 1;
+        if (sec[i].SectionFlags & 0x4 /* executable */)
+            idt_patch_section((uint8_t *)sec[i].VirtualAddress, sec[i].SizeOfRawData);
         xlog("section %-8s %#010x +%#08x", (char *)sec[i].SectionName, sec[i].VirtualAddress,
              sec[i].VirtualSize);
     }

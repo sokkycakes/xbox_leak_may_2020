@@ -759,6 +759,7 @@ NTSTATUS NTAPI NtReadFile(HANDLE FileHandle, HANDLE Event, PVOID ApcRoutine, PVO
 {
     gl_yield_point();
     (void)ApcContext;
+    guest_page_in(Buffer, Length, true);
     xfile *f = file_of(FileHandle);
     if (f && f->is_dvd) {
         LONGLONG off = ByteOffset ? ByteOffset->QuadPart : f->pos;
@@ -798,6 +799,7 @@ NTSTATUS NTAPI NtWriteFile(HANDLE FileHandle, HANDLE Event, PVOID ApcRoutine, PV
 {
     gl_yield_point();
     (void)ApcContext;
+    guest_page_in(Buffer, Length, false);
     xfile *f = file_of(FileHandle);
     if (f && f->is_dvd) return fcomplete(f, Event, ApcRoutine, ApcContext, iosb, STATUS_MEDIA_WRITE_PROTECTED, 0);
     if (f && f->fd < 0 && f->is_device) return volume_io(f, Event, ApcRoutine, ApcContext, iosb, Buffer, Length, ByteOffset, true);

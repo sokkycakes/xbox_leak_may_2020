@@ -55,11 +55,221 @@ static bool debug_service(greg_t *r)
 /* Ring 0 instructions titles run themselves (wbinvd before handing memory
    to the GPU, cli/sti around hardware access) fault in user mode; none of
    them has anything to do here. */
+/* ---- an interrupt table for titles that hook it -------------------------
+
+   Fable pages part of its memory itself: it reads the IDT's address with
+   sidt, points the page fault vector at its own handler, and pages in on
+   the faults (ending with iret, which works at any privilege level).  sidt
+   isn't privileged (or the host kernel answers it with a dummy address), so
+   the loader turns the cli; sidt pairs it finds in code into cli; hlt, and
+   the hlt is answered with a table in a page of contiguous memory nothing
+   else uses.  Every vector starts out pointing at a hlt of its own in the
+   page after it; a guest page fault goes to vector 14's handler while a
+   title has hooked it, and reaching the stub (the handler passing it on)
+   unwinds the frame and raises the access violation as usual. */
+#define IDT_ADDR  (CONTIG_BASE + 0xE000u)
+#define IDT_STUBS (CONTIG_BASE + 0xD000u)
+static uint32_t sidt_sites[16];
+static int sidt_count;
+static bool idt_ready;
+static __thread uint32_t idt_cr2;
+
+void idt_patch_section(uint8_t *p, uint32_t len)
+{
+    for (uint32_t i = 0; i + 4 <= len && sidt_count < 16; i++) {
+        if (p[i] != 0xFA || p[i + 1] != 0x0F || p[i + 2] != 0x01) continue;
+        uint8_t m = p[i + 3];
+        if (((m >> 3) & 7) != 1 || (m >> 6) == 3) continue;
+        p[i + 1] = 0xF4;
+        sidt_sites[sidt_count++] = (uint32_t)(uintptr_t)(p + i + 1);
+        xlog("loader: sidt at %#x is answered with xbcompat's interrupt table", (uint32_t)(uintptr_t)(p + i + 1));
+    }
+}
+
+static void idt_init(void)
+{
+    if (idt_ready) return;
+    memset((void *)IDT_STUBS, 0xF4, 256);
+    uint32_t *idt = (uint32_t *)IDT_ADDR;
+    for (uint32_t v = 0; v < 256; v++) {
+        uint32_t off = IDT_STUBS + v;
+        idt[v * 2] = (off & 0xFFFF) | (0x8u << 16);         /* offset low, kernel code selector */
+        idt[v * 2 + 1] = (off & 0xFFFF0000u) | 0x8E00u;     /* present 32-bit interrupt gate */
+    }
+    idt_ready = true;
+}
+
+static uint32_t idt_vector(unsigned v)
+{
+    const uint32_t *idt = (const uint32_t *)IDT_ADDR;
+    return (idt[v * 2] & 0xFFFF) | (idt[v * 2 + 1] & 0xFFFF0000u);
+}
+
+static bool idt_hooked(unsigned v)
+{
+    return idt_ready && idt_vector(v) != IDT_STUBS + v;
+}
+
+/* Once a title runs its own page fault handler, cli and sti are a lock: its
+   paging code counts on cli keeping every other thread out, as it does on
+   the console's one processor, and it ran on several threads at once here
+   (Fable hung paging the same page in and out).  A thread gives the lock up
+   while it waits, as a context switch would turn interrupts back on.
+   Other titles' cli and sti still do nothing. */
+static pthread_mutex_t cli_lock = PTHREAD_MUTEX_INITIALIZER;
+static __thread bool cli_held;
+
+static void idt_cli(bool disable)
+{
+    if (disable && !cli_held && idt_hooked(14)) {
+        pthread_mutex_lock(&cli_lock);
+        cli_held = true;
+    } else if (!disable && cli_held) {
+        cli_held = false;
+        pthread_mutex_unlock(&cli_lock);
+    }
+}
+
+bool idt_cli_release(void)
+{
+    if (!cli_held) return false;
+    cli_held = false;
+    pthread_mutex_unlock(&cli_lock);
+    return true;
+}
+
+void idt_cli_reacquire(void)
+{
+    pthread_mutex_lock(&cli_lock);
+    cli_held = true;
+}
+
+static const int gpr_index[8] = { REG_EAX, REG_ECX, REG_EDX, REG_EBX, REG_ESP, REG_EBP, REG_ESI, REG_EDI };
+
+/* The address a ModR/M memory operand names and the operand's length
+   (ModR/M byte on): 32-bit addressing, no segment overrides. */
+static uint32_t modrm_address(const greg_t *r, const uint8_t *m, int *len)
+{
+    int mod = m[0] >> 6, rm = m[0] & 7, n = 1;
+    uint32_t a = 0;
+    if (rm == 4) {
+        int ss = m[1] >> 6, idx = (m[1] >> 3) & 7, base = m[1] & 7;
+        n = 2;
+        if (idx != 4) a += (uint32_t)r[gpr_index[idx]] << ss;
+        if (base == 5 && mod == 0) { a += *(const uint32_t *)(m + n); n += 4; }
+        else a += (uint32_t)r[gpr_index[base]];
+    } else if (rm == 5 && mod == 0) {
+        a = *(const uint32_t *)(m + 1);
+        n += 4;
+    } else {
+        a = (uint32_t)r[gpr_index[rm]];
+    }
+    if (mod == 1) { a += (uint32_t)(int8_t)m[n]; n += 1; }
+    else if (mod == 2) { a += *(const uint32_t *)(m + n); n += 4; }
+    *len = n;
+    return a;
+}
+
 static bool privileged_insn(greg_t *r)
 {
     const uint8_t *ip = (const uint8_t *)r[REG_EIP];
     if (ip[0] == 0x0F && (ip[1] == 0x08 || ip[1] == 0x09)) { r[REG_EIP] += 2; return true; }   /* invd, wbinvd */
-    if (ip[0] == 0xFA || ip[0] == 0xFB) { r[REG_EIP] += 1; return true; }                    /* cli, sti */
+    if (ip[0] == 0xFA || ip[0] == 0xFB) { idt_cli(ip[0] == 0xFA); r[REG_EIP] += 1; return true; }   /* cli, sti */
+    /* mov to and from control registers, and invlpg: titles that edit page
+       tables themselves (memory.c). Other control registers read as a
+       paging, write-protecting console's would and ignore writes. */
+    if (ip[0] == 0x0F && (ip[1] == 0x20 || ip[1] == 0x22) && (ip[2] >> 6) == 3) {
+        int cr = (ip[2] >> 3) & 7, reg = gpr_index[ip[2] & 7];
+        if (ip[1] == 0x20) r[reg] = cr == 3 ? mem_read_cr3() : cr == 2 ? idt_cr2 : cr == 0 ? 0x8001003B : cr == 4 ? 0x610 : 0;
+        else if (cr == 3) mem_load_cr3();
+        r[REG_EIP] += 3;
+        return true;
+    }
+    if (ip[0] == 0x0F && ip[1] == 0x01 && ((ip[2] >> 3) & 7) == 7 && (ip[2] >> 6) != 3) {
+        int n;
+        mem_invlpg(modrm_address(r, ip + 2, &n));
+        r[REG_EIP] += 2 + n;
+        return true;
+    }
+    if (ip[0] == 0xF4 && ip[1] == 0x01) {
+        for (int i = 0; i < sidt_count; i++) {
+            if (sidt_sites[i] != (uint32_t)r[REG_EIP]) continue;
+            int n;
+            uint8_t *d = (uint8_t *)(uintptr_t)modrm_address(r, ip + 2, &n);
+            idt_init();
+            *(uint16_t *)d = 256 * 8 - 1;
+            *(uint32_t *)(d + 2) = IDT_ADDR;
+            r[REG_EIP] += 2 + n;
+            return true;
+        }
+    }
+    return false;
+}
+
+/* A page fault in guest code while the title has hooked vector 14: push an
+   interrupt frame (error code, eip, cs, eflags) on the thread's stack as
+   the CPU does in ring 0, and run the title's handler. */
+static bool idt_page_fault(greg_t *r, uint32_t addr, bool write, bool fetch)
+{
+    if (!idt_hooked(14)) return false;
+    uint32_t *sp = (uint32_t *)(uintptr_t)(r[REG_ESP] - 16);
+    sp[0] = (write ? 2 : 0) | (fetch ? 0x10 : 0);
+    sp[1] = r[REG_EIP];
+    sp[2] = r[REG_CS];
+    sp[3] = r[REG_EFL];
+    r[REG_ESP] = (greg_t)(uintptr_t)sp;
+    idt_cr2 = addr;
+    r[REG_EIP] = idt_vector(14);
+    return true;
+}
+
+/* Host code is about to read or write guest memory (a file read or write):
+   page in what the title's own tables leave out, by calling its handler the
+   way the fault would have, since a host access can't take that fault.  The
+   handler gives every register back and returns to the pushed address. */
+void guest_page_in(const void *p, size_t len, bool write)
+{
+#if defined(__i386__)
+    if (!len || !idt_hooked(14)) return;
+    static __thread uint32_t handler, code;
+    for (uint32_t va = (uint32_t)(uintptr_t)p & ~0xFFFu; va < (uint32_t)(uintptr_t)p + len; va += 0x1000) {
+        if (!mem_page_absent(va)) {
+            if (write) mem_fault_resync(va, true);
+            continue;
+        }
+        handler = idt_vector(14);
+        code = write ? 2 : 0;
+        idt_cr2 = va < (uint32_t)(uintptr_t)p ? (uint32_t)(uintptr_t)p : va;
+        __asm__ volatile("pushfl\n\t"
+                         "pushl %%cs\n\t"
+                         "pushl $1f\n\t"
+                         "pushl %1\n\t"
+                         "jmp *%0\n"
+                         "1:"
+                         : : "m"(handler), "m"(code) : "memory", "cc", "eax", "ecx", "edx", "esi", "edi");
+        if (write) mem_fault_resync(va, true);
+        if (va + 0x1000 < va) break;
+    }
+#else
+    (void)p; (void)len; (void)write;
+#endif
+}
+
+/* The handler passed the fault on to the vector's original entry. */
+static bool idt_stub(ucontext_t *uc)
+{
+    greg_t *r = uc->uc_mcontext.gregs;
+    uint32_t eip = r[REG_EIP];
+    if (!idt_ready || eip < IDT_STUBS || eip >= IDT_STUBS + 256) return false;
+    unsigned v = eip - IDT_STUBS;
+    uint32_t *sp = (uint32_t *)(uintptr_t)r[REG_ESP];
+    bool err = v == 8 || (v >= 10 && v <= 14) || v == 17;
+    uint32_t code = err ? *sp++ : 0;
+    r[REG_EIP] = sp[0];
+    r[REG_EFL] = sp[2];
+    r[REG_ESP] = (greg_t)(uintptr_t)(sp + 3);
+    if (v == 14 && rtl_redirect_fault(uc, SIGSEGV, 0xC0000005, idt_cr2, (code & 2) ? 1 : 0)) return true;
+    xlog("fatal: interrupt %u at eip=%08x reached the end of the title's handlers", v, r[REG_EIP]);
     return false;
 }
 
@@ -84,6 +294,7 @@ static void crash_handler(int sig, siginfo_t *si, void *uc_)
     /* A jump to unmapped code faults on the fetch: nothing to decode there. */
     bool fetch = sig == SIGSEGV && (greg_t)si->si_addr == r[REG_EIP];
     if (sig == SIGSEGV && !fetch && (read_tsc(r) || debug_service(r) || privileged_insn(r))) { g_guest_traps++; return; }
+    if (sig == SIGSEGV && !fetch && idt_stub(uc)) return;
     if (sig == SIGSEGV && nic_trap_fault(si->si_addr, uc)) return;
     if (sig == SIGTRAP && nic_trap_step(uc)) return;
     if (sig == SIGSEGV && gpu_regs_trap_fault(si->si_addr, uc)) return;
@@ -94,8 +305,13 @@ static void crash_handler(int sig, siginfo_t *si, void *uc_)
         xlog("breakpoint at eip=%08x ignored", r[REG_EIP]);
         return;
     }
-    /* A fault in guest code goes to the title's SEH handlers (rtl.c). */
+    /* A fault in guest code goes to the title's page fault handler if it
+       hooked one, else to its SEH handlers (rtl.c). */
     Dl_info gi;
+    if (sig == SIGSEGV && mem_fault_resync((uint32_t)(uintptr_t)si->si_addr, (r[REG_ERR] & 2) != 0)) return;
+    if (sig == SIGSEGV && thread_current() && !dladdr((void *)r[REG_EIP], &gi)
+        && idt_page_fault(r, (uint32_t)(uintptr_t)si->si_addr, (r[REG_ERR] & 2) != 0, fetch))
+        return;
     if (sig != SIGTRAP && thread_current() && !dladdr((void *)r[REG_EIP], &gi)) {
         ULONG code = sig == SIGILL ? 0xC000001D
                    : sig == SIGFPE ? (si->si_code == FPE_INTOVF ? 0xC0000095 : 0xC0000094)
