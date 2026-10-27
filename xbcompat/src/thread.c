@@ -196,6 +196,7 @@ static void *thread_main(void *arg)
     pthread_setname_np(pthread_self(), name);
     prof_thread_start();
     attach(t);
+    hle_stack_thread_init();
 
     pthread_mutex_lock(&start_lock);
     while (t->ethread.Tcb.SuspendCount > 0)

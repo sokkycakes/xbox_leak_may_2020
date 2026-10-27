@@ -923,18 +923,27 @@ ULONG NTAPI FscGetCacheSize(void) { return fsc_pages; }
 NTSTATUS NTAPI KeSaveFloatingPointState(PVOID FloatSave) { (void)FloatSave; return STATUS_SUCCESS; }
 NTSTATUS NTAPI KeRestoreFloatingPointState(PVOID FloatSave) { (void)FloatSave; return STATUS_SUCCESS; }
 
-/* Kernel stacks are only for drivers; hand out ordinary memory. */
+/* Kernel stacks are only for drivers, and XAPI's fibers: CreateFiber takes
+   its stacks from here, and Ninja Gaiden runs its game code on them.  Host
+   code runs there too (kernel calls, D3D, the GL driver), wanting far more
+   than a title asks for, so each gets 512 KB more below, in guest memory,
+   with a guard page under it: running off the end then faults instead of
+   writing over the host heap, as these did when they came from calloc. */
+#define KSTACK_EXTRA (512u << 10)
 PVOID NTAPI MmCreateKernelStack(ULONG NumberOfBytes, BOOLEAN DebuggerThread)
 {
     (void)DebuggerThread;
-    char *p = calloc(1, NumberOfBytes);
-    return p ? p + NumberOfBytes : NULL;
+    size_t n = ((size_t)NumberOfBytes + 0xFFF) & ~(size_t)0xFFF;
+    char *p = arena_alloc(n + KSTACK_EXTRA + 0x1000, 1);
+    if (!p) return NULL;
+    mprotect(p, 0x1000, PROT_NONE);
+    return p + 0x1000 + KSTACK_EXTRA + n;
 }
 
 void NTAPI MmDeleteKernelStack(PVOID StackBase, PVOID StackLimit)
 {
     (void)StackBase;
-    free(StackLimit);
+    arena_free(StackLimit);
 }
 
 /* The file system cache is the host's: nothing to drop. */

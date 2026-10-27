@@ -376,6 +376,18 @@ static void crash_handler(int sig, siginfo_t *si, void *uc_)
 }
 #endif
 
+/* A host abort (glibc's heap checks, an assert): say where, then go. */
+static void abort_handler(int sig)
+{
+    /* The heap may be what broke: nothing here allocates. */
+    void *frames[32];
+    int n = backtrace(frames, 32);
+    static const char msg[] = "xbcompat: fatal: host abort, backtrace:\n";
+    if (write(2, msg, sizeof msg - 1) < 0) _exit(128 + sig);
+    backtrace_symbols_fd(frames, n, 2);
+    _exit(128 + sig);
+}
+
 /* Guest faults xbcompat answers itself (DbgPrint's int 2Dh, privileged
    instructions, int 3) arrive as these signals. SDL's console keyboard on
    KMSDRM installs its own handlers for them when its video subsystem starts,
@@ -391,6 +403,7 @@ void install_fault_handlers(void)
     sigaction(SIGFPE, &sa, NULL);
     sigaction(SIGBUS, &sa, NULL);
     sigaction(SIGTRAP, &sa, NULL);
+    signal(SIGABRT, abort_handler);
 }
 
 static ULONG NTAPI run_entry_point(PVOID entry)
