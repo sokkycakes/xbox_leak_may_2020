@@ -1791,7 +1791,7 @@ static LONG NTAPI D3DDevice_CreateVertexBuffer(UINT_ Length, ULONG Usage, ULONG 
 {
     (void)Usage; (void)FVF; (void)Pool;
     D3DResource *vb = pool_alloc(sizeof(*vb));
-    PVOID mem = MmAllocateContiguousMemoryEx(Length, 0, 0x7FFFFFFF, 0, 4);
+    PVOID mem = MmAllocateContiguousMemoryEx(Length ? Length : 4, 0, 0x7FFFFFFF, 0, 4);
     if (!vb || !mem) return 0x8007000E; /* E_OUTOFMEMORY */
     vb->Common = 1 | D3DCOMMON_TYPE_VERTEXBUFFER | D3DCOMMON_D3DCREATED;
     vb->Data = (ULONG)mem & 0x7FFFFFFF;
@@ -8466,7 +8466,10 @@ static LONG NTAPI D3DDevice_CreateIndexBuffer(UINT_ Length, ULONG Usage, ULONG F
 {
     (void)Usage; (void)Format; (void)Pool;
     D3DResource *ib = pool_alloc(sizeof(*ib));
-    PVOID mem = MmAllocateContiguousMemoryEx(Length, 0, 0x7FFFFFFF, 0, 4);
+    /* An empty buffer still succeeds, as the library's allocation of zero
+       bytes does: Agent Under Fire makes one for a model with no indices
+       and stopped on the null buffer. */
+    PVOID mem = MmAllocateContiguousMemoryEx(Length ? Length : 4, 0, 0x7FFFFFFF, 0, 4);
     if (!ib || !mem) return 0x8007000E;
     ib->Common = 1 | D3DCOMMON_TYPE_INDEXBUFFER | D3DCOMMON_D3DCREATED;
     ib->Data = (ULONG)mem;   /* virtual, like the real library: D3D__IndexData points into it */
