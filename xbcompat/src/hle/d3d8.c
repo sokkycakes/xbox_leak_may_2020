@@ -691,6 +691,10 @@ static void bind_miniport(ULONG *dev)
             void *m = mmap(NULL, 16 << 20, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
             if (m != MAP_FAILED) {
                 gpu_regs = m;
+                /* An idle FIFO: NV_PFIFO_CACHE1_STATUS and NV_PFIFO_RUNOUT_STATUS
+                   report empty (bit 4).  LTCG idle waits (Third Age) spin on them. */
+                *(ULONG *)(gpu_regs + 0x3214) = 0x10;
+                *(ULONG *)(gpu_regs + 0x2400) = 0x10;
 #ifdef XBC_NATIVE
                 gpu_regs_protect(PROT_READ);
 #endif
@@ -784,6 +788,7 @@ static pthread_cond_t vblank_cond XBC_COND_ALIGN = PTHREAD_COND_INITIALIZER;
 
 /* A 60 Hz vertical blank, from the DPC thread (the GPU interrupt's DPC on an
    Xbox): sets the device's blank event and runs the title's callback. */
+static void late_callbacks(ULONG vblank);
 static void d3d_vblank(void)
 {
     extern LONG NTAPI KeSetEvent(KEVENT *, LONG, BOOLEAN);
@@ -805,6 +810,7 @@ static void d3d_vblank(void)
         ((void (CDECLAPI *)(ULONG *))cb)(data);
 #endif
     }
+    late_callbacks(n);
 }
 
 /* D3DPRESENT_INTERVAL_TWO (2), THREE (4), FOUR (8), alone or with IMMEDIATE
@@ -2454,7 +2460,9 @@ static GLuint texture_for(D3DPixelContainer *t)
     bool on_color = d3d.backbuffer && va == (d3d.backbuffer->Data | CONTIG_BASE) && t != (D3DPixelContainer *)d3d.backbuffer;
     bool on_depth = d3d.depth && va == (d3d.depth->Data | CONTIG_BASE) && t != (D3DPixelContainer *)d3d.depth;
     if (on_color || on_depth) hud_batch_flush();   /* queued draws land in the frame first */
-    if (front.s && va == (front.s->Data | CONTIG_BASE) && t != (D3DPixelContainer *)front.s) {
+    /* GTA III sets the front buffer surface itself as a texture (its trails
+       effect blends the last frame over the new one). */
+    if (front.s && va == (front.s->Data | CONTIG_BASE)) {
         ULONG fmt = (t->Format >> 8) & 0xFF;
         if (!front.tex) front_buffer_update();   /* asked for before a Swap: the frame so far */
         if (front.tex && (fmt == 0x12 || fmt == 0x1E)) {
@@ -8750,30 +8758,57 @@ static void NTAPI D3DDevice_GetScissors(ULONG *Count, ULONG *Exclusive, D3DRECT 
     }
 }
 
-/* Callbacks run "when the GPU gets there": we run them at the next sync point. */
+/* Callbacks run "when the GPU gets there": we run them at the next sync
+   point.  A title that spins on a flag its callback sets, without a D3D
+   call in between (MGS2's loading loop), gets them from the vertical blank
+   instead once they have waited two blanks, as the GPU's DPC would. */
+static pthread_mutex_t callbacks_lock = PTHREAD_MUTEX_INITIALIZER;
+static ULONG callbacks_vblank;   /* the blank count when the oldest pending one went in */
+
+static void call_callbacks(void)
+{
+    struct { PVOID fn; ULONG ctx; } run[64];
+    pthread_mutex_lock(&callbacks_lock);
+    unsigned n = d3d.ncallbacks;
+    memcpy(run, d3d.callbacks, n * sizeof run[0]);
+    d3d.ncallbacks = 0;
+    pthread_mutex_unlock(&callbacks_lock);
+    for (unsigned i = 0; i < n; i++) {
+#ifdef XBC_TRANSLATED
+        CPU_CALL(run[i].fn, CONV_CDECL, (uint32_t)run[i].ctx);
+#else
+        void (CDECLAPI *fn)(ULONG) = run[i].fn;
+        fn(run[i].ctx);
+#endif
+    }
+}
+
 static void run_callbacks(void)
 {
     hud_batch_flush();
     gl_no_yield++;
-    for (unsigned i = 0; i < d3d.ncallbacks; i++) {
-#ifdef XBC_TRANSLATED
-        CPU_CALL(d3d.callbacks[i].fn, CONV_CDECL, (uint32_t)d3d.callbacks[i].ctx);
-#else
-        void (CDECLAPI *fn)(ULONG) = d3d.callbacks[i].fn;
-        fn(d3d.callbacks[i].ctx);
-#endif
-    }
+    call_callbacks();
     gl_no_yield--;
-    d3d.ncallbacks = 0;
+}
+
+/* From d3d_vblank on the DPC thread. */
+static void late_callbacks(ULONG vblank)
+{
+    if (!__atomic_load_n(&d3d.ncallbacks, __ATOMIC_ACQUIRE)) return;
+    if (vblank - __atomic_load_n(&callbacks_vblank, __ATOMIC_RELAXED) < 2) return;
+    call_callbacks();
 }
 
 static void NTAPI D3DDevice_InsertCallback(ULONG Type, PVOID fn, ULONG Context)
 {
     (void)Type;
     if (d3d.ncallbacks == 64) run_callbacks();
+    pthread_mutex_lock(&callbacks_lock);
+    if (!d3d.ncallbacks) __atomic_store_n(&callbacks_vblank, d3dv.vblank_count, __ATOMIC_RELAXED);
     d3d.callbacks[d3d.ncallbacks].fn = fn;
     d3d.callbacks[d3d.ncallbacks].ctx = Context;
-    d3d.ncallbacks++;
+    __atomic_store_n(&d3d.ncallbacks, d3d.ncallbacks + 1, __ATOMIC_RELEASE);
+    pthread_mutex_unlock(&callbacks_lock);
 }
 
 static void NTAPI D3DDevice_SetVerticalBlankCallback(PVOID fn) { d3dv.vblank_callback = fn; }

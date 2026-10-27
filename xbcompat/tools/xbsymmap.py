@@ -110,6 +110,25 @@ EXTRA_SIGS = [
     # 5659): reads the CDevice's query array, which xbcompat keeps elsewhere.
     ("_D3DDevice_GetVisibilityTestResult@12 regs=eax,s,edx",
      rb"\x8b\x0d....\x56\x8b\xf0\xc1\xee\x08\x25\xff\x00\x00\x00\x57\x8b\xbc\xb1..\x00\x00\xc1\xe0\x04"),
+    # Resource IsBusy with the resource in ecx (Conker, LTCG 5849): tests
+    # the internal reference count and the fence against the device's GPU
+    # time; a loader thread spins on it until the GPU lets go.  The stack
+    # version (Halo) has the same body after a mov ecx, [esp+4], so this one
+    # must start a function (after int3 padding).
+    ("_D3DResource_IsBusy@4 regs=ecx",
+     rb"(?<=\xcc)\x8b\x01\x8b\xd0\x81\xe2\x00\x00\x07\x00\x81\xfa\x00\x00\x05\x00\x57\x8b\x3d....\x75.\x8b\x51\x14"),
+    # UpdateOverlay with the source rectangle in eax (Superman: The Man of
+    # Steel, LTCG 4831): writes the NV_PVIDEO registers through the
+    # device's register base, which xbcompat's device does not have.
+    ("_D3DDevice_UpdateOverlay@20 regs=s,eax,s,s,s",
+     rb"\x83\xec\x08\x53\x55\x8b\x6c\x24\x18\x56\x57\x8b\xf8\xa1....\x8b\x88..\x00\x00\x8b\xb0..\x00\x00"
+     rb"\x89\x88..\x00\x00\x8b\x17\x8b\x47\x08\x8b\x4f\x04"),
+    # GetDisplayMode with the mode pointer in esi (Third Age, LTCG 5849;
+    # XbSymbolDatabase has it on the stack): width and height from the
+    # front buffer's format, then the refresh rate and format.
+    ("_D3DDevice_GetDisplayMode@4 regs=esi",
+     rb"\xa1....\x8b\x90..\x00\x00\x8b\x4a\x10\x85\xc9\x75.\x8b\x4a\x0c\xc1\xe9\x14\x83\xe1\x0f"
+     rb"\xba\x01\x00\x00\x00\xd3\xe2\xeb.\x81\xe1\xff\x0f\x00\x00\x41\x8b\xd1\x89\x16"),
     # BeginPush with the dword count in esi; returns where to write.
     ("_D3DDevice_BeginPushLTCG@4 regs=esi",
      rb"\xa1....\x6a\x00\x50\xe8....\x8b\x0d....\x8b\x01\x8b\x49\x04\x8d\x54\xb0\x04"),

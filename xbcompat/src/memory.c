@@ -138,6 +138,66 @@ bool guest_writable(const void *p)
     return arena_state[page_of(a)] == PG_COMMITTED && arena_state[page_of(a + 3)] == PG_COMMITTED;
 }
 
+/* Fixed allocations above the arena (MGS2 reserves 0x70000000): the Xbox
+   hands out any user address below 0x80000000, the arena only covers part
+   of it.  They are mapped where asked when the host has the space free and
+   kept in a short list. */
+static struct { uint32_t base, size; } high[16];
+
+static int high_find(uint32_t a)
+{
+    for (int i = 0; i < 16; i++)
+        if (high[i].size && a >= high[i].base && a - high[i].base < high[i].size) return i;
+    return -1;
+}
+
+static NTSTATUS high_alloc(uint32_t *pbase, uint32_t *psize, ULONG type)
+{
+    uint32_t base = *pbase, end = (base + *psize + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    if (base < ARENA_END || end > CONTIG_BASE || end <= base) return STATUS_INVALID_PARAMETER;
+    int i = high_find(base);
+    if (type & MEM_RESERVE) {
+        base &= ~(GRANULE - 1);
+        if (i >= 0 || high_find(end - 1) >= 0) return 0xC0000018; /* STATUS_CONFLICTING_ADDRESSES */
+        for (i = 0; i < 16 && high[i].size; i++) ;
+        if (i == 16) return STATUS_NO_MEMORY;
+        void *m = mmap((void *)base, end - base, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE | MAP_NORESERVE, -1, 0);
+        if (m != (void *)base) {
+            if (m != MAP_FAILED) munmap(m, end - base);
+            xlog("NtAllocateVirtualMemory: %#x+%#x is taken on the host", base, end - base);
+            return 0xC0000018;
+        }
+        high[i].base = base; high[i].size = end - base;
+    } else {
+        base &= ~(PAGE_SIZE - 1);
+        if (i < 0 || end - high[i].base > high[i].size) return STATUS_UNSUCCESSFUL;
+    }
+    if ((type & MEM_COMMIT) && mprotect((void *)base, end - base, PROT_READ | PROT_WRITE | PROT_EXEC) != 0)
+        return STATUS_NO_MEMORY;
+    *pbase = base;
+    *psize = end - base;
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS high_free(uint32_t *pbase, uint32_t *psize, ULONG type)
+{
+    uint32_t base = *pbase;
+    int i = high_find(base);
+    if (i < 0) return STATUS_INVALID_PARAMETER;
+    uint32_t size = *psize ? (*psize + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1) : high[i].size;
+    if (type & MEM_RELEASE) {
+        base = high[i].base; size = high[i].size;
+        munmap((void *)base, size);
+        high[i].size = 0;
+    } else {
+        mprotect((void *)base, size, PROT_NONE);
+        madvise((void *)base, size, MADV_DONTNEED);
+    }
+    *pbase = base;
+    *psize = size;
+    return STATUS_SUCCESS;
+}
+
 NTSTATUS NTAPI NtAllocateVirtualMemory(PVOID *BaseAddress, ULONG_PTR ZeroBits,
                                        SIZE_T *RegionSize, ULONG AllocationType, ULONG Protect)
 {
@@ -158,6 +218,11 @@ NTSTATUS NTAPI NtAllocateVirtualMemory(PVOID *BaseAddress, ULONG_PTR ZeroBits,
         arena_set(first, size / PAGE_SIZE, PG_RESERVED, base);
     } else {
         uint32_t end = (base + size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+        if (base >= ARENA_END) {
+            st = high_alloc(&base, &size, AllocationType);
+            if (!st) { *BaseAddress = (PVOID)base; *RegionSize = size; }
+            goto out;
+        }
         if (!in_arena(base) || end > ARENA_END) { st = STATUS_INVALID_PARAMETER; goto out; }
         if (AllocationType & MEM_RESERVE) {
             base &= ~(GRANULE - 1);
@@ -202,8 +267,15 @@ NTSTATUS NTAPI NtFreeVirtualMemory(PVOID *BaseAddress, SIZE_T *RegionSize, ULONG
     gl_yield_point();
     uint32_t base = (uint32_t)*BaseAddress & ~(PAGE_SIZE - 1), size = *RegionSize;
     TRACE_ALL("NtFreeVirtualMemory(%#x, %#x, %#x)", base, size, FreeType);
-    if (!in_arena(base))
-        return STATUS_INVALID_PARAMETER;
+    if (!in_arena(base)) {
+        if (base < ARENA_END) return STATUS_INVALID_PARAMETER;
+        render_drain();
+        pthread_mutex_lock(&mem_lock);
+        NTSTATUS st = high_free(&base, &size, FreeType);
+        pthread_mutex_unlock(&mem_lock);
+        if (!st) { *BaseAddress = (PVOID)base; *RegionSize = size; }
+        return st;
+    }
     render_drain();
     pthread_mutex_lock(&mem_lock);
     uint32_t first = page_of(base);
