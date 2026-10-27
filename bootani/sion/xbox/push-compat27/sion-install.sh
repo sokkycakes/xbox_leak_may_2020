@@ -8,6 +8,9 @@
 #   /opt/xbcompat/bin/guide        the Guide's assets
 #   /opt/xbcompat/bin/kazeta-guide the Windows cards' Guide (old one kept as
 #                                  kazeta-guide.prev)
+#   /opt/xbcompat/tools/xbsymmap.py the game-matching signatures the build's fixes
+#                                  rely on (old one kept as xbsymmap.py.pre-compat27);
+#                                  maps are remade on each game's next launch
 #   /data/xbox-live/launch-title   runs the Live dashboard on /opt's xbcompat
 #   /data/xbox-live/xodash.hlemap  the Live dashboard's map, made for that
 #                                  binary; the map for the Live dashboard's own
@@ -39,6 +42,11 @@ if [ -f $K/kazeta-guide ]; then
 	cp $K/kazeta-guide $B/kazeta-guide.new && chmod 755 $B/kazeta-guide.new && mv $B/kazeta-guide.new $B/kazeta-guide
 	sion persist $B/kazeta-guide $B/kazeta-guide.prev > /dev/null 2>&1
 fi
+if [ -f $K/xbsymmap.py ]; then
+	T=$X/tools/xbsymmap.py
+	[ -f $T.pre-compat27 ] || { cp $T $T.pre-compat27 && sion persist $T.pre-compat27 > /dev/null 2>&1; }
+	cp $K/xbsymmap.py $T.new && mv $T.new $T && sion persist $T > /dev/null 2>&1
+fi
 keep=
 for f in $B/xbcompat.pre-live $B/guide.prev; do [ -e $f ] && keep="$keep $f"; done
 sion persist $B/xbcompat $B/xbcompat.prev $B/guide $keep > /dev/null
@@ -68,5 +76,5 @@ if ! pidof xbcompat > /dev/null && [ -f $B/xbcompat.prev ]; then
 	sleep 10
 fi
 rm -rf $K
-md5sum $B/xbcompat $B/kazeta-guide $L/launch-title
+md5sum $B/xbcompat $B/kazeta-guide $L/launch-title $X/tools/xbsymmap.py
 pidof xbcompat > /dev/null && echo "the Xbox dashboard is running" || echo "the dashboard is not running"

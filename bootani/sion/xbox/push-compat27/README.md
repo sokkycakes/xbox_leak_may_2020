@@ -11,3 +11,9 @@ i386 SDL2, interpreter set to /opt/xbcompat/lib/ld-linux.so.2, stripped.
 
 `guide.tar.gz`, `kazeta-guide` and `launch-title` are xujlbp f4ae70a1's,
 the ones on the Sion now. Install with `install.sh` from the PC.
+
+`xbsymmap.py` is this branch's xbcompat/tools/xbsymmap.py. The game maps
+are made on the Sion with /opt/xbcompat/tools, so without it the signatures
+these passes added (Halo 2's vertex shader calls among them) never reach the
+map and their fixes don't apply: Halo 2 then shows no picture. The old one
+is kept as xbsymmap.py.pre-compat27.

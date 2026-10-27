@@ -3,7 +3,8 @@
 # The Sion's combined xbcompat (Guide, Live, Windows game cards, streamed
 # discs, the GPU-build switch: xujlbp f4ae70a1) with the 2026-10-26/27
 # compatibility passes merged in (branch claude/project-thread-di7q3m),
-# 2026-10-27 evening: plus the Hulk intro fix.
+# 2026-10-27 evening: plus the Hulk intro fix, and the game-matching
+# signatures (tools/xbsymmap.py) those passes added, which Halo 2 needs.
 # The Guide, kazeta-guide and launch-title are the ones already installed.
 # Refuses while a game is running. Run on the PC:
 #
@@ -23,7 +24,7 @@ T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 K=$T/xbox-compat27
 mkdir -p "$K"
-cp xbcompat sion-install.sh launch-title kazeta-guide "$K/"
+cp xbcompat sion-install.sh launch-title kazeta-guide xbsymmap.py "$K/"
 tar -xzf guide.tar.gz -C "$K"
 [ -f "$K/guide/hudbkgnd.xui" ] || { echo 'guide.tar.gz did not unpack to guide/'; exit 1; }
 
@@ -32,3 +33,4 @@ ssh "$SION" '[ -f /opt/xbcompat/bin/xbcompat.pre-compat27 ] || { cp /opt/xbcompa
 (cd "$T" && tar -cf - xbox-compat27) | gzip | ssh "$SION" \
     'rm -rf /tmp/xbox-compat27 && gunzip -c | tar -C /tmp -xf - && sh /tmp/xbox-compat27/sion-install.sh'
 echo "expected: $(md5sum < xbcompat | cut -c1-32)  /opt/xbcompat/bin/xbcompat"
+echo "expected: $(md5sum < xbsymmap.py | cut -c1-32)  /opt/xbcompat/tools/xbsymmap.py"
