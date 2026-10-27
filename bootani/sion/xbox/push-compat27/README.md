@@ -4,7 +4,7 @@ The Sion's combined xbcompat with the 2026-10-26/27 compatibility passes.
 
 Source of `xbcompat`: claude/project-thread-xujlbp f4ae70a1 (Guide, Live,
 Windows game cards, streamed discs) merged with
-claude/project-thread-di7q3m aa97be22, plus the GPU-build switch from
+claude/project-thread-di7q3m (aa97be22, then the Hulk intro fix), plus the GPU-build switch from
 claude/project-thread-8q0kad (gpu-switch-on-xujlbp.patch, its conflicts
 resolved; kept outside this branch). Built with `make GL=opengl` against
 i386 SDL2, interpreter set to /opt/xbcompat/lib/ld-linux.so.2, stripped.
