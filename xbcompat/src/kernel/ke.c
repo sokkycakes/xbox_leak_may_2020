@@ -483,6 +483,7 @@ NTSTATUS wait_objects(ULONG count, PVOID objects[], int wait_any, KPROCESSOR_MOD
     NTSTATUS st;
     uint64_t prof_start = prof_wait_begin();
 
+    io_signal_late(true);
     if (xt) __atomic_store_n(&xt->in_wait, 1, __ATOMIC_SEQ_CST);
     static __thread struct disp_waiter me;
     static __thread bool me_init;
@@ -1247,6 +1248,10 @@ static void *dpc_thread(void *arg)
                 pthread_mutex_lock(&dpc_lock);
             }
         }
+
+        pthread_mutex_unlock(&dpc_lock);
+        io_signal_late(false);
+        pthread_mutex_lock(&dpc_lock);
 
         /* Run DPCs with the lock dropped: they may queue more. */
         while (dpc_head != dpc_tail) {

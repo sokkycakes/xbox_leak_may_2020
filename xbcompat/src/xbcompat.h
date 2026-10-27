@@ -58,6 +58,7 @@ void *pool_alloc(size_t size);
 void pool_free(void *p);
 bool pool_owns(const void *p);
 bool guest_writable(const void *p);
+void io_signal_late(bool all);   /* kernel/io.c: deferred overlapped-I/O events */
 size_t pool_size(void *p);
 
 NTSTATUS NTAPI NtAllocateVirtualMemory(PVOID *BaseAddress, ULONG_PTR ZeroBits,
@@ -223,6 +224,7 @@ void dvd_stat(const dvd_node *n, struct stat *sb);
 dvd_node *dvd_child(dvd_node *n, int i);
 ssize_t dvd_read(dvd_node *n, void *buf, size_t len, uint64_t off);
 ssize_t dvd_read_volume(void *buf, size_t len, uint64_t off);
+ULONG dvd_volume_sectors(void);
 bool dvd_extract(dvd_node *n, char *host, size_t hostlen);
 void dvd_title_started(const char *xbe_host_path);
 NTSTATUS dvd_scsi_pass_through(void *in, ULONG inlen);

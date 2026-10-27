@@ -574,6 +574,7 @@ static xfile *file_of(HANDLE h)
 
 extern LONG NTAPI KeSetEvent(KEVENT *, LONG, BOOLEAN);
 extern NTSTATUS NTAPI NtSetEvent(HANDLE, LONG *);
+extern ULONGLONG NTAPI KeQueryInterruptTime(void);
 
 /* I/O finishes at once here.  As in IopCompleteRequest, a request that fails
    without pending still writes the status block but signals nothing; any
@@ -595,6 +596,54 @@ static NTSTATUS complete(HANDLE Event, PVOID ApcRoutine, PVOID ApcContext, IO_ST
    passes the OVERLAPPED), also queues a packet to the port (io/internal.c
    IopCompleteRequest).  Errors here fail the call at once rather than
    pending, so they queue nothing, as there. */
+/* An overlapped request finishes inside the call here, but on an Xbox the
+   disk is still busy when ReadFile returns ERROR_IO_PENDING, so a title can
+   reset the OVERLAPPED event right after issuing the read and then wait on
+   it: Gun's streaming thread reads, calls ResetEvent on the event it just
+   woke for, and waits again, which here cleared the new read's completion
+   and hung the game before its first frame.  The status block is filled at
+   once; the event is set when any thread next waits, or by the DPC thread
+   2 ms later (a thread may already be blocked on it). */
+#define IO_LATE_MAX 64
+#define IO_LATE_AGE 20000   /* 2 ms in 100 ns units */
+static pthread_mutex_t io_late_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct { HANDLE event; ULONGLONG at; } io_late[IO_LATE_MAX];
+static int io_late_n;
+
+static void late_signal(HANDLE Event)
+{
+    pthread_mutex_lock(&io_late_lock);
+    if (io_late_n < IO_LATE_MAX) {
+        io_late[io_late_n].event = Event;
+        io_late[io_late_n].at = KeQueryInterruptTime();
+        io_late_n++;
+        Event = NULL;
+    }
+    pthread_mutex_unlock(&io_late_lock);
+    if (Event) NtSetEvent(Event, NULL);    /* list full: signal now */
+}
+
+/* Sets the events of finished overlapped requests: all of them (a thread is
+   about to wait) or only those older than IO_LATE_AGE (the DPC thread). */
+void io_signal_late(bool all)
+{
+    if (!__atomic_load_n(&io_late_n, __ATOMIC_RELAXED)) return;
+    HANDLE ready[IO_LATE_MAX];
+    int n = 0;
+    ULONGLONG now = all ? 0 : KeQueryInterruptTime();
+    pthread_mutex_lock(&io_late_lock);
+    for (int i = 0; i < io_late_n;) {
+        if (all || now - io_late[i].at >= IO_LATE_AGE) {
+            ready[n++] = io_late[i].event;
+            io_late[i] = io_late[--io_late_n];
+        } else {
+            i++;
+        }
+    }
+    pthread_mutex_unlock(&io_late_lock);
+    for (int i = 0; i < n; i++) NtSetEvent(ready[i], NULL);
+}
+
 static NTSTATUS fcomplete(xfile *f, HANDLE Event, PVOID ApcRoutine, PVOID ApcContext, IO_STATUS_BLOCK *iosb,
                           NTSTATUS st, ULONG info)
 {
@@ -606,6 +655,10 @@ static NTSTATUS fcomplete(xfile *f, HANDLE Event, PVOID ApcRoutine, PVOID ApcCon
        closes its files that way and stops with a fatal "Cache" error when
        it sees STATUS_END_OF_FILE there. */
     if (NT_ERROR(st)) return st;
+    if (f && f->async && Event) {
+        late_signal(Event);
+        Event = NULL;
+    }
     NTSTATUS r = complete(Event, ApcRoutine, ApcContext, iosb, st, info);
     if (f && f->port && !NT_ERROR(st) && !ApcRoutine && ApcContext)
         iocp_post(f->port, f->port_key, ApcContext, st, info);
@@ -1006,7 +1059,17 @@ NTSTATUS NTAPI NtQueryVolumeInformationFile(HANDLE FileHandle, IO_STATUS_BLOCK *
            unless formatted otherwise). Titles see it capped to what a console
            has (8 GB, so 32-bit block math holds); Frolick's dashboard, which
            counts in 64 bits, sees the disk's real size and free space. */
-        ULONG cluster = f->is_dvd ? 16384 : partition_cluster_bytes(partition_of(f->host));
+        if (f->is_dvd) {
+            /* gdfx/volinfo.c: the partition's sectors, one per unit, none free. */
+            li[0].QuadPart = dvd_volume_sectors();
+            li[1].QuadPart = 0;
+            if (Class == 7) { li[2].QuadPart = 0; u = (ULONG *)&li[3]; size = 32; }
+            else { u = (ULONG *)&li[2]; size = 24; }
+            u[0] = 1;
+            u[1] = 2048;
+            break;
+        }
+        ULONG cluster = partition_cluster_bytes(partition_of(f->host));
         ULONGLONG total = (ULONGLONG)vs.f_blocks * vs.f_frsize, avail = (ULONGLONG)vs.f_bavail * vs.f_frsize;
         if (total > 8ULL << 30 && !frolick_dash()) total = 8ULL << 30;
         if (avail > total) avail = total;
@@ -1169,7 +1232,8 @@ NTSTATUS NTAPI NtDeviceIoControlFile(HANDLE FileHandle, HANDLE Event, PVOID ApcR
         /* DISK_GEOMETRY: Cylinders(8), MediaType, TracksPerCylinder, SectorsPerTrack, BytesPerSector */
         if (OutLen < 24) return STATUS_BUFFER_TOO_SMALL;
         ULONG *g = Out;
-        g[0] = 0x100000; g[1] = 0;
+        xfile *gf = file_of(FileHandle);
+        g[0] = gf && gf->is_dvd && dvd_volume_sectors() ? dvd_volume_sectors() : 0x100000; g[1] = 0;
         g[2] = 12; g[3] = 1; g[4] = 1; g[5] = Code == IOCTL_DISK_GET_DRIVE_GEOMETRY ? 512 : 2048;
         return complete(Event, ApcRoutine, ApcContext, iosb, STATUS_SUCCESS, 24);
     }
