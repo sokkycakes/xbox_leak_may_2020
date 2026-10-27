@@ -4184,6 +4184,7 @@ static ULONG vs_compose(const vshader *layout, const uint32_t *code, unsigned ni
     }
     vshader *c = calloc(1, sizeof(*c));
     if (!c) return user;
+    c->magic = VSH_MAGIC;   /* titles pass the handle back (GetVertexShader, then SetVertexShader) */
     memcpy(c->attr, layout->attr, sizeof c->attr);
     c->stream_mask = layout->stream_mask;
     c->tess_normal_in = layout->tess_normal_in;
@@ -4278,6 +4279,17 @@ static void NTAPI D3DDevice_SelectVertexShader(ULONG handle, ULONG address)
        to trust over it: Splinter Cell's models vanished when the program
        was read back from there.  With no handle, the program at `address`
        runs with the current shader's declaration. */
+    if (handle & 1) {
+        /* GTA III's skinned peds: the handle's own program is a one-
+           instruction stub, and the real one was put at `address` with
+           LoadVertexShaderProgram. */
+        const vshader *own = (const vshader *)(handle & ~1u);
+        unsigned n = address < 136 ? vp_program_length(address) : 0;
+        if (own->code && own->ninstr < 4 && n > own->ninstr) {
+            select_direct(handle, address);
+            return;
+        }
+    }
     if (handle) {
         vs_set_program(handle);
         if (d3d.recording) pb_record(OP_VERTEX_SHADER, &d3d.vertex_shader, 4);
