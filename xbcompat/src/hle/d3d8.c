@@ -8187,6 +8187,41 @@ static void trace_dump_target(D3DSurface *s)
     gc_reset();   /* the texture binding changed behind the cache */
 }
 
+/* A texture target drawing with the back buffer's depth: its own copy of
+   that depth, flipped like the target's rows (see SetRenderTarget). */
+static struct { GLuint rb; ULONG w, h; GLbitfield mask; bool active; } rt_depth;
+
+static void rt_depth_copy(GLuint from, GLuint to, ULONG w, ULONG h)
+{
+    GLint draw = 0, read = 0;
+    glGetIntegerv(0x8CA6 /* DRAW_FRAMEBUFFER_BINDING */, &draw);
+    glGetIntegerv(0x8CAA /* READ_FRAMEBUFFER_BINDING */, &read);
+    GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
+    glDisable(GL_SCISSOR_TEST);
+    GLboolean dmask;
+    glGetBooleanv(GL_DEPTH_WRITEMASK, &dmask);
+    GLint smask = 0;
+    glGetIntegerv(GL_STENCIL_WRITEMASK, &smask);
+    glDepthMask(GL_TRUE);
+    glStencilMask(0xFF);
+    window_fb.bind(GL_READ_FRAMEBUFFER, from);
+    window_fb.bind(GL_DRAW_FRAMEBUFFER, to);
+    window_fb.blit(0, 0, w, h, 0, h, w, 0, rt_depth.mask, GL_NEAREST);
+    window_fb.bind(GL_READ_FRAMEBUFFER, read);
+    window_fb.bind(GL_DRAW_FRAMEBUFFER, draw);
+    glDepthMask(dmask);
+    glStencilMask(smask);
+    if (scissor) glEnable(GL_SCISSOR_TEST);
+}
+
+/* Leaving such a target: its depth goes back to the back buffer's. */
+static void rt_depth_leave(void)
+{
+    if (!rt_depth.active) return;
+    rt_depth.active = false;
+    rt_depth_copy(d3d.fbo, window_fb.fbo, rt_depth.w, rt_depth.h);
+}
+
 static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
 {
     gl_require();
@@ -8214,6 +8249,7 @@ static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
     }
     TRACE_ALL("D3D: render target %p (parent %p) depth %p", (void *)target, (void *)target->Parent, (void *)z);
     backbuffer_proxy_end();
+    rt_depth_leave();
     /* Depth surfaces with an image of their own: a depth texture's level, or
        a standalone integer depth surface (kept like one). */
     bool z_image = z && ((z->Parent && tex_target(z->Parent) == GL_TEXTURE_2D)
@@ -8281,13 +8317,26 @@ static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
        buffer of its own, never cleared, hid them by whatever an earlier
        target left there, differently with every camera angle. */
     GLuint window_depth = window_fb.samples <= 1 ? (window_fb.depth_rb ? window_fb.depth_rb : window_fb.resolve_depth_rb) : 0;
-    if (z && z == d3d.depth && window_depth && w == (ULONG)d3d.width && h == (ULONG)d3d.height) {
+    if (z && z == d3d.depth && window_depth && window_fb.blit && w == (ULONG)d3d.width && h == (ULONG)d3d.height) {
+        /* Texture targets are drawn upside down (GL row zero is the Xbox top
+           row), so the depth goes in as a flipped copy and comes back
+           flipped when the target is left (rt_depth_leave). */
+        if (!rt_depth.rb || rt_depth.w != w || rt_depth.h != h) {
+            if (!rt_depth.rb) p_glGenRenderbuffers(1, &rt_depth.rb);
+            p_glBindRenderbuffer(GL_RENDERBUFFER, rt_depth.rb);
+            p_glRenderbufferStorage(GL_RENDERBUFFER, window_fb.depth_storage, w, h);
+            rt_depth.w = w;
+            rt_depth.h = h;
+        }
+        GLenum attachment = window_fb.depth_storage == GL_DEPTH24_STENCIL8 ? GL_DEPTH_STENCIL_ATTACHMENT : GL_DEPTH_ATTACHMENT;
         p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
-        p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, window_fb.depth_storage == GL_DEPTH24_STENCIL8
-                                    ? GL_DEPTH_STENCIL_ATTACHMENT : GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, window_depth);
+        p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, attachment, GL_RENDERBUFFER, rt_depth.rb);
         d3d.host_zmax = window_fb.depth_storage == 0x81A5 /* GL_DEPTH_COMPONENT16 */ ? 65535.0f : 16777215.0f;
         GLenum st = p_glCheckFramebufferStatus(GL_FRAMEBUFFER);
         if (st == GL_FRAMEBUFFER_COMPLETE) {
+            rt_depth.mask = GL_DEPTH_BUFFER_BIT | (attachment == GL_DEPTH_STENCIL_ATTACHMENT ? GL_STENCIL_BUFFER_BIT : 0);
+            rt_depth_copy(window_fb.fbo, d3d.fbo, w, h);
+            rt_depth.active = true;
             d3d.rt_width = w;
             d3d.rt_height = h;
             d3d.rt_texture = true;
