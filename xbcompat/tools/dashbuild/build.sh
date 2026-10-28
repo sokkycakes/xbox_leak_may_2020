@@ -78,6 +78,9 @@ patch_src Joystick.cpp 's|#if 1 // Make Start/Back the same as A/B|#if 0 // Make
 # TitleCollection.h sits beside the two patched sources, the only ones built
 # with it (CTitleArray itself keeps its layout).
 patch_srcs "$HERE/games/memory.patch" TitleCollection.h TitleCollection.cpp SavedGameGrid.cpp
+# A file's blocks from its whole 64-bit size: GetFileSize's low half alone
+# showed a 4.7 GB disc image (Halo 2) as 411 MB in the Memory screens.
+patch_src FileUtil.cpp 's/^\(\s*\)int nBytes = GetFileSize(hFile, NULL);/\1DWORD dwHigh = 0;\n\1ULONGLONG qwBytes = GetFileSize(hFile, \&dwHigh);\n\1qwBytes |= (ULONGLONG)dwHigh << 32;/; s|return (nBytes + nBlockSize - 1) / nBlockSize;|return (int)((qwBytes + nBlockSize - 1) / nBlockSize);|'
 # A source compiled from the patch folder is rebuilt when its header changes.
 for f in TitleCollection.cpp SavedGameGrid.cpp; do
     [ "$WORK/patch/TitleCollection.h" -nt "$WORK/patch/$f" ] && touch "$WORK/patch/$f"
