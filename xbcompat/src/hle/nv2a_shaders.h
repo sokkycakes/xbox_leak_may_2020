@@ -127,5 +127,7 @@ extern uint32_t psh_shadow_stages;
  * in hardware numbering, which the program reads and writes in place.
  */
 void vsh_run_state(const uint32_t *code, unsigned count, const float v0[4], float consts[192][4]);
+void vsh_run_vertex(const uint32_t *code, unsigned count, const float attr[16][4], const float consts[192][4],
+                    float opos[4], int *a0);
 
 #endif

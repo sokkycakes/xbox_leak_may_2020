@@ -5753,6 +5753,57 @@ static void program_profile_log(double frames)
 /* Draw with a programmable vertex shader: generic attributes + GLSL. */
 static void draw_programmable_(vshader *sh, ULONG PrimitiveType, const UCHAR *up, ULONG up_stride, ULONG first,
                                ULONG count, const USHORT *indices);
+
+/* Debug aid (XBCOMPAT_VS_PROBE with XBCOMPAT_TRACE_FRAME): run a draw's
+   first vertex through the CPU interpreter and log its inputs and oPos. */
+static void vs_probe(const vshader *sh, const UCHAR *up, ULONG up_stride, ULONG first, ULONG count,
+                     const USHORT *indices)
+{
+    if (!count) return;
+    ULONG idx = indices ? indices[first] : first;
+    float attr[16][4];
+    for (int r = 0; r < 16; r++) {
+        attr[r][0] = attr[r][1] = attr[r][2] = 0; attr[r][3] = 1;
+        const vattr *a = &sh->attr[r];
+        if (a->stream < 0) continue;
+        const UCHAR *base;
+        ULONG stride;
+        if (up && a->stream == 0) base = up, stride = up_stride;
+        else {
+            D3DResource *vb = d3d.streams[a->stream].vb;
+            if (!vb) continue;
+            base = resource_data(vb);
+            stride = d3d.streams[a->stream].stride;
+        }
+        const UCHAR *s = base + a->offset + (size_t)idx * stride;
+        int n = a->components;
+        for (int k = 0; k < n && k < 4; k++) {
+            switch (a->type & 0xF) {
+            case 0: attr[r][k] = s[(k < 3 ? 2 - k : 3)] / 255.0f; break;
+            case 1: { SHORT v; memcpy(&v, s + 2 * k, 2); attr[r][k] = v / 32767.0f; break; }
+            case 2: memcpy(&attr[r][k], s + 4 * k, 4); break;
+            case 4: attr[r][k] = s[k] / 255.0f; break;
+            case 5: { SHORT v; memcpy(&v, s + 2 * k, 2); attr[r][k] = v; break; }
+            default: break;
+            }
+        }
+        xlog("D3D:   probe v%d (s%d+%u t%#x idx %u) = %g %g %g %g", r, a->stream, a->offset, a->type, idx,
+             attr[r][0], attr[r][1], attr[r][2], attr[r][3]);
+    }
+    uint32_t over[6] = { 0 };
+    for (unsigned i = 0; i < sh->nconsts; i++)
+        if ((unsigned)sh->const_slots[i] < 192) over[sh->const_slots[i] >> 5] |= 1u << (sh->const_slots[i] & 31);
+    float vp[2][4];
+    viewport_constants(vp);
+    static float c[192][4];
+    for (int r = 0; r < 192; r++)
+        memcpy(c[r], constant_row(sh, over, (d3d.constant_mode & 0x1F) == 0 ? (const float (*)[4])vp : NULL, r), 16);
+    float o[4];
+    int a0;
+    vsh_run_vertex(sh->code, sh->ninstr, (const float (*)[4])attr, (const float (*)[4])c, o, &a0);
+    xlog("D3D:   probe oPos %g %g %g %g a0 %d; c7 %g %g %g %g c50 %g %g %g %g c4.w %g", o[0], o[1], o[2], o[3], a0,
+         c[7][0], c[7][1], c[7][2], c[7][3], c[50][0], c[50][1], c[50][2], c[50][3], c[4][3]);
+}
 static void draw_programmable(vshader *sh, ULONG PrimitiveType, const UCHAR *up, ULONG up_stride, ULONG first,
                               ULONG count, const USHORT *indices)
 {
@@ -5781,9 +5832,10 @@ static void draw_programmable_(vshader *sh, ULONG PrimitiveType, const UCHAR *up
           RS(D3DRS_STENCILENABLE), d3d.viewport.X, d3d.viewport.Y, d3d.viewport.Width, d3d.viewport.Height,
           d3d.viewport.MinZ, d3d.viewport.MaxZ);
     if (g_trace == 1 && d3d.pixel_shader)
-        xlog("D3D:   ps constants c0 %08x %08x c1 %08x %08x, mapping %08x %08x", RS(D3DRS_PSCONSTANT0_0),
+        xlog("D3D:   ps constants c0 %08x %08x c1 %08x %08x, final %08x %08x, mapping %08x %08x %08x", RS(D3DRS_PSCONSTANT0_0),
              RS(D3DRS_PSCONSTANT0_0 + 1), RS(D3DRS_PSCONSTANT1_0), RS(D3DRS_PSCONSTANT1_0 + 1),
-             ((const ULONG *)d3d.pixel_shader)[57], ((const ULONG *)d3d.pixel_shader)[58]);
+             RS(D3DRS_PSFINALCOMBINERCONSTANT0), RS(D3DRS_PSFINALCOMBINERCONSTANT1),
+             ((const ULONG *)d3d.pixel_shader)[57], ((const ULONG *)d3d.pixel_shader)[58], ((const ULONG *)d3d.pixel_shader)[59]);
     if (g_trace == 1 && d3d.pixel_shader)
         xlog("D3D:   ps final %08x %08x, %u stages (%08x), modes %08x, rgb0 in %08x out %08x", d3d.render_state[8],
              d3d.render_state[9], d3d.render_state[53] & 0xFF, d3d.render_state[53], RS(D3DRS_PSTEXTUREMODES),
@@ -5795,6 +5847,7 @@ static void draw_programmable_(vshader *sh, ULONG PrimitiveType, const UCHAR *up
                         t->Format, t->Size);
         }
     DETAIL_TIMED(t_constants, upload_constants(sh, e));
+    if (g_trace == 1 && sh->code && getenv("XBCOMPAT_VS_PROBE")) vs_probe(sh, up, up_stride, first, count, indices);
     /* Indices from a GL buffer too (kept like the vertices, see stream_buffer). */
     conv_entry *ix;
     DETAIL_TIMED(t_indices, ix = indices && count && p_glGenBuffers ? index_entry(indices + first, count, true) : NULL);
@@ -8063,6 +8116,13 @@ static void trace_dump_target(D3DSurface *s)
         fclose(f);
         xlog("D3D:   dumped %s", path);
     }
+    path[strlen(path) - 4] = 0;
+    strcat(path, "-a.pgm");   /* and its alpha */
+    if ((f = fopen(path, "wb"))) {
+        fprintf(f, "P5 %u %u 255\n", (unsigned)w, (unsigned)h);
+        for (ULONG i = 0; i < w * h; i++) fputc(px[i * 4 + 3], f);
+        fclose(f);
+    }
     free(px);
     gc_reset();   /* the texture binding changed behind the cache */
 }
@@ -8187,6 +8247,30 @@ static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
        with none, the target has no depth at all, as on the Xbox. */
     p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
     p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, 0);
+    /* The device's own depth surface under a target of its size is the back
+       buffer's depth itself, as it is one memory on the Xbox: Halo 2 lays
+       its objects' depth down while drawing them into a 640x480 texture,
+       then shades them into the back buffer with ZFUNC EQUAL. A scratch
+       buffer of its own, never cleared, hid them by whatever an earlier
+       target left there, differently with every camera angle. */
+    GLuint window_depth = window_fb.samples <= 1 ? (window_fb.depth_rb ? window_fb.depth_rb : window_fb.resolve_depth_rb) : 0;
+    if (z && z == d3d.depth && window_depth && w == (ULONG)d3d.width && h == (ULONG)d3d.height) {
+        p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
+        p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, window_fb.depth_storage == GL_DEPTH24_STENCIL8
+                                    ? GL_DEPTH_STENCIL_ATTACHMENT : GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, window_depth);
+        d3d.host_zmax = window_fb.depth_storage == 0x81A5 /* GL_DEPTH_COMPONENT16 */ ? 65535.0f : 16777215.0f;
+        GLenum st = p_glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        if (st == GL_FRAMEBUFFER_COMPLETE) {
+            d3d.rt_width = w;
+            d3d.rt_height = h;
+            d3d.rt_texture = true;
+            target_viewport_reset(z, w, h);
+            return;
+        }
+        xlog("D3D: render target with the back buffer's depth incomplete (%#x)", st);
+        p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, 0);
+        p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, 0);
+    }
     static GLuint rb; static ULONG rb_w, rb_h;
     static GLenum rb_format;
     GLenum depth_storage = z ? backbuffer_depth_storage((z->Format >> 8) & 0xFF) : 0;

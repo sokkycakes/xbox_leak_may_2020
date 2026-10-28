@@ -170,3 +170,19 @@ void vsh_run_state(const uint32_t *code, unsigned count, const float v0[4], floa
     if (v0) memcpy(g_attr[0], v0, 16);
     run(&m, code, count);
 }
+
+/* One vertex through a program (attr: v0..v15), for debugging: oPos and
+   the A0 the program ended with. Constants are a copy, not written back. */
+void vsh_run_vertex(const uint32_t *code, unsigned count, const float attr[16][4], const float consts[192][4],
+                    float opos[4], int *a0)
+{
+    static float c[192][4];
+    machine m;
+    memset(&m, 0, sizeof m);
+    memcpy(c, consts, sizeof c);
+    m.c = c;
+    memcpy(g_attr, attr, sizeof g_attr);
+    run(&m, code, count);
+    memcpy(opos, m.R[12], 16);
+    if (a0) *a0 = m.a0;
+}
