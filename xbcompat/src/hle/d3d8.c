@@ -4552,6 +4552,20 @@ static GLuint vertex_shader_generic_object(vshader *sh)
         xlog("D3D: vertex program %p: %u instructions, inputs%s", (void *)sh, sh->ninstr, line);
     }
     sh->vs = compile_shader(GL_VERTEX_SHADER, src);
+    {
+        /* XBCOMPAT_VSH_DUMP=2: each program's GLSL too, under the GL shader
+           id the draw traces name ("vs N"). */
+        const char *dump = getenv("XBCOMPAT_VSH_DUMP");
+        if (dump && atoi(dump) >= 2) {
+            xlog("D3D: vertex program %p is GL shader %u:", (void *)sh, sh->vs);
+            for (char *line = src, *end; *line; line = end) {
+                end = strchr(line, '\n');
+                int len = end ? (int)(end - line) : (int)strlen(line);
+                xlog("D3D:   | %.*s", len, line);
+                end = end ? end + 1 : line + len;
+            }
+        }
+    }
     note_two_side(sh->vs, src);
     free(src);
     if (!sh->vs) sh->failed = true;
