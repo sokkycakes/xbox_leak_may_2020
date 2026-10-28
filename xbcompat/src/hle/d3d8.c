@@ -1394,8 +1394,10 @@ static void pace_present(void)
 
 /* Swap in three parts, so that with XBCOMPAT_ASYNC_DRAWS the title's thread
    can run the first and last while the render worker presents. */
+static void vis_fifo_poll(bool wait);
 static void swap_begin_frame(void)
 {
+    vis_fifo_poll(false);
     d3d.frame++;
     __atomic_store_n(&published_frame_count, d3d.frame, __ATOMIC_RELEASE);
     if (d3d.frame == 1) xlog("D3D: first Present");
@@ -10128,6 +10130,8 @@ static vshader inline_layout(const vshader *sh, ULONG *stride)
     return tmp;
 }
 
+static void vis_fifo_begin(void);
+static void vis_fifo_report(ULONG offset);
 static void pb_interpret_body(const ULONG *p, unsigned n)
 {
     static uint8_t *inline_buf;
@@ -10250,6 +10254,11 @@ static void pb_interpret_body(const ULONG *p, unsigned n)
                 partial[slot][c] = f;
                 if (c == 3) imm_set(slot, partial[slot][0], partial[slot][1], partial[slot][2], partial[slot][3]);
             } else if (m == 0x100) {   /* NV097_NO_OPERATION */
+            } else if (m == 0x17C8) {   /* NV097_CLEAR_REPORT_VALUE: the query below starts at zero */
+            } else if (m == 0x17CC) {   /* NV097_SET_ZPASS_PIXEL_COUNT_ENABLE */
+                if (d) vis_fifo_begin();
+            } else if (m == 0x17D0) {   /* NV097_GET_REPORT: type << 24 | offset */
+                if ((d >> 24) == 1) vis_fifo_report(d & 0xFFFFFF);
             } else if (pb_render_state(m, d)) {
             } else {
                 unsigned u = 0;
@@ -10528,6 +10537,92 @@ static LONG NTAPI D3DDevice_GetVisibilityTestResult(ULONG index, UINT_ *result, 
     p_glGetQueryObjectuiv(vis[slot].query, 0x8866 /* GL_QUERY_RESULT */, &n);
     if (result) *result = n;
     return D3D_OK;
+}
+
+/* Visibility tests begun or ended in the title's own push buffer.  Halo 2
+   inlines BeginVisibilityTest (CLEAR_REPORT_VALUE, then
+   SET_ZPASS_PIXEL_COUNT_ENABLE) and calls EndVisibilityTest: the count has
+   to start when the push buffer gets there, or EndVisibilityTest found none
+   running and every result read as no pixels (its lights' glows and lens
+   flares never showed).  An inlined EndVisibilityTest marks its report in
+   the device's tables at +0x7D4 incomplete (fourth dword -1) and sends
+   GET_REPORT with the report's GPU offset; the count goes there, and the
+   mark is cleared, once GL has the result. */
+static struct { GLuint query; ULONG *report; ULONG frame; } vis_fifo[256];
+static unsigned vis_fifo_n;
+
+static ULONG *vis_fifo_address(ULONG offset)
+{
+    ULONG *dev = d3d.device;
+    if (!dev) return NULL;
+    for (unsigned t = 0; t < 16; t++) {
+        ULONG base = dev[0x7D4 / 4 + t];
+        if (!base) continue;
+        ULONG delta = (offset - (base & 0xFFFFFF)) & 0xFFFFFF;
+        if (delta < 256 * 16 && !(delta & 15)) return (ULONG *)(base + delta);
+    }
+    return NULL;
+}
+
+static void vis_fifo_write(ULONG *report, ULONG count)
+{
+    report[0] = d3d.frame;
+    report[1] = 0;
+    report[2] = count;
+    __atomic_store_n(&report[3], 0, __ATOMIC_RELEASE);
+}
+
+static void vis_fifo_begin(void)
+{
+    if (!p_glGenQueries || vis_active) return;
+    hud_batch_flush();
+    p_glGenQueries(1, &vis_active);
+    p_glBeginQuery(0x8914 /* GL_SAMPLES_PASSED */, vis_active);
+    hud_query_active = true;
+}
+
+/* Results GL has (all of them with `wait`) go to their reports. */
+static void vis_fifo_poll(bool wait)
+{
+    static void (APIENTRY *del)(GLsizei, const GLuint *);
+    if (!del) del = SDL_GL_GetProcAddress("glDeleteQueries");
+    unsigned k = 0;
+    for (unsigned i = 0; i < vis_fifo_n; i++) {
+        GLuint avail = 0, n = 0;
+        if (!wait && d3d.frame - vis_fifo[i].frame < 2)
+            p_glGetQueryObjectuiv(vis_fifo[i].query, 0x8867 /* GL_QUERY_RESULT_AVAILABLE */, &avail);
+        else
+            avail = 1;
+        if (!avail) { vis_fifo[k++] = vis_fifo[i]; continue; }
+        p_glGetQueryObjectuiv(vis_fifo[i].query, 0x8866 /* GL_QUERY_RESULT */, &n);
+        vis_fifo_write(vis_fifo[i].report, n);
+        if (del) del(1, &vis_fifo[i].query);
+    }
+    vis_fifo_n = k;
+}
+
+static void vis_fifo_report(ULONG offset)
+{
+    static bool said;
+    ULONG *report = vis_fifo_address(offset);
+    GLuint q = vis_active;
+    if (q) {
+        hud_batch_flush();
+        p_glEndQuery(0x8914);
+        vis_active = 0;
+        hud_query_active = false;
+    }
+    if (!said) {
+        said = true;
+        xlog("D3D: visibility tests in the push buffer (report at %#lx%s)", (unsigned long)offset, report ? "" : ", not a device table");
+    }
+    if (!report) {
+        if (q) { static void (APIENTRY *del)(GLsizei, const GLuint *); if (!del) del = SDL_GL_GetProcAddress("glDeleteQueries"); if (del) del(1, &q); }
+        return;
+    }
+    if (!q) { vis_fifo_write(report, d3d.width * d3d.height); return; }   /* no count started: all of it */
+    if (vis_fifo_n == sizeof vis_fifo / sizeof vis_fifo[0]) vis_fifo_poll(true);
+    vis_fifo[vis_fifo_n++] = (typeof(vis_fifo[0])){ q, report, d3d.frame };
 }
 
 /* ---- state blocks ----------------------------------------------------- */
