@@ -341,6 +341,9 @@ static void emit_disasm(emitter *e, const vinstr *in)
 static const char *const prologue =
     "#version 120\n"
     "/* NV2A vertex program, translated by xbcompat */\n"
+    /* Multipass titles redraw the same triangles with other programs and
+       ZFUNC EQUAL: their positions must come out bit for bit the same. */
+    "invariant gl_Position;\n"
     "uniform vec4 c[192];\n"
     "uniform float flip_y;\n"
     "uniform float fog_vertex_mode;\n"

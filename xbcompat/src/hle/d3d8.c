@@ -193,6 +193,7 @@ typedef struct d3d_state {
     struct D3DSurface *target, *target_depth;     /* current render target */
     int rt_width, rt_height;     /* size of the current render target */
     bool rt_texture;             /* rendering into a texture (GL rows run bottom-up) */
+    bool rt_upright;             /* a texture target drawn the back buffer's way up, in d3d.fbo (see SetRenderTarget) */
     float target_zmax;           /* largest value of the current depth buffer's format */
     float host_zmax;             /* the same for the GL depth buffer actually backing it */
     ULONG fbo;                   /* framebuffer object for texture targets */
@@ -1137,7 +1138,7 @@ static void draw_window_pixels_masked(const uint8_t *tmp, GLenum format, GLenum 
     if (p_glBindFramebuffer) p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
     p_glWindowPos2i(0, 0);
     glDrawPixels(w, h, format, type, tmp);
-    if (p_glBindFramebuffer) p_glBindFramebuffer(GL_FRAMEBUFFER, d3d.rt_texture ? d3d.fbo : 0);
+    if (p_glBindFramebuffer) p_glBindFramebuffer(GL_FRAMEBUFFER, d3d.rt_texture || d3d.rt_upright ? d3d.fbo : 0);
     glPopAttrib();
 }
 
@@ -5032,7 +5033,7 @@ static GLuint fixed_lighting_shader(void)
         size_t size = sizeof ff_lighting_source + 64;
         char *source = malloc(size);
         if (!source) return 0;
-        snprintf(source, size, "#version 120\n#define FF_INPUTS %u\n%s", key,
+        snprintf(source, size, "#version 120\ninvariant gl_Position;\n#define FF_INPUTS %u\n%s", key,
                  ff_lighting_source + 13);   /* past its own #version line */
         objects[key] = compile_shader(GL_VERTEX_SHADER, source);
         free(source);
@@ -5920,7 +5921,7 @@ static void draw_programmable_(vshader *sh, ULONG PrimitiveType, const UCHAR *up
                     else if (indices) glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, indices + first);
                     else glDrawArrays(gl_primitive(PrimitiveType), first, count));
     frame_draws++;
-    if (flush_every && last_frame_draws >= FLUSH_MIN_DRAWS && !d3d.rt_texture && ++flush_count >= flush_every) {
+    if (flush_every && last_frame_draws >= FLUSH_MIN_DRAWS && !d3d.rt_texture && !d3d.rt_upright && ++flush_count >= flush_every) {
         flush_count = 0;
         glFlush();
     }
@@ -5934,7 +5935,7 @@ static void draw_programmable_(vshader *sh, ULONG PrimitiveType, const UCHAR *up
     /* The generic arrays stay bound for the next programmable draw; the
        fixed-function paths turn them off (gc_disable_attrib_arrays). */
     end_program(e);
-    if (g_trace == 1 && d3d.rt_texture && getenv("XBCOMPAT_RT_PROBE")) rt_probe();
+    if (g_trace == 1 && (d3d.rt_texture || d3d.rt_upright) && getenv("XBCOMPAT_RT_PROBE")) rt_probe();
     debug_dump_draw();
 }
 
@@ -6085,7 +6086,7 @@ static void draw_declared_(const vshader *sh, ULONG PrimitiveType, const UCHAR *
         TIMED(t_gl, if (indices) glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, indices + first);
                     else glDrawArrays(gl_primitive(PrimitiveType), first, count));
     end_program(e);
-    if (g_trace == 1 && d3d.rt_texture && getenv("XBCOMPAT_RT_PROBE")) rt_probe();
+    if (g_trace == 1 && (d3d.rt_texture || d3d.rt_upright) && getenv("XBCOMPAT_RT_PROBE")) rt_probe();
     debug_dump_draw();
 }
 
@@ -6835,7 +6836,7 @@ static void upload_depth_memory(void)
     if (p_glBindFramebuffer) p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
     p_glWindowPos2i(0, 0);
     glDrawPixels(w, h, 0x84F9 /* GL_DEPTH_STENCIL */, 0x84FA /* GL_UNSIGNED_INT_24_8 */, tmp);
-    if (p_glBindFramebuffer) p_glBindFramebuffer(GL_FRAMEBUFFER, d3d.rt_texture ? d3d.fbo : 0);
+    if (p_glBindFramebuffer) p_glBindFramebuffer(GL_FRAMEBUFFER, d3d.rt_texture || d3d.rt_upright ? d3d.fbo : 0);
     glPopAttrib();
     gc_reset();   /* the cached GL state no longer matches */
     if (program) p_glUseProgram(program);
@@ -7073,7 +7074,7 @@ static void resolve_window_framebuffer(GLbitfield mask)
     window_fb.bind(GL_READ_FRAMEBUFFER, window_fb.fbo);
     window_fb.bind(GL_DRAW_FRAMEBUFFER, window_fb.resolve);
     window_fb.blit(0, 0, d3d.width, d3d.height, 0, 0, d3d.width, d3d.height, mask, GL_NEAREST);
-    window_fb.bind(GL_DRAW_FRAMEBUFFER, d3d.rt_texture ? d3d.fbo : window_fb.fbo);
+    window_fb.bind(GL_DRAW_FRAMEBUFFER, d3d.rt_texture || d3d.rt_upright ? d3d.fbo : window_fb.fbo);
     if (scissor) glEnable(GL_SCISSOR_TEST);
 }
 
@@ -7100,7 +7101,7 @@ static void backbuffer_proxy_blit(bool to_window)
         window_fb.bind(GL_DRAW_FRAMEBUFFER, d3d.fbo);
     }
     window_fb.blit(0, 0, w, h, 0, h, w, 0, GL_COLOR_BUFFER_BIT, GL_NEAREST);
-    window_fb.bind(GL_FRAMEBUFFER, d3d.rt_texture ? d3d.fbo : window_fb.fbo);
+    window_fb.bind(GL_FRAMEBUFFER, d3d.rt_texture || d3d.rt_upright ? d3d.fbo : window_fb.fbo);
     if (scissor) glEnable(GL_SCISSOR_TEST);
 }
 
@@ -7160,7 +7161,7 @@ static void backbuffer_read_begin(GLbitfield mask)
 
 static void backbuffer_read_end(void)
 {
-    if (p_glBindFramebuffer) p_glBindFramebuffer(GL_READ_FRAMEBUFFER, d3d.rt_texture ? d3d.fbo : 0);
+    if (p_glBindFramebuffer) p_glBindFramebuffer(GL_READ_FRAMEBUFFER, d3d.rt_texture || d3d.rt_upright ? d3d.fbo : 0);
 }
 
 /* A GL texture holding the back buffer's current pixels, top row first like
@@ -7783,7 +7784,7 @@ static void guide_overlay(void)
 
 static void restore_window_framebuffer(void)
 {
-    if (window_fb.fbo) window_fb.bind(GL_FRAMEBUFFER, d3d.rt_texture ? d3d.fbo : window_fb.fbo);
+    if (window_fb.fbo) window_fb.bind(GL_FRAMEBUFFER, d3d.rt_texture || d3d.rt_upright ? d3d.fbo : window_fb.fbo);
 }
 
 /* Bits per texel of an Xbox D3DFORMAT and whether it is stored linearly
@@ -8140,12 +8141,14 @@ static bool readback_rt_surface(D3DSurface *s)
 /* --trace aid: while /data/xbox/xbcompat-dump-targets exists, a traced
    frame writes each texture render target it leaves to
    /tmp/xbc-dump/F-N-DATA-WxH.ppm (top row first) for looking at offline. */
+static void rt_upright_copy(bool to_target);
 static void trace_dump_target(D3DSurface *s)
 {
     static unsigned seq;
     static unsigned long seq_frame;
-    if (g_trace != 1 || !s || s == d3d.backbuffer || !d3d.rt_texture) return;
+    if (g_trace != 1 || !s || s == d3d.backbuffer || !(d3d.rt_texture || d3d.rt_upright)) return;
     if (access("/data/xbox/xbcompat-dump-targets", F_OK) && access("/tmp/xbcompat-dump-targets", F_OK)) return;
+    if (d3d.rt_upright) rt_upright_copy(true);
     GLenum face;
     ULONG level;
     tex_entry *e = s->Parent ? surface_image(s, &face, &level) : NULL;
@@ -8187,39 +8190,43 @@ static void trace_dump_target(D3DSurface *s)
     gc_reset();   /* the texture binding changed behind the cache */
 }
 
-/* A texture target drawing with the back buffer's depth: its own copy of
-   that depth, flipped like the target's rows (see SetRenderTarget). */
-static struct { GLuint rb; ULONG w, h; GLbitfield mask; bool active; } rt_depth;
+/* A texture target drawing with the back buffer's depth (see
+   SetRenderTarget): drawn the back buffer's way up into a stand-in color
+   texture next to that depth, whose rows go to the target, flipped, when it
+   is left. */
+static struct { GLuint color, tex_fbo; ULONG w, h; GLuint tex; GLenum face; ULONG level; } rt_upright;
 
-static void rt_depth_copy(GLuint from, GLuint to, ULONG w, ULONG h)
+/* Copy rows between the stand-in and the target, flipping them. */
+static void rt_upright_copy(bool to_target)
 {
     GLint draw = 0, read = 0;
     glGetIntegerv(0x8CA6 /* DRAW_FRAMEBUFFER_BINDING */, &draw);
     glGetIntegerv(0x8CAA /* READ_FRAMEBUFFER_BINDING */, &read);
     GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
     glDisable(GL_SCISSOR_TEST);
-    GLboolean dmask;
-    glGetBooleanv(GL_DEPTH_WRITEMASK, &dmask);
-    GLint smask = 0;
-    glGetIntegerv(GL_STENCIL_WRITEMASK, &smask);
-    glDepthMask(GL_TRUE);
-    glStencilMask(0xFF);
-    window_fb.bind(GL_READ_FRAMEBUFFER, from);
-    window_fb.bind(GL_DRAW_FRAMEBUFFER, to);
-    window_fb.blit(0, 0, w, h, 0, h, w, 0, rt_depth.mask, GL_NEAREST);
+    GLboolean cmask[4];
+    glGetBooleanv(GL_COLOR_WRITEMASK, cmask);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    window_fb.bind(GL_FRAMEBUFFER, rt_upright.tex_fbo);
+    p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, rt_upright.face, rt_upright.tex, rt_upright.level);
+    window_fb.bind(GL_READ_FRAMEBUFFER, to_target ? d3d.fbo : rt_upright.tex_fbo);
+    window_fb.bind(GL_DRAW_FRAMEBUFFER, to_target ? rt_upright.tex_fbo : d3d.fbo);
+    int w = (int)rt_upright.w, h = (int)rt_upright.h;
+    window_fb.blit(0, 0, w, h, 0, h, w, 0, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    window_fb.bind(GL_FRAMEBUFFER, rt_upright.tex_fbo);
+    p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
     window_fb.bind(GL_READ_FRAMEBUFFER, read);
     window_fb.bind(GL_DRAW_FRAMEBUFFER, draw);
-    glDepthMask(dmask);
-    glStencilMask(smask);
+    glColorMask(cmask[0], cmask[1], cmask[2], cmask[3]);
     if (scissor) glEnable(GL_SCISSOR_TEST);
 }
 
-/* Leaving such a target: its depth goes back to the back buffer's. */
-static void rt_depth_leave(void)
+/* Leaving such a target: its rows go to its texture. */
+static void rt_upright_leave(void)
 {
-    if (!rt_depth.active) return;
-    rt_depth.active = false;
-    rt_depth_copy(d3d.fbo, window_fb.fbo, rt_depth.w, rt_depth.h);
+    if (!d3d.rt_upright) return;
+    rt_upright_copy(true);
+    d3d.rt_upright = false;
 }
 
 static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
@@ -8249,7 +8256,7 @@ static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
     }
     TRACE_ALL("D3D: render target %p (parent %p) depth %p", (void *)target, (void *)target->Parent, (void *)z);
     backbuffer_proxy_end();
-    rt_depth_leave();
+    rt_upright_leave();
     /* Depth surfaces with an image of their own: a depth texture's level, or
        a standalone integer depth surface (kept like one). */
     bool z_image = z && ((z->Parent && tex_target(z->Parent) == GL_TEXTURE_2D)
@@ -8317,33 +8324,44 @@ static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
        buffer of its own, never cleared, hid them by whatever an earlier
        target left there, differently with every camera angle. */
     GLuint window_depth = window_fb.samples <= 1 ? (window_fb.depth_rb ? window_fb.depth_rb : window_fb.resolve_depth_rb) : 0;
-    if (z && z == d3d.depth && window_depth && window_fb.blit && w == (ULONG)d3d.width && h == (ULONG)d3d.height) {
+    if (!bb_proxy && z && z == d3d.depth && window_depth && window_fb.blit && w == (ULONG)d3d.width && h == (ULONG)d3d.height) {
         /* Texture targets are drawn upside down (GL row zero is the Xbox top
-           row), so the depth goes in as a flipped copy and comes back
-           flipped when the target is left (rt_depth_leave). */
-        if (!rt_depth.rb || rt_depth.w != w || rt_depth.h != h) {
-            if (!rt_depth.rb) p_glGenRenderbuffers(1, &rt_depth.rb);
-            p_glBindRenderbuffer(GL_RENDERBUFFER, rt_depth.rb);
-            p_glRenderbufferStorage(GL_RENDERBUFFER, window_fb.depth_storage, w, h);
-            rt_depth.w = w;
-            rt_depth.h = h;
+           row) and the back buffer isn't; mirrored, the same triangles land
+           on depths a bit off from the back buffer pass's, and its ZFUNC
+           EQUAL flickered over every object. So this one is drawn the back
+           buffer's way up into a stand-in that goes to the texture, flipped,
+           when the target is left. */
+        if (!rt_upright.color || rt_upright.w != w || rt_upright.h != h) {
+            if (!rt_upright.color) glGenTextures(1, &rt_upright.color);
+            if (!rt_upright.tex_fbo) p_glGenFramebuffers(1, &rt_upright.tex_fbo);
+            glBindTexture(GL_TEXTURE_2D, rt_upright.color);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_BGRA, GL_UNSIGNED_BYTE, NULL);
+            gc_reset();   /* the texture binding changed behind the cache */
+            rt_upright.w = w;
+            rt_upright.h = h;
         }
+        p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rt_upright.color, 0);
         GLenum attachment = window_fb.depth_storage == GL_DEPTH24_STENCIL8 ? GL_DEPTH_STENCIL_ATTACHMENT : GL_DEPTH_ATTACHMENT;
-        p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
-        p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, attachment, GL_RENDERBUFFER, rt_depth.rb);
+        p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, attachment, GL_RENDERBUFFER, window_depth);
         d3d.host_zmax = window_fb.depth_storage == 0x81A5 /* GL_DEPTH_COMPONENT16 */ ? 65535.0f : 16777215.0f;
         GLenum st = p_glCheckFramebufferStatus(GL_FRAMEBUFFER);
         if (st == GL_FRAMEBUFFER_COMPLETE) {
-            rt_depth.mask = GL_DEPTH_BUFFER_BIT | (attachment == GL_DEPTH_STENCIL_ATTACHMENT ? GL_STENCIL_BUFFER_BIT : 0);
-            rt_depth_copy(window_fb.fbo, d3d.fbo, w, h);
-            rt_depth.active = true;
+            rt_upright.tex = tex;
+            rt_upright.face = face_target;
+            rt_upright.level = target_level;
+            rt_upright_copy(false);
+            d3d.rt_upright = true;
             d3d.rt_width = w;
             d3d.rt_height = h;
-            d3d.rt_texture = true;
+            d3d.rt_texture = false;
             target_viewport_reset(z, w, h);
             return;
         }
         xlog("D3D: render target with the back buffer's depth incomplete (%#x)", st);
+        p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, face_target, tex, target_level);
         p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, 0);
         p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, 0);
     }
