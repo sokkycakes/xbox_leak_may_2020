@@ -1736,6 +1736,7 @@ static void swap_cpu_backbuffer(void)
     TRACE_ALL("D3D: frame with no draws, back buffer memory %s", changed ? "written by the CPU, shown" : "unchanged");
     if (changed) d3d.bb_cpu_dirty = true, frame_idle = false;
 }
+static void rt_probe(void);
 static void NTAPI D3DDevice_Clear(ULONG Count, const D3DRECT *pRects, ULONG Flags, ULONG Color, float Z,
                                   ULONG Stencil)
 {
@@ -1789,6 +1790,7 @@ static void NTAPI D3DDevice_Clear(ULONG Count, const D3DRECT *pRects, ULONG Flag
     }
     glDisable(GL_SCISSOR_TEST);
     glColorMask(1, 1, 1, 1);
+    if (g_trace == 1 && getenv("XBCOMPAT_RT_PROBE")) rt_probe();
 }
 
 /* ---- resources --------------------------------------------------------- */
@@ -5754,6 +5756,62 @@ static void program_profile_log(double frames)
 static void draw_programmable_(vshader *sh, ULONG PrimitiveType, const UCHAR *up, ULONG up_stride, ULONG first,
                                ULONG count, const USHORT *indices);
 
+/* Debug aid (XBCOMPAT_RT_PROBE with TRACE_FRAME): after a draw into a
+   texture target, how much of it is non-zero, and the GL state it drew with. */
+static void rt_probe(void)
+{
+    while (glGetError()) {}
+    int w = d3d.rt_width, h = d3d.rt_height;
+    uint8_t *px = malloc((size_t)w * h * 4);
+    if (!px) return;
+    GLint fb = 0, vp[4], sc[4];
+    glGetIntegerv(0x8CA6 /* DRAW_FRAMEBUFFER_BINDING */, &fb);
+    glGetIntegerv(GL_VIEWPORT, vp);
+    glGetIntegerv(GL_SCISSOR_BOX, sc);
+    GLint rfb = 0;
+    glGetIntegerv(0x8CAA /* READ_FRAMEBUFFER_BINDING */, &rfb);
+    p_glBindFramebuffer(GL_READ_FRAMEBUFFER, fb);
+    glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    unsigned rgb = 0, alpha = 0;
+    for (int i = 0; i < w * h; i++) {
+        if (px[i * 4] | px[i * 4 + 1] | px[i * 4 + 2]) rgb++;
+        if (px[i * 4 + 3]) alpha++;
+    }
+    float d = -1, dmax = -1;
+    float *dp = malloc((size_t)w * h * 4);
+    if (dp) {
+        glReadPixels(0, 0, w, h, GL_DEPTH_COMPONENT, GL_FLOAT, dp);
+        for (int i = 0; i < w * h; i++) if (dp[i] > dmax) dmax = dp[i];
+        d = dp[(h / 2) * w + w / 2];
+        free(dp);
+    }
+    static void (APIENTRY *gfap)(GLenum, GLenum, GLenum, GLint *);
+    if (!gfap) gfap = SDL_GL_GetProcAddress("glGetFramebufferAttachmentParameteriv");
+    GLint dtype = -1, dname = -1, stype = -1, sname = -1;
+    if (gfap) {
+        gfap(GL_READ_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, 0x8CD0 /* OBJECT_TYPE */, &dtype);
+        gfap(GL_READ_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, 0x8CD1 /* OBJECT_NAME */, &dname);
+        gfap(GL_READ_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, 0x8CD0, &stype);
+        gfap(GL_READ_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, 0x8CD1, &sname);
+    }
+    xlog("D3D:   rt probe depth max %g; depth attachment type %#x name %d, stencil %#x %d, err %#x", dmax, dtype, dname,
+         stype, sname, glGetError());
+    p_glBindFramebuffer(GL_READ_FRAMEBUFFER, rfb);
+    GLint dfunc = 0, sfunc = 0, sref = 0, smask = 0;
+    glGetIntegerv(GL_DEPTH_FUNC, &dfunc);
+    glGetIntegerv(GL_STENCIL_FUNC, &sfunc);
+    glGetIntegerv(GL_STENCIL_REF, &sref);
+    glGetIntegerv(GL_STENCIL_VALUE_MASK, &smask);
+    GLboolean cm[4];
+    glGetBooleanv(GL_COLOR_WRITEMASK, cm);
+    xlog("D3D:   rt probe fb %d %dx%d: %u rgb / %u alpha px; vp %d,%d %dx%d scissor %d %d,%d %dx%d depth %d func %#x mid %g "
+         "stencil %d func %#x ref %d mask %#x cmask %d%d%d%d err %#x",
+         fb, w, h, rgb, alpha, vp[0], vp[1], vp[2], vp[3], glIsEnabled(GL_SCISSOR_TEST), sc[0], sc[1], sc[2], sc[3],
+         glIsEnabled(GL_DEPTH_TEST), dfunc, d, glIsEnabled(GL_STENCIL_TEST), sfunc, sref, smask, cm[0], cm[1], cm[2], cm[3],
+         glGetError());
+    free(px);
+}
+
 /* Debug aid (XBCOMPAT_VS_PROBE with XBCOMPAT_TRACE_FRAME): run a draw's
    first vertex through the CPU interpreter and log its inputs and oPos. */
 static void vs_probe(const vshader *sh, const UCHAR *up, ULONG up_stride, ULONG first, ULONG count,
@@ -5876,6 +5934,7 @@ static void draw_programmable_(vshader *sh, ULONG PrimitiveType, const UCHAR *up
     /* The generic arrays stay bound for the next programmable draw; the
        fixed-function paths turn them off (gc_disable_attrib_arrays). */
     end_program(e);
+    if (g_trace == 1 && d3d.rt_texture && getenv("XBCOMPAT_RT_PROBE")) rt_probe();
     debug_dump_draw();
 }
 
@@ -6026,6 +6085,7 @@ static void draw_declared_(const vshader *sh, ULONG PrimitiveType, const UCHAR *
         TIMED(t_gl, if (indices) glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, indices + first);
                     else glDrawArrays(gl_primitive(PrimitiveType), first, count));
     end_program(e);
+    if (g_trace == 1 && d3d.rt_texture && getenv("XBCOMPAT_RT_PROBE")) rt_probe();
     debug_dump_draw();
 }
 
@@ -8210,6 +8270,34 @@ static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
     }
     p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, face_target, tex, target_level);
     d3d.target_zmax = z ? depth_format_max((z->Format >> 8) & 0xFF) : d3d.zscale;
+    p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
+    p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
+    p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, 0);
+    /* The device's own depth surface under a target of its size is the back
+       buffer's depth itself (even where it has an image of its own: that is
+       only a copy for sampling), as it is one memory on the Xbox: Halo 2 lays
+       its objects' depth down while drawing them into a 640x480 texture,
+       then shades them into the back buffer with ZFUNC EQUAL. A scratch
+       buffer of its own, never cleared, hid them by whatever an earlier
+       target left there, differently with every camera angle. */
+    GLuint window_depth = window_fb.samples <= 1 ? (window_fb.depth_rb ? window_fb.depth_rb : window_fb.resolve_depth_rb) : 0;
+    if (z && z == d3d.depth && window_depth && w == (ULONG)d3d.width && h == (ULONG)d3d.height) {
+        p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
+        p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, window_fb.depth_storage == GL_DEPTH24_STENCIL8
+                                    ? GL_DEPTH_STENCIL_ATTACHMENT : GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, window_depth);
+        d3d.host_zmax = window_fb.depth_storage == 0x81A5 /* GL_DEPTH_COMPONENT16 */ ? 65535.0f : 16777215.0f;
+        GLenum st = p_glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        if (st == GL_FRAMEBUFFER_COMPLETE) {
+            d3d.rt_width = w;
+            d3d.rt_height = h;
+            d3d.rt_texture = true;
+            target_viewport_reset(z, w, h);
+            return;
+        }
+        xlog("D3D: render target with the back buffer's depth incomplete (%#x)", st);
+        p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, 0);
+        p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, 0);
+    }
     if (z_image) {
         /* Give standalone integer depth surfaces their own persistent image,
            just like texture views. A shared scratch renderbuffer loses data
@@ -8247,30 +8335,6 @@ static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
        with none, the target has no depth at all, as on the Xbox. */
     p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
     p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, 0);
-    /* The device's own depth surface under a target of its size is the back
-       buffer's depth itself, as it is one memory on the Xbox: Halo 2 lays
-       its objects' depth down while drawing them into a 640x480 texture,
-       then shades them into the back buffer with ZFUNC EQUAL. A scratch
-       buffer of its own, never cleared, hid them by whatever an earlier
-       target left there, differently with every camera angle. */
-    GLuint window_depth = window_fb.samples <= 1 ? (window_fb.depth_rb ? window_fb.depth_rb : window_fb.resolve_depth_rb) : 0;
-    if (z && z == d3d.depth && window_depth && w == (ULONG)d3d.width && h == (ULONG)d3d.height) {
-        p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
-        p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, window_fb.depth_storage == GL_DEPTH24_STENCIL8
-                                    ? GL_DEPTH_STENCIL_ATTACHMENT : GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, window_depth);
-        d3d.host_zmax = window_fb.depth_storage == 0x81A5 /* GL_DEPTH_COMPONENT16 */ ? 65535.0f : 16777215.0f;
-        GLenum st = p_glCheckFramebufferStatus(GL_FRAMEBUFFER);
-        if (st == GL_FRAMEBUFFER_COMPLETE) {
-            d3d.rt_width = w;
-            d3d.rt_height = h;
-            d3d.rt_texture = true;
-            target_viewport_reset(z, w, h);
-            return;
-        }
-        xlog("D3D: render target with the back buffer's depth incomplete (%#x)", st);
-        p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, 0);
-        p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, 0);
-    }
     static GLuint rb; static ULONG rb_w, rb_h;
     static GLenum rb_format;
     GLenum depth_storage = z ? backbuffer_depth_storage((z->Format >> 8) & 0xFF) : 0;
