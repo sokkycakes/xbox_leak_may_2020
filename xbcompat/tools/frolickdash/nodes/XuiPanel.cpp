@@ -14,7 +14,7 @@
 // focus moved, Press(), Play(id, frame), SetText(id, text),
 // SetImage(id, path), SetFocus(id), GetFocus(), SetVisible(id, 0|1),
 // Fade(id, opacity, seconds), Pulse(id, dy, period, seconds),
-// SetOpacity(id, n), SetData(id, k, text), SetValue(id, n), Reload().  OnPress and OnFocus are delivered from
+// SetOpacity(id, n), SetData(id, k, text), SetValue(id, n), SetWidth(id, w), Reload().  OnPress and OnFocus are delivered from
 // Advance, after the call that caused them, so script can trigger them.  Images and fonts are .xtx / .ttf files
 // packed by tools/mkassets.py beside the scene.
 #include "std.h"
@@ -400,6 +400,7 @@ public:
     void SetText(const TCHAR* szId, const TCHAR* szText);
     void SetImage(const TCHAR* szId, const TCHAR* szPath);
     CObject* SetValue(CObject** rgparam, int nParam);
+    CObject* SetWidth(CObject** rgparam, int nParam);
     CObject* Fade(CObject** rgparam, int nParam);
     CObject* Pulse(CObject** rgparam, int nParam);
     // Fade(id, opacity, seconds): the control's opacity eased to a value
@@ -472,6 +473,7 @@ START_NODE_FUN(CXuiPanel, CNode)
     NODE_FUN(SetOpacity)
     NODE_FUN(SetData)
     NODE_FUN(SetValue)
+    NODE_FUN(SetWidth)
     NODE_FUN(Fade)
     NODE_FUN(Pulse)
     NODE_FUN_VV(Reload)
@@ -920,6 +922,42 @@ CObject* CXuiPanel::SetValue(CObject** rgparam, int nParam)
     // the bar's visual is held where the value puts it (the scene set it
     // so when it loaded; a value set later moves it)
     n->setBarValue();
+    return NULL;
+}
+
+// SetWidth(id, w): an element's Width; a figure's path is stretched by
+// moving its right half, so rounded ends keep their shape (a gauge's fill
+// drawn as a pill).
+CObject* CXuiPanel::SetWidth(CObject** rgparam, int nParam)
+{
+    if (nParam != 2)
+        return NULL;
+    xui::Node* n = Find(rgparam[0]->Deref()->ToStr()->GetSz());
+    if (n == NULL)
+        return NULL;
+    float w = rgparam[1]->Deref()->ToNum()->m_nValue;
+    // never narrower than its height and a bit: the ends' points must stay
+    // on their own side of the middle to be told apart next time
+    if (w < n->height() + 1.0f)
+        w = n->height() + 1.0f;
+    xui::Value* pv = n->props.get("Points");
+    xui::Points* pts = pv && pv->type == xui::TCustom ? pv->pts : NULL;
+    if (pts && pts->w > 0.0f)
+    {
+        float half = pts->w / 2.0f, dx = w * pts->w / n->width() - pts->w;
+        for (int i = 0; i < pts->pts.n; i++)
+        {
+            xui::Point& pt = pts->pts[i];
+            if (pt.p[0] > half) pt.p[0] += dx;
+            if (pt.c1[0] > half) pt.c1[0] += dx;
+            if (pt.c2[0] > half) pt.c2[0] += dx;
+        }
+        pts->w += dx;
+    }
+    xui::Value& v = n->props.set("Width");
+    v.free();
+    v.type = xui::TFloat;
+    v.f = w;
     return NULL;
 }
 

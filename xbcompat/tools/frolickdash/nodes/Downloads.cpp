@@ -56,6 +56,9 @@
 //                     "Paused", "Pending", or why it waits
 //   GetDetail(i)      "288 MB of 412 MB" (active) or "412 MB" (pending)
 //   GetProgress(i)    0..1
+//   GetRate(i)        how fast it is coming in ("1.9 MB/s"), from how its
+//                     bytes grow between looks at status.txt; "" until
+//                     there are two looks, or when nothing came in
 //   GetIcon(i)        the Blades' 64x icon for the kind
 //   IsPaused()        the active download is paused
 //   ItemStream(i)     0 a queued download, 1 a Streaming Download,
@@ -147,6 +150,66 @@ struct PAUSECMD
 };
 static PAUSECMD c_rgPause[STREAM_MAX];          // z / r, until the helper says
 static int c_nPause;
+// The download rate of each item status.txt lists with a byte count: its
+// bytes and the time at the last look, and a smoothed bytes per second
+// (-1 until there are two looks).
+struct RATE
+{
+    CHAR szId[DL_ID];
+    __int64 qwBytes;
+    DWORD dwTime;
+    float nRate;
+    bool bSeen;
+};
+#define RATE_MAX (STREAM_MAX + 2)
+static RATE c_rgRate[RATE_MAX];
+static int c_nRates;
+
+static void SampleRate(const CHAR* szId, __int64 qwBytes)
+{
+    DWORD dwNow = GetTickCount();
+    RATE* r = NULL;
+    for (int i = 0; i < c_nRates && r == NULL; i++)
+        if (strcmp(c_rgRate[i].szId, szId) == 0)
+            r = &c_rgRate[i];
+    if (r == NULL)
+    {
+        if (c_nRates == RATE_MAX)
+            return;
+        r = &c_rgRate[c_nRates++];
+        strncpy(r->szId, szId, DL_ID - 1);
+        r->szId[DL_ID - 1] = 0;
+        r->qwBytes = qwBytes;
+        r->dwTime = dwNow;
+        r->nRate = -1.0f;
+        r->bSeen = true;
+        return;
+    }
+    r->bSeen = true;
+    DWORD dt = dwNow - r->dwTime;
+    if (qwBytes < r->qwBytes)
+    {
+        r->qwBytes = qwBytes;   // started over
+        r->dwTime = dwNow;
+        r->nRate = -1.0f;
+        return;
+    }
+    if (dt < 500)
+        return;
+    float nNow = (float)(qwBytes - r->qwBytes) * 1000.0f / (float)dt;
+    // smoothed over a few seconds: archive.org's ranges come in bursts
+    r->nRate = r->nRate < 0.0f ? nNow : r->nRate * 0.7f + nNow * 0.3f;
+    r->qwBytes = qwBytes;
+    r->dwTime = dwNow;
+}
+
+static float RateOf(const CHAR* szId)
+{
+    for (int i = 0; i < c_nRates; i++)
+        if (strcmp(c_rgRate[i].szId, szId) == 0)
+            return c_rgRate[i].nRate;
+    return -1.0f;
+}
 
 const CHAR* StoreServiceState()
 {
@@ -178,6 +241,7 @@ public:
     CStrObject* GetStatus(int i);
     CStrObject* GetDetail(int i);
     float GetProgress(int i);
+    CStrObject* GetRate(int i);
     CStrObject* GetIcon(int i);
     int IsPaused();
     int ItemStream(int i);
@@ -234,6 +298,7 @@ START_NODE_FUN(CDownloads, CNode)
     NODE_FUN_SI(GetStatus)
     NODE_FUN_SI(GetDetail)
     NODE_FUN_NI(GetProgress)
+    NODE_FUN_SI(GetRate)
     NODE_FUN_SI(GetIcon)
     NODE_FUN_IV(IsPaused)
     NODE_FUN_II(ItemStream)
@@ -403,6 +468,8 @@ void CDownloads::ReadStatus()
     c_nInstalled = 0;
     c_nStreams = 0;
     bool rgbListed[STREAM_MAX] = { false };    // removed ones still listed
+    for (int r = 0; r < c_nRates; r++)
+        c_rgRate[r].bSeen = false;
     bool bChanged = false;
     CHAR* line = p;
     while (line && *line)
@@ -432,6 +499,7 @@ void CDownloads::ReadStatus()
                 s->qwBytes = _atoi64(f[3]);
                 s->bFill = atoi(f[4]);
                 Copy(s->szName, f[5], DL_NAME);
+                SampleRate(s->szId, s->qwIn);
             }
         }
         else if (strcmp(f[0], "online") == 0 && k >= 3)
@@ -451,6 +519,7 @@ void CDownloads::ReadStatus()
                     m_rg[i].nSizeMB = (int)(total / (1024 * 1024));
                 }
                 m_rg[i].nDoneMB = (float)(_atoi64(f[3]) / 1024) / 1024.0f;
+                SampleRate(f[1], _atoi64(f[3]));
                 if (i == 0)
                 {
                     Copy(c_szActiveState, f[2], sizeof c_szActiveState);
@@ -502,6 +571,12 @@ void CDownloads::ReadStatus()
         line = next;
     }
     delete [] p;
+    // what status.txt no longer lists starts over when it comes back
+    int nRates = 0;
+    for (int r = 0; r < c_nRates; r++)
+        if (c_rgRate[r].bSeen)
+            c_rgRate[nRates++] = c_rgRate[r];
+    c_nRates = nRates;
     if (bChanged)
         SaveQueue();
     // what the helper no longer lists: removed, or finished
@@ -859,6 +934,22 @@ CStrObject* CDownloads::GetDetail(int i)
         return StoreStr(szSize);
     StoreFormatMB(szDone, (int)m_rg[q].nDoneMB);
     sprintf(sz, "%s of %s", szDone, szSize);
+    return StoreStr(sz);
+}
+
+CStrObject* CDownloads::GetRate(int i)
+{
+    STREAMITEM* ps;
+    int q = Item(i, &ps);
+    float n = ps ? RateOf(ps->szId) : q >= 0 ? RateOf(m_rg[q].szId) : -1.0f;
+    CHAR sz[32];
+    if (n < 1024.0f)
+        sz[0] = 0;
+    else if (n >= 1024.0f * 1024.0f)
+        _snprintf(sz, sizeof sz, "%.1f MB/s", n / (1024.0f * 1024.0f));
+    else
+        _snprintf(sz, sizeof sz, "%d KB/s", (int)(n / 1024.0f));
+    sz[sizeof sz - 1] = 0;
     return StoreStr(sz);
 }
 

@@ -581,6 +581,13 @@ DEF theLaunchLevel Level
             if (bLaunchSoundDone)
                 theGameCollection.LaunchGame(nLaunchGame);
         }
+        // the catalog's downloads tile follows the download under way
+        nTileTick = nTileTick + 1;
+        if (nTileTick >= 20)
+        {
+            nTileTick = 0;
+            CatTileTick();
+        }
         // the Downloads page follows its active download, Spotlight the
         // catalog and what is queued (twice a second); the settings pages
         // their clock and a resolution's countdown (once a second)
@@ -1981,6 +1988,8 @@ function initialize()
     nLaunchWait = 0;
     nDlTick = 0;
     nDlItem = 0;
+    nTileTick = 0;
+    CatTileTick();
     bMusicFade = false;
     nMusicVol = 1;
     sndMusic.Play();
@@ -2596,6 +2605,7 @@ var sAction;        // "copy", "move", "delete", "deleteall"
 var sConfirmBack;   // the page behind the confirm or notice page
 var nDlTick;        // frames since the Downloads page last refreshed
 var nDlItem;        // the download a confirm is about
+var nTileTick;      // frames since the catalog's downloads tile was filled
 
 // ---- the lists ----------------------------------------------------------
 
@@ -3269,6 +3279,42 @@ function DlRefresh()
 
 // twice a second while the page shows: the active row's progress, or
 // the whole list when a download finished (the queue moved up)
+// The catalog pad's downloads tile: the download under way (the Downloads
+// page's active item), how far it is and how fast it comes in, or that
+// nothing is downloading (sokky, 2026-10-29).  The fill is a pill as wide
+// as the track times the progress.
+function CatTileTick()
+{
+    var f;
+    var r;
+    if (theDownloads.HasActive() == 0)
+    {
+        padCatalog.SetText("dlTitle", "Nothing downloading");
+        padCatalog.SetText("dlPct", "");
+        padCatalog.SetVisible("dlFill", 0);
+        return;
+    }
+    f = theDownloads.GetProgress(0);
+    padCatalog.SetText("dlTitle", theDownloads.GetName(0));
+    padCatalog.SetVisible("dlFill", 1);
+    padCatalog.SetWidth("dlFill", 219 * f);
+    if (theDownloads.ItemStream(0) == 3)
+        r = "Paused";
+    else if (theDownloads.ItemStream(0) == 0)
+    {
+        if (theDownloads.IsPaused() == 1)
+            r = "Paused";
+        else
+            r = theDownloads.GetRate(0);
+    }
+    else
+        r = theDownloads.GetRate(0);
+    // until it has a rate: how far it is
+    if (r == "")
+        r = Math.floor(f * 100) + "%";
+    padCatalog.SetText("dlPct", r);
+}
+
 function DlTick()
 {
     var v;
