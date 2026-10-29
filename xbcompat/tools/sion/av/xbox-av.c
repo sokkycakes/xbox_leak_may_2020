@@ -30,7 +30,13 @@
  *
  *   xbox-av [--socket PATH]     (default $XBOX_AV_SOCKET, /run/xbox-av.sock)
  *
- * KMS_MODE=WxH picks the mode the session starts in, as bootani does.
+ * KMS_MODE=WxH picks the mode the session starts in, as bootani does
+ * (WxHi for an interlaced one).
+ *
+ * The mode can change between titles: when a title leaves ('S'), the mode
+ * named in $XBOX_AV_MODE_FILE (/run/xbox-av-mode, WxH or WxHi, written by
+ * Frolick's settings helper) is set if the display has it, and the next
+ * title keeps it (xbcompat's window takes the display's mode).
  */
 #define _GNU_SOURCE
 #define _FILE_OFFSET_BITS 64
@@ -103,6 +109,21 @@ static int open_card(void)
     return -1;
 }
 
+/* The connector's mode named by spec (WxH, or WxHi for interlaced): the
+   first one listed (the display's preferred rate first), progressive
+   unless spec asks for interlaced. */
+static int match_mode(const struct drm_mode_modeinfo *modes, uint32_t n, const char *spec)
+{
+    int ww = 0, wh = 0;
+    char il = 0;
+    if (!spec || sscanf(spec, "%dx%d%c", &ww, &wh, &il) < 2) return -1;
+    int want_il = il == 'i';
+    for (uint32_t m = 0; m < n; m++)
+        if (modes[m].hdisplay == ww && modes[m].vdisplay == wh &&
+            !!(modes[m].flags & DRM_MODE_FLAG_INTERLACE) == want_il) return m;
+    return -1;
+}
+
 /* The connected connector and the CRTC that drives it (or can), and the
    mode to start in: KMS_MODE if the display has it, else the CRTC's, else
    the display's preferred one. */
@@ -148,13 +169,13 @@ static int find_output(void)
 
         struct drm_mode_crtc gcr = { .crtc_id = crtc };
         int cur = !xioctl(DRM_IOCTL_MODE_GETCRTC, &gcr) && gcr.mode_valid;
-        int pick = -1, ww = 0, wh = 0;
+        int pick = match_mode(modes, nmodes, getenv("KMS_MODE"));
+        int ww = 0, wh = 0;
         const char *want = getenv("KMS_MODE");
-        if (want && sscanf(want, "%dx%d", &ww, &wh) == 2) {
-            for (int pass = 0; pass < 2 && pick < 0; pass++)
-                for (uint32_t m = 0; m < nmodes; m++)
-                    if (modes[m].hdisplay == ww && modes[m].vdisplay == wh &&
-                        !!(modes[m].flags & DRM_MODE_FLAG_INTERLACE) == pass) { pick = m; break; }
+        if (pick < 0 && want && sscanf(want, "%dx%d", &ww, &wh) == 2) {
+            /* WxH the display only has interlaced */
+            for (uint32_t m = 0; m < nmodes; m++)
+                if (modes[m].hdisplay == ww && modes[m].vdisplay == wh) { pick = m; break; }
         }
         if (pick >= 0) mode = modes[pick];
         else if (cur) mode = gcr.mode;
@@ -174,6 +195,44 @@ static int find_output(void)
     }
     say("no connected display");
     return -1;
+}
+
+/* The mode the settings ask for, when it isn't the one on screen. */
+static int wanted_mode(struct drm_mode_modeinfo *out)
+{
+    const char *path = getenv("XBOX_AV_MODE_FILE");
+    char spec[32] = "";
+    FILE *f = fopen(path && *path ? path : "/run/xbox-av-mode", "r");
+    if (!f) return 0;
+    if (!fgets(spec, sizeof spec, f)) spec[0] = 0;
+    fclose(f);
+    spec[strcspn(spec, "\r\n ")] = 0;
+    if (!spec[0] || !conn_id) return 0;
+    /* already in that mode (at whichever rate): no modeset, which the
+       HDMI-to-AV box would show as colour bars */
+    if (match_mode(&mode, 1, spec) == 0) return 0;
+    struct drm_mode_get_connector gc = { .connector_id = conn_id };
+    if (xioctl(DRM_IOCTL_MODE_GETCONNECTOR, &gc) || !gc.count_modes) return 0;
+    uint32_t n = gc.count_modes;
+    struct drm_mode_modeinfo *modes = calloc(n + 1, sizeof *modes);
+    gc.modes_ptr = (uintptr_t)modes;
+    gc.count_encoders = gc.count_props = 0;
+    gc.encoders_ptr = gc.props_ptr = gc.prop_values_ptr = 0;
+    int pick = -1;
+    if (!xioctl(DRM_IOCTL_MODE_GETCONNECTOR, &gc)) {
+        if (gc.count_modes < n) n = gc.count_modes;
+        pick = match_mode(modes, n, spec);
+    }
+    if (pick < 0) {
+        say("the display has no %s mode; staying in %ux%u%s", spec, mode.hdisplay, mode.vdisplay,
+            mode.flags & DRM_MODE_FLAG_INTERLACE ? "i" : "");
+        free(modes);
+        return 0;
+    }
+    int change = memcmp(&modes[pick], &mode, sizeof mode) != 0;
+    if (change) *out = modes[pick];
+    free(modes);
+    return change;
 }
 
 static int set_master(int tries_ms)
@@ -208,6 +267,12 @@ static int show(const uint8_t *px, uint32_t w, uint32_t h)
     struct drm_mode_crtc gcr = { .crtc_id = crtc_id };
     if (!xioctl(DRM_IOCTL_MODE_GETCRTC, &gcr) && gcr.mode_valid) { mode = gcr.mode; have_mode = 1; }
     if (!have_mode && find_output()) return -1;
+    struct drm_mode_modeinfo next;
+    if (wanted_mode(&next)) {
+        say("switching the display to %ux%u%s %uHz", next.hdisplay, next.vdisplay,
+            next.flags & DRM_MODE_FLAG_INTERLACE ? "i" : "", next.vrefresh);
+        mode = next;
+    }
 
     struct drm_mode_create_dumb cd = { .width = mode.hdisplay, .height = mode.vdisplay, .bpp = 32 };
     if (xioctl(DRM_IOCTL_MODE_CREATE_DUMB, &cd)) { say("CREATE_DUMB: %s", strerror(errno)); return -1; }

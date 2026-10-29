@@ -1,0 +1,129 @@
+<XuiCanvas>
+<Properties>
+ <Width>1120</Width>
+ <Height>770</Height>
+</Properties>
+<XuiScene>
+<Properties>
+ <Id>scDisplayHD</Id>
+ <Width>1120</Width>
+ <Height>770</Height>
+ <ClassOverride>dashVideoSettings_HD</ClassOverride>
+ <TransFrom>FadeOut</TransFrom>
+ <TransTo>FadeIn</TransTo>
+ <TransBackFrom>FadeOut</TransBackFrom>
+ <TransBackTo>FadeIn</TransBackTo>
+</Properties>
+<XuiList>
+<Properties>
+ <Id>listOptions</Id>
+ <Width>420</Width>
+ <Height>435</Height>
+ <Position>144,153,0</Position>
+ <ClassOverride>dashCScreenSize</ClassOverride>
+</Properties>
+</XuiList>
+<XuiNavButton>
+<Properties>
+ <Id>legend_y</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>165,611,0</Position>
+ <Visual>legend_Y</Visual>
+ <Enabled>false</Enabled>
+ <PressKey>22531</PressKey>
+</Properties>
+</XuiNavButton>
+<XuiNavButton>
+<Properties>
+ <Id>legend_x</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>146,639,0</Position>
+ <Visual>legend_X</Visual>
+ <Enabled>false</Enabled>
+ <PressKey>22530</PressKey>
+</Properties>
+</XuiNavButton>
+<XuiNavButton>
+<Properties>
+ <Id>legend_a</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>573,639,0</Position>
+ <Visual>legend_A</Visual>
+ <Text>Select</Text>
+</Properties>
+</XuiNavButton>
+<XuiBackButton>
+<Properties>
+ <Id>legend_b</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>555,611,0</Position>
+ <Visual>legend_B</Visual>
+ <UnfocusedInput>true</UnfocusedInput>
+ <Text>Back</Text>
+ <PressKey>22593</PressKey>
+</Properties>
+</XuiBackButton>
+<XuiLabel>
+<Properties>
+ <Id>labHeader</Id>
+ <Width>855</Width>
+ <Height>47</Height>
+ <Position>156,96,0</Position>
+ <Visual>Label_Head</Visual>
+ <Text>HDTV Settings</Text>
+</Properties>
+</XuiLabel>
+<XuiLabel>
+<Properties>
+ <Id>graphic_MetaPane</Id>
+ <Width>420</Width>
+ <Height>445</Height>
+ <Position>579,151,0</Position>
+ <Visual>Metapane</Visual>
+</Properties>
+</XuiLabel>
+<XuiLabel>
+<Properties>
+ <Id>labCurrentSettingsText</Id>
+ <Width>420</Width>
+ <Height>35</Height>
+ <Position>579,153,0</Position>
+ <Visual>Label_MetaHead_1line</Visual>
+ <Text>Current Setting</Text>
+</Properties>
+</XuiLabel>
+<XuiLabel>
+<Properties>
+ <Id>labCurrentSettings</Id>
+ <Width>420</Width>
+ <Height>35</Height>
+ <Position>579,190,0</Position>
+ <Visual>Label_Body_1line</Visual>
+ <Text>&lt;setting&gt;</Text>
+</Properties>
+</XuiLabel>
+<XuiLabel>
+<Properties>
+ <Id>labMetaBody</Id>
+ <Width>415</Width>
+ <Height>367</Height>
+ <Position>579,231,0</Position>
+ <Text>Select a high definition output setting. 
+
+When you change your console's output setting, you will be asked if you can see a picture. If the picture does not appear within 10 seconds, your console will change back to its original settings.</Text>
+</Properties>
+</XuiLabel>
+<XuiLabel>
+<Properties>
+ <Id>labAVPackInfo</Id>
+ <Width>420</Width>
+ <Height>150</Height>
+ <Position>147,424,0</Position>
+</Properties>
+</XuiLabel>
+</XuiScene>
+</XuiCanvas>

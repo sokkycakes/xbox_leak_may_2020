@@ -1,0 +1,132 @@
+<XuiCanvas>
+<Properties>
+ <Width>1120</Width>
+ <Height>770</Height>
+</Properties>
+<XuiScene>
+<Properties>
+ <Id>scLanguageSettings</Id>
+ <Width>1120</Width>
+ <Height>770</Height>
+ <ClassOverride>dashLanguageSettings</ClassOverride>
+ <DefaultFocus>lstLanguages</DefaultFocus>
+ <TransFrom>FadeOut</TransFrom>
+ <TransTo>FadeIn</TransTo>
+ <TransBackFrom>FadeOut</TransBackFrom>
+ <TransBackTo>FadeIn</TransBackTo>
+</Properties>
+<XuiList>
+<Properties>
+ <Id>lstLanguages</Id>
+ <Width>420</Width>
+ <Height>435</Height>
+ <Position>144,153,0</Position>
+ <ClassOverride>dashCLanguage</ClassOverride>
+ <NavUp>btnAccept</NavUp>
+ <NavDown>btnAccept</NavDown>
+</Properties>
+</XuiList>
+<XuiBackButton>
+<Properties>
+ <Id>legend_b</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>555,611,0</Position>
+ <Visual>legend_B</Visual>
+ <UnfocusedInput>true</UnfocusedInput>
+ <Text>Back</Text>
+ <PressKey>22593</PressKey>
+</Properties>
+</XuiBackButton>
+<XuiNavButton>
+<Properties>
+ <Id>legend_a</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>573,639,0</Position>
+ <Visual>legend_A</Visual>
+ <Text>Select</Text>
+</Properties>
+</XuiNavButton>
+<XuiNavButton>
+<Properties>
+ <Id>legend_x</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>146,639,0</Position>
+ <Visual>legend_X</Visual>
+ <Enabled>false</Enabled>
+ <PressKey>22530</PressKey>
+</Properties>
+</XuiNavButton>
+<XuiNavButton>
+<Properties>
+ <Id>legend_y</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>165,611,0</Position>
+ <Visual>legend_Y</Visual>
+ <Enabled>false</Enabled>
+ <PressKey>22531</PressKey>
+</Properties>
+</XuiNavButton>
+<XuiLabel>
+<Properties>
+ <Id>labHeader</Id>
+ <Width>855</Width>
+ <Height>47</Height>
+ <Position>156,96,0</Position>
+ <Visual>Label_Head</Visual>
+ <Text>Language Settings</Text>
+</Properties>
+</XuiLabel>
+<XuiLabel>
+<Properties>
+ <Id>graphic_MetaPane</Id>
+ <Width>420</Width>
+ <Height>445</Height>
+ <Position>579,151,0</Position>
+ <Visual>Metapane</Visual>
+</Properties>
+</XuiLabel>
+<XuiLabel>
+<Properties>
+ <Id>labCurrentSettingsText</Id>
+ <Width>420</Width>
+ <Height>35</Height>
+ <Position>579,155,0</Position>
+ <Visual>Label_MetaHead_1line</Visual>
+ <Text>Current Setting</Text>
+</Properties>
+</XuiLabel>
+<XuiLabel>
+<Properties>
+ <Id>labCurrentSettings</Id>
+ <Width>420</Width>
+ <Height>35</Height>
+ <Position>579,190,0</Position>
+ <Visual>Label_Body_1line</Visual>
+</Properties>
+</XuiLabel>
+<XuiLabel>
+<Properties>
+ <Id>labMetaBody</Id>
+ <Width>415</Width>
+ <Height>367</Height>
+ <Position>579,231,0</Position>
+ <Text>
+</Text>
+</Properties>
+</XuiLabel>
+<XuiControl>
+<Properties>
+ <Id>metaPanelScene</Id>
+ <Width>420</Width>
+ <Height>480</Height>
+ <Position>578.966,153.053,0</Position>
+ <Show>false</Show>
+ <Visual>metaScene_1line</Visual>
+</Properties>
+</XuiControl>
+</XuiScene>
+</XuiCanvas>

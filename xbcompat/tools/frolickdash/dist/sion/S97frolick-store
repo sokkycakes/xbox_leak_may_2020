@@ -1,0 +1,24 @@
+#!/bin/sh
+# Frolick's storefront helper (tools/frolickdash/store): the Internet
+# Archive catalog and downloads for the Frolick dashboard, through files in
+# E:\FROLICK\STORE.  Log: /var/log/frolick-store.log.
+BIN=/opt/frolick/bin/frolick-store
+PID=/var/run/frolick-store.pid
+case "$1" in
+start)
+	[ -x "$BIN" ] || exit 0
+	[ -f "$PID" ] && kill -0 "$(cat "$PID")" 2>/dev/null && exit 0
+	mkdir -p /data/frolick/downloads
+	"$BIN" >>/var/log/frolick-store.log 2>&1 &
+	echo $! >"$PID"
+	;;
+stop)
+	[ -f "$PID" ] && kill "$(cat "$PID")" 2>/dev/null
+	rm -f "$PID"
+	;;
+restart)
+	"$0" stop
+	sleep 1
+	"$0" start
+	;;
+esac

@@ -1,0 +1,88 @@
+<XuiCanvas>
+<Properties>
+ <Width>1120</Width>
+ <Height>770</Height>
+</Properties>
+<XuiScene>
+<Properties>
+ <Id>scInfo</Id>
+ <Width>1120</Width>
+ <Height>770</Height>
+ <ClassOverride>dashSystemReset</ClassOverride>
+ <TransFrom>FadeOut</TransFrom>
+ <TransTo>FadeIn</TransTo>
+ <TransBackFrom>FadeOut</TransBackFrom>
+ <TransBackTo>FadeIn</TransBackTo>
+</Properties>
+<XuiLabel>
+<Properties>
+ <Id>lblHelpTitle</Id>
+ <Width>855</Width>
+ <Height>47</Height>
+ <Position>156,96,0</Position>
+ <Visual>Label_Head</Visual>
+ <Text>System Info</Text>
+</Properties>
+</XuiLabel>
+<XuiEdit>
+<Properties>
+ <Id>edInfo</Id>
+ <Width>832</Width>
+ <Height>440</Height>
+ <Position>154,151,0</Position>
+ <Visual>edit_NoCaret</Visual>
+ <Text>Do you want to reset your console? This will restore all console settings to factory defaults. Data on storage devices will not be affected.</Text>
+ <ReadOnly>true</ReadOnly>
+ <Multiline>true</Multiline>
+ <SmoothScroll>true</SmoothScroll>
+</Properties>
+</XuiEdit>
+<XuiNavButton>
+<Properties>
+ <Id>btnY</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>165,611,0</Position>
+ <Visual>legend_Y</Visual>
+ <Enabled>false</Enabled>
+ <UnfocusedInput>true</UnfocusedInput>
+ <PressKey>22531</PressKey>
+</Properties>
+</XuiNavButton>
+<XuiNavButton>
+<Properties>
+ <Id>btnX</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>146,639,0</Position>
+ <Visual>legend_X</Visual>
+ <Enabled>false</Enabled>
+ <UnfocusedInput>true</UnfocusedInput>
+ <PressKey>22530</PressKey>
+</Properties>
+</XuiNavButton>
+<XuiBackButton>
+<Properties>
+ <Id>btnB</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>555,611,0</Position>
+ <Visual>legend_B</Visual>
+ <UnfocusedInput>true</UnfocusedInput>
+ <Text>Back</Text>
+ <PressKey>22593</PressKey>
+</Properties>
+</XuiBackButton>
+<XuiButton>
+<Properties>
+ <Id>btnA</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>573,639,0</Position>
+ <Visual>legend_A</Visual>
+ <Enabled>false</Enabled>
+ <UnfocusedInput>true</UnfocusedInput>
+</Properties>
+</XuiButton>
+</XuiScene>
+</XuiCanvas>

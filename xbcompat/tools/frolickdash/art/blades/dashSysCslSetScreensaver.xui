@@ -1,0 +1,132 @@
+<XuiCanvas>
+<Properties>
+ <Width>1120</Width>
+ <Height>770</Height>
+</Properties>
+<XuiScene>
+<Properties>
+ <Id>scScreensaver</Id>
+ <Width>1120</Width>
+ <Height>770</Height>
+ <Position>-1,-1,0</Position>
+ <ClassOverride>dashScreensaver</ClassOverride>
+ <DefaultFocus>btnOn</DefaultFocus>
+ <TransFrom>FadeOut</TransFrom>
+ <TransTo>FadeIn</TransTo>
+ <TransBackFrom>FadeOut</TransBackFrom>
+ <TransBackTo>FadeIn</TransBackTo>
+</Properties>
+<XuiButton>
+<Properties>
+ <Id>btnOn</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>144,153,0</Position>
+ <NavDown>btnOff</NavDown>
+ <Text>Enable Screen Saver</Text>
+</Properties>
+</XuiButton>
+<XuiBackButton>
+<Properties>
+ <Id>legend_b</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>555,611,0</Position>
+ <Visual>legend_B</Visual>
+ <UnfocusedInput>true</UnfocusedInput>
+ <Text>Back</Text>
+ <PressKey>22593</PressKey>
+</Properties>
+</XuiBackButton>
+<XuiNavButton>
+<Properties>
+ <Id>legend_a</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>573,639,0</Position>
+ <Visual>legend_A</Visual>
+ <Text>Select</Text>
+</Properties>
+</XuiNavButton>
+<XuiNavButton>
+<Properties>
+ <Id>legend_x</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>146,639,0</Position>
+ <Visual>legend_X</Visual>
+ <Enabled>false</Enabled>
+ <PressKey>22530</PressKey>
+</Properties>
+</XuiNavButton>
+<XuiNavButton>
+<Properties>
+ <Id>legend_y</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>165,611,0</Position>
+ <Visual>legend_Y</Visual>
+ <Enabled>false</Enabled>
+ <PressKey>22531</PressKey>
+</Properties>
+</XuiNavButton>
+<XuiButton>
+<Properties>
+ <Id>btnOff</Id>
+ <Width>420</Width>
+ <Height>47</Height>
+ <Position>144,199,0</Position>
+ <NavUp>btnOn</NavUp>
+ <Text>Disable Screen Saver</Text>
+</Properties>
+</XuiButton>
+<XuiLabel>
+<Properties>
+ <Id>labHeader</Id>
+ <Width>855</Width>
+ <Height>47</Height>
+ <Position>156,96,0</Position>
+ <Visual>Label_Head</Visual>
+ <Text>Screen Saver</Text>
+</Properties>
+</XuiLabel>
+<XuiLabel>
+<Properties>
+ <Id>graphic_MetaPane</Id>
+ <Width>420</Width>
+ <Height>445</Height>
+ <Position>579,151,0</Position>
+ <Visual>Metapane</Visual>
+</Properties>
+</XuiLabel>
+<XuiLabel>
+<Properties>
+ <Id>labCurrentSettingsText</Id>
+ <Width>420</Width>
+ <Height>35</Height>
+ <Position>579,155,0</Position>
+ <Visual>Label_MetaHead_1line</Visual>
+ <Text>Current Setting</Text>
+</Properties>
+</XuiLabel>
+<XuiLabel>
+<Properties>
+ <Id>labCurrentSettings</Id>
+ <Width>420</Width>
+ <Height>35</Height>
+ <Position>579,192,0</Position>
+ <Visual>Label_Body_1line</Visual>
+ <Text>&lt;setting&gt;</Text>
+</Properties>
+</XuiLabel>
+<XuiLabel>
+<Properties>
+ <Id>labMetaBody</Id>
+ <Width>415</Width>
+ <Height>358</Height>
+ <Position>579,233,0</Position>
+ <Text>Enable the screen saver to automatically dim the screen image after 10 minutes of inactivity.</Text>
+</Properties>
+</XuiLabel>
+</XuiScene>
+</XuiCanvas>
