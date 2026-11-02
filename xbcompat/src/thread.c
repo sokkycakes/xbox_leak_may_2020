@@ -124,6 +124,15 @@ static void attach(xthread *t)
     pcr->NtTib.StackLimit = (char *)pcr->NtTib.StackBase - t->stack_size;
     t->ethread.Tcb.StackBase = pcr->NtTib.StackBase;
     t->ethread.Tcb.StackLimit = pcr->NtTib.StackLimit;
+    /* XAPI's XSetProcessQuantumLength writes ApcState.Process->ThreadQuantum
+       (KPROCESS +0x14); every thread shares one zeroed process block. */
+    static ULONG *process;
+    if (!process) {
+        process = arena_alloc(0x20, 0);
+        memset(process, 0, 0x20);
+        process[0x14 / 4] = 60;   /* 20 ms */
+    }
+    t->ethread.Tcb.ApcState.Process = process;
 
 #ifdef XBC_NATIVE
     t->ldt_index = ldt_alloc(pcr, sizeof(*pcr) - 1);
@@ -187,6 +196,7 @@ static void *thread_main(void *arg)
     pthread_setname_np(pthread_self(), name);
     prof_thread_start();
     attach(t);
+    hle_stack_thread_init();
 
     pthread_mutex_lock(&start_lock);
     while (t->ethread.Tcb.SuspendCount > 0)

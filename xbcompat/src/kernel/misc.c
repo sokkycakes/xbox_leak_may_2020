@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <dirent.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "../xbcompat.h"
@@ -27,6 +28,15 @@ ULONG HalBootSMCVideoMode = 0;
 BOOLEAN KdDebuggerEnabled = 0, KdDebuggerNotPresent = 1;
 PVOID LaunchDataPage = NULL;
 ULONG IdexChannelObject[32];
+#ifndef XBC_TRANSLATED
+/* IDE_CHANNEL_OBJECT's DeviceQueue.DeviceListHead (+0x28) starts empty:
+   XAPI's CancelIo walks it for the file's queued IRPs (Counter-Strike
+   cancels its reads when a level loads). */
+__attribute__((constructor)) static void idex_channel_init(void)
+{
+    IdexChannelObject[10] = IdexChannelObject[11] = (ULONG)(uintptr_t)&IdexChannelObject[10];
+}
+#endif
 UCHAR XboxEEPROMKey[16], XboxHDKey[16], XboxSignatureKey[16], XboxLANKey[16];
 UCHAR XboxAlternateSignatureKeys[16][16];
 UCHAR XePublicKeyData[284];
@@ -264,6 +274,42 @@ static void relaunch(const char *path)
     xlog("relaunch failed: %s", strerror(errno));
 }
 
+/* The Guide's Quick Launch: another title, as an XLaunchNewImage with no
+   launch data would start it ("<D: target>" and the XBE in it). */
+void guide_launch(const char *nt_dir, const char *xbe)
+{
+    if (!LaunchDataPage) LaunchDataPage = MmAllocateContiguousMemory(4096);
+    if (!LaunchDataPage) return;
+    memset(LaunchDataPage, 0, 4096);
+    char path[1100];
+    snprintf(path, sizeof(path), "%s;%s", nt_dir, xbe);
+    xlog("Guide: Quick Launch %s", path);
+    relaunch(path);
+}
+
+/* Quick Launch from a Guide outside xbcompat (kazeta-guide, over a Windows
+   game card): it leaves "<D: target>;<xbe>" in <hdd>/.guidelaunch and goes
+   back to the dashboard, and the dashboard's xbcompat starts that title in
+   its place before the dashboard runs.  Taken once, and only fresh. */
+void guide_launch_pending(ULONG title_id)
+{
+    if (title_id != 0xFFFE0000) return;
+    char path[4096], buf[1100];
+    snprintf(path, sizeof(path), "%s/.guidelaunch", fs_hdd_root());
+    struct stat st;
+    if (stat(path, &st)) return;
+    FILE *f = fopen(path, "r");
+    size_t n = f ? fread(buf, 1, sizeof(buf) - 1, f) : 0;
+    if (f) fclose(f);
+    unlink(path);
+    buf[n] = 0;
+    buf[strcspn(buf, "\r\n")] = 0;
+    char *semi = strchr(buf, ';');
+    if (!semi || time(NULL) - st.st_mtime > 120) { xlog("Guide: stale or bad %s, ignored", path); return; }
+    *semi = 0;
+    guide_launch(buf, semi + 1);
+}
+
 /* Where in the title a reboot came from: the return address and the saved
    EBP chain of the guest code that called in (titles built with frame
    pointers), for finding which of a title's exits fired. */
@@ -327,6 +373,14 @@ void NTAPI HalReturnToFirmware(ULONG Routine)
     av_hand_over();
     if (Routine == 2 && path && path[0]) relaunch(path);
     xlog("HalReturnToFirmware(%u): title asked to reboot or return to the dashboard", Routine);
+    if (LaunchDataPage) {
+        /* Why: XapiBootToDash's LD_LAUNCH_DASHBOARD (reason, context,
+           parameters) sits at the start of the page's launch data. */
+        const ULONG *ld = (const ULONG *)((const char *)LaunchDataPage + 1024);
+        xlog("HalReturnToFirmware: launch data type %u, title %#x, dashboard reason %u context %u "
+             "parameters %#x %#x", *(const ULONG *)LaunchDataPage, ((const ULONG *)LaunchDataPage)[1],
+             ld[0], ld[1], ld[2], ld[3]);
+    }
 #ifdef XBC_TRANSLATED
     if (Routine == 4 /* HalFatalErrorRebootRoutine */) cpu_dump_guest();
 #endif
@@ -869,18 +923,27 @@ ULONG NTAPI FscGetCacheSize(void) { return fsc_pages; }
 NTSTATUS NTAPI KeSaveFloatingPointState(PVOID FloatSave) { (void)FloatSave; return STATUS_SUCCESS; }
 NTSTATUS NTAPI KeRestoreFloatingPointState(PVOID FloatSave) { (void)FloatSave; return STATUS_SUCCESS; }
 
-/* Kernel stacks are only for drivers; hand out ordinary memory. */
+/* Kernel stacks are only for drivers, and XAPI's fibers: CreateFiber takes
+   its stacks from here, and Ninja Gaiden runs its game code on them.  Host
+   code runs there too (kernel calls, D3D, the GL driver), wanting far more
+   than a title asks for, so each gets 512 KB more below, in guest memory,
+   with a guard page under it: running off the end then faults instead of
+   writing over the host heap, as these did when they came from calloc. */
+#define KSTACK_EXTRA (512u << 10)
 PVOID NTAPI MmCreateKernelStack(ULONG NumberOfBytes, BOOLEAN DebuggerThread)
 {
     (void)DebuggerThread;
-    char *p = calloc(1, NumberOfBytes);
-    return p ? p + NumberOfBytes : NULL;
+    size_t n = ((size_t)NumberOfBytes + 0xFFF) & ~(size_t)0xFFF;
+    char *p = arena_alloc(n + KSTACK_EXTRA + 0x1000, 1);
+    if (!p) return NULL;
+    mprotect(p, 0x1000, PROT_NONE);
+    return p + 0x1000 + KSTACK_EXTRA + n;
 }
 
 void NTAPI MmDeleteKernelStack(PVOID StackBase, PVOID StackLimit)
 {
     (void)StackBase;
-    free(StackLimit);
+    arena_free(StackLimit);
 }
 
 /* The file system cache is the host's: nothing to drop. */

@@ -4,8 +4,10 @@
  */
 #define _GNU_SOURCE
 #include <errno.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <unistd.h>
 
 #include "xbcompat.h"
 
@@ -44,12 +46,38 @@ static void reserve_fixed(uint32_t base, uint32_t size, int prot)
 
 volatile ULONG *g_apu_sample_counter;
 
+/* Contiguous memory is the console's physical memory, which it also shows
+   write-combined at 0xF0000000 + physical address; titles turn a locked
+   resource's address into that view by or-ing 0xF0000000 (Area 51).  Back
+   the range with one shared file so the view can alias its first 64 MB. */
+static int contig_fd = -1;
+#define WC_VIEW_BASE 0xF0000000u
+#define WC_VIEW_SIZE 0x04000000u
+static void map_contiguous(void)
+{
+    int fd = memfd_create("xbcompat-contiguous", MFD_CLOEXEC);
+    if (fd < 0 || ftruncate(fd, CONTIG_SIZE) != 0) {
+        if (fd >= 0) close(fd);
+        reserve_fixed(CONTIG_BASE, CONTIG_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC);
+        return;
+    }
+    void *p = mmap((void *)CONTIG_BASE, CONTIG_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC,
+                   MAP_SHARED | MAP_FIXED_NOREPLACE | MAP_NORESERVE, fd, 0);
+    if (p != (void *)CONTIG_BASE)
+        fatal("cannot reserve guest range %#x-%#x: %s (is this a 32-bit build?)",
+              CONTIG_BASE, CONTIG_BASE + CONTIG_SIZE, strerror(errno));
+    void *wc = mmap((void *)WC_VIEW_BASE, WC_VIEW_SIZE, PROT_READ | PROT_WRITE,
+                    MAP_SHARED | MAP_FIXED_NOREPLACE | MAP_NORESERVE, fd, 0);
+    if (wc != (void *)WC_VIEW_BASE) xlog("write-combined view at %#x unavailable: %s", WC_VIEW_BASE, strerror(errno));
+    contig_fd = fd;     /* kept for page tables titles fill in themselves */
+}
+
 void mem_init(void)
 {
     /* The image region is mapped by the loader; reserve the rest up front so
        host allocations (malloc, SDL, GL) can never land inside them. */
     reserve_fixed(ARENA_BASE, ARENA_END - ARENA_BASE, PROT_NONE);
-    reserve_fixed(CONTIG_BASE, CONTIG_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC);
+    map_contiguous();
     /* The network library pokes the MCP NIC's registers at 0xFEF00000
        directly.  Back them with plain memory: every register reads zero,
        which the driver sees as a NIC with no link. */
@@ -101,6 +129,75 @@ static void arena_set(uint32_t first, uint32_t pages, uint8_t state, uint32_t ba
 static inline bool in_arena(uint32_t a) { return a >= ARENA_BASE && a < ARENA_END; }
 static inline uint32_t page_of(uint32_t a) { return (a - ARENA_BASE) / PAGE_SIZE; }
 
+/* Whether a guest dword at a is still committed: deferred completions
+   (DSound packet status words) can name memory the title has since freed. */
+bool guest_writable(const void *p)
+{
+    uint32_t a = (uint32_t)p;
+    if (!in_arena(a)) return true;
+    return arena_state[page_of(a)] == PG_COMMITTED && arena_state[page_of(a + 3)] == PG_COMMITTED;
+}
+
+/* Fixed allocations above the arena (MGS2 reserves 0x70000000): the Xbox
+   hands out any user address below 0x80000000, the arena only covers part
+   of it.  They are mapped where asked when the host has the space free and
+   kept in a short list. */
+static struct { uint32_t base, size; } high[16];
+
+static int high_find(uint32_t a)
+{
+    for (int i = 0; i < 16; i++)
+        if (high[i].size && a >= high[i].base && a - high[i].base < high[i].size) return i;
+    return -1;
+}
+
+static NTSTATUS high_alloc(uint32_t *pbase, uint32_t *psize, ULONG type)
+{
+    uint32_t base = *pbase, end = (base + *psize + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    if (base < ARENA_END || end > CONTIG_BASE || end <= base) return STATUS_INVALID_PARAMETER;
+    int i = high_find(base);
+    if (type & MEM_RESERVE) {
+        base &= ~(GRANULE - 1);
+        if (i >= 0 || high_find(end - 1) >= 0) return 0xC0000018; /* STATUS_CONFLICTING_ADDRESSES */
+        for (i = 0; i < 16 && high[i].size; i++) ;
+        if (i == 16) return STATUS_NO_MEMORY;
+        void *m = mmap((void *)base, end - base, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE | MAP_NORESERVE, -1, 0);
+        if (m != (void *)base) {
+            if (m != MAP_FAILED) munmap(m, end - base);
+            xlog("NtAllocateVirtualMemory: %#x+%#x is taken on the host", base, end - base);
+            return 0xC0000018;
+        }
+        high[i].base = base; high[i].size = end - base;
+    } else {
+        base &= ~(PAGE_SIZE - 1);
+        if (i < 0 || end - high[i].base > high[i].size) return STATUS_UNSUCCESSFUL;
+    }
+    if ((type & MEM_COMMIT) && mprotect((void *)base, end - base, PROT_READ | PROT_WRITE | PROT_EXEC) != 0)
+        return STATUS_NO_MEMORY;
+    *pbase = base;
+    *psize = end - base;
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS high_free(uint32_t *pbase, uint32_t *psize, ULONG type)
+{
+    uint32_t base = *pbase;
+    int i = high_find(base);
+    if (i < 0) return STATUS_INVALID_PARAMETER;
+    uint32_t size = *psize ? (*psize + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1) : high[i].size;
+    if (type & MEM_RELEASE) {
+        base = high[i].base; size = high[i].size;
+        munmap((void *)base, size);
+        high[i].size = 0;
+    } else {
+        mprotect((void *)base, size, PROT_NONE);
+        madvise((void *)base, size, MADV_DONTNEED);
+    }
+    *pbase = base;
+    *psize = size;
+    return STATUS_SUCCESS;
+}
+
 NTSTATUS NTAPI NtAllocateVirtualMemory(PVOID *BaseAddress, ULONG_PTR ZeroBits,
                                        SIZE_T *RegionSize, ULONG AllocationType, ULONG Protect)
 {
@@ -121,6 +218,11 @@ NTSTATUS NTAPI NtAllocateVirtualMemory(PVOID *BaseAddress, ULONG_PTR ZeroBits,
         arena_set(first, size / PAGE_SIZE, PG_RESERVED, base);
     } else {
         uint32_t end = (base + size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+        if (base >= ARENA_END) {
+            st = high_alloc(&base, &size, AllocationType);
+            if (!st) { *BaseAddress = (PVOID)base; *RegionSize = size; }
+            goto out;
+        }
         if (!in_arena(base) || end > ARENA_END) { st = STATUS_INVALID_PARAMETER; goto out; }
         if (AllocationType & MEM_RESERVE) {
             base &= ~(GRANULE - 1);
@@ -165,8 +267,15 @@ NTSTATUS NTAPI NtFreeVirtualMemory(PVOID *BaseAddress, SIZE_T *RegionSize, ULONG
     gl_yield_point();
     uint32_t base = (uint32_t)*BaseAddress & ~(PAGE_SIZE - 1), size = *RegionSize;
     TRACE_ALL("NtFreeVirtualMemory(%#x, %#x, %#x)", base, size, FreeType);
-    if (!in_arena(base))
-        return STATUS_INVALID_PARAMETER;
+    if (!in_arena(base)) {
+        if (base < ARENA_END) return STATUS_INVALID_PARAMETER;
+        render_drain();
+        pthread_mutex_lock(&mem_lock);
+        NTSTATUS st = high_free(&base, &size, FreeType);
+        pthread_mutex_unlock(&mem_lock);
+        if (!st) { *BaseAddress = (PVOID)base; *RegionSize = size; }
+        return st;
+    }
     render_drain();
     pthread_mutex_lock(&mem_lock);
     uint32_t first = page_of(base);
@@ -555,4 +664,113 @@ NTSTATUS NTAPI NtProtectVirtualMemory(PVOID *BaseAddress, SIZE_T *RegionSize, UL
     TRACE_ALL("NtProtectVirtualMemory(%p, %#lx, %#x)", *BaseAddress, (unsigned long)*RegionSize, NewProtect);
     if (OldProtect) *OldProtect = 0x04;   /* PAGE_READWRITE */
     return STATUS_SUCCESS;
+}
+
+/* ---- page tables a title edits itself ---------------------------------- */
+
+/* Fable pages its own memory: it reserves a large range, reads CR3, writes
+   page directory and page table entries through the write-combined view of
+   physical memory, and reloads CR3 or runs invlpg after each change (with
+   cli/sti around it).  CR3 reads give the console's page directory page
+   (physical 0xF000, which contiguous memory never hands out); a CR3 load
+   or an invlpg maps what those tables say onto the arena range, backed by
+   the same shared file as contiguous memory, so a page there is the
+   physical page its entry names.  Only the arena is ever remapped. */
+#define PD_PHYS 0xF000u
+
+static pthread_mutex_t pt_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint32_t *pt_shadow[1024];       /* the entries as last mapped, per 4 MB */
+
+static void pt_unmap(uint32_t va, uint32_t len)
+{
+    mmap((void *)va, len, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED | MAP_NORESERVE, -1, 0);
+}
+
+static void pt_sync_pde(unsigned i, int only)
+{
+    uint32_t va0 = (uint32_t)i << 22;
+    if (va0 < ARENA_BASE || va0 + (1u << 22) > ARENA_END || contig_fd < 0) return;
+    const uint32_t *pd = (const uint32_t *)(CONTIG_BASE + PD_PHYS);
+    uint32_t pde = pd[i];
+    const uint32_t *pt = NULL;
+    if ((pde & 1) && !(pde & 0x80) && (pde & ~0xFFFu) < CONTIG_SIZE)
+        pt = (const uint32_t *)(CONTIG_BASE + (pde & ~0xFFFu));
+    if (!pt && !pt_shadow[i]) return;
+    if (!pt_shadow[i]) pt_shadow[i] = calloc(1024, sizeof(uint32_t));
+    uint32_t *sh = pt_shadow[i];
+    for (unsigned j = only >= 0 ? (unsigned)only : 0; j < (only >= 0 ? (unsigned)only + 1 : 1024u); j++) {
+        uint32_t raw = pt ? pt[j] : 0, pte;
+        if (!(raw & 1) || (raw & ~0xFFFu) >= CONTIG_SIZE) pte = 0;
+        else pte = (raw & ~0xFFFu) | 1 | (raw & 0x40 ? 2 : 0);    /* 2: mapped writable */
+        if (pte == sh[j]) continue;
+        uint32_t va = va0 + (j << 12);
+        if (pte) {
+            /* The processor sets an entry's accessed bit on use and its
+               dirty bit on the first write, and a title that pages its
+               memory out writes back only dirty pages.  A page is mapped
+               read-only until its entry is dirty; the first write sets
+               the bit (mem_fault_resync) and maps it writable. */
+            if (pt) ((uint32_t *)pt)[j] = raw | 0x20;
+            int prot = PROT_READ | PROT_EXEC | (pte & 2 ? PROT_WRITE : 0);
+            if (mmap((void *)va, PAGE_SIZE, prot, MAP_SHARED | MAP_FIXED, contig_fd, pte & ~0xFFFu) != (void *)va)
+                xlog("page tables: cannot map %#x to physical %#x: %s", va, pte & ~0xFFFu, strerror(errno));
+        } else {
+            pt_unmap(va, PAGE_SIZE);
+        }
+        sh[j] = pte;
+    }
+}
+
+uint32_t mem_read_cr3(void)
+{
+    return PD_PHYS;
+}
+
+void mem_load_cr3(void)
+{
+    pthread_mutex_lock(&pt_lock);
+    for (unsigned i = 0; i < 1024; i++) pt_sync_pde(i, -1);
+    pthread_mutex_unlock(&pt_lock);
+}
+
+void mem_invlpg(uint32_t va)
+{
+    pthread_mutex_lock(&pt_lock);
+    pt_sync_pde(va >> 22, (va >> 12) & 0x3FF);
+    pthread_mutex_unlock(&pt_lock);
+}
+
+/* A fault on a page whose entry the title made present without a TLB
+   flush, which x86 doesn't need for a page that wasn't present: map it and
+   run the access again. */
+bool mem_fault_resync(uint32_t va, bool write)
+{
+    unsigned i = va >> 22, j = (va >> 12) & 0x3FF;
+    if (!pt_shadow[i]) return false;
+    pthread_mutex_lock(&pt_lock);
+    uint32_t before = pt_shadow[i][j];
+    if (write && before) {
+        /* A write to a page that isn't dirty yet: mark it so. */
+        uint32_t pde = ((const uint32_t *)(CONTIG_BASE + PD_PHYS))[i];
+        if ((pde & 1) && !(pde & 0x80) && (pde & ~0xFFFu) < CONTIG_SIZE) {
+            uint32_t *pt = (uint32_t *)(CONTIG_BASE + (pde & ~0xFFFu));
+            if ((pt[j] & 3) == 3) pt[j] |= 0x60;
+        }
+    }
+    pt_sync_pde(i, j);
+    uint32_t after = pt_shadow[i][j];
+    pthread_mutex_unlock(&pt_lock);
+    return after && (!before || (write && (after & 2) && !(before & 2)));
+}
+
+/* Whether `va` is a page of the title's own tables that they don't map. */
+bool mem_page_absent(uint32_t va)
+{
+    unsigned i = va >> 22;
+    if (!pt_shadow[i]) return false;
+    pthread_mutex_lock(&pt_lock);
+    pt_sync_pde(i, (va >> 12) & 0x3FF);
+    bool absent = !pt_shadow[i][(va >> 12) & 0x3FF];
+    pthread_mutex_unlock(&pt_lock);
+    return absent;
 }

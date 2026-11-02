@@ -1,15 +1,6 @@
 --- a/xbcompat/src/guide/guide.cpp
 +++ b/xbcompat/src/guide/guide.cpp
-@@ -46,6 +46,8 @@
- // without them (kazeta-guide) shows the game box without the picture.
- __attribute__((weak)) const char *xbe_file_path(void);
- __attribute__((weak)) bool xbe_image_read(const char *xbe, const char *section, unsigned char **bgra, int *w, int *h);
-+// kazeta-guide: the cart's icon as BGRA rows (malloc'd), when it has one.
-+__attribute__((weak)) bool kazeta_title_image(unsigned char **bgra, int *w, int *h);
- bool guide_frame(int w, int h);
- void guide_draw(int w, int h);
- }
-@@ -164,7 +166,7 @@
+@@ -194,7 +194,7 @@
          else glDisable(GL_TEXTURE_2D);
          if (blend == xui::BlendAdd) blendSep(GL_SRC_ALPHA, GL_ONE, GL_ZERO, GL_ONE);
          else if (blend == xui::BlendMultiply) blendSep(GL_ZERO, GL_SRC_COLOR, GL_ZERO, GL_ONE);
@@ -18,14 +9,3 @@
          // Immediate mode: the title's client arrays and buffers stay as they were.
          glBegin(GL_TRIANGLES);
          for (int i = 0; i < ni; i++) {
-@@ -471,7 +473,9 @@
- void load_title_image() {
-     unsigned char* px = 0; int w = 0, h = 0;
-     const char* xbe = xbe_file_path ? xbe_file_path() : 0;
--    if (!xbe || !xbe_image_read || !xbe_image_read(xbe, "$$XTIMAGE", &px, &w, &h)) {
-+    if (kazeta_title_image && kazeta_title_image(&px, &w, &h)) {
-+        // kazeta-guide: the cart's own icon
-+    } else if (!xbe || !xbe_image_read || !xbe_image_read(xbe, "$$XTIMAGE", &px, &w, &h)) {
-         xlog("Guide: no title image");
-         return;
-     }

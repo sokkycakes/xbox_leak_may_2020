@@ -7,6 +7,10 @@
 // open, the way xbcompat masks a title's XInput.  Y in the Guide ("Xbox
 // Dashboard") exits with status 42; the cart runner then ends the title.
 //
+// Quick Launch (another game from the Guide) goes through the dashboard: see
+// guide_launch.  Game Storage and Quick Launch read their pictures with
+// xbcompat's own src/xbeimage.c, built in on its own (XBEIMAGE_HOST).
+//
 // Environment: DISPLAY (gamescope's Xwayland), XBCOMPAT_GUIDE_DIR (the Guide's
 // scenes), XBCOMPAT_HDD (for the shared <hdd>/.guide settings), KAZETA_TITLE_ID
 // (hex), KAZETA_TITLE_NAME and KAZETA_TITLE_ICON (the cart's PNG icon, for the
@@ -124,6 +128,20 @@ extern "C" void reset_request_always(const char *why)
 {
     xlog("leaving to the dashboard (%s)", why);
     leave_ = 1;
+}
+
+// The Guide's Quick Launch: the title to start goes to <hdd>/.guidelaunch
+// ("<D: target>;<xbe>"); the Guide then leaves for the dashboard as Y does,
+// and the dashboard's xbcompat starts that title in its place.
+extern "C" void guide_launch(const char *nt_dir, const char *xbe)
+{
+    char path[1024];
+    snprintf(path, sizeof path, "%s/.guidelaunch", fs_hdd_root());
+    FILE *f = fopen(path, "w");
+    if (!f) { xlog("Quick Launch: cannot write %s", path); return; }
+    fprintf(f, "%s;%s\n", nt_dir, xbe);
+    fclose(f);
+    xlog("Quick Launch %s;%s", nt_dir, xbe);
 }
 
 // ---- sound -----------------------------------------------------------------

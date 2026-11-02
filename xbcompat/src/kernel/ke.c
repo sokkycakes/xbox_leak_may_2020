@@ -330,12 +330,18 @@ ULONGLONG ke_guest_tsc(void)
     return t / 10000000ULL * XBOX_TSC_FREQ + t % 10000000ULL * XBOX_TSC_FREQ / 10000000ULL;
 }
 
+/* A year: longer intervals are treated as infinite (deadlines stay inside a 32-bit time_t). */
+#define FOREVER_100NS (365LL * 86400 * 10000000LL)
+
 /* Absolute deadline (CLOCK_REALTIME based timespec) for a Ke timeout. */
 static bool deadline_from(LARGE_INTEGER *timeout, struct timespec *out)
 {
     if (!timeout) return false;
     LONGLONG t = timeout->QuadPart;
     ULONGLONG now = system_time_now();
+    /* Sleep(INFINITE) and friends pass 0x8000000000000000; anything past
+       the 32-bit time_t range is a wait without end. */
+    if (t < -FOREVER_100NS || t > (LONGLONG)(now + FOREVER_100NS)) return false;
     ULONGLONG due = t < 0 ? now + (ULONGLONG)(-t) : (ULONGLONG)t;
     if (due < now) due = now;
     ULONGLONG unix100 = due - EPOCH_DIFF_100NS;
@@ -477,6 +483,8 @@ NTSTATUS wait_objects(ULONG count, PVOID objects[], int wait_any, KPROCESSOR_MOD
     NTSTATUS st;
     uint64_t prof_start = prof_wait_begin();
 
+    io_signal_late(true);
+    bool cli_was_held = idt_cli_release();
     if (xt) __atomic_store_n(&xt->in_wait, 1, __ATOMIC_SEQ_CST);
     static __thread struct disp_waiter me;
     static __thread bool me_init;
@@ -577,6 +585,7 @@ done:
     }
     thread_wait_end(xt);
     prof_wait_end(prof_start, count ? ((DISPATCHER_HEADER *)objects[0])->Type : -1, count ? objects[0] : NULL);
+    if (cli_was_held) idt_cli_reacquire();
     return st;
 }
 
@@ -614,6 +623,7 @@ NTSTATUS NTAPI KeDelayExecutionThread(KPROCESSOR_MODE WaitMode, BOOLEAN Alertabl
     gl_yield_point();
     LONGLONG t = Interval->QuadPart;
     ULONGLONG rel = t < 0 ? (ULONGLONG)-t : (t > (LONGLONG)system_time_now() ? t - system_time_now() : 0);
+    if (t == INT64_MIN || rel > (ULONGLONG)FOREVER_100NS) rel = FOREVER_100NS;   /* Sleep(INFINITE) */
     uint64_t prof_start = prof_wait_begin();
     cpu_block();
     if (rel == 0) {
@@ -1240,6 +1250,10 @@ static void *dpc_thread(void *arg)
                 pthread_mutex_lock(&dpc_lock);
             }
         }
+
+        pthread_mutex_unlock(&dpc_lock);
+        io_signal_late(false);
+        pthread_mutex_lock(&dpc_lock);
 
         /* Run DPCs with the lock dropped: they may queue more. */
         while (dpc_head != dpc_tail) {

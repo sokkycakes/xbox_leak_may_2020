@@ -929,6 +929,29 @@ ssize_t dvd_read_volume(void *buf, size_t len, uint64_t off)
     return d && disc_read(d, buf, len, off) ? (ssize_t)len : -1;
 }
 
+/* The size of the volume in sectors, as the drive's geometry and the file
+   system's FileFsSizeInformation report it (gdfx/mountvol.c, volinfo.c).
+   An image trimmed after its last file, or a directory, reports what a
+   pressed disc's game partition holds: titles compare it against that to
+   tell their disc from a copy on the hard disk (Hulk: Ultimate Destruction
+   says it "must be run from its original game disc" when D: reads empty). */
+#define XGD1_GAME_SECTORS (XGD1_LIVE_LAST + 1 - (ULONG)(XGD1_BASE / SECTOR))
+ULONG dvd_volume_sectors(void)
+{
+    pthread_mutex_lock(&g_lock);
+    disc *d = g_disc;
+    uint64_t bytes = 0;
+    if (d && d->kind == DISC_XDVDFS && d->fd >= 0) {
+        off_t end = lseek(d->fd, 0, SEEK_END);
+        if (end > 0 && (uint64_t)end > d->base) bytes = (uint64_t)end - d->base;
+    }
+    bool media = d && (d->kind == DISC_XDVDFS || d->kind == DISC_DIR);
+    pthread_mutex_unlock(&g_lock);
+    if (!media && !dvd_is_media()) return 0;
+    ULONG n = (ULONG)(bytes / SECTOR);
+    return n > XGD1_GAME_SECTORS ? n : XGD1_GAME_SECTORS;
+}
+
 /* A copy of a disc file on the host, for the loader and xbrun.py, which take
    an XBE by its path: kept under $TMPDIR/xbcompat-disc while it matches. */
 static const char *cache_dir(void)

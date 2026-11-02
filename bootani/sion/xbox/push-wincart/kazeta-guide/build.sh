@@ -28,6 +28,7 @@ for f in "$W/guide.cpp" "$XB"/tools/frolickdash/xui/xui_parse.cpp "$XB"/tools/fr
 	g++ $F -std=c++98 -fno-threadsafe-statics -c -o "$W/obj/$(basename "$f" .cpp).o" "$f"
 done
 g++ $F -std=c++11 -I"$TOP/xbcompat/src/third_party" -c -o "$W/obj/host.o" "$HERE/host.cpp"
+gcc -O2 -g -DXBEIMAGE_HOST -I"$XB/src" -c -o "$W/obj/xbeimage.o" "$XB/src/xbeimage.c"
 g++ -o "$OUT" "$W"/obj/*.o -L"$W/lib" -lSDL2 -lGL -lX11 -lXrender -lm -ldl
 strip "$OUT"
 md5sum "$OUT"
