@@ -13,7 +13,12 @@
 //     --focus ID    focus this control
 //     --guide       the whole Guide as xbcompat draws it (frame + main)
 //     --page P      ... with page P open: settings, volume, vibration, game,
-//                   recent, downloads, saves, confirm (a save's delete)
+//                   recent, downloads, saves, confirm (a save's delete),
+//                   controls (Controller Configuration), controls-ls (its
+//                   Left Stick), controls-buttons, controls-bind (Buttons' A,
+//                   Advanced), controls-pick (A's choices), controls-layouts,
+//                   controls-save (Back with changes)
+//   GUIDEVIEW_PADMAP=FILE       the layout Controller Configuration starts from
 //   GUIDEVIEW_HDD=DIR           the hard disk the pages read (default /tmp)
 //   GUIDEVIEW_XBE=default.xbe   the title image comes from this XBE
 //     --dump        print the frame's tree (id, class, size, position, scale, show)
@@ -36,6 +41,14 @@ unsigned xinput_guide_ports(void) { return 1; }
 void xinput_guide_vibration(bool) {}
 const char* fs_hdd_root(void) { return getenv("GUIDEVIEW_HDD") ? getenv("GUIDEVIEW_HDD") : "/tmp"; }
 void reset_request_always(const char*) {}
+bool xinput_padmap_get(int, padmap_profile* out, char* family, size_t n) {
+    const char* f = getenv("GUIDEVIEW_PADMAP");
+    snprintf(family, n, "xbox");
+    if (f) padmap_load_file(out, f, 0, 0); else padmap_profile_init(out, "Standard");
+    return true;
+}
+bool xinput_padmap_dir(char* dir, size_t n) { return padmap_dir(dir, n, fs_hdd_root()); }
+void xinput_padmap_reload(void) {}
 void xlog(const char* fmt, ...) {
     va_list a; va_start(a, fmt); vfprintf(stderr, fmt, a); va_end(a); fputc('\n', stderr);
 }
@@ -104,6 +117,17 @@ int main(int argc, char** argv) {
         if (page && (!strcmp(page, "saves") || !strcmp(page, "confirm"))) {
             press("ctlGamerCard"); press("btnManageGameFiles");
             if (!strcmp(page, "confirm") && nsaves) ask_confirm(AskDeleteSave, "Delete Level 12 - Gold?");
+        }
+        if (page && !strncmp(page, "controls", 8)) {
+            press("ctlGamerCard"); press("btnViewAchievements");
+            const char* sub = page + 8;
+            if (!strcmp(sub, "-ls")) cfg_press(CfgMain, cfgPages[CfgMain].rows[1 + PM_SRC_LSTICK]);
+            if (!strcmp(sub, "-buttons") || !strcmp(sub, "-bind") || !strcmp(sub, "-pick"))
+                cfg_press(CfgMain, cfgPages[CfgMain].rows[1 + PM_SRC_BUTTONS]);
+            if (!strcmp(sub, "-bind")) { cfgSlot = PM_A; cfg_show(CfgBind, 0, true); }
+            if (!strcmp(sub, "-pick")) cfg_press(CfgSource, cfgPages[CfgSource].rows[0 + 1]);
+            if (!strcmp(sub, "-layouts")) cfg_press(CfgMain, cfgPages[CfgMain].rows[0]);
+            if (!strcmp(sub, "-save")) { cfg_changed(); page_back(); }
         }
         if (focus) g.menu->setFocus(g.menu->find(focus));
         if (play) for (int i = 0; i < 6; i++) { g.lastTime = now_s() - 1.0 / 30; guide_frame(W, H); }

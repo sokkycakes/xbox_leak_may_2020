@@ -10,6 +10,44 @@ in the thread "Research Steam Input for controller config" and summarised in
 the write-up linked from the project memory. This document only decides how we
 build ours.
 
+## 0. As built (2026-11-02)
+
+Phases 0 and 1 are built, most of 2, and the keyboard and mouse part of 4.
+Where the build differs from the design below:
+
+- **Code**: `xbcompat/src/input/padmap.h` (API), `padmap.c` (runtime),
+  `padmap_json.c` (reader and writer), `padmap_store.c` (files, built-in
+  templates). Tests: `make test-padmap` (4147 checks) and
+  `tests/xinput_test.c` `test_layout` (a layout on SDL's virtual pad).
+- **JSON keys**: sources are `left_stick`, `right_stick`, `dpad`, `buttons`
+  (every button in one source), `left_trigger`, `right_trigger`. A binding is
+  a string (`"a"`, `"key:w"`, `"mouse:left"`, `"left_stick_up"`, `"lt"`,
+  `"preset:next"`, `"none"`) or an object with `press`, `long_press`,
+  `double_press`, `long_ms`, `double_ms`, `turbo_hz`, `toggle`. Trigger mode
+  binds `full_press`, button mode `button`, D-pad mode `up/down/left/right`.
+  Mode shifts are `"mode_shifts": [{ "hold": "lb", "sources": {...} }]` inside a
+  preset. Gyro, scroll, radial menu and `release`/`start_press` are not in
+  yet.
+- **Runtime**: one `bind_step` state machine per input (press, long, double,
+  turbo, toggle) instead of node objects; same per-sample diff/step/collect
+  shape. Buttons held across a preset switch count as up until let go.
+- **Templates**: built into `padmap_store.c` (Standard, Southpaw, Inverted
+  Look, Nintendo Layout, Bumpers as Triggers, and Keyboard and Mouse for
+  Windows game cards), not files under `/opt`.
+- **Guide**: four list pages on Game Storage's Blades list: Controller
+  Configuration (Layout, each part of the pad, Reset; X saves), a part's page
+  (Mode, its bindings, and tuning rows that Left/Right or A step instead of
+  sliders), the pick list (layouts or what a binding does; keys and mouse for
+  Windows carts), and Advanced (Y on a binding: Press, Hold, Double Press,
+  Turbo, Toggle, Clear). B on the first page with changes asks to save. An
+  edited template is saved as "Custom". Saving reloads every pad's layout at
+  once. Mode shifts and extra presets work from JSON but have no Guide page
+  yet; the live "Test" row is not built.
+- **kazeta-guide**: each pad runs through its layout before the merge into
+  the virtual 360 pad; keys and mouse go to a second uinput device
+  ("Kazeta layout keyboard and mouse") made the first time a layout uses
+  them.
+
 ## 1. What we have today
 
 | Host | Reads pads | Hands the game | Where the state is built |
@@ -142,8 +180,9 @@ real pad --SDL (HIDAPI, gamecontrollerdb)--> standard controller state
   drives the pad" merge, then also flushes `report.keys[]` and
   `report.mouse` to two more uinput devices (keyboard, mouse) opened next to
   the pad in `ui_open()`.
-- The Guide button is never remappable. L+R+Back+Start reset stays on the
-  mapped output so it keeps working under a swapped layout.
+- The Guide button is never remappable. The Guide's own reads and the
+  L+R+Back+Start reset read the raw pad, so no layout can lock either away
+  (as built; the first draft had the reset on the mapped output).
 
 ### 4.2 Source state (input to padmap)
 
@@ -317,8 +356,8 @@ in `guide.cpp` and new XUI scenes; the rest are additions to the node set.
   runs stay deterministic.
 - **Pad hot-plug**: profile lookup reruns in `sync_devices()` so a different
   pad type picks its own default.
-- **Reset combo and Guide button**: read from the mapped output and from the
-  raw Guide bit respectively; neither can be remapped away.
+- **Reset combo and Guide button**: both read the raw pad; neither can be
+  remapped away.
 - **Two hosts, one library**: padmap has no SDL or OS calls of its own; the
   host fills `padmap_src` and consumes `padmap_out`, so both build it from
   the same file and the sinks differ.

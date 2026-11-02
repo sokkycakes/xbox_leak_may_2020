@@ -729,6 +729,20 @@ Texture Renderer::lineTex(Font* font, const char* line, float px, int* w, int* h
         int gw = ix1 - ix0, gh = iy1 - iy0;
         if (gw > 0 && gh > 0 && gx >= 0 && gy >= 0 && gx + gw <= img.w && gy + gh <= img.h)
             stbtt_MakeCodepointBitmapSubpixel(&font->info, cov + gy * img.w + gx, gw, gh, img.w, scale, scale, xs, 0, cp);
+        else if (gw > 0 && gh > 0 && gw * gh < (1 << 20)) {
+            // a glyph that reaches past the line's box (a J's hook in front
+            // of the first letter): drawn clipped, not dropped
+            unsigned char* gb = new unsigned char[gw * gh];
+            stbtt_MakeCodepointBitmapSubpixel(&font->info, gb, gw, gh, gw, scale, scale, xs, 0, cp);
+            for (int yy = 0; yy < gh; yy++)
+                for (int xx = 0; xx < gw; xx++) {
+                    int px = gx + xx, py = gy + yy;
+                    if (px < 0 || py < 0 || px >= img.w || py >= img.h) continue;
+                    unsigned char& c = cov[py * img.w + px];
+                    if (gb[yy * gw + xx] > c) c = gb[yy * gw + xx];
+                }
+            delete [] gb;
+        }
         x += advOf(aw * scale);
         prev = cp;
     }

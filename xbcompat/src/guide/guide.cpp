@@ -16,6 +16,7 @@
 // turned down.  LT / RT (or Left / Right) switch tabs, A picks, B goes back
 // or closes, Y goes to the dashboard.
 #include "xui.h"
+#include "input/padmap.h"
 
 #include <SDL.h>
 #include <SDL_opengl.h>
@@ -54,6 +55,11 @@ __attribute__((weak)) bool kazeta_title_image(unsigned char **bgra, int *w, int 
 // (misc.c, io.c); a host without them lists the games but can't start one.
 __attribute__((weak)) void guide_launch(const char *nt_dir, const char *xbe);
 __attribute__((weak)) bool fs_card_dir(char *out, size_t outlen);
+// Controller Configuration (src/hle/xinput.c, kazeta-guide's host.cpp): the
+// pad's layout for this game, where layouts are kept, and "look again".
+__attribute__((weak)) bool xinput_padmap_get(int port, padmap_profile *out, char *family, size_t familysize);
+__attribute__((weak)) bool xinput_padmap_dir(char *dir, size_t size);
+__attribute__((weak)) void xinput_padmap_reload(void);
 bool guide_frame(int w, int h);
 void guide_draw(int w, int h);
 }
@@ -1180,18 +1186,339 @@ bool remove_tree(const char* path) {
     return unlink(path) == 0;
 }
 
+// -- Controller Configuration: this game's controller layout -----------------
+// Per-game remapping in Steam Input's shape (src/input/padmap.h), on the
+// Blades list rows Game Storage uses.  The main page lists the layout and
+// one row per part of the pad (sticks, D-pad, buttons, triggers) with what
+// it does; A on a part opens it: its mode, then a row per input or setting.
+// A on a binding picks what it does in the game from a list, Y opens its
+// long press, double press, turbo and toggle; A or Left / Right step a
+// setting.  B on the main page asks to save the layout for this game
+// (<hdd>/../input/<title id>/), which the pads then use at once.
+enum { CfgMain, CfgSource, CfgPick, CfgBind };
+enum { RowLayout, RowSource, RowReset, RowMode, RowOutput, RowDeadzone, RowSensitivity, RowCurve, RowInvertY,
+       RowInvertX, RowThreshold, RowBinding, RowTemplate, RowTarget, RowAct, RowTurbo, RowToggle, RowClear };
+struct CfgRow { char name[64], info[96]; int kind, arg; };
+struct CfgPage { CfgRow rows[96]; int n; };
+CfgPage cfgPages[4];
+padmap_profile cfgProf;     // what the pages edit (the active preset)
+bool cfgDirty, cfgHave;
+int cfgPreset;              // the preset edited (the first)
+int cfgSrc;                 // the source page's part of the pad
+int cfgSlot;                // the binding being edited (a slot of cfgSrc)
+int cfgAct;                 // ... and which of its activators the pick list sets
+int cfgPickFor;             // what the pick list is for: CfgMain (templates) or CfgBind / CfgSource (targets)
+uint16_t cfgTargets[160]; int ncfgTargets;
+
+bool cfg_windows() { return !xbe_file_path; }
+pm_source& cfg_source() { return cfgProf.preset[cfgPreset].src[cfgSrc]; }
+
+// What a binding does, as the game sees it: an Xbox game's bumpers are its
+// White and Black buttons.
+const char* cfg_target_label(uint16_t t) {
+    if (!cfg_windows() && PM_TKIND(t) == PM_T_BUTTON) {
+        if (PM_TCODE(t) == PM_LB) return "White";
+        if (PM_TCODE(t) == PM_RB) return "Black";
+    }
+    if (!cfg_windows() && t == PM_TARGET(PM_T_AXIS, PM_AX_LT)) return "Left Trigger";
+    return padmap_target_label(t);
+}
+
+void cfg_bind_text(const pm_bind& b, const char* unset, char* out, int n) {
+    if (!b.set) { snprintf(out, n, "%s", unset); return; }
+    int k = snprintf(out, n, "%s", cfg_target_label(b.target[PM_ACT_PRESS]));
+    if (b.target[PM_ACT_LONG] && k < n) k += snprintf(out + k, n - k, ", hold: %s", cfg_target_label(b.target[PM_ACT_LONG]));
+    if (b.target[PM_ACT_DOUBLE] && k < n) k += snprintf(out + k, n - k, ", double: %s", cfg_target_label(b.target[PM_ACT_DOUBLE]));
+    if (b.turbo_hz && k < n) k += snprintf(out + k, n - k, ", turbo");
+    if (b.toggle && k < n) snprintf(out + k, n - k, ", toggle");
+}
+
+const char* cfg_pct(float f) { static char b[4][16]; static int i; char* o = b[i++ & 3]; snprintf(o, 16, "%d%%", (int)(f * 100 + 0.5f)); return o; }
+
+// The main page's line for a part of the pad.
+void cfg_source_text(int src, char* out, int n) {
+    const pm_source& s = cfgProf.preset[cfgPreset].src[src];
+    switch (s.mode) {
+    case PM_MODE_PASS: snprintf(out, n, "Default"); return;
+    case PM_MODE_OFF: snprintf(out, n, "Off"); return;
+    case PM_MODE_JOYSTICK:
+        if (src == PM_SRC_DPAD) snprintf(out, n, "Joystick: %s", s.output ? "Right Stick" : "Left Stick");
+        else snprintf(out, n, "Joystick%s%s", (int)s.output != (src == PM_SRC_RSTICK) ? (s.output ? ": Right Stick" : ": Left Stick") : "",
+                      s.invert_y ? ", inverted" : "");
+        return;
+    case PM_MODE_MOUSE: snprintf(out, n, "Mouse"); return;
+    case PM_MODE_TRIGGER: snprintf(out, n, "Trigger%s", (int)s.output != (src == PM_SRC_RTRIG) ? (s.output ? ": Right Trigger" : ": Left Trigger") : ""); return;
+    case PM_MODE_BUTTON: { char b[80]; cfg_bind_text(s.bind[0], "None", b, sizeof b); snprintf(out, n, "Button: %s", b); return; }
+    case PM_MODE_DPAD: {
+        int k = snprintf(out, n, "D-pad:");
+        for (int d = 0; d < 4 && k < n; d++)
+            k += snprintf(out + k, n - k, "%s %s", d ? "," : "", s.bind[d].set ? cfg_target_label(s.bind[d].target[0]) : "-");
+        return;
+    }
+    case PM_MODE_BUTTONS: {
+        int changed = 0, k = 0;
+        out[0] = 0;
+        for (int b = 0; b < PM_NBTN; b++) {
+            if (!s.bind[b].set) continue;
+            if (++changed <= 3 && k < n)
+                k += snprintf(out + k, n - k, "%s%s: %s", changed > 1 ? ", " : "", padmap_button_label(b), cfg_target_label(s.bind[b].target[0]));
+        }
+        if (!changed) snprintf(out, n, "Default");
+        else if (changed > 3 && k < n) snprintf(out + k, n - k, " ...");
+        return;
+    }
+    }
+    snprintf(out, n, "%s", padmap_mode_label(s.mode));
+}
+
+void cfg_add(CfgPage& p, int kind, int arg, const char* name, const char* info) {
+    if (p.n >= (int)(sizeof p.rows / sizeof p.rows[0])) return;
+    CfgRow& r = p.rows[p.n++];
+    r.kind = kind; r.arg = arg;
+    snprintf(r.name, sizeof r.name, "%s", name);
+    snprintf(r.info, sizeof r.info, "%s", info ? info : "");
+}
+
+void cfg_build_main() {
+    CfgPage& p = cfgPages[CfgMain]; p.n = 0;
+    char b[96];
+    snprintf(b, sizeof b, "%s%s", cfgProf.name, cfgDirty ? " (not saved)" : "");
+    cfg_add(p, RowLayout, 0, "Layout", b);
+    for (int s = 0; s < PM_NSRC; s++) { cfg_source_text(s, b, sizeof b); cfg_add(p, RowSource, s, padmap_source_label(s), b); }
+    cfg_add(p, RowReset, 0, "Reset", "The game's own controls");
+}
+
+void cfg_build_source() {
+    CfgPage& p = cfgPages[CfgSource]; p.n = 0;
+    const pm_source& s = cfg_source();
+    char b[96];
+    cfg_add(p, RowMode, 0, "Mode", padmap_mode_label(s.mode));
+    static const char* dirs[4] = { "Up", "Down", "Left", "Right" };
+    bool stick = cfgSrc == PM_SRC_LSTICK || cfgSrc == PM_SRC_RSTICK;
+    switch (s.mode) {
+    case PM_MODE_JOYSTICK:
+        cfg_add(p, RowOutput, 0, "Moves", s.output ? "Right Stick" : "Left Stick");
+        // fall through
+    case PM_MODE_MOUSE:
+        if (cfgSrc != PM_SRC_DPAD) cfg_add(p, RowDeadzone, 0, "Deadzone", cfg_pct(s.deadzone));
+        cfg_add(p, RowSensitivity, 0, "Sensitivity", cfg_pct(s.sensitivity));
+        if (cfgSrc != PM_SRC_DPAD) cfg_add(p, RowCurve, 0, "Response Curve", s.curve < 0.9f ? "Fast" : s.curve > 1.6f ? "Very Slow Start" : s.curve > 1.1f ? "Slow Start" : "Linear");
+        cfg_add(p, RowInvertY, 0, "Invert Up/Down", s.invert_y ? "On" : "Off");
+        cfg_add(p, RowInvertX, 0, "Invert Left/Right", s.invert_x ? "On" : "Off");
+        break;
+    case PM_MODE_DPAD:
+        for (int d = 0; d < 4; d++) {
+            char dflt[32]; snprintf(dflt, sizeof dflt, "%s", stick ? "None" : padmap_button_label(PM_DPAD_UP + d));
+            cfg_bind_text(s.bind[d], dflt, b, sizeof b);
+            cfg_add(p, RowBinding, d, dirs[d], b);
+        }
+        if (stick) cfg_add(p, RowThreshold, 0, "Push Needed", cfg_pct(s.threshold));
+        break;
+    case PM_MODE_BUTTONS:
+        for (int i = 0; i < PM_NBTN; i++) {
+            if (i == PM_GUIDE || (i >= PM_DPAD_UP && i <= PM_DPAD_RIGHT)) continue;
+            uint16_t same = PM_TARGET(PM_T_BUTTON, i);
+            cfg_bind_text(s.bind[i], i >= PM_MISC ? "None" : cfg_target_label(same), b, sizeof b);
+            cfg_add(p, RowBinding, i, padmap_button_label(i), b);
+        }
+        break;
+    case PM_MODE_TRIGGER:
+        cfg_add(p, RowOutput, 0, "Moves", s.output ? "Right Trigger" : "Left Trigger");
+        cfg_add(p, RowDeadzone, 0, "Deadzone", cfg_pct(s.deadzone));
+        cfg_add(p, RowSensitivity, 0, "Sensitivity", cfg_pct(s.sensitivity));
+        cfg_bind_text(s.bind[0], "None", b, sizeof b);
+        cfg_add(p, RowBinding, 0, "Full Pull", b);
+        cfg_add(p, RowThreshold, 0, "Full Pull Point", cfg_pct(s.threshold));
+        break;
+    case PM_MODE_BUTTON:
+        cfg_bind_text(s.bind[0], "None", b, sizeof b);
+        cfg_add(p, RowBinding, 0, "Pull", b);
+        cfg_add(p, RowThreshold, 0, "Pull Needed", cfg_pct(s.threshold));
+        break;
+    default: break;
+    }
+}
+
+const char* cfg_slot_name() {
+    static const char* dirs[4] = { "Up", "Down", "Left", "Right" };
+    const pm_source& s = cfg_source();
+    if (s.mode == PM_MODE_BUTTONS) return padmap_button_label(cfgSlot);
+    if (s.mode == PM_MODE_DPAD) return dirs[cfgSlot & 3];
+    return s.mode == PM_MODE_TRIGGER ? "Full Pull" : "Pull";
+}
+
+void cfg_build_bind() {
+    CfgPage& p = cfgPages[CfgBind]; p.n = 0;
+    pm_bind& b = cfg_source().bind[cfgSlot];
+    static const char* acts[PM_NACT] = { "Press", "Hold", "Double Press" };
+    for (int a = 0; a < PM_NACT; a++)
+        cfg_add(p, RowAct, a, acts[a], b.set || a ? cfg_target_label(b.target[a]) : "Default");
+    char t[32];
+    if (b.turbo_hz) snprintf(t, sizeof t, "%d a second", b.turbo_hz); else snprintf(t, sizeof t, "Off");
+    cfg_add(p, RowTurbo, 0, "Turbo", t);
+    cfg_add(p, RowToggle, 0, "Toggle", b.toggle ? "On" : "Off");
+    cfg_add(p, RowClear, 0, "Clear", "Back to the default");
+}
+
+// The pick list: templates, or what a binding can do in this game.
+void cfg_build_pick() {
+    CfgPage& p = cfgPages[CfgPick]; p.n = 0;
+    bool win = cfg_windows();
+    if (cfgPickFor == CfgMain) {
+        static const struct { const char* name; const char* info; } about[] = {
+            { "Standard", "The game's own controls" }, { "Southpaw", "Sticks swapped" },
+            { "Inverted Look", "Right stick up looks down" }, { "Nintendo Layout", "A and B, X and Y swapped" },
+            { "Bumpers as Triggers", "Bumpers and triggers swapped" }, { "Keyboard and Mouse", "WASD, the right stick moves the mouse" },
+        };
+        for (int i = 0; i < padmap_template_count(win); i++) {
+            const char* nm = padmap_template_name(i, win), *info = "";
+            for (unsigned k = 0; k < sizeof about / sizeof *about; k++) if (!strcmp(about[k].name, nm)) info = about[k].info;
+            cfg_add(p, RowTemplate, i, nm, info);
+        }
+        return;
+    }
+    ncfgTargets = 0;
+    cfgTargets[ncfgTargets++] = 0;
+    static const int btns[] = { PM_A, PM_B, PM_X, PM_Y, PM_LB, PM_RB, PM_BACK, PM_START, PM_LTHUMB, PM_RTHUMB,
+                                PM_DPAD_UP, PM_DPAD_DOWN, PM_DPAD_LEFT, PM_DPAD_RIGHT };
+    for (unsigned i = 0; i < sizeof btns / sizeof *btns; i++) cfgTargets[ncfgTargets++] = PM_TARGET(PM_T_BUTTON, btns[i]);
+    for (int a = 0; a < PM_NAX; a++) cfgTargets[ncfgTargets++] = PM_TARGET(PM_T_AXIS, a);
+    if (cfgProf.npresets > 1) cfgTargets[ncfgTargets++] = PM_TARGET(PM_T_PRESET, PM_PRESET_NEXT);
+    if (win) {
+        for (int m = PM_MS_LEFT; m <= PM_MS_WHEEL_DOWN; m++) cfgTargets[ncfgTargets++] = PM_TARGET(PM_T_MOUSE, m);
+        static const char* keys[] = { "space", "enter", "esc", "tab", "backspace", "lshift", "lctrl", "lalt", "up", "down", "left", "right",
+            "w", "a", "s", "d", "q", "e", "r", "f", "c", "x", "z", "v", "b", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "t", "u", "y",
+            "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11", "f12",
+            "rshift", "rctrl", "ralt", "capslock", "minus", "equal", "comma", "dot", "slash", "semicolon", "apostrophe",
+            "leftbrace", "rightbrace", "backslash", "grave", "insert", "delete", "home", "end", "pageup", "pagedown" };
+        for (unsigned i = 0; i < sizeof keys / sizeof *keys && ncfgTargets < (int)(sizeof cfgTargets / sizeof *cfgTargets); i++) {
+            char k[24]; snprintf(k, sizeof k, "key:%s", keys[i]);
+            uint16_t t; if (padmap_target_parse(&cfgProf, k, &t)) cfgTargets[ncfgTargets++] = t;
+        }
+    }
+    for (int i = 0; i < ncfgTargets; i++) {
+        uint16_t t = cfgTargets[i];
+        const char* kind = "";
+        switch (PM_TKIND(t)) {
+        case PM_T_NONE: kind = "Does nothing"; break;
+        case PM_T_BUTTON: kind = PM_TCODE(t) >= PM_DPAD_UP && PM_TCODE(t) <= PM_DPAD_RIGHT ? "D-pad" : "Button"; break;
+        case PM_T_AXIS: kind = PM_TCODE(t) >= PM_AX_LT ? "Trigger, pulled all the way" : "Stick, pushed all the way"; break;
+        case PM_T_KEY: kind = "Keyboard"; break;
+        case PM_T_MOUSE: kind = "Mouse"; break;
+        case PM_T_PRESET: kind = "Switches to the next layout"; break;
+        }
+        cfg_add(p, RowTarget, i, cfg_target_label(t), kind);
+    }
+}
+
+void cfg_build(int page) {
+    if (page == CfgMain) cfg_build_main();
+    else if (page == CfgSource) cfg_build_source();
+    else if (page == CfgBind) cfg_build_bind();
+    else cfg_build_pick();
+}
+
+// Opening: the layout of the pad that opened the Guide.
+bool cfg_begin() {
+    if (!xinput_padmap_get) return false;
+    char fam[32];
+    if (!xinput_padmap_get(g.port, &cfgProf, fam, sizeof fam)) return false;
+    cfgPreset = 0;
+    cfgDirty = false;
+    cfgHave = true;
+    return true;
+}
+
+void cfg_changed() {
+    cfgDirty = true;
+    // an edited template is the player's own
+    for (int i = 0; i < padmap_template_count(true); i++)
+        if (!strcmp(cfgProf.name, padmap_template_name(i, true))) { snprintf(cfgProf.name, sizeof cfgProf.name, "Custom"); break; }
+}
+
+bool cfg_save() {
+    char dir[1024];
+    if (!xinput_padmap_dir || !xinput_padmap_dir(dir, sizeof dir)) return false;
+    // (Standard is saved too: it keeps this game on its own controls even
+    // when a default layout for every game is set)
+    bool ok = padmap_save_title(&cfgProf, dir, (uint32_t)xbe_title_id());
+    xlog("Guide: layout \"%s\" %s for %08lX in %s", cfgProf.name, ok ? "saved" : "NOT saved", (unsigned long)xbe_title_id(), dir);
+    if (ok && xinput_padmap_reload) xinput_padmap_reload();
+    cfgDirty = !ok;
+    return ok;
+}
+
+// Steps a setting (A, or Left / Right); true when it changed.
+bool cfg_adjust(const CfgRow& r, int dir) {
+    pm_source& s = cfg_source();
+    switch (r.kind) {
+    case RowMode: {
+        uint8_t modes[PM_NMODES];
+        int n = padmap_source_modes(cfgSrc, modes, PM_NMODES), i = 0;
+        if (!cfg_windows()) {   // no mouse for an Xbox game
+            int k = 0;
+            for (int j = 0; j < n; j++) if (modes[j] != PM_MODE_MOUSE) modes[k++] = modes[j];
+            n = k;
+        }
+        while (i < n && modes[i] != s.mode) i++;
+        i = ((i + dir) % n + n) % n;
+        padmap_source_init(&s, cfgSrc, modes[i]);
+        break;
+    }
+    case RowOutput: s.output ^= 1; break;
+    case RowDeadzone: { float v = s.deadzone + 0.05f * dir; s.deadzone = v < 0 ? 0 : v > 0.5f ? 0.5f : v; break; }
+    case RowSensitivity: { float v = s.sensitivity + 0.1f * dir; s.sensitivity = v < 0.3f ? 0.3f : v > 3 ? 3 : v; break; }
+    case RowCurve: {
+        static const float curves[] = { 0.7f, 1.0f, 1.5f, 2.0f };
+        int i = 0; while (i < 3 && curves[i] < s.curve - 0.01f) i++;
+        i += dir; i = i < 0 ? 0 : i > 3 ? 3 : i;
+        s.curve = curves[i];
+        break;
+    }
+    case RowInvertY: s.invert_y = !s.invert_y; break;
+    case RowInvertX: s.invert_x = !s.invert_x; break;
+    case RowThreshold: { float v = s.threshold + 0.05f * dir; s.threshold = v < 0.1f ? 0.1f : v > 1 ? 1 : v; break; }
+    case RowTurbo: {
+        pm_bind& b = s.bind[cfgSlot];
+        int v = b.turbo_hz + 5 * dir; b.turbo_hz = (uint8_t)(v < 0 ? 0 : v > 20 ? 20 : v);
+        if (b.turbo_hz && !b.set) { b.set = true; if (!b.target[0] && s.mode == PM_MODE_BUTTONS) b.target[0] = PM_TARGET(PM_T_BUTTON, cfgSlot); }
+        break;
+    }
+    case RowToggle: {
+        pm_bind& b = s.bind[cfgSlot];
+        b.toggle = !b.toggle;
+        if (!b.set) { b.set = true; if (s.mode == PM_MODE_BUTTONS) b.target[0] = PM_TARGET(PM_T_BUTTON, cfgSlot); }
+        break;
+    }
+    default: return false;
+    }
+    cfg_changed();
+    return true;
+}
+
 // -- the pages -------------------------------------------------------------
 // Each is a Blades list of six rows (Downloads five, the active one on top
 // under "Active", the queue under "Pending"); sel is the item with the
 // focus, scroll the first one showing.
 struct List { int rows, count, scroll, sel; };
-List lRecent = { 6, 0, 0, 0 }, lDownloads = { 5, 0, 0, 0 }, lSaves = { 6, 0, 0, 0 };
+List lRecent = { 6, 0, 0, 0 }, lDownloads = { 5, 0, 0, 0 }, lSaves = { 5, 0, 0, 0 };
 // the confirm page's question and what Yes does
-enum { AskNone, AskDeleteSave, AskRemoveDownload };
+enum { AskNone, AskDeleteSave, AskRemoveDownload, AskSaveLayout };
 int ask; xui::Scene* askFrom;
 char askId[96];  // the download asked about
+// Controller Configuration's pages: Game Storage's list, four times
+xui::Scene* cfgScene[4];
+// (five rows: the sixth would sit under the page's "1 of N")
+List lCfg[4] = { { 5, 0, 0, 0 }, { 5, 0, 0, 0 }, { 5, 0, 0, 0 }, { 5, 0, 0, 0 } };
+
+int cfg_page_of(xui::Scene* m) {
+    for (int i = 0; i < 4; i++) if (m && m == cfgScene[i]) return i;
+    return -1;
+}
 
 List* list_of(xui::Scene* m) {
+    int c = cfg_page_of(m);
+    if (c >= 0) return &lCfg[c];
     return m == g.recent ? &lRecent : m == g.downloads ? &lDownloads : m == g.saves ? &lSaves : 0;
 }
 
@@ -1225,7 +1552,13 @@ void fill_row(xui::Scene* m, int r, int i) {
     List* l = list_of(m);
     set_show(m, id, i < l->count);
     if (i >= l->count) return;
-    if (m == g.recent) {
+    int c = cfg_page_of(m);
+    if (c >= 0) {
+        const CfgRow& row = cfgPages[c].rows[i];
+        set_text(m, id, row.name);
+        set_str(m, id, "Data1", row.info);
+        set_image(m, sub, "ico_64x_controller.png");
+    } else if (m == g.recent) {
         set_text(m, id, games[i].name);
         set_str(m, id, "Data1", games[i].platform);
         set_image(m, sub, games[i].img);
@@ -1254,6 +1587,14 @@ void list_legends() {
         x = "Remove";
     }
     else if (g.menu == g.confirm) a = "Select";
+    else if (cfg_page_of(g.menu) >= 0 && l->sel < l->count) {
+        int c = cfg_page_of(g.menu);
+        const CfgRow& r = cfgPages[c].rows[l->sel];
+        bool step = r.kind >= RowMode && r.kind <= RowThreshold ? true : r.kind == RowTurbo || r.kind == RowToggle;
+        a = step ? "Change" : "Select";
+        if (c == CfgMain) x = "Save";
+        if (r.kind == RowBinding) y = "Advanced";
+    }
     set_legend("Legend_A", a);
     set_legend("Legend_X", x);
     set_legend("Legend_Y", y);
@@ -1274,6 +1615,7 @@ void fill_list(xui::Scene* m) {
         if (l->sel >= l->scroll + l->rows) l->scroll = l->sel - l->rows + 1;
     }
     for (int r = 0; r < l->rows; r++) fill_row(m, r, l->scroll + r);
+    for (int r = l->rows; r < 8; r++) { char id[32]; row_id(id, sizeof id, r); set_show(m, id, false); }
     bool empty = m == g.downloads ? dl_count() == 0 : l->count == 0;
     set_show(m, "txt_EmptyList", empty);
     char total[32] = "";
@@ -1296,6 +1638,27 @@ bool list_move(int dir) {
     l->sel = s;
     fill_list(g.menu);
     return true;
+}
+
+// Controller Configuration: (re)builds a page and shows it, the focus on
+// item sel (-1: where it was).
+void open_page(xui::Scene* m, const char* focus);
+void cfg_show(int page, int sel, bool open) {
+    xui::Scene* m = cfgScene[page];
+    cfg_build(page);
+    List& l = lCfg[page];
+    l.count = cfgPages[page].n;
+    if (sel >= 0) { l.sel = sel; if (open) l.scroll = 0; }
+    static const char* const heads[4] = { "Controller Configuration", 0, "Choose", 0 };
+    char h[96];
+    if (page == CfgSource) snprintf(h, sizeof h, "%s", padmap_source_label(cfgSrc));
+    else if (page == CfgBind) snprintf(h, sizeof h, "%s: %s", padmap_source_label(cfgSrc), cfg_slot_name());
+    else if (page == CfgPick && cfgPickFor == CfgMain) snprintf(h, sizeof h, "Layouts");
+    else if (page == CfgPick) snprintf(h, sizeof h, "%s: %s", cfgPickFor == CfgBind && cfgAct ? (cfgAct == PM_ACT_LONG ? "Hold" : "Double Press") : "Press", cfg_slot_name());
+    else snprintf(h, sizeof h, "%s", heads[page]);
+    set_text(m, "txt_Header", h); set_text(m, "labHeader", h);
+    if (open) open_page(m, 0);
+    else fill_list(m);
 }
 
 // Frolick's page as a Guide page: its slate band and its own prompts go
@@ -1395,6 +1758,8 @@ bool load() {
     if (g.downloadsEl) page_dress(g.downloads = new xui::Scene(g.downloadsEl, g.gameSkinEl), "Downloads");
     if (g.savesEl) page_dress(g.saves = new xui::Scene(g.savesEl, g.gameSkinEl), "Game Storage");
     if (g.confirmEl) page_dress(g.confirm = new xui::Scene(g.confirmEl, g.gameSkinEl), 0);
+    if (g.savesEl && xinput_padmap_get)
+        for (int i = 0; i < 4; i++) page_dress(cfgScene[i] = new xui::Scene(g.savesEl, g.gameSkinEl), "Controller Configuration");
     g.strip = g.tabs->find("tabStrip");
     nrows = 0;
     collect_rows(g.main->root, false); collect_rows(g.settings->root, false);
@@ -1609,6 +1974,15 @@ void page_back() {
     xui::Scene* m = g.menu;
     if (m == g.confirm) { ask = AskNone; open_page(askFrom, 0); if (list_of(askFrom)) fill_list(askFrom); return; }
     if (m == g.saves) { show_menu(g.game, "btnManageGameFiles"); return; }
+    int c = cfg_page_of(m);
+    if (c == CfgPick) { cfg_show(cfgPickFor, -1, true); return; }
+    if (c == CfgBind) { cfg_show(CfgSource, -1, true); return; }
+    if (c == CfgSource) { cfg_show(CfgMain, -1, true); return; }
+    if (c == CfgMain) {
+        if (cfgDirty) { ask_confirm(AskSaveLayout, "Save this layout for this game?"); return; }
+        show_menu(g.game, "btnViewAchievements");
+        return;
+    }
     g.full = false;
     g.hud->play("FullToHalf");
     show_menu(g.main, m == g.recent ? "btnBlank1" : m == g.downloads ? "btnQuickChat" : "ctlGamerCard");
@@ -1642,6 +2016,71 @@ void leave() {
     ds_set_duck(0.0f);
 }
 
+// The bindings' defaults: a button as itself, the D-pad's directions as theirs.
+uint16_t cfg_default_target() {
+    const pm_source& s = cfg_source();
+    if (s.mode == PM_MODE_BUTTONS) return PM_TARGET(PM_T_BUTTON, cfgSlot);
+    if (s.mode == PM_MODE_DPAD && cfgSrc == PM_SRC_DPAD) return PM_TARGET(PM_T_BUTTON, PM_DPAD_UP + (cfgSlot & 3));
+    return 0;
+}
+
+// A on a Controller Configuration row.
+bool cfg_press(int page, const CfgRow& r) {
+    switch (r.kind) {
+    case RowLayout: {
+        cfgPickFor = CfgMain;
+        int cur = 0;
+        for (int i = 0; i < padmap_template_count(cfg_windows()); i++)
+            if (!strcmp(cfgProf.name, padmap_template_name(i, cfg_windows()))) cur = i;
+        cfg_show(CfgPick, cur, true);
+        return true;
+    }
+    case RowSource: cfgSrc = r.arg; cfg_show(CfgSource, 0, true); return true;
+    case RowReset:
+        padmap_profile_init(&cfgProf, "Standard");
+        cfgPreset = 0; cfgDirty = true;
+        cfg_show(CfgMain, -1, false);
+        return true;
+    case RowBinding:
+    case RowAct: {
+        if (r.kind == RowBinding) { cfgSlot = r.arg; cfgAct = PM_ACT_PRESS; cfgPickFor = CfgSource; }
+        else { cfgAct = r.arg; cfgPickFor = CfgBind; }
+        cfg_build_pick();
+        const pm_bind& b = cfg_source().bind[cfgSlot];
+        uint16_t cur = b.set ? b.target[cfgAct] : cfgAct ? 0 : cfg_default_target();
+        int sel = 0;
+        for (int i = 0; i < ncfgTargets; i++) if (cfgTargets[i] == cur) sel = i;
+        cfg_show(CfgPick, sel, true);
+        return true;
+    }
+    case RowTemplate: {
+        padmap_template(&cfgProf, r.arg, cfg_windows());
+        cfgPreset = 0; cfgDirty = true;
+        cfg_show(CfgMain, 0, true);
+        return true;
+    }
+    case RowTarget: {
+        pm_bind& b = cfg_source().bind[cfgSlot];
+        if (!b.set) { b.set = true; b.target[0] = cfg_default_target(); }
+        b.target[cfgAct] = cfgTargets[r.arg];
+        cfg_changed();
+        cfg_show(cfgPickFor, -1, true);
+        return true;
+    }
+    case RowClear: {
+        pm_bind& b = cfg_source().bind[cfgSlot];
+        memset(&b, 0, sizeof b);
+        cfg_changed();
+        cfg_show(CfgSource, -1, true);
+        return true;
+    }
+    default:
+        if (!cfg_adjust(r, 1)) return false;
+        cfg_show(page, -1, false);
+        return true;
+    }
+}
+
 // A on a control; true when it did something (the select sound), false for
 // a row with nothing behind it yet (the inactive sound).
 bool press(const char* id) {
@@ -1653,7 +2092,10 @@ bool press(const char* id) {
         show_menu(g.game, "btnViewAchievements");
         if (xui::Node* pg = g.game->find("page")) pg->play("Open");
     }
-    else if (!strcmp(id, "btnViewAchievements")) return false;  // Controller Configuration: not here yet
+    else if (!strcmp(id, "btnViewAchievements")) {  // Controller Configuration
+        if (!cfgScene[0] || !cfg_begin()) return false;
+        cfg_show(CfgMain, 0, true);
+    }
     else if (!strcmp(id, "btnManageGameFiles")) {  // Game Storage: Frolick's Saved Games
         if (!g.saves) return false;
         scan_saves(); lSaves.count = nsaves; lSaves.sel = lSaves.scroll = 0;
@@ -1683,6 +2125,7 @@ bool press(const char* id) {
             if (!dl_press(l->sel - dl_off())) return false;
             fill_list(g.downloads);
         }
+        else if (cfg_page_of(g.menu) >= 0) return cfg_press(cfg_page_of(g.menu), cfgPages[cfg_page_of(g.menu)].rows[l->sel]);
         else return false;  // a save: Y deletes it
     }
     else if (!strcmp(id, "btnYes") || !strcmp(id, "btnNo")) {
@@ -1692,6 +2135,14 @@ bool press(const char* id) {
             remove_tree(saves[lSaves.sel].dir);
             scan_saves(); lSaves.count = nsaves;
             game_page();  // its saved games count
+        }
+        if (ask == AskSaveLayout) {
+            // Yes saves it, No leaves the saved one as it was; either way out
+            if (yes && !cfg_save()) xlog("Guide: the layout wasn't saved");
+            cfgDirty = false;
+            ask = AskNone;
+            show_menu(g.game, "btnViewAchievements");
+            return true;
         }
         if (yes && ask == AskRemoveDownload) {
             // the item asked about, wherever it is now
@@ -1751,6 +2202,26 @@ void step(double t) {
                 }
                 g.repeatAt = t + ((down & (GUIDE_LEFT | GUIDE_RIGHT)) ? 0.4 : 0.12);
             }
+            break;
+        }
+        int cp = cfg_page_of(g.menu);
+        if (cp >= 0 && (b & (GUIDE_LEFT | GUIDE_RIGHT))) {
+            List& l = lCfg[cp];
+            if (((down & (GUIDE_LEFT | GUIDE_RIGHT)) || t >= g.repeatAt) && l.sel < l.count) {
+                if (cfg_adjust(cfgPages[cp].rows[l.sel], (b & GUIDE_RIGHT) ? 1 : -1)) { cfg_show(cp, -1, false); play(SndFocus); }
+                g.repeatAt = t + ((down & (GUIDE_LEFT | GUIDE_RIGHT)) ? 0.4 : 0.12);
+            }
+            break;
+        }
+        if (cp == CfgMain && (down & GUIDE_X)) {
+            play(cfg_save() ? SndSelect : SndInactive);
+            cfg_show(CfgMain, -1, false);
+            break;
+        }
+        if (cp == CfgSource && (down & GUIDE_Y) && lCfg[cp].sel < lCfg[cp].count && cfgPages[cp].rows[lCfg[cp].sel].kind == RowBinding) {
+            play(SndSelect);
+            cfgSlot = cfgPages[cp].rows[lCfg[cp].sel].arg;
+            cfg_show(CfgBind, 0, true);
             break;
         }
         if (home && (down & (GUIDE_LT | GUIDE_RT | GUIDE_LEFT | GUIDE_RIGHT))) {
