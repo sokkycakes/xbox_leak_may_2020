@@ -12,7 +12,7 @@
  * Build (32-bit, like xbcompat itself; needs libsdl2-dev:i386):
  *   gcc -m32 -no-pie -fno-pie -std=gnu11 -Wall -Isrc \
  *       $(PKG_CONFIG_PATH=/usr/lib/i386-linux-gnu/pkgconfig pkg-config --cflags sdl2) \
- *       -o xinput_test tests/xinput_test.c \
+ *       -o xinput_test tests/xinput_test.c src/input/padmap*.c -lm \
  *       $(PKG_CONFIG_PATH=/usr/lib/i386-linux-gnu/pkgconfig pkg-config --libs sdl2) -lpthread
  * Run:  SDL_VIDEODRIVER=dummy ./xinput_test
  */
@@ -38,6 +38,9 @@ void xlog(const char *fmt, ...)
 }
 
 void install_fault_handlers(void) {}
+static ULONG title_id = 0x4D530004;
+ULONG xbe_title_id(void) { return title_id; }
+const char *fs_hdd_root(void) { return NULL; }
 ULONG d3d_frame_count(void) { return 0; }
 static bool reset_on = true;
 static int resets;
@@ -499,6 +502,107 @@ static void test_reset_combo(void)
     SDL_JoystickDetachVirtual(index);
 }
 
+/* Controller Configuration: the title sees the layout, the Guide and the
+   reset combo see the real pad. */
+static void write_text(const char *path, const char *text)
+{
+    FILE *f = fopen(path, "w");
+    CHECK(f != NULL);
+    if (!f) return;
+    fputs(text, f);
+    fclose(f);
+}
+
+static void test_layout(void)
+{
+    char dir[] = "/tmp/xinput-layout-XXXXXX", path[256];
+    CHECK(mkdtemp(dir) != NULL);
+    snprintf(path, sizeof path, "%s/4D530004", dir);
+    CHECK(mkdir(path, 0755) == 0);
+    snprintf(path, sizeof path, "%s/4D530004/selected", dir);
+    write_text(path, "Swapped\n");
+    snprintf(path, sizeof path, "%s/4D530004/Swapped.json", dir);
+    write_text(path, "{ \"name\": \"Swapped\", \"sources\": {"
+                     " \"buttons\": { \"mode\": \"buttons\", \"a\": \"b\", \"b\": \"a\", \"back\": \"none\", \"start\": \"none\" },"
+                     " \"left_stick\": { \"mode\": \"joystick\", \"output\": \"right_stick\" },"
+                     " \"right_trigger\": { \"mode\": \"button\", \"button\": \"x\" } } }");
+    setenv("XBCOMPAT_PADMAP_DIR", dir, 1);
+
+    reset_hle();
+    XInitDevices(0, NULL);
+    int index = attach_virtual_pad(NULL);
+    SDL_Joystick *js = SDL_JoystickOpen(index);
+    force_sync();
+    CHECK(xi.port[0].pm != NULL);
+    padmap_profile prof;
+    char family[32];
+    CHECK(xinput_padmap_get(0, &prof, family, sizeof family) && !strcmp(prof.name, "Swapped"));
+    CHECK(!xinput_padmap_get(1, &prof, family, sizeof family));
+    HANDLE h = XInputOpen(&fake_gamepad, 0, XDEVICE_NO_SLOT, NULL);
+    CHECK(h != NULL);
+    xi_handle *d = (xi_handle *)h;
+    XINPUT_STATE st;
+
+    SDL_JoystickSetVirtualButton(js, SDL_CONTROLLER_BUTTON_A, 1);
+    SDL_JoystickSetVirtualAxis(js, SDL_CONTROLLER_AXIS_LEFTX, 32767);
+    SDL_JoystickSetVirtualAxis(js, SDL_CONTROLLER_AXIS_TRIGGERRIGHT, 32767);
+    settle(js, d);
+    CHECK(XInputGetState(h, &st) == ERROR_SUCCESS);
+    CHECK(st.Gamepad.bAnalogButtons[XINPUT_GAMEPAD_A] == 0 && st.Gamepad.bAnalogButtons[XINPUT_GAMEPAD_B] == 255);
+    CHECK(st.Gamepad.bAnalogButtons[XINPUT_GAMEPAD_X] == 255 && st.Gamepad.bAnalogButtons[XINPUT_GAMEPAD_RIGHT_TRIGGER] == 0);
+    CHECK(st.Gamepad.sThumbLX == 0 && st.Gamepad.sThumbRX == 32767);
+    /* the Guide reads the real A */
+    unsigned g = xinput_guide_read(NULL);
+    CHECK((g & GUIDE_A) && !(g & GUIDE_B));
+
+    /* Back and Start are off for the title, but the reset combo still works */
+    SDL_JoystickSetVirtualButton(js, SDL_CONTROLLER_BUTTON_A, 0);
+    SDL_JoystickSetVirtualAxis(js, SDL_CONTROLLER_AXIS_LEFTX, 0);
+    SDL_JoystickSetVirtualButton(js, SDL_CONTROLLER_BUTTON_BACK, 1);
+    SDL_JoystickSetVirtualButton(js, SDL_CONTROLLER_BUTTON_START, 1);
+    SDL_JoystickSetVirtualAxis(js, SDL_CONTROLLER_AXIS_TRIGGERLEFT, 32767);
+    settle(js, d);
+    CHECK(XInputGetState(h, &st) == ERROR_SUCCESS);
+    CHECK(!(st.Gamepad.wButtons & (XINPUT_GAMEPAD_BACK | XINPUT_GAMEPAD_START)));
+    resets = 0;
+    xinput_check_reset_combo();
+    CHECK(resets == 1);
+    SDL_JoystickSetVirtualButton(js, SDL_CONTROLLER_BUTTON_BACK, 0);
+    SDL_JoystickSetVirtualButton(js, SDL_CONTROLLER_BUTTON_START, 0);
+    SDL_JoystickSetVirtualAxis(js, SDL_CONTROLLER_AXIS_TRIGGERLEFT, 0);
+    SDL_JoystickSetVirtualAxis(js, SDL_CONTROLLER_AXIS_TRIGGERRIGHT, 0);
+    settle(js, d);
+    xinput_check_reset_combo();
+
+    /* the Guide resets the title's selection: the pad goes back to plain */
+    snprintf(path, sizeof path, "%s/4D530004/selected", dir);
+    CHECK(unlink(path) == 0);
+    xinput_padmap_reload();
+    CHECK(xi.port[0].pm == NULL);
+    SDL_JoystickSetVirtualButton(js, SDL_CONTROLLER_BUTTON_A, 1);
+    settle(js, d);
+    CHECK(XInputGetState(h, &st) == ERROR_SUCCESS);
+    CHECK(st.Gamepad.bAnalogButtons[XINPUT_GAMEPAD_A] == 255 && st.Gamepad.bAnalogButtons[XINPUT_GAMEPAD_B] == 0);
+    SDL_JoystickSetVirtualButton(js, SDL_CONTROLLER_BUTTON_A, 0);
+
+    /* XBCOMPAT_PADMAP forces a file for every controller and title */
+    snprintf(path, sizeof path, "%s/4D530004/Swapped.json", dir);
+    setenv("XBCOMPAT_PADMAP", path, 1);
+    xinput_padmap_reload();
+    CHECK(xi.port[0].pm != NULL);
+    unsetenv("XBCOMPAT_PADMAP");
+    unsetenv("XBCOMPAT_PADMAP_DIR");
+
+    XInputClose(h);
+    SDL_JoystickClose(js);
+    SDL_JoystickDetachVirtual(index);
+    force_sync();
+    CHECK(xi.port[0].pm == NULL);
+    char cmd[300];
+    snprintf(cmd, sizeof cmd, "rm -rf '%s'", dir);
+    CHECK(system(cmd) == 0);
+}
+
 static void test_prealloc(void)
 {
     /* A list without the gamepad type leaves it no handles (XID_Init). */
@@ -843,6 +947,7 @@ int main(void)
     test_no_devices();
     test_controller();
     test_reset_combo();
+    test_layout();
     test_prealloc();
     test_virtual_spec();
     test_original_pad();

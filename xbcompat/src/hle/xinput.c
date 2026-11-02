@@ -77,6 +77,14 @@
  * "wait/N" pauses N 60ths.  Words run one after another, each held and then
  * let go for at least two presented frames, so a title drawing a few frames
  * a second still sees every press.
+ *
+ * Controller Configuration (src/input/padmap.h): each controller can carry
+ * a per-game layout, looked up by title ID and pad family when it is
+ * plugged in (<hdd>/../input, or XBCOMPAT_PADMAP_DIR), or forced for every
+ * controller with XBCOMPAT_PADMAP=FILE.  It sits between SDL and the title's
+ * report: the title sees the mapped pad, while the Guide and the reset combo
+ * read the real one, so no layout can lock either out.  The keyboard pad,
+ * the input script and the pipe are never mapped.
  */
 #define _GNU_SOURCE
 #include <SDL.h>
@@ -91,6 +99,7 @@
 #include "../xbcompat.h"
 #include "hle.h"
 #include "../cpu.h"
+#include "../input/padmap.h"
 
 /* ---- XDK definitions (public/xdk/inc/xbox.h, winerror.h) ------------- */
 
@@ -224,6 +233,7 @@ typedef struct {
     bool unseen;                                /* removed, and the title hasn't polled since */
     bool kbd_left;                              /* ...and it was the keyboard pad */
     xi_handle *open;
+    padmap *pm;                                 /* this game's layout, NULL: none */
 } xi_port;
 
 typedef struct {                                /* an XInputSetState in flight */
@@ -347,6 +357,96 @@ static const char *table_name(const XPP_DEVICE_TYPE *t)
     return "unknown";
 }
 
+/* ---- Controller Configuration (padmap) ------------------------------- */
+
+/* The pad family a layout can be kept for (<dir>/default-<family>.json). */
+static const char *pad_family(SDL_GameController *gc)
+{
+#if SDL_VERSION_ATLEAST(2, 0, 12)
+    switch (SDL_GameControllerGetType(gc)) {
+    case SDL_CONTROLLER_TYPE_XBOX360:
+    case SDL_CONTROLLER_TYPE_XBOXONE: return "xbox";
+    case SDL_CONTROLLER_TYPE_PS3:
+    case SDL_CONTROLLER_TYPE_PS4:
+#if SDL_VERSION_ATLEAST(2, 0, 14)
+    case SDL_CONTROLLER_TYPE_PS5:
+#endif
+        return "playstation";
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_PRO:
+#if SDL_VERSION_ATLEAST(2, 24, 0)
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_LEFT:
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT:
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_PAIR:
+#endif
+        return "switch";
+    default: break;
+    }
+#endif
+    (void)gc;
+    return "other";
+}
+
+static bool padmap_dir_for_title(char *dir, size_t size)
+{
+    return padmap_dir(dir, size, fs_hdd_root());
+}
+
+/* Looks up port i's layout: XBCOMPAT_PADMAP, else by title and family. */
+static void load_layout(unsigned i)
+{
+    xi_port *p = &xi.port[i];
+    padmap_profile prof;
+    char from[1024] = "", dir[1024], err[200];
+    const char *forced = getenv("XBCOMPAT_PADMAP");
+    bool found;
+    if (forced && *forced) {
+        found = padmap_load_file(&prof, forced, err, sizeof err);
+        if (found) snprintf(from, sizeof from, "%s", forced);
+        else xlog("XInput: port %u: XBCOMPAT_PADMAP: %s", i, err);
+    } else {
+        found = padmap_dir_for_title(dir, sizeof dir) &&
+                padmap_load_title(&prof, dir, (uint32_t)xbe_title_id(), pad_family(p->gc), from, sizeof from);
+    }
+    padmap_free(p->pm);
+    p->pm = NULL;
+    if (found && !padmap_profile_is_identity(&prof)) {
+        p->pm = padmap_new(&prof);
+        xlog("XInput: port %u: layout \"%s\" (%s)", i, prof.name, from);
+    }
+}
+
+/* The Guide saved or picked a layout: every controller looks again. */
+void xinput_padmap_reload(void)
+{
+    pthread_mutex_lock(&xi.lock);
+    for (unsigned i = 0; i < XI_PORTS; i++)
+        if (xi.port[i].gc) load_layout(i);
+    pthread_mutex_unlock(&xi.lock);
+}
+
+/* What the Guide edits: the port's pad family and current layout (the
+   identity layout when it has none).  False for an empty or keyboard port. */
+bool xinput_padmap_get(int port, padmap_profile *out, char *family, size_t familysize)
+{
+    bool ok = false;
+    pthread_mutex_lock(&xi.lock);
+    if (port >= 0 && port < XI_PORTS && xi.port[port].gc) {
+        xi_port *p = &xi.port[port];
+        if (p->pm) *out = *padmap_get_profile(p->pm);
+        else padmap_profile_init(out, "Standard");
+        if (family && familysize) snprintf(family, familysize, "%s", pad_family(p->gc));
+        ok = true;
+    }
+    pthread_mutex_unlock(&xi.lock);
+    return ok;
+}
+
+/* The directory layouts are kept in, for the Guide. */
+bool xinput_padmap_dir(char *dir, size_t size)
+{
+    return padmap_dir_for_title(dir, size);
+}
+
 /* ---- SDL --------------------------------------------------------------- */
 
 static void insert_port(unsigned i, SDL_GameController *gc, SDL_JoystickID instance, bool kbd)
@@ -361,6 +461,7 @@ static void insert_port(unsigned i, SDL_GameController *gc, SDL_JoystickID insta
     /* Only the Gamepad sample looks at the subtype (to pick the mesh). */
     p->subtype = (name && strstr(name, "Duke")) ? XINPUT_DEVSUBTYPE_GC_GAMEPAD : XINPUT_DEVSUBTYPE_GC_GAMEPAD_ALT;
     xlog("XInput: port %u: %s inserted", i, name ? name : "controller");
+    if (gc) load_layout(i);
     if (gc && xi.log_input) {
         SDL_Joystick *js = SDL_GameControllerGetJoystick(gc);
         char guid[33];
@@ -381,6 +482,8 @@ static void remove_port(unsigned i)
     if (!p->connected) return;
     xlog("XInput: port %u: %s removed", i, p->kbd ? "keyboard pad" : "controller");
     p->kbd_left = p->kbd;
+    padmap_free(p->pm);
+    p->pm = NULL;
     if (p->gc) {
         SDL_GameControllerRumble(p->gc, 0, 0, 0);
         SDL_GameControllerClose(p->gc);
@@ -758,32 +861,58 @@ static void read_keyboard(XINPUT_GAMEPAD *g)
 #undef K
 }
 
-static void read_controller(SDL_GameController *gc, XINPUT_GAMEPAD *g)
+/* A controller's state in SDL's terms (padmap's input). */
+static void read_sdl(SDL_GameController *gc, padmap_pad *s)
 {
-#define BTN(b) SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_##b)
-#define AXIS(a) SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_##a)
+    memset(s, 0, sizeof(*s));
+    for (int b = 0; b < PM_NBTN && b < SDL_CONTROLLER_BUTTON_MAX; b++)
+        if (SDL_GameControllerGetButton(gc, (SDL_GameControllerButton)b)) s->buttons |= PM_BIT(b);
+    s->lx = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_LEFTX);
+    s->ly = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_LEFTY);
+    s->rx = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_RIGHTX);
+    s->ry = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_RIGHTY);
+    s->lt = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_TRIGGERLEFT);
+    s->rt = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_TRIGGERRIGHT);
+}
+
+/* SDL's terms to the Xbox report. */
+static void pad_report(const padmap_pad *s, XINPUT_GAMEPAD *g)
+{
+#define BTN(b) ((s->buttons & PM_BIT(PM_##b)) != 0)
     g->bAnalogButtons[XINPUT_GAMEPAD_A] = BTN(A) ? 255 : 0;
     g->bAnalogButtons[XINPUT_GAMEPAD_B] = BTN(B) ? 255 : 0;
     g->bAnalogButtons[XINPUT_GAMEPAD_X] = BTN(X) ? 255 : 0;
     g->bAnalogButtons[XINPUT_GAMEPAD_Y] = BTN(Y) ? 255 : 0;
-    g->bAnalogButtons[XINPUT_GAMEPAD_BLACK] = BTN(RIGHTSHOULDER) ? 255 : 0;
-    g->bAnalogButtons[XINPUT_GAMEPAD_WHITE] = BTN(LEFTSHOULDER) ? 255 : 0;
-    g->bAnalogButtons[XINPUT_GAMEPAD_LEFT_TRIGGER] = trigger_byte(AXIS(TRIGGERLEFT));
-    g->bAnalogButtons[XINPUT_GAMEPAD_RIGHT_TRIGGER] = trigger_byte(AXIS(TRIGGERRIGHT));
+    g->bAnalogButtons[XINPUT_GAMEPAD_BLACK] = BTN(RB) ? 255 : 0;
+    g->bAnalogButtons[XINPUT_GAMEPAD_WHITE] = BTN(LB) ? 255 : 0;
+    g->bAnalogButtons[XINPUT_GAMEPAD_LEFT_TRIGGER] = trigger_byte(s->lt);
+    g->bAnalogButtons[XINPUT_GAMEPAD_RIGHT_TRIGGER] = trigger_byte(s->rt);
     g->wButtons = (BTN(DPAD_UP) ? XINPUT_GAMEPAD_DPAD_UP : 0) |
                   (BTN(DPAD_DOWN) ? XINPUT_GAMEPAD_DPAD_DOWN : 0) |
                   (BTN(DPAD_LEFT) ? XINPUT_GAMEPAD_DPAD_LEFT : 0) |
                   (BTN(DPAD_RIGHT) ? XINPUT_GAMEPAD_DPAD_RIGHT : 0) |
                   (BTN(START) ? XINPUT_GAMEPAD_START : 0) |
                   (BTN(BACK) ? XINPUT_GAMEPAD_BACK : 0) |
-                  (BTN(LEFTSTICK) ? XINPUT_GAMEPAD_LEFT_THUMB : 0) |
-                  (BTN(RIGHTSTICK) ? XINPUT_GAMEPAD_RIGHT_THUMB : 0);
-    g->sThumbLX = AXIS(LEFTX);
-    g->sThumbLY = stick_y(AXIS(LEFTY));
-    g->sThumbRX = AXIS(RIGHTX);
-    g->sThumbRY = stick_y(AXIS(RIGHTY));
+                  (BTN(LTHUMB) ? XINPUT_GAMEPAD_LEFT_THUMB : 0) |
+                  (BTN(RTHUMB) ? XINPUT_GAMEPAD_RIGHT_THUMB : 0);
+    g->sThumbLX = s->lx;
+    g->sThumbLY = stick_y(s->ly);
+    g->sThumbRX = s->rx;
+    g->sThumbRY = stick_y(s->ry);
 #undef BTN
-#undef AXIS
+}
+
+/* A controller's report: through its layout when `mapped` and it has one. */
+static void read_controller(const xi_port *p, XINPUT_GAMEPAD *g, bool mapped)
+{
+    padmap_pad s;
+    read_sdl(p->gc, &s);
+    if (mapped && p->pm) {
+        padmap_out o;
+        padmap_sample(p->pm, &s, now_us(), &o);
+        s = o.pad;
+    }
+    pad_report(&s, g);
 }
 
 /* Holds down the button, or pushes the stick, NAME (see the top of the file). */
@@ -966,7 +1095,9 @@ static void read_pipe(XINPUT_GAMEPAD *g)
     }
 }
 
-static void read_port(const xi_port *p, XINPUT_GAMEPAD *g)
+/* `mapped`: the title's view (through the layout, which this advances);
+   otherwise the real pad, for the Guide and the reset combo. */
+static void read_port(const xi_port *p, XINPUT_GAMEPAD *g, bool mapped)
 {
     memset(g, 0, sizeof(*g));
     if (p->kbd) {
@@ -974,7 +1105,7 @@ static void read_port(const xi_port *p, XINPUT_GAMEPAD *g)
         read_script(g, (unsigned)(p - xi.port));
     }
     else if (p->gc) {
-        read_controller(p->gc, g);
+        read_controller(p, g, mapped);
         /* The keyboard keeps working beside a controller in port 0. */
         if (p == &xi.port[0] && !xi.kbd_disabled) read_keyboard(g);
     }
@@ -1009,7 +1140,7 @@ static void sample(xi_handle *h, const xi_port *p, bool force)
         }
     }
     XINPUT_GAMEPAD before = h->last;
-    read_port(p, &h->last);
+    read_port(p, &h->last, true);
     if (xi.log_input && memcmp(&before, &h->last, sizeof(before)))
         xlog("XInput: port %u: buttons %#06x, A %u B %u X %u Y %u Black %u White %u LT %u RT %u, sticks %d,%d / %d,%d",
              h->port, h->last.wButtons, h->last.bAnalogButtons[XINPUT_GAMEPAD_A],
@@ -1044,7 +1175,7 @@ void xinput_check_reset_combo(void)
         const xi_port *p = &xi.port[i];
         if (!p->connected) continue;
         XINPUT_GAMEPAD g;
-        read_port(p, &g);
+        read_port(p, &g, false);
         held = (g.wButtons & (XINPUT_GAMEPAD_BACK | XINPUT_GAMEPAD_START)) ==
                    (XINPUT_GAMEPAD_BACK | XINPUT_GAMEPAD_START) &&
                g.bAnalogButtons[XINPUT_GAMEPAD_LEFT_TRIGGER] >= 128 &&
@@ -1118,7 +1249,7 @@ unsigned xinput_guide_read(int *port)
         unsigned b = 0;
         if (p->connected) {
             XINPUT_GAMEPAD g;
-            read_port(p, &g);
+            read_port(p, &g, false);
             b = guide_bits(&g);
             if (p->gc && SDL_GameControllerGetButton(p->gc, SDL_CONTROLLER_BUTTON_GUIDE)) b |= GUIDE_HOME;
             if (p->kbd || (i == 0 && !getenv("XBCOMPAT_NO_KBD_PAD"))) {
@@ -1139,10 +1270,11 @@ void xinput_guide_mask(bool on)
     pthread_mutex_lock(&xi.lock);
     if (!on && guide_masked)
         for (unsigned i = 0; i < XI_PORTS; i++) guide_latch[i] = true;
-    if (on)
+    if (on != guide_masked)
         for (unsigned i = 0; i < XI_PORTS; i++) {
             xi_port *p = &xi.port[i];
-            if (p->gc) SDL_GameControllerRumble(p->gc, 0, 0, 0);
+            if (on && p->gc) SDL_GameControllerRumble(p->gc, 0, 0, 0);
+            if (p->pm) padmap_reset(p->pm);     /* turbo, toggles and pending taps stop */
         }
     guide_masked = on;
     pthread_mutex_unlock(&xi.lock);
@@ -1398,7 +1530,7 @@ static HANDLE NTAPI XInputOpen(XPP_DEVICE_TYPE *DeviceType, ULONG dwPort, ULONG 
         p->open = d;
         /* The driver reads one report synchronously at open; the packet
            number only starts counting with the interrupt transfers. */
-        read_port(p, &d->last);
+        read_port(p, &d->last, true);
         d->sampled_us = now_us();
         xlog("XInput: XInputOpen port %u: handle %p (%s, autopoll %s, %u ms)", dwPort, (void *)d,
              p->kbd ? "keyboard" : SDL_GameControllerName(p->gc),
