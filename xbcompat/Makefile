@@ -91,7 +91,9 @@ override CFLAGS += -Isrc
 LDLIBS += -ldl
 endif
 endif
-SRC      = src/main.c src/probe.c src/log.c src/prof.c src/loader.c src/xbeimage.c src/memory.c src/thread.c $(KERNSRC) $(HLESRC)
+# Controller Configuration (src/input/padmap.h): plain C, no guest calls
+INPUTSRC = src/input/padmap.c src/input/padmap_json.c src/input/padmap_store.c
+SRC      = src/main.c src/probe.c src/log.c src/prof.c src/loader.c src/xbeimage.c src/memory.c src/thread.c $(KERNSRC) $(HLESRC) $(INPUTSRC)
 OBJ      = $(SRC:%.c=$(BUILD)/%.o)
 # The Guide overlay (src/guide, C++98 with no C++ library) on the frolickdash
 # XUI runtime; the native renderer builds leave it out (d3d8.c's hook is weak).
@@ -189,6 +191,11 @@ $(BUILD)/%.o: %.c src/xbcompat.h src/xbox.h src/hle/hle.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+$(BUILD)/src/input/%.o: src/input/%.c src/input/padmap.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c -o $@ $<
+$(BUILD)/src/hle/xinput.o: src/input/padmap.h
+
 $(BUILD)/src/kernel/ob.o $(BUILD)/src/kernel/irp.o: src/kernel/driver.h
 $(BUILD)/src/hle/d3d8.o: src/hle/ff_vsh.h src/hle/dxt_decode.h src/hle/nv2a_shaders.h src/hle/async_draws.h
 
@@ -197,13 +204,21 @@ $(BUILD)/glslcheck: tools/glslcheck.c
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $< $(LDLIBS)
 
 # Renders a Guide scene to a .ppm with xbcompat's own XUI code (tools/guide).
-$(BUILD)/guideview: tools/guide/guideview.cpp src/guide/guide.cpp $(filter-out $(BUILD)/src/guide/guide.o,$(GUIDESRC:%.cpp=$(BUILD)/%.o)) $(BUILD)/src/xbeimage.o
+$(BUILD)/guideview: tools/guide/guideview.cpp src/guide/guide.cpp $(filter-out $(BUILD)/src/guide/guide.o,$(GUIDESRC:%.cpp=$(BUILD)/%.o)) $(BUILD)/src/xbeimage.o \
+                    $(INPUTSRC:%.c=$(BUILD)/%.o)
 	$(CXX) $(CXXFLAGS) -o $@ $< $(filter %.o,$^) $(LDLIBS)
 
 src/kernel/exports.gen.c: tools/gen_exports.py
 	python3 tools/gen_exports.py "$(LEAK)/private/ntos/init/ntoskrnl.src" $@
 
+# padmap's own tests, built for the host (no SDL, no -m32): make test-padmap
+$(BUILD)/padmap_test: tests/padmap_test.c $(INPUTSRC) src/input/padmap.h
+	@mkdir -p $(BUILD)
+	cc -std=gnu11 -O1 -g -Wall -Wextra -Wno-unused-parameter -Isrc -o $@ tests/padmap_test.c $(INPUTSRC) -lm
+test-padmap: $(BUILD)/padmap_test
+	$(BUILD)/padmap_test
+
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all clean
+.PHONY: all clean test-padmap

@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <pthread.h>
 
 #include "../xbcompat.h"
 #include "hle.h"
@@ -144,6 +145,132 @@ static void *make_reg_thunk(const char *spec, void *target)
 }
 #endif
 
+#ifndef XBC_TRANSLATED
+/* D3D on a stack of the title's own.  Ninja Gaiden runs its game code on
+   stacks it allocates itself and switches to; the GL work behind a draw
+   (llvmpipe compiles shaders with LLVM there) needs far more than those
+   hold, ran off their end and wrecked the host heap.  D3D entry points go
+   through a thunk that, when the caller's stack is neither the thread's
+   host stack nor its spare, copies the stack arguments to the spare one,
+   calls there and switches back. */
+#define HLE_SPARE_STACK (1u << 20)
+static __thread uintptr_t hle_stack[4];   /* host stack low end, its size, top of the spare stack, its low end */
+static uint32_t hle_stack_tls;            /* hle_stack's offset from the thread pointer (gs) */
+
+static uintptr_t thread_pointer(void)
+{
+    uintptr_t tp;
+    __asm__("movl %%gs:0, %0" : "=r"(tp));
+    return tp;
+}
+
+void hle_stack_thread_init(void)
+{
+    pthread_attr_t a;
+    void *lo;
+    size_t size;
+    if (pthread_getattr_np(pthread_self(), &a)) return;
+    pthread_attr_getstack(&a, &lo, &size);
+    pthread_attr_destroy(&a);
+    void *spare = mmap(NULL, HLE_SPARE_STACK, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (spare == MAP_FAILED) return;
+    hle_stack[0] = (uintptr_t)lo;
+    hle_stack[1] = size;
+    hle_stack[2] = (uintptr_t)spare + HLE_SPARE_STACK - 16;
+    hle_stack[3] = (uintptr_t)spare;
+}
+
+/* The thunk.  The spare stack's top moves down by one frame for the call,
+   so a guest callback that switches back to its own stack and calls D3D
+   again gets a frame below.  A frame: the stack arguments (and a few more,
+   in case the implementation takes more than the name says), the caller's
+   esp, the previous top, a spot for edx and the esp to return on.  How
+   much the implementation popped is measured, not assumed. */
+static void *make_stack_thunk(void *impl, unsigned nargs)
+{
+    unsigned n = nargs + 4;
+    uint32_t lo = hle_stack_tls, sz = hle_stack_tls + 4, top = hle_stack_tls + 8, base = hle_stack_tls + 12;
+    uint32_t o_esp = 4 * n, o_top = o_esp + 4, o_edx = o_esp + 8, o_ret = o_esp + 12;
+    uint8_t *code = alloc_code(256 + n * 13), *c = code;
+#define B(...) do { const uint8_t b_[] = { __VA_ARGS__ }; memcpy(c, b_, sizeof b_); c += sizeof b_; } while (0)
+#define D(v) do { uint32_t d_ = (v); memcpy(c, &d_, 4); c += 4; } while (0)
+    uint8_t *to_direct[3];
+    B(0x50);                                    /* push eax */
+    B(0x8D, 0x44, 0x24, 0x04);                  /* lea eax, [esp+4] */
+    B(0x65, 0x2B, 0x05); D(lo);                 /* sub eax, gs:[lo] */
+    B(0x65, 0x3B, 0x05); D(sz);                 /* cmp eax, gs:[size] */
+    B(0x0F, 0x82); to_direct[0] = c; D(0);      /* jb direct: on the host stack */
+    B(0x65, 0x8B, 0x05); D(base);               /* mov eax, gs:[spare low end] */
+    B(0x85, 0xC0);                              /* test eax, eax */
+    B(0x0F, 0x84); to_direct[1] = c; D(0);      /* jz direct: no spare stack on this thread */
+    B(0xF7, 0xD8);                              /* neg eax */
+    B(0x8D, 0x44, 0x04, 0x04);                  /* lea eax, [esp+eax+4]: esp - low end */
+    B(0x3D); D(HLE_SPARE_STACK);                /* cmp eax, spare size */
+    B(0x0F, 0x82); to_direct[2] = c; D(0);      /* jb direct: on the spare stack already */
+    B(0x51);                                    /* push ecx */
+    B(0x65, 0x8B, 0x0D); D(top);                /* mov ecx, gs:[top] */
+    B(0x81, 0xE9); D(o_ret + 4);                /* sub ecx, frame size */
+    for (unsigned i = 0; i < n; i++) {
+        B(0x8B, 0x84, 0x24); D(12 + 4 * i);     /* mov eax, [esp+12+4i] */
+        B(0x89, 0x81); D(4 * i);                /* mov [ecx+4i], eax */
+    }
+    B(0x89, 0xA1); D(o_esp);                    /* mov [ecx+o_esp], esp */
+    B(0x65, 0x8B, 0x05); D(top);                /* mov eax, gs:[top] */
+    B(0x89, 0x81); D(o_top);                    /* mov [ecx+o_top], eax */
+    B(0x65, 0x89, 0x0D); D(top);                /* mov gs:[top], ecx */
+    B(0x8B, 0xC1);                              /* mov eax, ecx */
+    B(0x94);                                    /* xchg eax, esp */
+    B(0x8B, 0x08);                              /* mov ecx, [eax] */
+    B(0x8B, 0x40, 0x04);                        /* mov eax, [eax+4] */
+    B(0xE8); D((uint32_t)impl - ((uint32_t)c + 4));                 /* call impl */
+    B(0x65, 0x8B, 0x0D); D(top);                /* mov ecx, gs:[top]: this frame */
+    B(0x89, 0x91); D(o_edx);                    /* mov [ecx+o_edx], edx */
+    B(0x8B, 0xD4);                              /* mov edx, esp */
+    B(0x2B, 0xD1);                              /* sub edx, ecx: what the call popped */
+    B(0x03, 0x91); D(o_esp);                    /* add edx, [ecx+o_esp] */
+    B(0x50);                                    /* push eax */
+    B(0x8B, 0x81); D(o_esp);                    /* mov eax, [ecx+o_esp] */
+    B(0x8B, 0x40, 0x08);                        /* mov eax, [eax+8]: the return address */
+    B(0x89, 0x42, 0x08);                        /* mov [edx+8], eax */
+    B(0x58);                                    /* pop eax */
+    B(0x83, 0xC2, 0x08);                        /* add edx, 8 */
+    B(0x89, 0x91); D(o_ret);                    /* mov [ecx+o_ret], edx */
+    B(0x8B, 0x91); D(o_top);                    /* mov edx, [ecx+o_top] */
+    B(0x65, 0x89, 0x15); D(top);                /* mov gs:[top], edx */
+    B(0x8B, 0x91); D(o_edx);                    /* mov edx, [ecx+o_edx] */
+    B(0x8B, 0xA1); D(o_ret);                    /* mov esp, [ecx+o_ret] */
+    B(0xC3);                                    /* ret */
+    for (int k = 0; k < 3; k++) { uint32_t rel = (uint32_t)(c - (to_direct[k] + 4)); memcpy(to_direct[k], &rel, 4); }
+    B(0x58);                                    /* direct: pop eax */
+    B(0xE9); D((uint32_t)impl - ((uint32_t)c + 4));                 /* jmp impl */
+    if (c > code + 256 + n * 13) fatal("HLE: stack thunk overran its space");
+#undef B
+#undef D
+    return code;
+}
+
+/* Stack argument dwords of a D3D entry point, from its decorated name (and
+   its register spec), or -1 when the name does not say. */
+static int d3d_stack_args(const sym *s)
+{
+    const char *n = s->name;
+    if (strncmp(n, "_D3D", 4) && strncmp(n, "@D3D", 4) && strncmp(n, "_Direct3D", 9)) return -1;
+    const char *at = strrchr(n, '@');
+    if (!at || at == n || !at[1]) return -1;
+    int bytes = atoi(at + 1);
+    if (s->regs) {
+        int k = 0;
+        for (const char *p = s->regs; *p; p++)
+            if (*p == 's' && (p == s->regs || p[-1] == ',')) k += p[1] == '2' ? 2 : 1;
+        return k;
+    }
+    if (n[0] == '@') return bytes > 8 ? (bytes - 8) / 4 : 0;
+    return bytes / 4;
+}
+#else
+void hle_stack_thread_init(void) {}
+#endif
+
 static void write_jmp(ULONG at, void *target)
 {
     uint8_t *p = (uint8_t *)at;
@@ -208,6 +335,9 @@ void hle_patch(xbe_image *img, const char *mapfile)
         return;
     }
     load_map(mapfile);
+#ifndef XBC_TRANSLATED
+    hle_stack_tls = (uint32_t)((uintptr_t)&hle_stack[0] - thread_pointer());
+#endif
     unsigned replaced = 0, trapped = 0;
     for (size_t i = 0; i < nsyms; i++) {
         if (syms[i].data || !replaced_library_api(syms[i].name)) continue;
@@ -239,6 +369,10 @@ void hle_patch(xbe_image *img, const char *mapfile)
         } else if (impl) {
             impl = (void *)(uintptr_t)cpu_guest_entry(impl);
         }
+#ifndef XBC_TRANSLATED
+        int nargs = impl ? d3d_stack_args(&syms[i]) : -1;
+        if (nargs >= 0 && !getenv("XBCOMPAT_NO_STACK_THUNKS")) impl = make_stack_thunk(impl, (unsigned)nargs);
+#endif
         if (impl) {
             write_jmp(syms[i].va, impl);
             replaced++;

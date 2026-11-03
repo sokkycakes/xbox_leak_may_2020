@@ -16,6 +16,7 @@
  * is matched case-insensitively against the host directory.
  */
 #define _GNU_SOURCE
+#include <ctype.h>
 #include <dirent.h>
 #include <ftw.h>
 #include <errno.h>
@@ -56,6 +57,21 @@ typedef struct xfile {
     PVOID port_key;
 } xfile;
 
+/* A file's FsContext for titles that read the FCB themselves (xbcompat.h):
+   zeroed, flags clear, and the same made-up physical position as both
+   FATX's FirstCluster and GDFX's FirstSector, so files sort by path. */
+static PVOID stand_in_fcb(const char *xpath)
+{
+    ULONG *fcb = pool_alloc(0x40);
+    memset(fcb, 0, 0x40);
+    uint32_t h = 2166136261u;
+    for (const char *c = xpath ? xpath : ""; *c; c++) h = (h ^ (unsigned char)tolower((unsigned char)*c)) * 16777619u;
+    h = (h & 0x00fffffe) | 2;   /* even, so FATX's flag bit 0 reads clear; never 0 */
+    fcb[0] = h;
+    fcb[0x1c / 4] = h;
+    return fcb;
+}
+
 static char cdrom_dir[PATH_MAX];
 static char hdd_dir[PATH_MAX];
 static char card_dir[PATH_MAX];
@@ -90,6 +106,9 @@ static bool find_card(char *out, size_t outlen)
     wincart_shim(out, out, outlen);   /* Windows carts as stub Xbox titles (wincart.c) */
     return true;
 }
+
+/* The card's folder on the host, as CARD0: shows it (the Guide's Quick Launch). */
+bool fs_card_dir(char *out, size_t outlen) { return find_card(out, outlen); }
 
 static bool find_card_raw(char *out, size_t outlen)
 {
@@ -209,9 +228,10 @@ static bool match_component(const char *dir, const char *name, char *out, size_t
 static NTSTATUS translate_path(const char *xpath, char *host, size_t hostlen, int *is_device)
 {
     char path[1024];
-    /* The object manager treats a bare "X:" or "CdRom0:" prefix as a \??\ link. */
-    const char *colon = strchr(xpath, ':'), *bslash = strchr(xpath, '\\');
-    if (xpath[0] != '\\' && colon && (!bslash || colon < bslash))
+    /* A name without a leading backslash ("X:\...", "CdRom0:", or a bare
+       file name) is relative to \??\, as XAPI's CreateFile opens it
+       (fileopcr.c). */
+    if (xpath[0] != '\\')
         snprintf(path, sizeof(path), "\\??\\%s", xpath);
     else
         snprintf(path, sizeof(path), "%s", xpath);
@@ -226,7 +246,11 @@ static NTSTATUS translate_path(const char *xpath, char *host, size_t hostlen, in
         size_t n = rest ? (size_t)(rest - path) : strlen(path);
         snprintf(link, sizeof(link), "%.*s", (int)n, path);
         char *target = symlink_lookup(link);
-        if (!target) return STATUS_OBJECT_PATH_NOT_FOUND;
+        /* Not in \??\: the name itself when it is the last component, as
+           the object manager says.  GTA III calls a missing texture file it
+           tries to open by its bare name a dirty disc when told the path
+           is missing, and loads on when told the file is. */
+        if (!target) return rest ? STATUS_OBJECT_PATH_NOT_FOUND : STATUS_OBJECT_NAME_NOT_FOUND;
         char tmp[1024];
         snprintf(tmp, sizeof(tmp), "%s%s", target, rest ? rest : "");
         free(target);
@@ -517,6 +541,7 @@ made:
     {
         xobject *o = object_new(OBJ_FILE);
         o->file = f;
+        o->fs_context = stand_in_fcb(f->xbox);
         *FileHandle = handle_insert(o);
     }
     f = NULL;
@@ -554,6 +579,7 @@ static xfile *file_of(HANDLE h)
 
 extern LONG NTAPI KeSetEvent(KEVENT *, LONG, BOOLEAN);
 extern NTSTATUS NTAPI NtSetEvent(HANDLE, LONG *);
+extern ULONGLONG NTAPI KeQueryInterruptTime(void);
 
 /* I/O finishes at once here.  As in IopCompleteRequest, a request that fails
    without pending still writes the status block but signals nothing; any
@@ -575,9 +601,69 @@ static NTSTATUS complete(HANDLE Event, PVOID ApcRoutine, PVOID ApcContext, IO_ST
    passes the OVERLAPPED), also queues a packet to the port (io/internal.c
    IopCompleteRequest).  Errors here fail the call at once rather than
    pending, so they queue nothing, as there. */
+/* An overlapped request finishes inside the call here, but on an Xbox the
+   disk is still busy when ReadFile returns ERROR_IO_PENDING, so a title can
+   reset the OVERLAPPED event right after issuing the read and then wait on
+   it: Gun's streaming thread reads, calls ResetEvent on the event it just
+   woke for, and waits again, which here cleared the new read's completion
+   and hung the game before its first frame.  The status block is filled at
+   once; the event is set when any thread next waits, or by the DPC thread
+   2 ms later (a thread may already be blocked on it). */
+#define IO_LATE_MAX 64
+#define IO_LATE_AGE 20000   /* 2 ms in 100 ns units */
+static pthread_mutex_t io_late_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct { HANDLE event; ULONGLONG at; } io_late[IO_LATE_MAX];
+static int io_late_n;
+
+static void late_signal(HANDLE Event)
+{
+    pthread_mutex_lock(&io_late_lock);
+    if (io_late_n < IO_LATE_MAX) {
+        io_late[io_late_n].event = Event;
+        io_late[io_late_n].at = KeQueryInterruptTime();
+        io_late_n++;
+        Event = NULL;
+    }
+    pthread_mutex_unlock(&io_late_lock);
+    if (Event) NtSetEvent(Event, NULL);    /* list full: signal now */
+}
+
+/* Sets the events of finished overlapped requests: all of them (a thread is
+   about to wait) or only those older than IO_LATE_AGE (the DPC thread). */
+void io_signal_late(bool all)
+{
+    if (!__atomic_load_n(&io_late_n, __ATOMIC_RELAXED)) return;
+    HANDLE ready[IO_LATE_MAX];
+    int n = 0;
+    ULONGLONG now = all ? 0 : KeQueryInterruptTime();
+    pthread_mutex_lock(&io_late_lock);
+    for (int i = 0; i < io_late_n;) {
+        if (all || now - io_late[i].at >= IO_LATE_AGE) {
+            ready[n++] = io_late[i].event;
+            io_late[i] = io_late[--io_late_n];
+        } else {
+            i++;
+        }
+    }
+    pthread_mutex_unlock(&io_late_lock);
+    for (int i = 0; i < n; i++) NtSetEvent(ready[i], NULL);
+}
+
 static NTSTATUS fcomplete(xfile *f, HANDLE Event, PVOID ApcRoutine, PVOID ApcContext, IO_STATUS_BLOCK *iosb,
                           NTSTATUS st, ULONG info)
 {
+    /* A request that fails at once leaves the caller's status block alone
+       (IopCompleteRequest copies it only for success or a pended error).
+       XAPI's overlapped ReadFile primes OVERLAPPED.Internal with
+       STATUS_PENDING, so GetOverlappedResult on a read that hit the end of
+       a file still succeeds with 0 bytes: Counter-Strike's file cache
+       closes its files that way and stops with a fatal "Cache" error when
+       it sees STATUS_END_OF_FILE there. */
+    if (NT_ERROR(st)) return st;
+    if (f && f->async && Event) {
+        late_signal(Event);
+        Event = NULL;
+    }
     NTSTATUS r = complete(Event, ApcRoutine, ApcContext, iosb, st, info);
     if (f && f->port && !NT_ERROR(st) && !ApcRoutine && ApcContext)
         iocp_post(f->port, f->port_key, ApcContext, st, info);
@@ -673,6 +759,7 @@ NTSTATUS NTAPI NtReadFile(HANDLE FileHandle, HANDLE Event, PVOID ApcRoutine, PVO
 {
     gl_yield_point();
     (void)ApcContext;
+    guest_page_in(Buffer, Length, true);
     xfile *f = file_of(FileHandle);
     if (f && f->is_dvd) {
         LONGLONG off = ByteOffset ? ByteOffset->QuadPart : f->pos;
@@ -712,6 +799,7 @@ NTSTATUS NTAPI NtWriteFile(HANDLE FileHandle, HANDLE Event, PVOID ApcRoutine, PV
 {
     gl_yield_point();
     (void)ApcContext;
+    guest_page_in(Buffer, Length, false);
     xfile *f = file_of(FileHandle);
     if (f && f->is_dvd) return fcomplete(f, Event, ApcRoutine, ApcContext, iosb, STATUS_MEDIA_WRITE_PROTECTED, 0);
     if (f && f->fd < 0 && f->is_device) return volume_io(f, Event, ApcRoutine, ApcContext, iosb, Buffer, Length, ByteOffset, true);
@@ -946,11 +1034,43 @@ NTSTATUS NTAPI NtSetInformationFile(HANDLE FileHandle, IO_STATUS_BLOCK *iosb, PV
     return st;
 }
 
-/* Frolick's dashboard (title FFFE0000; the combined build also checks
-   its name, see tools/frolickdash/dist/stream/xbcompat-gudfcx.patch). */
+/* Frolick, as the dashboard (FFFE0000) or as the game in E:\Games\Frolick
+   (FRLK): its XBE is named "Frolick", or older builds named "Xbox Dashboard"
+   run from a Games/Frolick folder. The stock dashboard is neither. */
 static bool frolick_dash(void)
 {
-    return xbe_title_id() == 0xFFFE0000;
+    const char *name = xbe_title_name(), *path = xbe_file_path();
+    if (name && !strcmp(name, "Frolick")) return true;
+    if (!path) return false;
+    size_t n = strlen(path);
+    const char *tail = "/games/frolick/default.xbe";
+    return n >= strlen(tail) && !strcasecmp(path + n - strlen(tail), tail);
+}
+
+/* What the hidden cache drives (X:, Y:, Z: = partition3-5) and xbcompat's
+   own cache beside the hard disk (<hdd>/../cache) take on disk.  On a
+   console those are fixed partitions apart from E:, so Frolick, which sees
+   the real disk, sees it less a fixed reservation for them, and E:'s used
+   space without what they hold. */
+#define CACHE_RESERVE (3ULL * 750 << 20)
+static ULONGLONG du_total;
+static int du_add(const char *path, const struct stat *sb, int flag, struct FTW *ftw)
+{
+    (void)path; (void)flag; (void)ftw;
+    du_total += (ULONGLONG)sb->st_blocks * 512;
+    return 0;
+}
+static ULONGLONG hidden_cache_bytes(void)
+{
+    char p[PATH_MAX + 16];
+    du_total = 0;
+    for (int i = 3; i <= 5; i++) {
+        snprintf(p, sizeof(p), "%s/partition%d", hdd_dir, i);
+        nftw(p, du_add, 16, FTW_PHYS | FTW_MOUNT);
+    }
+    snprintf(p, sizeof(p), "%s/../cache", hdd_dir);
+    nftw(p, du_add, 16, FTW_PHYS | FTW_MOUNT);
+    return du_total;
 }
 
 NTSTATUS NTAPI NtQueryVolumeInformationFile(HANDLE FileHandle, IO_STATUS_BLOCK *iosb, PVOID Info,
@@ -958,6 +1078,7 @@ NTSTATUS NTAPI NtQueryVolumeInformationFile(HANDLE FileHandle, IO_STATUS_BLOCK *
 {
     xfile *f = file_of(FileHandle);
     if (!f) return STATUS_INVALID_HANDLE;
+    TRACE("NtQueryVolumeInformationFile(%s, class %u)", f->host, Class);
     ULONG size = 0;
     struct statvfs vs;
     if (statvfs(f->host, &vs) != 0) memset(&vs, 0, sizeof(vs));
@@ -975,12 +1096,36 @@ NTSTATUS NTAPI NtQueryVolumeInformationFile(HANDLE FileHandle, IO_STATUS_BLOCK *
         ULONG *u;
         /* Report a FATX-like volume with the partition's cluster size (16 KB
            unless formatted otherwise). Titles see it capped to what a console
-           has (8 GB, so 32-bit block math holds); Frolick's dashboard, which
-           counts in 64 bits, sees the disk's real size and free space. */
-        ULONG cluster = f->is_dvd ? 16384 : partition_cluster_bytes(partition_of(f->host));
+           has (8 GB, so 32-bit block math holds); Frolick, which counts in
+           64 bits, sees the disk's real size less the cache drives'
+           reservation, and its free space as if they were apart (never more
+           than is really free). */
+        if (f->is_dvd) {
+            /* gdfx/volinfo.c: the partition's sectors, one per unit, none free. */
+            li[0].QuadPart = dvd_volume_sectors();
+            li[1].QuadPart = 0;
+            if (Class == 7) { li[2].QuadPart = 0; u = (ULONG *)&li[3]; size = 32; }
+            else { u = (ULONG *)&li[2]; size = 24; }
+            u[0] = 1;
+            u[1] = 2048;
+            break;
+        }
+        ULONG cluster = partition_cluster_bytes(partition_of(f->host));
         ULONGLONG total = (ULONGLONG)vs.f_blocks * vs.f_frsize, avail = (ULONGLONG)vs.f_bavail * vs.f_frsize;
-        if (total > 8ULL << 30 && !frolick_dash()) total = 8ULL << 30;
+        if (!frolick_dash()) {
+            if (total > 8ULL << 30) total = 8ULL << 30;
+        } else if (!f->is_dvd && total > 2 * CACHE_RESERVE) {
+            ULONGLONG used = total - (ULONGLONG)vs.f_bfree * vs.f_frsize, hidden = hidden_cache_bytes();
+            used = used > hidden ? used - hidden : 0;
+            total -= CACHE_RESERVE;
+            ULONGLONG free_e = total > used ? total - used : 0;
+            if (free_e < avail) avail = free_e;
+        }
         if (avail > total) avail = total;
+        /* Free space stays under 4 GB: titles that multiply it out into a
+           DWORD of bytes (Mercenaries, King Kong) saw 8 GB wrap to 0 and
+           sent the player to the dashboard to free blocks. */
+        if (avail > 0xFFE00000ULL && !frolick_dash()) avail = 0xFFE00000ULL;
         li[0].QuadPart = total / cluster;
         li[1].QuadPart = avail / cluster;
         if (Class == 7) { li[2].QuadPart = li[1].QuadPart; u = (ULONG *)&li[3]; size = 32; }
@@ -1136,7 +1281,8 @@ NTSTATUS NTAPI NtDeviceIoControlFile(HANDLE FileHandle, HANDLE Event, PVOID ApcR
         /* DISK_GEOMETRY: Cylinders(8), MediaType, TracksPerCylinder, SectorsPerTrack, BytesPerSector */
         if (OutLen < 24) return STATUS_BUFFER_TOO_SMALL;
         ULONG *g = Out;
-        g[0] = 0x100000; g[1] = 0;
+        xfile *gf = file_of(FileHandle);
+        g[0] = gf && gf->is_dvd && dvd_volume_sectors() ? dvd_volume_sectors() : 0x100000; g[1] = 0;
         g[2] = 12; g[3] = 1; g[4] = 1; g[5] = Code == IOCTL_DISK_GET_DRIVE_GEOMETRY ? 512 : 2048;
         return complete(Event, ApcRoutine, ApcContext, iosb, STATUS_SUCCESS, 24);
     }

@@ -341,10 +341,14 @@ static void emit_disasm(emitter *e, const vinstr *in)
 static const char *const prologue =
     "#version 120\n"
     "/* NV2A vertex program, translated by xbcompat */\n"
+    /* Multipass titles redraw the same triangles with other programs and
+       ZFUNC EQUAL: their positions must come out bit for bit the same. */
+    "invariant gl_Position;\n"
     "uniform vec4 c[192];\n"
     "uniform float flip_y;\n"
     "uniform float fog_vertex_mode;\n"
-    "uniform vec4 vp_scale, vp_offset, wdepth;\n";
+    "uniform vec4 vp_scale, vp_offset, wdepth;\n"
+    "uniform vec4 vt_scale[4];\n";
 
 static const char *const helpers =
     "\n"
@@ -537,7 +541,7 @@ char *vsh_translate_ex(const uint32_t *code, unsigned count, unsigned flags)
        writes, for the same limit. */
     for (int t = 0; t < 4; t++)
         if (!two_side || (outs & (1u << (OUT_T0 + t))))
-            sb_put(&e.b, "  gl_TexCoord[%d] = oT%d;\n", t, t);
+            sb_put(&e.b, "  gl_TexCoord[%d] = oT%d * vt_scale[%d];\n", t, t, t);
     sb_put(&e.b,
            /* Preserve finite factors outside [0,1] until fragment use. */
            "  float fog_factor = oFog.x;\n"

@@ -1,3 +1,4 @@
+#define _GNU_SOURCE   /* REG_EFL (gpu_regs_trap_*) */
 #include <sys/mman.h>
 /*
  * Direct3D 8 (Xbox) on SDL2 + OpenGL.
@@ -192,6 +193,7 @@ typedef struct d3d_state {
     struct D3DSurface *target, *target_depth;     /* current render target */
     int rt_width, rt_height;     /* size of the current render target */
     bool rt_texture;             /* rendering into a texture (GL rows run bottom-up) */
+    bool rt_upright;             /* a texture target drawn the back buffer's way up, in d3d.fbo (see SetRenderTarget) */
     float target_zmax;           /* largest value of the current depth buffer's format */
     float host_zmax;             /* the same for the GL depth buffer actually backing it */
     ULONG fbo;                   /* framebuffer object for texture targets */
@@ -360,6 +362,7 @@ static bool ff_pretransformed;
 static void program_off(void);
 static const float *vertex_diffuse(void);
 static GLuint backbuffer_copy_texture(ULONG data, ULONG w, ULONG h);
+static GLuint depth_copy_texture(ULONG w, ULONG h);
 static void swap_cpu_backbuffer(void);
 static void front_buffer_update(void);
 static void front_buffer_memory(void);
@@ -373,7 +376,11 @@ static void run_callbacks(void);
 static void pusher_drain(void);
 static void pusher_init(ULONG *dev);
 static void sync_device_surfaces(void);
+static void device_visibility_reports(ULONG *dev);
 static bool device_layout_5849;   /* d3d.device is laid out like the 5849 CDevice */
+/* Where the CDevice keeps its render target (then the depth buffer, and
+   three frame buffers at +0x10..+0x18); 0 when unknown. */
+static ULONG device_surfaces_off;
 
 /* ---- the GL context across guest threads -------------------------------- */
 
@@ -612,6 +619,62 @@ static unsigned d3d_build(void)
    worker has got to.  Otherwise the device's GPU time is its CPU time. */
 static volatile ULONG async_gpu_time;
 
+/* The dummy NV2A register window (bind_miniport) is plain memory, but some
+   registers act on a write.  Halo 2's CDevice::KickOff sets NV_PFB_WBC_FLUSH
+   (0x100410 bit 16) and spins until the GPU clears it, then writes the push
+   buffer's put pointer to the FIFO channel (0x800040), whose get pointer
+   (0x800044) the library waits on.  Writes to those two pages trap, run one
+   instruction single-stepped, and then the flush is done and the FIFO has
+   caught up. */
+static uint8_t *gpu_regs;
+#define PFB_PAGE 0x100000u
+#define PFB_WBC 0x410u
+#define PFB_WBC_FLUSH 0x10000u
+#define USER_PAGE 0x800000u
+#define USER_DMA_PUT 0x40u
+#define USER_DMA_GET 0x44u
+
+static bool gpu_regs_trapped(uintptr_t a)
+{
+    uintptr_t b = (uintptr_t)gpu_regs;
+    return gpu_regs && ((a >= b + PFB_PAGE && a < b + PFB_PAGE + 0x1000) || (a >= b + USER_PAGE && a < b + USER_PAGE + 0x1000));
+}
+
+static void gpu_regs_protect(int prot)
+{
+    mprotect(gpu_regs + PFB_PAGE, 0x1000, prot);
+    mprotect(gpu_regs + USER_PAGE, 0x1000, prot);
+}
+#ifdef XBC_NATIVE
+#include <ucontext.h>
+static pthread_mutex_t regs_trap_lock = PTHREAD_MUTEX_INITIALIZER;
+static __thread bool regs_stepping;
+
+bool gpu_regs_trap_fault(void *addr, void *ucv)
+{
+    if (!gpu_regs_trapped((uintptr_t)addr)) return false;
+    greg_t *r = ((ucontext_t *)ucv)->uc_mcontext.gregs;
+    pthread_mutex_lock(&regs_trap_lock);   /* held until the step completes */
+    gpu_regs_protect(PROT_READ | PROT_WRITE);
+    regs_stepping = true;
+    r[REG_EFL] |= 0x100;
+    return true;
+}
+
+bool gpu_regs_trap_step(void *ucv)
+{
+    if (!regs_stepping) return false;
+    greg_t *r = ((ucontext_t *)ucv)->uc_mcontext.gregs;
+    r[REG_EFL] &= ~0x100;
+    regs_stepping = false;
+    *(volatile ULONG *)(gpu_regs + PFB_PAGE + PFB_WBC) &= ~PFB_WBC_FLUSH;   /* the flush is done at once */
+    *(volatile ULONG *)(gpu_regs + USER_PAGE + USER_DMA_GET) = *(volatile ULONG *)(gpu_regs + USER_PAGE + USER_DMA_PUT);
+    gpu_regs_protect(PROT_READ);
+    pthread_mutex_unlock(&regs_trap_lock);
+    return true;
+}
+#endif
+
 static void bind_miniport(ULONG *dev)
 {
     static const struct { unsigned build, swap_cb; } layouts[] = { { 5849, 0x1db4 } };
@@ -626,10 +689,46 @@ static void bind_miniport(ULONG *dev)
         /* The miniport (device+0x1c28) starts with the NV2A register base;
            library code that still pokes registers gets a dummy window
            instead of writing into guest memory near address 0. */
-        static void *regs;
-        if (!regs) regs = mmap(NULL, 16 << 20, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-        if (regs != MAP_FAILED) dev[0x1c28 / 4] = (ULONG)regs;
+        if (!gpu_regs) {
+            void *m = mmap(NULL, 16 << 20, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+            if (m != MAP_FAILED) {
+                gpu_regs = m;
+                /* An idle FIFO: NV_PFIFO_CACHE1_STATUS and NV_PFIFO_RUNOUT_STATUS
+                   report empty (bit 4).  LTCG idle waits (Third Age) spin on them. */
+                *(ULONG *)(gpu_regs + 0x3214) = 0x10;
+                *(ULONG *)(gpu_regs + 0x2400) = 0x10;
+#ifdef XBC_NATIVE
+                gpu_regs_protect(PROT_READ);
+#endif
+            }
+        }
+        if (gpu_regs) {
+            dev[0x1c28 / 4] = (ULONG)gpu_regs;
+            /* m_pGpuRegisters... the FIFO channel KickOff writes its put pointer to. */
+            if (!dev[0x1c20 / 4]) dev[0x1c20 / 4] = (ULONG)(gpu_regs + USER_PAGE);
+            /* m_NvBase: Halo 2 polls the FIFO and PGRAPH through it to wait for idle
+               (put == get, then NV_PGRAPH_STATUS), which the zeroed window answers. */
+            if (!dev[0x934 / 4]) dev[0x934 / 4] = (ULONG)gpu_regs;
+        }
         device_layout_5849 = true;
+        device_surfaces_off = 0x1a04;
+        sync_device_surfaces();
+        device_visibility_reports(dev);
+    } else if (build >= 5600 && build < 5849 && off == 0x1db4) {
+        /* 5659 (Counter-Strike) has its miniport where 5849 does; its
+           inlined code reads the render target at device+0x1a04 and the
+           fence times at +0x2c/+0x30 too. */
+        d3d.cpu_time = dev + 0x2c / 4;
+        dev[0x30 / 4] = (ULONG)d3d.cpu_time;
+        device_layout_5849 = true;
+        device_surfaces_off = 0x1a04;
+        sync_device_surfaces();
+        device_visibility_reports(dev);
+    } else if (off && build >= 4831 && build < 5600 && off >= 0x400) {
+        /* 4831 LTCG: miniport at +0x254c, and inlined GetRenderTarget and
+           GetDepthStencilSurface read +0x21b4 and +0x21b8 (Superman, The
+           Fellowship of the Ring). */
+        device_surfaces_off = off - (0x254c - 0x21b4);
         sync_device_surfaces();
     }
     /* Library code that still runs reads the current vertex shader's flags
@@ -652,16 +751,37 @@ static void bind_miniport(ULONG *dev)
     xlog("D3D: D3D build %u, miniport callbacks at device+%#x", build, off);
 }
 
+/* The 5659/5849 CDevice's visibility reports: +0x7D4 holds 16 pointers to
+   tables of 256 16-byte entries {time, -, pixel count, state}, state -1
+   while the GPU has not written it.  Titles inline GetVisibilityTestResult
+   and read them (Beyond Good & Evil, Halo 2, Ninja Gaiden).  xbcompat's
+   tests are GL queries, so every entry reads as finished with the whole
+   screen visible: the conservative answer for what a title culls on it. */
+static void device_visibility_reports(ULONG *dev)
+{
+    if (dev[0x7D4 / 4]) return;
+    ULONG *t = pool_alloc(16 * 256 * 16);
+    if (!t) return;
+    for (unsigned i = 0; i < 16 * 256; i++) {
+        t[i * 4 + 0] = 0;
+        t[i * 4 + 1] = 0;
+        t[i * 4 + 2] = 640 * 480;
+        t[i * 4 + 3] = 0;
+    }
+    for (unsigned i = 0; i < 16; i++) dev[0x7D4 / 4 + i] = (ULONG)(t + i * 256 * 4);
+}
+
 /* Where the 5849 CDevice keeps its surfaces (GetRenderTarget2 and friends
    read them; inlined copies of those run in the title). */
 
 static void sync_device_surfaces(void)
 {
     ULONG *dev = d3d.device;
-    if (!dev || !device_layout_5849) return;
-    dev[0x1a04 / 4] = (ULONG)d3d.target;
-    dev[0x1a08 / 4] = (ULONG)d3d.target_depth;
-    dev[0x1a14 / 4] = dev[0x1a18 / 4] = dev[0x1a1c / 4] = (ULONG)d3d.backbuffer;
+    ULONG o = device_surfaces_off / 4;
+    if (!dev || !o) return;
+    dev[o] = (ULONG)d3d.target;
+    dev[o + 1] = (ULONG)d3d.target_depth;
+    dev[o + 4] = dev[o + 5] = dev[o + 6] = (ULONG)d3d.backbuffer;
 }
 
 /* Signalled at each vblank, for BlockUntilVerticalBlank (wait_vblank). */
@@ -670,6 +790,7 @@ static pthread_cond_t vblank_cond XBC_COND_ALIGN = PTHREAD_COND_INITIALIZER;
 
 /* A 60 Hz vertical blank, from the DPC thread (the GPU interrupt's DPC on an
    Xbox): sets the device's blank event and runs the title's callback. */
+static void late_callbacks(ULONG vblank);
 static void d3d_vblank(void)
 {
     extern LONG NTAPI KeSetEvent(KEVENT *, LONG, BOOLEAN);
@@ -691,6 +812,20 @@ static void d3d_vblank(void)
         ((void (CDECLAPI *)(ULONG *))cb)(data);
 #endif
     }
+    late_callbacks(n);
+}
+
+/* D3DPRESENT_INTERVAL_TWO (2), THREE (4), FOUR (8), alone or with IMMEDIATE
+   (0x80000000: "or at once when late"): a frame stays up that many blanks.
+   MechAssault asks for TWO_OR_IMMEDIATE and times its Bink movies by
+   Present, so at one blank per frame they played twice as fast. */
+static unsigned present_vblanks = 1;
+static void set_present_interval(ULONG interval)
+{
+    ULONG n = interval & 0xF;
+    unsigned v = n & 8 ? 4 : n & 4 ? 3 : n & 2 ? 2 : 1;
+    if (v != present_vblanks) xlog("D3D: presentation interval %#lx: %u blanks per frame", (unsigned long)interval, v);
+    present_vblanks = v;
 }
 
 static LONG NTAPI Direct3D_CreateDevice(UINT_ Adapter, ULONG DeviceType, PVOID pUnused, ULONG Flags,
@@ -706,6 +841,7 @@ static LONG NTAPI Direct3D_CreateDevice(UINT_ Adapter, ULONG DeviceType, PVOID p
     gamma_identity();
     xlog("D3D: CreateDevice %ux%u, format %#x, depth %s, multisample %#x", d3d.width, d3d.height,
          pp->BackBufferFormat, pp->EnableAutoDepthStencil ? "yes" : "no", pp->MultiSampleType);
+    set_present_interval(pp->FullScreen_PresentationInterval);
 
     av_title_starting();
     const char *boot_path = "/tmp/xbcompat-trace-boot";
@@ -721,42 +857,48 @@ static LONG NTAPI Direct3D_CreateDevice(UINT_ Adapter, ULONG DeviceType, PVOID p
             xlog("D3D: tracing from device creation to frame %lu", trace_boot_frames);
         }
     }
-    if (SDL_Init(SDL_INIT_VIDEO) != 0) fatal("SDL_Init: %s", SDL_GetError());
-    install_fault_handlers();
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
-    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
-    SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
-    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-    /* KMSDRM switches the display to the mode closest to a window's size
-       (640x480 when the display has it). A fullscreen-desktop window keeps
-       the display's own mode (KMS_MODE, e.g. 720x480 NTSC), and the back
-       buffer is stretched over it (create_window_framebuffer). */
-    Uint32 flags = SDL_WINDOW_OPENGL;
-    const char *driver = SDL_GetCurrentVideoDriver();
-    if ((driver && !strcasecmp(driver, "kmsdrm")) || getenv("XBCOMPAT_FULLSCREEN")) flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
-    d3d.window = SDL_CreateWindow("xbcompat", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                                  d3d.width, d3d.height, flags);
-    if (!d3d.window) fatal("SDL_CreateWindow: %s", SDL_GetError());
-    d3d.gl = SDL_GL_CreateContext(d3d.window);
-    if (!d3d.gl) fatal("SDL_GL_CreateContext: %s", SDL_GetError());
-    gl_held = gl_mine = true;
-    gl_creator = pthread_self();
-    shader_diagnostics_init();
-    gc_reset();
-    glGetIntegerv(GL_MAX_VERTEX_ATTRIBS, &host_vertex_attribs);
-    if (host_vertex_attribs > 16) host_vertex_attribs = 16;
-    const char *swap_env = getenv("XBCOMPAT_SWAP_INTERVAL");
-    int swap_interval = swap_env && !strcmp(swap_env, "0") ? 0 : 1;
-    int swap_result = SDL_GL_SetSwapInterval(swap_interval);
-    xlog("D3D: swap interval %d (%s)", swap_interval, swap_result ? SDL_GetError() : "accepted");
-    xlog("D3D: OpenGL %s on %s", glGetString(GL_VERSION), glGetString(GL_RENDERER));
-    /* The Raspberry Pi's VC4 can't fetch B,G,R,A vertex colors; Mesa then
-       converts them on every draw, and that path crashes in vc4 (indexed
-       draws from client arrays). Swizzle them ourselves instead. */
-    const char *renderer = (const char *)glGetString(GL_RENDERER);
-    vc4 = renderer && strstr(renderer, "VC4");
-    rgba_vertex_colors = vc4 || getenv("XBCOMPAT_RGBA_VERTEX_COLORS");
+    /* A second CreateDevice (Halo 2 makes its device twice) keeps the window
+       and its context.  A new window would open under the old one, which
+       keeps the screen (the KMS display, the top of a desktop): the title
+       drew and the screen stayed black. */
+    if (!d3d.window) {
+        if (SDL_Init(SDL_INIT_VIDEO) != 0) fatal("SDL_Init: %s", SDL_GetError());
+        install_fault_handlers();
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
+        SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
+        SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
+        SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+        /* KMSDRM switches the display to the mode closest to a window's size
+           (640x480 when the display has it). A fullscreen-desktop window keeps
+           the display's own mode (KMS_MODE, e.g. 720x480 NTSC), and the back
+           buffer is stretched over it (create_window_framebuffer). */
+        Uint32 flags = SDL_WINDOW_OPENGL;
+        const char *driver = SDL_GetCurrentVideoDriver();
+        if ((driver && !strcasecmp(driver, "kmsdrm")) || getenv("XBCOMPAT_FULLSCREEN")) flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
+        d3d.window = SDL_CreateWindow("xbcompat", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+                                      d3d.width, d3d.height, flags);
+        if (!d3d.window) fatal("SDL_CreateWindow: %s", SDL_GetError());
+        d3d.gl = SDL_GL_CreateContext(d3d.window);
+        if (!d3d.gl) fatal("SDL_GL_CreateContext: %s", SDL_GetError());
+        gl_held = gl_mine = true;
+        gl_creator = pthread_self();
+        shader_diagnostics_init();
+        gc_reset();
+        glGetIntegerv(GL_MAX_VERTEX_ATTRIBS, &host_vertex_attribs);
+        if (host_vertex_attribs > 16) host_vertex_attribs = 16;
+        const char *swap_env = getenv("XBCOMPAT_SWAP_INTERVAL");
+        int swap_interval = swap_env && !strcmp(swap_env, "0") ? 0 : 1;
+        int swap_result = SDL_GL_SetSwapInterval(swap_interval);
+        xlog("D3D: swap interval %d (%s)", swap_interval, swap_result ? SDL_GetError() : "accepted");
+        xlog("D3D: OpenGL %s on %s", glGetString(GL_VERSION), glGetString(GL_RENDERER));
+        /* The Raspberry Pi's VC4 can't fetch B,G,R,A vertex colors; Mesa then
+           converts them on every draw, and that path crashes in vc4 (indexed
+           draws from client arrays). Swizzle them ourselves instead. */
+        const char *renderer = (const char *)glGetString(GL_RENDERER);
+        vc4 = renderer && strstr(renderer, "VC4");
+        rgba_vertex_colors = vc4 || getenv("XBCOMPAT_RGBA_VERTEX_COLORS");
+    }
 
     for (int i = 0; i < 10; i++) identity(&d3d.transforms[i]);
     d3d.viewport = (D3DVIEWPORT8){ 0, 0, d3d.width, d3d.height, 0, 1 };
@@ -996,7 +1138,7 @@ static void draw_window_pixels_masked(const uint8_t *tmp, GLenum format, GLenum 
     if (p_glBindFramebuffer) p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
     p_glWindowPos2i(0, 0);
     glDrawPixels(w, h, format, type, tmp);
-    if (p_glBindFramebuffer) p_glBindFramebuffer(GL_FRAMEBUFFER, d3d.rt_texture ? d3d.fbo : 0);
+    if (p_glBindFramebuffer) p_glBindFramebuffer(GL_FRAMEBUFFER, d3d.rt_texture || d3d.rt_upright ? d3d.fbo : 0);
     glPopAttrib();
 }
 
@@ -1243,7 +1385,7 @@ static void pace_present(void)
     static Uint64 next;
     log_fps();
     if (unpaced()) return;
-    Uint64 now = SDL_GetPerformanceCounter(), period = SDL_GetPerformanceFrequency() / 60;
+    Uint64 now = SDL_GetPerformanceCounter(), period = SDL_GetPerformanceFrequency() / 60 * present_vblanks;
     if (!next || now > next + period) next = now;   /* first frame, or fell behind: resync */
     TIMED(t_pace, sleep_until(next));
     next += period;
@@ -1253,8 +1395,10 @@ static void pace_present(void)
 
 /* Swap in three parts, so that with XBCOMPAT_ASYNC_DRAWS the title's thread
    can run the first and last while the render worker presents. */
+static void vis_fifo_poll(bool wait);
 static void swap_begin_frame(void)
 {
+    vis_fifo_poll(false);
     d3d.frame++;
     __atomic_store_n(&published_frame_count, d3d.frame, __ATOMIC_RELEASE);
     if (d3d.frame == 1) xlog("D3D: first Present");
@@ -1395,10 +1539,35 @@ static void swap_exit_check(void)
     }
 }
 
+/* Swap(D3DSWAP_BYPASSCOPY) ... Swap(D3DSWAP_FINISH): the library points the
+   render target at the next frame buffer and texture stage 0 at the frame
+   just drawn, and the title draws its own copy of it (the EA Harry Potter
+   and Lord of the Rings games filter the frame this way) before FINISH
+   puts the target and the texture back and shows the frame.  One GL frame
+   stands for both buffers here: stage 0 gets a view of the back buffer,
+   which texture_for() copies before the title draws over it. */
+#define D3DSWAP_COPY       1
+#define D3DSWAP_BYPASSCOPY 2
+#define D3DSWAP_FINISH     4
+static void NTAPI D3DDevice_SetTexture(ULONG Stage, D3DResource *t);
+static struct { bool open; D3DResource *saved; struct D3DSurface view; } swap_split;
+
 static ULONG NTAPI D3DDevice_Swap(ULONG Flags)
 {
     gl_require();
-    (void)Flags;
+    if ((Flags & (D3DSWAP_COPY | D3DSWAP_BYPASSCOPY)) && !(Flags & D3DSWAP_FINISH)) {
+        if (!swap_split.open && (Flags & D3DSWAP_BYPASSCOPY) && d3d.backbuffer) {
+            swap_split.saved = d3d.textures[0];
+            swap_split.view = *d3d.backbuffer;
+            D3DDevice_SetTexture(0, (D3DResource *)&swap_split.view);
+        }
+        swap_split.open = true;
+        return d3d.frame;
+    }
+    if (swap_split.open) {
+        if (d3d.textures[0] == (D3DResource *)&swap_split.view) D3DDevice_SetTexture(0, swap_split.saved);
+        swap_split.open = false;
+    }
     if (async_front()) return async_swap();
     pusher_drain();
     hud_batch_flush();
@@ -1568,6 +1737,7 @@ static void swap_cpu_backbuffer(void)
     TRACE_ALL("D3D: frame with no draws, back buffer memory %s", changed ? "written by the CPU, shown" : "unchanged");
     if (changed) d3d.bb_cpu_dirty = true, frame_idle = false;
 }
+static void rt_probe(void);
 static void NTAPI D3DDevice_Clear(ULONG Count, const D3DRECT *pRects, ULONG Flags, ULONG Color, float Z,
                                   ULONG Stencil)
 {
@@ -1621,6 +1791,7 @@ static void NTAPI D3DDevice_Clear(ULONG Count, const D3DRECT *pRects, ULONG Flag
     }
     glDisable(GL_SCISSOR_TEST);
     glColorMask(1, 1, 1, 1);
+    if (g_trace == 1 && getenv("XBCOMPAT_RT_PROBE")) rt_probe();
 }
 
 /* ---- resources --------------------------------------------------------- */
@@ -1638,7 +1809,7 @@ static LONG NTAPI D3DDevice_CreateVertexBuffer(UINT_ Length, ULONG Usage, ULONG 
 {
     (void)Usage; (void)FVF; (void)Pool;
     D3DResource *vb = pool_alloc(sizeof(*vb));
-    PVOID mem = MmAllocateContiguousMemoryEx(Length, 0, 0x7FFFFFFF, 0, 4);
+    PVOID mem = MmAllocateContiguousMemoryEx(Length ? Length : 4, 0, 0x7FFFFFFF, 0, 4);
     if (!vb || !mem) return 0x8007000E; /* E_OUTOFMEMORY */
     vb->Common = 1 | D3DCOMMON_TYPE_VERTEXBUFFER | D3DCOMMON_D3DCREATED;
     vb->Data = (ULONG)mem & 0x7FFFFFFF;
@@ -1822,7 +1993,31 @@ typedef struct tex_entry {
     GLuint id;
     GLenum target;
     struct tex_entry *next;
+    uint64_t hash;       /* watched textures: memory_sample_hash() at upload */
+    ULONG checked;       /* the frame the hash was last compared in */
+    bool watch;
+    /* Small watched textures are compared at every draw for their first
+       frames, and from their first change on: Halo 2 writes glyphs into its
+       font cache between the draws of a frame. */
+    bool per_draw;
+    unsigned char probe_frames;
 } tex_entry;
+
+/* A sparse FNV-1a over a texture's memory: one word per 64 bytes.  Titles
+   that build texture headers over their own memory (XGSetTextureHeader,
+   Register) and write it with the CPU never lock it: the movie player in
+   The Return of the King decodes each frame into the same three planes. */
+static uint64_t memory_sample_hash(const uint8_t *p, ULONG bytes)
+{
+    /* Small images are read whole: a glyph cache (Halo 2's 256x256 font
+       texture) gets a few pixels at a time, which one word in eight missed. */
+    ULONG step = bytes <= 256 * 1024 ? 8 : 64;
+    uint64_t x = 0xcbf29ce484222325ull;
+    for (ULONG o = 0; o + 8 <= bytes; o += step) x = (x ^ *(const uint64_t *)(p + o)) * 0x100000001b3ull;
+    return x;
+}
+
+static ULONG watched_bytes(const D3DPixelContainer *t);
 
 /* Kept in buckets by data address: a draw looks up each stage's texture,
    and walking one list of every texture a level loaded (hundreds) per stage
@@ -2277,7 +2472,9 @@ static GLuint texture_for(D3DPixelContainer *t)
     bool on_color = d3d.backbuffer && va == (d3d.backbuffer->Data | CONTIG_BASE) && t != (D3DPixelContainer *)d3d.backbuffer;
     bool on_depth = d3d.depth && va == (d3d.depth->Data | CONTIG_BASE) && t != (D3DPixelContainer *)d3d.depth;
     if (on_color || on_depth) hud_batch_flush();   /* queued draws land in the frame first */
-    if (front.s && va == (front.s->Data | CONTIG_BASE) && t != (D3DPixelContainer *)front.s) {
+    /* GTA III sets the front buffer surface itself as a texture (its trails
+       effect blends the last frame over the new one). */
+    if (front.s && va == (front.s->Data | CONTIG_BASE)) {
         ULONG fmt = (t->Format >> 8) & 0xFF;
         if (!front.tex) front_buffer_update();   /* asked for before a Swap: the frame so far */
         if (front.tex && (fmt == 0x12 || fmt == 0x1E)) {
@@ -2331,6 +2528,14 @@ static GLuint texture_for(D3DPixelContainer *t)
             zsync.writes = depth_gpu_writes;
             tex_invalidate(t->res.Data);
         } else if (zsync.writes != depth_gpu_writes) {
+            /* An A8R8G8B8 view (Halo 2, every frame) is packed on the GPU.
+               The memory stays behind, so zsync does too. */
+            ULONG zw, zh, zpitch, dw, dh, dpitch;
+            container_size(t, &zw, &zh, &zpitch);
+            container_size((D3DPixelContainer *)d3d.depth, &dw, &dh, &dpitch);
+            GLuint id = ((t->Format >> 8) & 0xFF) == 0x12 && zpitch == zw * 4 && zpitch == dpitch
+                        ? depth_copy_texture(zw, zh) : 0;
+            if (id) return id;
             readback_surface(d3d.depth, true);
             zsync.hash = depth_memory_hash();
             zsync.writes = depth_gpu_writes;
@@ -2342,8 +2547,23 @@ static GLuint texture_for(D3DPixelContainer *t)
     if (nocache) tex_invalidate(t->res.Data);
     ULONG fmt = (t->Format >> 8) & 0xFF, w, h, pitch;
     ULONG pal = fmt == 0x0B ? palette_hash() : 0;
+    bool per_draw = false;
+    unsigned char probe_frames = 0;
     for (tex_entry *e = *tex_bucket(t->res.Data); e; e = e->next)
-        if (e->data == t->res.Data && e->format == t->Format && e->size == t->Size && e->pal == pal) return e->id;
+        if (e->data == t->res.Data && e->format == t->Format && e->size == t->Size && e->pal == pal) {
+            if (!e->watch) return e->id;
+            bool same_frame = e->checked == d3d.frame;
+            if (same_frame && !(e->per_draw && watched_bytes(t) <= 256 * 1024) && e->probe_frames >= 30) return e->id;
+            if (!same_frame && e->probe_frames < 30) e->probe_frames++;
+            e->checked = d3d.frame;
+            if (memory_sample_hash((const uint8_t *)(t->res.Data | CONTIG_BASE), watched_bytes(t)) == e->hash)
+                return e->id;
+            TRACE_ALL("D3D: texture memory at %#x changed without a lock, uploaded again", (unsigned)t->res.Data);
+            per_draw = true;   /* the CPU writes it: compare at every draw from now on (small ones) */
+            probe_frames = e->probe_frames;
+            tex_invalidate(t->res.Data);
+            break;
+        }
 
     hud_batch_flush();   /* uploading rebinds texture units a queued draw uses */
     container_size(t, &w, &h, &pitch);
@@ -2380,21 +2600,45 @@ static GLuint texture_for(D3DPixelContainer *t)
     debug_dump_texture(target, t->res.Data, fmt, w, h);
 
     tex_entry *e = malloc(sizeof(*e));
-    *e = (tex_entry){ t->res.Data, t->Format, t->Size, pal, id, target, *tex_bucket(t->res.Data) };
+    *e = (tex_entry){ t->res.Data, t->Format, t->Size, pal, id, target, *tex_bucket(t->res.Data), 0, 0, false };
+    /* Linear textures over the title's own memory are watched for CPU writes,
+       and so are linear textures the title's inlined D3D created (header
+       outside xbcompat's pool): their Lock is inlined too, so nothing tells
+       xbcompat about writes (Halo 2's font cache). */
+    e->watch = t->Size && (!(t->res.Common & D3DCOMMON_D3DCREATED) || !pool_owns(t)) && target == GL_TEXTURE_2D;
+    if (e->watch) {
+        e->hash = memory_sample_hash(src, watched_bytes(t));
+        e->checked = d3d.frame;
+        e->per_draw = per_draw;
+        /* Large ones are compared once a frame from the start. */
+        e->probe_frames = watched_bytes(t) <= 256 * 1024 ? probe_frames : 30;
+    }
     *tex_bucket(t->res.Data) = e;
     tex_cache_version++;
     return id;
 }
 
+static ULONG watched_bytes(const D3DPixelContainer *t)
+{
+    ULONG w, h, pitch;
+    container_size((D3DPixelContainer *)t, &w, &h, &pitch);
+    return pitch * h;
+}
+
 static void NTAPI D3DDevice_SetTexture(ULONG Stage, D3DResource *t)
 {
+    pusher_drain();   /* draws the title wrote into the push buffer use the texture they were written with */
     if (d3d.recording) { ULONG a[2] = { Stage, (ULONG)t }; pb_record(OP_TEXTURE, a, sizeof(a)); }
     TRACE_ALL("D3D: SetTexture(%u, %p) data %#x", Stage, (void *)t, t ? (unsigned)t->Data : 0);
     if (Stage < 4) d3d.textures[Stage] = t;
+    /* 5659 and 5849 CDevice keep the stage textures at +0xF88; inlined
+       GetTexture reads them there (Beyond Good & Evil, GTA Vice City). */
+    if (Stage < 4 && device_layout_5849 && d3d.device) ((ULONG *)d3d.device)[0xF88 / 4 + Stage] = (ULONG)t;
 }
 
 static void NTAPI D3DDevice_SetTextureStageStateNotInline(ULONG Stage, ULONG Type, ULONG Value)
 {
+    pusher_drain();
     if (Stage < 4 && Type < 32) TSS(Stage, Type) = Value;
 }
 
@@ -2903,8 +3147,11 @@ static void NTAPI D3DDevice_SetStreamSource(UINT_ Stream, D3DResource *vb, UINT_
     d3d.streams[Stream].stride = Stride;
 }
 
+static ULONG own_vertex_shader(ULONG handle);
 static void NTAPI D3DDevice_SetVertexShader(ULONG Handle)
 {
+    pusher_drain();
+    Handle = own_vertex_shader(Handle);
     if (d3d.recording) pb_record(OP_VERTEX_SHADER, &Handle, 4);
     if (vs_direct_input()) { vs_set_program_ext(Handle); return; }
     d3d.vertex_shader = Handle;
@@ -3000,6 +3247,7 @@ static bool pb_render_state(ULONG m, ULONG d);
 
 static void FASTCALL SetRenderState_Simple(ULONG Method, ULONG Value)
 {
+    pusher_drain();
     /* Inline header code usually stores the value in D3D__RenderState
        itself, but LTCG builds can drop or defer that store; record it from
        the method too. */
@@ -3063,8 +3311,19 @@ static void NTAPI SetRenderStateNotInline(ULONG State, ULONG Value)
     if (State < d3d.rs_count) d3d.render_state[State] = Value;
 }
 
+static void FASTCALL SetRenderState_Deferred(ULONG State, ULONG Value)
+{
+    SetRenderStateNotInline(State, Value);
+}
+
+static void FASTCALL SetTextureState_Deferred(ULONG Stage, ULONG Type, ULONG Value)
+{
+    D3DDevice_SetTextureStageStateNotInline(Stage, Type, Value);
+}
+
 #define COMPLEX_STATE(name, index) \
-    static void NTAPI SetRenderState_##name(ULONG Value) { RS(index) = Value; }
+    static void NTAPI SetRenderState_##name(ULONG Value) \
+    { pusher_drain(); RS(index) = Value; TRACE_ALL("D3D: SetRenderState_" #name " %#x", (unsigned)Value); }
 COMPLEX_STATE(ZEnable, D3DRS_ZENABLE)
 COMPLEX_STATE(CullMode, D3DRS_CULLMODE)
 COMPLEX_STATE(FillMode, D3DRS_FILLMODE)
@@ -3597,6 +3856,12 @@ static GLuint link_program(GLuint vs, GLuint fs)
         char log[2048];
         p_glGetProgramInfoLog(prog, sizeof(log), NULL, log);
         xlog("D3D: program failed to link:\n%s", log);
+        static int shown;
+        if (shown++ < 2 && p_glGetShaderSource) {
+            static char src[65536];
+            if (vs) { p_glGetShaderSource(vs, sizeof(src), NULL, src); xlog("--- vertex shader ---\n%s", src); }
+            if (fs) { p_glGetShaderSource(fs, sizeof(src), NULL, src); xlog("--- fragment shader ---\n%s", src); }
+        }
         p_glDeleteProgram(prog);
         return 0;
     }
@@ -3615,6 +3880,7 @@ typedef struct {
 } vattr;
 
 typedef struct {
+    ULONG magic;             /* VSH_MAGIC: one of ours, not a title's own VertexShader */
     vattr attr[16];
     uint32_t *code;          /* NV2A microcode, NULL for a fixed-function declaration */
     unsigned ninstr;
@@ -3655,9 +3921,12 @@ static bool decode_vsdt(ULONG t, vattr *a)
     return true;
 }
 
+#define VSH_MAGIC 0x48535658u   /* 'XVSH' */
+
 static vshader *parse_declaration(const ULONG *decl)
 {
     vshader *sh = calloc(1, sizeof(*sh));
+    sh->magic = VSH_MAGIC;
     for (int i = 0; i < 16; i++) sh->attr[i].stream = -1;
     sh->tess_normal_in = sh->tess_normal_out = sh->tess_uv_out = -1;
     int stream = 0;
@@ -3739,7 +4008,7 @@ typedef struct program_entry {
     unsigned attr_mask;      /* the locations in attr */
     GLint loc_ff_lighting, loc_fog_vertex_mode, loc_ff_transform, loc_ff_texcount, loc_zw_scale;
     GLint loc_shadow_func, loc_shadow_dim;
-    GLint loc_c, loc_flip_y, loc_vp_scale, loc_vp_offset, loc_wdepth;
+    GLint loc_c, loc_flip_y, loc_vp_scale, loc_vp_offset, loc_wdepth, loc_vt_scale;
     GLint loc_tex[4], loc_cube[4], loc_vol[4], loc_tex_scale, loc_c0, loc_c1, loc_fc0, loc_fc1,
           loc_bump_env, loc_bump_lum, loc_eye_vector, loc_key_color;
     struct { GLint location; unsigned words; uint32_t *value; } uniforms[32];   /* last values set */
@@ -3828,6 +4097,7 @@ static void NTAPI D3DDevice_DeleteVertexShader(ULONG handle)
     free(sh->decl);
     free(sh->consts);
     free(sh->const_slots);
+    sh->magic = 0;
     free(sh);
 }
 
@@ -3935,6 +4205,7 @@ static ULONG vs_compose(const vshader *layout, const uint32_t *code, unsigned ni
     }
     vshader *c = calloc(1, sizeof(*c));
     if (!c) return user;
+    c->magic = VSH_MAGIC;   /* titles pass the handle back (GetVertexShader, then SetVertexShader) */
     memcpy(c->attr, layout->attr, sizeof c->attr);
     c->stream_mask = layout->stream_mask;
     c->tess_normal_in = layout->tess_normal_in;
@@ -4005,13 +4276,41 @@ static void vs_set_program(ULONG h)
     }
 }
 
+/* SelectVertexShaderDirect: the layout `layout_h` describes, running the
+   program loaded at `address` (titles load them with LoadVertexShaderProgram). */
+static void select_direct(ULONG layout_h, ULONG address)
+{
+    pusher_drain();
+    unsigned n = address < 136 ? vp_program_length(address) : 0;
+    vs_set_program(n ? vs_compose((const vshader *)(layout_h & ~1u), vp_mem[address], n, NULL, layout_h) : layout_h);
+    if (d3d.recording) pb_record(OP_VERTEX_SHADER, &d3d.vertex_shader, 4);
+}
+
 static void NTAPI D3DDevice_SelectVertexShader(ULONG handle, ULONG address)
 {
+    if ((handle & 1) && ((const vshader *)(handle & ~1u))->magic != VSH_MAGIC) {
+        /* An inlined SelectVertexShaderDirect (Halo 2): the title's
+           VertexShader only carries the layout. */
+        select_direct(own_vertex_shader(handle), address);
+        return;
+    }
+    handle = own_vertex_shader(handle);
     /* With a handle, its own program runs (the program it was loaded with
        is at `address`); xbcompat's program memory copy is not exact enough
        to trust over it: Splinter Cell's models vanished when the program
        was read back from there.  With no handle, the program at `address`
        runs with the current shader's declaration. */
+    if (handle & 1) {
+        /* GTA III's skinned peds: the handle's own program is a one-
+           instruction stub, and the real one was put at `address` with
+           LoadVertexShaderProgram. */
+        const vshader *own = (const vshader *)(handle & ~1u);
+        unsigned n = address < 136 ? vp_program_length(address) : 0;
+        if (own->code && own->ninstr < 4 && n > own->ninstr) {
+            select_direct(handle, address);
+            return;
+        }
+    }
     if (handle) {
         vs_set_program(handle);
         if (d3d.recording) pb_record(OP_VERTEX_SHADER, &d3d.vertex_shader, 4);
@@ -4077,6 +4376,8 @@ static D3DResource *vs_input_shim(D3DResource *vb, ULONG offset)
 
 static void NTAPI D3DDevice_SetVertexShaderInput(ULONG handle, UINT_ count, const ULONG *inputs)
 {
+    pusher_drain();
+    handle = own_vertex_shader(handle);
     if (d3d.recording) { ULONG h[2] = { handle, count }; pb_record2(OP_VS_INPUT, h, 8, inputs, count * 12); }
     if (!handle) {
         /* Back to the streams SetStreamSource set and the shader's own layout. */
@@ -4147,6 +4448,7 @@ static ULONG direct_layout_handle(const ULONG *vaf)
     static unsigned n;
     vshader tmp;
     memset(&tmp, 0, sizeof(tmp));
+    tmp.magic = VSH_MAGIC;
     tmp.tess_normal_in = tmp.tess_normal_out = tmp.tess_uv_out = -1;
     for (int r = 0; r < 16; r++) {
         const ULONG *in = vaf + r * 4;
@@ -4173,6 +4475,24 @@ static ULONG direct_layout_handle(const ULONG *vaf)
     return (ULONG)sh | 1;
 }
 
+/* A handle to a VertexShader the title's own D3D code filled: an LTCG build
+   inlines SetVertexShaderInputDirect and SelectVertexShaderDirect, which copy
+   the D3DVERTEXATTRIBUTEFORMAT into the library's g_DirectVertexShader
+   (Slot[] at +0x14, after RefCount, Flags, ProgramSize,
+   ProgramAndConstantsDwords and Dimensionality) and pass that on (Halo 2).
+   Ours carry VSH_MAGIC; a title's becomes the layout it describes. */
+static ULONG own_vertex_shader(ULONG handle)
+{
+    if (!(handle & 1) || ((const vshader *)(handle & ~1u))->magic == VSH_MAGIC) return handle;
+    const ULONG *vs = (const ULONG *)(handle & ~1u);
+    static bool warned;
+    if ((vs[1] & 0x10 /* VERTEXSHADER_PROGRAM */) && !warned) {
+        warned = true;
+        xlog("D3D: title-built vertex shader %#x has a program; drawing with its layout only", handle);
+    }
+    return direct_layout_handle(vs + 5);
+}
+
 static void NTAPI D3DDevice_SetVertexShaderInputDirect(const ULONG *vaf, UINT_ count, const ULONG *inputs)
 {
     D3DDevice_SetVertexShaderInput(vaf ? direct_layout_handle(vaf) : 0, count, inputs);
@@ -4180,7 +4500,8 @@ static void NTAPI D3DDevice_SetVertexShaderInputDirect(const ULONG *vaf, UINT_ c
 
 static void NTAPI D3DDevice_SelectVertexShaderDirect(const ULONG *vaf, ULONG address)
 {
-    D3DDevice_SelectVertexShader(vaf ? direct_layout_handle(vaf) : 0, address);
+    if (vaf) select_direct(direct_layout_handle(vaf), address);
+    else D3DDevice_SelectVertexShader(0, address);
 }
 
 
@@ -4231,9 +4552,23 @@ static GLuint vertex_shader_generic_object(vshader *sh)
             if (sh->attr[r].stream >= 0)
                 n += snprintf(line + n, sizeof line - n, " v%d=s%d+%u:%#x", r, sh->attr[r].stream,
                               sh->attr[r].offset, sh->attr[r].type);
-        xlog("D3D: vertex program %u instructions, inputs%s", sh->ninstr, line);
+        xlog("D3D: vertex program %p: %u instructions, inputs%s", (void *)sh, sh->ninstr, line);
     }
     sh->vs = compile_shader(GL_VERTEX_SHADER, src);
+    {
+        /* XBCOMPAT_VSH_DUMP=2: each program's GLSL too, under the GL shader
+           id the draw traces name ("vs N"). */
+        const char *dump = getenv("XBCOMPAT_VSH_DUMP");
+        if (dump && atoi(dump) >= 2) {
+            xlog("D3D: vertex program %p is GL shader %u:", (void *)sh, sh->vs);
+            for (char *line = src, *end; *line; line = end) {
+                end = strchr(line, '\n');
+                int len = end ? (int)(end - line) : (int)strlen(line);
+                xlog("D3D:   | %.*s", len, line);
+                end = end ? end + 1 : line + len;
+            }
+        }
+    }
     note_two_side(sh->vs, src);
     free(src);
     if (!sh->vs) sh->failed = true;
@@ -4308,6 +4643,7 @@ static program_entry *program_for(GLuint vs, GLuint fs)
         e->loc_vp_scale = U("vp_scale");
         e->loc_vp_offset = U("vp_offset");
         e->loc_wdepth = U("wdepth");
+        e->loc_vt_scale = U("vt_scale");
         static const char *tex[] = { "tex0", "tex1", "tex2", "tex3" }, *cube[] = { "cube0", "cube1", "cube2", "cube3" },
                           *vol[] = { "vol0", "vol1", "vol2", "vol3" };
         for (int i = 0; i < 4; i++) {
@@ -4489,8 +4825,8 @@ static GLuint fragment_shader_object(void)
         xlog("D3D: pixel shader %#x could not be translated", d3d.pixel_shader);
     } else {
         /* Debug aid: XBCOMPAT_PSH_DUMP=1 logs every translated pixel shader. */
-        if (getenv("XBCOMPAT_PSH_DUMP")) xlog("D3D: pixel shader %#x:\n%s", d3d.pixel_shader, src);
         e->fs = compile_shader(GL_FRAGMENT_SHADER, src);
+        if (getenv("XBCOMPAT_PSH_DUMP")) xlog("D3D: pixel shader %#x (fs %u):\n%s", d3d.pixel_shader, e->fs, src);
         free(src);
     }
     e->next = fshaders;
@@ -4697,7 +5033,7 @@ static GLuint fixed_lighting_shader(void)
         size_t size = sizeof ff_lighting_source + 64;
         char *source = malloc(size);
         if (!source) return 0;
-        snprintf(source, size, "#version 120\n#define FF_INPUTS %u\n%s", key,
+        snprintf(source, size, "#version 120\ninvariant gl_Position;\n#define FF_INPUTS %u\n%s", key,
                  ff_lighting_source + 13);   /* past its own #version line */
         objects[key] = compile_shader(GL_VERTEX_SHADER, source);
         free(source);
@@ -5339,6 +5675,25 @@ static void upload_constants(const vshader *sh, program_entry *e)
     }
 #undef CROW
 uploaded:
+    if (e->loc_vt_scale >= 0) {
+        /* Linear textures are addressed in texels.  A pixel shader scales
+           the coordinates itself (tex_scale); with the fixed-function
+           combiners the program's oT goes to GL as it is, so scale it here
+           (Goblet of Fire copies its frame through a 640x480 view with
+           coordinates 0.5..640.5, which sampled one corner texel). */
+        float sc[4][4];
+        for (int s = 0; s < 4; s++) {
+            sc[s][0] = sc[s][1] = sc[s][2] = sc[s][3] = 1;
+            const D3DPixelContainer *t = (const D3DPixelContainer *)d3d.textures[s];
+            if (!e->fs && t && t->Size) {
+                ULONG w, h, pitch;
+                container_size((D3DPixelContainer *)t, &w, &h, &pitch);
+                sc[s][0] = 1.0f / w;
+                sc[s][1] = 1.0f / h;
+            }
+        }
+        program_uniform4fv(e, e->loc_vt_scale, 4, &sc[0][0]);
+    }
     if (e->loc_flip_y >= 0) program_uniform1f(e, e->loc_flip_y, d3d.rt_texture ? -1.0f : 1.0f);
     if (e->loc_vp_scale >= 0) program_uniform4fv(e, e->loc_vp_scale, 1, vp[0]);
     if (e->loc_vp_offset >= 0) {
@@ -5401,6 +5756,113 @@ static void program_profile_log(double frames)
 /* Draw with a programmable vertex shader: generic attributes + GLSL. */
 static void draw_programmable_(vshader *sh, ULONG PrimitiveType, const UCHAR *up, ULONG up_stride, ULONG first,
                                ULONG count, const USHORT *indices);
+
+/* Debug aid (XBCOMPAT_RT_PROBE with TRACE_FRAME): after a draw into a
+   texture target, how much of it is non-zero, and the GL state it drew with. */
+static void rt_probe(void)
+{
+    while (glGetError()) {}
+    int w = d3d.rt_width, h = d3d.rt_height;
+    uint8_t *px = malloc((size_t)w * h * 4);
+    if (!px) return;
+    GLint fb = 0, vp[4], sc[4];
+    glGetIntegerv(0x8CA6 /* DRAW_FRAMEBUFFER_BINDING */, &fb);
+    glGetIntegerv(GL_VIEWPORT, vp);
+    glGetIntegerv(GL_SCISSOR_BOX, sc);
+    GLint rfb = 0;
+    glGetIntegerv(0x8CAA /* READ_FRAMEBUFFER_BINDING */, &rfb);
+    p_glBindFramebuffer(GL_READ_FRAMEBUFFER, fb);
+    glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    unsigned rgb = 0, alpha = 0;
+    for (int i = 0; i < w * h; i++) {
+        if (px[i * 4] | px[i * 4 + 1] | px[i * 4 + 2]) rgb++;
+        if (px[i * 4 + 3]) alpha++;
+    }
+    float d = -1, dmax = -1;
+    float *dp = malloc((size_t)w * h * 4);
+    if (dp) {
+        glReadPixels(0, 0, w, h, GL_DEPTH_COMPONENT, GL_FLOAT, dp);
+        for (int i = 0; i < w * h; i++) if (dp[i] > dmax) dmax = dp[i];
+        d = dp[(h / 2) * w + w / 2];
+        free(dp);
+    }
+    static void (APIENTRY *gfap)(GLenum, GLenum, GLenum, GLint *);
+    if (!gfap) gfap = SDL_GL_GetProcAddress("glGetFramebufferAttachmentParameteriv");
+    GLint dtype = -1, dname = -1, stype = -1, sname = -1;
+    if (gfap) {
+        gfap(GL_READ_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, 0x8CD0 /* OBJECT_TYPE */, &dtype);
+        gfap(GL_READ_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, 0x8CD1 /* OBJECT_NAME */, &dname);
+        gfap(GL_READ_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, 0x8CD0, &stype);
+        gfap(GL_READ_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, 0x8CD1, &sname);
+    }
+    xlog("D3D:   rt probe depth max %g; depth attachment type %#x name %d, stencil %#x %d, err %#x", dmax, dtype, dname,
+         stype, sname, glGetError());
+    p_glBindFramebuffer(GL_READ_FRAMEBUFFER, rfb);
+    GLint dfunc = 0, sfunc = 0, sref = 0, smask = 0;
+    glGetIntegerv(GL_DEPTH_FUNC, &dfunc);
+    glGetIntegerv(GL_STENCIL_FUNC, &sfunc);
+    glGetIntegerv(GL_STENCIL_REF, &sref);
+    glGetIntegerv(GL_STENCIL_VALUE_MASK, &smask);
+    GLboolean cm[4];
+    glGetBooleanv(GL_COLOR_WRITEMASK, cm);
+    xlog("D3D:   rt probe fb %d %dx%d: %u rgb / %u alpha px; vp %d,%d %dx%d scissor %d %d,%d %dx%d depth %d func %#x mid %g "
+         "stencil %d func %#x ref %d mask %#x cmask %d%d%d%d err %#x",
+         fb, w, h, rgb, alpha, vp[0], vp[1], vp[2], vp[3], glIsEnabled(GL_SCISSOR_TEST), sc[0], sc[1], sc[2], sc[3],
+         glIsEnabled(GL_DEPTH_TEST), dfunc, d, glIsEnabled(GL_STENCIL_TEST), sfunc, sref, smask, cm[0], cm[1], cm[2], cm[3],
+         glGetError());
+    free(px);
+}
+
+/* Debug aid (XBCOMPAT_VS_PROBE with XBCOMPAT_TRACE_FRAME): run a draw's
+   first vertex through the CPU interpreter and log its inputs and oPos. */
+static void vs_probe(const vshader *sh, const UCHAR *up, ULONG up_stride, ULONG first, ULONG count,
+                     const USHORT *indices)
+{
+    if (!count) return;
+    ULONG idx = indices ? indices[first] : first;
+    float attr[16][4];
+    for (int r = 0; r < 16; r++) {
+        attr[r][0] = attr[r][1] = attr[r][2] = 0; attr[r][3] = 1;
+        const vattr *a = &sh->attr[r];
+        if (a->stream < 0) continue;
+        const UCHAR *base;
+        ULONG stride;
+        if (up && a->stream == 0) base = up, stride = up_stride;
+        else {
+            D3DResource *vb = d3d.streams[a->stream].vb;
+            if (!vb) continue;
+            base = resource_data(vb);
+            stride = d3d.streams[a->stream].stride;
+        }
+        const UCHAR *s = base + a->offset + (size_t)idx * stride;
+        int n = a->components;
+        for (int k = 0; k < n && k < 4; k++) {
+            switch (a->type & 0xF) {
+            case 0: attr[r][k] = s[(k < 3 ? 2 - k : 3)] / 255.0f; break;
+            case 1: { SHORT v; memcpy(&v, s + 2 * k, 2); attr[r][k] = v / 32767.0f; break; }
+            case 2: memcpy(&attr[r][k], s + 4 * k, 4); break;
+            case 4: attr[r][k] = s[k] / 255.0f; break;
+            case 5: { SHORT v; memcpy(&v, s + 2 * k, 2); attr[r][k] = v; break; }
+            default: break;
+            }
+        }
+        xlog("D3D:   probe v%d (s%d+%u t%#x idx %u) = %g %g %g %g", r, a->stream, a->offset, a->type, idx,
+             attr[r][0], attr[r][1], attr[r][2], attr[r][3]);
+    }
+    uint32_t over[6] = { 0 };
+    for (unsigned i = 0; i < sh->nconsts; i++)
+        if ((unsigned)sh->const_slots[i] < 192) over[sh->const_slots[i] >> 5] |= 1u << (sh->const_slots[i] & 31);
+    float vp[2][4];
+    viewport_constants(vp);
+    static float c[192][4];
+    for (int r = 0; r < 192; r++)
+        memcpy(c[r], constant_row(sh, over, (d3d.constant_mode & 0x1F) == 0 ? (const float (*)[4])vp : NULL, r), 16);
+    float o[4];
+    int a0;
+    vsh_run_vertex(sh->code, sh->ninstr, (const float (*)[4])attr, (const float (*)[4])c, o, &a0);
+    xlog("D3D:   probe oPos %g %g %g %g a0 %d; c7 %g %g %g %g c50 %g %g %g %g c4.w %g", o[0], o[1], o[2], o[3], a0,
+         c[7][0], c[7][1], c[7][2], c[7][3], c[50][0], c[50][1], c[50][2], c[50][3], c[4][3]);
+}
 static void draw_programmable(vshader *sh, ULONG PrimitiveType, const UCHAR *up, ULONG up_stride, ULONG first,
                               ULONG count, const USHORT *indices)
 {
@@ -5422,16 +5884,21 @@ static void draw_programmable_(vshader *sh, ULONG PrimitiveType, const UCHAR *up
     bool ready;
     DETAIL_TIMED(t_program, ready = use_program(vs, &e));
     if (!ready) return;
-    TRACE_ALL("D3D: draw(program %u) prim %u count %u indices %p vs %u ps %#x z %u/%u/%u blend %u %u/%u atest %u cw %#x stencil %u vp %u,%u %ux%u %g-%g",
-          e ? e->prog : 0, PrimitiveType, count, indices ? indices + first : NULL, vs, d3d.pixel_shader,
+    TRACE_ALL("D3D: draw(program %u) prim %u count %u indices %p vs %u ps %#x fs %u z %u/%u/%u blend %u %u/%u atest %u cw %#x stencil %u vp %u,%u %ux%u %g-%g",
+          e ? e->prog : 0, PrimitiveType, count, indices ? indices + first : NULL, vs, d3d.pixel_shader, e ? e->fs : 0,
           RS(D3DRS_ZENABLE), RS(D3DRS_ZFUNC), RS(D3DRS_ZWRITEENABLE), RS(D3DRS_ALPHABLENDENABLE),
           RS(D3DRS_SRCBLEND), RS(D3DRS_DESTBLEND), RS(D3DRS_ALPHATESTENABLE), RS(D3DRS_COLORWRITEENABLE),
           RS(D3DRS_STENCILENABLE), d3d.viewport.X, d3d.viewport.Y, d3d.viewport.Width, d3d.viewport.Height,
           d3d.viewport.MinZ, d3d.viewport.MaxZ);
     if (g_trace == 1 && d3d.pixel_shader)
-        xlog("D3D:   ps constants c0 %08x %08x c1 %08x %08x, mapping %08x %08x", RS(D3DRS_PSCONSTANT0_0),
+        xlog("D3D:   ps constants c0 %08x %08x c1 %08x %08x, final %08x %08x, mapping %08x %08x %08x", RS(D3DRS_PSCONSTANT0_0),
              RS(D3DRS_PSCONSTANT0_0 + 1), RS(D3DRS_PSCONSTANT1_0), RS(D3DRS_PSCONSTANT1_0 + 1),
-             ((const ULONG *)d3d.pixel_shader)[57], ((const ULONG *)d3d.pixel_shader)[58]);
+             RS(D3DRS_PSFINALCOMBINERCONSTANT0), RS(D3DRS_PSFINALCOMBINERCONSTANT1),
+             ((const ULONG *)d3d.pixel_shader)[57], ((const ULONG *)d3d.pixel_shader)[58], ((const ULONG *)d3d.pixel_shader)[59]);
+    if (g_trace == 1 && d3d.pixel_shader)
+        xlog("D3D:   ps final %08x %08x, %u stages (%08x), modes %08x, rgb0 in %08x out %08x", d3d.render_state[8],
+             d3d.render_state[9], d3d.render_state[53] & 0xFF, d3d.render_state[53], RS(D3DRS_PSTEXTUREMODES),
+             d3d.render_state[34], d3d.render_state[45]);
     if (g_trace == 1)
         for (int st = 0; st < 4; st++) {
             const D3DPixelContainer *t = (const D3DPixelContainer *)d3d.textures[st];
@@ -5439,6 +5906,7 @@ static void draw_programmable_(vshader *sh, ULONG PrimitiveType, const UCHAR *up
                         t->Format, t->Size);
         }
     DETAIL_TIMED(t_constants, upload_constants(sh, e));
+    if (g_trace == 1 && sh->code && getenv("XBCOMPAT_VS_PROBE")) vs_probe(sh, up, up_stride, first, count, indices);
     /* Indices from a GL buffer too (kept like the vertices, see stream_buffer). */
     conv_entry *ix;
     DETAIL_TIMED(t_indices, ix = indices && count && p_glGenBuffers ? index_entry(indices + first, count, true) : NULL);
@@ -5453,7 +5921,7 @@ static void draw_programmable_(vshader *sh, ULONG PrimitiveType, const UCHAR *up
                     else if (indices) glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, indices + first);
                     else glDrawArrays(gl_primitive(PrimitiveType), first, count));
     frame_draws++;
-    if (flush_every && last_frame_draws >= FLUSH_MIN_DRAWS && !d3d.rt_texture && ++flush_count >= flush_every) {
+    if (flush_every && last_frame_draws >= FLUSH_MIN_DRAWS && !d3d.rt_texture && !d3d.rt_upright && ++flush_count >= flush_every) {
         flush_count = 0;
         glFlush();
     }
@@ -5467,6 +5935,7 @@ static void draw_programmable_(vshader *sh, ULONG PrimitiveType, const UCHAR *up
     /* The generic arrays stay bound for the next programmable draw; the
        fixed-function paths turn them off (gc_disable_attrib_arrays). */
     end_program(e);
+    if (g_trace == 1 && (d3d.rt_texture || d3d.rt_upright) && getenv("XBCOMPAT_RT_PROBE")) rt_probe();
     debug_dump_draw();
 }
 
@@ -5617,6 +6086,8 @@ static void draw_declared_(const vshader *sh, ULONG PrimitiveType, const UCHAR *
         TIMED(t_gl, if (indices) glDrawElements(gl_primitive(PrimitiveType), count, GL_UNSIGNED_SHORT, indices + first);
                     else glDrawArrays(gl_primitive(PrimitiveType), first, count));
     end_program(e);
+    if (g_trace == 1 && (d3d.rt_texture || d3d.rt_upright) && getenv("XBCOMPAT_RT_PROBE")) rt_probe();
+    debug_dump_draw();
 }
 
 #include "fvf_plan.h"
@@ -6365,7 +6836,7 @@ static void upload_depth_memory(void)
     if (p_glBindFramebuffer) p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
     p_glWindowPos2i(0, 0);
     glDrawPixels(w, h, 0x84F9 /* GL_DEPTH_STENCIL */, 0x84FA /* GL_UNSIGNED_INT_24_8 */, tmp);
-    if (p_glBindFramebuffer) p_glBindFramebuffer(GL_FRAMEBUFFER, d3d.rt_texture ? d3d.fbo : 0);
+    if (p_glBindFramebuffer) p_glBindFramebuffer(GL_FRAMEBUFFER, d3d.rt_texture || d3d.rt_upright ? d3d.fbo : 0);
     glPopAttrib();
     gc_reset();   /* the cached GL state no longer matches */
     if (program) p_glUseProgram(program);
@@ -6603,7 +7074,7 @@ static void resolve_window_framebuffer(GLbitfield mask)
     window_fb.bind(GL_READ_FRAMEBUFFER, window_fb.fbo);
     window_fb.bind(GL_DRAW_FRAMEBUFFER, window_fb.resolve);
     window_fb.blit(0, 0, d3d.width, d3d.height, 0, 0, d3d.width, d3d.height, mask, GL_NEAREST);
-    window_fb.bind(GL_DRAW_FRAMEBUFFER, d3d.rt_texture ? d3d.fbo : window_fb.fbo);
+    window_fb.bind(GL_DRAW_FRAMEBUFFER, d3d.rt_texture || d3d.rt_upright ? d3d.fbo : window_fb.fbo);
     if (scissor) glEnable(GL_SCISSOR_TEST);
 }
 
@@ -6630,7 +7101,7 @@ static void backbuffer_proxy_blit(bool to_window)
         window_fb.bind(GL_DRAW_FRAMEBUFFER, d3d.fbo);
     }
     window_fb.blit(0, 0, w, h, 0, h, w, 0, GL_COLOR_BUFFER_BIT, GL_NEAREST);
-    window_fb.bind(GL_FRAMEBUFFER, d3d.rt_texture ? d3d.fbo : window_fb.fbo);
+    window_fb.bind(GL_FRAMEBUFFER, d3d.rt_texture || d3d.rt_upright ? d3d.fbo : window_fb.fbo);
     if (scissor) glEnable(GL_SCISSOR_TEST);
 }
 
@@ -6690,7 +7161,7 @@ static void backbuffer_read_begin(GLbitfield mask)
 
 static void backbuffer_read_end(void)
 {
-    if (p_glBindFramebuffer) p_glBindFramebuffer(GL_READ_FRAMEBUFFER, d3d.rt_texture ? d3d.fbo : 0);
+    if (p_glBindFramebuffer) p_glBindFramebuffer(GL_READ_FRAMEBUFFER, d3d.rt_texture || d3d.rt_upright ? d3d.fbo : 0);
 }
 
 /* A GL texture holding the back buffer's current pixels, top row first like
@@ -7005,6 +7476,200 @@ ready:
     return true;
 }
 
+/* The device depth buffer's bytes as a 32-bit color texture, top row first,
+   for an A8R8G8B8 header over the depth memory: Halo 2 reads its D24S8
+   depth that way every frame, with the depth itself no longer attached.
+   Made on the GPU, where reading the depth back and uploading it again
+   made the CPU wait for the GPU each frame.  The window's depth
+   renderbuffer is blitted into a texture (resolving it when multisampled),
+   a shader packs the depth into bytes the way the memory holds them (G R A
+   its low to high bytes), the stencil test adds each stencil bit into
+   blue, and the result is flipped into the texture handed out.  0 where
+   the window's depth isn't D24S8 or GL lacks something; texture_for reads
+   back then. */
+static GLuint depth_copy_texture(ULONG w, ULONG h)
+{
+    static GLuint src_fb, copy, copy_fb, pack, pack_fb, stencil_fb, out, out_fb, prog_depth, prog_flat;
+    static GLint u_depth, u_texel, u_colour;
+    static GLuint src_rb;
+    static int copy_w, copy_h;
+    static ULONG out_w, out_h;
+    static unsigned long made_writes;
+    static int state;   /* 0 untried, 1 ready, -1 unavailable */
+    GLuint rb = window_fb.depth_rb ? window_fb.depth_rb : window_fb.resolve_depth_rb;
+    if (state < 0 || !window_fb.fbo || !window_fb.blit || window_fb.depth_storage != GL_DEPTH24_STENCIL8 || !rb
+        || !p_glCreateProgram || w > (ULONG)d3d.width || h > (ULONG)d3d.height)
+        return 0;
+    if (!state) {
+        state = -1;
+        if (env_int("XBCOMPAT_DEPTH_VIEW_READBACK", 0)) return 0;
+        static const char depth_fs[] =
+            "#version 120\n"
+            "uniform sampler2D depth; uniform vec2 texel;\n"
+            "void main() {\n"
+            "    float d = texture2D(depth, gl_FragCoord.xy * texel).r;\n"
+            /* From 2^23 up a float holds whole numbers only, and there
+               d * 2^24 is the depth plus one when the driver rounds d to
+               the nearest float (llvmpipe lands one higher: the lowest
+               byte is then one over); below, rounding d * (2^24 - 1)
+               gives it. */
+            "    float z = d >= 0.5 ? d * 16777216.0 - 1.0 : floor(d * 16777215.0 + 0.5);\n"
+            "    float hi = floor(z / 65536.0), mid = floor((z - hi * 65536.0) / 256.0);\n"
+            "    gl_FragColor = vec4(mid, z - hi * 65536.0 - mid * 256.0, 0.0, hi) / 255.0;\n"
+            "}\n";
+        static const char flat_fs[] = "#version 120\nuniform vec4 colour;\nvoid main() { gl_FragColor = colour; }\n";
+        GLuint vs = compile_shader(GL_VERTEX_SHADER, present_vs);
+        GLuint fs1 = compile_shader(GL_FRAGMENT_SHADER, depth_fs), fs2 = compile_shader(GL_FRAGMENT_SHADER, flat_fs);
+        GLint ok1 = 0, ok2 = 0;
+        if (vs && fs1 && fs2) {
+            prog_depth = p_glCreateProgram();
+            p_glAttachShader(prog_depth, vs); p_glAttachShader(prog_depth, fs1);
+            p_glLinkProgram(prog_depth);
+            p_glGetProgramiv(prog_depth, GL_LINK_STATUS, &ok1);
+            prog_flat = p_glCreateProgram();
+            p_glAttachShader(prog_flat, vs); p_glAttachShader(prog_flat, fs2);
+            p_glLinkProgram(prog_flat);
+            p_glGetProgramiv(prog_flat, GL_LINK_STATUS, &ok2);
+        }
+        if (vs) p_glDeleteShader(vs);
+        if (fs1) p_glDeleteShader(fs1);
+        if (fs2) p_glDeleteShader(fs2);
+        if (!ok1 || !ok2) {
+            xlog("D3D: no depth packing programs, views of the depth buffer read it back");
+            return 0;
+        }
+        u_depth = p_glGetUniformLocation(prog_depth, "depth");
+        u_texel = p_glGetUniformLocation(prog_depth, "texel");
+        u_colour = p_glGetUniformLocation(prog_flat, "colour");
+        p_glGenFramebuffers(1, &src_fb);
+        p_glGenFramebuffers(1, &copy_fb);
+        p_glGenFramebuffers(1, &pack_fb);
+        p_glGenFramebuffers(1, &stencil_fb);
+        p_glGenFramebuffers(1, &out_fb);
+        glGenTextures(1, &copy);
+        glGenTextures(1, &pack);
+        glGenTextures(1, &out);
+        state = 1;
+    }
+    GLint draw = 0, read = 0;
+    glGetIntegerv(0x8CA6 /* GL_DRAW_FRAMEBUFFER_BINDING */, &draw);
+    glGetIntegerv(0x8CAA /* GL_READ_FRAMEBUFFER_BINDING */, &read);
+    if (rb != src_rb || copy_w != d3d.width || copy_h != d3d.height) {
+        /* first use, or the window framebuffer was made again */
+        glBindTexture(GL_TEXTURE_2D, copy);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH24_STENCIL8, d3d.width, d3d.height, 0, 0x84F9 /* GL_DEPTH_STENCIL */,
+                     0x84FA /* GL_UNSIGNED_INT_24_8 */, NULL);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+        glTexParameteri(GL_TEXTURE_2D, 0x884C /* GL_TEXTURE_COMPARE_MODE */, GL_NONE);
+        glBindTexture(GL_TEXTURE_2D, pack);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, d3d.width, d3d.height, 0, GL_BGRA, GL_UNSIGNED_BYTE, NULL);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        window_fb.bind(GL_FRAMEBUFFER, src_fb);
+        p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, rb);
+        glDrawBuffer(GL_NONE); glReadBuffer(GL_NONE);
+        GLenum st0 = p_glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        window_fb.bind(GL_FRAMEBUFFER, copy_fb);
+        p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, copy, 0);
+        glDrawBuffer(GL_NONE); glReadBuffer(GL_NONE);
+        GLenum st1 = p_glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        window_fb.bind(GL_FRAMEBUFFER, pack_fb);
+        p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, pack, 0);
+        GLenum st2 = p_glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        /* the stencil passes test the copy: the depth pass samples it, from
+           the framebuffer without it */
+        window_fb.bind(GL_FRAMEBUFFER, stencil_fb);
+        p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, pack, 0);
+        p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, copy, 0);
+        GLenum st3 = p_glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        window_fb.bind(GL_READ_FRAMEBUFFER, read);
+        window_fb.bind(0x8CA9 /* GL_DRAW_FRAMEBUFFER */, draw);
+        if (st0 != GL_FRAMEBUFFER_COMPLETE || st1 != GL_FRAMEBUFFER_COMPLETE || st2 != GL_FRAMEBUFFER_COMPLETE
+            || st3 != GL_FRAMEBUFFER_COMPLETE) {
+            xlog("D3D: depth packing framebuffers incomplete (%#x %#x %#x %#x), views of the depth buffer read it back",
+                 st0, st1, st2, st3);
+            state = -1;
+            return 0;
+        }
+        src_rb = rb; copy_w = d3d.width; copy_h = d3d.height;
+        made_writes = depth_gpu_writes - 1;
+    }
+    if (made_writes == depth_gpu_writes && out_w == w && out_h == h) {
+        TRACE_ALL("D3D: depth view copy reused (%ux%u)", w, h);
+        return out;
+    }
+    if (out_w != w || out_h != h) {
+        glBindTexture(GL_TEXTURE_2D, out);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_BGRA, GL_UNSIGNED_BYTE, NULL);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+        window_fb.bind(GL_FRAMEBUFFER, out_fb);
+        p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, out, 0);
+        out_w = w; out_h = h;
+    }
+
+    GLuint program = cur_program;
+    GLuint saved_sampler = bound_sampler[0];
+    glPushAttrib(GL_ALL_ATTRIB_BITS);
+    glDisable(GL_SCISSOR_TEST);
+    window_fb.bind(GL_READ_FRAMEBUFFER, src_fb);
+    window_fb.bind(0x8CA9 /* GL_DRAW_FRAMEBUFFER */, copy_fb);
+    window_fb.blit(0, 0, d3d.width, d3d.height, 0, 0, d3d.width, d3d.height,
+                   GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT, GL_NEAREST);
+
+    window_fb.bind(GL_FRAMEBUFFER, pack_fb);
+    glViewport(0, 0, w, h);
+    glDisable(GL_DEPTH_TEST); glDisable(GL_BLEND); glDisable(GL_ALPHA_TEST); glDisable(GL_CULL_FACE);
+    glDisable(GL_COLOR_LOGIC_OP); glDisable(GL_POLYGON_STIPPLE); glDisable(GL_STENCIL_TEST); glDisable(GL_DITHER);
+    for (int i = 0; i < 6; i++) glDisable(GL_CLIP_PLANE0 + i);
+    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+    glDepthMask(GL_FALSE);
+    glStencilMask(0);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    p_glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, copy);
+    if (separate_samplers) bind_stage_sampler(0, 0);
+    p_glUseProgram(prog_depth);
+    p_glUniform1i(u_depth, 0);
+    float texel[2] = { 1.0f / d3d.width, 1.0f / d3d.height };
+    p_glUniform2fv(u_texel, 1, texel);
+    glBegin(GL_TRIANGLE_STRIP);
+    glVertex2f(-1, -1); glVertex2f(1, -1); glVertex2f(-1, 1); glVertex2f(1, 1);
+    glEnd();
+    glBindTexture(GL_TEXTURE_2D, 0);
+    /* the stencil into blue: each bit set adds its value */
+    window_fb.bind(GL_FRAMEBUFFER, stencil_fb);
+    p_glUseProgram(prog_flat);
+    glColorMask(GL_FALSE, GL_FALSE, GL_TRUE, GL_FALSE);
+    glEnable(GL_BLEND);
+    if (p_glBlendEquation) p_glBlendEquation(GL_FUNC_ADD);
+    glBlendFunc(GL_ONE, GL_ONE);
+    glEnable(GL_STENCIL_TEST);
+    glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+    for (int bit = 0; bit < 8; bit++) {
+        glStencilFunc(GL_EQUAL, 1 << bit, 1 << bit);
+        float colour[4] = { 0, 0, (float)(1 << bit) / 255.0f, 0 };
+        p_glUniform4fv(u_colour, 1, colour);
+        glBegin(GL_TRIANGLE_STRIP);
+        glVertex2f(-1, -1); glVertex2f(1, -1); glVertex2f(-1, 1); glVertex2f(1, 1);
+        glEnd();
+    }
+    /* GL's rows run bottom-up, the memory's top-down */
+    window_fb.bind(GL_READ_FRAMEBUFFER, pack_fb);
+    window_fb.bind(0x8CA9 /* GL_DRAW_FRAMEBUFFER */, out_fb);
+    window_fb.blit(0, 0, w, h, 0, h, w, 0, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    glPopAttrib();
+    window_fb.bind(GL_READ_FRAMEBUFFER, read);
+    window_fb.bind(0x8CA9 /* GL_DRAW_FRAMEBUFFER */, draw);
+    if (separate_samplers) bind_stage_sampler(0, saved_sampler);
+    gc_reset();   /* the cached GL state no longer matches */
+    if (program) { p_glUseProgram(program); cur_program = program; }
+    made_writes = depth_gpu_writes;
+    TRACE_ALL("D3D: depth packed into a %ux%u texture on the GPU for a view", w, h);
+    return out;
+}
+
 static void present_window_framebuffer(void)
 {
     if (!window_fb.fbo) return;
@@ -7119,7 +7784,7 @@ static void guide_overlay(void)
 
 static void restore_window_framebuffer(void)
 {
-    if (window_fb.fbo) window_fb.bind(GL_FRAMEBUFFER, d3d.rt_texture ? d3d.fbo : window_fb.fbo);
+    if (window_fb.fbo) window_fb.bind(GL_FRAMEBUFFER, d3d.rt_texture || d3d.rt_upright ? d3d.fbo : window_fb.fbo);
 }
 
 /* Bits per texel of an Xbox D3DFORMAT and whether it is stored linearly
@@ -7400,7 +8065,7 @@ static GLuint surface_rt_texture(D3DSurface *s, ULONG w, ULONG h)
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_BGRA, GL_UNSIGNED_BYTE, NULL);
     }
     tex_entry *e = malloc(sizeof(*e));
-    *e = (tex_entry){ s->Data, s->Format, s->Size, 0, id, GL_TEXTURE_2D, *tex_bucket(s->Data) };
+    *e = (tex_entry){ s->Data, s->Format, s->Size, 0, id, GL_TEXTURE_2D, *tex_bucket(s->Data), 0, 0, false };
     *tex_bucket(s->Data) = e;
     tex_cache_version++;
     return id;
@@ -7476,12 +8141,14 @@ static bool readback_rt_surface(D3DSurface *s)
 /* --trace aid: while /data/xbox/xbcompat-dump-targets exists, a traced
    frame writes each texture render target it leaves to
    /tmp/xbc-dump/F-N-DATA-WxH.ppm (top row first) for looking at offline. */
+static void rt_upright_copy(bool to_target);
 static void trace_dump_target(D3DSurface *s)
 {
     static unsigned seq;
     static unsigned long seq_frame;
-    if (g_trace != 1 || !s || s == d3d.backbuffer || !d3d.rt_texture) return;
+    if (g_trace != 1 || !s || s == d3d.backbuffer || !(d3d.rt_texture || d3d.rt_upright)) return;
     if (access("/data/xbox/xbcompat-dump-targets", F_OK) && access("/tmp/xbcompat-dump-targets", F_OK)) return;
+    if (d3d.rt_upright) rt_upright_copy(true);
     GLenum face;
     ULONG level;
     tex_entry *e = s->Parent ? surface_image(s, &face, &level) : NULL;
@@ -7512,8 +8179,54 @@ static void trace_dump_target(D3DSurface *s)
         fclose(f);
         xlog("D3D:   dumped %s", path);
     }
+    path[strlen(path) - 4] = 0;
+    strcat(path, "-a.pgm");   /* and its alpha */
+    if ((f = fopen(path, "wb"))) {
+        fprintf(f, "P5 %u %u 255\n", (unsigned)w, (unsigned)h);
+        for (ULONG i = 0; i < w * h; i++) fputc(px[i * 4 + 3], f);
+        fclose(f);
+    }
     free(px);
     gc_reset();   /* the texture binding changed behind the cache */
+}
+
+/* A texture target drawing with the back buffer's depth (see
+   SetRenderTarget): drawn the back buffer's way up into a stand-in color
+   texture next to that depth, whose rows go to the target, flipped, when it
+   is left. */
+static struct { GLuint color, tex_fbo; ULONG w, h; GLuint tex; GLenum face; ULONG level; } rt_upright;
+
+/* Copy rows between the stand-in and the target, flipping them. */
+static void rt_upright_copy(bool to_target)
+{
+    GLint draw = 0, read = 0;
+    glGetIntegerv(0x8CA6 /* DRAW_FRAMEBUFFER_BINDING */, &draw);
+    glGetIntegerv(0x8CAA /* READ_FRAMEBUFFER_BINDING */, &read);
+    GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
+    glDisable(GL_SCISSOR_TEST);
+    GLboolean cmask[4];
+    glGetBooleanv(GL_COLOR_WRITEMASK, cmask);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    window_fb.bind(GL_FRAMEBUFFER, rt_upright.tex_fbo);
+    p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, rt_upright.face, rt_upright.tex, rt_upright.level);
+    window_fb.bind(GL_READ_FRAMEBUFFER, to_target ? d3d.fbo : rt_upright.tex_fbo);
+    window_fb.bind(GL_DRAW_FRAMEBUFFER, to_target ? rt_upright.tex_fbo : d3d.fbo);
+    int w = (int)rt_upright.w, h = (int)rt_upright.h;
+    window_fb.blit(0, 0, w, h, 0, h, w, 0, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    window_fb.bind(GL_FRAMEBUFFER, rt_upright.tex_fbo);
+    p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+    window_fb.bind(GL_READ_FRAMEBUFFER, read);
+    window_fb.bind(GL_DRAW_FRAMEBUFFER, draw);
+    glColorMask(cmask[0], cmask[1], cmask[2], cmask[3]);
+    if (scissor) glEnable(GL_SCISSOR_TEST);
+}
+
+/* Leaving such a target: its rows go to its texture. */
+static void rt_upright_leave(void)
+{
+    if (!d3d.rt_upright) return;
+    rt_upright_copy(true);
+    d3d.rt_upright = false;
 }
 
 static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
@@ -7543,6 +8256,7 @@ static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
     }
     TRACE_ALL("D3D: render target %p (parent %p) depth %p", (void *)target, (void *)target->Parent, (void *)z);
     backbuffer_proxy_end();
+    rt_upright_leave();
     /* Depth surfaces with an image of their own: a depth texture's level, or
        a standalone integer depth surface (kept like one). */
     bool z_image = z && ((z->Parent && tex_target(z->Parent) == GL_TEXTURE_2D)
@@ -7599,6 +8313,58 @@ static void NTAPI D3DDevice_SetRenderTarget(D3DSurface *target, D3DSurface *z)
     }
     p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, face_target, tex, target_level);
     d3d.target_zmax = z ? depth_format_max((z->Format >> 8) & 0xFF) : d3d.zscale;
+    p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
+    p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
+    p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, 0);
+    /* The device's own depth surface under a target of its size is the back
+       buffer's depth itself (even where it has an image of its own: that is
+       only a copy for sampling), as it is one memory on the Xbox: Halo 2 lays
+       its objects' depth down while drawing them into a 640x480 texture,
+       then shades them into the back buffer with ZFUNC EQUAL. A scratch
+       buffer of its own, never cleared, hid them by whatever an earlier
+       target left there, differently with every camera angle. */
+    GLuint window_depth = window_fb.samples <= 1 ? (window_fb.depth_rb ? window_fb.depth_rb : window_fb.resolve_depth_rb) : 0;
+    if (!bb_proxy && z && z == d3d.depth && window_depth && window_fb.blit && w == (ULONG)d3d.width && h == (ULONG)d3d.height) {
+        /* Texture targets are drawn upside down (GL row zero is the Xbox top
+           row) and the back buffer isn't; mirrored, the same triangles land
+           on depths a bit off from the back buffer pass's, and its ZFUNC
+           EQUAL flickered over every object. So this one is drawn the back
+           buffer's way up into a stand-in that goes to the texture, flipped,
+           when the target is left. */
+        if (!rt_upright.color || rt_upright.w != w || rt_upright.h != h) {
+            if (!rt_upright.color) glGenTextures(1, &rt_upright.color);
+            if (!rt_upright.tex_fbo) p_glGenFramebuffers(1, &rt_upright.tex_fbo);
+            glBindTexture(GL_TEXTURE_2D, rt_upright.color);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_BGRA, GL_UNSIGNED_BYTE, NULL);
+            gc_reset();   /* the texture binding changed behind the cache */
+            rt_upright.w = w;
+            rt_upright.h = h;
+        }
+        p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rt_upright.color, 0);
+        GLenum attachment = window_fb.depth_storage == GL_DEPTH24_STENCIL8 ? GL_DEPTH_STENCIL_ATTACHMENT : GL_DEPTH_ATTACHMENT;
+        p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, attachment, GL_RENDERBUFFER, window_depth);
+        d3d.host_zmax = window_fb.depth_storage == 0x81A5 /* GL_DEPTH_COMPONENT16 */ ? 65535.0f : 16777215.0f;
+        GLenum st = p_glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        if (st == GL_FRAMEBUFFER_COMPLETE) {
+            rt_upright.tex = tex;
+            rt_upright.face = face_target;
+            rt_upright.level = target_level;
+            rt_upright_copy(false);
+            d3d.rt_upright = true;
+            d3d.rt_width = w;
+            d3d.rt_height = h;
+            d3d.rt_texture = false;
+            target_viewport_reset(z, w, h);
+            return;
+        }
+        xlog("D3D: render target with the back buffer's depth incomplete (%#x)", st);
+        p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, face_target, tex, target_level);
+        p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, 0);
+        p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, 0);
+    }
     if (z_image) {
         /* Give standalone integer depth surfaces their own persistent image,
            just like texture views. A shared scratch renderbuffer loses data
@@ -7720,6 +8486,15 @@ static LONG NTAPI D3DDevice_CreateImageSurface(UINT_ w, UINT_ h, ULONG fmt, D3DS
 {
     *pp = new_linear_surface(fmt, w, h);
     return *pp ? D3D_OK : 0x8007000E;
+}
+
+/* D3D::CreateStandAloneSurface.  Later libraries take (w, h, format, pp)
+   and return an HRESULT; 4831 takes (w, h, scratch, format) and returns the
+   surface.  A format is a small number, a pointer never is. */
+static ULONG NTAPI D3D_CreateStandAloneSurface(UINT_ w, UINT_ h, ULONG a3, ULONG a4)
+{
+    if (a4 >= XBE_BASE) return (ULONG)D3DDevice_CreateImageSurface(w, h, a3, (D3DSurface **)a4);
+    return (ULONG)(uintptr_t)new_linear_surface(a4, w, h);
 }
 
 static LONG NTAPI D3DDevice_CreateRenderTarget(UINT_ w, UINT_ h, ULONG fmt, ULONG ms, BOOLEAN lockable,
@@ -8152,7 +8927,10 @@ static LONG NTAPI D3DDevice_CreateIndexBuffer(UINT_ Length, ULONG Usage, ULONG F
 {
     (void)Usage; (void)Format; (void)Pool;
     D3DResource *ib = pool_alloc(sizeof(*ib));
-    PVOID mem = MmAllocateContiguousMemoryEx(Length, 0, 0x7FFFFFFF, 0, 4);
+    /* An empty buffer still succeeds, as the library's allocation of zero
+       bytes does: Agent Under Fire makes one for a model with no indices
+       and stopped on the null buffer. */
+    PVOID mem = MmAllocateContiguousMemoryEx(Length ? Length : 4, 0, 0x7FFFFFFF, 0, 4);
     if (!ib || !mem) return 0x8007000E;
     ib->Common = 1 | D3DCOMMON_TYPE_INDEXBUFFER | D3DCOMMON_D3DCREATED;
     ib->Data = (ULONG)mem;   /* virtual, like the real library: D3D__IndexData points into it */
@@ -8285,6 +9063,7 @@ static int constant_slot(LONG reg)
 
 static void NTAPI D3DDevice_SetVertexShaderConstant(LONG Register, const float *data, ULONG count)
 {
+    pusher_drain();
     if (d3d.recording) { ULONG h[2] = { (ULONG)Register, count }; pb_record2(OP_VS_CONST, h, 8, data, count * 16); }
     TRACE_ALL("D3D: vs constant %d x%u = %g %g %g %g", Register, count, data[0], data[1], data[2], data[3]);
     for (unsigned r = 1; r < count && r < 8; r++)
@@ -8371,13 +9150,30 @@ static LONG NTAPI Direct3D_CheckDeviceFormat(UINT_ a, ULONG b, ULONG c, ULONG d,
 static LONG NTAPI Direct3D_CheckDeviceType(UINT_ a, ULONG b, ULONG c, ULONG d, BOOLEAN e) { return D3D_OK; }
 static LONG NTAPI Direct3D_CheckDeviceMultiSampleType(UINT_ a, ULONG b, ULONG c, BOOLEAN d, ULONG e) { return D3D_OK; }
 static LONG NTAPI Direct3D_CheckDepthStencilMatch(UINT_ a, ULONG b, ULONG c, ULONG d, ULONG e) { return D3D_OK; }
-static UINT_ NTAPI Direct3D_GetAdapterModeCount(UINT_ a) { return 1; }
+/* The modes an NTSC-M component pack without widescreen or 720p offers:
+   480p, then 480i and its 240-line field modes, each in four formats.
+   Titles (RenderWare among them) search this list for the mode they want
+   and give up when it is missing. */
+static const struct { USHORT w, h; ULONG flags; } adapter_modes[] = {
+    { 640, 480, 0x040 }, { 720, 480, 0x040 }, { 640, 480, 0x140 },          /* progressive, 10x11 PAR */
+    { 640, 480, 0x020 }, { 720, 480, 0x020 }, { 640, 240, 0x0A0 }, { 720, 240, 0x0A0 },
+    { 640, 480, 0x120 }, { 640, 240, 0x1A0 },                                /* interlaced, field */
+};
+static const ULONG adapter_formats[4] = { 0x1E, 0x11, 0x1C, 0x12 };   /* LIN_X8R8G8B8, R5G6B5, X1R5G5B5, A8R8G8B8 */
+
+static UINT_ NTAPI Direct3D_GetAdapterModeCount(UINT_ a) { (void)a; return 4 * sizeof(adapter_modes) / sizeof(adapter_modes[0]); }
 static LONG NTAPI Direct3D_GetAdapterDisplayMode(UINT_ a, ULONG *mode)
 {
     mode[0] = 640; mode[1] = 480; mode[2] = 60; mode[3] = 0; mode[4] = 0x1E;
     return D3D_OK;
 }
-static LONG NTAPI Direct3D_EnumAdapterModes(UINT_ a, UINT_ m, ULONG *mode) { return Direct3D_GetAdapterDisplayMode(a, mode); }
+static LONG NTAPI Direct3D_EnumAdapterModes(UINT_ a, UINT_ m, ULONG *mode)
+{
+    if (m >= Direct3D_GetAdapterModeCount(a)) return D3DERR_INVALIDCALL;
+    mode[0] = adapter_modes[m / 4].w; mode[1] = adapter_modes[m / 4].h; mode[2] = 60;
+    mode[3] = adapter_modes[m / 4].flags; mode[4] = adapter_formats[m % 4];
+    return D3D_OK;
+}
 static LONG NTAPI Direct3D_GetAdapterIdentifier(UINT_ a, ULONG flags, char *id)
 {
     memset(id, 0, 1024);
@@ -8415,35 +9211,66 @@ static void NTAPI D3DDevice_GetScissors(ULONG *Count, ULONG *Exclusive, D3DRECT 
     }
 }
 
-/* Callbacks run "when the GPU gets there": we run them at the next sync point. */
+/* Callbacks run "when the GPU gets there": we run them at the next sync
+   point.  A title that spins on a flag its callback sets, without a D3D
+   call in between (MGS2's loading loop), gets them from the vertical blank
+   instead once they have waited two blanks, as the GPU's DPC would. */
+static pthread_mutex_t callbacks_lock = PTHREAD_MUTEX_INITIALIZER;
+static ULONG callbacks_vblank;   /* the blank count when the oldest pending one went in */
+
+static void call_callbacks(void)
+{
+    struct { PVOID fn; ULONG ctx; } run[64];
+    pthread_mutex_lock(&callbacks_lock);
+    unsigned n = d3d.ncallbacks;
+    memcpy(run, d3d.callbacks, n * sizeof run[0]);
+    d3d.ncallbacks = 0;
+    pthread_mutex_unlock(&callbacks_lock);
+    for (unsigned i = 0; i < n; i++) {
+#ifdef XBC_TRANSLATED
+        CPU_CALL(run[i].fn, CONV_CDECL, (uint32_t)run[i].ctx);
+#else
+        void (CDECLAPI *fn)(ULONG) = run[i].fn;
+        fn(run[i].ctx);
+#endif
+    }
+}
+
 static void run_callbacks(void)
 {
     hud_batch_flush();
     gl_no_yield++;
-    for (unsigned i = 0; i < d3d.ncallbacks; i++) {
-#ifdef XBC_TRANSLATED
-        CPU_CALL(d3d.callbacks[i].fn, CONV_CDECL, (uint32_t)d3d.callbacks[i].ctx);
-#else
-        void (CDECLAPI *fn)(ULONG) = d3d.callbacks[i].fn;
-        fn(d3d.callbacks[i].ctx);
-#endif
-    }
+    call_callbacks();
     gl_no_yield--;
-    d3d.ncallbacks = 0;
+}
+
+/* From d3d_vblank on the DPC thread. */
+static void late_callbacks(ULONG vblank)
+{
+    if (!__atomic_load_n(&d3d.ncallbacks, __ATOMIC_ACQUIRE)) return;
+    if (vblank - __atomic_load_n(&callbacks_vblank, __ATOMIC_RELAXED) < 2) return;
+    call_callbacks();
 }
 
 static void NTAPI D3DDevice_InsertCallback(ULONG Type, PVOID fn, ULONG Context)
 {
     (void)Type;
     if (d3d.ncallbacks == 64) run_callbacks();
+    pthread_mutex_lock(&callbacks_lock);
+    if (!d3d.ncallbacks) __atomic_store_n(&callbacks_vblank, d3dv.vblank_count, __ATOMIC_RELAXED);
     d3d.callbacks[d3d.ncallbacks].fn = fn;
     d3d.callbacks[d3d.ncallbacks].ctx = Context;
-    d3d.ncallbacks++;
+    __atomic_store_n(&d3d.ncallbacks, d3d.ncallbacks + 1, __ATOMIC_RELEASE);
+    pthread_mutex_unlock(&callbacks_lock);
 }
 
 static void NTAPI D3DDevice_SetVerticalBlankCallback(PVOID fn) { d3dv.vblank_callback = fn; }
 static void NTAPI D3DDevice_SetSwapCallback(PVOID fn) { d3dv.swap_callback = fn; }
-static void NTAPI D3DDevice_GetDisplayFieldStatus(ULONG *st) { st[0] = 3; st[1] = d3d.frame; }
+/* D3DFIELD_STATUS: the field and the vertical blank count.  The count runs
+   with the display, not with Swap: the XMV movie player in Chamber of
+   Secrets waits for it to pass a frame's time before it presents, and with
+   the Swap count it waited forever. */
+static void NTAPI D3DDevice_GetDisplayFieldStatus(ULONG *st) { st[0] = 3; st[1] = d3dv.vblank_count; }
 static void NTAPI D3DDevice_SetScreenSpaceOffset(float x, float y) { d3d.screen_offset[0] = x; d3d.screen_offset[1] = y; }
 static void NTAPI D3DDevice_SetBackBufferScale(float x, float y) { d3d.backbuffer_scale[0] = x; d3d.backbuffer_scale[1] = y; }
 static void NTAPI D3DDevice_GetBackBufferScale(float *x, float *y) { *x = d3d.backbuffer_scale[0]; *y = d3d.backbuffer_scale[1]; }
@@ -8647,11 +9474,23 @@ static void NTAPI D3DResource_FreePrivateData(D3DResource *r, const void *g) {}
    last three dwords map D3D constant registers to combiner constants. */
 #define PSDEF_DWORDS 60
 
+/* CreatePixelShader's handle is the library's { RefCount, D3DOwned, pPSDef }
+   object with the definition copied right after it.  Titles rely on that:
+   Mortal Kombat Armageddon, Darkwatch and From Russia with Love search the
+   object for the copy and then for the pointer to it, and read past the
+   end of memory when either is missing. */
+static ULONG *own_ps_def(ULONG handle)
+{
+    ULONG *o = (ULONG *)handle;
+    return o && pool_owns(o) && o[2] == (ULONG)(o + 3) ? o + 3 : NULL;
+}
+
 static void NTAPI D3DDevice_CreatePixelShader(const ULONG *def, ULONG *handle)
 {
-    ULONG *copy = pool_alloc(PSDEF_DWORDS * 4);
-    memcpy(copy, def, PSDEF_DWORDS * 4);
-    *handle = (ULONG)copy;
+    ULONG *obj = pool_alloc((3 + PSDEF_DWORDS) * 4);
+    obj[0] = 1; obj[1] = 1; obj[2] = (ULONG)(obj + 3);
+    memcpy(obj + 3, def, PSDEF_DWORDS * 4);
+    *handle = (ULONG)obj;
     if (getenv("XBCOMPAT_PSH_CATALOG")) {
         /* Debug aid: log every definition a title creates (tests/psh_catalog.py). */
         char line[PSDEF_DWORDS * 9 + 1], *o = line;
@@ -8668,6 +9507,10 @@ static void NTAPI D3DDevice_CreatePixelShader(const ULONG *def, ULONG *handle)
    dialog boxes and button glyphs got no color constant and drew nothing. */
 static void set_pixel_shader_def(const ULONG *def, ULONG *obj)
 {
+    /* Combiner registers the title wrote into the push buffer before this
+       call come first, as on the GPU: Halo 2's next pass otherwise ran with
+       the previous pass's leftover combiners over the new definition. */
+    pusher_drain();
     TRACE_ALL("D3D: pixel shader %p", (void *)def);
     if (d3d.recording) { ULONG h = (ULONG)def; pb_record(OP_PIXEL_SHADER, &h, 4); }
     d3d.pixel_shader = (ULONG)def;
@@ -8702,7 +9545,14 @@ static void NTAPI D3DDevice_SetPixelShader(ULONG handle)
     /* A title that builds its own shader objects (LTCG, no CreatePixelShader
        to replace) passes the library's { RefCount, D3DOwned, pPSDef }. */
     ULONG *obj = NULL;
-    if (def && !pool_owns(def) && def[0] < 0x10000 && def[1] <= 1 && def[2] >= 0x10000) {
+    if (own_ps_def(handle)) {
+        obj = (ULONG *)handle;
+        def = own_ps_def(handle);
+    } else if (def && (!pool_owns(def) || (d3d.device && def >= d3d.device && def < d3d.device + 0x1000))
+               && def[0] < 0x10000 && def[1] <= 1 && def[2] >= 0x10000) {
+        /* The device's own object counts too: an inlined
+           SetPixelShaderProgram fills the one in the CDevice (+0x924 in 5849,
+           Halo 2), which xbcompat allocates. */
         obj = (ULONG *)def;
         def = (const ULONG *)def[2];
     }
@@ -8719,16 +9569,23 @@ static void NTAPI D3DDevice_SetPixelShaderProgram(const ULONG *def)
     set_pixel_shader_def(def, NULL);
 }
 
-static void NTAPI D3DDevice_GetPixelShader(ULONG *handle) { *handle = d3d.pixel_shader; }
+static void NTAPI D3DDevice_GetPixelShader(ULONG *handle)
+{
+    ULONG *def = (ULONG *)d3d.pixel_shader;
+    /* our own objects hand back the handle, not the definition inside */
+    *handle = def && own_ps_def((ULONG)(def - 3)) == def ? (ULONG)(def - 3) : d3d.pixel_shader;
+}
 static void NTAPI D3DDevice_DeletePixelShader(ULONG handle)
 {
     if (!handle) return;
-    if (handle == d3d.pixel_shader) d3d.pixel_shader = 0;
+    ULONG *def = own_ps_def(handle);
+    if ((ULONG)def == d3d.pixel_shader || handle == d3d.pixel_shader) d3d.pixel_shader = 0;
     pool_free((void *)handle);
 }
 static void NTAPI D3DDevice_GetPixelShaderFunction(ULONG handle, ULONG *def)
 {
-    if (handle) memcpy(def, (const void *)handle, PSDEF_DWORDS * 4);
+    const ULONG *own = own_ps_def(handle);
+    if (handle) memcpy(def, own ? own : (const ULONG *)handle, PSDEF_DWORDS * 4);
 }
 
 static ULONG float_color(const float *f)
@@ -8885,7 +9742,19 @@ static void imm_flush(ULONG prim)
         glDisable(GL_COLOR_MATERIAL);
     }
     unsigned units = d3d.pixel_shader ? 0xF : apply_textures();
-    if (!sh) { static const int two[4] = { 2, 2, 2, 2 }; apply_texture_transforms(units, two); }
+    {
+        /* A declaration without a program is the fixed-function pipeline too:
+           its texture transforms and the texel coordinates of linear
+           textures apply (Hulk draws its intro screens and movies as one
+           640x480 linear texture with coordinates 0..640, 0..480). */
+        int tsize[4];
+        for (int u = 0; u < 4; u++) {
+            ULONG tci = TSS(u, D3DTSS_TEXCOORDINDEX) & 0xFFFF;
+            const vattr *tc = sh ? &sh->attr[9 + (tci < 4 ? tci : 0)] : NULL;
+            tsize[u] = tc && tc->stream >= 0 ? tc->components : 2;
+        }
+        apply_texture_transforms(units, tsize);
+    }
     program_entry *e;
     if (!use_program(0, &e)) return;
     TRACE_ALL("D3D: immediate draw prim %u, %u vertices, vs %#x%s, colour %s, first at %g %g %g %g colour %g %g %g %g",
@@ -9490,6 +10359,8 @@ static vshader inline_layout(const vshader *sh, ULONG *stride)
     return tmp;
 }
 
+static void vis_fifo_begin(void);
+static void vis_fifo_report(ULONG offset);
 static void pb_interpret_body(const ULONG *p, unsigned n)
 {
     static uint8_t *inline_buf;
@@ -9586,6 +10457,11 @@ static void pb_interpret_body(const ULONG *p, unsigned n)
                 unsigned slot = const_load + pos / 4;
                 if (slot < 192) { d3d.vs_const[slot][pos % 4] = f; vsc_touch(slot, 1); }
                 if (k == count - 1) const_load += (pos + 1) / 4;
+            } else if (m >= 0x1500 && m < 0x1528) {   /* NV097_SET_VERTEX3F / SET_VERTEX4F: position, emits */
+                /* SetVertexData4f(D3DVSDE_VERTEX) inlined by LTCG titles. */
+                unsigned c = m < 0x1518 ? (m - 0x1500) / 4 : (m - 0x1518) / 4, last = m < 0x1518 ? 2 : 3;
+                partial[0][c] = f;
+                if (c == last) imm_set(-1, partial[0][0], partial[0][1], partial[0][2], last == 3 ? f : 1);
             } else if (m >= 0x1880 && m < 0x1900) {   /* NV097_SET_VERTEX_DATA2F_M */
                 unsigned slot = (m - 0x1880) / 8, c = ((m - 0x1880) % 8) / 4;
                 partial[slot][c] = f;
@@ -9607,6 +10483,11 @@ static void pb_interpret_body(const ULONG *p, unsigned n)
                 partial[slot][c] = f;
                 if (c == 3) imm_set(slot, partial[slot][0], partial[slot][1], partial[slot][2], partial[slot][3]);
             } else if (m == 0x100) {   /* NV097_NO_OPERATION */
+            } else if (m == 0x17C8) {   /* NV097_CLEAR_REPORT_VALUE: the query below starts at zero */
+            } else if (m == 0x17CC) {   /* NV097_SET_ZPASS_PIXEL_COUNT_ENABLE */
+                if (d) vis_fifo_begin();
+            } else if (m == 0x17D0) {   /* NV097_GET_REPORT: type << 24 | offset */
+                if ((d >> 24) == 1) vis_fifo_report(d & 0xFFFFFF);
             } else if (pb_render_state(m, d)) {
             } else {
                 unsigned u = 0;
@@ -9637,6 +10518,7 @@ static bool pb_state_only(const ULONG *p, unsigned n)
            immediate vertex data all sit in 0x1800..0x1AFF, with the eye
            vector between them. */
         if (last >= 0x17FC && method < 0x1B00 && !(method >= 0x181C && last <= 0x1824)) return false;
+        if (last >= 0x1500 && method < 0x1528) return false;   /* SET_VERTEX3F / 4F */
     }
     return true;
 }
@@ -9884,6 +10766,92 @@ static LONG NTAPI D3DDevice_GetVisibilityTestResult(ULONG index, UINT_ *result, 
     p_glGetQueryObjectuiv(vis[slot].query, 0x8866 /* GL_QUERY_RESULT */, &n);
     if (result) *result = n;
     return D3D_OK;
+}
+
+/* Visibility tests begun or ended in the title's own push buffer.  Halo 2
+   inlines BeginVisibilityTest (CLEAR_REPORT_VALUE, then
+   SET_ZPASS_PIXEL_COUNT_ENABLE) and calls EndVisibilityTest: the count has
+   to start when the push buffer gets there, or EndVisibilityTest found none
+   running and every result read as no pixels (its lights' glows and lens
+   flares never showed).  An inlined EndVisibilityTest marks its report in
+   the device's tables at +0x7D4 incomplete (fourth dword -1) and sends
+   GET_REPORT with the report's GPU offset; the count goes there, and the
+   mark is cleared, once GL has the result. */
+static struct { GLuint query; ULONG *report; ULONG frame; } vis_fifo[256];
+static unsigned vis_fifo_n;
+
+static ULONG *vis_fifo_address(ULONG offset)
+{
+    ULONG *dev = d3d.device;
+    if (!dev) return NULL;
+    for (unsigned t = 0; t < 16; t++) {
+        ULONG base = dev[0x7D4 / 4 + t];
+        if (!base) continue;
+        ULONG delta = (offset - (base & 0xFFFFFF)) & 0xFFFFFF;
+        if (delta < 256 * 16 && !(delta & 15)) return (ULONG *)(base + delta);
+    }
+    return NULL;
+}
+
+static void vis_fifo_write(ULONG *report, ULONG count)
+{
+    report[0] = d3d.frame;
+    report[1] = 0;
+    report[2] = count;
+    __atomic_store_n(&report[3], 0, __ATOMIC_RELEASE);
+}
+
+static void vis_fifo_begin(void)
+{
+    if (!p_glGenQueries || vis_active) return;
+    hud_batch_flush();
+    p_glGenQueries(1, &vis_active);
+    p_glBeginQuery(0x8914 /* GL_SAMPLES_PASSED */, vis_active);
+    hud_query_active = true;
+}
+
+/* Results GL has (all of them with `wait`) go to their reports. */
+static void vis_fifo_poll(bool wait)
+{
+    static void (APIENTRY *del)(GLsizei, const GLuint *);
+    if (!del) del = SDL_GL_GetProcAddress("glDeleteQueries");
+    unsigned k = 0;
+    for (unsigned i = 0; i < vis_fifo_n; i++) {
+        GLuint avail = 0, n = 0;
+        if (!wait && d3d.frame - vis_fifo[i].frame < 2)
+            p_glGetQueryObjectuiv(vis_fifo[i].query, 0x8867 /* GL_QUERY_RESULT_AVAILABLE */, &avail);
+        else
+            avail = 1;
+        if (!avail) { vis_fifo[k++] = vis_fifo[i]; continue; }
+        p_glGetQueryObjectuiv(vis_fifo[i].query, 0x8866 /* GL_QUERY_RESULT */, &n);
+        vis_fifo_write(vis_fifo[i].report, n);
+        if (del) del(1, &vis_fifo[i].query);
+    }
+    vis_fifo_n = k;
+}
+
+static void vis_fifo_report(ULONG offset)
+{
+    static bool said;
+    ULONG *report = vis_fifo_address(offset);
+    GLuint q = vis_active;
+    if (q) {
+        hud_batch_flush();
+        p_glEndQuery(0x8914);
+        vis_active = 0;
+        hud_query_active = false;
+    }
+    if (!said) {
+        said = true;
+        xlog("D3D: visibility tests in the push buffer (report at %#lx%s)", (unsigned long)offset, report ? "" : ", not a device table");
+    }
+    if (!report) {
+        if (q) { static void (APIENTRY *del)(GLsizei, const GLuint *); if (!del) del = SDL_GL_GetProcAddress("glDeleteQueries"); if (del) del(1, &q); }
+        return;
+    }
+    if (!q) { vis_fifo_write(report, d3d.width * d3d.height); return; }   /* no count started: all of it */
+    if (vis_fifo_n == sizeof vis_fifo / sizeof vis_fifo[0]) vis_fifo_poll(true);
+    vis_fifo[vis_fifo_n++] = (typeof(vis_fifo[0])){ q, report, d3d.frame };
 }
 
 /* ---- state blocks ----------------------------------------------------- */
@@ -10293,6 +11261,16 @@ static void NTAPI D3DDevice_SetRenderTargetFast(D3DSurface *target, D3DSurface *
     D3DDevice_SetRenderTarget(target, z);
 }
 
+/* SetRenderTarget's path for a target the same size and format as the
+   current one (5849 LTCG, render target on the stack, depth in ebx): it only
+   swaps the surface offsets, so the viewport the title set stays. */
+static void NTAPI D3DDevice_SetRenderTargetSameSize(D3DSurface *target, D3DSurface *z)
+{
+    D3DVIEWPORT8 v = d3d.viewport;
+    D3DDevice_SetRenderTargetFast(target, z, 0);
+    D3DDevice_SetViewport(&v);
+}
+
 /* SetTexture's fast path when only the image moves (same size and format):
    the method is NV097_SET_TEXTURE_OFFSET(stage).  The stage keeps a copy of
    its texture header pointing at the new data. */
@@ -10353,7 +11331,7 @@ static void NTAPI D3D_Nop12(ULONG a, ULONG b, ULONG c) { (void)a; (void)b; (void
 static void FASTCALL D3D_FastNop(ULONG a, ULONG b) { (void)a; (void)b; }
 static LONG NTAPI D3DDevice_Reset(PVOID pp)
 {
-    (void)pp;
+    if (pp) set_present_interval(((D3DPRESENT_PARAMETERS *)pp)->FullScreen_PresentationInterval);
     persisted.first_flip = true;   /* the mode is set again: the next Present frees the persisted frame */
     return D3D_OK;
 }
@@ -10490,6 +11468,13 @@ const struct hle_func d3d8_funcs[] = {
     F("_D3DDevice_SetRenderState_MultiSampleAntiAlias@4", SetRenderState_MultiSampleAntiAlias),
     F("_D3DDevice_SetRenderState_MultiSampleMask@4", SetRenderState_MultiSampleMask),
     F("_D3DDevice_SetRenderState_MultiSampleMode@4", SetRenderState_MultiSampleMode),
+    /* The older name of the same state (MULTISAMPLEMODE before 4361's split). */
+    F("_D3DDevice_SetRenderState_MultiSampleType@4", SetRenderState_MultiSampleMode),
+    /* 3925 (Halo, Azurik) sets deferred states through these, with the
+       state and stage in registers; they only store the value, like the
+       NotInline forms. */
+    F("@D3DDevice_SetRenderState_Deferred@8", SetRenderState_Deferred),
+    F("@D3DDevice_SetTextureState_Deferred@12", SetTextureState_Deferred),
     F("_D3DDevice_SetRenderState_MultiSampleRenderTargetMode@4", SetRenderState_MultiSampleRenderTargetMode),
     F("_D3DDevice_SetRenderState_ShadowFunc@4", SetRenderState_ShadowFunc),
     F("_D3DDevice_SetRenderState_LineWidth@4", SetRenderState_LineWidth),
@@ -10510,6 +11495,13 @@ const struct hle_func d3d8_funcs[] = {
     F("_D3DSurface_GetDesc@8", D3DSurface_GetDesc),
     F("_D3DSurface_LockRect@16", D3DSurface_LockRect),
     F("_D3DDevice_CreateImageSurface@16", D3DDevice_CreateImageSurface),
+    /* The library's own helper behind CreateImageSurface and the other
+       Create*Surface calls; 4831 titles (Nightfire, House of the Dead III)
+       call it directly. */
+    F("_D3D_CreateStandAloneSurface@16", D3D_CreateStandAloneSurface),
+    /* SetRenderTarget's body, which SetRenderTarget(Fast) and LTCG titles
+       call with a third argument the host doesn't need. */
+    F("_D3D_CommonSetRenderTarget@12", D3DDevice_SetRenderTargetFast),
     F("_D3DDevice_CreateRenderTarget@24", D3DDevice_CreateRenderTarget),
     F("_D3DDevice_CreateDepthStencilSurface@20", D3DDevice_CreateDepthStencilSurface),
     F("_D3DDevice_CopyRects@20", D3DDevice_CopyRects),
@@ -10598,6 +11590,7 @@ const struct hle_func d3d8_funcs[] = {
     F("_D3DDevice_SetModelView@12", D3DDevice_SetModelView),
     F("_D3DDevice_GetViewportOffsetAndScale@8", D3DDevice_GetViewportOffsetAndScale),
     F("_D3DDevice_SetRenderTargetFast@12", D3DDevice_SetRenderTargetFast),
+    F("_D3DDevice_SetRenderTargetSameSize@8", D3DDevice_SetRenderTargetSameSize),
     F("@D3DDevice_SwitchTexture@12", D3DDevice_SwitchTexture),
     F("_D3DDevice_SetRenderState@8", SetRenderStateNotInline),
     F("_D3DDevice_SetRenderState2@8", SetRenderStateNotInline),

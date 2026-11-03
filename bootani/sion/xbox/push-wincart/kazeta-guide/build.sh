@@ -22,12 +22,16 @@ ln -s "$(ldconfig -p | sed -n 's/.*libSDL2-2.0.so.0 (libc6,x86-64) => //p' | hea
 cp "$XB/src/guide/guide.cpp" "$W/guide.cpp"
 (cd "$W" && patch -p4 < "$HERE/guide-overlay-alpha.patch")
 
-F="-O2 -g -fno-exceptions -fno-rtti -I$XB/tools/frolickdash/xui -I$W/SDL2-2.30.0/include -D_snprintf=snprintf -Wno-misleading-indentation"
+F="-O2 -g -fno-exceptions -fno-rtti -I$XB/src -I$XB/tools/frolickdash/xui -I$W/SDL2-2.30.0/include -D_snprintf=snprintf -Wno-misleading-indentation"
 for f in "$W/guide.cpp" "$XB"/tools/frolickdash/xui/xui_parse.cpp "$XB"/tools/frolickdash/xui/xui_scene.cpp \
          "$XB"/tools/frolickdash/xui/xui_draw.cpp "$XB"/tools/frolickdash/xui/xui_classes.cpp; do
 	g++ $F -std=c++98 -fno-threadsafe-statics -c -o "$W/obj/$(basename "$f" .cpp).o" "$f"
 done
 g++ $F -std=c++11 -I"$TOP/xbcompat/src/third_party" -c -o "$W/obj/host.o" "$HERE/host.cpp"
+gcc -O2 -g -DXBEIMAGE_HOST -I"$XB/src" -c -o "$W/obj/xbeimage.o" "$XB/src/xbeimage.c"
+for f in "$XB"/src/input/padmap*.c; do  # Controller Configuration's layouts
+	gcc -O2 -g -std=gnu11 -I"$XB/src" -c -o "$W/obj/$(basename "$f" .c).o" "$f"
+done
 g++ -o "$OUT" "$W"/obj/*.o -L"$W/lib" -lSDL2 -lGL -lX11 -lXrender -lm -ldl
 strip "$OUT"
 md5sum "$OUT"

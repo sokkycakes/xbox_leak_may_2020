@@ -6,7 +6,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef XBEIMAGE_HOST
+/* built on its own for a host without xbcompat (kazeta-guide, 64-bit) */
+#include <stdbool.h>
+#include <stdint.h>
+typedef uint32_t ULONG;
+#else
 #include "xbcompat.h"
+#endif
 #pragma GCC diagnostic ignored "-Wunused-function"  /* the volume decoder */
 #include "hle/dxt_decode.h"
 
@@ -15,6 +22,7 @@
    Format packs the texel format in bits 8-15 and log2 width and height in
    bits 20-23 and 24-27. */
 static ULONG rd32(const uint8_t *p) { return p[0] | p[1] << 8 | p[2] << 16 | (ULONG)p[3] << 24; }
+static bool xpr_decode(uint8_t *xpr, ULONG size, uint8_t **out, int *ow, int *oh);
 
 static void expand(ULONG fmt, const uint8_t *s, uint8_t *bgra)
 {
@@ -62,6 +70,32 @@ bool xbe_image_read(const char *xbe, const char *section, uint8_t **out, int *ow
     }
     fclose(f);
     if (!xpr) return false;
+    bool ok = xpr_decode(xpr, size, out, ow, oh);
+    free(xpr);
+    return ok;
+}
+
+/* An XPR texture of its own file: a save's SaveImage.xbx, a title's
+   TitleImage.xbx under UDATA. */
+bool xpr_image_read(const char *path, uint8_t **out, int *ow, int *oh)
+{
+    FILE *f = path ? fopen(path, "rb") : NULL;
+    if (!f) return false;
+    uint8_t *xpr = NULL;
+    long size = fseek(f, 0, SEEK_END) ? -1 : ftell(f);
+    if (size >= 20 + 12 && size <= (1 << 24) && !fseek(f, 0, SEEK_SET)) {
+        xpr = malloc(size);
+        if (fread(xpr, 1, size, f) != (size_t)size) { free(xpr); xpr = NULL; }
+    }
+    fclose(f);
+    if (!xpr) return false;
+    bool ok = xpr_decode(xpr, (ULONG)size, out, ow, oh);
+    free(xpr);
+    return ok;
+}
+
+static bool xpr_decode(uint8_t *xpr, ULONG size, uint8_t **out, int *ow, int *oh)
+{
     bool ok = false;
     ULONG start = rd32(xpr + 8), format = rd32(xpr + 24);
     ULONG fmt = (format >> 8) & 0xff, w = 1u << ((format >> 20) & 15), h = 1u << ((format >> 24) & 15);
@@ -107,6 +141,5 @@ bool xbe_image_read(const char *xbe, const char *section, uint8_t **out, int *ow
         *out = px; *ow = (int)w; *oh = (int)h;
         ok = true;
     }
-    free(xpr);
     return ok;
 }

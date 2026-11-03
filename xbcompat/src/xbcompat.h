@@ -57,6 +57,17 @@ void arena_free(void *p);
 void *pool_alloc(size_t size);
 void pool_free(void *p);
 bool pool_owns(const void *p);
+bool guest_writable(const void *p);
+uint32_t mem_read_cr3(void);            /* page tables titles edit themselves (memory.c) */
+void mem_load_cr3(void);
+void mem_invlpg(uint32_t va);
+bool mem_fault_resync(uint32_t va, bool write);
+bool mem_page_absent(uint32_t va);
+void guest_page_in(const void *p, size_t len, bool write);   /* main.c */
+void idt_patch_section(uint8_t *p, uint32_t len);   /* main.c */
+bool idt_cli_release(void);
+void idt_cli_reacquire(void);
+void io_signal_late(bool all);   /* kernel/io.c: deferred overlapped-I/O events */
 size_t pool_size(void *p);
 
 NTSTATUS NTAPI NtAllocateVirtualMemory(PVOID *BaseAddress, ULONG_PTR ZeroBits,
@@ -158,6 +169,11 @@ enum obj_kind { OBJ_NONE, OBJ_EVENT, OBJ_SEMAPHORE, OBJ_MUTANT, OBJ_TIMER, OBJ_T
 typedef struct xobject {
     enum obj_kind kind;
     int refs;
+    /* Where a FILE_OBJECT keeps FsContext (+8), since a file's xobject is
+       the file object titles get: 5xxx XAPI's XGetFilePhysicalSortKey reads
+       the file system's FCB through it (FATX's FirstCluster at +0x1c,
+       GDFX's FirstSector at +0).  Files point it at a small stand-in FCB. */
+    PVOID fs_context;
     char *name;
     union {
         KEVENT event;
@@ -217,6 +233,7 @@ void dvd_stat(const dvd_node *n, struct stat *sb);
 dvd_node *dvd_child(dvd_node *n, int i);
 ssize_t dvd_read(dvd_node *n, void *buf, size_t len, uint64_t off);
 ssize_t dvd_read_volume(void *buf, size_t len, uint64_t off);
+ULONG dvd_volume_sectors(void);
 bool dvd_extract(dvd_node *n, char *host, size_t hostlen);
 void dvd_title_started(const char *xbe_host_path);
 NTSTATUS dvd_scsi_pass_through(void *in, ULONG inlen);
@@ -275,6 +292,11 @@ ULONG xbe_title_id(void);
 const char *xbe_title_name(void);
 const char *xbe_file_path(void);
 bool xbe_image_read(const char *xbe, const char *section, uint8_t **bgra, int *w, int *h);
+bool xpr_image_read(const char *path, uint8_t **bgra, int *w, int *h);
+/* The Guide's Quick Launch (misc.c, io.c) */
+void guide_launch(const char *nt_dir, const char *xbe);
+void guide_launch_pending(ULONG title_id);
+bool fs_card_dir(char *out, size_t outlen);
 void xbe_reload_section(ULONG va, ULONG raw_offset, ULONG raw_size, ULONG virtual_size);
 void kernel_resolve_imports(xbe_image *img);
 void kernel_init(void);
@@ -283,6 +305,7 @@ const char *kernel_export_name(unsigned ordinal);
 /* ---- HLE -------------------------------------------------------------- */
 
 void hle_patch(xbe_image *img, const char *sigdir);
+void hle_stack_thread_init(void);   /* a guest thread's spare stack for D3D calls */
 ULONG d3d_frame_count(void);   /* frames presented so far (hle/d3d8.c) */
 void video_init(int width, int height);
 void video_present(void);

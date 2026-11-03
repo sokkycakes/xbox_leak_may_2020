@@ -16,6 +16,7 @@
 // turned down.  LT / RT (or Left / Right) switch tabs, A picks, B goes back
 // or closes, Y goes to the dashboard.
 #include "xui.h"
+#include "input/padmap.h"
 
 #include <SDL.h>
 #include <SDL_opengl.h>
@@ -27,6 +28,7 @@
 #include <unistd.h>
 #include <dirent.h>
 #include <limits.h>
+#include <sys/stat.h>
 
 extern "C" {
 typedef unsigned long ULONG;
@@ -46,6 +48,18 @@ void xlog(const char *fmt, ...);
 // without them (kazeta-guide) shows the game box without the picture.
 __attribute__((weak)) const char *xbe_file_path(void);
 __attribute__((weak)) bool xbe_image_read(const char *xbe, const char *section, unsigned char **bgra, int *w, int *h);
+__attribute__((weak)) bool xpr_image_read(const char *path, unsigned char **bgra, int *w, int *h);
+// kazeta-guide: the cart's icon as BGRA rows (malloc'd), when it has one.
+__attribute__((weak)) bool kazeta_title_image(unsigned char **bgra, int *w, int *h);
+// Quick Launch's start of another title and the game card's folder
+// (misc.c, io.c); a host without them lists the games but can't start one.
+__attribute__((weak)) void guide_launch(const char *nt_dir, const char *xbe);
+__attribute__((weak)) bool fs_card_dir(char *out, size_t outlen);
+// Controller Configuration (src/hle/xinput.c, kazeta-guide's host.cpp): the
+// pad's layout for this game, where layouts are kept, and "look again".
+__attribute__((weak)) bool xinput_padmap_get(int port, padmap_profile *out, char *family, size_t familysize);
+__attribute__((weak)) bool xinput_padmap_dir(char *dir, size_t size);
+__attribute__((weak)) void xinput_padmap_reload(void);
 bool guide_frame(int w, int h);
 void guide_draw(int w, int h);
 }
@@ -68,11 +82,27 @@ namespace {
 
 // ---- assets: one directory of .xui scenes, .xtx images and font.ttf ------
 
-// titleimage.png is the title's own picture, decoded from its XBE.
+// titleimage.png is the title's own picture, decoded from its XBE; the
+// list pages' pictures (games' title images, saves' images) are made the
+// same way and kept by name.
+struct MemImage { char name[96]; unsigned char* xtx; int len; };
 struct DirResources : xui::Resources {
     char dir[512];
     unsigned char* tile; int tileLen;  // titleimage.png as .xtx bytes
-    DirResources() : tile(0), tileLen(0) {}
+    MemImage mem[96]; int nmem;
+    DirResources() : tile(0), tileLen(0), nmem(0) {}
+    // name: "<name>.xtx"; bgra: w*h pixels
+    bool add(const char* name, const unsigned char* bgra, int w, int h) {
+        for (int i = 0; i < nmem; i++) if (!strcasecmp(mem[i].name, name)) return true;
+        if (nmem == (int)(sizeof mem / sizeof mem[0])) return false;
+        MemImage& m = mem[nmem++];
+        snprintf(m.name, sizeof m.name, "%s", name);
+        m.len = 12 + w * h * 4;
+        m.xtx = new unsigned char[m.len];
+        memcpy(m.xtx, "XTX1", 4); memcpy(m.xtx + 4, &w, 4); memcpy(m.xtx + 8, &h, 4);
+        memcpy(m.xtx + 12, bgra, w * h * 4);
+        return true;
+    }
     bool read(const char* path, unsigned char** data, int* len) {
         const char* name = path;
         const char* s = strstr(name, "://");
@@ -89,6 +119,12 @@ struct DirResources : xui::Resources {
             memcpy(*data, tile, tileLen); *len = tileLen;
             return true;
         }
+        for (int i = 0; i < nmem; i++)
+            if (!strcasecmp(mem[i].name, nm)) {
+                *data = new unsigned char[mem[i].len];
+                memcpy(*data, mem[i].xtx, mem[i].len); *len = mem[i].len;
+                return true;
+            }
         char full[800]; snprintf(full, sizeof full, "%s/%s", dir, nm);
         FILE* f = fopen(full, "rb");
         if (!f) return false;
@@ -226,10 +262,14 @@ struct Guide {
     xui::Renderer* r;
     xui::Element *frameEl, *mainEl, *settingsEl, *skinEl, *cardEl, *volumeEl, *vibrationEl;
     xui::Element *tabsEl, *tabsSkinEl, *gameEl, *gameSkinEl;
+    xui::Element *recentEl, *downloadsEl, *savesEl, *confirmEl;
     // menu: the page showing.  main and settings are the home's Game and
     // Settings tabs; volume and vibration are Settings' own pages, game the
     // Game tab's fuller view of the game.
     xui::Scene *frame, *main, *settings, *volume, *vibration, *game, *menu;
+    // Frolick's list pages: Quick Launch (Recent Games), Downloads (Active
+    // Downloads), Game Storage (the title's Saved Games) and its Yes / No.
+    xui::Scene *recent, *downloads, *saves, *confirm;
     xui::Scene* card;  // the game box, drawn in the main menu's ctlGamerCard
     xui::Scene* tabs;  // the Blades tab strip over the home's pages
     xui::Node* strip;  // ... its pieces and 1To2 / 2To1 timelines
@@ -238,6 +278,8 @@ struct Guide {
     char startedAt[16];
     int shownMinutes;
     bool full;         // the frame expanded (HalfToFull) for the game view
+    const char* launchDir;  // Quick Launch: the game to start once the Guide is away
+    double listedAt;   // when the Downloads page last read the queue
     xui::Node* hud;  // HUDRootScene: owns the open/close timelines
     State state;
     unsigned prev;
@@ -248,8 +290,10 @@ struct Guide {
     bool vibrationOn;
     Sound sounds[SndCount];
     Guide() : r(0), frameEl(0), mainEl(0), settingsEl(0), skinEl(0), cardEl(0), volumeEl(0), vibrationEl(0),
-              tabsEl(0), tabsSkinEl(0), gameEl(0), gameSkinEl(0), frame(0), main(0), settings(0), volume(0), vibration(0), game(0), menu(0), card(0),
-              tabs(0), strip(0), tab(0), started(0), shownMinutes(-1), full(false),
+              tabsEl(0), tabsSkinEl(0), gameEl(0), gameSkinEl(0), recentEl(0), downloadsEl(0), savesEl(0), confirmEl(0),
+              frame(0), main(0), settings(0), volume(0), vibration(0), game(0), menu(0),
+              recent(0), downloads(0), saves(0), confirm(0), card(0),
+              tabs(0), strip(0), tab(0), started(0), shownMinutes(-1), full(false), launchDir(0), listedAt(0),
               hud(0), state(Off), prev(0), holdStart(-1), lastTime(-1), repeatAt(0), leaveAt(0), port(0),
               armed(false), volumeLevel(10), vibrationOn(true) {}
 };
@@ -306,20 +350,25 @@ float text_zoom_for(xui::Node* n, float zoom) {
 // Frolick's page has white text for its slate band; on the Guide's grey
 // panel it takes the Guide's black (sokky), keeping each text's fade, and
 // so does the clock the full view would turn white (the prompts stay white).
+int cfg_page_of(xui::Scene* m);  // Controller Configuration's pages
+bool is_page(xui::Scene* m) {
+    return m && (m == g.game || m == g.recent || m == g.downloads || m == g.saves || m == g.confirm || cfg_page_of(m) >= 0);
+}
+
 xui::Color text_color_for(xui::Node* n, xui::Color col) {
-    if (!g.game || g.menu != g.game) return col;
+    if (!is_page(g.menu)) return col;
     if (!strcmp(n->id(), "DateTimeTextId")) return col & 0xff000000;
     for (xui::Node* p = n; p; p = p->parent)
-        if (p == g.game->root) return col & 0xff000000;
+        if (p == g.menu->root) return col & 0xff000000;
     return col;
 }
 
 // Its dark shadows, made for white text, become the light one its rows
 // have (0x5aebebeb: the header's 0xbe was much stronger, sokky).
 xui::Color text_shadow_for(xui::Node* n, xui::Color col) {
-    if (!g.game || g.menu != g.game || (col & 0xff) >= 0x80) return col;
+    if (!is_page(g.menu) || (col & 0xff) >= 0x80) return col;
     for (xui::Node* p = n; p; p = p->parent)
-        if (p == g.game->root) return 0x5aebebeb;
+        if (p == g.menu->root) return 0x5aebebeb;
     return col;
 }
 
@@ -471,7 +520,9 @@ void compact_card() {
 void load_title_image() {
     unsigned char* px = 0; int w = 0, h = 0;
     const char* xbe = xbe_file_path ? xbe_file_path() : 0;
-    if (!xbe || !xbe_image_read || !xbe_image_read(xbe, "$$XTIMAGE", &px, &w, &h)) {
+    if (kazeta_title_image && kazeta_title_image(&px, &w, &h)) {
+        // kazeta-guide: the cart's own icon
+    } else if (!xbe || !xbe_image_read || !xbe_image_read(xbe, "$$XTIMAGE", &px, &w, &h)) {
         xlog("Guide: no title image");
         return;
     }
@@ -540,6 +591,1086 @@ void session_text() {
     if (g.card) set_text(g.card, "credText", buf);
 }
 
+
+// ---- Frolick's list pages ------------------------------------------------
+// Quick Launch, Downloads and Game Storage are Frolick's own pages (sokky,
+// 2026-10-25): its Recent Games, Active Downloads and Saved Games, filled
+// here from what Frolick keeps on the hard disk, as Frolick's hub fills
+// them.  The hard disk's folders are named as the titles made them, so
+// paths are matched without case.
+
+// dir/name, its name as the folder spells it
+bool ci_path(const char* dir, const char* name, char* out, int n) {
+    DIR* d = opendir(dir);
+    if (!d) return false;
+    bool ok = false;
+    while (struct dirent* e = readdir(d))
+        if (!strcasecmp(e->d_name, name)) { snprintf(out, n, "%s/%s", dir, e->d_name); ok = true; break; }
+    closedir(d);
+    return ok;
+}
+
+// root + "a/b/c", each part matched without case
+bool ci_walk(const char* root, const char* rel, char* out, int n) {
+    if (!root) return false;
+    char cur[1024]; snprintf(cur, sizeof cur, "%s", root);
+    char part[256];
+    while (*rel) {
+        const char* sl = strchr(rel, '/');
+        int l = sl ? (int)(sl - rel) : (int)strlen(rel);
+        snprintf(part, sizeof part, "%.*s", l, rel);
+        char next[1024];
+        if (!ci_path(cur, part, next, sizeof next)) return false;
+        snprintf(cur, sizeof cur, "%s", next);
+        rel += l + (sl ? 1 : 0);
+    }
+    snprintf(out, n, "%s", cur);
+    return true;
+}
+
+char* read_file(const char* path, long* len) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return 0;
+    fseek(f, 0, SEEK_END); long l = ftell(f); fseek(f, 0, SEEK_SET);
+    if (l < 0 || l > (1 << 20)) { fclose(f); return 0; }
+    char* p = new char[l + 2];
+    l = (long)fread(p, 1, l, f);
+    p[l] = p[l + 1] = 0;
+    fclose(f);
+    if (len) *len = l;
+    return p;
+}
+
+// the next line of p (cut in place, its \r gone), or 0 at the end
+char* next_line(char** p) {
+    if (!*p || !**p) return 0;
+    char* line = *p;
+    char* nl = strchr(line, '\n');
+    if (nl) { *nl = 0; *p = nl + 1; } else *p = line + strlen(line);
+    int n = (int)strlen(line);
+    if (n && line[n - 1] == '\r') line[n - 1] = 0;
+    return line;
+}
+
+int split_tabs(char* s, char** f, int n) {
+    int k = 0;
+    f[k++] = s;
+    for (; *s && k < n; s++)
+        if (*s == '\t') { *s = 0; f[k++] = s + 1; }
+    return k;
+}
+
+void format_mb(char* out, int n, int mb) {
+    if (mb >= 1024) snprintf(out, n, "%d.%d GB", mb / 1024, (mb % 1024) * 10 / 1024);
+    else snprintf(out, n, "%d MB", mb);
+}
+
+unsigned rd32le(const unsigned char* p) { return p[0] | p[1] << 8 | p[2] << 16 | (unsigned)p[3] << 24; }
+
+// An XBE's title ID and name (its certificate), the name as ASCII.
+bool xbe_info(const char* path, ULONG* tid, char* name, int n) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return false;
+    unsigned char h[0x1000];
+    size_t got = fread(h, 1, sizeof h, f);
+    fclose(f);
+    if (got < 0x178 || memcmp(h, "XBEH", 4)) return false;
+    unsigned cert = rd32le(h + 0x118) - rd32le(h + 0x104);
+    if (cert + 0x5c > got) return false;
+    *tid = rd32le(h + cert + 8);
+    int k = 0;
+    for (int i = 0; i < 40 && k < n - 1; i++) {
+        unsigned c = h[cert + 0xc + 2 * i] | h[cert + 0xd + 2 * i] << 8;
+        if (!c) break;
+        name[k++] = c < 0x80 ? (char)c : '?';
+    }
+    name[k] = 0;
+    return true;
+}
+
+// An image for a row: a picture made from bgra under `name`, else the
+// Blades icon (Frolick's default for its rows).
+void row_image(char* out, int n, const char* name, unsigned char* px, int w, int h, const char* fallback) {
+    if (px && g.res.add(name, px, w, h)) {
+        snprintf(out, n, "%.*s.png", (int)strlen(name) - 4, name);
+    } else snprintf(out, n, "%s", fallback);
+    free(px);
+}
+
+// -- Quick Launch: Frolick's recently played games --------------------------
+// Frolick writes each launch's key at the top of its T:\recent.txt (the
+// dashboard title's TDATA): an XBE's title ID in hex (a cart's stub XBE
+// included).  Listed are the games those keys name that are here now, the
+// hard disk's E:\Games folders and the game card, newest first, the game
+// being played left out.
+struct Game { char name[96], ntdir[600], img[100]; const char* platform; };
+Game games[20]; int ngames;
+
+void scan_recent() {
+    ngames = 0;
+    const char* hdd = fs_hdd_root();
+    char path[1024];
+    if (!ci_walk(hdd, "partition1/TDATA/FFFE0000/recent.txt", path, sizeof path)) return;
+    char* text = read_file(path, 0);
+    if (!text) return;
+    // the games here: E:\Games\<folder>\default.xbe, and the card's
+    struct Here { ULONG tid; char name[96], ntdir[600], xbe[1024]; };
+    static Here here[64]; int nhere = 0;
+    char gdir[1024];
+    if (ci_walk(hdd, "partition1/Games", gdir, sizeof gdir)) {
+        if (DIR* d = opendir(gdir)) {
+            while (struct dirent* e = readdir(d)) {
+                if (e->d_name[0] == '.' || nhere == 64) continue;
+                char sub[1100]; snprintf(sub, sizeof sub, "%s/%s", gdir, e->d_name);
+                Here& h = here[nhere];
+                if (!ci_path(sub, "default.xbe", h.xbe, sizeof h.xbe) || !xbe_info(h.xbe, &h.tid, h.name, sizeof h.name)) continue;
+                if (!h.name[0]) snprintf(h.name, sizeof h.name, "%s", e->d_name);
+                snprintf(h.ntdir, sizeof h.ntdir, "\\Device\\Harddisk0\\Partition1\\%s\\%s", strrchr(gdir, '/') + 1, e->d_name);
+                nhere++;
+            }
+            closedir(d);
+        }
+    }
+    char card[1024];
+    if (fs_card_dir && nhere < 64 && fs_card_dir(card, sizeof card)) {
+        Here& h = here[nhere];
+        if (ci_path(card, "default.xbe", h.xbe, sizeof h.xbe) && xbe_info(h.xbe, &h.tid, h.name, sizeof h.name)) {
+            snprintf(h.ntdir, sizeof h.ntdir, "\\Device\\GameCard0");
+            nhere++;
+        }
+    }
+    char* p = text;
+    while (char* key = next_line(&p)) {
+        if (ngames == 20) break;
+        ULONG tid = (ULONG)strtoul(key, 0, 16);
+        if (!key[0] || tid == xbe_title_id()) continue;
+        for (int i = 0; i < nhere; i++) {
+            if (here[i].tid != tid) continue;
+            Game& gm = games[ngames++];
+            snprintf(gm.name, sizeof gm.name, "%s", here[i].name);
+            snprintf(gm.ntdir, sizeof gm.ntdir, "%s", here[i].ntdir);
+            // a Kazeta cart's stub XBE (a Windows card's, wincart.c, or a DS
+            // cart's in E:\Games, dstitle.py) has its .wincart beside it,
+            // naming the cart's runtime
+            char dir[1024], wc[1100]; snprintf(dir, sizeof dir, "%s", here[i].xbe);
+            if (char* sl = strrchr(dir, '/')) *sl = 0;
+            gm.platform = "Xbox";
+            if (ci_path(dir, ".wincart", wc, sizeof wc)) {
+                gm.platform = "Windows";
+                if (char* text = read_file(wc, 0)) {
+                    char* p = text;
+                    while (char* line = next_line(&p))
+                        if (!strncasecmp(line, "runtime=", 8) && !strncasecmp(line + 8, "nds", 3)) gm.platform = "Nintendo DS";
+                    delete[] text;
+                }
+            }
+            unsigned char* px = 0; int w = 0, h = 0;
+            char nm[64]; snprintf(nm, sizeof nm, "game_%08lx.xtx", (unsigned long)tid);
+            if (!xbe_image_read || !xbe_image_read(here[i].xbe, "$$XTIMAGE", &px, &w, &h)) px = 0;
+            row_image(gm.img, sizeof gm.img, nm, px, w, h, "frolick_ico_64x_games.png");
+            break;
+        }
+    }
+    delete[] text;
+}
+
+// -- Downloads: Frolick's download queue -----------------------------------
+// Frolick's Downloads node keeps the queue in E:\FROLICK\STORE\queue.txt,
+// the active download first ("q id go|pause bytes kind title"), and its
+// helper (frolick-store, running beside the game) reports in status.txt;
+// the page reads both, and A / X change the queue as Frolick's page does.
+// Streaming Downloads still coming in are listed too, as Frolick's page
+// lists them (its d00cfd0d, 240cc4f6): status.txt's "streaming id in
+// bytes 1|0|2 title" lines; the one filling (1), else a paused one (2), is
+// the active item when the queue has none, the others pend after the
+// queue.  Start Now, Pause / Resume and Remove on one go to the helper
+// through play.txt (f, z / r, x), its p line kept.
+struct Download { char id[96], name[128], kind[32]; long long bytes; int sizeMB; float doneMB; int state; };
+enum { DlPending, DlDownloading, DlPaused };
+Download dls[16]; int ndl;
+int dlOnline;              // -1 the helper isn't running
+char dlActiveState[16], dlActiveDetail[64];
+struct Stream { char id[96], name[128]; long long in, bytes; int fill; };  // fill: 0 pending, 1 filling, 2 paused
+Stream streams[16]; int nstreams;
+char streamFirst[96];          // Start Now on a stream, until the helper drops it
+char streamGone[16][96]; int nstreamGone;  // removed, until no longer listed
+struct PauseCmd { char id[96]; bool pause; };
+PauseCmd pauses[16]; int npauses;          // z / r, until the helper says
+
+bool store_path(const char* file, char* out, int n) {
+    char dir[1024];
+    if (!ci_walk(fs_hdd_root(), "partition1/FROLICK/STORE", dir, sizeof dir)) return false;
+    if (!ci_path(dir, file, out, n)) snprintf(out, n, "%s/%s", dir, file);
+    return true;
+}
+
+void save_play();
+
+void load_downloads() {
+    ndl = 0; nstreams = 0; dlOnline = -1; dlActiveState[0] = dlActiveDetail[0] = 0;
+    bool listed[16] = { false };  // removed streams the helper still lists
+    char path[1100];
+    char* text = store_path("queue.txt", path, sizeof path) ? read_file(path, 0) : 0;
+    if (text && strstr(text, "\nend")) {
+        char* p = text;
+        while (char* line = next_line(&p)) {
+            char* f[6];
+            if (strncmp(line, "q\t", 2) || ndl == 16 || split_tabs(line, f, 6) != 6) continue;
+            Download& d = dls[ndl];
+            memset(&d, 0, sizeof d);
+            snprintf(d.id, sizeof d.id, "%s", f[1]);
+            snprintf(d.kind, sizeof d.kind, "%s", f[4]);
+            snprintf(d.name, sizeof d.name, "%s", f[5]);
+            d.bytes = atoll(f[3]);
+            d.sizeMB = (int)(d.bytes / (1024 * 1024));
+            d.state = ndl == 0 ? (!strcmp(f[2], "pause") ? DlPaused : DlDownloading) : DlPending;
+            ndl++;
+        }
+    }
+    delete[] text;
+    // status.txt: the helper rewrites it every second
+    struct stat st;
+    text = store_path("status.txt", path, sizeof path) && !stat(path, &st) && time(0) - st.st_mtime < 10 ? read_file(path, 0) : 0;
+    if (text && strstr(text, "\nend")) {
+        char* p = text;
+        while (char* line = next_line(&p)) {
+            char* f[6];
+            int k = split_tabs(line, f, 6);
+            int i = -1;
+            if (k >= 2) for (int j = 0; j < ndl; j++) if (!strcmp(dls[j].id, f[1])) i = j;
+            if (!strcmp(f[0], "streaming") && k >= 6 && nstreams < 16) {
+                bool gone = false;
+                for (int r = 0; r < nstreamGone; r++)
+                    if (!strcmp(streamGone[r], f[1])) { gone = true; listed[r] = true; }
+                if (!gone) {
+                    Stream& sm = streams[nstreams++];
+                    snprintf(sm.id, sizeof sm.id, "%s", f[1]);
+                    sm.in = atoll(f[2]); sm.bytes = atoll(f[3]); sm.fill = atoi(f[4]);
+                    snprintf(sm.name, sizeof sm.name, "%s", f[5]);
+                }
+            }
+            else if (!strcmp(f[0], "online") && k >= 2) dlOnline = atoi(f[1]);
+            else if (!strcmp(f[0], "active") && k >= 5 && i >= 0) {
+                long long total = atoll(f[4]);
+                if (total > 0) { dls[i].bytes = total; dls[i].sizeMB = (int)(total / (1024 * 1024)); }
+                dls[i].doneMB = (float)(atoll(f[3]) / 1024) / 1024.0f;
+                if (i == 0) {
+                    snprintf(dlActiveState, sizeof dlActiveState, "%s", f[2]);
+                    if (k >= 6) snprintf(dlActiveDetail, sizeof dlActiveDetail, "%s", f[5]);
+                }
+            }
+            else if (!strcmp(f[0], "have") && k >= 3 && i >= 0) dls[i].doneMB = (float)(atoll(f[2]) / 1024) / 1024.0f;
+            else if (!strcmp(f[0], "done") && k >= 2 && i >= 0) {
+                // finished: Frolick moves it to its history when it next runs
+                memmove(&dls[i], &dls[i + 1], (ndl - i - 1) * sizeof dls[0]);
+                ndl--;
+                if (i == 0 && ndl && dls[0].state == DlPending) dls[0].state = DlDownloading;
+            }
+        }
+        // what the helper no longer lists is removed, or finished
+        int keep = 0;
+        for (int r = 0; r < nstreamGone; r++)
+            if (listed[r]) snprintf(streamGone[keep++], sizeof streamGone[0], "%s", streamGone[r]);
+        bool changed = keep != nstreamGone;
+        nstreamGone = keep;
+        if (streamFirst[0]) {
+            bool there = false;
+            for (int k = 0; k < nstreams; k++) there = there || !strcmp(streams[k].id, streamFirst);
+            if (!there) { streamFirst[0] = 0; changed = true; }
+            // until the helper says, the one asked for fills
+            else for (int k = 0; k < nstreams; k++) {
+                if (!strcmp(streams[k].id, streamFirst)) streams[k].fill = 1;
+                else if (streams[k].fill == 1) streams[k].fill = 0;
+            }
+        }
+        // a pause or resume the helper has carried out (or a game it dropped)
+        keep = 0;
+        for (int c = 0; c < npauses; c++) {
+            bool pending = false;
+            for (int k = 0; k < nstreams; k++) {
+                if (strcmp(streams[k].id, pauses[c].id)) continue;
+                pending = (streams[k].fill == 2) != pauses[c].pause;
+                if (pending) streams[k].fill = pauses[c].pause ? 2 : 0;  // shown as asked meanwhile
+            }
+            if (pending) pauses[keep++] = pauses[c];
+        }
+        if (keep != npauses) { npauses = keep; changed = true; }
+        if (changed) save_play();
+    }
+    delete[] text;
+}
+
+void save_downloads() {
+    char path[1100];
+    if (!store_path("queue.txt", path, sizeof path)) return;
+    FILE* f = fopen(path, "w");
+    if (!f) return;
+    fprintf(f, "frolick-queue 1\n");
+    for (int i = 0; i < ndl; i++)
+        fprintf(f, "q\t%s\t%s\t%lld\t%s\t%s\n", dls[i].id, dls[i].state == DlPaused ? "pause" : "go", dls[i].bytes, dls[i].kind, dls[i].name);
+    fprintf(f, "end\n");
+    fclose(f);
+}
+
+const char* dl_status(int i) {
+    if (dls[i].state == DlPaused) return "Paused";
+    if (dls[i].state == DlPending) return "Pending";
+    if (dlOnline < 0) return "Waiting";
+    if (!strcmp(dlActiveState, "nospace")) return "Not enough space";
+    if (!strcmp(dlActiveState, "error")) return "Retrying";
+    if (!strcmp(dlActiveState, "installing")) return "Installing";
+    return "Downloading";
+}
+
+void dl_detail(int i, char* out, int n) {
+    char size[24], done[24];
+    format_mb(size, sizeof size, dls[i].sizeMB);
+    if (i == 0 && dlActiveDetail[0] && dls[0].state == DlDownloading) snprintf(out, n, "%s", dlActiveDetail);
+    else if (dls[i].state == DlPending && dls[i].doneMB <= 0) snprintf(out, n, "%s", size);
+    else { format_mb(done, sizeof done, (int)dls[i].doneMB); snprintf(out, n, "%s of %s", done, size); }
+}
+
+// A pending item jumps the queue (the active one waits again at the top);
+// the active one pauses or resumes.
+void dl_start(int i) {
+    if (i < 0 || i >= ndl) return;
+    if (i == 0) dls[0].state = dls[0].state == DlDownloading ? DlPaused : DlDownloading;
+    else {
+        Download d = dls[i];
+        memmove(&dls[1], &dls[0], i * sizeof dls[0]);
+        dls[0] = d;
+        dls[0].state = DlDownloading;
+        dls[1].state = DlPending;
+    }
+    save_downloads();
+}
+
+void dl_remove(int i) {
+    if (i < 0 || i >= ndl) return;
+    memmove(&dls[i], &dls[i + 1], (ndl - i - 1) * sizeof dls[0]);
+    ndl--;
+    if (i == 0 && ndl && dls[0].state == DlPending) dls[0].state = DlDownloading;
+    save_downloads();
+}
+
+// The Guide's own line for a stream: its f, x, z or r.
+bool play_ours(const char* id) {
+    if (!strcmp(id, streamFirst)) return true;
+    for (int r = 0; r < nstreamGone; r++) if (!strcmp(id, streamGone[r])) return true;
+    for (int c = 0; c < npauses; c++) if (!strcmp(id, pauses[c].id)) return true;
+    return false;
+}
+
+// play.txt for the helper: the stream to fill first (f), the streams
+// removed (x), paused (z) and resumed (r).  The lines Frolick left (its p,
+// the game to play, and its commands for other streams) are kept.
+void save_play() {
+    char path[1100];
+    if (!store_path("play.txt", path, sizeof path)) return;
+    char kept[16][200]; int nkept = 0;
+    if (char* text = read_file(path, 0)) {
+        char* p = text;
+        while (char* line = next_line(&p)) {
+            if (nkept == 16 || strlen(line) < 3 || line[1] != '\t' || !strchr("pfxzr", line[0])) continue;
+            if (line[0] == 'f' ? streamFirst[0] != 0 : line[0] != 'p' && play_ours(line + 2)) continue;
+            snprintf(kept[nkept++], sizeof kept[0], "%s", line);
+        }
+        delete[] text;
+    }
+    char tmp[1110]; snprintf(tmp, sizeof tmp, "%s.new", path);
+    FILE* f = fopen(tmp, "w");
+    if (!f) return;
+    for (int k = 0; k < nkept; k++) fprintf(f, "%s\n", kept[k]);
+    if (streamFirst[0]) fprintf(f, "f\t%s\n", streamFirst);
+    for (int r = 0; r < nstreamGone; r++) fprintf(f, "x\t%s\n", streamGone[r]);
+    for (int c = 0; c < npauses; c++) fprintf(f, "%c\t%s\n", pauses[c].pause ? 'z' : 'r', pauses[c].id);
+    fprintf(f, "end\n");
+    fclose(f);
+    rename(tmp, path);
+}
+
+// The page's items, as Frolick lists them: the active one first (the
+// queue's, else the stream filling), then the queue, then the streams.
+// An item is a queue index (q >= 0) or a stream index (s >= 0).
+struct DlItem { int q, s; };
+bool queue_active() { return ndl && dls[0].state != DlPending; }
+int stream_active() {
+    if (queue_active()) return -1;
+    for (int k = 0; k < nstreams; k++) if (streams[k].fill == 1) return k;
+    // none fills while one is paused: the paused one is the active item
+    for (int k = 0; k < nstreams; k++) if (streams[k].fill == 2) return k;
+    return -1;
+}
+bool dl_has_active() { return queue_active() || stream_active() >= 0; }
+int dl_count() { return ndl + nstreams; }
+DlItem dl_item(int i) {
+    DlItem it = { -1, -1 };
+    int a = stream_active();
+    if (a >= 0) { if (i == 0) { it.s = a; return it; } i--; }
+    if (i >= 0 && i < ndl) { it.q = i; return it; }
+    i -= ndl;
+    for (int k = 0; k < nstreams; k++) {
+        if (k == a) continue;
+        if (i-- == 0) { it.s = k; return it; }
+    }
+    return it;
+}
+
+void dl_item_text(int i, char* name, int nn, char* line, int nl, const char** status, float* progress, bool* theme) {
+    DlItem it = dl_item(i);
+    *theme = false;
+    if (it.s >= 0) {
+        Stream& sm = streams[it.s];
+        char done[24], size[24];
+        format_mb(done, sizeof done, (int)(sm.in / (1024 * 1024)));
+        format_mb(size, sizeof size, (int)(sm.bytes / (1024 * 1024)));
+        snprintf(name, nn, "%s", sm.name);
+        snprintf(line, nl, "Streaming Download   %s of %s", done, size);
+        *status = sm.fill == 0 ? "Pending" : sm.fill == 2 ? "Paused" : dlOnline < 0 ? "Waiting" : sm.in >= sm.bytes ? "Checking" : "Downloading";
+        *progress = sm.bytes > 0 ? (float)((double)sm.in / (double)sm.bytes) : 0;
+        return;
+    }
+    int d = it.q < 0 ? 0 : it.q;
+    char detail[96];
+    dl_detail(d, detail, sizeof detail);
+    snprintf(name, nn, "%s", dls[d].name);
+    snprintf(line, nl, "%s   %s", dls[d].kind, detail);
+    *status = dl_status(d);
+    *progress = dls[d].sizeMB > 0 ? dls[d].doneMB / dls[d].sizeMB : 0;
+    *theme = !strcmp(dls[d].kind, "Theme");
+}
+
+// The helper is told to pause or resume a stream; the item shows it at once.
+void stream_pause(int k, bool pause) {
+    int c = 0;
+    while (c < npauses && strcmp(pauses[c].id, streams[k].id)) c++;
+    if (c == npauses) { if (npauses == 16) return; npauses++; }
+    snprintf(pauses[c].id, sizeof pauses[c].id, "%s", streams[k].id);
+    pauses[c].pause = pause;
+    streams[k].fill = pause ? 2 : 0;
+}
+
+// A on an item, as on Frolick's page: the active one pauses / resumes, a
+// pending one starts now (a paused stream resumes and fills first).
+// False when A does nothing.
+bool dl_press(int i) {
+    DlItem it = dl_item(i);
+    if (it.q >= 0) { dl_start(it.q); return true; }
+    if (it.s < 0) return false;
+    if (streams[it.s].fill == 1) {
+        stream_pause(it.s, true);
+        if (!strcmp(streamFirst, streams[it.s].id)) streamFirst[0] = 0;
+        save_play();
+        return true;
+    }
+    if (streams[it.s].fill == 2) stream_pause(it.s, false);
+    snprintf(streamFirst, sizeof streamFirst, "%s", streams[it.s].id);
+    for (int k = 0; k < nstreams; k++) {
+        if (k == it.s) streams[k].fill = 1;
+        else if (streams[k].fill == 1) streams[k].fill = 0;
+    }
+    save_play();
+    return true;
+}
+
+void dl_remove_item(int i) {
+    DlItem it = dl_item(i);
+    if (it.q >= 0) { dl_remove(it.q); return; }
+    if (it.s < 0 || nstreamGone == 16) return;
+    snprintf(streamGone[nstreamGone++], sizeof streamGone[0], "%s", streams[it.s].id);
+    if (!strcmp(streamFirst, streams[it.s].id)) streamFirst[0] = 0;
+    for (int c = 0; c < npauses; c++)
+        if (!strcmp(pauses[c].id, streams[it.s].id)) { pauses[c] = pauses[--npauses]; break; }
+    save_play();
+    memmove(&streams[it.s], &streams[it.s + 1], (nstreams - it.s - 1) * sizeof streams[0]);
+    nstreams--;
+}
+
+// -- Game Storage: the title's saved games ---------------------------------
+// E:\UDATA\<title id>\<save>: its name from SaveMeta.xbx, its picture from
+// SaveImage.xbx (else the title's TitleImage.xbx), "date, size" under it,
+// as Frolick's Saved Games page shows a title's saves.
+struct Save { char name[96], info[96], dir[1100], img[100]; };
+Save saves[48]; int nsaves;
+
+// Name= in a SaveMeta.xbx (UTF-16): the [en] section's, else the first.
+void save_name(const char* dir, char* out, int n) {
+    snprintf(out, n, "Broken Save");
+    char path[1200];
+    long len = 0;
+    char* raw = ci_path(dir, "SaveMeta.xbx", path, sizeof path) ? read_file(path, &len) : 0;
+    if (!raw) return;
+    char* a = new char[len / 2 + 2]; int k = 0;
+    for (long i = (len >= 2 && (unsigned char)raw[0] == 0xff) ? 2 : 0; i + 1 < len; i += 2) {
+        unsigned c = (unsigned char)raw[i] | (unsigned char)raw[i + 1] << 8;
+        a[k++] = c < 0x80 ? (char)c : '?';
+    }
+    a[k] = 0;
+    bool found = false, inEn = false;
+    char* p = a;
+    while (char* line = next_line(&p)) {
+        if (line[0] == '[') { inEn = !strncasecmp(line, "[en", 3); continue; }
+        if (strncasecmp(line, "Name=", 5)) continue;
+        if (!found || inEn) { snprintf(out, n, "%s", line + 5); found = true; }
+        if (inEn) break;
+    }
+    delete[] a; delete[] raw;
+}
+
+// bytes in 16 KB blocks, as the dashboard counts a save
+long long dir_blocks(const char* dir) {
+    long long b = 0;
+    DIR* d = opendir(dir);
+    if (!d) return 0;
+    while (struct dirent* e = readdir(d)) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        char p[1300]; snprintf(p, sizeof p, "%s/%s", dir, e->d_name);
+        struct stat st;
+        if (stat(p, &st)) continue;
+        if (S_ISDIR(st.st_mode)) b += dir_blocks(p);
+        else b += (st.st_size + 16383) / 16384 * 16384;
+    }
+    closedir(d);
+    return b;
+}
+
+void scan_saves() {
+    nsaves = 0;
+    char hex[16], tdir[1024];
+    snprintf(hex, sizeof hex, "%08lX", (unsigned long)xbe_title_id());
+    char rel[64]; snprintf(rel, sizeof rel, "partition1/UDATA/%s", hex);
+    if (!ci_walk(fs_hdd_root(), rel, tdir, sizeof tdir)) return;
+    char tpath[1100];
+    bool timg = ci_path(tdir, "TitleImage.xbx", tpath, sizeof tpath);
+    DIR* d = opendir(tdir);
+    if (!d) return;
+    while (struct dirent* e = readdir(d)) {
+        if (e->d_name[0] == '.' || nsaves == 48) continue;
+        Save& sv = saves[nsaves];
+        snprintf(sv.dir, sizeof sv.dir, "%s/%s", tdir, e->d_name);
+        struct stat st;
+        if (stat(sv.dir, &st) || !S_ISDIR(st.st_mode)) continue;
+        save_name(sv.dir, sv.name, sizeof sv.name);
+        char when[48];
+        struct tm lt; time_t mt = st.st_mtime; localtime_r(&mt, &lt);
+        int hr = lt.tm_hour % 12; if (!hr) hr = 12;
+        snprintf(when, sizeof when, "%d/%d/%d %d:%02d %s", lt.tm_mon + 1, lt.tm_mday, lt.tm_year + 1900, hr, lt.tm_min, lt.tm_hour < 12 ? "AM" : "PM");
+        long long kb = dir_blocks(sv.dir) / 1024;
+        if (kb >= 1024) snprintf(sv.info, sizeof sv.info, "%s, %lld.%lld MB", when, kb / 1024, kb % 1024 * 10 / 1024);
+        else snprintf(sv.info, sizeof sv.info, "%s, %lld KB", when, kb);
+        unsigned char* px = 0; int w = 0, h = 0;
+        char ipath[1300], nm[64];
+        unsigned hash = 5381; for (const char* c = sv.dir; *c; c++) hash = hash * 33 + (unsigned char)*c;
+        snprintf(nm, sizeof nm, "save_%08x.xtx", hash);
+        if (!xpr_image_read || !((ci_path(sv.dir, "SaveImage.xbx", ipath, sizeof ipath) && xpr_image_read(ipath, &px, &w, &h)) ||
+                                 (timg && xpr_image_read(tpath, &px, &w, &h)))) px = 0;
+        row_image(sv.img, sizeof sv.img, nm, px, w, h, "frolick_ico_64x_games.png");
+        nsaves++;
+    }
+    closedir(d);
+}
+
+bool remove_tree(const char* path) {
+    struct stat st;
+    if (lstat(path, &st)) return false;
+    if (S_ISDIR(st.st_mode)) {
+        DIR* d = opendir(path);
+        if (!d) return false;
+        while (struct dirent* e = readdir(d)) {
+            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+            char p[1300]; snprintf(p, sizeof p, "%s/%s", path, e->d_name);
+            remove_tree(p);
+        }
+        closedir(d);
+        return rmdir(path) == 0;
+    }
+    return unlink(path) == 0;
+}
+
+// -- Controller Configuration: this game's controller layout -----------------
+// Per-game remapping in Steam Input's shape (src/input/padmap.h), on the
+// Blades list rows Game Storage uses.  The main page lists the layout and
+// one row per part of the pad (sticks, D-pad, buttons, triggers) with what
+// it does; A on a part opens it: its mode, then a row per input or setting.
+// A on a binding picks what it does in the game from a list, Y opens its
+// long press, double press, turbo and toggle; A or Left / Right step a
+// setting.  B on the main page asks to save the layout for this game
+// (<hdd>/../input/<title id>/), which the pads then use at once.
+enum { CfgMain, CfgSource, CfgPick, CfgBind };
+enum { RowLayout, RowSource, RowReset, RowMode, RowOutput, RowDeadzone, RowSensitivity, RowCurve, RowInvertY,
+       RowInvertX, RowThreshold, RowBinding, RowTemplate, RowTarget, RowAct, RowTurbo, RowToggle, RowClear };
+struct CfgRow { char name[64], info[96]; int kind, arg; };
+struct CfgPage { CfgRow rows[96]; int n; };
+CfgPage cfgPages[4];
+padmap_profile cfgProf;     // what the pages edit (the active preset)
+bool cfgDirty, cfgHave;
+int cfgPreset;              // the preset edited (the first)
+int cfgSrc;                 // the source page's part of the pad
+int cfgSlot;                // the binding being edited (a slot of cfgSrc)
+int cfgAct;                 // ... and which of its activators the pick list sets
+int cfgPickFor;             // what the pick list is for: CfgMain (templates) or CfgBind / CfgSource (targets)
+uint16_t cfgTargets[160]; int ncfgTargets;
+
+bool cfg_windows() { return !xbe_file_path; }
+pm_source& cfg_source() { return cfgProf.preset[cfgPreset].src[cfgSrc]; }
+
+// What a binding does, as the game sees it: an Xbox game's bumpers are its
+// White and Black buttons.
+const char* cfg_target_label(uint16_t t) {
+    if (!cfg_windows() && PM_TKIND(t) == PM_T_BUTTON) {
+        if (PM_TCODE(t) == PM_LB) return "White";
+        if (PM_TCODE(t) == PM_RB) return "Black";
+    }
+    if (!cfg_windows() && t == PM_TARGET(PM_T_AXIS, PM_AX_LT)) return "Left Trigger";
+    return padmap_target_label(t);
+}
+
+void cfg_bind_text(const pm_bind& b, const char* unset, char* out, int n) {
+    if (!b.set) { snprintf(out, n, "%s", unset); return; }
+    int k = snprintf(out, n, "%s", cfg_target_label(b.target[PM_ACT_PRESS]));
+    if (b.target[PM_ACT_LONG] && k < n) k += snprintf(out + k, n - k, ", hold: %s", cfg_target_label(b.target[PM_ACT_LONG]));
+    if (b.target[PM_ACT_DOUBLE] && k < n) k += snprintf(out + k, n - k, ", double: %s", cfg_target_label(b.target[PM_ACT_DOUBLE]));
+    if (b.turbo_hz && k < n) k += snprintf(out + k, n - k, ", turbo");
+    if (b.toggle && k < n) snprintf(out + k, n - k, ", toggle");
+}
+
+const char* cfg_pct(float f) { static char b[4][16]; static int i; char* o = b[i++ & 3]; snprintf(o, 16, "%d%%", (int)(f * 100 + 0.5f)); return o; }
+
+// The main page's line for a part of the pad.
+void cfg_source_text(int src, char* out, int n) {
+    const pm_source& s = cfgProf.preset[cfgPreset].src[src];
+    switch (s.mode) {
+    case PM_MODE_PASS: snprintf(out, n, "Default"); return;
+    case PM_MODE_OFF: snprintf(out, n, "Off"); return;
+    case PM_MODE_JOYSTICK:
+        if (src == PM_SRC_DPAD) snprintf(out, n, "Joystick: %s", s.output ? "Right Stick" : "Left Stick");
+        else snprintf(out, n, "Joystick%s%s", (int)s.output != (src == PM_SRC_RSTICK) ? (s.output ? ": Right Stick" : ": Left Stick") : "",
+                      s.invert_y ? ", inverted" : "");
+        return;
+    case PM_MODE_MOUSE: snprintf(out, n, "Mouse"); return;
+    case PM_MODE_TRIGGER: snprintf(out, n, "Trigger%s", (int)s.output != (src == PM_SRC_RTRIG) ? (s.output ? ": Right Trigger" : ": Left Trigger") : ""); return;
+    case PM_MODE_BUTTON: { char b[80]; cfg_bind_text(s.bind[0], "None", b, sizeof b); snprintf(out, n, "Button: %s", b); return; }
+    case PM_MODE_DPAD: {
+        int k = snprintf(out, n, "D-pad:");
+        for (int d = 0; d < 4 && k < n; d++)
+            k += snprintf(out + k, n - k, "%s %s", d ? "," : "", s.bind[d].set ? cfg_target_label(s.bind[d].target[0]) : "-");
+        return;
+    }
+    case PM_MODE_BUTTONS: {
+        int changed = 0, k = 0;
+        out[0] = 0;
+        for (int b = 0; b < PM_NBTN; b++) {
+            if (!s.bind[b].set) continue;
+            if (++changed <= 3 && k < n)
+                k += snprintf(out + k, n - k, "%s%s: %s", changed > 1 ? ", " : "", padmap_button_label(b), cfg_target_label(s.bind[b].target[0]));
+        }
+        if (!changed) snprintf(out, n, "Default");
+        else if (changed > 3 && k < n) snprintf(out + k, n - k, " ...");
+        return;
+    }
+    }
+    snprintf(out, n, "%s", padmap_mode_label(s.mode));
+}
+
+void cfg_add(CfgPage& p, int kind, int arg, const char* name, const char* info) {
+    if (p.n >= (int)(sizeof p.rows / sizeof p.rows[0])) return;
+    CfgRow& r = p.rows[p.n++];
+    r.kind = kind; r.arg = arg;
+    snprintf(r.name, sizeof r.name, "%s", name);
+    snprintf(r.info, sizeof r.info, "%s", info ? info : "");
+}
+
+void cfg_build_main() {
+    CfgPage& p = cfgPages[CfgMain]; p.n = 0;
+    char b[96];
+    snprintf(b, sizeof b, "%s%s", cfgProf.name, cfgDirty ? " (not saved)" : "");
+    cfg_add(p, RowLayout, 0, "Layout", b);
+    for (int s = 0; s < PM_NSRC; s++) { cfg_source_text(s, b, sizeof b); cfg_add(p, RowSource, s, padmap_source_label(s), b); }
+    cfg_add(p, RowReset, 0, "Reset", "The game's own controls");
+}
+
+void cfg_build_source() {
+    CfgPage& p = cfgPages[CfgSource]; p.n = 0;
+    const pm_source& s = cfg_source();
+    char b[96];
+    cfg_add(p, RowMode, 0, "Mode", padmap_mode_label(s.mode));
+    static const char* dirs[4] = { "Up", "Down", "Left", "Right" };
+    bool stick = cfgSrc == PM_SRC_LSTICK || cfgSrc == PM_SRC_RSTICK;
+    switch (s.mode) {
+    case PM_MODE_JOYSTICK:
+        cfg_add(p, RowOutput, 0, "Moves", s.output ? "Right Stick" : "Left Stick");
+        // fall through
+    case PM_MODE_MOUSE:
+        if (cfgSrc != PM_SRC_DPAD) cfg_add(p, RowDeadzone, 0, "Deadzone", cfg_pct(s.deadzone));
+        cfg_add(p, RowSensitivity, 0, "Sensitivity", cfg_pct(s.sensitivity));
+        if (cfgSrc != PM_SRC_DPAD) cfg_add(p, RowCurve, 0, "Response Curve", s.curve < 0.9f ? "Fast" : s.curve > 1.6f ? "Very Slow Start" : s.curve > 1.1f ? "Slow Start" : "Linear");
+        cfg_add(p, RowInvertY, 0, "Invert Up/Down", s.invert_y ? "On" : "Off");
+        cfg_add(p, RowInvertX, 0, "Invert Left/Right", s.invert_x ? "On" : "Off");
+        break;
+    case PM_MODE_DPAD:
+        for (int d = 0; d < 4; d++) {
+            char dflt[32]; snprintf(dflt, sizeof dflt, "%s", stick ? "None" : padmap_button_label(PM_DPAD_UP + d));
+            cfg_bind_text(s.bind[d], dflt, b, sizeof b);
+            cfg_add(p, RowBinding, d, dirs[d], b);
+        }
+        if (stick) cfg_add(p, RowThreshold, 0, "Push Needed", cfg_pct(s.threshold));
+        break;
+    case PM_MODE_BUTTONS:
+        for (int i = 0; i < PM_NBTN; i++) {
+            if (i == PM_GUIDE || (i >= PM_DPAD_UP && i <= PM_DPAD_RIGHT)) continue;
+            uint16_t same = PM_TARGET(PM_T_BUTTON, i);
+            cfg_bind_text(s.bind[i], i >= PM_MISC ? "None" : cfg_target_label(same), b, sizeof b);
+            cfg_add(p, RowBinding, i, padmap_button_label(i), b);
+        }
+        break;
+    case PM_MODE_TRIGGER:
+        cfg_add(p, RowOutput, 0, "Moves", s.output ? "Right Trigger" : "Left Trigger");
+        cfg_add(p, RowDeadzone, 0, "Deadzone", cfg_pct(s.deadzone));
+        cfg_add(p, RowSensitivity, 0, "Sensitivity", cfg_pct(s.sensitivity));
+        cfg_bind_text(s.bind[0], "None", b, sizeof b);
+        cfg_add(p, RowBinding, 0, "Full Pull", b);
+        cfg_add(p, RowThreshold, 0, "Full Pull Point", cfg_pct(s.threshold));
+        break;
+    case PM_MODE_BUTTON:
+        cfg_bind_text(s.bind[0], "None", b, sizeof b);
+        cfg_add(p, RowBinding, 0, "Pull", b);
+        cfg_add(p, RowThreshold, 0, "Pull Needed", cfg_pct(s.threshold));
+        break;
+    default: break;
+    }
+}
+
+const char* cfg_slot_name() {
+    static const char* dirs[4] = { "Up", "Down", "Left", "Right" };
+    const pm_source& s = cfg_source();
+    if (s.mode == PM_MODE_BUTTONS) return padmap_button_label(cfgSlot);
+    if (s.mode == PM_MODE_DPAD) return dirs[cfgSlot & 3];
+    return s.mode == PM_MODE_TRIGGER ? "Full Pull" : "Pull";
+}
+
+void cfg_build_bind() {
+    CfgPage& p = cfgPages[CfgBind]; p.n = 0;
+    pm_bind& b = cfg_source().bind[cfgSlot];
+    static const char* acts[PM_NACT] = { "Press", "Hold", "Double Press" };
+    for (int a = 0; a < PM_NACT; a++)
+        cfg_add(p, RowAct, a, acts[a], b.set || a ? cfg_target_label(b.target[a]) : "Default");
+    char t[32];
+    if (b.turbo_hz) snprintf(t, sizeof t, "%d a second", b.turbo_hz); else snprintf(t, sizeof t, "Off");
+    cfg_add(p, RowTurbo, 0, "Turbo", t);
+    cfg_add(p, RowToggle, 0, "Toggle", b.toggle ? "On" : "Off");
+    cfg_add(p, RowClear, 0, "Clear", "Back to the default");
+}
+
+// The pick list: templates, or what a binding can do in this game.
+void cfg_build_pick() {
+    CfgPage& p = cfgPages[CfgPick]; p.n = 0;
+    bool win = cfg_windows();
+    if (cfgPickFor == CfgMain) {
+        static const struct { const char* name; const char* info; } about[] = {
+            { "Standard", "The game's own controls" }, { "Southpaw", "Sticks swapped" },
+            { "Inverted Look", "Right stick up looks down" }, { "Nintendo Layout", "A and B, X and Y swapped" },
+            { "Bumpers as Triggers", "Bumpers and triggers swapped" }, { "Keyboard and Mouse", "WASD, the right stick moves the mouse" },
+        };
+        for (int i = 0; i < padmap_template_count(win); i++) {
+            const char* nm = padmap_template_name(i, win), *info = "";
+            for (unsigned k = 0; k < sizeof about / sizeof *about; k++) if (!strcmp(about[k].name, nm)) info = about[k].info;
+            cfg_add(p, RowTemplate, i, nm, info);
+        }
+        return;
+    }
+    ncfgTargets = 0;
+    cfgTargets[ncfgTargets++] = 0;
+    static const int btns[] = { PM_A, PM_B, PM_X, PM_Y, PM_LB, PM_RB, PM_BACK, PM_START, PM_LTHUMB, PM_RTHUMB,
+                                PM_DPAD_UP, PM_DPAD_DOWN, PM_DPAD_LEFT, PM_DPAD_RIGHT };
+    for (unsigned i = 0; i < sizeof btns / sizeof *btns; i++) cfgTargets[ncfgTargets++] = PM_TARGET(PM_T_BUTTON, btns[i]);
+    for (int a = 0; a < PM_NAX; a++) cfgTargets[ncfgTargets++] = PM_TARGET(PM_T_AXIS, a);
+    if (cfgProf.npresets > 1) cfgTargets[ncfgTargets++] = PM_TARGET(PM_T_PRESET, PM_PRESET_NEXT);
+    if (win) {
+        for (int m = PM_MS_LEFT; m <= PM_MS_WHEEL_DOWN; m++) cfgTargets[ncfgTargets++] = PM_TARGET(PM_T_MOUSE, m);
+        static const char* keys[] = { "space", "enter", "esc", "tab", "backspace", "lshift", "lctrl", "lalt", "up", "down", "left", "right",
+            "w", "a", "s", "d", "q", "e", "r", "f", "c", "x", "z", "v", "b", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "t", "u", "y",
+            "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11", "f12",
+            "rshift", "rctrl", "ralt", "capslock", "minus", "equal", "comma", "dot", "slash", "semicolon", "apostrophe",
+            "leftbrace", "rightbrace", "backslash", "grave", "insert", "delete", "home", "end", "pageup", "pagedown" };
+        for (unsigned i = 0; i < sizeof keys / sizeof *keys && ncfgTargets < (int)(sizeof cfgTargets / sizeof *cfgTargets); i++) {
+            char k[24]; snprintf(k, sizeof k, "key:%s", keys[i]);
+            uint16_t t; if (padmap_target_parse(&cfgProf, k, &t)) cfgTargets[ncfgTargets++] = t;
+        }
+    }
+    for (int i = 0; i < ncfgTargets; i++) {
+        uint16_t t = cfgTargets[i];
+        const char* kind = "";
+        switch (PM_TKIND(t)) {
+        case PM_T_NONE: kind = "Does nothing"; break;
+        case PM_T_BUTTON: kind = PM_TCODE(t) >= PM_DPAD_UP && PM_TCODE(t) <= PM_DPAD_RIGHT ? "D-pad" : "Button"; break;
+        case PM_T_AXIS: kind = PM_TCODE(t) >= PM_AX_LT ? "Trigger, pulled all the way" : "Stick, pushed all the way"; break;
+        case PM_T_KEY: kind = "Keyboard"; break;
+        case PM_T_MOUSE: kind = "Mouse"; break;
+        case PM_T_PRESET: kind = "Switches to the next layout"; break;
+        }
+        cfg_add(p, RowTarget, i, cfg_target_label(t), kind);
+    }
+}
+
+void cfg_build(int page) {
+    if (page == CfgMain) cfg_build_main();
+    else if (page == CfgSource) cfg_build_source();
+    else if (page == CfgBind) cfg_build_bind();
+    else cfg_build_pick();
+}
+
+// Opening: the layout of the pad that opened the Guide.
+bool cfg_begin() {
+    if (!xinput_padmap_get) return false;
+    char fam[32];
+    if (!xinput_padmap_get(g.port, &cfgProf, fam, sizeof fam)) return false;
+    cfgPreset = 0;
+    cfgDirty = false;
+    cfgHave = true;
+    return true;
+}
+
+void cfg_changed() {
+    cfgDirty = true;
+    // an edited template is the player's own
+    for (int i = 0; i < padmap_template_count(true); i++)
+        if (!strcmp(cfgProf.name, padmap_template_name(i, true))) { snprintf(cfgProf.name, sizeof cfgProf.name, "Custom"); break; }
+}
+
+bool cfg_save() {
+    char dir[1024];
+    if (!xinput_padmap_dir || !xinput_padmap_dir(dir, sizeof dir)) return false;
+    // (Standard is saved too: it keeps this game on its own controls even
+    // when a default layout for every game is set)
+    bool ok = padmap_save_title(&cfgProf, dir, (uint32_t)xbe_title_id());
+    xlog("Guide: layout \"%s\" %s for %08lX in %s", cfgProf.name, ok ? "saved" : "NOT saved", (unsigned long)xbe_title_id(), dir);
+    if (ok && xinput_padmap_reload) xinput_padmap_reload();
+    cfgDirty = !ok;
+    return ok;
+}
+
+// Steps a setting (A, or Left / Right); true when it changed.
+bool cfg_adjust(const CfgRow& r, int dir) {
+    pm_source& s = cfg_source();
+    switch (r.kind) {
+    case RowMode: {
+        uint8_t modes[PM_NMODES];
+        int n = padmap_source_modes(cfgSrc, modes, PM_NMODES), i = 0;
+        if (!cfg_windows()) {   // no mouse for an Xbox game
+            int k = 0;
+            for (int j = 0; j < n; j++) if (modes[j] != PM_MODE_MOUSE) modes[k++] = modes[j];
+            n = k;
+        }
+        while (i < n && modes[i] != s.mode) i++;
+        i = ((i + dir) % n + n) % n;
+        padmap_source_init(&s, cfgSrc, modes[i]);
+        break;
+    }
+    case RowOutput: s.output ^= 1; break;
+    case RowDeadzone: { float v = s.deadzone + 0.05f * dir; s.deadzone = v < 0 ? 0 : v > 0.5f ? 0.5f : v; break; }
+    case RowSensitivity: { float v = s.sensitivity + 0.1f * dir; s.sensitivity = v < 0.3f ? 0.3f : v > 3 ? 3 : v; break; }
+    case RowCurve: {
+        static const float curves[] = { 0.7f, 1.0f, 1.5f, 2.0f };
+        int i = 0; while (i < 3 && curves[i] < s.curve - 0.01f) i++;
+        i += dir; i = i < 0 ? 0 : i > 3 ? 3 : i;
+        s.curve = curves[i];
+        break;
+    }
+    case RowInvertY: s.invert_y = !s.invert_y; break;
+    case RowInvertX: s.invert_x = !s.invert_x; break;
+    case RowThreshold: { float v = s.threshold + 0.05f * dir; s.threshold = v < 0.1f ? 0.1f : v > 1 ? 1 : v; break; }
+    case RowTurbo: {
+        pm_bind& b = s.bind[cfgSlot];
+        int v = b.turbo_hz + 5 * dir; b.turbo_hz = (uint8_t)(v < 0 ? 0 : v > 20 ? 20 : v);
+        if (b.turbo_hz && !b.set) { b.set = true; if (!b.target[0] && s.mode == PM_MODE_BUTTONS) b.target[0] = PM_TARGET(PM_T_BUTTON, cfgSlot); }
+        break;
+    }
+    case RowToggle: {
+        pm_bind& b = s.bind[cfgSlot];
+        b.toggle = !b.toggle;
+        if (!b.set) { b.set = true; if (s.mode == PM_MODE_BUTTONS) b.target[0] = PM_TARGET(PM_T_BUTTON, cfgSlot); }
+        break;
+    }
+    default: return false;
+    }
+    cfg_changed();
+    return true;
+}
+
+// -- the pages -------------------------------------------------------------
+// Each is a Blades list of six rows (Downloads five, the active one on top
+// under "Active", the queue under "Pending"); sel is the item with the
+// focus, scroll the first one showing.
+struct List { int rows, count, scroll, sel; };
+List lRecent = { 6, 0, 0, 0 }, lDownloads = { 5, 0, 0, 0 }, lSaves = { 5, 0, 0, 0 };
+// the confirm page's question and what Yes does
+enum { AskNone, AskDeleteSave, AskRemoveDownload, AskSaveLayout };
+int ask; xui::Scene* askFrom;
+char askId[96];  // the download asked about
+// Controller Configuration's pages: Game Storage's list, four times
+xui::Scene* cfgScene[4];
+// (five rows: the sixth would sit under the page's "1 of N")
+List lCfg[4] = { { 5, 0, 0, 0 }, { 5, 0, 0, 0 }, { 5, 0, 0, 0 }, { 5, 0, 0, 0 } };
+
+int cfg_page_of(xui::Scene* m) {
+    for (int i = 0; i < 4; i++) if (m && m == cfgScene[i]) return i;
+    return -1;
+}
+
+List* list_of(xui::Scene* m) {
+    int c = cfg_page_of(m);
+    if (c >= 0) return &lCfg[c];
+    return m == g.recent ? &lRecent : m == g.downloads ? &lDownloads : m == g.saves ? &lSaves : 0;
+}
+
+// Downloads: row 0 is the active download, hidden when there is none
+int dl_off() { return dl_has_active() ? 0 : 1; }
+
+void row_id(char* out, int n, int r) { snprintf(out, n, "list_items_%d", r); }
+
+void fill_row(xui::Scene* m, int r, int i) {
+    char id[32], sub[48]; row_id(id, sizeof id, r);
+    snprintf(sub, sizeof sub, "%s_icon", id);
+    if (m == g.downloads) {
+        int d = r - dl_off();
+        bool on = d >= 0 && d < dl_count();
+        set_show(m, id, on);
+        if (!on) return;
+        char name[128], line[160]; const char* status; float f; bool theme;
+        dl_item_text(d, name, sizeof name, line, sizeof line, &status, &f, &theme);
+        set_text(m, id, name);
+        set_str(m, id, "Data1", line);
+        set_str(m, id, "Data3", status);
+        set_image(m, sub, theme ? "frolick_ico_64x_Themes.png" : "frolick_ico_64x_GameDownloads.png");
+        char bar[48]; snprintf(bar, sizeof bar, "%s_bar", id);
+        set_show(m, bar, d == 0 && dl_has_active());
+        if (xui::Node* b = m->find(bar)) {
+            xui::Value& v = b->props.set("Value"); v.free(); v.type = xui::TFloat; v.f = f < 0 ? 0 : f > 1 ? 1 : f;
+            b->setBarValue();
+        }
+        return;
+    }
+    List* l = list_of(m);
+    set_show(m, id, i < l->count);
+    if (i >= l->count) return;
+    int c = cfg_page_of(m);
+    if (c >= 0) {
+        const CfgRow& row = cfgPages[c].rows[i];
+        set_text(m, id, row.name);
+        set_str(m, id, "Data1", row.info);
+        set_image(m, sub, "ico_64x_controller.png");
+    } else if (m == g.recent) {
+        set_text(m, id, games[i].name);
+        set_str(m, id, "Data1", games[i].platform);
+        set_image(m, sub, games[i].img);
+    } else {
+        set_text(m, id, saves[i].name);
+        set_str(m, id, "Data1", saves[i].info);
+        set_image(m, sub, saves[i].img);
+    }
+}
+
+void set_legend(const char* id, const char* text);
+
+// the prompts for the focused item
+void list_legends() {
+    List* l = list_of(g.menu);
+    if (!l) l = &lRecent;  // the confirm page
+    const char* a = 0, *x = 0, *y = 0;
+    if (g.menu == g.recent && l->count) a = guide_launch ? "Play" : 0;
+    else if (g.menu == g.saves && l->count) y = "Delete";  // Frolick's Y
+    else if (g.menu == g.downloads && dl_count() && l->sel - dl_off() >= 0) {
+        DlItem it = dl_item(l->sel - dl_off());
+        if (it.q == 0 && queue_active()) a = dls[0].state == DlPaused ? "Resume" : "Pause";
+        else if (it.s >= 0 && streams[it.s].fill == 1) a = "Pause";
+        else if (it.s >= 0 && streams[it.s].fill == 2) a = "Resume";
+        else if (it.q >= 0 || it.s >= 0) a = "Start Now";
+        x = "Remove";
+    }
+    else if (g.menu == g.confirm) a = "Select";
+    else if (cfg_page_of(g.menu) >= 0 && l->sel < l->count) {
+        int c = cfg_page_of(g.menu);
+        const CfgRow& r = cfgPages[c].rows[l->sel];
+        bool step = r.kind >= RowMode && r.kind <= RowThreshold ? true : r.kind == RowTurbo || r.kind == RowToggle;
+        a = step ? "Change" : "Select";
+        if (c == CfgMain) x = "Save";
+        if (r.kind == RowBinding) y = "Advanced";
+    }
+    set_legend("Legend_A", a);
+    set_legend("Legend_X", x);
+    set_legend("Legend_Y", y);
+}
+
+void fill_list(xui::Scene* m) {
+    List* l = list_of(m);
+    if (!l) return;
+    if (m == g.downloads) {
+        l->count = dl_count() + dl_off(); if (l->count > l->rows) l->count = l->rows;
+        if (l->sel < dl_off()) l->sel = dl_off();
+        if (l->sel >= l->count) l->sel = l->count - 1;
+        l->scroll = 0;
+    } else {
+        if (l->sel >= l->count) l->sel = l->count - 1;
+        if (l->sel < 0) l->sel = 0;
+        if (l->sel < l->scroll) l->scroll = l->sel;
+        if (l->sel >= l->scroll + l->rows) l->scroll = l->sel - l->rows + 1;
+    }
+    for (int r = 0; r < l->rows; r++) fill_row(m, r, l->scroll + r);
+    for (int r = l->rows; r < 8; r++) { char id[32]; row_id(id, sizeof id, r); set_show(m, id, false); }
+    bool empty = m == g.downloads ? dl_count() == 0 : l->count == 0;
+    set_show(m, "txt_EmptyList", empty);
+    char total[32] = "";
+    if (m == g.downloads) {
+        if (dl_count() && l->sel - dl_off() >= 0) snprintf(total, sizeof total, "%d of %d", l->sel - dl_off() + 1, dl_count());
+        else if (dl_count()) snprintf(total, sizeof total, "%d waiting", dl_count());
+    } else if (l->count) snprintf(total, sizeof total, "%d of %d", l->sel + 1, l->count);
+    set_text(m, "labTotal", total);
+    char id[32]; row_id(id, sizeof id, l->sel - l->scroll);
+    m->setFocus(empty ? 0 : m->find(id));
+    if (m == g.menu) list_legends();
+}
+
+// up / down on a list page; true when the focus moved
+bool list_move(int dir) {
+    List* l = list_of(g.menu);
+    int lo = g.menu == g.downloads ? dl_off() : 0;
+    int s = l->sel + dir;
+    if (s < lo || s >= l->count) return false;
+    l->sel = s;
+    fill_list(g.menu);
+    return true;
+}
+
+// Controller Configuration: (re)builds a page and shows it, the focus on
+// item sel (-1: where it was).
+void open_page(xui::Scene* m, const char* focus);
+void cfg_show(int page, int sel, bool open) {
+    xui::Scene* m = cfgScene[page];
+    cfg_build(page);
+    List& l = lCfg[page];
+    l.count = cfgPages[page].n;
+    if (sel >= 0) { l.sel = sel; if (open) l.scroll = 0; }
+    static const char* const heads[4] = { "Controller Configuration", 0, "Choose", 0 };
+    char h[96];
+    if (page == CfgSource) snprintf(h, sizeof h, "%s", padmap_source_label(cfgSrc));
+    else if (page == CfgBind) snprintf(h, sizeof h, "%s: %s", padmap_source_label(cfgSrc), cfg_slot_name());
+    else if (page == CfgPick && cfgPickFor == CfgMain) snprintf(h, sizeof h, "Layouts");
+    else if (page == CfgPick) snprintf(h, sizeof h, "%s: %s", cfgPickFor == CfgBind && cfgAct ? (cfgAct == PM_ACT_LONG ? "Hold" : "Double Press") : "Press", cfg_slot_name());
+    else snprintf(h, sizeof h, "%s", heads[page]);
+    set_text(m, "txt_Header", h); set_text(m, "labHeader", h);
+    if (open) open_page(m, 0);
+    else fill_list(m);
+}
+
+// Frolick's page as a Guide page: its slate band and its own prompts go
+// (the frame has its own), the header names the Guide's row.
+void page_dress(xui::Scene* m, const char* header) {
+    hide_drawn(m, "body");
+    static const char* legends[] = { "legend_A", "legend_B", "legend_X", "legend_Y", "legend_a", "legend_b", "legend_x", "legend_y" };
+    for (unsigned i = 0; i < sizeof legends / sizeof legends[0]; i++) set_show(m, legends[i], false);
+    if (header) { set_text(m, "txt_Header", header); set_text(m, "labHeader", header); }
+}
+
 void show_menu(xui::Scene* m, const char* focus);
 
 // Shows a home tab: the strip plays its switch, the tab's page comes up.
@@ -590,6 +1721,11 @@ bool load() {
     g.gameSkinEl = g.gameEl ? g.res.scene("GuideGameSkin.xui", err, sizeof err) : 0;
     if (!g.gameSkinEl) { xlog("Guide: off, scene load failed: %s", err); return false; }
     g.cardEl = g.res.scene("GuideCard.xui", err, sizeof err);  // optional
+    // Frolick's list pages (optional: the rows they're behind stay inactive)
+    g.recentEl = g.res.scene("GuideRecent.xui", err, sizeof err);
+    g.downloadsEl = g.res.scene("GuideDownloads.xui", err, sizeof err);
+    g.savesEl = g.res.scene("GuideSaves.xui", err, sizeof err);
+    g.confirmEl = g.res.scene("GuideConfirm.xui", err, sizeof err);
     g.started = now_s();
     {
         time_t t = time(0); struct tm lt; localtime_r(&t, &lt);
@@ -619,6 +1755,12 @@ bool load() {
     g.game = new xui::Scene(g.gameEl, g.gameSkinEl);
     g.tabs = new xui::Scene(g.tabsEl, g.tabsSkinEl);
     g.tabs->setFocus(0);
+    if (g.recentEl) page_dress(g.recent = new xui::Scene(g.recentEl, g.gameSkinEl), "Quick Launch");
+    if (g.downloadsEl) page_dress(g.downloads = new xui::Scene(g.downloadsEl, g.gameSkinEl), "Downloads");
+    if (g.savesEl) page_dress(g.saves = new xui::Scene(g.savesEl, g.gameSkinEl), "Game Storage");
+    if (g.confirmEl) page_dress(g.confirm = new xui::Scene(g.confirmEl, g.gameSkinEl), 0);
+    if (g.savesEl && xinput_padmap_get)
+        for (int i = 0; i < 4; i++) page_dress(cfgScene[i] = new xui::Scene(g.savesEl, g.gameSkinEl), "Controller Configuration");
     g.strip = g.tabs->find("tabStrip");
     nrows = 0;
     collect_rows(g.main->root, false); collect_rows(g.settings->root, false);
@@ -630,7 +1772,7 @@ bool load() {
     rest_visual(g.frame, "Legend_A");
     rest_visual(g.frame, "Legend_B");
     rest_visual(g.frame, "Legend_Y");
-    hide_drawn(g.frame, "Legend_X");
+    rest_visual(g.frame, "Legend_X");
     hide_drawn(g.frame, "CloseX");          // the PC Guide's mouse close box
     hide_drawn(g.frame, "EvaluationTextId");
     set_text(g.frame, "GamerTag", "Player");
@@ -784,13 +1926,21 @@ void settings_text() {
 }
 
 // The frame's legend for the page showing: A and B as the page's own
-// hidden legend buttons say (GFWL copies them the same way), Y always.
+// hidden legend buttons say (GFWL copies them the same way).  A prompt
+// with nothing to do stays as the 360 shows it: the grey disabled button
+// (its visual's NormalDisable frame), without a label (sokky).
 void set_legend(const char* id, const char* text) {
     xui::Node* n = g.frame->find(id);
     if (!n) return;
     xui::Node* t = n->visual ? n->visual : n;
-    xui::Value& v = t->props.set("Opacity"); v.free(); v.type = xui::TFloat; v.f = text ? 1 : 0;
-    if (text) set_text(g.frame, id, text);
+    xui::Value& v = t->props.set("Opacity"); v.free(); v.type = xui::TFloat; v.f = 1;
+    if (text) {
+        rest_visual(g.frame, id);
+        set_text(g.frame, id, text);
+    } else {
+        set_text(g.frame, id, "");
+        if (n->visual && n->visual->play("NormalDisable")) n->visual->playing = false;
+    }
 }
 
 const char* page_legend(xui::Scene* m, const char* a, const char* b) {
@@ -808,6 +1958,43 @@ void show_menu(xui::Scene* m, const char* focus) {
     set_legend("Legend_B", back && back[0] ? back : "Back");
     // Y leaves for the Dashboard from the top screen only, not sub menus (sokky)
     set_legend("Legend_Y", m == g.main || m == g.settings ? "Xbox Dashboard" : 0);
+    set_legend("Legend_X", 0);
+    if (list_of(m) || m == g.confirm) list_legends();
+}
+
+// Opens one of Frolick's pages: the frame opens out to the Blades' width
+// (from the home), the page plays its Open.
+void open_page(xui::Scene* m, const char* focus) {
+    if (!g.full) { g.full = true; g.hud->play("HalfToFull"); }
+    show_menu(m, focus);
+    if (list_of(m)) fill_list(m);
+    if (xui::Node* pg = m->find("page")) pg->play("Open");
+}
+
+void ask_confirm(int what, const char* question) {
+    ask = what;
+    askFrom = g.menu;
+    set_text(g.confirm, "labHeader", question);
+    open_page(g.confirm, "btnNo");
+}
+
+// Back from a page: where it was opened from
+void page_back() {
+    xui::Scene* m = g.menu;
+    if (m == g.confirm) { ask = AskNone; open_page(askFrom, 0); if (list_of(askFrom)) fill_list(askFrom); return; }
+    if (m == g.saves) { show_menu(g.game, "btnManageGameFiles"); return; }
+    int c = cfg_page_of(m);
+    if (c == CfgPick) { cfg_show(cfgPickFor, -1, true); return; }
+    if (c == CfgBind) { cfg_show(CfgSource, -1, true); return; }
+    if (c == CfgSource) { cfg_show(CfgMain, -1, true); return; }
+    if (c == CfgMain) {
+        if (cfgDirty) { ask_confirm(AskSaveLayout, "Save this layout for this game?"); return; }
+        show_menu(g.game, "btnViewAchievements");
+        return;
+    }
+    g.full = false;
+    g.hud->play("FullToHalf");
+    show_menu(g.main, m == g.recent ? "btnBlank1" : m == g.downloads ? "btnQuickChat" : "ctlGamerCard");
 }
 
 void open_guide() {
@@ -838,6 +2025,71 @@ void leave() {
     ds_set_duck(0.0f);
 }
 
+// The bindings' defaults: a button as itself, the D-pad's directions as theirs.
+uint16_t cfg_default_target() {
+    const pm_source& s = cfg_source();
+    if (s.mode == PM_MODE_BUTTONS) return PM_TARGET(PM_T_BUTTON, cfgSlot);
+    if (s.mode == PM_MODE_DPAD && cfgSrc == PM_SRC_DPAD) return PM_TARGET(PM_T_BUTTON, PM_DPAD_UP + (cfgSlot & 3));
+    return 0;
+}
+
+// A on a Controller Configuration row.
+bool cfg_press(int page, const CfgRow& r) {
+    switch (r.kind) {
+    case RowLayout: {
+        cfgPickFor = CfgMain;
+        int cur = 0;
+        for (int i = 0; i < padmap_template_count(cfg_windows()); i++)
+            if (!strcmp(cfgProf.name, padmap_template_name(i, cfg_windows()))) cur = i;
+        cfg_show(CfgPick, cur, true);
+        return true;
+    }
+    case RowSource: cfgSrc = r.arg; cfg_show(CfgSource, 0, true); return true;
+    case RowReset:
+        padmap_profile_init(&cfgProf, "Standard");
+        cfgPreset = 0; cfgDirty = true;
+        cfg_show(CfgMain, -1, false);
+        return true;
+    case RowBinding:
+    case RowAct: {
+        if (r.kind == RowBinding) { cfgSlot = r.arg; cfgAct = PM_ACT_PRESS; cfgPickFor = CfgSource; }
+        else { cfgAct = r.arg; cfgPickFor = CfgBind; }
+        cfg_build_pick();
+        const pm_bind& b = cfg_source().bind[cfgSlot];
+        uint16_t cur = b.set ? b.target[cfgAct] : cfgAct ? 0 : cfg_default_target();
+        int sel = 0;
+        for (int i = 0; i < ncfgTargets; i++) if (cfgTargets[i] == cur) sel = i;
+        cfg_show(CfgPick, sel, true);
+        return true;
+    }
+    case RowTemplate: {
+        padmap_template(&cfgProf, r.arg, cfg_windows());
+        cfgPreset = 0; cfgDirty = true;
+        cfg_show(CfgMain, 0, true);
+        return true;
+    }
+    case RowTarget: {
+        pm_bind& b = cfg_source().bind[cfgSlot];
+        if (!b.set) { b.set = true; b.target[0] = cfg_default_target(); }
+        b.target[cfgAct] = cfgTargets[r.arg];
+        cfg_changed();
+        cfg_show(cfgPickFor, -1, true);
+        return true;
+    }
+    case RowClear: {
+        pm_bind& b = cfg_source().bind[cfgSlot];
+        memset(&b, 0, sizeof b);
+        cfg_changed();
+        cfg_show(CfgSource, -1, true);
+        return true;
+    }
+    default:
+        if (!cfg_adjust(r, 1)) return false;
+        cfg_show(page, -1, false);
+        return true;
+    }
+}
+
 // A on a control; true when it did something (the select sound), false for
 // a row with nothing behind it yet (the inactive sound).
 bool press(const char* id) {
@@ -849,10 +2101,69 @@ bool press(const char* id) {
         show_menu(g.game, "btnViewAchievements");
         if (xui::Node* pg = g.game->find("page")) pg->play("Open");
     }
-    else if (!strcmp(id, "btnViewAchievements")) return false;  // Controller Configuration: not here yet
-    else if (!strcmp(id, "btnManageGameFiles")) return false;  // Game Storage: not here yet
+    else if (!strcmp(id, "btnViewAchievements")) {  // Controller Configuration
+        if (!cfgScene[0] || !cfg_begin()) return false;
+        cfg_show(CfgMain, 0, true);
+    }
+    else if (!strcmp(id, "btnManageGameFiles")) {  // Game Storage: Frolick's Saved Games
+        if (!g.saves) return false;
+        scan_saves(); lSaves.count = nsaves; lSaves.sel = lSaves.scroll = 0;
+        open_page(g.saves, 0);
+    }
     else if (!strcmp(id, "btnOptions")) leave();  // Exit Game
-    else if (!strcmp(id, "btnBlank1") || !strcmp(id, "btnQuickChat")) return false;  // Quick Launch, Downloads
+    else if (!strcmp(id, "btnBlank1")) {  // Quick Launch: Frolick's Recent Games
+        if (!g.recent) return false;
+        scan_recent(); lRecent.count = ngames; lRecent.sel = lRecent.scroll = 0;
+        open_page(g.recent, 0);
+    }
+    else if (!strcmp(id, "btnQuickChat")) {  // Downloads: Frolick's Active Downloads
+        if (!g.downloads) return false;
+        load_downloads(); lDownloads.sel = 0;
+        open_page(g.downloads, 0);
+    }
+    else if (!strncmp(id, "list_items_", 11)) {
+        List* l = list_of(g.menu);
+        if (!l || l->sel >= l->count) return false;
+        if (g.menu == g.recent) {
+            if (!guide_launch) return false;
+            xlog("Guide: Quick Launch %s", games[l->sel].name);
+            leave();
+            g.launchDir = games[l->sel].ntdir;
+        }
+        else if (g.menu == g.downloads) {
+            if (!dl_press(l->sel - dl_off())) return false;
+            fill_list(g.downloads);
+        }
+        else if (cfg_page_of(g.menu) >= 0) return cfg_press(cfg_page_of(g.menu), cfgPages[cfg_page_of(g.menu)].rows[l->sel]);
+        else return false;  // a save: Y deletes it
+    }
+    else if (!strcmp(id, "btnYes") || !strcmp(id, "btnNo")) {
+        bool yes = id[3] == 'Y';
+        if (yes && ask == AskDeleteSave && lSaves.sel < nsaves) {
+            xlog("Guide: delete save %s", saves[lSaves.sel].dir);
+            remove_tree(saves[lSaves.sel].dir);
+            scan_saves(); lSaves.count = nsaves;
+            game_page();  // its saved games count
+        }
+        if (ask == AskSaveLayout) {
+            // Yes saves it, No leaves the saved one as it was; either way out
+            if (yes && !cfg_save()) xlog("Guide: the layout wasn't saved");
+            cfgDirty = false;
+            ask = AskNone;
+            show_menu(g.game, "btnViewAchievements");
+            return true;
+        }
+        if (yes && ask == AskRemoveDownload) {
+            // the item asked about, wherever it is now
+            load_downloads();
+            for (int i = 0; i < dl_count(); i++) {
+                DlItem it = dl_item(i);
+                const char* did = it.q >= 0 ? dls[it.q].id : it.s >= 0 ? streams[it.s].id : "";
+                if (!strcmp(did, askId)) { dl_remove_item(i); break; }
+            }
+        }
+        page_back();
+    }
     else if (!strcmp(id, "btnOnlineStatus")) { settings_text(); show_menu(g.volume, "sliderVolume"); }
     else if (!strcmp(id, "btnVoice")) { settings_text(); show_menu(g.vibration, "chkVibration"); }
     else if (!strcmp(id, "chkVibration")) {
@@ -884,11 +2195,7 @@ void step(double t) {
         bool home = g.menu == g.main || g.menu == g.settings;
         if ((down & GUIDE_B) && !home && !toggle) {
             play(SndBack);
-            if (g.menu == g.game) {
-                g.full = false;
-                g.hud->play("FullToHalf");
-                show_menu(g.main, "ctlGamerCard");
-            }
+            if (g.menu == g.game || list_of(g.menu) || g.menu == g.confirm) page_back();
             else show_menu(g.settings, g.menu == g.volume ? "btnOnlineStatus" : "btnVoice");
             break;
         }
@@ -906,12 +2213,48 @@ void step(double t) {
             }
             break;
         }
+        int cp = cfg_page_of(g.menu);
+        if (cp >= 0 && (b & (GUIDE_LEFT | GUIDE_RIGHT))) {
+            List& l = lCfg[cp];
+            if (((down & (GUIDE_LEFT | GUIDE_RIGHT)) || t >= g.repeatAt) && l.sel < l.count) {
+                if (cfg_adjust(cfgPages[cp].rows[l.sel], (b & GUIDE_RIGHT) ? 1 : -1)) { cfg_show(cp, -1, false); play(SndFocus); }
+                g.repeatAt = t + ((down & (GUIDE_LEFT | GUIDE_RIGHT)) ? 0.4 : 0.12);
+            }
+            break;
+        }
+        if (cp == CfgMain && (down & GUIDE_X)) {
+            play(cfg_save() ? SndSelect : SndInactive);
+            cfg_show(CfgMain, -1, false);
+            break;
+        }
+        if (cp == CfgSource && (down & GUIDE_Y) && lCfg[cp].sel < lCfg[cp].count && cfgPages[cp].rows[lCfg[cp].sel].kind == RowBinding) {
+            play(SndSelect);
+            cfgSlot = cfgPages[cp].rows[lCfg[cp].sel].arg;
+            cfg_show(CfgBind, 0, true);
+            break;
+        }
         if (home && (down & (GUIDE_LT | GUIDE_RT | GUIDE_LEFT | GUIDE_RIGHT))) {
             int t = (down & (GUIDE_RT | GUIDE_RIGHT)) ? 1 : 0;
             if (t != g.tab) { play(SndTab); show_tab(t, true); }
             break;
         }
         if ((down & GUIDE_Y) && home) { leave(); break; }
+        if ((down & GUIDE_Y) && g.menu == g.saves && lSaves.sel < nsaves) {  // Delete, as Frolick's Y
+            play(SndSelect);
+            char q[160]; snprintf(q, sizeof q, "Delete %s?", saves[lSaves.sel].name);
+            ask_confirm(AskDeleteSave, q);
+            break;
+        }
+        if ((down & GUIDE_X) && g.menu == g.downloads && dl_count() && lDownloads.sel - dl_off() >= 0) {
+            play(SndSelect);
+            DlItem it = dl_item(lDownloads.sel - dl_off());
+            const char* name = it.q >= 0 ? dls[it.q].name : it.s >= 0 ? streams[it.s].name : "";
+            snprintf(askId, sizeof askId, "%s", it.q >= 0 ? dls[it.q].id : it.s >= 0 ? streams[it.s].id : "");
+            // a Streaming Download's game goes with it (Frolick's Remove)
+            char q[200]; snprintf(q, sizeof q, it.s >= 0 ? "Remove %s and delete its game?" : "Remove %s from Downloads?", name);
+            ask_confirm(AskRemoveDownload, q);
+            break;
+        }
         if (down & GUIDE_A) {
             if (g.menu->focus && g.menu != g.volume) {
                 const char* id = g.menu->focus->id();
@@ -922,7 +2265,9 @@ void step(double t) {
         }
         if (b & (GUIDE_UP | GUIDE_DOWN)) {
             if ((down & (GUIDE_UP | GUIDE_DOWN)) || t >= g.repeatAt) {
-                if (g.menu->navigate((b & GUIDE_UP) ? "up" : "down")) play(SndFocus);
+                bool moved = list_of(g.menu) ? list_move((b & GUIDE_UP) ? -1 : 1)
+                                             : g.menu->navigate((b & GUIDE_UP) ? "up" : "down");
+                if (moved) play(SndFocus);
                 g.repeatAt = t + ((down & (GUIDE_UP | GUIDE_DOWN)) ? 0.4 : 0.12);
             }
         }
@@ -932,7 +2277,10 @@ void step(double t) {
         if (!g.hud->playing) g.state = Closed;
         break;
     case Leaving:
-        if (t >= g.leaveAt) reset_request_always("Guide");
+        if (t >= g.leaveAt) {
+            if (g.launchDir && guide_launch) guide_launch(g.launchDir, "default.xbe");
+            reset_request_always("Guide");
+        }
         break;
     case Off:
         break;
@@ -960,6 +2308,11 @@ bool guide_frame(int w, int h) {
     g.lastTime = t;
     step(t);
     if (g.state == Closed) return false;
+    if (g.menu == g.downloads && t - g.listedAt >= 1) {  // the helper's progress, once a second
+        g.listedAt = t;
+        load_downloads();
+        fill_list(g.downloads);
+    }
     { static const char* dbg = getenv("XBCOMPAT_GUIDE_DEBUG"); if (dbg && strstr(dbg, "nodraw")) return false; }
     g.frame->update(dt);
     g.menu->update(dt);
@@ -1089,8 +2442,8 @@ static void narrow_frame(float n) {
 // panel's edges: GFWL sets them in from the edges by about as much as the
 // narrowing.)
 void fit_legends(float l, float t, float r, float b) {
-    // (X is never drawn.  A prompt a page hides still counts, so the
-    // others don't jump between pages.)
+    // (Every prompt shows, greyed when it has nothing to do; X follows Y
+    // below.)
     static const char* ids[] = { "Legend_A", "Legend_B", "Legend_Y" };
     xui::Node* nd[3]; float bx[3], by[3]; int side[3];
     float dx[2] = {0, 0}, dy[2] = {0, 0};
@@ -1112,6 +2465,17 @@ void fit_legends(float l, float t, float r, float b) {
         if (!nd[i]) continue;
         offset(nd[i], 'x', dx[side[i]]);
         offset(nd[i], 'y', dy[side[i]]);
+    }
+    // X: the scene leaves it low on its own on the full-width pages; it
+    // goes in Y's column on B's row, over Y as B is over A (where the half
+    // view's own layout has it).
+    xui::Node* x = g.frame->find("Legend_X");
+    if (x && nd[2]) {
+        xui::Node* yv = nd[2]->visual ? nd[2]->visual : nd[2];
+        bool yOn = xui::propF(yv->props, "Opacity", 1) > 0;
+        float rowStep = nd[0] && nd[1] ? by[0] - by[1] : 28;
+        offset(x, 'x', bx[2] + dx[side[2]] - base_of(x, 'x'));
+        offset(x, 'y', by[2] + dy[side[2]] - (yOn ? rowStep : 0) - base_of(x, 'y'));
     }
 }
 
@@ -1165,7 +2529,7 @@ void guide_draw(int w, int h) {
     g.r->textZoom = h <= 576 && zoom > 0 ? zoom : 1;
     // Frolick's page is sized for Frolick's screen already (its text at
     // Frolick's size at this scale)
-    if (g.menu == g.game) g.r->textZoom = 1;
+    if (is_page(g.menu)) g.r->textZoom = 1;
     narrow_frame(n);
     fit_legends(cw * 0.1f, ch * 0.1f, cw * 0.9f, ch * 0.9f);
     float fx = 0, fy = 0;
@@ -1188,7 +2552,12 @@ void guide_draw(int w, int h) {
     }
     if (host && shown && op > 0.001f) {
         xui::Value& o = g.menu->root->props.set("Opacity"); o.free(); o.type = xui::TFloat; o.f = op;
+        // Frolick's list pages with Frolick's own baseline (the font's ascent):
+        // their two-line rows and bars are packed to it
+        float ae = g.r->ascentEm;
+        if (list_of(g.menu) || g.menu == g.confirm) g.r->ascentEm = 0;
         g.r->draw(g.menu, fx + hx * s, fy + hy * s, s * hs);
+        g.r->ascentEm = ae;
         xui::Node* slot = g.menu == g.main && g.card ? g.main->find("ctlGamerCard") : 0;
         if (slot && xui::propB(slot->props, "Show", true)) {
             xui::Vec3 z = {0, 0, 0};

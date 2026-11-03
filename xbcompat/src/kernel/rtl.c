@@ -4,6 +4,9 @@
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
+#include <unistd.h>
+#include <time.h>
 
 #include "../xbcompat.h"
 #include "../cpu.h"
@@ -587,6 +590,144 @@ void NTAPI RtlRaiseException(EXCEPTION_RECORD *rec)
     }
     fatal("unhandled guest exception %#x at %p", rec->ExceptionCode, rec->ExceptionAddress);
 }
+
+#ifdef XBC_NATIVE
+/* Hardware faults in guest code reach the title's SEH handlers, as the
+   console's trap handler sends them: main.c's signal handler calls
+   rtl_redirect_fault, which leaves an exception record and an Xbox CONTEXT
+   on the faulting thread's stack and resumes the thread in fault_entry.
+   Serious Sam pages its archive in this way, from a handler that commits
+   the page and continues. */
+#include <ucontext.h>
+
+typedef struct {
+    ULONG ContextFlags;
+    uint8_t FloatSave[516];           /* fxsave image + Cr0NpxState */
+    ULONG Edi, Esi, Ebx, Edx, Ecx, Eax, Ebp, Eip, SegCs, EFlags, Esp, SegSs;
+} XCONTEXT;
+_Static_assert(sizeof(XCONTEXT) == 0x238, "Xbox CONTEXT");
+
+struct fault_frame {
+    uint8_t *fx;                      /* +0: fault_entry saves the FPU here */
+    int sig;
+    ULONG addr;
+    EXCEPTION_RECORD rec;
+    XCONTEXT ctx;
+    uint8_t fxbuf[512 + 16];
+};
+
+void fault_entry(void);
+void fault_resume(XCONTEXT *ctx, uint8_t *fx) __attribute__((noreturn));
+__asm__(
+    ".text\n"
+    ".globl fault_entry\n"
+    "fault_entry:\n"                  /* esp: [0] a null return address, [4] frame */
+    "    movl 4(%esp), %eax\n"
+    "    movl (%eax), %eax\n"
+    "    fxsave (%eax)\n"
+    "    jmp fault_dispatch\n"
+    ".globl fault_resume\n"
+    "fault_resume:\n"                 /* [4] ctx, [8] fx */
+    "    movl 8(%esp), %eax\n"
+    "    fxrstor (%eax)\n"
+    "    movl 4(%esp), %eax\n"
+    "    movl 0x230(%eax), %ecx\n"    /* Esp: build eax, eflags, eip below it */
+    "    subl $12, %ecx\n"
+    "    movl 0x21C(%eax), %edx\n"
+    "    movl %edx, 0(%ecx)\n"
+    "    movl 0x22C(%eax), %edx\n"
+    "    movl %edx, 4(%ecx)\n"
+    "    movl 0x224(%eax), %edx\n"
+    "    movl %edx, 8(%ecx)\n"
+    "    movl 0x208(%eax), %edi\n"
+    "    movl 0x20C(%eax), %esi\n"
+    "    movl 0x210(%eax), %ebx\n"
+    "    movl 0x220(%eax), %ebp\n"
+    "    movl 0x214(%eax), %edx\n"
+    "    movl %ecx, %esp\n"
+    "    movl 0x218(%eax), %ecx\n"
+    "    popl %eax\n"
+    "    popfl\n"
+    "    ret\n");
+
+static void fault_report(const struct fault_frame *f)
+{
+    const XCONTEXT *c = &f->ctx;
+    xlog("fatal signal %d (%s) at eip=%08x accessing %#x (no guest handler took it)", f->sig, strsignal(f->sig),
+         c->Eip, f->addr);
+    xlog("  eax=%08x ebx=%08x ecx=%08x edx=%08x esi=%08x edi=%08x ebp=%08x esp=%08x",
+         c->Eax, c->Ebx, c->Ecx, c->Edx, c->Esi, c->Edi, c->Ebp, c->Esp);
+    const ULONG *sp = (const ULONG *)c->Esp;
+    xlog("  stack: %08x %08x %08x %08x %08x %08x %08x %08x", sp[0], sp[1], sp[2], sp[3], sp[4], sp[5],
+         sp[6], sp[7]);
+    /* Return addresses near the top of the stack, for the call chain. */
+    char buf[256]; int n = 0;
+    for (int i = 0; i < 256 && n < (int)sizeof(buf) - 12; i++)
+        if (sp[i] >= 0x10000 && sp[i] < 0x04000000) n += snprintf(buf + n, sizeof(buf) - n, " %x", sp[i]);
+    xlog("  stack words that look like code:%s", buf);
+}
+
+void __attribute__((used, force_align_arg_pointer, noreturn)) fault_dispatch(struct fault_frame *f)
+{
+    memcpy(f->ctx.FloatSave, f->fx, 512);
+    for (REGISTRATION *r = seh_head(); r && r != END_OF_CHAIN; r = r->Next) {
+        PVOID dispatcher = NULL;
+        ULONG disp = CALL_HANDLER(r, &f->rec, &f->ctx, &dispatcher);
+        if (disp == 0 /* ExceptionContinueExecution */) {
+            memcpy(f->fx, f->ctx.FloatSave, 512);
+            fault_resume(&f->ctx, f->fx);
+        }
+    }
+    fault_report(f);
+    _exit(128 + f->sig);
+}
+
+bool rtl_redirect_fault(void *ucontext, int sig, ULONG code, ULONG addr, ULONG write)
+{
+    greg_t *r = ((ucontext_t *)ucontext)->uc_mcontext.gregs;
+    /* A handler that continues without fixing the fault would spin here:
+       the same fault back to back, well under a millisecond apart.  (Serious
+       Sam takes the same fault once per file it opens, with work between.) */
+    static __thread ULONG last_eip, last_addr, repeats;
+    static __thread int64_t last_ns;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    int64_t now = ts.tv_sec * 1000000000LL + ts.tv_nsec;
+    if ((ULONG)r[REG_EIP] == last_eip && addr == last_addr && now - last_ns < 1000000) {
+        if (++repeats > 1000) return false;
+    } else {
+        last_eip = r[REG_EIP]; last_addr = addr; repeats = 0;
+    }
+    last_ns = now;
+    static unsigned logged;
+    if (logged < 16 || !(logged % 1000))
+        xlog("guest exception %#x at eip=%08x accessing %#x: to the title's handlers", code, (ULONG)r[REG_EIP], addr);
+    logged++;
+    uintptr_t sp = ((uintptr_t)r[REG_ESP] - 64 - sizeof(struct fault_frame)) & ~(uintptr_t)15;
+    struct fault_frame *f = (struct fault_frame *)sp;
+    memset(f, 0, sizeof(*f));
+    f->fx = (uint8_t *)(((uintptr_t)f->fxbuf + 15) & ~(uintptr_t)15);
+    f->sig = sig; f->addr = addr;
+    f->rec.ExceptionCode = code;
+    f->rec.ExceptionAddress = (PVOID)r[REG_EIP];
+    if (code == 0xC0000005) {
+        f->rec.NumberParameters = 2;
+        f->rec.ExceptionInformation[0] = write;
+        f->rec.ExceptionInformation[1] = addr;
+    }
+    XCONTEXT *c = &f->ctx;
+    c->ContextFlags = 0x1000F;        /* CONTEXT_FULL | CONTEXT_FLOATING_POINT */
+    c->Edi = r[REG_EDI]; c->Esi = r[REG_ESI]; c->Ebx = r[REG_EBX]; c->Edx = r[REG_EDX];
+    c->Ecx = r[REG_ECX]; c->Eax = r[REG_EAX]; c->Ebp = r[REG_EBP]; c->Eip = r[REG_EIP];
+    c->SegCs = r[REG_CS]; c->EFlags = r[REG_EFL]; c->Esp = r[REG_ESP]; c->SegSs = r[REG_SS];
+    ULONG *args = (ULONG *)(sp - 8);
+    args[0] = 0; args[1] = (ULONG)f;
+    r[REG_ESP] = (greg_t)args;
+    r[REG_EIP] = (greg_t)fault_entry;
+    r[REG_EFL] &= ~0x500;             /* TF, DF */
+    return true;
+}
+#endif
 
 void NTAPI RtlRaiseStatus(NTSTATUS st)
 {

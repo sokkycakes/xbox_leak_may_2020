@@ -7,12 +7,22 @@
 // open, the way xbcompat masks a title's XInput.  Y in the Guide ("Xbox
 // Dashboard") exits with status 42; the cart runner then ends the title.
 //
+// Quick Launch (another game from the Guide) goes through the dashboard: see
+// guide_launch.  Game Storage and Quick Launch read their pictures with
+// xbcompat's own src/xbeimage.c, built in on its own (XBEIMAGE_HOST).
+//
 // Environment: DISPLAY (gamescope's Xwayland), XBCOMPAT_GUIDE_DIR (the Guide's
 // scenes), XBCOMPAT_HDD (for the shared <hdd>/.guide settings), KAZETA_TITLE_ID
 // (hex), KAZETA_TITLE_NAME and KAZETA_TITLE_ICON (the cart's PNG icon, for the
 // game box and Now Playing), KAZETA_VOLUME_CMD (run with a linear gain, 0 to
 // 1, to set the title's volume), KAZETA_SOUND_PCM (ALSA PCM for the Guide's
 // sounds), KAZETA_NO_UINPUT=1 to leave the pads to the title.
+//
+// Controller Configuration: each real pad goes through its layout for this
+// title (xbcompat's src/input/padmap, the same files and the same
+// <hdd>/../input/<title id>/ layouts as xbcompat) before it reaches the
+// virtual pad; a layout's keys and mouse go to a second uinput device, made
+// the first time a layout uses them.
 #define SDL_VIDEO_DRIVER_X11 1
 #include <SDL.h>
 #include <SDL_syswm.h>
@@ -44,6 +54,8 @@
 #pragma GCC diagnostic ignored "-Wunused-function"
 #include "stb_image.h"
 #pragma GCC diagnostic pop
+
+#include "input/padmap.h"
 
 extern "C" {
 typedef unsigned long ULONG;
@@ -124,6 +136,20 @@ extern "C" void reset_request_always(const char *why)
 {
     xlog("leaving to the dashboard (%s)", why);
     leave_ = 1;
+}
+
+// The Guide's Quick Launch: the title to start goes to <hdd>/.guidelaunch
+// ("<D: target>;<xbe>"); the Guide then leaves for the dashboard as Y does,
+// and the dashboard's xbcompat starts that title in its place.
+extern "C" void guide_launch(const char *nt_dir, const char *xbe)
+{
+    char path[1024];
+    snprintf(path, sizeof path, "%s/.guidelaunch", fs_hdd_root());
+    FILE *f = fopen(path, "w");
+    if (!f) { xlog("Quick Launch: cannot write %s", path); return; }
+    fprintf(f, "%s;%s\n", nt_dir, xbe);
+    fclose(f);
+    xlog("Quick Launch %s;%s", nt_dir, xbe);
 }
 
 // ---- sound -----------------------------------------------------------------
@@ -234,6 +260,58 @@ static bool masked_, vibration_ = true;
 static int ui_ = -1;
 
 static char ui_node_[64];  // our uinput pad's /dev/input/eventN
+static padmap *pm_[PORTS];  // each pad's layout (Controller Configuration)
+
+static const char *pad_family(SDL_GameController *c)
+{
+    switch (SDL_GameControllerGetType(c)) {
+    case SDL_CONTROLLER_TYPE_XBOX360: case SDL_CONTROLLER_TYPE_XBOXONE: return "xbox";
+    case SDL_CONTROLLER_TYPE_PS3: case SDL_CONTROLLER_TYPE_PS4: case SDL_CONTROLLER_TYPE_PS5: return "playstation";
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_PRO:
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_LEFT:
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT:
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_PAIR: return "switch";
+    default: return "other";
+    }
+}
+
+extern "C" bool xinput_padmap_dir(char *dir, size_t size) { return padmap_dir(dir, size, fs_hdd_root()); }
+
+// The pad's layout: none (0) when it changes nothing.
+static void load_layout(int i)
+{
+    if (pm_[i]) { padmap_free(pm_[i]); pm_[i] = 0; }
+    if (!pads_[i]) return;
+    padmap_profile p;
+    char dir[1024], from[1024] = "";
+    const char *forced = getenv("XBCOMPAT_PADMAP");
+    if (forced && *forced) {
+        char err[160];
+        if (!padmap_load_file(&p, forced, err, sizeof err)) xlog("layout: %s", err);
+        snprintf(from, sizeof from, "%s", forced);
+    } else if (!xinput_padmap_dir(dir, sizeof dir) ||
+               !padmap_load_title(&p, dir, (uint32_t)xbe_title_id(), pad_family(pads_[i]), from, sizeof from))
+        return;
+    if (padmap_profile_is_identity(&p)) return;
+    pm_[i] = padmap_new(&p);
+    xlog("pad %d: layout \"%s\" (%s)", i + 1, p.name, from);
+}
+
+extern "C" bool xinput_padmap_get(int port, padmap_profile *out, char *family, size_t familysize)
+{
+    if (port < 0 || port >= PORTS) port = 0;
+    if (family && familysize) snprintf(family, familysize, "%s", pads_[port] ? pad_family(pads_[port]) : "xbox");
+    if (pm_[port]) { *out = *padmap_get_profile(pm_[port]); return true; }
+    char dir[1024];
+    if (!xinput_padmap_dir(dir, sizeof dir)) { padmap_profile_init(out, "Standard"); return true; }
+    padmap_load_title(out, dir, (uint32_t)xbe_title_id(), pads_[port] ? pad_family(pads_[port]) : "xbox", 0, 0);
+    return true;
+}
+
+extern "C" void xinput_padmap_reload(void)
+{
+    for (int i = 0; i < PORTS; i++) load_layout(i);
+}
 
 static bool is_virtual(int index)
 {
@@ -250,6 +328,7 @@ static void sync_pads()
             xlog("pad %d gone", i + 1);
             SDL_GameControllerClose(pads_[i]);
             pads_[i] = 0;
+            load_layout(i);
         }
     for (int j = 0; j < SDL_NumJoysticks(); j++) {
         if (!SDL_IsGameController(j) || is_virtual(j)) continue;
@@ -262,6 +341,7 @@ static void sync_pads()
                 pads_[i] = SDL_GameControllerOpen(j);
                 ids_[i] = id;
                 if (pads_[i]) xlog("pad %d: %s", i + 1, SDL_GameControllerName(pads_[i]));
+                load_layout(i);
                 break;
             }
     }
@@ -338,6 +418,7 @@ extern "C" unsigned xinput_guide_ports(void)
 extern "C" void xinput_guide_mask(bool on)
 {
     masked_ = on;
+    for (int i = 0; i < PORTS; i++) if (pm_[i]) padmap_reset(pm_[i]);
     if (on)
         for (int i = 0; i < PORTS; i++) if (pads_[i]) SDL_GameControllerRumble(pads_[i], 0, 0, 0);
 }
@@ -454,6 +535,86 @@ static void ui_service()
     }
 }
 
+// A layout's keyboard and mouse (Windows games only): a second uinput
+// device, made the first time a layout presses a key or moves the mouse.
+struct km_frame {
+    bool keys[256];
+    unsigned buttons;
+    int dx, dy, wheel;
+    bool any;
+    km_frame() : buttons(0), dx(0), dy(0), wheel(0), any(false) { memset(keys, 0, sizeof keys); }
+    void add(const padmap_out &o)
+    {
+        for (int i = 0; i < o.nkeys; i++) if (o.keys[i] < sizeof keys) keys[o.keys[i]] = any = true;
+        buttons |= o.mouse_buttons;
+        dx += o.mouse_dx; dy += o.mouse_dy; wheel += o.wheel;
+        if (o.mouse_buttons || o.mouse_dx || o.mouse_dy || o.wheel) any = true;
+    }
+};
+static int km_ = -1;
+static bool km_failed;
+
+static void km_emit(int type, int code, int value)
+{
+    struct input_event e;
+    memset(&e, 0, sizeof e);
+    e.type = type; e.code = code; e.value = value;
+    if (write(km_, &e, sizeof e) < 0) {}
+}
+
+static bool km_open()
+{
+    if (km_ >= 0) return true;
+    if (km_failed) return false;
+    km_ = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
+    if (km_ < 0) { km_failed = true; xlog("no /dev/uinput for the layout's keyboard and mouse"); return false; }
+    ioctl(km_, UI_SET_EVBIT, EV_KEY);
+    ioctl(km_, UI_SET_EVBIT, EV_REL);
+    for (int k = 1; k < 256; k++) ioctl(km_, UI_SET_KEYBIT, k);
+    ioctl(km_, UI_SET_KEYBIT, BTN_LEFT);
+    ioctl(km_, UI_SET_KEYBIT, BTN_RIGHT);
+    ioctl(km_, UI_SET_KEYBIT, BTN_MIDDLE);
+    ioctl(km_, UI_SET_RELBIT, REL_X);
+    ioctl(km_, UI_SET_RELBIT, REL_Y);
+    ioctl(km_, UI_SET_RELBIT, REL_WHEEL);
+    struct uinput_setup s;
+    memset(&s, 0, sizeof s);
+    s.id.bustype = BUS_VIRTUAL;
+    s.id.vendor = 0x1209;
+    s.id.product = 0x0001;
+    snprintf(s.name, sizeof s.name, "Kazeta layout keyboard and mouse");
+    if (ioctl(km_, UI_DEV_SETUP, &s) || ioctl(km_, UI_DEV_CREATE)) {
+        xlog("uinput keyboard and mouse setup failed");
+        close(km_); km_ = -1; km_failed = true;
+        return false;
+    }
+    xlog("layout keyboard and mouse created");
+    return true;
+}
+
+// This sample's keys and mouse: changes only, nothing at all until a layout
+// first uses them.
+static void km_send(const km_frame &f)
+{
+    static bool held[256];
+    static unsigned heldButtons;
+    bool down = f.any;
+    for (int k = 0; k < 256 && !down; k++) down = held[k];
+    if (!down && !heldButtons) return;
+    if (!km_open()) return;
+    bool sent = false;
+    for (int k = 1; k < 256; k++)
+        if (f.keys[k] != held[k]) { km_emit(EV_KEY, k, f.keys[k]); held[k] = f.keys[k]; sent = true; }
+    static const int mb[3] = { BTN_LEFT, BTN_RIGHT, BTN_MIDDLE };
+    for (int b = 0; b < 3; b++)
+        if (((f.buttons >> b) & 1) != ((heldButtons >> b) & 1)) { km_emit(EV_KEY, mb[b], (f.buttons >> b) & 1); sent = true; }
+    heldButtons = f.buttons;
+    if (f.dx) { km_emit(EV_REL, REL_X, f.dx); sent = true; }
+    if (f.dy) { km_emit(EV_REL, REL_Y, f.dy); sent = true; }
+    if (f.wheel) { km_emit(EV_REL, REL_WHEEL, f.wheel); sent = true; }
+    if (sent) km_emit(EV_SYN, SYN_REPORT, 0);
+}
+
 static void ui_forward()
 {
     if (ui_ < 0) return;
@@ -469,20 +630,44 @@ static void ui_forward()
                                                      SDL_CONTROLLER_BUTTON_RIGHTSTICK };
     static const SDL_GameControllerAxis ax[6] = { SDL_CONTROLLER_AXIS_LEFTX, SDL_CONTROLLER_AXIS_LEFTY, SDL_CONTROLLER_AXIS_RIGHTX,
                                                   SDL_CONTROLLER_AXIS_RIGHTY, SDL_CONTROLLER_AXIS_TRIGGERLEFT, SDL_CONTROLLER_AXIS_TRIGGERRIGHT };
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    uint64_t now = (uint64_t)ts.tv_sec * 1000000u + ts.tv_nsec / 1000;
+    km_frame k;
     for (int p = 0; p < PORTS && !masked_; p++) {
         SDL_GameController *c = pads_[p];
         if (!c) continue;
-        for (int i = 0; i < 11; i++) v[i] |= SDL_GameControllerGetButton(c, sb[i]);
+        // the pad as SDL reads it, through its layout
+        padmap_pad in;
+        memset(&in, 0, sizeof in);
+        for (int b = 0; b < PM_NBTN && b < SDL_CONTROLLER_BUTTON_MAX; b++)
+            if (SDL_GameControllerGetButton(c, (SDL_GameControllerButton)b)) in.buttons |= PM_BIT(b);
+        in.lx = SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_LEFTX);
+        in.ly = SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_LEFTY);
+        in.rx = SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_RIGHTX);
+        in.ry = SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_RIGHTY);
+        in.lt = SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_TRIGGERLEFT);
+        in.rt = SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_TRIGGERRIGHT);
+        padmap_pad o = in;
+        if (pm_[p]) {
+            padmap_out out;
+            padmap_sample(pm_[p], &in, now, &out);
+            o = out.pad;
+            k.add(out);
+        }
+        for (int i = 0; i < 11; i++) v[i] |= (o.buttons & PM_BIT(sb[i])) != 0;
+        const int a6[6] = { o.lx, o.ly, o.rx, o.ry, o.lt, o.rt };
         for (int i = 0; i < 6; i++) {
-            int a = SDL_GameControllerGetAxis(c, ax[i]);
+            int a = a6[i];
             if (i >= 4) a = a * 255 / 32767;
             if (abs(a) > abs(v[11 + i])) v[11 + i] = a;
         }
-        int hx = SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_DPAD_RIGHT) - SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_DPAD_LEFT);
-        int hy = SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_DPAD_DOWN) - SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_DPAD_UP);
+        int hx = !!(o.buttons & PM_BIT(PM_DPAD_RIGHT)) - !!(o.buttons & PM_BIT(PM_DPAD_LEFT));
+        int hy = !!(o.buttons & PM_BIT(PM_DPAD_DOWN)) - !!(o.buttons & PM_BIT(PM_DPAD_UP));
         if (hx) v[17] = hx;
         if (hy) v[18] = hy;
     }
+    km_send(k);
     v[8] = 0;  // the Guide button is the Guide's
     static const int codes[19] = { BTN_A, BTN_B, BTN_X, BTN_Y, BTN_TL, BTN_TR, BTN_SELECT, BTN_START, BTN_MODE, BTN_THUMBL, BTN_THUMBR,
                                    ABS_X, ABS_Y, ABS_RX, ABS_RY, ABS_Z, ABS_RZ, ABS_HAT0X, ABS_HAT0Y };
@@ -634,6 +819,7 @@ int main(int argc, char **argv)
         shown = draw;
     }
     if (ui_ >= 0) { ioctl(ui_, UI_DEV_DESTROY); close(ui_); }
+    if (km_ >= 0) { ioctl(km_, UI_DEV_DESTROY); close(km_); }
     SDL_Quit();
     return leave_ ? 42 : 0;
 }
