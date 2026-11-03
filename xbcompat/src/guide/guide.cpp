@@ -350,8 +350,9 @@ float text_zoom_for(xui::Node* n, float zoom) {
 // Frolick's page has white text for its slate band; on the Guide's grey
 // panel it takes the Guide's black (sokky), keeping each text's fade, and
 // so does the clock the full view would turn white (the prompts stay white).
+int cfg_page_of(xui::Scene* m);  // Controller Configuration's pages
 bool is_page(xui::Scene* m) {
-    return m && (m == g.game || m == g.recent || m == g.downloads || m == g.saves || m == g.confirm);
+    return m && (m == g.game || m == g.recent || m == g.downloads || m == g.saves || m == g.confirm || cfg_page_of(m) >= 0);
 }
 
 xui::Color text_color_for(xui::Node* n, xui::Color col) {
@@ -2456,6 +2457,17 @@ void fit_legends(float l, float t, float r, float b) {
         if (!nd[i]) continue;
         offset(nd[i], 'x', dx[side[i]]);
         offset(nd[i], 'y', dy[side[i]]);
+    }
+    // X (Controller Configuration's Save): the scene leaves it low on its
+    // own; it goes in Y's column, mirroring B over A: on A's row when Y is
+    // away, on B's row above Y when both show.
+    xui::Node* x = g.frame->find("Legend_X");
+    if (x && nd[2]) {
+        xui::Node* yv = nd[2]->visual ? nd[2]->visual : nd[2];
+        bool yOn = xui::propF(yv->props, "Opacity", 1) > 0;
+        float rowStep = nd[0] && nd[1] ? by[0] - by[1] : 28;
+        offset(x, 'x', bx[2] + dx[side[2]] - base_of(x, 'x'));
+        offset(x, 'y', by[2] + dy[side[2]] - (yOn ? rowStep : 0) - base_of(x, 'y'));
     }
 }
 
