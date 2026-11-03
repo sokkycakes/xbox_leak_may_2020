@@ -1772,7 +1772,7 @@ bool load() {
     rest_visual(g.frame, "Legend_A");
     rest_visual(g.frame, "Legend_B");
     rest_visual(g.frame, "Legend_Y");
-    hide_drawn(g.frame, "Legend_X");
+    rest_visual(g.frame, "Legend_X");
     hide_drawn(g.frame, "CloseX");          // the PC Guide's mouse close box
     hide_drawn(g.frame, "EvaluationTextId");
     set_text(g.frame, "GamerTag", "Player");
@@ -1926,13 +1926,21 @@ void settings_text() {
 }
 
 // The frame's legend for the page showing: A and B as the page's own
-// hidden legend buttons say (GFWL copies them the same way), Y always.
+// hidden legend buttons say (GFWL copies them the same way).  A prompt
+// with nothing to do stays as the 360 shows it: the grey disabled button
+// (its visual's NormalDisable frame), without a label (sokky).
 void set_legend(const char* id, const char* text) {
     xui::Node* n = g.frame->find(id);
     if (!n) return;
     xui::Node* t = n->visual ? n->visual : n;
-    xui::Value& v = t->props.set("Opacity"); v.free(); v.type = xui::TFloat; v.f = text ? 1 : 0;
-    if (text) set_text(g.frame, id, text);
+    xui::Value& v = t->props.set("Opacity"); v.free(); v.type = xui::TFloat; v.f = 1;
+    if (text) {
+        rest_visual(g.frame, id);
+        set_text(g.frame, id, text);
+    } else {
+        set_text(g.frame, id, "");
+        if (n->visual && n->visual->play("NormalDisable")) n->visual->playing = false;
+    }
 }
 
 const char* page_legend(xui::Scene* m, const char* a, const char* b) {
@@ -2434,8 +2442,8 @@ static void narrow_frame(float n) {
 // panel's edges: GFWL sets them in from the edges by about as much as the
 // narrowing.)
 void fit_legends(float l, float t, float r, float b) {
-    // (X is never drawn.  A prompt a page hides still counts, so the
-    // others don't jump between pages.)
+    // (Every prompt shows, greyed when it has nothing to do; X follows Y
+    // below.)
     static const char* ids[] = { "Legend_A", "Legend_B", "Legend_Y" };
     xui::Node* nd[3]; float bx[3], by[3]; int side[3];
     float dx[2] = {0, 0}, dy[2] = {0, 0};
@@ -2458,9 +2466,9 @@ void fit_legends(float l, float t, float r, float b) {
         offset(nd[i], 'x', dx[side[i]]);
         offset(nd[i], 'y', dy[side[i]]);
     }
-    // X (Controller Configuration's Save): the scene leaves it low on its
-    // own; it goes in Y's column, mirroring B over A: on A's row when Y is
-    // away, on B's row above Y when both show.
+    // X: the scene leaves it low on its own on the full-width pages; it
+    // goes in Y's column on B's row, over Y as B is over A (where the half
+    // view's own layout has it).
     xui::Node* x = g.frame->find("Legend_X");
     if (x && nd[2]) {
         xui::Node* yv = nd[2]->visual ? nd[2]->visual : nd[2];
