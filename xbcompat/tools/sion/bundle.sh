@@ -31,6 +31,12 @@
 #     libdrm-dev:i386 libasound2-dev:i386 libudev-dev:i386 libusb-1.0-0-dev:i386 libexpat1-dev:i386 \
 #     zlib1g-dev:i386 libzstd-dev:i386
 # NEWGAMES (the March 2001 Games scenes) is passed on to dashbuild.
+#
+# MESA=system takes the host's prebuilt i386 Mesa (Ubuntu's, every Gallium
+# driver: iris, crocus, i915, radeonsi, r600, r300, nouveau, llvmpipe, with
+# its LLVM) instead of building 23.3.6 with iris and softpipe only. That is
+# what the generic PC image uses, so AMD and NVIDIA GPUs get a real driver;
+# it needs libgl1-mesa-dri:i386 libegl-mesa0:i386 libgbm1:i386 on the host.
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 XBC=$(cd "$HERE/../.." && pwd)
@@ -76,7 +82,8 @@ if [ ! -f "$STAGE/usr/lib/libSDL2-2.0.so.0" ]; then
 fi
 
 # ---- Mesa: iris for the Sion's UHD 620, softpipe for anything else ---------
-if [ ! -f "$STAGE/usr/lib/dri/iris_dri.so" ]; then
+MESA=${MESA:-build}
+if [ "$MESA" = build ] && [ ! -f "$STAGE/usr/lib/dri/iris_dri.so" ]; then
     echo "== Mesa $MESA_VER"
     fetch "https://archive.mesa3d.org/mesa-$MESA_VER.tar.xz"
     rm -rf "$SRC/mesa-$MESA_VER"
@@ -149,12 +156,25 @@ cp "$WORK/xbcompat-build/xbcompat" "$OUT/bin/"
 # The display keeper, a static 64-bit program like the Sion's own.
 gcc -O2 -Wall -static -s -o "$OUT/bin/xbox-av" "$HERE/av/xbox-av.c"
 cp "$STAGE/XbSymbolDatabaseCLI" "$OUT/tools/"
-cp "$STAGE/usr/lib/libSDL2-2.0.so.0" "$STAGE"/usr/lib/libEGL_mesa.so.0 "$STAGE"/usr/lib/libgbm.so.1 \
-   "$STAGE"/usr/lib/libglapi.so.0 "$OUT/lib/"
-cp "$STAGE/usr/lib/dri/iris_dri.so" "$OUT/lib/dri/"
-ln -s iris_dri.so "$OUT/lib/dri/kms_swrast_dri.so"
-ln -s iris_dri.so "$OUT/lib/dri/swrast_dri.so"
-cp "$STAGE/usr/share/drirc.d/00-mesa-defaults.conf" "$OUT/share/"
+cp "$STAGE/usr/lib/libSDL2-2.0.so.0" "$OUT/lib/"
+if [ "$MESA" = system ]; then
+    # One libgallium holds every driver; the *_dri.so names are stubs that
+    # load it, and GBM finds its DRI backend in lib/gbm.
+    cp -L "$ML/libEGL_mesa.so.0" "$ML/libgbm.so.1" "$ML"/libgallium-*.so "$OUT/lib/"
+    cp -L "$ML/dri/libdril_dri.so" "$OUT/lib/dri/"
+    for d in iris crocus i915 radeonsi r600 r300 nouveau kms_swrast swrast virtio_gpu vmwgfx; do
+        ln -s libdril_dri.so "$OUT/lib/dri/${d}_dri.so"
+    done
+    mkdir -p "$OUT/lib/gbm"
+    cp -L "$ML/gbm/dri_gbm.so" "$OUT/lib/gbm/"
+    cp /usr/share/drirc.d/00-mesa-defaults.conf "$OUT/share/"
+else
+    cp "$STAGE"/usr/lib/libEGL_mesa.so.0 "$STAGE"/usr/lib/libgbm.so.1 "$STAGE"/usr/lib/libglapi.so.0 "$OUT/lib/"
+    cp "$STAGE/usr/lib/dri/iris_dri.so" "$OUT/lib/dri/"
+    ln -s iris_dri.so "$OUT/lib/dri/kms_swrast_dri.so"
+    ln -s iris_dri.so "$OUT/lib/dri/swrast_dri.so"
+    cp "$STAGE/usr/share/drirc.d/00-mesa-defaults.conf" "$OUT/share/"
+fi
 printf '{"file_format_version":"1.0.0","ICD":{"library_path":"libEGL_mesa.so.0"}}\n' \
     > "$OUT/share/glvnd/egl_vendor.d/50_mesa.json"
 # Loaded with dlopen (SDL: EGL, GBM, DRM, ALSA, udev, libusb for wired Xbox
@@ -233,7 +253,7 @@ cat > "$OUT/bin/xbrun" <<'EOF'
 # python, map tools and signatures. Maps go to $XDG_CACHE_HOME/xbcompat.
 X=/opt/xbcompat
 export LD_LIBRARY_PATH=$X/lib PYTHONHOME=$X PYTHONDONTWRITEBYTECODE=1 \
-    LIBGL_DRIVERS_PATH=$X/lib/dri GBM_DRIVERS_PATH=$X/lib/dri \
+    LIBGL_DRIVERS_PATH=$X/lib/dri GBM_DRIVERS_PATH=$X/lib/dri GBM_BACKENDS_PATH=$X/lib/gbm \
     __EGL_VENDOR_LIBRARY_FILENAMES=$X/share/glvnd/egl_vendor.d/50_mesa.json \
     XBCOMPAT_BIN=$X/bin/xbcompat XBSYMDB_CLI=$X/tools/XbSymbolDatabaseCLI
 exec $X/bin/python3 $X/tools/xbrun.py "$@"

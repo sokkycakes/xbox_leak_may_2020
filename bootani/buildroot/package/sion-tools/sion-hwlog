@@ -1,0 +1,120 @@
+#!/bin/sh
+#
+# sion-hwlog: write what this machine is and how the boot went to the boot
+# stick, for testing the image on PCs it wasn't made for. Each boot gets its
+# own folder, sion/logs/hardware/boot-NNN on the EFI partition, readable
+# from any PC:
+#
+#   summary.txt   machine, CPU, GPU and the driver it got, screens, sound,
+#                 network, pads, and whether the boot animation and the
+#                 dashboard came up
+#   pci.txt usb.txt drm.txt sound.txt net.txt input.txt cpu.txt
+#   dmesg.txt     the kernel log (missing firmware shows up here)
+#   logs/         /var/log: xbox.log, xbox-session.log, bootani.log, ...
+#
+#   sion-hwlog [snapshot-name]     (S99sion-hwlog runs it at boot, again a
+#                                  minute later, and at shutdown)
+
+. /usr/lib/sion/sion-lib.sh
+
+T=$SION_RUN/hwlog
+rm -rf "$T"
+mkdir -p "$T/logs"
+
+r() { cat "$1" 2>/dev/null; }
+
+# ---- the machine -----------------------------------------------------------
+{
+	echo "snapshot: ${1:-manual}  $(date '+%F %T')  up $(cut -d' ' -f1 /proc/uptime) s"
+	echo "image:    $(r /etc/sion-version)"
+	echo "kernel:   $(uname -r)  $(r /proc/cmdline)"
+	d=/sys/class/dmi/id
+	echo "machine:  $(r $d/sys_vendor) $(r $d/product_name) ($(r $d/product_version))"
+	echo "board:    $(r $d/board_vendor) $(r $d/board_name)  firmware $(r $d/bios_vendor) $(r $d/bios_version) $(r $d/bios_date)"
+	echo "cpu:      $(sed -n 's/^model name[^:]*: //p' /proc/cpuinfo | head -n1) x$(grep -c '^processor' /proc/cpuinfo)"
+	echo "          $(sed -n 's/^vendor_id[^:]*: //p' /proc/cpuinfo | head -n1), family $(sed -n 's/^cpu family[^:]*: //p' /proc/cpuinfo | head -n1), microcode $(sed -n 's/^microcode[^:]*: //p' /proc/cpuinfo | head -n1)"
+	echo "cpufreq:  $(r /sys/devices/system/cpu/cpu0/cpufreq/scaling_driver) / $(r /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor)  $(r /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq) kHz"
+	echo "memory:   $(sed -n 's/^MemTotal: *//p' /proc/meminfo)"
+	echo
+	echo "== GPUs (PCI display class) and their drivers"
+	for p in /sys/bus/pci/devices/*; do
+		case $(r "$p/class") in 0x03*) ;; *) continue ;; esac
+		drv=$(basename "$(readlink "$p/driver" 2>/dev/null)" 2>/dev/null)
+		echo "  ${p##*/}  $(r "$p/vendor"):$(r "$p/device")  driver: ${drv:-NONE}"
+	done
+	echo "== DRM cards"
+	for c in /sys/class/drm/card[0-9]; do
+		[ -e "$c" ] || continue
+		drv=$(basename "$(readlink "$c/device/driver" 2>/dev/null)" 2>/dev/null)
+		echo "  ${c##*/}  driver: ${drv:-?}"
+		for s in "$c"-*/status; do
+			[ -e "$s" ] || continue
+			o=${s%/status}
+			echo "    ${o##*/}: $(r "$s") $(r "$o/modes" | head -n1)"
+		done
+	done
+	[ -n "$(ls /dev/dri/card* 2>/dev/null)" ] || echo "  no /dev/dri/card*: no display driver at all"
+	echo "== sound"
+	r /proc/asound/cards | sed 's/^/  /'
+	[ -r /proc/asound/cards ] || echo "  no sound cards"
+	echo "== network"
+	for n in /sys/class/net/*; do
+		[ "${n##*/}" = lo ] && continue
+		drv=$(basename "$(readlink "$n/device/driver" 2>/dev/null)" 2>/dev/null)
+		w=; [ -d "$n/wireless" ] && w=" (Wi-Fi)"
+		echo "  ${n##*/}$w driver ${drv:-?} $(r "$n/operstate") $(ip -4 -o addr show "${n##*/}" 2>/dev/null | awk '{print $4}')"
+	done
+	echo "== game pads and keyboards"
+	sed -n 's/^N: Name=/  /p' /proc/bus/input/devices 2>/dev/null
+	echo "== firmware the kernel asked for and didn't find"
+	dmesg | grep -i 'firmware\|fw' | grep -i 'fail\|not found\|error\|missing\|-2' | sed 's/^/  /' | head -n 40
+	echo "== boot animation and dashboard"
+	pidof xbox-av > /dev/null && echo "  xbox-av running"
+	pidof xbcompat > /dev/null && echo "  xbcompat running (pid $(pidof xbcompat))" || echo "  xbcompat NOT running"
+	grep -h -i 'GL_RENDERER\|renderer\|EGL\|SDL video\|KMSDRM\|using /dev/dri' /var/log/xbox.log /var/log/bootani.log /var/log/xbox-av.log 2>/dev/null | head -n 20 | sed 's/^/  /'
+	echo "  dashboard: $(/usr/libexec/dashboard 2>/dev/null)"
+} > "$T/summary.txt" 2>&1
+
+{ for p in /sys/bus/pci/devices/*; do
+	drv=$(basename "$(readlink "$p/driver" 2>/dev/null)" 2>/dev/null)
+	echo "${p##*/} class $(r "$p/class") $(r "$p/vendor"):$(r "$p/device") sub $(r "$p/subsystem_vendor"):$(r "$p/subsystem_device") driver ${drv:--}"
+  done; echo; lspci -k 2>/dev/null; } > "$T/pci.txt"
+{ lsusb 2>/dev/null; echo; for u in /sys/bus/usb/devices/*; do
+	[ -r "$u/idVendor" ] || continue
+	echo "${u##*/} $(r "$u/idVendor"):$(r "$u/idProduct") $(r "$u/manufacturer") $(r "$u/product")"
+	for i in "$u"/*:*; do
+		[ -e "$i/driver" ] && echo "    ${i##*/} $(basename "$(readlink "$i/driver")")"
+	done
+  done; } > "$T/usb.txt" 2>&1
+{ for o in /sys/class/drm/card*; do
+	echo "== ${o##*/}"
+	for f in status enabled dpms modes; do [ -r "$o/$f" ] && echo "$f: $(r "$o/$f" | tr '\n' ' ')"; done
+	[ -r "$o/edid" ] && echo "edid: $(od -An -tx1 -v "$o/edid" | tr -d ' \n' | head -c 512)"
+  done
+  for f in /sys/kernel/debug/dri/*/name; do [ -r "$f" ] && echo "$f: $(r "$f")"; done; } > "$T/drm.txt" 2>&1
+{ r /proc/asound/cards; echo; r /proc/asound/pcm; echo; aplay -l 2>&1; echo; aplay -L 2>&1; } > "$T/sound.txt"
+{ ip addr 2>&1; echo; ip route 2>&1; echo; iw dev 2>&1; echo; r /var/run/sion/network.txt; } > "$T/net.txt"
+r /proc/bus/input/devices > "$T/input.txt"
+{ r /proc/cpuinfo; echo; lscpu 2>&1; echo; for f in /sys/devices/system/cpu/cpu0/cpufreq/*; do echo "${f##*/}: $(r "$f")"; done; \
+  echo; for h in /sys/class/hwmon/hwmon*; do echo "$(r "$h/name") $(r "$h/temp1_input")"; done; } > "$T/cpu.txt" 2>&1
+dmesg > "$T/dmesg.txt" 2>&1
+for f in /var/log/*; do
+	[ -f "$f" ] && cp "$f" "$T/logs/" 2>/dev/null
+done
+r /proc/mounts > "$T/logs/mounts.txt"
+ps > "$T/logs/ps.txt" 2>&1
+
+# ---- onto the stick ----------------------------------------------------------
+m=$(esp_mount) || { log "hwlog: no boot partition"; exit 0; }
+if [ ! -r "$SION_RUN/hwlog-dir" ]; then
+	mkdir -p "$m/sion/logs/hardware"
+	n=$(( $(cat "$m/sion/logs/hardware/count" 2>/dev/null || echo 0) + 1 ))
+	echo "$n" > "$m/sion/logs/hardware/count"
+	printf 'boot-%03d\n' "$n" > "$SION_RUN/hwlog-dir"
+fi
+dir=$m/sion/logs/hardware/$(cat "$SION_RUN/hwlog-dir")
+mkdir -p "$dir"
+# FAT names: no colons.
+(cd "$T" && tar -cf - .) | (cd "$dir" && tar -xf - 2>/dev/null)
+esp_umount "$m"
+log "hwlog: ${1:-manual} written to sion/logs/hardware/$(cat "$SION_RUN/hwlog-dir")"

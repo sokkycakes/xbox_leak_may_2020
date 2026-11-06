@@ -19,6 +19,19 @@ EFIVARS=/sys/firmware/efi/efivars
 
 mkdir -p "$SION_RUN"
 
+# Partition labels. An image built for other machines (the generic PC test
+# image) sets its own in /etc/sion-labels, with SION_STRICT_LABELS=1: then it
+# only ever uses partitions with those labels, so plugged into a Sion it
+# can't mount or write the Sion's own SIONBOOT/SIONDATA. EFI_ENTRY and
+# EFI_TRIAL_ENTRY name its UEFI boot entries ("sion" uses them).
+ESP_LABEL=SIONBOOT
+DATA_LABEL=SIONDATA
+SION_STRICT_LABELS=
+EFI_ENTRY=
+EFI_TRIAL_ENTRY=
+# shellcheck source=/dev/null
+[ -r /etc/sion-labels ] && . /etc/sion-labels
+
 log() {
 	echo "$(date '+%F %T') $*" >> "$SION_LOG"
 }
@@ -64,13 +77,14 @@ find_esp() {
 	for _ in $(seq 1 50); do
 		found=
 		for dev in $(partitions); do
-			if [ -n "$want" ] && [ "$(blkid -s PARTUUID -o value "$dev" 2>/dev/null)" = "$want" ]; then
+			if [ -n "$want" ] && [ "$(blkid -s PARTUUID -o value "$dev" 2>/dev/null)" = "$want" ] &&
+			   { [ -z "$SION_STRICT_LABELS" ] || [ "$(fs_label "$dev")" = "$ESP_LABEL" ]; }; then
 				found=$dev
 				break
 			fi
-			[ -z "$found" ] && [ "$(fs_label "$dev")" = SIONBOOT ] && found=$dev
+			[ -z "$found" ] && [ "$(fs_label "$dev")" = "$ESP_LABEL" ] && found=$dev
 		done
-		if [ -z "$found" ]; then
+		if [ -z "$found" ] && [ -z "$SION_STRICT_LABELS" ]; then
 			for dev in $(partitions); do
 				[ "$(blkid -s TYPE -o value "$dev" 2>/dev/null)" = vfat ] || continue
 				m=$(esp_mount_dev "$dev") || continue
@@ -89,13 +103,13 @@ find_esp() {
 	return 1
 }
 
-# The SIONDATA partition on the same disk as the EFI partition.
+# The SIONDATA ($DATA_LABEL) partition on the same disk as the EFI partition.
 find_data() {
 	esp=$(find_esp) || return 1
 	disk=$(part_disk "$esp")
 	for dev in $(partitions); do
 		[ "$(part_disk "$dev")" = "$disk" ] || continue
-		[ "$(fs_label "$dev")" = SIONDATA ] && echo "$dev" && return 0
+		[ "$(fs_label "$dev")" = "$DATA_LABEL" ] && echo "$dev" && return 0
 	done
 	return 1
 }

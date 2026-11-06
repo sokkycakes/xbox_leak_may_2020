@@ -6,7 +6,7 @@ X=/opt/xbcompat
 if [ -d $X/lib ]; then
 	# The Sion's bundle: a 32-bit userspace of its own.
 	export LD_LIBRARY_PATH=$X/lib
-	export LIBGL_DRIVERS_PATH=$X/lib/dri GBM_DRIVERS_PATH=$X/lib/dri
+	export LIBGL_DRIVERS_PATH=$X/lib/dri GBM_DRIVERS_PATH=$X/lib/dri GBM_BACKENDS_PATH=$X/lib/gbm
 	export __EGL_VENDOR_LIBRARY_FILENAMES=$X/share/glvnd/egl_vendor.d/50_mesa.json
 fi
 export XBCOMPAT_BIN=${XBCOMPAT_BIN:-$X/bin/xbcompat}
@@ -31,6 +31,16 @@ for _ in $(seq 1 50); do
 	ls /dev/dri/card* > /dev/null 2>&1 && break
 	sleep 0.2   # the GPU driver is a module udev may still be loading
 done
+# A PC with two GPUs (or a GPU plus the firmware's framebuffer): SDL and the
+# display keeper both use the card a screen is plugged into.
+if [ -z "$SDL_KMSDRM_DEVICE_INDEX" ]; then
+	for s in /sys/class/drm/card[0-9]*-*/status; do
+		[ "$(cat "$s" 2>/dev/null)" = connected ] || continue
+		c=${s#/sys/class/drm/card}
+		export SDL_KMSDRM_DEVICE_INDEX=${c%%-*}
+		break
+	done
+fi
 if ! ls /dev/dri/card* > /dev/null 2>&1; then
 	export SDL_VIDEODRIVER=offscreen
 	mkdir -p /var/log/xbox-shots

@@ -88,7 +88,15 @@ static void sleep_ms(int ms)
 
 static int open_card(void)
 {
-    for (int i = 0; i < 8; i++) {
+    /* The card SDL will use (xbox-env picks the one with a screen plugged
+       in, for PCs with two GPUs), then the first with outputs. */
+    const char *want = getenv("SDL_KMSDRM_DEVICE_INDEX");
+    for (int k = -1; k < 8; k++) {
+        int i = k;
+        if (k < 0) {
+            if (!want || !*want) continue;
+            i = atoi(want);
+        }
         char path[32];
         snprintf(path, sizeof path, "/dev/dri/card%d", i);
         int fd = open(path, O_RDWR | O_CLOEXEC);

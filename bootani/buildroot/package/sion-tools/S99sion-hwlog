@@ -1,0 +1,25 @@
+#!/bin/sh
+#
+# Hardware and boot logs on the boot stick (sion-hwlog), for the generic PC
+# test image: once the dashboard has had time to start, a minute later, and
+# at shutdown.
+#
+
+case "$1" in
+start)
+	printf 'Starting hwlog: '
+	( sleep 20; /usr/libexec/sion-hwlog boot; sleep 60; /usr/libexec/sion-hwlog after-80s ) > /dev/null 2>&1 < /dev/null &
+	echo "OK"
+	;;
+stop)
+	/usr/libexec/sion-hwlog shutdown > /dev/null 2>&1
+	;;
+restart|reload)
+	"$0" stop
+	"$0" start
+	;;
+*)
+	echo "Usage: $0 {start|stop|restart}"
+	exit 1
+	;;
+esac

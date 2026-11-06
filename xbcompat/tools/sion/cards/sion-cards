@@ -30,7 +30,7 @@ system_disk() {
 			return 0
 		fi
 		case $(blkid "/dev/$v" 2>/dev/null) in
-		*'LABEL="SIONBOOT"'*|*'LABEL="SIONDATA"'*|*'LABEL="XBOXBOOT"'*|*'LABEL="XBOXDATA"'*) return 0 ;;
+		*'LABEL="SIONBOOT"'*|*'LABEL="SIONDATA"'*|*'LABEL="CRIMSONBOOT"'*|*'LABEL="CRIMSONDATA"'*|*'LABEL="XBOXBOOT"'*|*'LABEL="XBOXDATA"'*) return 0 ;;
 		esac
 	done
 	return 1

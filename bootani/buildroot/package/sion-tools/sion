@@ -9,8 +9,10 @@ load_conf
 
 EFI_DIR=EFI/sion
 CURRENT=EFI/BOOT/BOOTX64.EFI
-TRIAL_LABEL="Sion trial"
-BOOT_LABEL="Sion"
+# UEFI boot entry names (an image for other machines names its own in
+# /etc/sion-labels, so it never reuses or deletes a Sion's "Sion" entry).
+TRIAL_LABEL=${EFI_TRIAL_ENTRY:-"Sion trial"}
+BOOT_LABEL=${EFI_ENTRY:-"Sion"}
 # How long a trial image gets to come up before the machine goes back to
 # the previous one, and how long it has to stay up before it's kept.
 TRIAL_TIMEOUT=${TRIAL_TIMEOUT:-300}
