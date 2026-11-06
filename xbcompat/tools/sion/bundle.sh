@@ -36,7 +36,8 @@
 # driver: iris, crocus, i915, radeonsi, r600, r300, nouveau, llvmpipe, with
 # its LLVM) instead of building 23.3.6 with iris and softpipe only. That is
 # what the generic PC image uses, so AMD and NVIDIA GPUs get a real driver;
-# it needs libgl1-mesa-dri:i386 libegl-mesa0:i386 libgbm1:i386 on the host.
+# it needs libgl1-mesa-dri:i386 libegl-mesa0:i386 libgbm-dev:i386 on the host
+# (without gbm.pc SDL2 quietly builds with no KMSDRM video at all).
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 XBC=$(cd "$HERE/../.." && pwd)
@@ -76,6 +77,7 @@ if [ ! -f "$STAGE/usr/lib/libSDL2-2.0.so.0" ]; then
             --enable-libudev --disable-dbus --disable-ime --disable-ibus --disable-fcitx \
             --enable-hidapi-libusb
         make -s -j"$J"
+        grep -q '^#define SDL_VIDEO_DRIVER_KMSDRM 1' include/SDL_config.h || { echo "SDL2 configured without KMSDRM"; exit 1; }
         make -s install DESTDIR="$STAGE"
     )
     sed -i "s|^prefix=.*|prefix=$STAGE/usr|" "$STAGE/usr/lib/pkgconfig/sdl2.pc"
@@ -83,6 +85,9 @@ fi
 
 # ---- Mesa: iris for the Sion's UHD 620, softpipe for anything else ---------
 MESA=${MESA:-build}
+if [ "$MESA" = system ] && [ ! -f "$ML/pkgconfig/gbm.pc" ]; then
+    echo "MESA=system needs libgbm-dev:i386 (SDL2's KMSDRM video is built against it)"; exit 1
+fi
 if [ "$MESA" = build ] && [ ! -f "$STAGE/usr/lib/dri/iris_dri.so" ]; then
     echo "== Mesa $MESA_VER"
     fetch "https://archive.mesa3d.org/mesa-$MESA_VER.tar.xz"

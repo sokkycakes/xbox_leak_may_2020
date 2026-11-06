@@ -8,6 +8,11 @@ if [ -d $X/lib ]; then
 	export LD_LIBRARY_PATH=$X/lib
 	export LIBGL_DRIVERS_PATH=$X/lib/dri GBM_DRIVERS_PATH=$X/lib/dri GBM_BACKENDS_PATH=$X/lib/gbm
 	export __EGL_VENDOR_LIBRARY_FILENAMES=$X/share/glvnd/egl_vendor.d/50_mesa.json
+	# With no GPU driver (the firmware framebuffer, a VM) Mesa draws in
+	# software: softpipe, as the Sion's own bundle has. A bundle with
+	# llvmpipe (the PC image's) crashed in its JIT code under xbcompat.
+	# Ignored by the hardware drivers.
+	export GALLIUM_DRIVER=${GALLIUM_DRIVER:-softpipe}
 fi
 export XBCOMPAT_BIN=${XBCOMPAT_BIN:-$X/bin/xbcompat}
 if [ -x $X/bin/python3 ]; then
