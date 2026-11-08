@@ -33,7 +33,7 @@
 #define CH		2
 #define PERIOD		240		/* 5 ms */
 #define NSUB		8		/* loopback subdevices captured */
-#define MAXOUT		4
+#define MAXOUT		8
 #define TARGET		960		/* frames kept queued in each output (20 ms) */
 #define SLACK		240
 
@@ -238,6 +238,58 @@ static int exists(const char *path)
 	return access(path, F_OK) == 0;
 }
 
+/* Turns on every playback switch of a card (USB headsets can come up with
+   one off; the Sion has no amixer). Once per card id while it's plugged in. */
+static char unmuted[256];
+
+static void unmute(const char *id)
+{
+	char name[80], tag[72];
+	snd_ctl_t *ctl;
+	snd_ctl_elem_list_t *list;
+	snd_ctl_elem_info_t *info;
+	snd_ctl_elem_value_t *val;
+
+	snprintf(tag, sizeof(tag), "|%s|", id);
+	if (strstr(unmuted, tag))
+		return;
+	snprintf(name, sizeof(name), "hw:CARD=%s", id);
+	if (snd_ctl_open(&ctl, name, 0) < 0)
+		return;
+	if (strlen(unmuted) + strlen(tag) < sizeof(unmuted))
+		strcat(unmuted, tag);
+	snd_ctl_elem_list_alloca(&list);
+	snd_ctl_elem_info_alloca(&info);
+	snd_ctl_elem_value_alloca(&val);
+	if (snd_ctl_elem_list(ctl, list) == 0) {
+		unsigned int n = snd_ctl_elem_list_get_count(list);
+		if (snd_ctl_elem_list_alloc_space(list, n) == 0 && snd_ctl_elem_list(ctl, list) == 0) {
+			for (unsigned int i = 0; i < snd_ctl_elem_list_get_used(list); i++) {
+				snd_ctl_elem_info_set_numid(info, snd_ctl_elem_list_get_numid(list, i));
+				if (snd_ctl_elem_info(ctl, info) < 0)
+					continue;
+				const char *en = snd_ctl_elem_info_get_name(info);
+				if (snd_ctl_elem_info_get_type(info) != SND_CTL_ELEM_TYPE_BOOLEAN ||
+				    !strstr(en, "Playback Switch") || !snd_ctl_elem_info_is_writable(info))
+					continue;
+				snd_ctl_elem_value_set_numid(val, snd_ctl_elem_list_get_numid(list, i));
+				if (snd_ctl_elem_read(ctl, val) < 0)
+					continue;
+				int off = 0;
+				for (unsigned int k = 0; k < snd_ctl_elem_info_get_count(info); k++)
+					if (!snd_ctl_elem_value_get_boolean(val, k)) {
+						snd_ctl_elem_value_set_boolean(val, k, 1);
+						off = 1;
+					}
+				if (off && snd_ctl_elem_write(ctl, val) >= 0)
+					LOG("%s: turned on %s %u", id, en, snd_ctl_elem_info_get_index(info));
+			}
+			snd_ctl_elem_list_free_space(list);
+		}
+	}
+	snd_ctl_close(ctl);
+}
+
 /* Fills want[] with the PCM names the outputs should have right now. */
 static int wanted(char want[MAXOUT][96])
 {
@@ -254,8 +306,16 @@ static int wanted(char want[MAXOUT][96])
 		if (!exists(path))
 			continue;
 		snprintf(path, sizeof(path), "/proc/asound/card%d/id", c);
-		if (!read_file(path, id, sizeof(id)))
-			snprintf(want[n++], 96, "plughw:CARD=%s,DEV=0", id);
+		if (read_file(path, id, sizeof(id)))
+			continue;
+		/* every playback device of the card: headsets such as the Razer
+		   Kraken have the ear cups on the second one (DEV=1) */
+		for (int d = 0; d < 8 && n < MAXOUT - 2; d++) {
+			snprintf(path, sizeof(path), "/proc/asound/card%d/pcm%dp", c, d);
+			if (exists(path))
+				snprintf(want[n++], 96, "plughw:CARD=%s,DEV=%d", id, d);
+		}
+		unmute(id);
 	}
 	if (!n && exists("/proc/asound/PCH"))
 		snprintf(want[n++], 96, "plug:'hdmi:CARD=PCH,DEV=0'");
@@ -291,6 +351,7 @@ static void rescan(int force)
 			return;
 	}
 	strcpy(last_cards, cards);
+	unmuted[0] = 0;		/* a card replugged comes up with its own switches */
 	read_config();
 	nw = wanted(want);
 	for (int i = 0; i < MAXOUT; i++) {
@@ -299,7 +360,7 @@ static void rescan(int force)
 		if (o->pcm && (!w || strcmp(o->name, w)))
 			out_close(o);
 		if (w && !o->pcm && strcmp(w, "-")) {
-			if (out_open(o, w, i == 0) < 0)
+			if (out_open(o, w, strncmp(w, "hw:CARD=Trigger6", 16) != 0) < 0)
 				snprintf(o->name, sizeof(o->name), "%s", w);	/* retry later */
 		} else if (!w)
 			memset(o, 0, sizeof(*o));

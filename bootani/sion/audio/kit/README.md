@@ -2,7 +2,7 @@
 
 All Sion sound goes into an ALSA loopback card. `sion-audiod` mixes it and plays it on:
 
-- the main output: the first USB sound card (headset, USB sound card), or the TV (HDMI) when none is plugged in. It follows hot-plugging, so a headset plugged in mid-game takes over within a second. `MAIN=` in /etc/default/sion-audio forces one.
+- the main output: every playback device of the first USB sound card (a headset like the Razer Kraken has its ear cups on the second one; their playback switches are turned on), or the TV (HDMI) when none is plugged in. It follows hot-plugging, so a headset plugged in mid-game takes over within a second. `MAIN=` in /etc/default/sion-audio forces one.
 - every JUA365 adapter (ALSA card `Trigger6`) at the same time, so whatever is on the adapter's HDMI hears the game. `MIRROR=0` turns that off.
 
 Files: snd-aloop.ko, trigger6.ko (rev d), sion-audiod, S07sion-audiod, sion-install.sh.
