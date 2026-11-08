@@ -11,6 +11,9 @@
 #include <errno.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 
 using namespace melonDS;
 
@@ -45,20 +48,55 @@ DSpicoSim::DSpicoSim(NDS* n, const std::string& p, unsigned bytesPerFrame)
 
 void DSpicoSim::Connect(int tries)
 {
-    sock = socket(AF_UNIX, SOCK_STREAM, 0);
-    sockaddr_un a {};
-    a.sun_family = AF_UNIX;
-    strncpy(a.sun_path, path.c_str(), sizeof a.sun_path - 1);
-    for (int i = 0; connect(sock, (sockaddr*)&a, sizeof a) != 0; i++)
+    if (path.rfind("tcp:", 0) == 0)
     {
-        if (i >= tries) { close(sock); sock = -1; return; }
-        usleep(50000);
+        // tcp:HOST:PORT, the Sion's mirrorrun --serve tcp:PORT over the network (HOST may be
+        // [v6addr%iface])
+        std::string hp = path.substr(4);
+        size_t c = hp.rfind(':');
+        std::string host = hp.substr(0, c), port = c == std::string::npos ? "7790" : hp.substr(c + 1);
+        if (host.size() > 1 && host.front() == '[' && host.back() == ']') host = host.substr(1, host.size() - 2);
+        for (int i = 0;; i++)
+        {
+            addrinfo hints {}, *res = nullptr;
+            hints.ai_socktype = SOCK_STREAM;
+            sock = -1;
+            if (getaddrinfo(host.c_str(), port.c_str(), &hints, &res) == 0)
+            {
+                for (addrinfo* r = res; r && sock < 0; r = r->ai_next)
+                {
+                    sock = socket(r->ai_family, SOCK_STREAM, 0);
+                    if (sock >= 0 && connect(sock, r->ai_addr, r->ai_addrlen) != 0) { close(sock); sock = -1; }
+                }
+                freeaddrinfo(res);
+            }
+            if (sock >= 0) break;
+            if (i >= tries) return;
+            usleep(50000);
+        }
+        int on = 1;
+        setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &on, sizeof on);
+    }
+    else
+    {
+        sock = socket(AF_UNIX, SOCK_STREAM, 0);
+        sockaddr_un a {};
+        a.sun_family = AF_UNIX;
+        strncpy(a.sun_path, path.c_str(), sizeof a.sun_path - 1);
+        for (int i = 0; connect(sock, (sockaddr*)&a, sizeof a) != 0; i++)
+        {
+            if (i >= tries) { close(sock); sock = -1; return; }
+            usleep(50000);
+        }
     }
     fcntl(sock, F_SETFL, fcntl(sock, F_GETFL) | O_NONBLOCK);
     // a real USB host only sends when the DSpico has a buffer free: keep the
     // socket's own buffering small so the Sion side feels the same backpressure
-    int small = 4096;
-    setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &small, sizeof small);
+    // (over TCP the kernel's own sizes: a 4 KB receive window starves the stream on
+    // delayed acks; the Sion side keeps its send buffer small instead)
+    int small = getenv("MIRROR_TCP_RCVBUF") ? atoi(getenv("MIRROR_TCP_RCVBUF")) : 4096;
+    if (path.rfind("tcp:", 0) != 0 || getenv("MIRROR_TCP_RCVBUF"))
+        setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &small, sizeof small);
 }
 
 DSpicoSim::~DSpicoSim()

@@ -31,6 +31,9 @@
 //                      TV's pace) or dump:FILE (every 60th picture, 720x480 raw, for tests)
 //     --sound OUT      the game's sound (see soundout.h): alsa ($AUDIODEV, the TV's HDMI
 //                      on the Sion) or wav:FILE
+//     --view OUT       a handheld showing the DS client (--dspico tcp:HOST:PORT) on its own
+//                      two screens, its pad and touch screen playing (viewout.h): sdl or
+//                      dump:FILE
 //     --stretch 0      where the game runs slow (a scene too heavy for the Sion), let the
 //                      sound break up instead of making it longer to match (up to 18%,
 //                      at the same pitch)
@@ -80,6 +83,7 @@
 #include "../common/mirror_format.h"
 #include "hostlink.h"
 #include "pads.h"
+#include "viewout.h"
 #include "saves.h"
 #ifdef HAVE_GL
 #include "glctx.h"
@@ -1812,7 +1816,7 @@ int main(int argc, char** argv)
 {
     if (argc < 3)
     {
-        fprintf(stderr, "usage: %s ROM FRAMES [--input F] [--record F] [--frames F] [--shots DIR] [--every N] [--stats F] [--boottype N] [--lang N] [--gamecode XXXX] [--half 1] [--gxdelta 1] [--serve LINK] [--reconnect 1] [--dspico PATH] [--usbrate N] [--realtime 1] [--jit 1] [--threaded 1] [--tv drm|dump:F] [--sound alsa|wav:F] [--stretch 0] [--hotplug 1] [--pads 1] [--save F] [--renderer soft|gl]\n", argv[0]);
+        fprintf(stderr, "usage: %s ROM FRAMES [--input F] [--record F] [--frames F] [--shots DIR] [--every N] [--stats F] [--boottype N] [--lang N] [--gamecode XXXX] [--half 1] [--gxdelta 1] [--serve LINK] [--reconnect 1] [--dspico PATH] [--usbrate N] [--realtime 1] [--jit 1] [--threaded 1] [--tv drm|dump:F] [--view sdl|dump:F] [--sound alsa|wav:F] [--stretch 0] [--hotplug 1] [--pads 1] [--save F] [--renderer soft|gl]\n", argv[0]);
         return 1;
     }
     const char* rompath = argv[1];
@@ -1828,7 +1832,7 @@ int main(int argc, char** argv)
     const char *serve = nullptr, *dspico = nullptr;
     u32 usbRate = 12000;
     bool realtime = false, jit = false, threaded = false;
-    const char *tvSpec = nullptr, *soundSpec = nullptr;
+    const char *tvSpec = nullptr, *soundSpec = nullptr, *viewSpec = nullptr;
     bool stretch = true;
     bool hotplug = false;   // the game starts at once; the DS can come and go
     bool padsOn = false;
@@ -1857,6 +1861,7 @@ int main(int argc, char** argv)
         else if (o == "--jit") jit = atoi(argv[i + 1]) != 0;
         else if (o == "--threaded") threaded = atoi(argv[i + 1]) != 0;
         else if (o == "--tv") tvSpec = argv[i + 1];
+        else if (o == "--view") viewSpec = argv[i + 1];
         else if (o == "--sound") soundSpec = argv[i + 1];
         else if (o == "--stretch") stretch = atoi(argv[i + 1]) != 0;
         else if (o == "--hotplug") hotplug = atoi(argv[i + 1]) != 0;
@@ -1985,6 +1990,13 @@ int main(int argc, char** argv)
         tv.Show(black, black);
     }
     if (soundSpec && !sound.Open(soundSpec)) return 1;
+    ViewOut view;
+    if (viewSpec)
+    {
+        if (!view.Open(viewSpec)) return 1;
+        static const u32 black[256 * 192] = {};
+        view.Show(black, black);
+    }
     SionPads sionPads;
     if (padsOn) padsOn = sionPads.Open();
     std::vector<u32> cursorScreen(256 * 192);
@@ -2481,7 +2493,12 @@ int main(int argc, char** argv)
             rec.RequestFull();
         }
         if (link && in.ds.held) padFrames++;
-        if (padsOn)
+        if (viewSpec)
+        {
+            view.Poll(in.pads.held, in.pads.touch, in.pads.x, in.pads.y);
+            if (view.QuitAsked()) gMirrorQuit = true;
+        }
+        else if (padsOn)
         {
             sionPads.Poll(in.pads.held, in.pads.touch, in.pads.x, in.pads.y);
             if (sionPads.MenuAsked()) menuWanted = true;
@@ -2563,6 +2580,7 @@ int main(int argc, char** argv)
             tv.Show((const u32*)top, cursorScreen.data());
         }
         else if (tvSpec) tv.Show((const u32*)top, (const u32*)bot);
+        if (viewSpec) view.Show((const u32*)top, (const u32*)bot);
         if (fo)
         {
             fwrite(top, 4, 256 * 192, fo);

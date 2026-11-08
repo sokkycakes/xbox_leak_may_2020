@@ -49,3 +49,32 @@ Not yet on the real RG DS and Sion.
     roms/ports/Sion Link.sh
     roms/ports/sionlink/slclient
     roms/ports/sionlink/font.ttf          (DejaVu Sans Mono)
+
+# DS mirror on the RG DS (`ports/Sion DS Mirror.sh`)
+
+The DS game the Sion runs (sionlink/mirror) on the RG DS's two screens. The RG DS runs
+the same client a real DS runs (`mirror/kit/sion-link-live.nds`) in `mirrorrun` built
+for arm64 with `--view sdl` (harness/viewout.cpp): BananaOS's SDL draws one window across
+both panels (`SDL_VIDEODRIVER=evdev SDL_BANANA_PANELS=stack`), each DS screen fills a
+640x480 panel, the bottom panel's touch is the DS's, F quits. The client's simulated
+DSpico (`--dspico tcp:HOST:PORT`) carries the bundle stream from the Sion's mirrorrun,
+which now serves `--serve usb,tcp:7790` (a DS on the DSpico or a viewer, whichever comes).
+
+Network: the home Wi-Fi when the RG DS is on it and the Sion answers at `SION_HOST`
+(`sionlink/mirror.conf`), else the Sion's DS network: `slclient --join-only` joins it and
+the viewer reaches the Sion at its IPv6 link-local address (EUI-64 from the BSSID).
+
+arm64 build: melonDS at `mirror/melonds/BASE` + `mirror-tap.patch`, cmake with an
+aarch64 toolchain file (`-DENABLE_GDBSTUB=OFF -DENABLE_OGLRENDERER=OFF`, JIT on) into
+`build-arm64`, then
+`CXX="aarch64-linux-gnu-g++ -static-libstdc++ -static-libgcc" ARCH=ARM64 B=build-arm64 VIEW=1 sh build.sh`
+with the arm64 pkg-config path. (melonDS must be built with the GDB stub off: the harness
+is built without it, and a mismatch crashes in FirmwareMem::Reset.)
+
+Tested 2026-11-08 in the cloud with the Mario Kart DS demo: over local TCP 2642 of 2700
+frames shown (menus and a race); through a proxy capped at 180 KB/s (the DS network's
+speed) 2458 of 2700, race fine; the arm64 build under qemu-user keeps up; and in QEMU with
+mac80211_hwsim: join the patched hostapd DS network, then the Sion kit's static
+mirrorrun over IPv6 link-local (569 frames shown under emulation). TCP note: a 4 KB
+receive buffer on the viewer starved the stream on delayed acks; only the Sion's send
+buffer stays small (16 KB). Not yet on the real RG DS. No game sound on the RG DS yet.

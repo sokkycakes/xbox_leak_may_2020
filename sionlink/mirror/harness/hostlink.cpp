@@ -4,6 +4,7 @@
 #include <cstring>
 #include <vector>
 #include <mutex>
+#include <thread>
 #include <atomic>
 #include <chrono>
 #include <algorithm>
@@ -13,6 +14,9 @@
 #include <poll.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #ifdef HAVE_LIBUSB
 #include <libusb-1.0/libusb.h>
 #endif
@@ -46,12 +50,46 @@ class SocketLink : public HostLink
 public:
     SocketLink(const std::string& path, const std::atomic<bool>* stop)
     {
-        int l = socket(AF_UNIX, SOCK_STREAM, 0);
-        sockaddr_un a {};
-        a.sun_family = AF_UNIX;
-        strncpy(a.sun_path, path.c_str(), sizeof a.sun_path - 1);
-        unlink(path.c_str());
-        if (bind(l, (sockaddr*)&a, sizeof a) || listen(l, 1)) { perror("link: bind"); close(l); return; }
+        // "tcp:PORT": a viewer over the network (the RG DS's mirrorrun --dspico tcp:HOST:PORT);
+        // otherwise a unix socket path (the cloud's simulated DSpico)
+        bool tcp = path.rfind("tcp:", 0) == 0;
+        int l;
+        if (tcp)
+        {
+            int port = atoi(path.c_str() + 4), on = 1, off = 0;
+            l = socket(AF_INET6, SOCK_STREAM, 0);
+            if (l >= 0)
+            {
+                setsockopt(l, SOL_SOCKET, SO_REUSEADDR, &on, sizeof on);
+                setsockopt(l, IPPROTO_IPV6, IPV6_V6ONLY, &off, sizeof off);   // IPv4 too
+                sockaddr_in6 a {};
+                a.sin6_family = AF_INET6;
+                a.sin6_addr = in6addr_any;
+                a.sin6_port = htons(port);
+                if (bind(l, (sockaddr*)&a, sizeof a)) { close(l); l = -1; }
+            }
+            if (l < 0)
+            {
+                // no IPv6 on this machine
+                l = socket(AF_INET, SOCK_STREAM, 0);
+                setsockopt(l, SOL_SOCKET, SO_REUSEADDR, &on, sizeof on);
+                sockaddr_in a {};
+                a.sin_family = AF_INET;
+                a.sin_addr.s_addr = htonl(INADDR_ANY);
+                a.sin_port = htons(port);
+                if (bind(l, (sockaddr*)&a, sizeof a)) { perror("link: bind"); close(l); return; }
+            }
+            if (listen(l, 1)) { perror("link: listen"); close(l); return; }
+        }
+        else
+        {
+            l = socket(AF_UNIX, SOCK_STREAM, 0);
+            sockaddr_un a {};
+            a.sun_family = AF_UNIX;
+            strncpy(a.sun_path, path.c_str(), sizeof a.sun_path - 1);
+            unlink(path.c_str());
+            if (bind(l, (sockaddr*)&a, sizeof a) || listen(l, 1)) { perror("link: bind"); close(l); return; }
+        }
         fprintf(stderr, "link: waiting for the DS on %s\n", path.c_str());
         for (;;)
         {
@@ -60,9 +98,12 @@ public:
             if (Stopped(stop)) break;
         }
         close(l);
-        unlink(path.c_str());
-        int small = 4096;   // see dspico_sim.cpp: little buffering, like USB
+        if (!tcp) unlink(path.c_str());
+        // see dspico_sim.cpp: little buffering, like USB; over a network a little more, for
+        // the round trip
+        int small = !tcp ? 4096 : getenv("MIRROR_TCP_SNDBUF") ? atoi(getenv("MIRROR_TCP_SNDBUF")) : 16384, on = 1;
         if (fd >= 0) setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &small, sizeof small);
+        if (fd >= 0 && tcp) setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof on);
     }
     ~SocketLink() { if (fd >= 0) close(fd); }
     bool Ok() const { return fd >= 0; }
@@ -352,12 +393,46 @@ static void HoldDsPadOff()
     // fd stays open: closing it gives the DS back
 }
 
+static std::unique_ptr<HostLink> OpenOne(const std::string& spec, const std::atomic<bool>* stop);
+
+// "usb,tcp:7790": whichever comes first, a DS on the DSpico or a handheld over the network
 std::unique_ptr<HostLink> OpenHostLink(const std::string& spec, const std::atomic<bool>* stop)
 {
-    HoldDsPadOff();
-    if (spec.rfind("sim:", 0) == 0)
+    if (spec.find(',') == std::string::npos) return OpenOne(spec, stop);
+    std::vector<std::string> specs;
+    for (size_t a = 0, b; a <= spec.size(); a = b + 1)
     {
-        auto l = std::make_unique<SocketLink>(spec.substr(4), stop);
+        b = spec.find(',', a);
+        if (b == std::string::npos) b = spec.size();
+        if (b > a) specs.push_back(spec.substr(a, b - a));
+    }
+    std::atomic<bool> done {false};
+    std::mutex m;
+    std::unique_ptr<HostLink> won;
+    std::vector<std::thread> waiters;
+    for (auto& one : specs)
+        waiters.emplace_back([&, one] {
+            // the others give up once one is there (or we're told to stop)
+            auto l = OpenOne(one, &done);
+            std::lock_guard<std::mutex> g(m);
+            if (l && !won) { won = std::move(l); done = true; fprintf(stderr, "link: %s\n", one.c_str()); }
+        });
+    // pass the caller's stop on to the waiters
+    while (!done)
+    {
+        if (Stopped(stop)) done = true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    for (auto& t : waiters) t.join();
+    return std::move(won);
+}
+
+static std::unique_ptr<HostLink> OpenOne(const std::string& spec, const std::atomic<bool>* stop)
+{
+    HoldDsPadOff();
+    if (spec.rfind("sim:", 0) == 0 || spec.rfind("tcp:", 0) == 0)
+    {
+        auto l = std::make_unique<SocketLink>(spec[0] == 't' ? spec : spec.substr(4), stop);
         if (l->Ok()) return l;
     }
 #ifdef HAVE_LIBUSB
@@ -368,6 +443,6 @@ std::unique_ptr<HostLink> OpenHostLink(const std::string& spec, const std::atomi
     }
 #endif
     else
-        fprintf(stderr, "link: unknown link %s (sim:PATH or usb)\n", spec.c_str());
+        fprintf(stderr, "link: unknown link %s (sim:PATH, tcp:PORT or usb; several with commas)\n", spec.c_str());
     return nullptr;
 }

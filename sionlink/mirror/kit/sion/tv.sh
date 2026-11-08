@@ -93,7 +93,7 @@ killall -q -9 xbcompat
 echo "$(date '+%F %T') dashboard stopped${session:+ (session loop too)}"
 
 # shellcheck disable=SC2086
-$RUN "$ROM" 0 --serve usb --hotplug 1 --realtime 1 --gxdelta 1 --jit 1 --threaded 1 $RENDER \
+$RUN "$ROM" 0 --serve "${SIONLINK_SERVE:-usb,tcp:7790}" --hotplug 1 --realtime 1 --gxdelta 1 --jit 1 --threaded 1 $RENDER \
 	$HALF $CODE --tv drm --sound alsa --pads 1 --save "${ROM%.*}.sav"
 echo "$(date '+%F %T') mirror exited with $?"
 

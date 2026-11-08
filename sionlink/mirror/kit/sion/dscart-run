@@ -96,5 +96,5 @@ RENDER="--renderer gl"
 CODE=
 [ -n "$gamecode" ] && CODE="--gamecode $gamecode"
 # shellcheck disable=SC2086
-exec $RUN "$rom" 0 --serve usb --hotplug 1 --realtime 1 --gxdelta 1 --jit 1 --threaded 1 $RENDER \
+exec $RUN "$rom" 0 --serve "${SIONLINK_SERVE:-usb,tcp:7790}" --hotplug 1 --realtime 1 --gxdelta 1 --jit 1 --threaded 1 $RENDER \
 	--half 1 $CODE --tv drm --sound alsa --pads 1 --save "$slot/$game.sav"

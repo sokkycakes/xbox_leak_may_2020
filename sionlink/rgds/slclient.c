@@ -8,6 +8,10 @@
 //
 //   slclient [--headless] [--font FILE.ttf] [--name NAME] [--iface IF]
 //            [--direct-peer MAC]   (testing without a radio, see sllinux.h)
+//   slclient --join-only [--iface IF]
+//            joins the Sion's DS network and stays on it (no Sion Link hello) until
+//            stopped, printing "joined BSSID" once there: the DS mirror's way onto it
+//            when the handheld and the Sion aren't on the same home Wi-Fi
 //
 // SDL2 + SDL2_ttf from the system; draws on the first display (BananaOS's
 // ports: the top panel).
@@ -25,7 +29,7 @@
 
 #include "sllinux.h"
 
-static bool headless;
+static bool headless, join_only;
 #ifndef SL_NO_SDL
 static SDL_Window *win;
 static SDL_Renderer *ren;
@@ -162,6 +166,8 @@ int main(int argc, char **argv)
     {
         if (!strcmp(argv[i], "--headless"))
             headless = true;
+        else if (!strcmp(argv[i], "--join-only"))
+            headless = join_only = true;
         else if (!strcmp(argv[i], "--font") && i + 1 < argc)
             font_path = argv[++i];
         else if (!strcmp(argv[i], "--name") && i + 1 < argc)
@@ -180,7 +186,7 @@ int main(int argc, char **argv)
         }
         else
         {
-            fprintf(stderr, "usage: slclient [--headless] [--font FILE.ttf] [--name NAME] [--iface IF] [--direct-peer MAC]\n");
+            fprintf(stderr, "usage: slclient [--headless | --join-only] [--font FILE.ttf] [--name NAME] [--iface IF] [--direct-peer MAC]\n");
             return 2;
         }
     }
@@ -237,6 +243,23 @@ int main(int argc, char **argv)
     }
 
     SlSetCancel(JoinCancel);
+    if (join_only)
+    {
+        if (SlJoin(JoinStatus))
+        {
+            uint8_t b[6];
+            char ssid[33];
+            int freq;
+            SlNetwork(b, ssid, &freq);
+            printf("joined %02x:%02x:%02x:%02x:%02x:%02x\n", b[0], b[1], b[2], b[3], b[4], b[5]);
+            fflush(stdout);
+            while (!stop)
+                Delay(200);
+        }
+        else
+            rc = 1;
+        goto out;
+    }
     while (!stop && !quit_pressed)
     {
         if (!SlJoin(JoinStatus))
