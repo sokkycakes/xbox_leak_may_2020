@@ -198,14 +198,12 @@ cmd_apply() {
 	load
 	[ "$1" = --force ] && rm -f "$STATE"
 	if [ -r "$STATE" ]; then
-		# The EDID work is done once a boot. On later calls (every Xbox session
-		# start) a 480-line choice made since, such as Frolick's "480p", which
-		# writes KMS_MODE=720x480, is mapped to this boot's 480i mode again, so a
-		# session restart doesn't switch a 15 kHz TV to 31 kHz.
+		# The EDID work is done once a boot, but every later call (each Xbox
+		# session start) puts the boot's mode back: a mode chosen since, such
+		# as Frolick's display setting, must not switch a 15 kHz TV to 31 kHz
+		# when the session restarts.
 		mode=$(cut -d' ' -f2 "$STATE")
-		cur=
-		[ -r /etc/default/kms ] && cur=$(. /etc/default/kms; echo "$KMS_MODE")
-		if [ "$mode" = "$MODE_480I" ] && [ "$cur" = "$MODE_480P" ]; then
+		if [ -n "$mode" ]; then
 			set_kms_mode "$mode"
 			echo "$mode" > /run/xbox-av-mode
 		fi

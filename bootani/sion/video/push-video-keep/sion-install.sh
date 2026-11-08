@@ -3,7 +3,8 @@
 # Runs on the Sion. Keeps the TV at 15 kHz 480i across Xbox session restarts.
 # Frolick's "480p" display setting writes KMS_MODE=720x480. sion-video turned
 # that into 2880x480i only once a boot, so a later `sion restart xbox` sent the
-# TV 720x480p (31 kHz). sion-video apply now maps it on every session start.
+# TV 720x480p (31 kHz). sion-video apply now puts the boot's mode back on
+# every session start.
 # Old file kept as /usr/libexec/sion-video.pre-keep. NOW=1 restarts the Xbox
 # session once (only when no game is running) to put the TV back on 480i.
 set -e
