@@ -33,6 +33,15 @@ driver sends raw NV12 (full-range BT.601), so there's no JPEG encoder in
 the kernel. A 24-bit RGB format (9) also shows up in a capture; it can be
 tried with `rgb888=1` but is unverified.
 
+Tested on a real JUA365 (firmware image 24010201) on the Sion. That adapter
+sends nothing on its interrupt endpoint, so after three missed frame-done
+reports the driver stops waiting for them (`ack_timeout_ms`, `slots`).
+
+`tools/t6-mirror.c` shows the main screen on the adapter (720x480p by
+default). It reads the main card's scanout buffer through EGL dma-buf import,
+or on the CPU for linear and Intel X/Y tiled buffers. `S99t6mirror` runs it
+whenever an adapter is plugged in.
+
 Unknown / not done: interlaced modes (no flag found yet), audio (session 3
 on the bulk pipe, 48 kHz stereo PCM), the hardware cursor, partial-frame
 updates.
