@@ -7,6 +7,8 @@
 #                   loaded now and at boot by S11modules
 #   t6-pattern   -> /usr/bin                    (draws a test pattern on the
 #                   adapter's outputs)
+#                   The driver also adds an ALSA card "Trigger6" for the
+#                   adapter's HDMI audio (TEST=1 plays a 2 s tone on it).
 #   t6-mirror    -> /usr/bin, S99t6mirror -> /etc/init.d (shows the main
 #                   screen on the adapter at 720x480p whenever it's plugged in;
 #                   started at boot through /etc/sion/late-start)
@@ -76,6 +78,14 @@ if [ "${TEST:-0}" = 1 ]; then
 		fi
 		i=$((i + 1))
 	done
+fi
+
+# HDMI audio: the adapter is its own ALSA card ("Trigger6"); it isn't a USB
+# audio class card, so xbox-env keeps the game sound where it was.
+grep -i trigger6 /proc/asound/cards
+if [ "${TEST:-0}" = 1 ] && [ -z "$playing" ] && command -v aplay > /dev/null; then
+	echo "2 s test tone on the adapter's HDMI"
+	aplay -q -D hw:CARD=Trigger6,DEV=0 $K/tone-440.wav || true
 fi
 
 /etc/init.d/S99t6mirror start

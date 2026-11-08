@@ -18,6 +18,12 @@ chip, USB 0711:5601). Source and notes: bootani/sion/drivers/trigger6 in the rep
 - trigger6.ko (2026-11-08 b): stops waiting for frame-done reports after 3
   misses (the JUA365 sends nothing on its interrupt endpoint, which capped
   output at ~10 fps); `slots=` parameter; logs the first interrupt reports.
+- trigger6.ko (2026-11-08 c): HDMI audio. ALSA card id "Trigger6"
+  (`hw:CARD=Trigger6,DEV=0`), S16_LE stereo 48 kHz, sent as session 3 on the
+  bulk pipe like the Windows driver; request 0x24 turns the stream on/off
+  (it was wrongly sent at mode set before). Not a USB audio class card, so
+  xbox-env's AUDIODEV choice (cards with /proc/asound/cardN/usbid) is unchanged.
+  `audio=0` module parameter disables it. tone-440.wav: 2 s test tone.
 - sion-install.sh: stops any running mirror, copies everything, adds the module to modules.dep and
   sion-extra.conf, persists, loads it, lists the adapter's ports.
   TEST=1 also draws colour bars on each connected port for 10 s (skipped

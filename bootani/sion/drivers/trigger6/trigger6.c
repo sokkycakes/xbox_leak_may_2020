@@ -22,7 +22,9 @@
  *    frame.
  */
 
+#include <linux/kthread.h>
 #include <linux/module.h>
+#include <linux/sched.h>
 #include <linux/unaligned.h>
 #include <linux/usb.h>
 #include <linux/vmalloc.h>
@@ -50,6 +52,9 @@
 #include <drm/drm_print.h>
 #include <drm/drm_probe_helper.h>
 
+#include <sound/core.h>
+#include <sound/pcm.h>
+
 #define DRIVER_NAME	"trigger6"
 #define DRIVER_DESC	"MCT Trigger 6 USB display adapters"
 #define DRIVER_MAJOR	1
@@ -61,7 +66,7 @@
 #define T6_GAMMA_CTRL		0x1c	/* wValue (output << 8) | 0 begin, 2 commit */
 #define T6_GAMMA_UPLOAD		0x1d	/* wValue output << 8, wIndex 0x100/0x200/0x400 */
 #define T6_SET_UNK23		0x23	/* 40 bytes, sent once at init */
-#define T6_SET_ACTIVE		0x24	/* 16 bytes */
+#define T6_SET_AUDIO		0x24	/* 16 bytes: audio stream on/off */
 #define T6_UNK31		0x31
 #define T6_GET_EDID		0x80	/* wValue byte offset, wIndex output */
 #define T6_GET_STATUS		0x87	/* wValue output, 1 byte */
@@ -95,6 +100,10 @@ MODULE_PARM_DESC(rgb888, "Send 24-bit RGB frames instead of NV12 (experimental, 
 static int t6_ack_timeout_ms = 100;
 module_param_named(ack_timeout_ms, t6_ack_timeout_ms, int, 0644);
 MODULE_PARM_DESC(ack_timeout_ms, "How long to wait for the adapter's frame-done report (0 = don't wait)");
+
+static int t6_audio = 1;
+module_param_named(audio, t6_audio, int, 0444);
+MODULE_PARM_DESC(audio, "Register an ALSA sound card for HDMI audio (default 1)");
 
 /* Frames rotate through this many video RAM slots per output, as Windows does. */
 static int t6_slots = T6_NUM_SLOTS;
@@ -198,6 +207,18 @@ struct t6_device {
 	struct work_struct hpd_work;
 
 	struct workqueue_struct *wq;
+	struct mutex bulk_lock;		/* keeps select + data packets together */
+
+	/* HDMI audio (session 3 on the bulk pipe) */
+	struct snd_card *snd;
+	struct snd_pcm_substream *a_sub;
+	spinlock_t a_lock;
+	bool a_running;
+	size_t a_pos, a_period_acc;
+	struct task_struct *a_thread;
+	wait_queue_head_t a_wq;
+	u8 *a_buf;
+
 	u32 seq;
 	unsigned int ack_misses;
 	int acks_seen;
@@ -261,15 +282,18 @@ static int t6_bulk(struct t6_device *t6, const void *data, size_t len)
 	return ret;
 }
 
-static void t6_set_active(struct t6_device *t6, bool on)
+static void t6_set_audio(struct t6_device *t6, bool on)
 {
-	/* The Windows driver sends this around every burst of frames. */
+	/*
+	 * The Windows driver sends this ~20 ms before and after each stretch
+	 * of audio, never around video. 0x2580 = its 50 ms pre-fill in bytes.
+	 */
 	static const u8 off[16] = { 0, 0, 0, 0, 0, 0, 0, 0, 0x80, 0x25, 0, 0, 0, 0, 2, 0 };
 	u8 buf[16];
 
 	memcpy(buf, off, sizeof(buf));
 	buf[0] = on;
-	t6_ctrl_out(t6, T6_SET_ACTIVE, 0, 0, buf, sizeof(buf));
+	t6_ctrl_out(t6, T6_SET_AUDIO, 0, 0, buf, sizeof(buf));
 }
 
 static void t6_load_gamma(struct t6_output *out)
@@ -433,9 +457,11 @@ static void t6_send_frame(struct t6_output *out, const u8 *frame)
 		sel.len = cpu_to_le32(len);
 		sel.offset = cpu_to_le32(off);
 		sel.more = cpu_to_le32(off + len < total);
+		mutex_lock(&t6->bulk_lock);
 		ret = t6_bulk(t6, &sel, sizeof(sel));
 		if (!ret)
 			ret = t6_bulk(t6, frame + off, len);
+		mutex_unlock(&t6->bulk_lock);
 		if (ret) {
 			drm_err_ratelimited(&t6->drm, "output %u: frame send failed: %d\n",
 					    out->idx, ret);
@@ -739,8 +765,7 @@ static void t6_crtc_atomic_enable(struct drm_crtc *crtc, struct drm_atomic_state
 		       DRM_MODE_ARG(m), le16_to_cpu(tm.pll_ctrl), le16_to_cpu(tm.pll_frac));
 	t6_ctrl_out(t6, T6_SET_MODE, out->idx, 0, &tm, sizeof(tm));
 	t6_ctrl_out(t6, T6_SET_OUTPUT_ENABLE, out->idx, 1, NULL, 0);
-	if (!t6->num_active++)
-		t6_set_active(t6, true);
+	t6->num_active++;
 	t6_load_gamma(out);
 
 	spin_lock_irqsave(&out->lock, flags);
@@ -768,8 +793,8 @@ static void t6_crtc_atomic_disable(struct drm_crtc *crtc, struct drm_atomic_stat
 	if (!drm_dev_enter(crtc->dev, &idx))
 		return;
 	t6_ctrl_out(t6, T6_SET_OUTPUT_ENABLE, out->idx, 0, NULL, 0);
-	if (was && !--t6->num_active)
-		t6_set_active(t6, false);
+	if (was)
+		t6->num_active--;
 	drm_dev_exit(idx);
 }
 
@@ -973,6 +998,277 @@ static int t6_hw_init(struct t6_device *t6)
 	return 0;
 }
 
+/* ------------------------------------------------------------------------ */
+/* HDMI audio                                                               */
+/*
+ * From the JUA365 capture: 16-bit stereo 48 kHz PCM goes to session 3 on the
+ * bulk pipe as {3, len, 0, len, 0, 0, 0, 0} + data, with no header. Windows
+ * turns the stream on with request 0x24, sends 50 ms up front, then 10 ms
+ * every 10 ms by its own clock (the adapter gives no feedback), and turns it
+ * off when the sound stops. The adapter plays it on its HDMI outputs.
+ */
+#define T6_AUDIO_BPS		(48000 * 4)
+#define T6_AUDIO_CHUNK		(T6_AUDIO_BPS / 100)	/* 10 ms */
+#define T6_AUDIO_PREFILL	(5 * T6_AUDIO_CHUNK)	/* 50 ms */
+
+static const struct snd_pcm_hardware t6_pcm_hw = {
+	.info = SNDRV_PCM_INFO_INTERLEAVED | SNDRV_PCM_INFO_MMAP |
+		SNDRV_PCM_INFO_MMAP_VALID | SNDRV_PCM_INFO_BLOCK_TRANSFER,
+	.formats = SNDRV_PCM_FMTBIT_S16_LE,
+	.rates = SNDRV_PCM_RATE_48000,
+	.rate_min = 48000,
+	.rate_max = 48000,
+	.channels_min = 2,
+	.channels_max = 2,
+	.buffer_bytes_max = 256 * 1024,
+	.period_bytes_min = T6_AUDIO_CHUNK / 2,
+	.period_bytes_max = 64 * 1024,
+	.periods_min = 2,
+	.periods_max = 256,
+};
+
+static int t6_pcm_open(struct snd_pcm_substream *sub)
+{
+	struct t6_device *t6 = snd_pcm_substream_chip(sub);
+	unsigned long flags;
+
+	sub->runtime->hw = t6_pcm_hw;
+	spin_lock_irqsave(&t6->a_lock, flags);
+	t6->a_sub = sub;
+	spin_unlock_irqrestore(&t6->a_lock, flags);
+	return 0;
+}
+
+static int t6_pcm_close(struct snd_pcm_substream *sub)
+{
+	struct t6_device *t6 = snd_pcm_substream_chip(sub);
+	unsigned long flags;
+
+	spin_lock_irqsave(&t6->a_lock, flags);
+	t6->a_running = false;
+	t6->a_sub = NULL;
+	spin_unlock_irqrestore(&t6->a_lock, flags);
+	return 0;
+}
+
+static int t6_pcm_prepare(struct snd_pcm_substream *sub)
+{
+	struct t6_device *t6 = snd_pcm_substream_chip(sub);
+	unsigned long flags;
+
+	spin_lock_irqsave(&t6->a_lock, flags);
+	t6->a_pos = 0;
+	t6->a_period_acc = 0;
+	spin_unlock_irqrestore(&t6->a_lock, flags);
+	return 0;
+}
+
+static int t6_pcm_trigger(struct snd_pcm_substream *sub, int cmd)
+{
+	struct t6_device *t6 = snd_pcm_substream_chip(sub);
+
+	switch (cmd) {
+	case SNDRV_PCM_TRIGGER_START:
+		spin_lock(&t6->a_lock);
+		t6->a_running = true;
+		spin_unlock(&t6->a_lock);
+		wake_up(&t6->a_wq);
+		return 0;
+	case SNDRV_PCM_TRIGGER_STOP:
+		spin_lock(&t6->a_lock);
+		t6->a_running = false;
+		spin_unlock(&t6->a_lock);
+		return 0;
+	}
+	return -EINVAL;
+}
+
+static snd_pcm_uframes_t t6_pcm_pointer(struct snd_pcm_substream *sub)
+{
+	struct t6_device *t6 = snd_pcm_substream_chip(sub);
+
+	return bytes_to_frames(sub->runtime, READ_ONCE(t6->a_pos));
+}
+
+static const struct snd_pcm_ops t6_pcm_ops = {
+	.open = t6_pcm_open,
+	.close = t6_pcm_close,
+	.prepare = t6_pcm_prepare,
+	.trigger = t6_pcm_trigger,
+	.pointer = t6_pcm_pointer,
+};
+
+/* Takes <len> bytes from the ring and sends them. Returns false once stopped. */
+static bool t6_audio_send(struct t6_device *t6, size_t len)
+{
+	struct snd_pcm_substream *sub;
+	struct snd_pcm_runtime *rt;
+	struct t6_select *sel = (struct t6_select *)t6->a_buf;
+	u8 *dst = t6->a_buf + sizeof(*sel);
+	size_t bsz, psz, avail, done = 0;
+	bool elapsed = false;
+	unsigned long flags;
+	int actual, ret, idx;
+
+	spin_lock_irqsave(&t6->a_lock, flags);
+	sub = t6->a_sub;
+	if (!sub || !t6->a_running) {
+		spin_unlock_irqrestore(&t6->a_lock, flags);
+		return false;
+	}
+	rt = sub->runtime;
+	bsz = frames_to_bytes(rt, rt->buffer_size);
+	psz = frames_to_bytes(rt, rt->period_size);
+	/* Only what the application has written; silence for the rest. */
+	avail = min_t(size_t, len, frames_to_bytes(rt, snd_pcm_playback_hw_avail(rt)));
+	while (done < avail) {
+		size_t n = min(avail - done, bsz - t6->a_pos);
+
+		memcpy(dst + done, rt->dma_area + t6->a_pos, n);
+		done += n;
+		t6->a_pos = (t6->a_pos + n) % bsz;
+	}
+	memset(dst + done, 0, len - done);
+	t6->a_period_acc += done;
+	if (t6->a_period_acc >= psz) {
+		t6->a_period_acc %= psz;
+		elapsed = true;
+	}
+	spin_unlock_irqrestore(&t6->a_lock, flags);
+	if (elapsed)
+		snd_pcm_period_elapsed(sub);
+
+	if (!drm_dev_enter(&t6->drm, &idx))
+		return false;
+	memset(sel, 0, sizeof(*sel));
+	sel->session = cpu_to_le32(3);
+	sel->total = cpu_to_le32(len);
+	sel->len = cpu_to_le32(len);
+	mutex_lock(&t6->bulk_lock);
+	ret = usb_bulk_msg(t6->udev, t6->bulk_out_pipe, sel, sizeof(*sel), &actual, 1000);
+	if (!ret)
+		ret = usb_bulk_msg(t6->udev, t6->bulk_out_pipe, dst, len, &actual, 1000);
+	mutex_unlock(&t6->bulk_lock);
+	drm_dev_exit(idx);
+	if (ret)
+		dev_err_ratelimited(&t6->udev->dev, "audio send failed: %d\n", ret);
+	return true;
+}
+
+static int t6_audio_thread(void *data)
+{
+	struct t6_device *t6 = data;
+
+	sched_set_fifo_low(current);
+	while (!kthread_should_stop()) {
+		ktime_t next;
+		size_t len = T6_AUDIO_PREFILL;
+		int idx;
+
+		wait_event_interruptible(t6->a_wq, READ_ONCE(t6->a_running) || kthread_should_stop());
+		if (kthread_should_stop())
+			break;
+		if (!READ_ONCE(t6->a_running))
+			continue;
+
+		if (drm_dev_enter(&t6->drm, &idx)) {
+			t6_set_audio(t6, true);
+			drm_dev_exit(idx);
+		}
+		next = ktime_get();
+		while (!kthread_should_stop() && t6_audio_send(t6, len)) {
+			ktime_t now;
+
+			len = T6_AUDIO_CHUNK;
+			next = ktime_add_ms(next, 10);
+			now = ktime_get();
+			/* Fell far behind (USB stall): start the clock again. */
+			if (ktime_before(next, ktime_sub_ms(now, 100)))
+				next = now;
+			set_current_state(TASK_UNINTERRUPTIBLE);
+			schedule_hrtimeout_range(&next, 200 * NSEC_PER_USEC, HRTIMER_MODE_ABS);
+		}
+		if (drm_dev_enter(&t6->drm, &idx)) {
+			t6_set_audio(t6, false);
+			drm_dev_exit(idx);
+		}
+	}
+	return 0;
+}
+
+static void t6_snd_private_free(struct snd_card *card)
+{
+	struct t6_device *t6 = card->private_data;
+
+	drm_dev_put(&t6->drm);
+}
+
+static void t6_audio_init(struct t6_device *t6, struct usb_interface *intf)
+{
+	struct snd_card *card;
+	struct snd_pcm *pcm;
+	int ret;
+
+	spin_lock_init(&t6->a_lock);
+	init_waitqueue_head(&t6->a_wq);
+	if (!t6_audio)
+		return;
+	t6->a_buf = kmalloc(sizeof(struct t6_select) + T6_AUDIO_PREFILL, GFP_KERNEL);
+	if (!t6->a_buf)
+		return;
+	ret = snd_card_new(&intf->dev, -1, "Trigger6", THIS_MODULE, 0, &card);
+	if (ret)
+		goto err;
+	strscpy(card->driver, "trigger6", sizeof(card->driver));
+	strscpy(card->shortname, "Trigger6 HDMI", sizeof(card->shortname));
+	snprintf(card->longname, sizeof(card->longname), "MCT Trigger 6 HDMI audio at usb-%s-%s",
+		 t6->udev->bus->bus_name, t6->udev->devpath);
+	ret = snd_pcm_new(card, "Trigger 6 HDMI", 0, 1, 0, &pcm);
+	if (ret)
+		goto err_card;
+	pcm->private_data = t6;
+	strscpy(pcm->name, "Trigger 6 HDMI", sizeof(pcm->name));
+	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &t6_pcm_ops);
+	snd_pcm_set_managed_buffer_all(pcm, SNDRV_DMA_TYPE_VMALLOC, NULL, 0, 0);
+
+	t6->a_thread = kthread_run(t6_audio_thread, t6, "trigger6-audio");
+	if (IS_ERR(t6->a_thread)) {
+		t6->a_thread = NULL;
+		goto err_card;
+	}
+	/* The card can outlive the USB device while it's open. */
+	drm_dev_get(&t6->drm);
+	card->private_data = t6;
+	card->private_free = t6_snd_private_free;
+	ret = snd_card_register(card);
+	if (ret) {
+		kthread_stop(t6->a_thread);
+		t6->a_thread = NULL;
+		snd_card_free(card);
+		return;
+	}
+	t6->snd = card;
+	drm_info(&t6->drm, "HDMI audio: ALSA card %d\n", card->number);
+	return;
+err_card:
+	snd_card_free(card);
+err:
+	drm_warn(&t6->drm, "no HDMI audio (%d)\n", ret);
+}
+
+static void t6_audio_fini(struct t6_device *t6)
+{
+	if (t6->a_thread) {
+		kthread_stop(t6->a_thread);
+		t6->a_thread = NULL;
+	}
+	if (t6->snd) {
+		snd_card_disconnect(t6->snd);
+		snd_card_free_when_closed(t6->snd);
+		t6->snd = NULL;
+	}
+}
+
 static void t6_release(struct drm_device *drm, void *arg)
 {
 	struct t6_device *t6 = to_t6(drm);
@@ -988,6 +1284,7 @@ static void t6_release(struct drm_device *drm, void *arg)
 	if (t6->wq)
 		destroy_workqueue(t6->wq);
 	kfree(t6->bulk_buf);
+	kfree(t6->a_buf);
 	kfree(t6->ctrl_buf);
 	usb_put_dev(t6->udev);
 }
@@ -1028,6 +1325,7 @@ static int t6_probe(struct usb_interface *intf, const struct usb_device_id *id)
 	t6->bulk_out_pipe = usb_sndbulkpipe(t6->udev, usb_endpoint_num(ep_out));
 	t6->intr_in_pipe = usb_rcvintpipe(t6->udev, usb_endpoint_num(ep_int));
 	mutex_init(&t6->ctrl_lock);
+	mutex_init(&t6->bulk_lock);
 	init_waitqueue_head(&t6->ack_wq);
 	INIT_WORK(&t6->hpd_work, t6_hpd_work);
 	ret = drmm_add_action(drm, t6_release, NULL);
@@ -1086,7 +1384,7 @@ static int t6_probe(struct usb_interface *intf, const struct usb_device_id *id)
 	if (ret)
 		drm_warn(drm, "no interrupt endpoint (%d); hotplug is polled\n", ret);
 
-	t6_set_active(t6, false);
+	t6_set_audio(t6, false);
 	usb_set_intfdata(intf, t6);
 
 	drmm_kms_helper_poll_init(drm);
@@ -1096,6 +1394,7 @@ static int t6_probe(struct usb_interface *intf, const struct usb_device_id *id)
 		return ret;
 
 	drm_client_setup(drm, NULL);
+	t6_audio_init(t6, intf);
 	return 0;
 }
 
@@ -1105,6 +1404,7 @@ static void t6_disconnect(struct usb_interface *intf)
 
 	if (!t6)
 		return;
+	t6_audio_fini(t6);
 	usb_kill_urb(t6->intr_urb);
 	cancel_work_sync(&t6->hpd_work);
 	drm_kms_helper_poll_fini(&t6->drm);

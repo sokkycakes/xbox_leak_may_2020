@@ -42,9 +42,13 @@ default). It reads the main card's scanout buffer through EGL dma-buf import,
 or on the CPU for linear and Intel X/Y tiled buffers. `S99t6mirror` runs it
 whenever an adapter is plugged in.
 
-Unknown / not done: interlaced modes (no flag found yet), audio (session 3
-on the bulk pipe, 48 kHz stereo PCM), the hardware cursor, partial-frame
-updates.
+HDMI audio is an ALSA card ("Trigger6", S16_LE stereo 48 kHz). From the
+capture: request 0x24 (16 bytes, first byte 1/0) turns the audio stream on
+and off; PCM goes to session 3 as {3, len, 0, len, 0, 0, 0, 0} + raw data,
+50 ms up front and then 10 ms every 10 ms, with no feedback from the adapter.
+
+Unknown / not done: interlaced modes (no flag found yet), the hardware cursor,
+partial-frame updates.
 
 ## Build
 

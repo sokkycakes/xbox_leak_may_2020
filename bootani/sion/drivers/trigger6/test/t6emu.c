@@ -9,6 +9,7 @@
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <time.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
@@ -114,6 +115,31 @@ static void *bulk_thread(void *arg)
 		n = ioctl(fd, USB_RAW_IOCTL_EP_READ, &p);
 		if (n != (int)s.len) {
 			fprintf(stderr, "t6emu: BAD data read %d want %u\n", n, s.len);
+			continue;
+		}
+		if (s.session == 3) {
+			/* Audio: {3, len, 0, len, 0...} + raw S16LE stereo 48 kHz. */
+			static FILE *af;
+			static long abytes, achunks;
+			static struct timespec t0;
+			struct timespec now;
+			int ok = s.total == s.len && !s.dest && !s.offset && !s.more && s.len % 4 == 0;
+			clock_gettime(CLOCK_MONOTONIC, &now);
+			if (!achunks)
+				t0 = now;
+			if (!af)
+				af = fopen("/tmp/t6audio.raw", "wb");
+			if (af && ok) {
+				fwrite(p.d, 1, s.len, af);
+				fflush(af);
+			}
+			abytes += s.len;
+			if (!ok || ++achunks % 100 == 1) {
+				double dt = (now.tv_sec - t0.tv_sec) + (now.tv_nsec - t0.tv_nsec) / 1e9;
+				printf("t6emu: audio chunk %ld len %u -> %s, %ld bytes in %.2f s\n",
+				       achunks, s.len, ok ? "OK" : "BAD", abytes, dt);
+				fflush(stdout);
+			}
 			continue;
 		}
 		if (s.session != 0 || s.offset != have || s.total > sizeof(frame) ||
