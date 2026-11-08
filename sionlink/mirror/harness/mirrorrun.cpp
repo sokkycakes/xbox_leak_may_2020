@@ -2763,5 +2763,5 @@ int main(int argc, char** argv)
     }
 #endif
     gCardHook = nullptr;
-    return 0;
+    return gMirrorLinkClosed ? 3 : 0;   // 3: the Sion ended the mirror (fd:N, MIRROR_QUIT_ON_CLOSE)
 }

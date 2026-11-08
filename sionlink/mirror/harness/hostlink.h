@@ -45,6 +45,8 @@ std::unique_ptr<HostLink> OpenHostLink(const std::string& spec, const std::atomi
 
 // set when mirrorrun is told to stop (SIGTERM, SIGINT): waiting for the DS stops too
 extern std::atomic<bool> gMirrorQuit;
+// --dspico fd:N with MIRROR_QUIT_ON_CLOSE: the Sion closed the link (mirrorrun exits with 3)
+extern std::atomic<bool> gMirrorLinkClosed;
 // dspad: OpenHostLink doesn't ask the pad service (itself) to let go of the DS first
 extern bool gDsPadSelf;
 

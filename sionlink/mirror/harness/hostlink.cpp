@@ -22,6 +22,7 @@
 #endif
 
 std::atomic<bool> gMirrorQuit {false};
+std::atomic<bool> gMirrorLinkClosed {false};
 
 static bool Stopped(const std::atomic<bool>* stop) { return gMirrorQuit || (stop && *stop); }
 

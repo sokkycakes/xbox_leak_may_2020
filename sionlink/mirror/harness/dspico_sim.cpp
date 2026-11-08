@@ -2,6 +2,7 @@
 // (usbEventQueue.h, ntrCardRomGameUsb.cpp).
 
 #include "dspico_sim.h"
+#include "hostlink.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -48,7 +49,17 @@ DSpicoSim::DSpicoSim(NDS* n, const std::string& p, unsigned bytesPerFrame)
 
 void DSpicoSim::Connect(int tries)
 {
-    if (path.rfind("tcp:", 0) == 0)
+    if (path.rfind("fd:", 0) == 0)
+    {
+        // fd:N, a connection already made by the program that started us (the RG DS's
+        // Sion Link app, which found the Sion and connected): used once, never again
+        if (fdUsed) return;
+        fdUsed = true;
+        sock = atoi(path.c_str() + 3);
+        int on = 1;
+        setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &on, sizeof on);
+    }
+    else if (path.rfind("tcp:", 0) == 0)
     {
         // tcp:HOST:PORT, the Sion's mirrorrun --serve tcp:PORT over the network (HOST may be
         // [v6addr%iface])
@@ -95,7 +106,7 @@ void DSpicoSim::Connect(int tries)
     // (over TCP the kernel's own sizes: a 4 KB receive window starves the stream on
     // delayed acks; the Sion side keeps its send buffer small instead)
     int small = getenv("MIRROR_TCP_RCVBUF") ? atoi(getenv("MIRROR_TCP_RCVBUF")) : 4096;
-    if (path.rfind("tcp:", 0) != 0 || getenv("MIRROR_TCP_RCVBUF"))
+    if ((path.rfind("tcp:", 0) != 0 && path.rfind("fd:", 0) != 0) || getenv("MIRROR_TCP_RCVBUF"))
         setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &small, sizeof small);
 }
 
@@ -434,6 +445,9 @@ void DSpicoSim::ReadSocket()
         fprintf(stderr, "dspico sim: the Sion side closed the link\n");
         close(sock);
         sock = -1;
+        // a connection we were handed can't be made again: the program that started us
+        // (the RG DS's app) goes back to its home screen
+        if (fdUsed && getenv("MIRROR_QUIT_ON_CLOSE")) gMirrorLinkClosed = true, gMirrorQuit = true;
         return;
     }
     if (r < 0) return;

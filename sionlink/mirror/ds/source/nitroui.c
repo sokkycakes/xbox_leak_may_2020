@@ -57,8 +57,10 @@ void uiShow(void)
     // both 2D engines on, the main one on top; the 3D engine as the game left it
     REG_POWERCNT = (REG_POWERCNT & (BIT(2) | BIT(3))) | BIT(0) | BIT(1) | BIT(9) | BIT(15);
     // bank A the main engine's bitmap, C the sub engine's; the others unmapped
+#ifndef SHIM_NDS_H   // (the RG DS app builds these screens on Linux: rgds/linkapp/shim)
     for (int b = 0; b < 9; b++)
         *(vu8*)(0x04000240 + (b < 7 ? b : b + 1)) = b == 0 ? 0x81 : b == 2 ? 0x84 : 0;
+#endif
     REG_DISPCNT = MODE_5_2D | DISPLAY_BG3_ACTIVE;
     REG_DISPCNT_SUB = MODE_5_2D | DISPLAY_BG3_ACTIVE;
     REG_BG3CNT = BG_BMP16_256x256 | BG_BMP_BASE(0) | BG_PRIORITY(0);

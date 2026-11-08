@@ -83,3 +83,38 @@ The Sion's DSpico is always plugged in, so it used to win `usb,tcp:7790` at once
 closed (first real try, 2026-11-08). Now a viewer over the network takes the game over from
 the DS on the DSpico whenever it connects, and the DS gets it back when the viewer quits; the
 port script checks the Sion's ssh port to tell whether it's on the home Wi-Fi.
+
+# Sion Link app (`linkapp/`, `ports/Sion Link.sh`)
+
+The DS app (`mirror/ds`, `sion-link-live.nds`) as a native program for the RG DS, with the
+same screens: `mirror/ds/source/nitroui.c` and its baked art built on a small libnds shim
+(`linkapp/shim/nds.h`), the two 256x192 screens scaled onto the two panels. Like the DS app it
+does its three things by itself:
+
+- **Controller**: while no DS game is mirrored, the RG DS's buttons and touch are a pad for
+  the Sion. Reports (`mirror_input`) go over TCP 7791 to a second `dspad` on the Sion
+  (`--link tcp:7791 --sock /run/sionlink-pad-net.sock`, started by `S97sionlink-pad`), which
+  makes its own Xbox 360 pad, so a DS on the DSpico and the RG DS can both play. Its pad
+  bundles give the lines on the lower screen.
+- **Mirror**: once a DS title runs on the Sion (its mirrorrun answers on TCP 7790), the app
+  hands that connection to the DS core (`mirrorrun ... --dspico fd:N --view sdl`, with
+  `MIRROR_QUIT_ON_CLOSE`), which has the panels until the title ends (exit code 3: home, and
+  the pad again) or F (home; A goes back to the game). The picture still comes through the DS
+  app run in melonDS; drawing the bundles natively is a later step.
+- **Download Play**: on the Sion's DS network (`sllinux.c`, as a DS joins it), programs the
+  Sion sends are taken in (the DS app's acks, chunk map and all), made back into a .nds and
+  started in the DS core. Sion games whose DS side keeps talking to the Sion after the
+  download need the core's radio bridged to the link (not yet).
+
+The Sion: home Wi-Fi when its ssh port answers at `SION_HOST` (`sionlink/mirror.conf`), else
+the Sion's DS network; Y switches between them (the DS network needs `sion-dslink start` on
+the Sion, and takes the handheld's own Wi-Fi down meanwhile). F quits.
+
+Sion side: `mirror/kit/sion/install-pad.sh` (the network pad and the mirror's network link).
+
+Build: `make -C linkapp` (native), or with the arm64 `CC`/pkg-config as above. Cloud tests
+2026-11-08: the pad against `dspad --link tcp:7791 --dry 1` (buttons arrive, the pad lines
+show); the mirror hand-off against a Sion-side mirrorrun with the MKDS demo (1040 frames shown,
+the title's end brings the home screen and the pad back); Download Play over a veth pair to
+`sionlinkd --if` (`--direct-peer`): `mirrorplay.nds` 195548 bytes in 1.8 s, rebuilt .nds
+boots the same as the original; the arm64 build under qemu-user. Not yet on the RG DS.
