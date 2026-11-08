@@ -65,7 +65,7 @@ dmesg | grep -i trigger6 | tail -5
 
 if [ "${TEST:-0}" = 1 ]; then
 	playing=
-	for p in $(pidof xbcompat); do
+	for p in $(pidof xbcompat xbcompat-gpu); do
 		tr '\0' ' ' < "/proc/$p/cmdline" | grep -q -e xboxdash -e Frolick -e Bootscreen || playing=yes
 	done
 	pidof gamescope kazeta-guide mirrorrun mirrorrun-gl > /dev/null && playing=yes

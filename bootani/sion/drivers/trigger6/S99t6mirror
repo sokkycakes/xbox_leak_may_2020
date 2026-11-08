@@ -16,7 +16,7 @@ start() {
 	(
 		# Let the dashboard take the main screen first.
 		n=0
-		while ! pidof xbcompat > /dev/null && [ $n -lt 30 ]; do sleep 2; n=$((n + 1)); done
+		while ! pidof xbcompat xbcompat-gpu > /dev/null && [ $n -lt 30 ]; do sleep 2; n=$((n + 1)); done
 		while :; do
 			found=
 			for c in /sys/class/drm/card[0-9]; do
