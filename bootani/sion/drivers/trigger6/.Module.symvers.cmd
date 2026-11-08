@@ -1,1 +1,0 @@
-savedcmd_Module.symvers :=  /tmp/claude-0/-home-user-xbox-leak-may-2020/89aaa004-0400-5c4f-92d8-368588fca535/scratchpad/k/linux-6.18.7/scripts/mod/modpost -M          -o Module.symvers -T modules.order -i /tmp/claude-0/-home-user-xbox-leak-may-2020/89aaa004-0400-5c4f-92d8-368588fca535/scratchpad/k/linux-6.18.7/Module.symvers -e 
