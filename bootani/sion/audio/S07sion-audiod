@@ -1,0 +1,41 @@
+#!/bin/sh
+#
+# sion-audiod: the sound router. Games play into the ALSA loopback card
+# (xbox-env sets AUDIODEV=plughw:CARD=Loopback,DEV=0 while this runs); the
+# router sends the sound to a USB sound card or the TV's HDMI, and to a
+# JUA365 adapter (card Trigger6) as well, following plug and unplug.
+# /etc/default/sion-audio: MAIN=<alsa pcm> forces the main output,
+# MIRROR=0 leaves the adapter out. touch /etc/sion/sion-audiod.off to disable.
+PID=/var/run/sion-audiod.pid
+LOG=/var/log/sion-audiod.log
+
+start() {
+	[ -e /etc/sion/sion-audiod.off ] && return 0
+	[ -e $PID ] && kill -0 "$(cat $PID)" 2>/dev/null && return 0
+	[ -e /proc/asound/Loopback ] || modprobe snd-aloop 2>/dev/null || insmod /lib/modules/$(uname -r)/extra/snd-aloop.ko
+	(
+		while :; do
+			[ -f $LOG ] && [ "$(wc -c < $LOG)" -gt 200000 ] && mv $LOG $LOG.old
+			/usr/bin/sion-audiod >> $LOG 2>&1
+			sleep 2
+		done
+	) < /dev/null > /dev/null 2>&1 &
+	echo $! > $PID
+	# xbox-env looks for the router when the session starts: be up first.
+	n=0
+	while ! pidof sion-audiod > /dev/null && [ $n -lt 20 ]; do sleep 0.1; n=$((n + 1)); done
+}
+
+stop() {
+	[ -e $PID ] && kill "$(cat $PID)" 2>/dev/null
+	rm -f $PID
+	killall sion-audiod 2>/dev/null
+	return 0
+}
+
+case "$1" in
+	start) start ;;
+	stop) stop ;;
+	restart) stop; sleep 1; start ;;
+	*) echo "usage: $0 start|stop|restart"; exit 1 ;;
+esac
