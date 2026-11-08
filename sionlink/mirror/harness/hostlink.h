@@ -27,12 +27,17 @@ public:
         int64_t from = waitFrom;
         return from ? NowMs() - from : 0;
     }
+    // another link takes over (a viewer over the network): Send gives up at once
+    void Abandon() { abandoned = true; }
+    // a viewer over the network (tcp:), not a DS on the DSpico
+    virtual bool Network() const { return false; }
     static int64_t NowMs()
     {
         return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
     }
 protected:
     std::atomic<int64_t> waitFrom {0};   // Send: when the DS last took some (0 when not sending)
+    std::atomic<bool> abandoned {false};
 };
 
 // waits for the DS to be there; nullptr if it can't, or once gMirrorQuit (or *stop) is set

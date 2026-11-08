@@ -78,3 +78,8 @@ mac80211_hwsim: join the patched hostapd DS network, then the Sion kit's static
 mirrorrun over IPv6 link-local (569 frames shown under emulation). TCP note: a 4 KB
 receive buffer on the viewer starved the stream on delayed acks; only the Sion's send
 buffer stays small (16 KB). Not yet on the real RG DS. No game sound on the RG DS yet.
+
+The Sion's DSpico is always plugged in, so it used to win `usb,tcp:7790` at once and the port
+closed (first real try, 2026-11-08). Now a viewer over the network takes the game over from
+the DS on the DSpico whenever it connects, and the DS gets it back when the viewer quits; the
+port script checks the Sion's ssh port to tell whether it's on the home Wi-Fi.

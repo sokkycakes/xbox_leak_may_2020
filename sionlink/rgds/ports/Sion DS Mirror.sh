@@ -8,7 +8,9 @@
 # The network: the home Wi-Fi when the handheld is on it and the Sion answers there
 # (SION_HOST in sionlink/mirror.conf), else the Sion's own DS network (needs
 # `sion-dslink start` on the Sion): the handheld joins it and reaches the Sion at its
-# IPv6 link-local address. Home Wi-Fi comes back afterwards if it was up.
+# IPv6 link-local address. Home Wi-Fi comes back afterwards if it was up. The Sion's mirror
+# hands the game to this viewer when it connects, even with a DS on the DSpico, and back to
+# that DS when this quits.
 D="$(cd "$(dirname "$0")" && pwd)/sionlink"
 LOG="$D/mirror-log.txt"
 SION_HOST=192.168.1.247
@@ -33,9 +35,10 @@ restore() {
 trap 'restore; exit 0' TERM INT HUP
 
 target=
-if [ -n "$was_up" ] && timeout 3 bash -c "exec 3<>/dev/tcp/$SION_HOST/$SION_PORT" 2>/dev/null; then
-    # (the Sion takes that test connection for a viewer and waits again once it closes)
-    sleep 0.5
+# Is the Sion on the home Wi-Fi? Its ssh port answers whenever it's on (the mirror's own
+# port only while a DS title runs, and a test connection there would take the game from
+# the DS on the DSpico). The viewer then keeps knocking until a DS title is up.
+if [ -n "$was_up" ] && timeout 3 bash -c "exec 3<>/dev/tcp/$SION_HOST/${SION_PROBE_PORT:-22}" 2>/dev/null; then
     target="tcp:$SION_HOST:$SION_PORT"
     echo "home Wi-Fi: the Sion answers at $SION_HOST"
 else

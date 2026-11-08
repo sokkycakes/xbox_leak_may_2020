@@ -2006,6 +2006,24 @@ int main(int argc, char** argv)
 
     std::unique_ptr<HostLink> link;
     LinkWaiter waiter;
+    // A viewer over the network takes over from a DS on the DSpico: the DSpico is always
+    // plugged in, so it wins the race at the start, and someone opening the mirror on a
+    // handheld (the RG DS's Sion DS Mirror) means it. While the DS on the DSpico has the
+    // link, the tcp: parts of --serve keep listening; when the viewer goes, both are waited
+    // for again.
+    std::string netServe;
+    if (serve && strchr(serve, ','))
+        for (size_t a = 0, b; a <= strlen(serve); a = b + 1)
+        {
+            std::string all = serve;
+            b = all.find(',', a);
+            if (b == std::string::npos) b = all.size();
+            std::string one = all.substr(a, b - a);
+            if (one.rfind("tcp:", 0) == 0)
+                netServe += (netServe.empty() ? "" : ",") + one;
+        }
+    LinkWaiter takeover;
+    bool takeoverOn = false;
     if (serve && hotplug)
         waiter.Start(serve);
     else if (serve)
@@ -2305,6 +2323,34 @@ int main(int argc, char** argv)
         {
             fprintf(stderr, "stopping at frame %u\n", f);
             break;
+        }
+        if (takeoverOn && (!link || rec.linkLost || link->Network()))
+        {
+            // the link went: its port is the waiter's again
+            takeover.Stop();
+            takeoverOn = false;
+        }
+        else if (link && !rec.linkLost && !link->Network() && !netServe.empty())
+        {
+            if (!takeoverOn)
+            {
+                takeover.Start(netServe);
+                takeoverOn = true;
+            }
+            else if (auto l = takeover.Take())
+            {
+                fprintf(stderr, "link: a viewer over the network takes over at frame %u\n", f);
+                link->Abandon();
+                rec.StopLink();
+                link = std::move(l);
+                pad = {};
+                in.ds = {};
+                rec.RestartLink(link.get());
+                lastReportAt = lastFullReq = f;
+                deaf = false;
+                firstReport = true;
+                takeoverOn = false;   // listening again next frame, for the one after
+            }
         }
         if (hotplug && !link)
         {
@@ -2655,6 +2701,7 @@ int main(int argc, char** argv)
     if (fo) fclose(fo);
     if (fidx) fclose(fidx);
     waiter.Stop();
+    takeover.Stop();
     rec.StopLink();
     if (link)
     {

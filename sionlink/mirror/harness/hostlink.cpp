@@ -46,13 +46,15 @@ static bool TakeReports(std::vector<uint8_t>& acc, mirror_input& in)
 class SocketLink : public HostLink
 {
     int fd = -1;
+    bool tcp = false;
     std::vector<uint8_t> acc;
 public:
+    bool Network() const override { return tcp; }
     SocketLink(const std::string& path, const std::atomic<bool>* stop)
     {
         // "tcp:PORT": a viewer over the network (the RG DS's mirrorrun --dspico tcp:HOST:PORT);
         // otherwise a unix socket path (the cloud's simulated DSpico)
-        bool tcp = path.rfind("tcp:", 0) == 0;
+        tcp = path.rfind("tcp:", 0) == 0;
         int l;
         if (tcp)
         {
@@ -112,7 +114,7 @@ public:
         waitFrom = NowMs();
         while (n)
         {
-            if (gMirrorQuit) { waitFrom = 0; return false; }
+            if (gMirrorQuit || abandoned) { waitFrom = 0; return false; }
             // keep draining reports while the DS side is slow to take data
             pollfd p {fd, POLLOUT | POLLIN, 0};
             poll(&p, 1, 100);
@@ -309,7 +311,7 @@ public:
             timeval tv {0, 50000};
             libusb_handle_events_timeout_completed(ctx, &tv, &done);
             if (done) break;
-            if (gMirrorQuit)
+            if (gMirrorQuit || abandoned)
             {
                 // told to stop while the DS takes nothing (switched off with its DSpico
                 // still plugged in): stopping mustn't wait for it
