@@ -345,14 +345,20 @@ static void src_import(struct src_buf *b, const struct drm_mode_fb_cmd2 *fb, int
 		DBG("GPU import of %ux%u %.4s mod %#llx failed", fb->width, fb->height,
 		    (char *)&fb->pixel_format, (unsigned long long)fb->modifier[0]);
 	}
+	/* CPU fallback: linear, and Intel X / Y tiling (no bit-6 swizzle on
+	 * gen8+); compressed (CCS) buffers can't be read this way. */
+	uint64_t mod = (fb->flags & DRM_MODE_FB_MODIFIERS) ? fb->modifier[0] : DRM_FORMAT_MOD_LINEAR;
 	if (nplanes == 1 && is_rgb32(fb->pixel_format) &&
-	    (!(fb->flags & DRM_MODE_FB_MODIFIERS) || fb->modifier[0] == DRM_FORMAT_MOD_LINEAR)) {
-		b->map_len = (size_t)fb->offsets[0] + (size_t)fb->pitches[0] * fb->height;
+	    (mod == DRM_FORMAT_MOD_LINEAR || mod == I915_FORMAT_MOD_X_TILED || mod == I915_FORMAT_MOD_Y_TILED)) {
+		off_t len = lseek(fds[0], 0, SEEK_END);
+		b->map_len = len > 0 ? (size_t)len : (size_t)fb->offsets[0] + (size_t)fb->pitches[0] * fb->height;
 		b->map = mmap(NULL, b->map_len, PROT_READ, MAP_SHARED, fds[0], 0);
 		if (b->map == MAP_FAILED)
 			b->map = NULL;
 		else {
-			DBG("imported %ux%u %.4s linear on the CPU", fb->width, fb->height, (char *)&fb->pixel_format);
+			b->mod = mod;
+			DBG("imported %ux%u %.4s mod %#llx on the CPU", fb->width, fb->height,
+			    (char *)&fb->pixel_format, (unsigned long long)mod);
 			return;
 		}
 	}
@@ -721,10 +727,25 @@ static void draw_cpu(int fd_unused, struct output *o, struct src_buf *b, int sx,
 			continue;
 		}
 		int syy = sy + (int)(((int64_t)(y - r.y) * sh + sh / 2) / r.h);
-		const uint32_t *s = (const uint32_t *)((uint8_t *)b->map + b->offset + (size_t)syy * b->pitch);
+		const uint8_t *base = (const uint8_t *)b->map + b->offset;
+		const uint32_t *s = (const uint32_t *)(base + (size_t)syy * b->pitch);
+		size_t tiles_per_row, row_off = 0;
+		if (b->mod == I915_FORMAT_MOD_X_TILED) {	/* 512 B x 8 rows */
+			tiles_per_row = b->pitch / 512;
+			row_off = (size_t)(syy / 8) * tiles_per_row * 4096 + (syy % 8) * 512;
+		} else if (b->mod == I915_FORMAT_MOD_Y_TILED) {	/* 128 B x 32 rows of 16 B columns */
+			tiles_per_row = b->pitch / 128;
+			row_off = (size_t)(syy / 32) * tiles_per_row * 4096 + (syy % 32) * 16;
+		}
 		memset(d, 0, r.x * 4);
 		for (int x = 0; x < r.w; x++) {
-			uint32_t p = s[xs[x]];
+			uint32_t p, bx = xs[x] * 4;
+			if (b->mod == I915_FORMAT_MOD_X_TILED)
+				p = *(const uint32_t *)(base + row_off + (bx / 512) * 4096 + bx % 512);
+			else if (b->mod == I915_FORMAT_MOD_Y_TILED)
+				p = *(const uint32_t *)(base + row_off + (bx / 128) * 4096 + ((bx % 128) / 16) * 512 + bx % 16);
+			else
+				p = s[xs[x]];
 			if (swap_rb)
 				p = (p & 0xff00ff00) | ((p >> 16) & 0xff) | ((p & 0xff) << 16);
 			d[r.x + x] = p | 0xff000000;
@@ -911,6 +932,12 @@ usage:
 			}
 		} else if (any && !warned++)
 			DBG("nothing on the main screen yet");
+
+		/* Drop buffers the main screen stopped using, so their memory
+		 * isn't kept alive by us. */
+		for (int i = 0; i < NCACHE; i++)
+			if (cache[i].fd >= 0 && frame_no - cache[i].last_used > (unsigned)fps * 2)
+				src_free(&cache[i]);
 
 		frame_no++;
 		next.tv_nsec += period;

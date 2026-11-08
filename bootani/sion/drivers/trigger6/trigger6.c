@@ -96,6 +96,11 @@ static int t6_ack_timeout_ms = 100;
 module_param_named(ack_timeout_ms, t6_ack_timeout_ms, int, 0644);
 MODULE_PARM_DESC(ack_timeout_ms, "How long to wait for the adapter's frame-done report (0 = don't wait)");
 
+/* Frames rotate through this many video RAM slots per output, as Windows does. */
+static int t6_slots = T6_NUM_SLOTS;
+module_param_named(slots, t6_slots, int, 0644);
+MODULE_PARM_DESC(slots, "Video RAM slots used per output, 1-3 (default 3)");
+
 struct t6_mode {
 	__le32 clock_khz;
 	__le16 refresh;
@@ -194,6 +199,9 @@ struct t6_device {
 
 	struct workqueue_struct *wq;
 	u32 seq;
+	unsigned int ack_misses;
+	int acks_seen;
+	unsigned int intr_logged;
 	unsigned int ref_khz;
 	unsigned int vram_mb;
 	unsigned int num_active;
@@ -297,10 +305,16 @@ static void t6_intr_complete(struct urb *urb)
 	case -ECONNRESET:
 	case -ENOENT:
 	case -ESHUTDOWN:
-	case -EPROTO:
 		return;
 	default:
+		dev_dbg_ratelimited(&t6->udev->dev, "interrupt endpoint: %d\n", urb->status);
 		goto resubmit;
+	}
+
+	if (t6->intr_logged < 4) {
+		t6->intr_logged++;
+		dev_info(&t6->udev->dev, "interrupt report (%u bytes): %*ph\n",
+			 urb->actual_length, min_t(int, urb->actual_length, 40), b);
 	}
 
 	if (urb->actual_length >= 36) {
@@ -386,11 +400,15 @@ static void t6_send_frame(struct t6_output *out, const u8 *frame)
 	struct t6_frame_hdr *hdr = (struct t6_frame_hdr *)frame;
 	struct t6_select sel = {};
 	bool rgb = out->stride != out->width;
-	u32 addr = t6_vram_base[out->idx] + out->slot * t6_vram_slot[out->idx];
+	unsigned int nslots = clamp(READ_ONCE(t6_slots), 1, T6_NUM_SLOTS);
+	u32 addr;
 	size_t total = T6_FRAME_HDR + out->payload, off;
 	int acks, ret;
 
-	out->slot = (out->slot + 1) % T6_NUM_SLOTS;
+	if (out->slot >= nslots)
+		out->slot = 0;
+	addr = t6_vram_base[out->idx] + out->slot * t6_vram_slot[out->idx];
+	out->slot = (out->slot + 1) % nslots;
 
 	/* The header sits in front of the pixels, right below their address. */
 	memset(hdr, 0, sizeof(*hdr));
@@ -425,10 +443,19 @@ static void t6_send_frame(struct t6_output *out, const u8 *frame)
 		}
 	}
 
-	if (t6_ack_timeout_ms > 0 &&
-	    !wait_event_timeout(t6->ack_wq, atomic_read(&t6->acks) != acks,
-				msecs_to_jiffies(t6_ack_timeout_ms)))
-		drm_dbg_driver(&t6->drm, "output %u: no frame-done report\n", out->idx);
+	/*
+	 * Some adapters never report frames done; after a few misses stop
+	 * waiting (each miss would cost a whole timeout) until one shows up.
+	 */
+	if (t6_ack_timeout_ms > 0 && (t6->ack_misses < 3 || atomic_read(&t6->acks) != t6->acks_seen)) {
+		if (wait_event_timeout(t6->ack_wq, atomic_read(&t6->acks) != acks,
+				       msecs_to_jiffies(t6_ack_timeout_ms))) {
+			t6->ack_misses = 0;
+		} else if (++t6->ack_misses == 3) {
+			drm_info(&t6->drm, "adapter doesn't report finished frames; not waiting for them\n");
+		}
+		t6->acks_seen = atomic_read(&t6->acks);
+	}
 }
 
 static void t6_output_work(struct work_struct *work)
