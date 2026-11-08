@@ -214,6 +214,7 @@ struct t6_device {
 	struct snd_pcm_substream *a_sub;
 	spinlock_t a_lock;
 	bool a_running;
+	bool a_on;			/* request 0x24 says audio is on */
 	size_t a_pos, a_period_acc;
 	struct task_struct *a_thread;
 	wait_queue_head_t a_wq;
@@ -765,6 +766,10 @@ static void t6_crtc_atomic_enable(struct drm_crtc *crtc, struct drm_atomic_state
 		       DRM_MODE_ARG(m), le16_to_cpu(tm.pll_ctrl), le16_to_cpu(tm.pll_frac));
 	t6_ctrl_out(t6, T6_SET_MODE, out->idx, 0, &tm, sizeof(tm));
 	t6_ctrl_out(t6, T6_SET_OUTPUT_ENABLE, out->idx, 1, NULL, 0);
+	/* Windows turns audio on right after a mode set; do the same when
+	 * sound is already playing, so the new mode carries it. */
+	if (READ_ONCE(t6->a_on))
+		t6_set_audio(t6, true);
 	t6->num_active++;
 	t6_load_gamma(out);
 
@@ -1175,6 +1180,7 @@ static int t6_audio_thread(void *data)
 			t6_set_audio(t6, true);
 			drm_dev_exit(idx);
 		}
+		WRITE_ONCE(t6->a_on, true);
 		next = ktime_get();
 		while (!kthread_should_stop() && t6_audio_send(t6, len)) {
 			ktime_t now;
@@ -1188,6 +1194,7 @@ static int t6_audio_thread(void *data)
 			set_current_state(TASK_UNINTERRUPTIBLE);
 			schedule_hrtimeout_range(&next, 200 * NSEC_PER_USEC, HRTIMER_MODE_ABS);
 		}
+		WRITE_ONCE(t6->a_on, false);
 		if (drm_dev_enter(&t6->drm, &idx)) {
 			t6_set_audio(t6, false);
 			drm_dev_exit(idx);

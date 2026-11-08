@@ -41,12 +41,16 @@ grep -qx trigger6 $C 2>/dev/null || { echo '# MCT Trigger 6 USB display adapters
 sion persist $D/extra/trigger6.ko $D/modules.dep $C /usr/bin/t6-pattern /usr/bin/t6-mirror \
 	/etc/init.d/S99t6mirror $L > /dev/null
 
+# The sound router (push-soundrouter) holds the adapter's sound card.
+ROUTER=
+pidof sion-audiod > /dev/null && ROUTER=1 && { /etc/init.d/S07sion-audiod stop || killall sion-audiod; sleep 1; } || true
 if grep -q '^trigger6 ' /proc/modules; then
 	echo "trigger6 was already loaded: reloading"
 	rmmod trigger6 || echo "could not unload the old trigger6 (in use?); reboot to pick up the new one"
 fi
 modprobe trigger6 || insmod $D/extra/trigger6.ko
 sleep 3
+[ -n "$ROUTER" ] && /etc/init.d/S07sion-audiod start || true
 
 card=
 for c in /sys/class/drm/card[0-9]; do

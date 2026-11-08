@@ -1,0 +1,1 @@
+savedcmd_trigger6.ko := ld -r -m elf_x86_64 --fatal-warnings -z noexecstack --no-warn-rwx-segments --build-id=sha1  -T /tmp/claude-0/-home-user-xbox-leak-may-2020/89aaa004-0400-5c4f-92d8-368588fca535/scratchpad/k/linux-6.18.7/scripts/module.lds -o trigger6.ko trigger6.o trigger6.mod.o .module-common.o
