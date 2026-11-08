@@ -157,7 +157,7 @@ static int gl_init(int render_fd)
 	void *gles = dlopen("libGLESv2.so.2", RTLD_NOW | RTLD_GLOBAL);
 	void *gbm = dlopen("libgbm.so.1", RTLD_NOW | RTLD_GLOBAL);
 	if (!egl || !gles || !gbm) {
-		LOG("no OpenGL ES libraries (%s)", dlerror());
+		LOG("no OpenGL ES libraries (EGL %s, GLESv2 %s, gbm %s)", egl ? "ok" : "missing", gles ? "ok" : "missing", gbm ? "ok" : "missing");
 		return -1;
 	}
 	PFNEGLGETPROCADDRESSPROC GetProc = (PFNEGLGETPROCADDRESSPROC)dlsym(egl, "eglGetProcAddress");
@@ -886,7 +886,7 @@ usage:
 	drm_driver_name(mainfd, mname, sizeof(mname));
 	int rfd = open_by_driver("renderD", mname, NULL, 0);
 	if (rfd < 0 || gl_init(rfd) < 0)
-		LOG("OpenGL not available: only linear buffers can be mirrored");
+		LOG("OpenGL not available: copying on the CPU (linear, X and Y tiled buffers)");
 	for (int i = 0; i < NCACHE; i++)
 		cache[i].fd = -1;
 
