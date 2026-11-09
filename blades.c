@@ -341,6 +341,7 @@ static BOOL blades_key(WORD key,BOOL down) {
         if(down) blades_pending_back=1;return TRUE;
     }
     if(blades_guide_open && (key=='Y' || key==0x5803)) {
+        if(music_key_y(down)) return TRUE;   /* music picker pages: Y = Play All Music / Play Album / Play Song */
         if(down) blades_pending_back=2;return TRUE;
     }
     if(blades_notice_root && (key==VK_UP || key==VK_DOWN || key==VK_LEFT || key==VK_RIGHT)) return TRUE;

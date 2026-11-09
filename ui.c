@@ -454,6 +454,7 @@ static void guide_page_shown(DWORD page,int catalog);
 static void guide_page_restored(void);
 static void guide_tick(void);
 static void guide_list_unbind_tree(DWORD root);
+static BOOL music_key_y(BOOL down);
 #include "blades.c"
 #include "guide_core.c"
 #include "guide_msgbox.c"
