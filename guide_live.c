@@ -198,6 +198,14 @@ static BOOL live_dispatch(DWORD button,const WCHAR *id) {
         return TRUE;
     }
     if(!lstrcmpW(id,L"btnJoinLive") || !lstrcmpW(id,L"btnJoinXbox")) {live_join();return TRUE;}
+    /* Family Settings > Xbox Live Controls (dash_accountm, an Xbox Live account page): needs an Xbox Live
+       sign-in, so the Guide's own Xbox Live sign-in offer, as for Sign In to Xbox Live. */
+    if(!lstrcmpW(id,L"btnLive")) {
+        BladesPage *top=blades_page();
+        if(top && top->catalog>=0 && !lstrcmpiW(blades_scenes[top->catalog].scene,L"dashSysCslSetPControlSelect.xur")) {
+            log_text("Xbox Live Controls need an Xbox Live sign-in");live_upsell();return TRUE;
+        }
+    }
     /* Game banner: no game is running on the dashboard, so A does nothing. */
     if(!lstrcmpW(id,L"btnGameBanner")) {log_text("Game banner: no game running (no reaction)");return TRUE;}
     return FALSE;
