@@ -122,7 +122,7 @@ static void guide_status_hide(void) {
 }
 
 /* ---------- xam notify.xur popup ---------- */
-static struct {DWORD scene,control,visual;int frames,serial,player;BOOL leaving;float width;WCHAR text[256],image[512];} live_toast;   /* serial: one per popup */
+static struct {DWORD scene,control,visual;int frames,serial,player;BOOL leaving;float width,height;WCHAR text[256],image[512];} live_toast;   /* serial: one per popup */
 #define TOAST_SHOW_FRAMES 300   /* TransTo loops until the popup is dismissed (~5 s) */
 #define TOAST_LEAVE_FRAMES 60   /* TransFrom 186..240 */
 static DWORD live_toast_scene(void) {return live_toast.scene;}
@@ -139,7 +139,6 @@ static void live_toast_close(void) {
 /* The visible bar ends 35 authored units above the bottom of the 87-high popup (the rest is
    room for the ring glow), i.e. 52.5 window pixels at 1.5x. Put the bar's bottom, not the empty
    frame's, on the title-safe line at window y 648 (90% of 720). */
-#define LIVE_TOAST_H 87.0f
 /* Where xam.xex draws a notification, in its HUD buffer's pixels (W x H, 852x480 or 640x480),
    at scale 1 with no other transform (0x818dce28 builds a translation-only view):
    - 0x818d5788 places it from the popup's flags (+0xa0, 2 unless the title moved it):
@@ -152,7 +151,7 @@ static void live_toast_close(void) {
 static void live_toast_view(float W,float H,float *x,float *y) {
     unsigned w=(unsigned)W,h=(unsigned)H,p=h==480?85:90;
     int left=(int)((w-w*p/100)/2),top=(int)((h-h*p/100)/2),right=left+(int)(w*p/100),bottom=top+(int)(h*p/100);
-    float pw=live_toast.width,ph=LIVE_TOAST_H;
+    float pw=live_toast.width,ph=live_toast.height;
     int px=(int)((W-pw)*0.5f),py=(int)(H-ph);   /* flags 2: bottom, centred (fctiwz truncates) */
     if(px<left) px=left; else if(px+pw>right) px=(int)(right-pw);
     if(py<top) py=top; else if(py+ph>bottom) py=(int)(bottom-ph);
@@ -232,8 +231,17 @@ static void guide_toast(const WCHAR *text,const WCHAR *image) {
        maximum is applied there. The popup itself sits at 0,0; where it appears on screen is
        decided when it is drawn (live_toast_view). */
     float width=59.0f+live_text_width(live_toast.text,11.0f)+19.0f;
-    xui_bounds(scene,0,0,width,LIVE_TOAST_H);
-    if(control) xui_bounds(control,0,0,width,LIVE_TOAST_H);
+    /* 0x818d5774 passes the TextPresenter's height (not the popup's authored 87) as the new
+       height: scr_Notification's presenter is 60 tall, so the popup becomes 60 tall and its
+       bottom, not 27 units of empty space below the bar, sits on the safe line. */
+    float height=60.0f;
+    {DWORD v=0;if(control) XUI_FN(0x7d32eb,HRESULT,DWORD,DWORD *)(control,&v);
+     DWORD tp=v?ui_find_deep(v,L"TextPresenter",0):0;
+     DWORD *d=tp?XUI_FN(0x7d268f,void *,DWORD,DWORD)(tp,XUI_GLOBAL(0x8f1188,DWORD)):0;
+     if(d && *(float *)&d[4]>0) height=*(float *)&d[4];}
+    xui_bounds(scene,0,0,width,height);
+    if(control) xui_bounds(control,0,0,width,height);
+    live_toast.height=height;
     live_toast.width=width;
     log_value("Notification width",(DWORD)width);
     live_toast.scene=scene;live_toast.control=control;live_toast.frames=TOAST_SHOW_FRAMES;live_toast.leaving=FALSE;live_toast.serial++;
