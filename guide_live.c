@@ -131,6 +131,34 @@ static void live_toast_close(void) {
     live_toast.scene=live_toast.control=0;live_toast.leaving=FALSE;
 }
 /* image: a file in xam_xam.xzp (signed_in.png, signed_out.png, ...) or a full URI. */
+/* Widest line of a popup text in XUI units, measured with the same Convection face the
+   engine draws with (assets\\fonts\\Convection-Medium.ttf, registered privately for GDI).
+   LIVE_TEXT_EM converts XUI PointSize to the GDI em height; calibrated against the engine's
+   rendered text (probe actions toast, toastfriend, toastlong: the engine needs about 1.5x the TTF em width before it stops clipping the last letter). */
+#define LIVE_TEXT_EM 1.5f
+#define LIVE_TOAST_MIN_W 140.0f
+static float live_text_width(const WCHAR *text,float points) {
+    static HDC dc;static HFONT font;static float cached_points;
+    if(!dc) {
+        WCHAR path[MAX_PATH];DWORD n=GetModuleFileNameW(0,path,MAX_PATH);WCHAR *slash=n?wcsrchr(path,L'\\'):0;
+        if(slash) {lstrcpyW(slash,L"\\assets\\fonts\\Convection-Medium.ttf");AddFontResourceExW(path,FR_PRIVATE,0);}
+        dc=CreateCompatibleDC(0);
+    }
+    if(!dc) return 283.0f;
+    if(!font || cached_points!=points) {
+        if(font) DeleteObject(font);
+        font=CreateFontW(-(int)(points*LIVE_TEXT_EM*16.0f+0.5f),0,0,0,FW_NORMAL,0,0,0,DEFAULT_CHARSET,OUT_TT_PRECIS,CLIP_DEFAULT_PRECIS,ANTIALIASED_QUALITY,DEFAULT_PITCH,L"Convection Medium");
+        cached_points=points;SelectObject(dc,font);
+    }
+    float widest=0;
+    for(const WCHAR *line=text;line && *line;) {
+        int len=0;while(line[len] && line[len]!=L'\r' && line[len]!=L'\n') len++;
+        SIZE size={0};if(len) GetTextExtentPoint32W(dc,line,len,&size);
+        if(size.cx/16.0f>widest) widest=size.cx/16.0f;
+        line+=len;while(*line==L'\r' || *line==L'\n') line++;
+    }
+    return widest;
+}
 /* Text, icon, Xbox logo and ring quadrant on the popup's visual. Applied again whenever the
    engine rebuilds the visual (a graphics device reset at start-up does), which would
    otherwise bring back the authored defaults: all four quadrants lit and no icon. */
@@ -178,14 +206,22 @@ static void guide_toast(const WCHAR *text,const WCHAR *image) {
     live_toast.player=player;
     if(control) live_toast_dress(control);
     /* Bottom centre of the title-safe area of the 1120x770 dash canvas (shown window y 58.7..718.7). */
-    xui_bounds(scene,330,592,460,87);
+    /* NotifyPopupScene (xam code) sizes the popup to its text: scr_Notification is authored
+       361 wide with its TextPresenter at x 59, 283 wide (19 to the right edge), and the bar,
+       right cap and text are anchored to stretch with the control. So the popup is
+       59 + widest line + 19 wide, centred at the bottom of the title-safe area. */
+    float width=59.0f+live_text_width(live_toast.text,11.0f)+19.0f;
+    if(width<LIVE_TOAST_MIN_W) width=LIVE_TOAST_MIN_W;
+    if(width>460.0f) width=460.0f;
+    xui_bounds(scene,560.0f-width/2,592,width,87);
+    if(control) xui_bounds(control,0,0,width,87);
     /* The dash view shows canvas 1120x660 (y 58.7..718.7) in a 1280x720 window, which would
        stretch the popup 1.14x wide and 1.09x tall and make its round disc oval. Its 32x32
        icon slots match the 32x32 icons, so draw it 1:1 in window pixels instead. */
     {XuiValue v={.type=7};float *f=(float *)&v.integer;f[0]=1120.0f/1280.0f;f[1]=660.0f/720.0f;f[2]=1.0f;
-     XuiValue p={.type=7};float *g=(float *)&p.integer;g[0]=230.0f;g[1]=87.0f;g[2]=0.0f;
-     log_value("Notification pivot",(DWORD)xui_property(scene,L"Pivot",&p));
-     log_value("Notification scale",(DWORD)xui_property(scene,L"Scale",&v));}
+     XuiValue p={.type=7};float *g=(float *)&p.integer;g[0]=width/2;g[1]=87.0f;g[2]=0.0f;
+     xui_property(scene,L"Pivot",&p);xui_property(scene,L"Scale",&v);}
+    log_value("Notification width",(DWORD)width);
     live_toast.scene=scene;live_toast.control=control;live_toast.frames=TOAST_SHOW_FRAMES;live_toast.leaving=FALSE;live_toast.serial++;
     if(control) ui_play_tree(control,L"TransTo",L"EndTransTo",0);
     /* PopUpSound (NotifyPopup.xma) is played by guide_sound.c, which honours NotificationSound. */
@@ -341,6 +377,7 @@ static void live_test_tick(void) {
             else if(!strcmp(name,"upsell")) live_upsell();
             else if(!strcmp(name,"page")) blades_navigate(blades_catalog(L"dash_dashmark.xzp",L"1400_StoreFrontScene.xur"));
             else if(!strcmp(name,"toast")) guide_toast(L"Player1\r\nsigned in",L"signed_in.png");
+            else if(!strcmp(name,"toastlong")) guide_toast(L"Somebody With A Long Name\r\nhas sent you a friend request",L"friend_online.png");
             else if(!strcmp(name,"toastfriend")) guide_toast(L"Gamertag\r\nis online",L"friend_online.png");
             else if(!strcmp(name,"shot")) ui_shot_request=TRUE;   /* screenshot at an exact frame (animation strips) */
             else if(!strcmp(name,"status")) guide_status_show(L"Signing out");
