@@ -215,6 +215,13 @@ static void blades_notice(const WCHAR *reason) {
     log_text("Console notice");log_wide(reason);
     live_notice(reason);
 }
+/* Blades 1-3 keep their content in scContainer (dash_root): the blade scene around it (TabN: txt_Header,
+   legend_a/b/x/y) is hidden too while a dash page is open, as the page authors its own header and legends. */
+static void blades_tab_sync(void) {
+    static DWORD tabs[4],tabs_of;
+    if(tabs_of!=ui_external) {tabs_of=ui_external;for(int i=0;i<4;i++) tabs[i]=ui_external?ui_find_deep(ui_external,dash_blades[i].tab,0):0;}
+    for(int i=0;i<4;i++) if(tabs[i] && tabs[i]!=dash_root[i] && i==ui_blade-1) blades_visible(tabs[i],!blades_dash_stack.depth);
+}
 static void blades_back(void) {
     if(blades_notice_root) {blades_notice_close();return;}
     if(guide_back()) return;
@@ -225,6 +232,7 @@ static void blades_back(void) {
         XUI_FN(0x7dec45,HRESULT,DWORD)(page->scene);
         memset(page,0,sizeof(*page));
         DWORD scene=blades_current();blades_visible(scene,TRUE);
+        if(!blades_guide_open && ui_mode==2) blades_tab_sync();   /* the blade scene takes focus again */
         DWORD focus=stack->depth?stack->pages[stack->depth-1].focus:stack->root_focus;
         if(!focus || FAILED(xui_focus(focus))) blades_focus(scene,blades_source());
         if(!blades_guide_open && !stack->depth) {
@@ -439,6 +447,7 @@ static void blades_meta(void) {
 static void blades_visibility(void) {
     if(!blades_ready || ui_mode!=2) return;
     for(int i=0;i<4;i++) blades_visible(dash_root[i],i==ui_blade-1 && !blades_dash_stack.depth);
+    blades_tab_sync();
     for(int i=0;i<blades_dash_stack.depth;i++)
         blades_visible(blades_dash_stack.pages[i].scene,i==blades_dash_stack.depth-1);
     if(blades_guide_open) {
