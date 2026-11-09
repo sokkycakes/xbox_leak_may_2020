@@ -319,6 +319,9 @@ static void blades_guide(BOOL open) {
 static BOOL blades_switch(int mode) {
     if(!blades_ready) return FALSE;
     if(mode==0) {if(!live_guide_toggle_blocked()) blades_guide(!blades_guide_open);return TRUE;}
+    /* F2 / F3 (host keys) wait like the Guide button while a message box is up: the box keeps the focus
+       and is closed only through its own buttons / B. */
+    if(live_guide_toggle_blocked()) {log_value("Host switch blocked by message box",mode);return TRUE;}
     if(mode==2) {
         if(blades_guide_open) blades_guide(FALSE);
         ui_mode=2;blades_visible(ui_demo,FALSE);blades_visible(ui_background,FALSE);
