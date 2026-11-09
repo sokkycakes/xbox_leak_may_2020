@@ -40,6 +40,7 @@ static const WCHAR *profiles_menu_scene(void);
 static BOOL profiles_key(WORD key,BOOL down);
 static BOOL profiles_pc_key(WORD key,BOOL down);
 static void profiles_text(const char *utf8);
+static void profiles_pc_char(WCHAR c);
 static BOOL profiles_wants_text(void);
 static void profiles_guide_opened(void);
 static void profiles_meta(DWORD meta);
@@ -150,6 +151,8 @@ static bool SDLCALL ui_window_message(void *unused,MSG *m) {
         if(m->wParam==VK_ESCAPE || m->wParam>=VK_F1 && m->wParam<=VK_F12) return true;
         if(profiles_pc_key((WORD)m->wParam,m->message==WM_KEYDOWN)) return true;  /* typing into the virtual keyboard */
         ui_key((WORD)m->wParam,m->message==WM_KEYDOWN);
+    } else if(m->message==WM_CHAR) {
+        profiles_pc_char((WCHAR)m->wParam);
     } else if(m->message>=WM_MOUSEFIRST && m->message<=WM_MOUSELAST) {
         DWORD message[5]={0},data[8]={0};
         RECT client;GetClientRect(m->hwnd,&client);

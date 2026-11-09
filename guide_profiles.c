@@ -554,13 +554,19 @@ static BOOL kb_enter_pending;
 static BOOL profiles_pc_key(WORD key,BOOL down) {
     if(!prof_kb_input()) return FALSE;
     if(key==VK_BACK) {if(down) kb_backspace();return TRUE;}
-    /* Enter waits for the tick: SDL hands out the text typed in the same message pump only after this. */
-    if(key==VK_RETURN) {if(down) kb_enter_pending=TRUE;return TRUE;}
+    /* Enter is taken from its WM_CHAR (profiles_pc_char), which is queued behind the WM_CHARs of the letters
+       typed before it; the key-down itself can be seen before those letters reach SDL's text input. */
+    if(key==VK_RETURN) return TRUE;
     if(key==VK_DELETE) {if(down && kb_cur<kb_len) {kb_move(1);kb_backspace();}return TRUE;}
     if(key==VK_HOME) {if(down) kb_move(-99);return TRUE;}
     if(key==VK_END) {if(down) kb_move(99);return TRUE;}
     if(key==VK_SPACE || (key>='0' && key<='9') || (key>='A' && key<='Z') || (key>=VK_OEM_1 && key<=VK_OEM_8) || (key>=VK_NUMPAD0 && key<=VK_DIVIDE)) return TRUE;
     return FALSE;
+}
+/* Window message hook, WM_CHAR: Enter's '\r' (SDL text input drops control characters). The letters typed
+   before it are already SDL text events by now; the tick runs Done after the event loop handed them out. */
+static void profiles_pc_char(WCHAR c) {
+    if(c==L'\r' && prof_kb_input()) kb_enter_pending=TRUE;
 }
 /* Gamepad/host keys while the virtual keyboard is up: X Backspace, Y Space, LB/RB cursor. */
 static BOOL profiles_key(WORD key,BOOL down) {
