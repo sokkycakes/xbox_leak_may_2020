@@ -122,7 +122,7 @@ static void guide_status_hide(void) {
 }
 
 /* ---------- xam notify.xur popup ---------- */
-static struct {DWORD scene,control;int frames,serial;BOOL leaving;WCHAR text[256],image[512];} live_toast;   /* serial: one per popup */
+static struct {DWORD scene,control,visual;int frames,serial,player;BOOL leaving;WCHAR text[256],image[512];} live_toast;   /* serial: one per popup */
 #define TOAST_SHOW_FRAMES 300   /* TransTo loops until the popup is dismissed (~5 s) */
 #define TOAST_LEAVE_FRAMES 60   /* TransFrom 186..240 */
 static DWORD live_toast_scene(void) {return live_toast.scene;}
@@ -131,6 +131,30 @@ static void live_toast_close(void) {
     live_toast.scene=live_toast.control=0;live_toast.leaving=FALSE;
 }
 /* image: a file in xam_xam.xzp (signed_in.png, signed_out.png, ...) or a full URI. */
+/* Text, icon, Xbox logo and ring quadrant on the popup's visual. Applied again whenever the
+   engine rebuilds the visual (a graphics device reset at start-up does), which would
+   otherwise bring back the authored defaults: all four quadrants lit and no icon. */
+static void live_toast_dress(DWORD control) {
+        /* The visual's xenonLogo.png is a hud skin file; relative to notify.xur it would be looked
+           up in xam_xam.xzp. */
+        static WCHAR logo[512];DWORD e=ui_find_deep(control,L"xenonLogo1",0);
+        if(e) xui_string(e,L"ImagePath",guide_uri(logo,L"huduiskin_skin.xzp",L"xenonLogo.png"));
+        xui_string(control,L"Text",live_toast.text);
+        if(live_toast.image[0]) xui_string(control,L"ImagePath",live_toast.image);
+        /* Ring of light: scr_Notification has one glow per controller quadrant (Indicator1 top
+           left = player 1 .. Indicator4 bottom right, each with its own TransTo/TransFrom) and
+           its TransTo/loop keys Show=True on all four from frame 44 to 192, so the visual alone
+           lights the whole ring. NotifyPopupScene (xam code) picks the quadrant of the player the
+           notification is about; Opacity is not keyed by the timeline, so the others stay off.
+           Sign-in/out popups concern the player on controller 1 (this PC host has one
+           controller); other popups are not about a player and light no quadrant. */
+        for(int i=1;i<=4;i++) {
+            WCHAR id[16];wsprintfW(id,L"Indicator%d",i);
+            DWORD e=ui_find_deep(control,id,0);
+            if(e) xui_number(e,L"Opacity",i==live_toast.player+1?1.0f:0.0f);
+        }
+    XUI_FN(0x7d32eb,HRESULT,DWORD,DWORD *)(control,&live_toast.visual);
+}
 static void guide_toast(const WCHAR *text,const WCHAR *image) {
     int player;   /* controller index the popup is about (0..3), -1 = none */
     /* Sign-in/out popups are system notifications the console always shows (the hud's
@@ -151,32 +175,20 @@ static void guide_toast(const WCHAR *text,const WCHAR *image) {
     lstrcpynW(live_toast.text,text?text:L"",256);
     if(image && !wcsstr(image,L"://")) guide_uri(live_toast.image,L"xam_xam.xzp",image);
     else lstrcpynW(live_toast.image,image?image:L"",512);
-    if(control) {
-        /* The visual's xenonLogo.png is a hud skin file; relative to notify.xur it would be looked
-           up in xam_xam.xzp. */
-        static WCHAR logo[512];DWORD e=ui_find_deep(control,L"xenonLogo1",0);
-        if(e) xui_string(e,L"ImagePath",guide_uri(logo,L"huduiskin_skin.xzp",L"xenonLogo.png"));
-        xui_string(control,L"Text",live_toast.text);
-        if(live_toast.image[0]) xui_string(control,L"ImagePath",live_toast.image);
-        /* Ring of light: scr_Notification has one glow per controller quadrant (Indicator1 top
-           left = player 1 .. Indicator4 bottom right, each with its own TransTo/TransFrom) and
-           its TransTo/loop keys Show=True on all four from frame 44 to 192, so the visual alone
-           lights the whole ring. NotifyPopupScene (xam code) picks the quadrant of the player the
-           notification is about; Opacity is not keyed by the timeline, so the others stay off.
-           Sign-in/out popups concern the player on controller 1 (this PC host has one
-           controller); other popups are not about a player and light no quadrant. */
-        for(int i=1;i<=4;i++) {
-            WCHAR id[16];wsprintfW(id,L"Indicator%d",i);
-            DWORD e=ui_find_deep(control,id,0);
-            if(e) xui_number(e,L"Opacity",i==player+1?1.0f:0.0f);
-        }
-    }
+    live_toast.player=player;
+    if(control) live_toast_dress(control);
     /* Bottom centre of the title-safe area of the 1120x770 dash canvas (shown window y 58.7..718.7). */
     xui_bounds(scene,330,592,460,87);
+    /* The dash view shows canvas 1120x660 (y 58.7..718.7) in a 1280x720 window, which would
+       stretch the popup 1.14x wide and 1.09x tall and make its round disc oval. Its 32x32
+       icon slots match the 32x32 icons, so draw it 1:1 in window pixels instead. */
+    {XuiValue v={.type=7};float *f=(float *)&v.integer;f[0]=1120.0f/1280.0f;f[1]=660.0f/720.0f;f[2]=1.0f;
+     XuiValue p={.type=7};float *g=(float *)&p.integer;g[0]=230.0f;g[1]=87.0f;g[2]=0.0f;
+     log_value("Notification pivot",(DWORD)xui_property(scene,L"Pivot",&p));
+     log_value("Notification scale",(DWORD)xui_property(scene,L"Scale",&v));}
     live_toast.scene=scene;live_toast.control=control;live_toast.frames=TOAST_SHOW_FRAMES;live_toast.leaving=FALSE;live_toast.serial++;
     if(control) ui_play_tree(control,L"TransTo",L"EndTransTo",0);
-    /* PopUpSound (NotifyPopup.xma): the engine's sound classes run without an audio device here
-       and XMA cannot be decoded on the PC, so NotificationSound has nothing to play. */
+    /* PopUpSound (NotifyPopup.xma) is played by guide_sound.c, which honours NotificationSound. */
     log_text("Notification");log_wide(live_toast.text);log_value("Notification player quadrant",player+1);
 }
 /* The popup belongs above everything: a scene added to the UI root after it (a dashboard page,
@@ -191,6 +203,10 @@ static void live_toast_raise(void) {
 }
 static void live_toast_tick(void) {
     if(live_toast.scene) live_toast_raise();
+    if(live_toast.scene && live_toast.control) {
+        DWORD visual=0;XUI_FN(0x7d32eb,HRESULT,DWORD,DWORD *)(live_toast.control,&visual);
+        if(visual!=live_toast.visual) {log_text("Notification visual rebuilt: dressed again");live_toast_dress(live_toast.control);}
+    }
     if(!live_toast.scene || --live_toast.frames>0) return;
     if(!live_toast.leaving && live_toast.control) {
         live_toast.leaving=TRUE;live_toast.frames=TOAST_LEAVE_FRAMES;
