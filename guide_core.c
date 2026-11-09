@@ -116,6 +116,9 @@ static GuideListSource guide_lists[16];
 /* The list asks itself for its count/texts every frame: answers must stay valid (static storage). */
 static void guide_list_bind(DWORD list,int (*count)(void *),const WCHAR *(*text)(void *,int),const WCHAR *(*image)(void *,int),void *ctx) {
     if(!list) return;
+    /* XuiCommonList: 0x7dd there inserts items ({index,count}); the refresh below would make it
+       dereference a NULL payload. Fill it with its own item messages (0x7dd/0x7e0/0x7e2) instead. */
+    if(xui_is(list,L"XuiCommonList")) {log_text("guide_list_bind: XuiCommonList is not bindable");return;}
     int slot=-1;
     for(int i=0;i<16;i++) if(guide_lists[i].list==list) slot=i;
     for(int i=0;i<16 && slot<0;i++) if(!guide_lists[i].list) slot=i;
@@ -136,9 +139,15 @@ static BOOL guide_list_answer(DWORD element,DWORD *message) {
         int n=s->count?s->count(s->ctx):0;
         if(message[1]==0x7dc) {if(d[0]!=0) return FALSE;d[1]=(DWORD)n;message[2]=1;return TRUE;}
         if((int)d[0]<0 || (int)d[0]>=n) return FALSE;
+        /* d[1] = the presenter's DataAssociation. Text: only the item's main text (0) is bound;
+           a row visual's other text presenters (btn_SignIn txt_line2/3) stay empty. */
+        if(message[1]==0x7df && d[1]!=0) return FALSE;
         const WCHAR *t=message[1]==0x7df?(s->text?s->text(s->ctx,(int)d[0]):0):(s->image?s->image(s->ctx,(int)d[0]):0);
         if(!t) return FALSE;
-        d[3]=(DWORD)t;message[2]=1;return TRUE;
+        /* 0x7df {iItem,iData,bItemData,szText}; 0x7e1 {iItem,iData,bItemData,bDirty,szPath,hBrush,...}
+           (the image presenter's reader, xlive 0x7ee3aa: d[5] brush, d[4] path, d[3] dirty). */
+        if(message[1]==0x7df) d[3]=(DWORD)t; else d[4]=(DWORD)t;
+        message[2]=1;return TRUE;
     }
     return FALSE;
 }
@@ -239,7 +248,23 @@ static BOOL guide_keep_press(DWORD src) {
            xui_is(src,L"XuiSlider") || xui_is(src,L"XuiListItem") || xui_is(src,L"XuiList") || xui_is(src,L"XuiEdit");
 }
 /* Notifies bubble to every parent and the filter runs once per class level: deliver once. */
+/* Skin prefix of a Guide element. On the console the Guide (hud.xex) has its own skin; here the hud
+   skin is loaded under the prefix "hud." (ui.c). Elements ask message 0x22 for their skin prefix
+   (xlive 0x7d237a) when they resolve a visual by name at run time: XuiList re-reads its visual
+   (0x7f7fcc -> 0x7d5361(id, prefix)) to find the row template, and that id is the bare skin id
+   ("List_SignIn"). The lookup (0x7d3e94) tries prefix+name first, then the bare name. Unanswered,
+   hud-only list visuals found nothing and the list made no rows. */
+static BOOL guide_skin_prefix(DWORD element,DWORD *message) {
+    if(message[1]!=0x22 || !message[4] || !guide_scene || !blades_guide_open) return FALSE;
+    for(DWORD e=element,depth=0;e && depth<64;depth++) {
+        if(e==guide_scene) {*(const WCHAR **)message[4]=L"hud.";message[2]=1;return TRUE;}
+        DWORD parent=0;if(FAILED(XUI_FN(0x7d32af,HRESULT,DWORD,DWORD *)(e,&parent))) break;
+        e=parent;
+    }
+    return FALSE;
+}
 static BOOL guide_filter(DWORD element,DWORD *message) {
+    if(guide_skin_prefix(element,message)) return TRUE;
     if(guide_list_answer(element,message)) return TRUE;
     if(live_filter(element,message) || profiles_filter(element,message) || music_filter(element,message)) return TRUE;
     if(message[1]==0xe && message[4]) {

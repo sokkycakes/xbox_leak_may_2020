@@ -384,10 +384,8 @@ static void prof_signin_page(DWORD page) {
     prof_userlist_list=ui_find_deep(ul,L"listUser",0);
     dash_attach(pane,ul,0,0);
     if(blades_guide_open) guide_prepare(ul);
-    /* UserList ships listUser with Visual 'List_SignIn' (rows = btn_SignIn: picture + gamertag). This xlive
-       build's XuiList visual loader creates no rows from that visual (its template is the first child; the same
-       happens with List_standard), so the Guide's common list visual is used: rows show the gamertag only. */
-    if(prof_userlist_list) xui_string(prof_userlist_list,L"Visual",L"hud.list_Common");
+    /* listUser's authored visual List_SignIn: rows = btn_SignIn (gamer picture + gamertag). */
+    if(prof_userlist_list) xui_string(prof_userlist_list,L"Visual",L"hud.List_SignIn");
     guide_list_bind(prof_userlist_list,prof_list_count,prof_list_text,prof_list_image,0);
     if(prof_userlist_list) {xui_focus(prof_userlist_list);xui_set_cursel(prof_userlist_list,0);}
 }
