@@ -42,6 +42,7 @@ static BOOL profiles_pc_key(WORD key,BOOL down);
 static void profiles_text(const char *utf8);
 static BOOL profiles_wants_text(void);
 static void profiles_guide_opened(void);
+static void profiles_meta(DWORD meta);
 static BOOL ui_focus_first(DWORD parent) {
     DWORD button_class=XUI_FN(0x7dec34,DWORD,const WCHAR *)(L"XuiButton");
     if(XUI_FN(0x7d876c,DWORD,DWORD,DWORD)(parent,button_class) && SUCCEEDED(xui_focus(parent))) return TRUE;
@@ -243,6 +244,7 @@ static void dash_show_meta(int blade,int index) {
         if(label) {xui_string(label,L"Text",text);xui_bounds(label,0,5,342,440);}
     }
     dash_meta[blade]=meta;dash_shown[blade]=index;
+    profiles_meta(meta);    /* CBladeMOTD: billboard or "Create Gamer Profile" by profile count */
 }
 static void ui_blade_contents(DWORD scene,const WCHAR *uri,DWORD *app) {
     WCHAR *slash;lstrcpynW(dash_base,uri,4096);

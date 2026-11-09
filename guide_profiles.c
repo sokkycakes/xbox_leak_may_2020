@@ -124,6 +124,11 @@ static void prof_frame(DWORD owner,const WCHAR *start,const WCHAR *end) {
 }
 static void prof_unlink(DWORD e) {if(e) XUI_FN(0x7d3289,HRESULT,DWORD)(e);}          /* XuiElementUnlink */
 static void prof_destroy(DWORD e) {if(e) XUI_FN(0x7dec45,HRESULT,DWORD)(e);}
+static DWORD prof_child(DWORD parent,const WCHAR *id) {   /* direct child by id */
+    DWORD c=0;if(parent) XUI_FN(0x7d32eb,HRESULT,DWORD,DWORD *)(parent,&c);
+    while(c && lstrcmpW(blades_id(c),id)) XUI_FN(0x7d3363,HRESULT,DWORD,DWORD *)(c,&c);
+    return c;
+}
 static DWORD prof_parent(DWORD e) {DWORD p=0;if(e) XUI_FN(0x7d32af,HRESULT,DWORD,DWORD *)(e,&p);return p;}
 static void prof_hide_scene(DWORD e,BOOL show) {if(e) {xui_bool(e,L"Show",show);xui_bool(e,L"DisableFocusRecursion",!show);}}
 static int prof_catalog(DWORD page) {
@@ -158,6 +163,10 @@ static DWORD prof_card_attach(DWORD slot,const WCHAR *frame,BOOL extended) {
     DWORD card=blades_load(blades_catalog(L"xam_gamercrd.xzp",L"GamerCard.xur"));
     if(!card) {log_text("Gamercard scene could not load");return 0;}
     dash_attach(slot,card,0,0);
+    /* Frame transitions are played recursively (hudbkgnd FullToError, the blades' nOpen/nClose): their frame
+       numbers lie past the card's Normal/Macro/Mini keys, so the card would end on its last key (Mini).
+       The card's own frames are played on its elements directly (prof_frame). */
+    log_value("Gamercard timeline recursion off",xui_bool(card,L"DisableTimelineRecursion",TRUE));
     if(guide_scene && blades_contains(guide_scene,slot,0)) guide_prepare(card);
     DWORD root=ui_find_deep(card,L"gamerCardScene",0);if(!root) root=card;
     WCHAR end[32];wsprintfW(end,L"End%s",frame);
@@ -235,6 +244,7 @@ static void profiles_guide_menu(void) {
         DWORD holder=ui_find_deep(menu,L"scnMusic",0);
         if(holder && blades_music_scene) {dash_attach(holder,blades_music_scene,0,0);guide_prepare(blades_music_scene);}
         log_text("Guide main menu swapped");log_wide(profiles_menu_file());
+        if(blades_guide_stack.depth) blades_guide_stack.root_focus=0;   /* it was an element of the old menu */
         blades_visible(menu,blades_guide_open && !blades_guide_stack.depth);
         prof_menu_fill(menu);
         if(blades_guide_open && !blades_guide_stack.depth) {
@@ -292,6 +302,21 @@ static void profiles_dash_blades(void) {
     if(!blades_guide_open && !blades_dash_stack.depth && ui_mode==2) ui_dash_enter(ui_blade);
 }
 
+/* gamesMetaMOTD / mediaMetaMOTD (class CBladeMOTD): "scnNoProfiles" ("Create Gamer Profile") is the
+   no-profiles state; otherwise the XuiBOTDContainer "botdBillboard" shows the Billboard of the Day. Offline that
+   is the authored default banner: gamesMetaMOTD names dash_botd defaultbanner_games.xur; mediaMetaMOTD names
+   none, so it gets defaultbanner0 like the Xbox Live blade's billboard. */
+static void profiles_meta(DWORD meta) {
+    DWORD none=meta?ui_find_deep(meta,L"scnNoProfiles",0):0,board=none?ui_find_deep(meta,L"botdBillboard",0):0;
+    if(!board) return;
+    if(!prof_loaded) prof_load();
+    xui_bool(none,L"Show",!prof_count);
+    if(!prof_count) return;
+    DWORD banner=dash_scene(meta==dash_meta[1]?L"dash_botd.xzp#defaultbanner_games.xur":L"dash_botd.xzp#defaultbanner0.xur");
+    if(banner) dash_attach(board,banner,0,0);
+    log_value("Billboard of the Day",banner?S_OK:E_FAIL);
+}
+
 /* ---------- flows ---------- */
 static BOOL prof_popping;
 static BOOL prof_from_dash;      /* the flow opened the Guide from the dashboard: close it at the end */
@@ -323,12 +348,12 @@ static void prof_go(const WCHAR *package,const WCHAR *scene) {blades_navigate(bl
 
 /* sign in / out */
 static int prof_signin_wait,prof_signin_index=-1,prof_signout_wait;
+static BOOL prof_signout_pending;
 static WCHAR prof_toast_text[64];
 static void prof_toast(const WCHAR *format,const WCHAR *name,const WCHAR *image) {
-    static WCHAR uri[600];
-    wsprintfW(prof_toast_text,format,name);guide_uri(uri,L"xam_xam.xzp",image);
+    wsprintfW(prof_toast_text,format,name);
     log_text("Toast");log_wide(prof_toast_text);
-    guide_toast(prof_toast_text,uri);
+    guide_toast(prof_toast_text,image);   /* xam_xam.xzp file name: guide_toast always shows these system icons */
 }
 static void prof_apply_state(void) {
     console_set_int(L"SignedIn",profile_signed+1);
@@ -339,8 +364,12 @@ static void profiles_sign_in(int index,BOOL end_flow) {
     if(index<0 || index>=PROF_MAX || !prof[index].used) return;
     profile_signed=index;
     log_text("Profile signed in");log_wide(prof[index].name);
+    /* Swap in MainMenuSignedIn while the flow pages still cover it, so the FullToHalf transition of
+       the pop already reveals the signed-in menu instead of an empty panel. */
+    profiles_guide_menu();
     if(end_flow) prof_flow_end();
-    prof_apply_state();
+    console_set_int(L"SignedIn",profile_signed+1);
+    profiles_dash_blades();
     prof_toast(L"%s\nsigned in",prof[index].name,L"signed_in.png");           /* xam Strings.xus 43 */
 }
 static void profiles_sign_out(void) {
@@ -353,13 +382,10 @@ static void profiles_sign_out(void) {
     prof_toast(L"%s\nsigned out",name,L"signed_out.png");                     /* xam Strings.xus 46 */
 }
 static void prof_signout_choice(int choice,void *ctx) {
-    /* Until the live module's message box lands, the placeholder answers -1 at once;
-       probes set XUI_MSGBOX_CHOICE to stand in for the button the user would pick. */
-    if(choice<0) {char c[8];if(GetEnvironmentVariableA("XUI_MSGBOX_CHOICE",c,8)) choice=atoi(c);}
+    /* guide_msgbox: 0 "Yes, sign out", 1 "No, don't sign out", -1 B. */
     log_value("Sign out choice",(DWORD)choice);
     if(choice!=0) return;
-    guide_status_show(PS_SIGNING_OUT);                                         /* hud Strings.xus 44 */
-    prof_signout_wait=60;
+    prof_signout_pending=TRUE;   /* "Signing out" once the box has slid out (msgbox_tick) */
 }
 static void profiles_sign_out_confirm(void) {
     if(profile_signed<0) return;
@@ -430,6 +456,8 @@ static DWORD kb_page;
 static int prof_new_picture;
 static WCHAR prof_new_name[16];
 static BOOL prof_kb_up(void) {BladesPage *p=blades_ready?blades_page():0;return kb_page && p && p->scene==kb_page;}
+/* Input for the keyboard only while no message box (e.g. a name error) is up over it. */
+static BOOL prof_kb_input(void) {return prof_kb_up() && !guide_msgbox_open();}
 static void kb_show(void) {
     if(!prof_kb_up()) return;
     DWORD edit=ui_find_deep(kb_page,L"XuiEdit1",0);if(!edit) return;
@@ -459,8 +487,12 @@ static void prof_open_keyboard(int mode,const WCHAR *text) {
     if(!blades_navigate(blades_catalog(L"vk_vk.xzp",L"Keyboard.xur"))) {kb_mode=KB_NONE;return;}
     kb_page=blades_page()->scene;
     dash_set_text(kb_page,L"Text_Header",mode==KB_RENAME?PS_EDIT_NAME:PS_KB_TITLE);
-    dash_set_text(kb_page,L"XuiText1",PS_KB_DESC);
-    dash_set_text(kb_page,L"XuiText2",L"");
+    /* XuiText1/XuiText2 are direct children of XuiKeyboardScene; a deep search would first find the
+       XuiText1 text element inside legend_x's visual. */
+    DWORD kbs=ui_find_deep(kb_page,L"XuiKeyboardScene",0);
+    DWORD t1=prof_child(kbs,L"XuiText1"),t2=prof_child(kbs,L"XuiText2");
+    if(t1) xui_string(t1,L"Text",PS_KB_DESC);
+    if(t2) xui_string(t2,L"Text",L"");
     DWORD edit=ui_find_deep(kb_page,L"XuiEdit1",0);if(edit) xui_int(edit,L"TextLimit",15);
     kb_set_caps(FALSE);kb_show();
 }
@@ -471,7 +503,7 @@ static void prof_keyboard_close(void) {
 static void kb_done(void) {
     int self=kb_mode==KB_RENAME?profile_signed:-1;
     const WCHAR *error=prof_validate(kb_buf,self);
-    if(error) {log_text("Profile name rejected");log_wide(error);prof_message(PS_KB_TITLE,error);return;}
+    if(error) {log_text("Profile name rejected");log_wide(kb_buf);log_wide(error);prof_message(PS_KB_TITLE,error);return;}
     if(kb_mode==KB_RENAME) {
         if(profile_signed>=0) {lstrcpyW(prof[profile_signed].name,kb_buf);prof_save(profile_signed);log_text("Profile renamed");log_wide(kb_buf);}
         prof_keyboard_close();kb_mode=KB_NONE;prof_cards_refresh();
@@ -513,16 +545,16 @@ static BOOL kb_char_ok(WCHAR c) {
 }
 /* PC keyboard text (SDL_EVENT_TEXT_INPUT) while the virtual keyboard is up. */
 static void profiles_text(const char *utf8) {
-    if(!prof_kb_up() || !utf8) return;
+    if(!prof_kb_input() || !utf8) return;
     WCHAR text[64];int n=MultiByteToWideChar(CP_UTF8,0,utf8,-1,text,64);
     for(int i=0;i<n && text[i];i++) if(kb_char_ok(text[i])) kb_insert(text[i]);
 }
-static BOOL profiles_wants_text(void) {return prof_kb_up();}
+static BOOL profiles_wants_text(void) {return prof_kb_input();}
 /* Physical keyboard while the virtual keyboard is up: typing arrives as text; Backspace edits,
    Enter is Done; arrows and Escape keep their navigation/back meaning. TRUE = consumed. */
 static BOOL kb_enter_pending;
 static BOOL profiles_pc_key(WORD key,BOOL down) {
-    if(!prof_kb_up()) return FALSE;
+    if(!prof_kb_input()) return FALSE;
     if(key==VK_BACK) {if(down) kb_backspace();return TRUE;}
     /* Enter waits for the tick: SDL hands out the text typed in the same message pump only after this. */
     if(key==VK_RETURN) {if(down) kb_enter_pending=TRUE;return TRUE;}
@@ -534,7 +566,7 @@ static BOOL profiles_pc_key(WORD key,BOOL down) {
 }
 /* Gamepad/host keys while the virtual keyboard is up: X Backspace, Y Space, LB/RB cursor. */
 static BOOL profiles_key(WORD key,BOOL down) {
-    if(!prof_kb_up()) return FALSE;
+    if(!prof_kb_input()) return FALSE;
     if(key==0x5802) {if(down) kb_backspace();return TRUE;}
     if(key==0x5803 || key=='Y') {if(down) kb_insert(L' ');return TRUE;}
     if(key==VK_PRIOR) {if(down) kb_move(-1);return TRUE;}
@@ -722,7 +754,7 @@ static void profiles_page(DWORD page,int catalog) {
 }
 static BOOL profiles_back(void) {
     if(prof_popping) return FALSE;
-    if(prof_signin_wait || prof_signout_wait) return TRUE;
+    if(prof_signin_wait || prof_signout_wait || prof_signout_pending) return TRUE;
     if(prof_kb_up()) {kb_cancel();return TRUE;}
     if(prof_top_is(L"Congratulations.xur")) {          /* back to the keyboard with the chosen name */
         prof_back_one();
@@ -753,25 +785,47 @@ static void prof_807_tick(void) {
    the legend shows the previous page's texts again: re-apply the top page's legend every few frames while
    the Guide is open (the texts only change when they differ). */
 static void prof_legend_tick(void) {
-    static int n;
-    if(!blades_guide_open || ++n%8) return;
+    static int n;static DWORD last_top;
+    if(!blades_guide_open || !guide_scene) {last_top=0;return;}
     BladesPage *page=blades_guide_stack.depth?blades_page():0;
     DWORD top=page?page->scene:guide_menu;
+    if(top==last_top && ++n%8) return;
+    last_top=top;n=0;
     if(top) guide_legend(top);
-    {   /* After HalfToFull the frame can keep drawing Legend_X/Y although their Show is FALSE (seen on the
-           sign-in page): give a hidden legend an empty text so it cannot name the previous page's action. */
-        const GuideLegend *l=top?guide_module_legend(top):0;
-        const WCHAR *ids[2]={L"Legend_X",L"Legend_Y"},*texts[2]={l?l->x:0,l?l->y:0};
-        for(int i=0;l && i<2;i++) if(!texts[i]) {DWORD e=ui_find_deep(guide_scene,ids[i],0);if(e) xui_string(e,L"Text",L"");}
+    /* hudbkgnd's frame timelines key Legend_X/Y Show and Opacity, so while HalfToFull/FullToHalf plays a
+       legend the page does not use is drawn again (an empty X/Y icon on the sign-in page). Size and
+       ClipChildren are not keyed: a hidden X/Y legend is clipped to nothing until a page uses it again. */
+    const WCHAR *ids[2]={L"Legend_X",L"Legend_Y"};
+    for(int i=0;i<2;i++) {
+        DWORD e=ui_find_deep(guide_scene,ids[i],0);if(!e) continue;
+        BOOL used=xui_get_int(e,L"Show",1)!=0;   /* as guide_legend just set it */
+        if(!used) xui_string(e,L"Text",L"");      /* never the previous page's action */
+        xui_bool(e,L"ClipChildren",!used);
+        XUI_FN(0x7d345b,HRESULT,DWORD,float,float)(e,used?420.0f:0.0f,used?40.0f:0.0f);   /* authored 420x40 */
     }
 }
+/* Signed-in Guide menu: ctlGamerCard is only the slot; the focusable part is the gamercard's own
+   baseMetaPane button (gamerCardScene DefaultFocus, hud btn_Gamercard visual with its Focus frames). */
+static void prof_card_focus_tick(void) {
+    if(!blades_guide_open || blades_guide_stack.depth || !guide_menu || profile_signed<0) return;
+    DWORD f=xui_focused(),slot=ui_find_deep(guide_menu,L"ctlGamerCard",0);
+    if(!f || f!=slot) return;
+    DWORD pane=ui_find_deep(slot,L"baseMetaPane",0);
+    if(pane) xui_focus(pane);
+}
 static void profiles_tick(void) {
-    if(kb_enter_pending) {kb_enter_pending=FALSE;if(prof_kb_up()) kb_done();}
+    prof_card_focus_tick();
+    if(kb_enter_pending) {kb_enter_pending=FALSE;if(prof_kb_input()) kb_done();}
     prof_legend_tick();
     prof_807_tick();
     if(prof_signin_pending) {int i=prof_signin_pending-1;prof_signin_pending=0;prof_signin_status(i);}
     if(prof_tile_pending) {int picture=prof_tile_pending-1;prof_tile_pending=0;if(profile_signed>=0) prof_set_picture(picture);}
     if(prof_signin_wait && !--prof_signin_wait) {profiles_sign_in(prof_signin_index,TRUE);prof_signin_index=-1;}
+    if(prof_signout_pending && !msgbox.box && !msgbox.dying) {
+        prof_signout_pending=FALSE;
+        guide_status_show(PS_SIGNING_OUT);                                     /* hud Strings.xus 44 */
+        prof_signout_wait=60;
+    }
     if(prof_signout_wait && !--prof_signout_wait) {guide_status_hide();profiles_sign_out();}
     if(prof_auto_toast && !--prof_auto_toast && profile_signed>=0) prof_toast(L"%s\nsigned in",prof[profile_signed].name,L"signed_in.png");
     if(kb_page && !prof_kb_up()) {
