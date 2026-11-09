@@ -692,9 +692,8 @@ static void music_tick(void) {
     }
     if(blades_guide_open!=music_guide_was_open) {
         music_guide_was_open=blades_guide_open;
+        /* blades_guide(TRUE) drops the pages left open, so the Guide always reopens at its main menu */
         if(blades_guide_open && music_volume_mode) music_volume_ui(FALSE);
-        /* reopened on a picker page: the Guide opens Half, these pages are Full */
-        if(blades_guide_open && music_top_kind()) guide_page_restored();
     }
     /* the list creates its rows when it lays them out: give new rows their row visual */
     if(music_top_kind()==MP_SOURCES || music_top_kind()==MP_CONTAINERS || music_top_kind()==MP_SONGS) {
@@ -702,12 +701,8 @@ static void music_tick(void) {
         DWORD list=guide_find(page->scene,kind==MP_SOURCES?L"listSources":L"listItems");
         if(list) music_list_rows(list,0,kind==MP_SOURCES?L"hud.btn_standard":L"hud.XuiButton");
     }
-    /* hudbkgnd's HalfToFull timeline re-shows Legend_X after the page set its legends: re-apply */
-    if(music_top_kind()) {
-        static DWORD legend_x;
-        if(!legend_x || !blades_contains(guide_scene,legend_x,0)) legend_x=guide_find(guide_scene,L"Legend_X");
-        if(legend_x && xui_get_int(legend_x,L"Show",0)) guide_legend(blades_page()->scene);
-    }
+    /* hudbkgnd's HalfToFull timeline keeps Legend_X shown while it runs (~45 frames): the page's
+       legend (music_legend) is applied again by live_legend_tick once the frame has settled. */
     if(music_press_kind) {int kind=music_press_kind;music_press_kind=0;music_list_press(kind,music_press_sel);}
     if(music_y_pending) {music_y_pending=FALSE;music_y();}
     if(music_begin_pending) music_begin();
