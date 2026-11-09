@@ -19,6 +19,9 @@
 #define S_JOIN_CONNECT   L"Connecting to Xbox Live"   /* dash_signupbo [2] */
 #define S_JOIN_FAIL      L"Can't connect to Xbox Live."   /* dash_signupbo [1] */
 #define S_JOIN_OK        L"OK"                 /* dash_signupbo [6] */
+#define S_MARKET_TITLE   L"Xbox Live Marketplace"   /* marketplace_media Strings.xus[200] */
+#define S_MARKET_SIGNIN  L"Please sign in to Xbox Live to use Xbox Live Marketplace."   /* [195] */
+#define S_MARKET_OK      L"OK"                 /* marketplace_media [207] */
 #define LIVE_CONNECT_FRAMES 120                /* ~2 s of connecting/checking before the attempt fails */
 
 static BOOL msgbox_filter(DWORD element,DWORD *message);
@@ -79,6 +82,18 @@ static void live_recover(void) {
 }
 static void live_join(void) {
     live_flow_start(LIVE_JOIN,L"dash_signupbo.xzp",L"DownloadLiveSignup.xur",S_JOIN_CONNECT);
+}
+/* Connect to Xbox Live with a local (non-Live) profile: xam's Live upsell, InfoUpsellLive (Full Guide).
+   From the dashboard (Live blade btnConnect) it opens over the dash like the console's
+   XamShowLiveUpsellUI, and B there returns to the dashboard. */
+static DWORD live_upsell_page;
+static BOOL live_upsell_from_dash;
+static void live_upsell(void) {
+    BOOL from_dash=!blades_guide_open;
+    if(from_dash) {blades_guide(TRUE);if(!blades_guide_open) return;}
+    if(!blades_navigate(blades_catalog(L"hud_hud.xzp",L"InfoUpsellLive.xur"))) {if(from_dash) blades_guide(FALSE);return;}
+    BladesPage *top=blades_page();
+    live_upsell_page=top?top->scene:0;live_upsell_from_dash=from_dash;
 }
 
 /* ---------- hud Status.xur ("Signing out") ---------- */
@@ -149,7 +164,18 @@ static void guide_toast(const WCHAR *text,const WCHAR *image) {
        and XMA cannot be decoded on the PC, so NotificationSound has nothing to play. */
     log_text("Notification");log_wide(live_toast.text);
 }
+/* The popup belongs above everything: a scene added to the UI root after it (a dashboard page,
+   the example dashboard) would otherwise draw over it. Keep it the root's last child. */
+static void live_toast_raise(void) {
+    DWORD child=0,last=0;XUI_FN(0x7d32eb,HRESULT,DWORD,DWORD *)(ui_root,&child);
+    while(child) {last=child;XUI_FN(0x7d3363,HRESULT,DWORD,DWORD *)(child,&child);}
+    if(!last || last==live_toast.scene) return;
+    XUI_FN(0x7d3289,HRESULT,DWORD)(live_toast.scene);   /* XuiElementUnlink */
+    if(FAILED(xui_add(ui_root,live_toast.scene))) {log_text("Notification could not be raised");live_toast.scene=live_toast.control=0;return;}
+    log_text("Notification kept above a newer scene");
+}
 static void live_toast_tick(void) {
+    if(live_toast.scene) live_toast_raise();
     if(!live_toast.scene || --live_toast.frames>0) return;
     if(!live_toast.leaving && live_toast.control) {
         live_toast.leaving=TRUE;live_toast.frames=TOAST_LEAVE_FRAMES;
@@ -162,9 +188,13 @@ static void live_toast_tick(void) {
 /* ---------- hooks ---------- */
 static BOOL live_dispatch(DWORD button,const WCHAR *id) {
     if(!lstrcmpW(id,L"btnRecoverProfile") || !lstrcmpW(id,L"btnUseExistingTag")) {live_recover();return TRUE;}
-    if(!lstrcmpW(id,L"btnSignInLive")) {
-        /* Connect to Xbox Live with a local (non-Live) profile: the Live upsell (Full Guide). */
-        blades_navigate(blades_catalog(L"hud_hud.xzp",L"InfoUpsellLive.xur"));
+    if(!lstrcmpW(id,L"btnSignInLive") || !lstrcmpW(id,L"btnConnect")) {live_upsell();return TRUE;}
+    /* Xbox Live Marketplace (dash Live blade banner / Marketplace buttons, authored to
+       1400_StoreFrontScene): no Live sign-in exists here, so the console's own refusal. */
+    if(wcsstr(blades_nav_path(button),L"1400_StoreFrontScene")) {
+        const WCHAR *b[]={S_MARKET_OK};
+        log_text("Xbox Live Marketplace needs an Xbox Live sign-in");
+        guide_msgbox(S_MARKET_TITLE,S_MARKET_SIGNIN,b,1,0,0,0);
         return TRUE;
     }
     if(!lstrcmpW(id,L"btnJoinLive") || !lstrcmpW(id,L"btnJoinXbox")) {live_join();return TRUE;}
@@ -184,6 +214,12 @@ static void live_page(DWORD page,int catalog) {
 static BOOL live_back(void) {
     if(msgbox_back()) return TRUE;
     if(live_page_on_top(live_status_page) && !live_status_closing) return TRUE;   /* signing out can't be cancelled */
+    if(live_upsell_from_dash && live_page_on_top(live_upsell_page)) {
+        /* The upsell was opened from the dashboard: B goes back to the dashboard. */
+        live_upsell_from_dash=FALSE;live_upsell_page=0;
+        if(blades_guide_open) {while(blades_guide_stack.depth) blades_guide_pop();blades_guide(FALSE);}
+        return TRUE;
+    }
     return FALSE;
 }
 /* Keys while a message box or the status page is up: only Up/Down/A reach the box; B goes to
@@ -196,7 +232,27 @@ static BOOL live_key(WORD key,BOOL down) {
     return TRUE;
 }
 static BOOL live_guide_toggle_blocked(void) {return guide_msgbox_open() || live_page_on_top(live_status_page);}
-static BOOL live_filter(DWORD element,DWORD *message) {return msgbox_filter(element,message);}
+/* While a box or the status page is up nothing else may act: the pad and keyboard are held by
+   live_key; mouse input still reaches the engine (ui.c), so notifies from elements outside the
+   modal scene (a click or hover on the page or dashboard below) are dropped here, and
+   live_mouse_end gives the focus back to the box if the mouse moved it out. */
+static DWORD live_modal_root(void) {return msgbox.box?msgbox.box:live_page_on_top(live_status_page)?live_status_page:0;}
+static DWORD live_mouse_begin(void) {return live_modal_root()?xui_focused():0;}
+static void live_mouse_end(DWORD focus) {
+    DWORD root=live_modal_root(),now=xui_focused();
+    /* Only the box's buttons may take the focus (a click on its message text would leave A nothing to press). */
+    BOOL button=now && msgbox.box && blades_contains(msgbox.box,now,0) && !wcsncmp(blades_id(now),L"Button",6);
+    if(root && focus && now!=focus && !button) xui_focus(focus);
+}
+static BOOL live_filter(DWORD element,DWORD *message) {
+    if(msgbox_filter(element,message)) return TRUE;
+    DWORD root=live_modal_root();
+    if(root && message[1]==0xe && message[4]) {
+        DWORD *n=(DWORD *)message[4];
+        if(n[1] && !blades_contains(root,n[1],0) && !(msgbox.dying && blades_contains(msgbox.dying,n[1],0))) {message[2]=1;return TRUE;}
+    }
+    return FALSE;
+}
 /* blades_notice: a console message box with the console's OK button (signin [39]). */
 static void live_notice(const WCHAR *text) {const WCHAR *b[]={S_BTN_OK};guide_msgbox(L"",text,b,1,0,0,0);}
 static void live_test_tick(void);
@@ -205,7 +261,9 @@ static void live_test_tick(void);
 static void live_legend_tick(void) {
     static WCHAR state[8];static int settle;
     if(lstrcmpW(state,guide_state)) {lstrcpyW(state,guide_state);settle=64;}
-    if(settle>0 && --settle==0 && blades_guide_open && !guide_msgbox_open() && guide_top) guide_legend(guide_top);
+    /* Applied every 4 frames until the frame timeline has run, so a legend the timeline turns on
+       is hidden again before it shows for long. */
+    if(settle>0 && (--settle&3)==0 && blades_guide_open && !guide_msgbox_open() && guide_top) guide_legend(guide_top);
 }
 static void live_tick(void) {
     msgbox_tick();live_flow_tick();live_toast_tick();live_legend_tick();
@@ -219,6 +277,7 @@ static const GuideLegend *live_legend(DWORD scene) {
     return 0;
 }
 
+static BOOL CALLBACK live_test_window(HWND w,LPARAM out) {if(IsWindowVisible(w)) {*(HWND *)out=w;return FALSE;}return TRUE;}
 /* Probe-only hooks (cloud tests): XUI_LIVE=action@frame;action@frame...
    actions: box1 box2 box3 (message boxes), recover, join, upsell, toast, status, statushide. */
 static void live_test_tick(void) {
@@ -240,10 +299,21 @@ static void live_test_tick(void) {
             else if(!strcmp(name,"box3")) {const WCHAR *b[]={L"Test Connection",S_JOIN_OK,L"Cancel"};guide_msgbox(S_JOIN_TITLE,S_JOIN_FAIL,b,3,1,0,0);}
             else if(!strcmp(name,"recover")) live_recover();
             else if(!strcmp(name,"join")) live_join();
-            else if(!strcmp(name,"upsell")) blades_navigate(blades_catalog(L"hud_hud.xzp",L"InfoUpsellLive.xur"));
+            else if(!strcmp(name,"upsell")) live_upsell();
+            else if(!strcmp(name,"page")) blades_navigate(blades_catalog(L"dash_dashmark.xzp",L"1400_StoreFrontScene.xur"));
             else if(!strcmp(name,"toast")) guide_toast(L"Player1\r\nsigned in",L"signed_in.png");
             else if(!strcmp(name,"status")) guide_status_show(L"Signing out");
             else if(!strcmp(name,"statushide")) guide_status_hide();
+            else if(!strncmp(name,"click",5) || !strncmp(name,"hover",5)) {
+                /* clickXxY / hoverXxY: a mouse click (or move) at client pixel X,Y through the window's message queue */
+                int x=atoi(name+5),y=0;char *by=strchr(name,'x');if(by) y=atoi(by+1);
+                HWND w=0;EnumThreadWindows(GetCurrentThreadId(),live_test_window,(LPARAM)&w);
+                if(w) {
+                    LPARAM xy=MAKELPARAM(x,y);PostMessageW(w,WM_MOUSEMOVE,0,xy);
+                    if(name[0]=='c') {PostMessageW(w,WM_LBUTTONDOWN,MK_LBUTTON,xy);PostMessageW(w,WM_LBUTTONUP,0,xy);}
+                }
+                log_value("Probe mouse x",x);log_value("Probe mouse y",y);
+            }
         }
         at+=n;while(*at==';') at++;
     }
