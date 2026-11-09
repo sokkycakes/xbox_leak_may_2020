@@ -12,12 +12,35 @@ Guide retains its separate skin, opening/closing animation, clock, button
 legends, and supplied music panel. Checkboxes, radio controls, lists, and sliders
 receive focus through the native XUI engine.
 
-This does **not** make every console operation functional. Xbox accounts and
-profile storage, game/media catalogs and playback, networking and Xbox Live,
-console configuration and hardware, power control, and the original setup
-workflow are not connected. Their application callbacks are still required.
-Unavailable actions report that the operation was not performed. The host does
-not display successful profile creation in place of creating a profile.
+## Xbox Guide (2026-11-09)
+
+The Guide now works locally, in the console's own scenes, strings and art:
+
+- **Gamer profiles** (`guide_profiles.c`): create from the Guide or the dashboard
+  (on-screen keyboard or PC keyboard, name checks with the console's messages),
+  sign in from the list with gamer pictures, sign out, auto sign-in, rename,
+  change gamer picture (13 built-in pictures), Game Defaults, View Games, and
+  gamercards on the Guide and the signed-in blades. Profiles are stored in
+  `build\profiles\` (`console.ini`, `<n>.ini`).
+- **Personal Settings** (`guide_settings.c`): Online Status, Voice, Vibration,
+  Notifications, Themes, Dashboard Trim, Guide Background, Custom Color, Shut Down
+  (closes the app after Yes). Saved per profile, or console-wide when signed out.
+- **Music** (`guide_music.c`): the mini media player plays the music in your
+  Windows Music folder (play/pause, previous/next, shuffle, volume), with the
+  console's music picker pages (Albums, Artists, Saved Playlists, Songs, Genres).
+- **Message boxes, notifications and status pages** (`guide_msgbox.c`,
+  `guide_live.c`) use the console's own layouts.
+- **Xbox Live**: sign-in, Join, Recover Gamertag, Connect and Marketplace end in
+  the console's own offline "Can't connect to Xbox Live" behaviour.
+- **Sounds** (`guide_sound.c`): the console UI sounds play in the dashboard and
+  the Guide (see Build).
+
+Known limits: there is no Xbox Live service; the 576 song list uses a plain
+list because its visual `List_prgbr_2string` is not in any supplied package; the
+keyboard's Symbols/Accents tables, marketplace gamer pictures, the "Smoke" theme
+tile and `metal2.png` are not in the supplied packages. Some dashboard buttons
+outside the Guide (Initial Setup, Media Center, Open Tray, Windows-based PC)
+still have no reaction.
 
 The complete remaining-work inventory is `FUNCTIONALITY-REPORT.txt`. Its
 unresolved paths and native control inventory come from the runtime audit in
