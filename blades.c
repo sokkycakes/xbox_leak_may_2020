@@ -24,6 +24,10 @@ static BOOL blades_is_back(DWORD element);
 static int blades_resolve(const WCHAR *path,int source);
 static DWORD blades_load(int index);
 static BOOL blades_audit_done;
+/* Guide live module (guide_live.c): message box / status page input, console notices. */
+static BOOL live_key(WORD key,BOOL down);
+static BOOL live_guide_toggle_blocked(void);
+static void live_notice(const WCHAR *text);
 static int blades_audit_routes,blades_audit_unresolved,blades_audit_handlers;
 static void blades_audit_controls(DWORD element,int index,int depth) {
     if(depth>32) return;
@@ -208,39 +212,8 @@ static void blades_notice_close(void) {
     if(blades_saved_focus) xui_focus(blades_saved_focus);
 }
 static void blades_notice(const WCHAR *reason) {
-    log_text("Unavailable console operation");log_wide(reason);
-    if(blades_notice_root) blades_notice_close();
-    blades_saved_focus=XUI_FN(0x7d4a95,DWORD,DWORD)(ui_root);
-    if(FAILED(xui_create(L"XuiCanvas",&blades_notice_root))) return;
-    xui_bounds(blades_notice_root,180,180,760,370);
-    /* Native button visual gives this host diagnostic the original skin. */
-    DWORD panel=0;
-    if(SUCCEEDED(xui_create(L"XuiButton",&panel))) {
-        xui_bounds(panel,0,0,760,370);xui_string(panel,L"Visual",L"btn_standard");
-        xui_bool(panel,L"Enabled",FALSE);xui_add(blades_notice_root,panel);
-    }
-    const WCHAR *at=reason;
-    for(int row=0;*at && row<6;row++) {
-        WCHAR line[64];int length=lstrlenW(at);
-        if(length>48) {
-            length=48;while(length>0 && at[length]!=L' ')length--;
-            if(!length)length=48;
-        }
-        memcpy(line,at,length*sizeof(WCHAR));line[length]=0;
-        DWORD text=0;
-        if(SUCCEEDED(xui_create(L"XuiText",&text))) {
-            xui_bounds(text,35,25+row*42,690,40);xui_string(text,L"Font",L"Convection");
-            xui_number(text,L"PointSize",24);xui_color(text,L"TextColor",0xffffffff);
-            xui_text(text,line);xui_add(blades_notice_root,text);
-        }
-        at+=length;while(*at==L' ')at++;
-    }
-    if(SUCCEEDED(xui_create(L"XuiButton",&blades_notice_back))) {
-        xui_bounds(blades_notice_back,35,295,650,55);
-        xui_string(blades_notice_back,L"Visual",L"btn_standard");xui_string(blades_notice_back,L"Text",L"Back");
-        xui_add(blades_notice_root,blades_notice_back);
-    }
-    xui_add(ui_root,blades_notice_root);xui_visuals(blades_notice_root);xui_focus(blades_notice_back);
+    log_text("Console notice");log_wide(reason);
+    live_notice(reason);
 }
 static void blades_back(void) {
     if(blades_notice_root) {blades_notice_close();return;}
@@ -266,12 +239,11 @@ static void blades_back(void) {
 static BOOL blades_navigate(int index) {
     BladesStack *stack=blades_stack();
     if(index<0) {
-        blades_notice(index==-2?L"This scene name has more than one supplied destination. The original application handler is required to choose it.":
-                      L"The requested scene is not available in the converted package. See the functionality report.");
+        log_text(index==-2?"Navigation: scene name has more than one supplied destination":"Navigation: scene not in the converted packages");
         return FALSE;
     }
-    if(stack->depth>=BLADES_STACK_MAX) {blades_notice(L"The menu history is full. Return to an earlier menu.");return FALSE;}
-    DWORD scene=blades_load(index);if(!scene) {blades_notice(L"The supplied scene could not be loaded by the PC XUI engine. See blades.log.");return FALSE;}
+    if(stack->depth>=BLADES_STACK_MAX) {log_text("Navigation: menu history full");return FALSE;}
+    DWORD scene=blades_load(index);if(!scene) {log_text("Navigation: scene could not be loaded");return FALSE;}
     DWORD parent=blades_guide_open?blades_guide_host:ui_root;
     HRESULT hr=xui_add(parent,scene);
     if(SUCCEEDED(hr)) hr=xui_visuals(scene);
@@ -291,12 +263,24 @@ static BOOL blades_navigate(int index) {
     }
     log_value("Blades submenu depth",stack->depth);return TRUE;
 }
+/* Drop the Guide page on top without animating the frame (the Guide is closed or closing). */
+static void blades_guide_pop(void) {
+    if(!blades_guide_stack.depth) return;
+    BladesPage *page=&blades_guide_stack.pages[--blades_guide_stack.depth];
+    guide_list_unbind_tree(page->scene);
+    XUI_FN(0x7dec45,HRESULT,DWORD)(page->scene);
+    memset(page,0,sizeof(*page));
+}
 static void blades_guide(BOOL open) {
     if(!blades_ready) return;
     blades_notice_close();
     if(open==blades_guide_open) return;
     if(open) {
         blades_dashboard_focus=XUI_FN(0x7d4a95,DWORD,DWORD)(ui_root);
+        /* The console's Guide button always opens the Guide at its main menu: pages left open
+           when it was closed are dropped (they stay on screen during the close slide). */
+        while(blades_guide_stack.depth) blades_guide_pop();
+        if(blades_guide_home) {blades_visible(blades_guide_home,TRUE);guide_top=blades_guide_home;}
         ui_guide_toggle();
         blades_guide_root=guide_scene;blades_guide_home=guide_menu;blades_guide_host=guide_host;
         if(!guide_open || !guide_host) return;
@@ -333,7 +317,7 @@ static void blades_guide(BOOL open) {
 }
 static BOOL blades_switch(int mode) {
     if(!blades_ready) return FALSE;
-    if(mode==0) {blades_guide(!blades_guide_open);return TRUE;}
+    if(mode==0) {if(!live_guide_toggle_blocked()) blades_guide(!blades_guide_open);return TRUE;}
     if(mode==2) {
         if(blades_guide_open) blades_guide(FALSE);
         ui_mode=2;blades_visible(ui_demo,FALSE);blades_visible(ui_background,FALSE);
@@ -352,6 +336,7 @@ static BOOL blades_switch(int mode) {
 static BOOL blades_in_submenu(void) {return blades_ready && blades_stack()->depth>0;}
 static BOOL blades_key(WORD key,BOOL down) {
     if(!blades_ready || ui_mode!=2) return FALSE;
+    if(live_key(key,down)) return TRUE;
     if(key==VK_BACK || key==0x5801) {
         if(down) blades_pending_back=1;return TRUE;
     }
@@ -394,15 +379,11 @@ static void blades_dispatch(DWORD button) {
     if(!lstrcmpW(id,L"navCreateProfile") || !lstrcmpW(id,L"btnNewProfile")) {
         int index=blades_catalog(L"createprofile_cp.xzp",L"CreateGamerProfile.xur");
         if(index>=0) blades_navigate(index);
-        else blades_notice(L"The Create Profile scene is supplied, but its console profile creation and storage functions have not been translated.");
         return;
     }
-    if(!lstrcmpW(id,L"navSystemSetUp")) {
-        blades_notice(L"Initial Setup requires the console boot configuration, storage, and profile services. Those console services are not connected.");return;
-    }
-    if(!lstrcmpW(id,L"navMCX")) {
-        blades_notice(L"Media Center requires the original console network and computer affiliation services. No computer is affiliated with this host.");return;
-    }
+    /* Initial Setup and Media Center need console services with no console string for their
+       absence here: the buttons do not react. */
+    if(!lstrcmpW(id,L"navSystemSetUp") || !lstrcmpW(id,L"navMCX")) {log_text("Console service not available (no reaction)");log_wide(id);return;}
     /* dash.xex 920a5f58 chooses Memory.xzp for this authored name;
        gamer-profile device selection has a different scene with the same name. */
     if(!lstrcmpW(id,L"navMemory")) {
@@ -420,10 +401,9 @@ static void blades_dispatch(DWORD button) {
     }
     const WCHAR *path=blades_nav_path(button);
     if(path[0]) {log_text("Authored navigation");log_wide(id);log_wide(path);blades_navigate(blades_resolve(path,source));return;}
-    log_text("Original application handler required");log_wide(id);
-    if(!lstrcmpW(id,L"btn_tray")) blades_notice(L"Open Tray requires the Xbox optical drive functions. No console optical drive is connected to this host.");
-    else if(wcsstr(id,L"Recover") || wcsstr(id,L"Live") || wcsstr(id,L"Connect")) blades_notice(L"This action requires the original Xbox account, network, or Xbox Live service. Those console services are not connected.");
-    else blades_notice(L"This action requires console services that are not connected. The operation has not been performed.");
+    /* No console string exists for these (Initial Setup, Media Center, Open Tray, other console
+       services): like a console with the service missing, the button does not react. */
+    log_text("Original application handler required (no reaction)");log_wide(id);
 }
 static void blades_meta(void) {
     BladesPage *page=blades_page();if(!page || page->catalog<0) return;

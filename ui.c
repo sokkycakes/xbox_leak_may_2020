@@ -403,8 +403,10 @@ static void ui_guide_watch(void) {
     }
     if(last!=guide_top) {guide_top=last;if(last) guide_legend(last);}
 }
-static void ui_guide_toggle(void) {
-    if(!dash_app) return;
+/* Creates the Guide frame once (hud skin, hudbkgnd, main menu). It stays Closed until toggled;
+   the message box uses it on its own (ClosedToError) when the Guide is not open. */
+static BOOL guide_frame(void) {
+    if(!dash_app) return FALSE;
     if(!guide_scene) {
         WCHAR skin[4096];lstrcpyW(skin,dash_base);lstrcatW(skin,L"huduiskin_skin.xzp#skin.xur");
         log_wide(skin);log_value("Guide skin",XUI_FN(0x7d6909,HRESULT,const WCHAR *,const WCHAR *)(skin,L"hud."));
@@ -417,12 +419,16 @@ static void ui_guide_toggle(void) {
         DWORD host=guide_scene?ui_find_deep(guide_scene,L"AppHostElementId",0):0;
         guide_menu=host?dash_scene(L"hud_hud.xzp#MainMenuSignedOut.xur"):0;
         if(guide_menu) dash_attach(host,guide_menu,0,0);
-        if(!guide_menu) return;
+        if(!guide_menu) return FALSE;
         guide_host=host;ui_guide_watch();
         log_value("Guide visuals rebound",guide_rebound);
         dash_set_text(guide_scene,L"GamerTag",L"");
         guide_open=FALSE;
     }
+    return guide_menu!=0;
+}
+static void ui_guide_toggle(void) {
+    if(!guide_frame()) return;
     guide_open=!guide_open;
     if(guide_open) {
         guide_clock();guide_play(L"Half");

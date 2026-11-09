@@ -195,6 +195,7 @@ static void music_tick(void);
 static void live_tick(void);
 static BOOL profiles_filter(DWORD element,DWORD *message);
 static BOOL music_filter(DWORD element,DWORD *message);
+static BOOL live_filter(DWORD element,DWORD *message);   /* message box presses */
 static void profiles_guide_opened(void);
 static void music_guide_opened(void);
 
@@ -240,7 +241,7 @@ static BOOL guide_keep_press(DWORD src) {
 /* Notifies bubble to every parent and the filter runs once per class level: deliver once. */
 static BOOL guide_filter(DWORD element,DWORD *message) {
     if(guide_list_answer(element,message)) return TRUE;
-    if(profiles_filter(element,message) || music_filter(element,message)) return TRUE;
+    if(live_filter(element,message) || profiles_filter(element,message) || music_filter(element,message)) return TRUE;
     if(message[1]==0xe && message[4]) {
         DWORD *n=(DWORD *)message[4];
         if(guide_last_notify[0]==(DWORD)message && guide_last_notify[1]==n[0] && guide_last_notify[2]==n[1]) return FALSE;
