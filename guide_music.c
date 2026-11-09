@@ -449,30 +449,6 @@ static void music_common_list(DWORD list,int n,const WCHAR *(*text)(void *,int),
     }
     xui_bool(list,L"Show",n>0);
 }
-/* The hud skin is loaded under the prefix "hud.", but the row templates inside its list visuals
-   name their row visual unprefixed (List_standard rows use "btn_standard"), which the engine
-   cannot resolve here, so a list given hud.List_standard gets no rows at all. hud.XuiList (the
-   same geometry: 420x74 template, the same scroll ends) has rows of the class default visual;
-   those rows are then given the row visual the authored list visual names. */
-static void music_list_rows(DWORD list,const WCHAR *list_visual,const WCHAR *row_visual) {
-    static DWORD seen_list,rows[64],visuals[64];static int count;
-    if(list_visual) xui_string(list,L"Visual",list_visual);
-    if(list!=seen_list || list_visual) {seen_list=list;count=0;}
-    DWORD row=0;XUI_FN(0x7d32eb,HRESULT,DWORD,DWORD *)(list,&row);
-    while(row) {
-        if(xui_is(row,L"XuiListItem")) {
-            DWORD visual=0;XUI_FN(0x7d32eb,HRESULT,DWORD,DWORD *)(row,&visual);
-            int k=0;while(k<count && rows[k]!=row) k++;
-            if(k==count || visuals[k]!=visual) {
-                xui_string(row,L"Visual",row_visual);
-                XUI_FN(0x7d32eb,HRESULT,DWORD,DWORD *)(row,&visual);
-                if(k==count && count<64) count++;
-                if(k<64) {rows[k]=row;visuals[k]=visual;}
-            }
-        }
-        XUI_FN(0x7d3363,HRESULT,DWORD,DWORD *)(row,&row);
-    }
-}
 static void music_item_count(DWORD page,DWORD list,int count) {
     int sel=list?xui_cursel(list):0;if(sel<0) sel=0;
     if(count) wsprintfW(music_count_text,L"%d of %d",sel+1,count);   /* Strings.xus "%d of %d" */
@@ -487,9 +463,8 @@ static void music_fill_page(DWORD page,int kind) {
         BOOL any=music_ready() && music_song_count>0;
         guide_show(page,L"labelNoMediaSourcesText",music_ready() && !any);
         if(list) {
-            xui_string(list,L"Visual",L"hud.XuiList");
+            xui_string(list,L"Visual",L"hud.List_standard");   /* authored; rows = btn_standard */
             music_common_list(list,music_source_count(0),music_source_text,music_source_image);
-            music_list_rows(list,0,L"hud.btn_standard");   /* authored List_standard */
             if(any) {xui_set_cursel(list,0);xui_focus(list);}
         }
     } else if(kind==MP_CONTAINERS || kind==MP_SONGS) {
@@ -503,12 +478,11 @@ static void music_fill_page(DWORD page,int kind) {
         guide_text(page,L"labelNoResultsText",containers?empty[music_cont_kind&3]:L"No songs found.");
         guide_show(page,L"labelNoResultsText",count==0);
         if(list) {
-            /* 572: no authored visual (class default XuiList). 576: List_prgbr_2string is in no supplied
-               skin, so the engine's class default applies there too (same look as 572). */
+            /* 572: no authored visual: the hud skin's class default XuiList (rows = its XuiButton).
+               576: List_prgbr_2string is in no supplied skin, so the class default applies there too. */
             xui_string(list,L"Visual",L"hud.XuiList");
             if(count) {guide_list_bind(list,music_list_count_fn,music_list_text_fn,0,containers?(void *)1:0);xui_set_cursel(list,0);xui_focus(list);}
             else xui_bool(list,L"Show",FALSE);
-            music_list_rows(list,0,L"hud.XuiButton");
         }
         music_item_count(page,count?list:0,count);
     }
@@ -694,12 +668,6 @@ static void music_tick(void) {
         music_guide_was_open=blades_guide_open;
         /* blades_guide(TRUE) drops the pages left open, so the Guide always reopens at its main menu */
         if(blades_guide_open && music_volume_mode) music_volume_ui(FALSE);
-    }
-    /* the list creates its rows when it lays them out: give new rows their row visual */
-    if(music_top_kind()==MP_SOURCES || music_top_kind()==MP_CONTAINERS || music_top_kind()==MP_SONGS) {
-        BladesPage *page=blades_page();int kind=music_top_kind();
-        DWORD list=guide_find(page->scene,kind==MP_SOURCES?L"listSources":L"listItems");
-        if(list) music_list_rows(list,0,kind==MP_SOURCES?L"hud.btn_standard":L"hud.XuiButton");
     }
     /* hudbkgnd's HalfToFull timeline keeps Legend_X shown while it runs (~45 frames): the page's
        legend (music_legend) is applied again by live_legend_tick once the frame has settled. */
