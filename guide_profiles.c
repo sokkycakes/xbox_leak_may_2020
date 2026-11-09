@@ -622,10 +622,141 @@ static int prof_tile_count(void *ctx) {return PROF_PICTURES;}
 static const WCHAR *prof_tile_text(void *ctx,int i) {return L"";}
 static const WCHAR *prof_tile_image(void *ctx,int i) {return prof_picture_uri(i,64);}
 static DWORD prof_tile_list;
+
+/* ---------- Game Defaults (gamerprofile_gp 830 / 832 / 831): local profile settings ----------
+   Strings: GamerProfile_Custom.xus [10]..[24] descriptions, [40]..[42] categories, [43]..[54] setting names,
+   [55] "%s Defaults", value names [0],[1],[33],[64]..[93]. Stored in the profile's <n>.ini [Profile]. */
+static const WCHAR *const PV_ONOFF[]={L"Off",L"On"};
+static const WCHAR *const PV_STICK[]={L"Left Stick",L"Right Stick"};
+static const WCHAR *const PV_YAXIS[]={L"Normal",L"Inverted"};
+static const WCHAR *const PV_SENS[]={L"Low",L"Medium",L"High"};
+static const WCHAR *const PV_DIFF[]={L"Easy",L"Normal",L"Hard"};
+static const WCHAR *const PV_COLOR[]={L"None",L"Black",L"White",L"Yellow",L"Orange",L"Pink",L"Red",L"Purple",L"Blue",L"Green",L"Brown",L"Gray"};
+static const WCHAR *const PV_PEDAL[]={L"Button",L"Trigger"};
+static const WCHAR *const PV_CAMERA[]={L"Back",L"Inside",L"Front"};
+static const WCHAR *const PV_GEARS[]={L"Automatic",L"Manual"};
+typedef struct {const WCHAR *key,*label,*help;const WCHAR *const *values;int count,def;} PrefSetting;
+#define PREF_N(a) (int)(sizeof a/sizeof a[0])
+static const PrefSetting pref_general[]={
+    {L"PrefSensitivity",L"Controller Sensitivity",L"Choose your default controller sensitivity.",PV_SENS,PREF_N(PV_SENS),1},
+    {L"PrefDifficulty",L"Difficulty",L"Choose your default game difficulty.",PV_DIFF,PREF_N(PV_DIFF),1},
+    {L"PrefColor1",L"Primary Color",L"Choose your default primary color.",PV_COLOR,PREF_N(PV_COLOR),0},
+    {L"PrefColor2",L"Secondary Color",L"Choose your default secondary color.",PV_COLOR,PREF_N(PV_COLOR),0},
+};
+static const PrefSetting pref_action[]={
+    {L"PrefYAxis",L"Y-Axis",L"Choose how vertical look is controlled. With normal control, push the stick up to look up. With inverted control, push the stick down to look up.",PV_YAXIS,PREF_N(PV_YAXIS),0},
+    {L"PrefAutoAim",L"Auto-Aim",L"Choose whether targets are automatically selected.",PV_ONOFF,PREF_N(PV_ONOFF),1},
+    {L"PrefAutoCenter",L"Auto-Center",L"Choose whether your aim returns to the center of the screen.",PV_ONOFF,PREF_N(PV_ONOFF),0},
+    {L"PrefMovement",L"Movement",L"Choose the stick you want to use for movement.",PV_STICK,PREF_N(PV_STICK),0},
+};
+static const PrefSetting pref_racing[]={
+    {L"PrefTransmission",L"Transmission",L"Choose your default transmission.",PV_GEARS,PREF_N(PV_GEARS),0},
+    {L"PrefCamera",L"Camera Angle",L"Choose your default camera angle.",PV_CAMERA,PREF_N(PV_CAMERA),0},
+    {L"PrefBrake",L"Brake Control",L"Choose whether buttons or triggers apply the brakes.",PV_PEDAL,PREF_N(PV_PEDAL),1},
+    {L"PrefAccelerator",L"Accelerator Control",L"Choose whether buttons or triggers control the accelerator.",PV_PEDAL,PREF_N(PV_PEDAL),1},
+};
+#define PREF_GD L"\r\n\r\nGame defaults establish default settings for a game the first time you play it. For a game you're playing or have already played, change your settings in the game."
+static const struct {const WCHAR *name,*help;const PrefSetting *set;int count;} pref_cats[3]={
+    {L"General",L"Choose defaults for all games." PREF_GD,pref_general,PREF_N(pref_general)},
+    {L"Action",L"Choose defaults for action and shooting games." PREF_GD,pref_action,PREF_N(pref_action)},
+    {L"Racing",L"Choose defaults for racing games." PREF_GD,pref_racing,PREF_N(pref_racing)},
+};
+static DWORD pref_cat_list,pref_value_lists[8],pref_one_list;
+static int pref_cat=0,pref_one=-1,pref_cat_pending,pref_one_pending,pref_pick_pending;
+/* binding a list and selecting the stored value send selection changes (index 0 first): they are not
+   the user's, so they are ignored while a page is being filled */
+static int pref_settle;
+static int pref_get(const PrefSetting *s) {
+    if(profile_signed<0) return s->def;
+    WCHAR name[32];prof_file(name,profile_signed);
+    int v=ini_get_int(name,L"Profile",s->key,s->def);return v<0 || v>=s->count?s->def:v;
+}
+static void pref_set(const PrefSetting *s,int v) {
+    if(profile_signed<0 || v<0 || v>=s->count) return;
+    WCHAR name[32];prof_file(name,profile_signed);ini_set_int(name,L"Profile",s->key,v);
+    log_text("Game default");log_wide(s->key);log_value("Game default value",(DWORD)v);
+}
+static void pref_select(DWORD list,int v) {
+    DWORD top[1]={(DWORD)v};
+    xui_set_cursel(list,v);xui_send(list,0x7db,top,sizeof top);   /* a btn_spinner list shows its top item */
+}
+static int pref_cat_count(void *ctx) {return 3;}
+static const WCHAR *pref_cat_text(void *ctx,int i) {return i>=0 && i<3?pref_cats[i].name:0;}
+static int pref_values_count(void *ctx) {return ((const PrefSetting *)ctx)->count;}
+static const WCHAR *pref_values_text(void *ctx,int i) {const PrefSetting *s=ctx;return i>=0 && i<s->count?s->values[i]:0;}
+static void pref_page(DWORD page,const WCHAR *scene) {
+    pref_settle=2;
+    if(!lstrcmpiW(scene,L"830_GamerPreferences.xur")) {
+        pref_cat_list=ui_find_deep(page,L"preferenceList",0);
+        guide_list_bind(pref_cat_list,pref_cat_count,pref_cat_text,0,0);
+        guide_text(page,L"Text1",pref_cats[0].help);
+        if(pref_cat_list) {xui_set_cursel(pref_cat_list,0);xui_focus(pref_cat_list);}
+    } else if(!lstrcmpiW(scene,L"832_PreferenceCategory.xur")) {
+        WCHAR head[64];wsprintfW(head,L"%s Defaults",pref_cats[pref_cat].name);guide_text(page,L"headerText",head);
+        for(int i=0;i<8;i++) {
+            WCHAR id[32];BOOL used=i<pref_cats[pref_cat].count;
+            const PrefSetting *s=&pref_cats[pref_cat].set[used?i:0];
+            wsprintfW(id,L"setting%dLabel",i+1);DWORD label=ui_find_deep(page,id,0);
+            if(label) {xui_bool(label,L"Show",used);if(used) xui_string(label,L"Text",s->label);}
+            wsprintfW(id,L"setting%dValue",i+1);DWORD list=pref_value_lists[i]=ui_find_deep(page,id,0);
+            if(!list) continue;
+            if(used) {guide_list_bind(list,pref_values_count,pref_values_text,0,(void *)s);pref_select(list,pref_get(s));}
+            else {xui_bool(list,L"Show",FALSE);pref_value_lists[i]=0;}
+        }
+        if(pref_value_lists[0]) xui_focus(pref_value_lists[0]);
+    } else if(!lstrcmpiW(scene,L"831_PreferenceSetting.xur")) {
+        const PrefSetting *s=&pref_cats[pref_cat].set[pref_one<0?0:pref_one];
+        guide_text(page,L"Text1",s->help);
+        pref_one_list=ui_find_deep(page,L"valueList",0);
+        guide_list_bind(pref_one_list,pref_values_count,pref_values_text,0,(void *)s);
+        if(pref_one_list) {xui_set_cursel(pref_one_list,pref_get(s));xui_focus(pref_one_list);}
+    }
+}
+/* Press / selection change from the Game Defaults lists; the page change runs on the next tick. */
+static BOOL pref_notify(DWORD src,DWORD code) {
+    if(prof_top_is(L"830_GamerPreferences.xur") && src==pref_cat_list) {
+        if(code==1) {int row=xui_cursel(src);if(row>=0 && row<3) pref_cat_pending=row+1;}
+        return TRUE;
+    }
+    if(prof_top_is(L"832_PreferenceCategory.xur")) for(int i=0;i<pref_cats[pref_cat].count && i<8;i++) if(src && src==pref_value_lists[i]) {
+        const PrefSetting *s=&pref_cats[pref_cat].set[i];
+        if(code==4 && !pref_settle) {int v=xui_cursel(src);if(v>=0 && v!=pref_get(s)) pref_set(s,v);}
+        else if(code==1) pref_one_pending=i+1;
+        return TRUE;
+    }
+    if(prof_top_is(L"831_PreferenceSetting.xur") && src==pref_one_list) {
+        if(code==1) {int v=xui_cursel(src);if(v>=0) pref_pick_pending=v+1;}
+        return TRUE;
+    }
+    return FALSE;
+}
+static void pref_tick(void) {
+    static int last=-1;
+    BladesPage *top=blades_page();
+    if(top && prof_top_is(L"830_GamerPreferences.xur") && pref_cat_list) {
+        int row=xui_cursel(pref_cat_list);
+        if(row!=last && row>=0 && row<3) {last=row;guide_text(top->scene,L"Text1",pref_cats[row].help);}
+    } else last=-1;
+    if(pref_settle) pref_settle--;
+    if(pref_cat_pending) {pref_cat=pref_cat_pending-1;pref_cat_pending=0;prof_go(L"gamerprofile_gp.xzp",L"832_PreferenceCategory.xur");}
+    if(pref_one_pending) {pref_one=pref_one_pending-1;pref_one_pending=0;prof_go(L"gamerprofile_gp.xzp",L"831_PreferenceSetting.xur");}
+    if(pref_pick_pending) {
+        int v=pref_pick_pending-1;pref_pick_pending=0;
+        if(pref_one>=0 && pref_one<pref_cats[pref_cat].count) {
+            const PrefSetting *s=&pref_cats[pref_cat].set[pref_one];
+            pref_set(s,v);
+            if(prof_top_is(L"831_PreferenceSetting.xur")) prof_back_one();
+            if(prof_top_is(L"832_PreferenceCategory.xur") && pref_value_lists[pref_one]) {
+                pref_select(pref_value_lists[pref_one],v);xui_focus(pref_value_lists[pref_one]);
+            }
+        }
+    }
+}
 static void prof_gp_page(DWORD page,int catalog) {
     const WCHAR *scene=blades_scenes[catalog].scene;
     DWORD slot=ui_find_deep(page,L"gamerCard",0);
-    if(!lstrcmpiW(scene,L"GamerCardScene.xur")) {
+    if(!lstrcmpiW(scene,L"830_GamerPreferences.xur") || !lstrcmpiW(scene,L"831_PreferenceSetting.xur") || !lstrcmpiW(scene,L"832_PreferenceCategory.xur")) pref_page(page,scene);
+    else if(!lstrcmpiW(scene,L"GamerCardScene.xur")) {
         prof_card_attach(slot,L"Normal",TRUE);
         prof_hide_scene(ui_find_deep(page,L"meOnlineButtonGroup",0),FALSE);
         DWORD group=ui_find_deep(page,L"meOfflineButtonGroup",0);prof_hide_scene(group,TRUE);
@@ -693,6 +824,7 @@ static BOOL profiles_dispatch(DWORD button,const WCHAR *id) {
     if(prof_scene_is(top,L"GamerCardScene.xur")) {
         if(!lstrcmpW(id,L"editProfileButton")) {prof_go(L"gamerprofile_gp.xzp",L"808_editProfile.xur");return TRUE;}
         if(!lstrcmpW(id,L"viewGamesButton")) {prof_go(L"gamerprofile_gp.xzp",L"820_GameShowcaseMe.xur");return TRUE;}
+        if(!lstrcmpW(id,L"gamerPreferencesButton")) {prof_go(L"gamerprofile_gp.xzp",L"830_GamerPreferences.xur");return TRUE;}
         if(!lstrcmpW(id,L"autoSignInButton") && profile_signed>=0) {
             BOOL on=console_get_int(L"AutoSignIn",0)==profile_signed+1;
             console_set_int(L"AutoSignIn",on?0:profile_signed+1);
@@ -723,6 +855,7 @@ static void prof_set_picture(int picture) {
     prof_cards_refresh();
 }
 static void profiles_notify(DWORD src,DWORD code,DWORD *data) {
+    if((code==1 || code==4) && src && blades_ready && pref_notify(src,code)) return;
     if(code!=1 || !src || !blades_ready) return;
     if(src==prof_userlist_list && prof_top_is(L"signin1.xur") && !prof_signin_wait) {
         int row=xui_cursel(src),index=prof_list_slot(row);
@@ -816,6 +949,7 @@ static void profiles_tick(void) {
     if(kb_enter_pending) {kb_enter_pending=FALSE;if(prof_kb_input()) kb_done();}
     prof_legend_tick();
     prof_807_tick();
+    pref_tick();
     if(prof_signin_pending) {int i=prof_signin_pending-1;prof_signin_pending=0;prof_signin_status(i);}
     if(prof_tile_pending) {int picture=prof_tile_pending-1;prof_tile_pending=0;if(profile_signed>=0) prof_set_picture(picture);}
     if(prof_signin_wait && !--prof_signin_wait) {profiles_sign_in(prof_signin_index,TRUE);prof_signin_index=-1;}

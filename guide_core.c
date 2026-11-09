@@ -161,6 +161,8 @@ static const WCHAR *guide_full_scenes[]={
     L"572_SelectMediaContainer.xur",L"576_SelectSong.xur",L"FileView.xur",L"BeginPlayback.xur",0};
 static const WCHAR *guide_state_for(int catalog) {
     if(catalog<0) return L"Half";
+    /* every gamer profile page (gamerprofile_gp, XAM system UI) is a 855-wide page: Full */
+    if(!lstrcmpiW(blades_scenes[catalog].package,L"gamerprofile_gp.xzp")) return L"Full";
     for(int i=0;guide_full_scenes[i];i++) if(!lstrcmpiW(blades_scenes[catalog].scene,guide_full_scenes[i])) return L"Full";
     return L"Half";
 }
