@@ -132,12 +132,14 @@ static void live_toast_close(void) {
 }
 /* image: a file in xam_xam.xzp (signed_in.png, signed_out.png, ...) or a full URI. */
 static void guide_toast(const WCHAR *text,const WCHAR *image) {
+    int player;   /* controller index the popup is about (0..3), -1 = none */
     /* Sign-in/out popups are system notifications the console always shows (the hud's
        "some system notifications will always appear"); others honour the setting. */
     /* image may be a bare xam_xam.xzp file name or a full URI (profiles passes ...xam_xam.xzp#signed_in.png) */
     const WCHAR *file=image?wcsrchr(image,L'#'):0;file=file?file+1:image;
     BOOL system=file && (!lstrcmpiW(file,L"signed_in.png") || !lstrcmpiW(file,L"signed_out.png") || !lstrcmpiW(file,L"signed_in_live.png"));
     if(!system && !setting_get_int(L"ShowNotifications",1)) {log_text("Notification hidden by settings");log_wide(text);return;}
+    player=system?0:-1;
     live_toast_close();
     guide_frame();   /* loads the hud skin (scr_Notification lives there) and the frame below the popup */
     DWORD scene=dash_scene(L"xam_xam.xzp#notify.xur");
@@ -156,6 +158,18 @@ static void guide_toast(const WCHAR *text,const WCHAR *image) {
         if(e) xui_string(e,L"ImagePath",guide_uri(logo,L"huduiskin_skin.xzp",L"xenonLogo.png"));
         xui_string(control,L"Text",live_toast.text);
         if(live_toast.image[0]) xui_string(control,L"ImagePath",live_toast.image);
+        /* Ring of light: scr_Notification has one glow per controller quadrant (Indicator1 top
+           left = player 1 .. Indicator4 bottom right, each with its own TransTo/TransFrom) and
+           its TransTo/loop keys Show=True on all four from frame 44 to 192, so the visual alone
+           lights the whole ring. NotifyPopupScene (xam code) picks the quadrant of the player the
+           notification is about; Opacity is not keyed by the timeline, so the others stay off.
+           Sign-in/out popups concern the player on controller 1 (this PC host has one
+           controller); other popups are not about a player and light no quadrant. */
+        for(int i=1;i<=4;i++) {
+            WCHAR id[16];wsprintfW(id,L"Indicator%d",i);
+            DWORD e=ui_find_deep(control,id,0);
+            if(e) xui_number(e,L"Opacity",i==player+1?1.0f:0.0f);
+        }
     }
     /* Bottom centre of the title-safe area of the 1120x770 dash canvas (shown window y 58.7..718.7). */
     xui_bounds(scene,330,592,460,87);
@@ -163,7 +177,7 @@ static void guide_toast(const WCHAR *text,const WCHAR *image) {
     if(control) ui_play_tree(control,L"TransTo",L"EndTransTo",0);
     /* PopUpSound (NotifyPopup.xma): the engine's sound classes run without an audio device here
        and XMA cannot be decoded on the PC, so NotificationSound has nothing to play. */
-    log_text("Notification");log_wide(live_toast.text);
+    log_text("Notification");log_wide(live_toast.text);log_value("Notification player quadrant",player+1);
 }
 /* The popup belongs above everything: a scene added to the UI root after it (a dashboard page,
    the example dashboard) would otherwise draw over it. Keep it the root's last child. */
@@ -288,7 +302,7 @@ static const GuideLegend *live_legend(DWORD scene) {
 
 static BOOL CALLBACK live_test_window(HWND w,LPARAM out) {if(IsWindowVisible(w)) {*(HWND *)out=w;return FALSE;}return TRUE;}
 /* Probe-only hooks (cloud tests): XUI_LIVE=action@frame;action@frame...
-   actions: box1 box2 box3 (message boxes), recover, join, upsell, toast, status, statushide. */
+   actions: box1 box2 box3 (message boxes), recover, join, upsell, toast, toastfriend, status, statushide, shot. */
 static void live_test_tick(void) {
     static DWORD frame;static char spec[256];static int ready=-1;
     if(!probe_mode) return;
@@ -311,6 +325,8 @@ static void live_test_tick(void) {
             else if(!strcmp(name,"upsell")) live_upsell();
             else if(!strcmp(name,"page")) blades_navigate(blades_catalog(L"dash_dashmark.xzp",L"1400_StoreFrontScene.xur"));
             else if(!strcmp(name,"toast")) guide_toast(L"Player1\r\nsigned in",L"signed_in.png");
+            else if(!strcmp(name,"toastfriend")) guide_toast(L"Gamertag\r\nis online",L"friend_online.png");
+            else if(!strcmp(name,"shot")) ui_shot_request=TRUE;   /* screenshot at an exact frame (animation strips) */
             else if(!strcmp(name,"status")) guide_status_show(L"Signing out");
             else if(!strcmp(name,"statushide")) guide_status_hide();
             else if(!strncmp(name,"click",5) || !strncmp(name,"hover",5)) {
