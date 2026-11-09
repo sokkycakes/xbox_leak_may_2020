@@ -244,6 +244,24 @@ static void blades_back(void) {
     }
     if(blades_guide_open) blades_pending_back=2;
 }
+/* The Guide frame (hudbkgnd: panel, its pages and message boxes) is a child of the UI root and is
+   created once, the first time it is needed. A sign-in notification at start-up (an auto sign-in
+   profile) creates it before any dashboard page exists, so a dash page added to the root later was
+   its younger sibling and drew over the opened Guide (page text and legends through the panel).
+   Keep the frame the root's last scene below the notification popup (live_toast_tick raises that). */
+static DWORD live_toast_scene(void);
+static void blades_raise_guide(void) {
+    if(!guide_scene || !ui_root) return;
+    DWORD child=0,parent=0,last=0,toast=live_toast_scene();
+    XUI_FN(0x7d32af,HRESULT,DWORD,DWORD *)(guide_scene,&parent);   /* XuiElementGetParent */
+    if(parent!=ui_root) return;
+    XUI_FN(0x7d32eb,HRESULT,DWORD,DWORD *)(ui_root,&child);
+    while(child) {if(child!=toast) last=child;XUI_FN(0x7d3363,HRESULT,DWORD,DWORD *)(child,&child);}
+    if(last==guide_scene) return;
+    XUI_FN(0x7d3289,HRESULT,DWORD)(guide_scene);   /* XuiElementUnlink */
+    if(FAILED(xui_add(ui_root,guide_scene))) {log_text("Guide frame could not be raised");return;}
+    log_text("Guide frame kept above a dashboard page");
+}
 static BOOL blades_navigate(int index) {
     BladesStack *stack=blades_stack();
     if(index<0) {
@@ -256,6 +274,7 @@ static BOOL blades_navigate(int index) {
     HRESULT hr=xui_add(parent,scene);
     if(SUCCEEDED(hr)) hr=xui_visuals(scene);
     if(FAILED(hr)) {XUI_FN(0x7dec45,HRESULT,DWORD)(scene);return FALSE;}
+    if(parent==ui_root) blades_raise_guide();
     blades_prepare(scene,index);
     DWORD focus=XUI_FN(0x7d4a95,DWORD,DWORD)(ui_root);
     if(stack->depth) stack->pages[stack->depth-1].focus=focus;else stack->root_focus=focus;

@@ -125,6 +125,7 @@ static void guide_status_hide(void) {
 static struct {DWORD scene,control;int frames,serial;BOOL leaving;WCHAR text[256],image[512];} live_toast;   /* serial: one per popup */
 #define TOAST_SHOW_FRAMES 300   /* TransTo loops until the popup is dismissed (~5 s) */
 #define TOAST_LEAVE_FRAMES 60   /* TransFrom 186..240 */
+static DWORD live_toast_scene(void) {return live_toast.scene;}
 static void live_toast_close(void) {
     if(live_toast.scene) XUI_FN(0x7dec45,HRESULT,DWORD)(live_toast.scene);
     live_toast.scene=live_toast.control=0;live_toast.leaving=FALSE;

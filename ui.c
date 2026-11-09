@@ -881,6 +881,7 @@ static HRESULT independent_ui(SDL_Window *window, IDirect3DDevice9 *device, D3DP
         SDL_Delay(1);
     }
     SDL_SetWindowsMessageHook(0,0);ui_root=0;
+    exit_watchdog(0);   /* host.c: the shutdown below cannot hang the process */
     music_shutdown();sound_shutdown();   /* no audio/MCI/scan thread left running while the engine and process go down */
     for(int i=0;i<4;i++) if(pads[i]) {SDL_CloseGamepad(pads[i]);pads[i]=0;}
     XUI_GLOBAL(0x8f141c,void *)=0;

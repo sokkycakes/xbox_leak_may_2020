@@ -64,6 +64,29 @@ static BOOL verify_modules(void) {
     }
     CloseHandle(snapshot);log_value("No xlive.dll or SDL3.dll loaded",ok);return ok;
 }
+/* Shutdown is made deterministic: once the interface has ended, every step (audio, MCI, engine,
+ * D3D, SDL) runs under a watchdog, and the process ends with TerminateProcess after the log is
+ * flushed, so no DLL detach, late destructor or leftover thread (Wine's audio/MCI/GL threads,
+ * the engine's statics) can hang the exit or free something twice. */
+static volatile LONG exit_code_now,exit_user_wait;   /* exit_user_wait: an error box is up, the user closes it */
+static void process_end(int code) {
+    log_value("Process exit",code);
+    if(log_file && log_file!=INVALID_HANDLE_VALUE) {FlushFileBuffers(log_file);CloseHandle(log_file);log_file=0;}
+    TerminateProcess(GetCurrentProcess(),(UINT)code);
+    ExitProcess((UINT)code);
+}
+static DWORD WINAPI exit_watchdog_main(void *unused) {
+    Sleep(8000);
+    while(exit_user_wait) Sleep(100);
+    log_text("Exit watchdog: shutdown did not finish in 8 s, ending the process");
+    process_end((int)exit_code_now);
+    return 0;
+}
+static void exit_watchdog(int code) {
+    static HANDLE watchdog;
+    InterlockedExchange(&exit_code_now,code);
+    if(!watchdog) watchdog=CreateThread(0,0,exit_watchdog_main,0,0,0);
+}
 #include "ui.c"
 
 int main(void) {
@@ -124,13 +147,17 @@ int main(void) {
     if(SUCCEEDED(hr)) {
         hr=independent_ui(window,device,&pp);
         log_value("UI exit",hr);
-        if(!verify_modules()) hr=E_FAIL;
-        IDirect3DDevice9_Release(device);
+        exit_watchdog(FAILED(hr)?13:0);
+        if(!verify_modules()) {hr=E_FAIL;exit_watchdog(13);}
+        IDirect3DDevice9_Release(device);log_text("Graphics device released");
     }
-    IDirect3D9_Release(d3d);SDL_DestroyWindow(window);SDL_Quit();
-    /* The OS releases image-wide CRT and compatibility state at process exit.
-     * The XUI scene, render context, and input are explicitly released in ui.c. */
-    if(FAILED(hr) && !probe_mode) MessageBoxW(0,L"The interface could not continue. See guide.log beside the executable.",L"Standalone XUI",MB_OK|MB_ICONERROR);
-    CloseHandle(log_file);
+    IDirect3D9_Release(d3d);SDL_DestroyWindow(window);SDL_Quit();log_text("SDL closed");
+    /* The XUI scene, render context, input, audio and MCI are released in ui.c; image-wide CRT and
+     * engine statics are left to the OS: the process ends here without DLL detach or atexit. */
+    if(FAILED(hr) && !probe_mode) {
+        InterlockedExchange(&exit_user_wait,1);
+        MessageBoxW(0,L"The interface could not continue. See guide.log beside the executable.",L"Standalone XUI",MB_OK|MB_ICONERROR);
+    }
+    process_end(FAILED(hr)?13:0);
     return FAILED(hr)?13:0;
 }

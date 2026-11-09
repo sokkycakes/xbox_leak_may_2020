@@ -710,6 +710,8 @@ static void music_tick(void) {
 /* Program exit (ui.c): close the MCI song and let the library scan finish before the process ends. */
 static void music_shutdown(void) {
     music_close();
+    music_mci(L"close all",0,0);   /* no MCI device (DirectShow graph and its threads) outlives the UI */
+    log_text("Music closed");
     if(music_scan_handle) {
         if(WaitForSingleObject(music_scan_handle,3000)!=WAIT_OBJECT_0) log_text("Music scan still running at exit");
         CloseHandle(music_scan_handle);music_scan_handle=0;
