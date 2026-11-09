@@ -488,6 +488,44 @@ static BOOL music_key_y(BOOL down);
 #include "guide_music.c"
 #include "guide_live.c"
 #include "guide_sound.c"
+
+/* xam.xex 2.0.1888 draws its HUD (the Guide frame hudbkgnd.xur and everything in it) into its
+   own back buffer: 852x480 when the console is set to widescreen, 640x480 otherwise
+   (0x818db5a0, VdQueryVideoMode IsWidescreen), and the video scaler fills the screen with it.
+   The HUD view (0x818d0248, vtable 0x8187138c slot 5) is a uniform scale of buffer height/770
+   (480/770) with the x translation from the HUD object's +0x44: -60 by default (constructor
+   0x818d0bc8) and set again on every video mode change (0x818d0cf0): -40 widescreen, -60 normal.
+   So in 16:9 the 1120-wide frame sits 40 buffer pixels left of the screen's left edge and the
+   blade ends near 658 of 852; in 4:3 it starts 60 pixels left and fills almost the whole 640.
+   The host's window is 1280x720 (16:9), so the buffer is scaled 1280/852 x 720/480 onto it.
+   Notifications are drawn 1:1 in the same buffer (see live_toast_view). */
+#define HUD_WIDESCREEN 1
+#define HUD_BUFFER_W (HUD_WIDESCREEN?852.0f:640.0f)
+#define HUD_BUFFER_H 480.0f
+#define HUD_OFFSET_X (HUD_WIDESCREEN?-40.0f:-60.0f)
+static void ui_hud_matrix(float *m,float sx,float sy,float tx,float ty) {
+    for(int i=0;i<16;i++) m[i]=i%5?0.0f:1.0f;
+    m[0]=sx;m[5]=sy;m[12]=tx;m[13]=ty;
+}
+static void ui_hud_render(void *dc,DWORD *render_message) {
+    float to_x=1280.0f/HUD_BUFFER_W,to_y=720.0f/HUD_BUFFER_H,m[16];
+    if(guide_scene) {
+        float k=HUD_BUFFER_H/770.0f;
+        ui_hud_matrix(m,k*to_x,k*to_y,HUD_OFFSET_X*to_x,0);
+        XUI_FN(0x808731,HRESULT,void *,void *)(dc,m);
+        XUI_FN(0x8085b0,HRESULT,void *,DWORD)(dc,0xff181b20);
+        XUI_FN(0x7dbd06,HRESULT,DWORD,void *)(guide_scene,render_message);
+        XUI_FN(0x8085cd,HRESULT,void *)(dc);
+    }
+    if(live_toast.scene) {
+        float x,y;live_toast_view(HUD_BUFFER_W,HUD_BUFFER_H,&x,&y);
+        ui_hud_matrix(m,to_x,to_y,x*to_x,y*to_y);
+        XUI_FN(0x808731,HRESULT,void *,void *)(dc,m);
+        XUI_FN(0x8085b0,HRESULT,void *,DWORD)(dc,0xff181b20);
+        XUI_FN(0x7dbd06,HRESULT,DWORD,void *)(live_toast.scene,render_message);
+        XUI_FN(0x8085cd,HRESULT,void *)(dc);
+    }
+}
 static HRESULT ui_load_scene(const WCHAR *path,DWORD *app) {
     WCHAR uri[4096];
     if(FAILED(ui_resource_uri(path,uri))) return E_INVALIDARG;
@@ -832,11 +870,25 @@ static HRESULT independent_ui(SDL_Window *window, IDirect3DDevice9 *device, D3DP
             transform[0]=scale;transform[5]=scale_y?scale_y:scale;transform[12]=x;transform[13]=y;
             ui_offset_x=ui_dash_zoom?0:x;ui_offset_y=ui_dash_zoom?-64:y;ui_scale=ui_dash_zoom?1280.0f/1120:scale;ui_scale_y=ui_dash_zoom?12.0f/11:scale;
         }
+        /* On the console the Guide and its popups are xam.xex's HUD, drawn over the title with
+           xam's own view, not the dash's (see ui_hud_render). The dash pass leaves them out. */
+        BOOL hud_layer=ui_mode==2 && (guide_scene || live_toast.scene);
         XUI_FN(0x808731,HRESULT,void *,void *)(dc,transform);
         hr=XUI_FN(0x8085b0,HRESULT,void *,DWORD)(dc,0xff181b20);
         DWORD render_data[5]={(DWORD)dc,0xffffffff,1,0,0};
         DWORD render_message[5]={20,0,0,20,(DWORD)render_data};
-        HRESULT rendered=XUI_FN(0x7dbd06,HRESULT,DWORD,void *)(app[2],render_message);
+        HRESULT rendered=S_OK;
+        if(!hud_layer) rendered=XUI_FN(0x7dbd06,HRESULT,DWORD,void *)(app[2],render_message);
+        else {
+            DWORD child=0;XUI_FN(0x7d32eb,HRESULT,DWORD,DWORD *)(app[2],&child);
+            while(child) {
+                if(child!=guide_scene && child!=live_toast.scene) {
+                    HRESULT one=XUI_FN(0x7dbd06,HRESULT,DWORD,void *)(child,render_message);
+                    if(FAILED(one)) rendered=one;
+                }
+                XUI_FN(0x7d3363,HRESULT,DWORD,DWORD *)(child,&child);
+            }
+        }
         XUI_FN(0x8085cd,HRESULT,void *)(dc);
         IDirect3DDevice9_EndScene(device);
         if(ui_dash_zoom) {
@@ -854,6 +906,11 @@ static HRESULT independent_ui(SDL_Window *window, IDirect3DDevice9 *device, D3DP
                 }
                 IDirect3DSurface9_Release(rt);
             }
+        }
+        if(hud_layer) {
+            IDirect3DDevice9_BeginScene(device);
+            ui_hud_render(dc,render_message);
+            IDirect3DDevice9_EndScene(device);
         }
         if(frame==0) { log_value("First XUI begin",hr); log_value("First XUI render",rendered); }
         BOOL shot_now=ui_shot_request;ui_shot_request=FALSE;

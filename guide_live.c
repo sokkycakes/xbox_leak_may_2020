@@ -122,7 +122,7 @@ static void guide_status_hide(void) {
 }
 
 /* ---------- xam notify.xur popup ---------- */
-static struct {DWORD scene,control,visual;int frames,serial,player;BOOL leaving;WCHAR text[256],image[512];} live_toast;   /* serial: one per popup */
+static struct {DWORD scene,control,visual;int frames,serial,player;BOOL leaving;float width;WCHAR text[256],image[512];} live_toast;   /* serial: one per popup */
 #define TOAST_SHOW_FRAMES 300   /* TransTo loops until the popup is dismissed (~5 s) */
 #define TOAST_LEAVE_FRAMES 60   /* TransFrom 186..240 */
 static DWORD live_toast_scene(void) {return live_toast.scene;}
@@ -136,11 +136,28 @@ static void live_toast_close(void) {
    LIVE_TEXT_EM converts XUI PointSize to the GDI em height; calibrated against the engine's
    rendered text (probe actions toast, toastfriend, toastlong: the engine needs about 1.5x the TTF em width before it stops clipping the last letter). */
 #define LIVE_TEXT_EM 1.5f
-#define LIVE_TOAST_MIN_W 140.0f
 /* The visible bar ends 35 authored units above the bottom of the 87-high popup (the rest is
    room for the ring glow), i.e. 52.5 window pixels at 1.5x. Put the bar's bottom, not the empty
    frame's, on the title-safe line at window y 648 (90% of 720). */
-#define LIVE_TOAST_BOTTOM (58.7f+(648.0f+52.5f)*660.0f/720.0f)
+#define LIVE_TOAST_H 87.0f
+/* Where xam.xex draws a notification, in its HUD buffer's pixels (W x H, 852x480 or 640x480),
+   at scale 1 with no other transform (0x818dce28 builds a translation-only view):
+   - 0x818d5788 places it from the popup's flags (+0xa0, 2 unless the title moved it):
+     bit 0 top, bit 1 bottom (H - h), else centred; bit 2 left, bit 3 right (W - w), else centred.
+   - 0x818dce28 then clamps it into the title-safe rect from 0x818db640: 85% of the buffer on a
+     480-line buffer (90% otherwise), centred, in whole pixels. A popup past the right or bottom
+     edge is moved back inside.
+   At 852x480 the safe rect is 64,36-788,444, so the default popup is centred with its bottom
+   on y 444 (666 of 720 on screen). */
+static void live_toast_view(float W,float H,float *x,float *y) {
+    unsigned w=(unsigned)W,h=(unsigned)H,p=h==480?85:90;
+    int left=(int)((w-w*p/100)/2),top=(int)((h-h*p/100)/2),right=left+(int)(w*p/100),bottom=top+(int)(h*p/100);
+    float pw=live_toast.width,ph=LIVE_TOAST_H;
+    int px=(int)((W-pw)*0.5f),py=(int)(H-ph);   /* flags 2: bottom, centred (fctiwz truncates) */
+    if(px<left) px=left; else if(px+pw>right) px=(int)(right-pw);
+    if(py<top) py=top; else if(py+ph>bottom) py=(int)(bottom-ph);
+    *x=(float)px;*y=(float)py;
+}
 static float live_text_width(const WCHAR *text,float points) {
     static HDC dc;static HFONT font;static float cached_points;
     if(!dc) {
@@ -209,25 +226,15 @@ static void guide_toast(const WCHAR *text,const WCHAR *image) {
     else lstrcpynW(live_toast.image,image?image:L"",512);
     live_toast.player=player;
     if(control) live_toast_dress(control);
-    /* Bottom centre of the title-safe area of the 1120x770 dash canvas (shown window y 58.7..718.7). */
-    /* NotifyPopupScene (xam code) sizes the popup to its text: scr_Notification is authored
-       361 wide with its TextPresenter at x 59, 283 wide (19 to the right edge), and the bar,
-       right cap and text are anchored to stretch with the control. So the popup is
-       59 + widest line + 19 wide, centred at the bottom of the title-safe area. */
+    /* NotifyPopupScene, xam.xex 0x818d56e0: the popup's new width is its own width minus the
+       TextPresenter's width plus the measured text width. scr_Notification is authored 361 wide
+       with its TextPresenter at x 59, 283 wide, so that is 59 + widest line + 19. No minimum or
+       maximum is applied there. The popup itself sits at 0,0; where it appears on screen is
+       decided when it is drawn (live_toast_view). */
     float width=59.0f+live_text_width(live_toast.text,11.0f)+19.0f;
-    if(width<LIVE_TOAST_MIN_W) width=LIVE_TOAST_MIN_W;
-    if(width>460.0f) width=460.0f;
-    xui_bounds(scene,560.0f-width/2,LIVE_TOAST_BOTTOM-87.0f,width,87);
-    if(control) xui_bounds(control,0,0,width,87);
-    /* notify.xur is authored on a 640x480 canvas: XAM scaled it with the screen height, so on a
-       720-line screen it is 720/480 = 1.5x its authored size (uniformly, so the disc stays round).
-       The dash view shows canvas 1120x660 (y 58.7..718.7) in the 1280x720 window, i.e. 1.143x
-       wide and 1.091x tall, so the scene itself is scaled by 1.5 divided by those. Scaling
-       pivots on the popup's bottom centre, which sits at the title-safe bottom (90% of the
-       screen height). */
-    {XuiValue v={.type=7};float *f=(float *)&v.integer;f[0]=1.5f*1120.0f/1280.0f;f[1]=1.5f*660.0f/720.0f;f[2]=1.0f;
-     XuiValue p={.type=7};float *g=(float *)&p.integer;g[0]=width/2;g[1]=87.0f;g[2]=0.0f;
-     xui_property(scene,L"Pivot",&p);xui_property(scene,L"Scale",&v);}
+    xui_bounds(scene,0,0,width,LIVE_TOAST_H);
+    if(control) xui_bounds(control,0,0,width,LIVE_TOAST_H);
+    live_toast.width=width;
     log_value("Notification width",(DWORD)width);
     live_toast.scene=scene;live_toast.control=control;live_toast.frames=TOAST_SHOW_FRAMES;live_toast.leaving=FALSE;live_toast.serial++;
     if(control) ui_play_tree(control,L"TransTo",L"EndTransTo",0);
