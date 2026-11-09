@@ -137,7 +137,10 @@ static void live_toast_close(void) {
    rendered text (probe actions toast, toastfriend, toastlong: the engine needs about 1.5x the TTF em width before it stops clipping the last letter). */
 #define LIVE_TEXT_EM 1.5f
 #define LIVE_TOAST_MIN_W 140.0f
-#define LIVE_TOAST_BOTTOM (58.7f+648.0f*660.0f/720.0f)   /* window y 648 = 90% of 720 */
+/* The visible bar ends 35 authored units above the bottom of the 87-high popup (the rest is
+   room for the ring glow), i.e. 52.5 window pixels at 1.5x. Put the bar's bottom, not the empty
+   frame's, on the title-safe line at window y 648 (90% of 720). */
+#define LIVE_TOAST_BOTTOM (58.7f+(648.0f+52.5f)*660.0f/720.0f)
 static float live_text_width(const WCHAR *text,float points) {
     static HDC dc;static HFONT font;static float cached_points;
     if(!dc) {
