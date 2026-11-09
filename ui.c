@@ -376,8 +376,9 @@ static void guide_prepare(DWORD scene) {
     /* artPanel stays hidden as authored: the Guide's panel is hudbkgnd's graphic-base (HUD_background). */
     dash_set_text(scene,L"labelProfiles",L"No Profiles Found");  /* dashStrings 9 */
 }
+static const GuideLegend *guide_module_legend(DWORD scene);
 static void guide_legend(DWORD scene) {
-    const GuideLegend *l=0;
+    const GuideLegend *l=guide_module_legend(scene);
     for(int i=0;i<(int)(sizeof guide_legends/sizeof *guide_legends) && !l;i++) if(ui_find_deep(scene,guide_legends[i].scene,0)) l=&guide_legends[i];
     const WCHAR *ids[4]={L"Legend_A",L"Legend_B",L"Legend_X",L"Legend_Y"},*texts[4]={l?l->a:0,l?l->b:0,l?l->x:0,l?l->y:0};
     for(int i=0;i<4;i++) {

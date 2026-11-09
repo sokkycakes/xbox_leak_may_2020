@@ -4,3 +4,4 @@ static void settings_notify(DWORD src,DWORD code,DWORD *data) {}
 static void settings_page(DWORD page,int catalog) {}
 static BOOL settings_back(void) {return FALSE;}
 static void settings_tick(void) {}
+static const GuideLegend *settings_legend(DWORD scene) {return 0;}

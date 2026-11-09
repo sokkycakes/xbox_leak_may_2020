@@ -198,6 +198,23 @@ static BOOL music_filter(DWORD element,DWORD *message);
 static void profiles_guide_opened(void);
 static void music_guide_opened(void);
 
+static const GuideLegend *profiles_legend(DWORD scene);
+static const GuideLegend *settings_legend(DWORD scene);
+static const GuideLegend *music_legend(DWORD scene);
+static const GuideLegend *live_legend(DWORD scene);
+/* Cross-module services (implemented by the live module). */
+static void live_join(void);          /* Join Xbox Live: console's own connect attempt + can't-connect result */
+static void live_recover(void);       /* Recover Gamertag from Xbox Live */
+static void guide_toast(const WCHAR *text,const WCHAR *image);   /* xam notify.xur popup; honours Notifications settings */
+static void guide_status_show(const WCHAR *text);                /* hud Status.xur ("Signing out") */
+static void guide_status_hide(void);
+static const GuideLegend *guide_module_legend(DWORD scene) {
+    const GuideLegend *l=live_legend(scene);
+    if(!l) l=profiles_legend(scene);
+    if(!l) l=settings_legend(scene);
+    if(!l) l=music_legend(scene);
+    return l;
+}
 static BOOL guide_dispatch(DWORD button,const WCHAR *id) {
     return live_dispatch(button,id) || profiles_dispatch(button,id) || settings_dispatch(button,id) || music_dispatch(button,id);
 }

@@ -6,3 +6,4 @@ static BOOL profiles_back(void) {return FALSE;}
 static void profiles_tick(void) {}
 static BOOL profiles_filter(DWORD element,DWORD *message) {return FALSE;}
 static void profiles_guide_opened(void) {}
+static const GuideLegend *profiles_legend(DWORD scene) {return 0;}
