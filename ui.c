@@ -26,6 +26,7 @@ static DWORD ui_zoom_frames;
 static IDirect3DSurface9 *ui_zoom_surface;
 static int demo_selection,ui_pending;
 static BOOL ui_quit;
+static SDL_Gamepad *ui_pads[4];  /* open game controllers (settings: rumble, battery) */
 static BOOL ui_shot_request;  /* probe key S: save shot-NN.png */
 static int ui_shot_count;
 static BOOL blades_message(DWORD element,DWORD *message);
@@ -296,6 +297,11 @@ static const WCHAR *ui_element_id(DWORD e) {
 static void guide_rebind(DWORD e,int depth) {
     if(depth>12) return;
     DWORD visual=0;XUI_FN(0x7d32eb,HRESULT,DWORD,DWORD *)(e,&visual);
+    /* Only an XuiVisual first child is a visual. A group's first child is a control (radio group ->
+       its first radio): setting "hud.<that id>" on the group is accepted by the engine, so the
+       first radio was then skipped as if it were the group's visual and kept the dash skin's
+       XuiRadioButton (248-wide ellipsis text: "Play Through Head..."). */
+    if(visual && !XUI_FN(0x7d876c,DWORD,DWORD,DWORD)(visual,XUI_FN(0x7dec34,DWORD,const WCHAR *)(L"XuiVisual"))) visual=0;
     const WCHAR *name=ui_element_id(visual);
     /* XuiControl data +8 (class handle at 0x8f1194) keeps the authored Visual name, e.g.
        btn_oneline-icon. When that visual exists only in the hud. skin the engine instantiated the
@@ -366,6 +372,9 @@ static void guide_prepare(DWORD scene) {
     guide_rebind(scene,0);
     for(int i=0;i<(int)(sizeof guide_hud_visuals/sizeof *guide_hud_visuals);i++) {
         DWORD e=ui_find_deep(scene,guide_hud_visuals[i][0],0);
+        /* Only the mini player's sliderVolume uses Slider_Volume; OptionsVoice's has no authored
+           Visual, so it takes the class default, which only the hud skin defines (hud.XuiSlider). */
+        if(e && !lstrcmpW(guide_hud_visuals[i][0],L"sliderVolume") && !ui_find_deep(scene,L"sceneMiniMediaPlayer",0)) {xui_string(e,L"Visual",L"hud.XuiSlider");continue;}
         if(e) xui_string(e,L"Visual",guide_hud_visuals[i][1]);
     }
     /* InfoUpsellLive's four white body labels. */
@@ -638,7 +647,7 @@ static HRESULT independent_ui(SDL_Window *window, IDirect3DDevice9 *device, D3DP
     XUI_FN(0x7e2089,void,HWND)(pp->hDeviceWindow);
     XUI_FN(0x7e222b,HRESULT,DWORD,HWND)(ui_root,pp->hDeviceWindow);
     SDL_SetWindowsMessageHook(ui_window_message,0);
-    SDL_Gamepad *pads[4]={0};
+    SDL_Gamepad **pads=ui_pads;
     int pad_count=0;SDL_JoystickID *pad_ids=SDL_GetGamepads(&pad_count);
     for(int i=0;i<pad_count && i<4;i++) pads[i]=SDL_OpenGamepad(pad_ids[i]);
     SDL_free(pad_ids);
@@ -824,7 +833,7 @@ static HRESULT independent_ui(SDL_Window *window, IDirect3DDevice9 *device, D3DP
         SDL_Delay(1);
     }
     SDL_SetWindowsMessageHook(0,0);ui_root=0;
-    for(int i=0;i<4;i++) if(pads[i]) SDL_CloseGamepad(pads[i]);
+    for(int i=0;i<4;i++) if(pads[i]) {SDL_CloseGamepad(pads[i]);pads[i]=0;}
     XUI_GLOBAL(0x8f141c,void *)=0;
     log_value("Xui scene cleanup",XUI_FN(0x7dec45,HRESULT,DWORD)(app[2]));
     if(dc) log_value("Xui context cleanup",XUI_FN(0x808693,HRESULT,void *)(dc));
