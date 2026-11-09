@@ -118,7 +118,9 @@ static void live_toast_close(void) {
 static void guide_toast(const WCHAR *text,const WCHAR *image) {
     /* Sign-in/out popups are system notifications the console always shows (the hud's
        "some system notifications will always appear"); others honour the setting. */
-    BOOL system=image && (!lstrcmpiW(image,L"signed_in.png") || !lstrcmpiW(image,L"signed_out.png") || !lstrcmpiW(image,L"signed_in_live.png"));
+    /* image may be a bare xam_xam.xzp file name or a full URI (profiles passes ...xam_xam.xzp#signed_in.png) */
+    const WCHAR *file=image?wcsrchr(image,L'#'):0;file=file?file+1:image;
+    BOOL system=file && (!lstrcmpiW(file,L"signed_in.png") || !lstrcmpiW(file,L"signed_out.png") || !lstrcmpiW(file,L"signed_in_live.png"));
     if(!system && !setting_get_int(L"ShowNotifications",1)) {log_text("Notification hidden by settings");log_wide(text);return;}
     live_toast_close();
     guide_frame();   /* loads the hud skin (scr_Notification lives there) and the frame below the popup */
