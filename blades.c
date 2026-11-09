@@ -147,7 +147,7 @@ static DWORD blades_load(int index) {
 static int blades_source(void) {
     BladesPage *page=blades_page();
     if(page) return page->catalog;
-    if(blades_guide_open) return blades_catalog(L"hud_hud.xzp",L"MainMenuSignedOut.xur");
+    if(blades_guide_open) return blades_catalog(L"hud_hud.xzp",profiles_menu_scene());
     if(ui_blade==4) return blades_catalog(L"dash_dashmain.xzp",L"dashmain.xur");
     return blades_catalog(dash_blades[ui_blade-1].package,dash_blades[ui_blade-1].content);
 }
@@ -300,6 +300,7 @@ static void blades_guide(BOOL open) {
         ui_guide_toggle();
         blades_guide_root=guide_scene;blades_guide_home=guide_menu;blades_guide_host=guide_host;
         if(!guide_open || !guide_host) return;
+        profiles_guide_opened();  /* Guide main menu by sign-in state */
         blades_visible(ui_demo,FALSE);blades_visible(ui_background,FALSE);
         blades_visible(ui_external,TRUE);blades_visible(guide_scene,TRUE);
         if(!blades_music_scene) {

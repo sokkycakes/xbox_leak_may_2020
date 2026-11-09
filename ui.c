@@ -32,6 +32,15 @@ static BOOL blades_message(DWORD element,DWORD *message);
 static BOOL blades_switch(int mode);
 static BOOL blades_in_submenu(void);
 static BOOL blades_key(WORD key,BOOL down);
+/* Local profiles (guide_profiles.c). */
+static void profiles_dash_ready(void);
+static const WCHAR *profiles_menu_file(void);
+static const WCHAR *profiles_menu_scene(void);
+static BOOL profiles_key(WORD key,BOOL down);
+static BOOL profiles_pc_key(WORD key,BOOL down);
+static void profiles_text(const char *utf8);
+static BOOL profiles_wants_text(void);
+static void profiles_guide_opened(void);
 static BOOL ui_focus_first(DWORD parent) {
     DWORD button_class=XUI_FN(0x7dec34,DWORD,const WCHAR *)(L"XuiButton");
     if(XUI_FN(0x7d876c,DWORD,DWORD,DWORD)(parent,button_class) && SUCCEEDED(xui_focus(parent))) return TRUE;
@@ -109,6 +118,7 @@ static BOOL ui_blade_move(int step) {
     return TRUE;
 }
 static void ui_key(WORD key,BOOL down) {
+    if(profiles_key(key,down)) return;  /* virtual keyboard: X/Y/LB/RB edit the name */
     if(blades_key(key,down)) return;
     if(guide_open && (key==VK_BACK || key=='Y')) {
         /* Guide: Y returns to the Xbox Dashboard; B backs out of a submenu, or closes the Guide from its main menu. */
@@ -131,6 +141,7 @@ static bool SDLCALL ui_window_message(void *unused,MSG *m) {
     if(!ui_root) return true;
     if(m->message==WM_KEYDOWN || m->message==WM_KEYUP) {
         if(m->wParam==VK_ESCAPE || m->wParam>=VK_F1 && m->wParam<=VK_F12) return true;
+        if(profiles_pc_key((WORD)m->wParam,m->message==WM_KEYDOWN)) return true;  /* typing into the virtual keyboard */
         ui_key((WORD)m->wParam,m->message==WM_KEYDOWN);
     } else if(m->message>=WM_MOUSEFIRST && m->message<=WM_MOUSELAST) {
         DWORD message[5]={0},data[8]={0};
@@ -180,7 +191,7 @@ static HRESULT ui_play_tree(DWORD element,const WCHAR *start,const WCHAR *end,in
    dashcomm.xzp dashStrings.xus, as the dash reads them. */
 #define DASH_META_MAX 8
 typedef struct {const WCHAR *tab,*content,*package,*panel;float x,y;const WCHAR *buttons[DASH_META_MAX],*metas[DASH_META_MAX];} DashBlade;
-static const DashBlade dash_blades[4]={
+static DashBlade dash_blades[4]={  /* the profiles module swaps blades 1-3 to the signed-in scenes */
     {L"Tab1",L"liveSignedOutUI.xur",L"dash_live.xzp",L"MetaContainer",354,118,{L"fakeGamerCard"},{L"dash_botd.xzp#defaultbanner0.xur"}},
     {L"Tab2",L"gamesSignedOut.xur",L"dash_gamesbla.xzp",L"metaPanelScene",0,0,
         {L"fakeGamerCard",L"navCreateProfile",L"navArcade",L"navDemos",L"navTrailers"},
@@ -260,6 +271,7 @@ static void ui_blade_contents(DWORD scene,const WCHAR *uri,DWORD *app) {
         dash_show_meta(i,0);
     }
     dash_focused=0;
+    profiles_dash_ready();  /* auto sign-in, signed-in blades, profile counts, X legend */
 }
 /* Follow focus inside the blades and swap the meta panel to match the focused item. */
 static void ui_dash_focus(void) {
@@ -374,7 +386,6 @@ static void guide_prepare(DWORD scene) {
         for(int i=0;i<4;i++) {DWORD e=ui_find_deep(scene,labels[i],0);if(e) xui_string(e,L"Visual",L"hud.Label_BodyWhite");}
     }
     /* artPanel stays hidden as authored: the Guide's panel is hudbkgnd's graphic-base (HUD_background). */
-    dash_set_text(scene,L"labelProfiles",L"No Profiles Found");  /* dashStrings 9 */
 }
 static const GuideLegend *guide_module_legend(DWORD scene);
 static void guide_legend(DWORD scene) {
@@ -415,7 +426,7 @@ static void ui_guide_toggle(void) {
             {L"graphic-base-error",L"hud.HUD_background"},{L"graphic-blade-error",L"hud.HUD_blade"},{L"ROL",L"hud.ringOfLight_Group"}};
         for(int i=0;guide_scene && i<5;i++) {DWORD e=ui_find_deep(guide_scene,named[i][0],0);if(e) xui_string(e,L"Visual",named[i][1]);}
         DWORD host=guide_scene?ui_find_deep(guide_scene,L"AppHostElementId",0):0;
-        guide_menu=host?dash_scene(L"hud_hud.xzp#MainMenuSignedOut.xur"):0;
+        guide_menu=host?dash_scene(profiles_menu_file()):0;
         if(guide_menu) dash_attach(host,guide_menu,0,0);
         if(!guide_menu) return;
         guide_host=host;ui_guide_watch();
@@ -652,7 +663,9 @@ static HRESULT independent_ui(SDL_Window *window, IDirect3DDevice9 *device, D3DP
     int stick_direction=0;
     for(DWORD frame=0;running;frame++) {
         SDL_Event event;
+        if(profiles_wants_text()!=SDL_TextInputActive(window)) {if(profiles_wants_text()) SDL_StartTextInput(window); else SDL_StopTextInput(window);}
         while(SDL_PollEvent(&event)) {
+            if(event.type==SDL_EVENT_TEXT_INPUT) profiles_text(event.text.text);
             if(event.type==SDL_EVENT_KEY_DOWN && event.key.key==SDLK_F8) ui_dump_classes();
             if(event.type==SDL_EVENT_KEY_DOWN && event.key.key==SDLK_F1) ui_switch(0);
             if(event.type==SDL_EVENT_KEY_DOWN && event.key.key==SDLK_F2) ui_switch(1);
@@ -701,6 +714,17 @@ static HRESULT independent_ui(SDL_Window *window, IDirect3DDevice9 *device, D3DP
             while(keys[key_at]==',') key_at++;
             if(keys[key_at]=='S') {ui_shot_request=TRUE;key_at++;}
             else if(keys[key_at]=='W') key_at++;
+            else if(keys[key_at]=='K') {
+                /* K types the next '|'-separated part of XUI_TYPE as PC key presses ('<' Backspace, '>' Enter). */
+                static char typed[256];static char *next=0;
+                if(!next) {if(!GetEnvironmentVariableA("XUI_TYPE",typed,sizeof typed)) typed[0]=0;next=typed;}
+                for(;*next && *next!='|';next++) {
+                    char c=*next;WORD vk=c=='<'?VK_BACK:c=='>'?VK_RETURN:(WORD)(VkKeyScanA(c)&0xff);
+                    PostMessageA(pp->hDeviceWindow,WM_KEYDOWN,vk,1);PostMessageA(pp->hDeviceWindow,WM_KEYUP,vk,0xC0000001);
+                }
+                if(*next) next++;
+                key_at++;
+            }
             else if(keys[key_at]=='G') {ui_switch(0);key_at++;}
             else if(keys[key_at]=='F') {ui_switch(1);key_at++;}
             else if(keys[key_at]=='T') {ui_switch(2);key_at++;}
