@@ -54,6 +54,8 @@ static BOOL ui_focus_first(DWORD parent) {
 static BOOL guide_filter(DWORD element,DWORD *message);
 static BOOL sound_filter(DWORD element,DWORD *message);
 static void sound_init(void);
+static void sound_shutdown(void);
+static void music_shutdown(void);
 static HRESULT WINAPI ui_message_filter(DWORD element,DWORD *message) {
     if(sound_filter(element,message)) return S_OK;  /* XuiSound play/stop (guide_sound.c) */
     if(guide_filter(element,message)) return S_OK;
@@ -879,6 +881,7 @@ static HRESULT independent_ui(SDL_Window *window, IDirect3DDevice9 *device, D3DP
         SDL_Delay(1);
     }
     SDL_SetWindowsMessageHook(0,0);ui_root=0;
+    music_shutdown();sound_shutdown();   /* no audio/MCI/scan thread left running while the engine and process go down */
     for(int i=0;i<4;i++) if(pads[i]) {SDL_CloseGamepad(pads[i]);pads[i]=0;}
     XUI_GLOBAL(0x8f141c,void *)=0;
     log_value("Xui scene cleanup",XUI_FN(0x7dec45,HRESULT,DWORD)(app[2]));

@@ -271,6 +271,7 @@ static DWORD WINAPI music_scan_thread(void *unused) {
     return 0;
 }
 static BOOL music_ready(void) {return music_scan_state==2;}
+static HANDLE music_scan_handle;
 
 /* ---------- playback ---------- */
 static int music_current(void) {return music_pos>=0 && music_pos<music_queue_count?music_queue[music_order[music_pos]]:-1;}
@@ -664,8 +665,8 @@ static void music_tick(void) {
         music_volume=console_get_int(L"MusicVolume",100);
         music_shuffle=console_get_int(L"MusicShuffle",0)!=0;
         InterlockedExchange(&music_scan_state,1);
-        HANDLE t=CreateThread(0,0,music_scan_thread,0,0,0);
-        if(t) CloseHandle(t);else music_scan_thread(0);
+        music_scan_handle=CreateThread(0,0,music_scan_thread,0,0,0);
+        if(!music_scan_handle) music_scan_thread(0);
     }
     if(music_scan_state==2 && !music_pages_pending) {
         music_pages_pending=TRUE;
@@ -704,6 +705,14 @@ static void music_tick(void) {
         music_last_poll=GetTickCount();
         WCHAR mode[32]=L"";
         if(!music_mci(L"status blades_song mode",mode,32) && !lstrcmpW(mode,L"stopped")) music_start(music_pos+1);
+    }
+}
+/* Program exit (ui.c): close the MCI song and let the library scan finish before the process ends. */
+static void music_shutdown(void) {
+    music_close();
+    if(music_scan_handle) {
+        if(WaitForSingleObject(music_scan_handle,3000)!=WAIT_OBJECT_0) log_text("Music scan still running at exit");
+        CloseHandle(music_scan_handle);music_scan_handle=0;
     }
 }
 static BOOL music_filter(DWORD element,DWORD *message) {

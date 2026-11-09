@@ -33,6 +33,7 @@ static CRITICAL_SECTION sound_lock;
 static HWAVEOUT sound_out;
 static HANDLE sound_event,sound_thread,sound_dump=INVALID_HANDLE_VALUE;
 static BOOL sound_ready,sound_device;
+static volatile LONG sound_quit;   /* sound_shutdown: the mixer thread leaves its loop */
 static volatile LONG sound_mixed;   /* blocks mixed (diagnostics) */
 static WAVEHDR sound_hdr[SOUND_BUFFERS];
 static short sound_buf[SOUND_BUFFERS][SOUND_BLOCK*2];
@@ -58,17 +59,19 @@ static void sound_mix(short *out) {
 }
 static DWORD WINAPI sound_main(void *unused) {
     if(sound_device) {
-        for(;;) {
+        while(!sound_quit) {
             WaitForSingleObject(sound_event,100);
+            if(sound_quit) break;
             for(int b=0;b<SOUND_BUFFERS;b++) if(sound_hdr[b].dwFlags&WHDR_DONE) {
                 sound_mix(sound_buf[b]);sound_hdr[b].dwFlags&=~WHDR_DONE;
                 if(waveOutWrite(sound_out,&sound_hdr[b],sizeof(WAVEHDR))!=MMSYSERR_NOERROR) sound_hdr[b].dwFlags|=WHDR_DONE;
             }
         }
+        return 0;
     }
     /* No device: keep time so voices start and finish as they would. */
     DWORD start=GetTickCount();ULONGLONG done=0;
-    for(;;) {
+    while(!sound_quit) {
         Sleep(10);
         ULONGLONG due=(ULONGLONG)(GetTickCount()-start)*SOUND_RATE/1000/SOUND_BLOCK;
         while(done<due) {short block[SOUND_BLOCK*2];sound_mix(block);done++;}
@@ -76,7 +79,7 @@ static DWORD WINAPI sound_main(void *unused) {
     return 0;
 }
 static void sound_init(void) {
-    if(sound_ready) return;
+    if(sound_ready || sound_quit) return;
     InitializeCriticalSection(&sound_lock);
     char dump[MAX_PATH];
     if(GetEnvironmentVariableA("XUI_SOUND_DUMP",dump,sizeof dump)) sound_dump=CreateFileA(dump,GENERIC_WRITE,FILE_SHARE_READ,0,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,0);
@@ -93,6 +96,26 @@ static void sound_init(void) {
     sound_thread=CreateThread(0,0,sound_main,0,0,0);
     if(sound_thread) SetThreadPriority(sound_thread,THREAD_PRIORITY_ABOVE_NORMAL);
     if(sound_device) SetEvent(sound_event);
+}
+
+/* Program exit (ui.c, before the engine is released): stop the mixer thread, then the device, so no
+   thread mixes or writes buffers while the process tears down. */
+static void sound_shutdown(void) {
+    if(!sound_ready) return;
+    InterlockedExchange(&sound_quit,1);
+    if(sound_event) SetEvent(sound_event);
+    if(sound_thread) {
+        if(WaitForSingleObject(sound_thread,2000)!=WAIT_OBJECT_0) log_text("Sound thread did not stop");
+        CloseHandle(sound_thread);sound_thread=0;
+    }
+    if(sound_device) {
+        waveOutReset(sound_out);
+        for(int b=0;b<SOUND_BUFFERS;b++) waveOutUnprepareHeader(sound_out,&sound_hdr[b],sizeof(WAVEHDR));
+        waveOutClose(sound_out);sound_device=FALSE;
+    }
+    if(sound_dump!=INVALID_HANDLE_VALUE) {CloseHandle(sound_dump);sound_dump=INVALID_HANDLE_VALUE;}
+    sound_ready=FALSE;
+    log_text("Sound output closed");
 }
 
 /* assets\sounds\<name>.wav: PCM 16-bit, 48 kHz, mono or stereo (build.py writes them). */
