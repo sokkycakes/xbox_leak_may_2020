@@ -359,7 +359,7 @@ static void prof_signout_choice(int choice,void *ctx) {
     log_value("Sign out choice",(DWORD)choice);
     if(choice!=0) return;
     guide_status_show(PS_SIGNING_OUT);                                         /* hud Strings.xus 44 */
-    prof_signout_wait=60;
+    prof_signout_wait=blades_guide_open?120:60;   /* in the Guide the Error panel slides back for ~60 frames first: keep "Signing out" up ~1 s after it */
 }
 static void profiles_sign_out_confirm(void) {
     if(profile_signed<0) return;

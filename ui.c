@@ -138,6 +138,8 @@ static void ui_key(WORD key,BOOL down) {
     struct {WORD key,unicode,flags;BYTE user,hid;} stroke={key,0,down?1:2,0,0};
     XUI_FN(0x7d4af9,HRESULT,void *)(&stroke);
 }
+static DWORD live_mouse_begin(void);       /* guide_live.c: mouse held while a message box is up */
+static void live_mouse_end(DWORD focus);
 static bool SDLCALL ui_window_message(void *unused,MSG *m) {
     if(!ui_root) return true;
     if(m->message==WM_KEYDOWN || m->message==WM_KEYUP) {
@@ -149,8 +151,10 @@ static bool SDLCALL ui_window_message(void *unused,MSG *m) {
         RECT client;GetClientRect(m->hwnd,&client);
         if(!client.right || !client.bottom) return true;
         LPARAM xy=MAKELPARAM((short)(((short)LOWORD(m->lParam)*1280.0f/client.right-ui_offset_x)/ui_scale),(short)(((short)HIWORD(m->lParam)*720.0f/client.bottom-ui_offset_y)/ui_scale_y));
+        DWORD modal=live_mouse_begin();
         if(SUCCEEDED(XUI_FN(0x7e2095,HRESULT,HWND,void *,void *,UINT,WPARAM,LPARAM)(m->hwnd,message,data,m->message,m->wParam,xy)))
             XUI_FN(0x7e22f9,HRESULT,DWORD,void *)(ui_root,message);
+        live_mouse_end(modal);
     }
     return true;
 }
