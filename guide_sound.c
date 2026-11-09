@@ -188,13 +188,16 @@ static void sound_play(DWORD element) {
     if(id && !lstrcmpW(id,L"PopUpSound")) {
         if(!setting_get_int(L"NotificationSound",1)) {wsprintfA(line,"Sound muted by NotificationSound: %ls",file);log_text(line);return;}
         /* PopUpSound is the one sound with a static File: when the host rebuilds visuals (graphics
-           device reset) the popup's new visual would chime again. Once per popup control. */
-        static DWORD last_control,last_tick;
+           device reset) the popup's new visual would chime again. Once per popup (guide_toast's serial),
+           however long the popup has been up. */
+        static int played=-1;
         DWORD visual=0,control=0;
         XUI_FN(0x7d32af,HRESULT,DWORD,DWORD *)(element,&visual);
         if(visual) XUI_FN(0x7d32af,HRESULT,DWORD,DWORD *)(visual,&control);
-        if(control && control==last_control && GetTickCount()-last_tick<10000) {log_text("Sound repeat skipped (popup visual rebuilt)");return;}
-        last_control=control;last_tick=GetTickCount();
+        if(control && control==live_toast.control) {
+            if(played==live_toast.serial) {log_text("Sound repeat skipped (popup visual rebuilt)");return;}
+            played=live_toast.serial;
+        }
     }
     float volume=-12;
     if(SUCCEEDED(xui_get(element,L"Volume",&v))) {if(v.type==4) volume=v.number;xui_value_free(&v);}

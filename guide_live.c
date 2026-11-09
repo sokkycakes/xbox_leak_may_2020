@@ -122,7 +122,7 @@ static void guide_status_hide(void) {
 }
 
 /* ---------- xam notify.xur popup ---------- */
-static struct {DWORD scene,control;int frames;BOOL leaving;WCHAR text[256],image[512];} live_toast;
+static struct {DWORD scene,control;int frames,serial;BOOL leaving;WCHAR text[256],image[512];} live_toast;   /* serial: one per popup */
 #define TOAST_SHOW_FRAMES 300   /* TransTo loops until the popup is dismissed (~5 s) */
 #define TOAST_LEAVE_FRAMES 60   /* TransFrom 186..240 */
 static void live_toast_close(void) {
@@ -158,7 +158,7 @@ static void guide_toast(const WCHAR *text,const WCHAR *image) {
     }
     /* Bottom centre of the title-safe area of the 1120x770 dash canvas (shown window y 58.7..718.7). */
     xui_bounds(scene,330,592,460,87);
-    live_toast.scene=scene;live_toast.control=control;live_toast.frames=TOAST_SHOW_FRAMES;live_toast.leaving=FALSE;
+    live_toast.scene=scene;live_toast.control=control;live_toast.frames=TOAST_SHOW_FRAMES;live_toast.leaving=FALSE;live_toast.serial++;
     if(control) ui_play_tree(control,L"TransTo",L"EndTransTo",0);
     /* PopUpSound (NotifyPopup.xma): the engine's sound classes run without an audio device here
        and XMA cannot be decoded on the PC, so NotificationSound has nothing to play. */
