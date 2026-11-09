@@ -26,6 +26,8 @@ static DWORD ui_zoom_frames;
 static IDirect3DSurface9 *ui_zoom_surface;
 static int demo_selection,ui_pending;
 static BOOL ui_quit;
+static BOOL ui_shot_request;  /* probe key S: save shot-NN.png */
+static int ui_shot_count;
 static BOOL blades_message(DWORD element,DWORD *message);
 static BOOL blades_switch(int mode);
 static BOOL blades_in_submenu(void);
@@ -37,7 +39,9 @@ static BOOL ui_focus_first(DWORD parent) {
     while(child) {if(ui_focus_first(child)) return TRUE;XUI_FN(0x7d3363,HRESULT,DWORD,DWORD *)(child,&child);}
     return FALSE;
 }
+static BOOL guide_filter(DWORD element,DWORD *message);
 static HRESULT WINAPI ui_message_filter(DWORD element,DWORD *message) {
+    if(guide_filter(element,message)) return S_OK;
     if(blades_message(element,message)) return S_OK;
     if(message[1]==0xe && message[4]) {
         DWORD *data=(DWORD *)message[4];
@@ -347,8 +351,28 @@ static const GuideLegend guide_legends[]={
     {L"scnNotificationsOnline",0,L"Back"},{L"scnOptionsController",0,L"Back"}};
 static DWORD guide_host,guide_top,guide_seen[64];
 static int guide_seen_count;
+/* Authored visuals that exist only in the hud skin. When a scene loads, the engine resolves them
+   against the dashboard skin and falls back to the class default, so set them explicitly. */
+static const WCHAR *guide_hud_visuals[][2]={
+    {L"btnNewProfile",L"hud.btn_oneline-icon"},{L"btnRecoverProfile",L"hud.btn_oneline-icon"},
+    {L"btnJoinLive",L"hud.btn_oneline-icon"},{L"btnGameBanner",L"hud.btn_gamebanner"},
+    {L"paneSongs",L"hud.btn_MetaPane_static"},{L"btnPlay",L"hud.xuiButtonImageCentered"},
+    {L"btnPrev",L"hud.xuiButtonImageCenteredMusic"},{L"btnNext",L"hud.xuiButtonImageCenteredMusic"},
+    {L"btnPlaybackMode",L"hud.xuiButtonImageCenteredMusic"},{L"btnVolume",L"hud.xuiButtonImageCenteredMusic"},
+    {L"sliderVolume",L"hud.Slider_Volume"},{L"txtMessage",L"hud.txt_Starting"},
+    {L"bg-Community",L"hud.btn_MetaPane_static"},{L"btnRecentPlayers",L"hud.xuiButtonImageLeftTextRight"},
+    {L"btnFriends",L"hud.xuiButtonImageLeftTextRight"},{L"btnMessages",L"hud.xuiButtonImageLeftTextRight"}};
 static void guide_prepare(DWORD scene) {
     guide_rebind(scene,0);
+    for(int i=0;i<(int)(sizeof guide_hud_visuals/sizeof *guide_hud_visuals);i++) {
+        DWORD e=ui_find_deep(scene,guide_hud_visuals[i][0],0);
+        if(e) xui_string(e,L"Visual",guide_hud_visuals[i][1]);
+    }
+    /* InfoUpsellLive's four white body labels. */
+    if(ui_find_deep(scene,L"scnInfoUpsellLive",0)) {
+        const WCHAR *labels[]={L"XuiControl1",L"XuiControl2",L"XuiControl3",L"XuiControl4"};
+        for(int i=0;i<4;i++) {DWORD e=ui_find_deep(scene,labels[i],0);if(e) xui_string(e,L"Visual",L"hud.Label_BodyWhite");}
+    }
     /* artPanel stays hidden as authored: the Guide's panel is hudbkgnd's graphic-base (HUD_background). */
     dash_set_text(scene,L"labelProfiles",L"No Profiles Found");  /* dashStrings 9 */
 }
@@ -406,7 +430,21 @@ static void ui_guide_toggle(void) {
     } else {guide_play(L"Closed");ui_dash_enter(ui_blade);}
     log_value("Guide open",guide_open);
 }
+/* Guide services (guide_core.c) used by blades.c. */
+static BOOL guide_keep_press(DWORD src);
+static BOOL guide_dispatch(DWORD button,const WCHAR *id);
+static BOOL guide_back(void);
+static void guide_page_shown(DWORD page,int catalog);
+static void guide_page_restored(void);
+static void guide_tick(void);
+static void guide_list_unbind_tree(DWORD root);
 #include "blades.c"
+#include "guide_core.c"
+#include "guide_msgbox.c"
+#include "guide_profiles.c"
+#include "guide_settings.c"
+#include "guide_music.c"
+#include "guide_live.c"
 static HRESULT ui_load_scene(const WCHAR *path,DWORD *app) {
     WCHAR uri[4096];
     if(FAILED(ui_resource_uri(path,uri))) return E_INVALIDARG;
@@ -660,7 +698,9 @@ static HRESULT independent_ui(SDL_Window *window, IDirect3DDevice9 *device, D3DP
             static char keys[1024];static int key_at=-1;
             if(key_at<0) {key_at=0;if(!GetEnvironmentVariableA("XUI_KEYS",keys,sizeof keys)) keys[0]=0;}
             while(keys[key_at]==',') key_at++;
-            if(keys[key_at]=='G') {ui_switch(0);key_at++;}
+            if(keys[key_at]=='S') {ui_shot_request=TRUE;key_at++;}
+            else if(keys[key_at]=='W') key_at++;
+            else if(keys[key_at]=='G') {ui_switch(0);key_at++;}
             else if(keys[key_at]=='F') {ui_switch(1);key_at++;}
             else if(keys[key_at]=='T') {ui_switch(2);key_at++;}
             else if(keys[key_at]) {WORD key=keys[key_at]=='L'?VK_LEFT:keys[key_at]=='R'?VK_RIGHT:keys[key_at]=='D'?VK_DOWN:keys[key_at]=='U'?VK_UP:keys[key_at]=='B'?VK_BACK:keys[key_at]=='Y'?'Y':keys[key_at]=='X'?0x5802:keys[key_at]=='E'?VK_ESCAPE:VK_RETURN;ui_key(key,TRUE);ui_key(key,FALSE);key_at++;}
@@ -758,7 +798,8 @@ static HRESULT independent_ui(SDL_Window *window, IDirect3DDevice9 *device, D3DP
             }
         }
         if(frame==0) { log_value("First XUI begin",hr); log_value("First XUI render",rendered); }
-        if(probe && (frame==90 || frame==150 || frame==probe_end-5) || ui_dash_zoom && ui_zoom_frames==120) {
+        BOOL shot_now=ui_shot_request;ui_shot_request=FALSE;
+        if(shot_now || probe && (frame==90 || frame==150 || frame==probe_end-5) || ui_dash_zoom && ui_zoom_frames==120) {
             if(strstr(GetCommandLineA(),"--dump-tree")) ui_dump(app[2],0);
             IDirect3DSurface9 *rt=0,*copy=0;
             if(SUCCEEDED(IDirect3DDevice9_GetRenderTarget(device,0,&rt))) {
@@ -769,6 +810,7 @@ static HRESULT independent_ui(SDL_Window *window, IDirect3DDevice9 *device, D3DP
                         HMODULE dx=GetModuleHandleA("d3dx9_33.dll");
                         HRESULT (WINAPI *save)(LPCWSTR,int,IDirect3DSurface9 *,void *,void *)=(void *)GetProcAddress(dx,"D3DXSaveSurfaceToFileW");
                         WCHAR path[MAX_PATH];GetModuleFileNameW(0,path,MAX_PATH);WCHAR *slash=wcsrchr(path,L'\\');lstrcpyW(slash+1,!probe?L"dash-capture.png":ui_mode==1?L"dashboard-preview.png":ui_mode==2?L"scene-preview.png":L"guide-preview.png");
+                        if(shot_now) wsprintfW(slash+1,L"shot-%02d.png",++ui_shot_count);
                         saved=save(path,3,copy,0,0);
                     }
                     log_value("Preview capture",saved); IDirect3DSurface9_Release(copy);

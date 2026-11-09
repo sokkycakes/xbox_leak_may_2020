@@ -244,9 +244,11 @@ static void blades_notice(const WCHAR *reason) {
 }
 static void blades_back(void) {
     if(blades_notice_root) {blades_notice_close();return;}
+    if(guide_back()) return;
     BladesStack *stack=blades_stack();
     if(stack->depth) {
         BladesPage *page=&stack->pages[--stack->depth];
+        guide_list_unbind_tree(page->scene);
         XUI_FN(0x7dec45,HRESULT,DWORD)(page->scene);
         memset(page,0,sizeof(*page));
         DWORD scene=blades_current();blades_visible(scene,TRUE);
@@ -256,6 +258,7 @@ static void blades_back(void) {
             WCHAR start[32],end[32];wsprintfW(start,L"%dClose",ui_blade);wsprintfW(end,L"%sEnd",start);
             ui_play_tree(ui_external,start,end,0);
         }
+        guide_page_restored();
         log_value("Blades Back depth",stack->depth);return;
     }
     if(blades_guide_open) blades_pending_back=2;
@@ -281,6 +284,7 @@ static BOOL blades_navigate(int index) {
     *page=(BladesPage){.scene=scene,.catalog=index,.shown=-1};
     if(blades_guide_open) {guide_prepare(scene);guide_top=scene;guide_legend(scene);}
     blades_visible(scene,TRUE);blades_focus(scene,index);
+    guide_page_shown(scene,index);
     if(!blades_guide_open && stack->depth==1) {
         WCHAR start[32],end[32];wsprintfW(start,L"%dOpen",ui_blade);wsprintfW(end,L"%sEnd",start);
         ui_play_tree(ui_external,start,end,0);
@@ -306,7 +310,9 @@ static void blades_guide(BOOL open) {
                 blades_music_scene=blades_load(music);
                 if(blades_music_scene) {
                     dash_attach(holder,blades_music_scene,0,0);guide_prepare(blades_music_scene);
-                    dash_set_text(blades_music_scene,L"btnPlaylist",L"No music selected");
+                    dash_set_text(blades_music_scene,L"btnPlaylist",L"Select Music");  /* hud Strings.xus 28 */
+                    {DWORD e=ui_find_deep(blades_music_scene,L"sliderVolume",0);if(e) xui_bool(e,L"Show",FALSE);
+                     e=ui_find_deep(blades_music_scene,L"imgVolume",0);if(e) xui_bool(e,L"Show",FALSE);}
                 }
             }
         }
@@ -369,6 +375,7 @@ static BOOL blades_message(DWORD element,DWORD *message) {
         blades_pending_back=1;message[2]=1;return TRUE;
     }
     if((ui_mode!=2 && ui_mode!=3) || !blades_contains(blades_current(),data[1],0)) return FALSE;
+    if(guide_keep_press(data[1])) return FALSE;
     blades_pending=data[1];message[2]=1;return TRUE;
 }
 static void blades_dispatch(DWORD button) {
@@ -376,8 +383,9 @@ static void blades_dispatch(DWORD button) {
     if(blades_is_back(button) || !lstrcmpW(id,L"btnB") || !lstrcmpW(id,L"legend_b") || !lstrcmpW(id,L"navB")) {blades_back();return;}
     if(!lstrcmpW(id,L"btnA") || !lstrcmpW(id,L"legend_a") || !lstrcmpW(id,L"navA")) {
         DWORD focus=XUI_FN(0x7d4a95,DWORD,DWORD)(ui_root);
-        if(focus && focus!=button) blades_dispatch(focus);return;
+        if(focus && focus!=button && !guide_keep_press(focus)) blades_dispatch(focus);return;
     }
+    if(guide_dispatch(button,id)) return;
     /* XamShowSigninUI / XamShowCreateProfileUI are invoked by the original blade
        handlers; their native storage/authentication work is unavailable here. */
     if(!lstrcmpW(id,L"fakeGamerCard") || !lstrcmpW(id,L"btnSignIn")) {
@@ -464,6 +472,7 @@ static void blades_tick(void) {
     if(blades_pending_back) {int action=blades_pending_back;blades_pending_back=0;blades_pending=0;if(action==2)blades_guide(FALSE);else blades_back();}
     if(blades_pending) {DWORD button=blades_pending;blades_pending=0;blades_dispatch(button);}
     if((ui_mode==2 || ui_mode==3) && !blades_notice_root) blades_meta();
+    guide_tick();
 }
 static void blades_reset(void) {
     if(!blades_ready) return;
