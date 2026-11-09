@@ -319,8 +319,13 @@ static BOOL music_start(int pos) {
     log_text("Music stopped");music_ui();return FALSE;
 }
 static void music_set_queue(const int *ids,int n,int start) {
-    if(n>MUSIC_QUEUE_LIMIT) n=MUSIC_QUEUE_LIMIT;
     if(start>=n || start<0) start=0;
+    if(n>MUSIC_QUEUE_LIMIT) {
+        /* Song Limit: 100 songs are queued. A song chosen past the first 100 (Play Song / A on song 102 of 105)
+           still plays first: the 100-song window is moved to end at the list's end and keeps the chosen song. */
+        int first=start<MUSIC_QUEUE_LIMIT?0:n-MUSIC_QUEUE_LIMIT;
+        ids+=first;start-=first;n=MUSIC_QUEUE_LIMIT;
+    }
     for(int i=0;i<n;i++) music_queue[i]=ids[i];
     music_queue_count=n;music_pos=0;
     music_reorder(start);
@@ -493,11 +498,19 @@ static void music_open(int kind) {
     blades_navigate(catalog);
 }
 /* Start playing a request: the 100 song limit notice first, then BeginPlayback. */
+static void music_play_request(void) {
+    music_close();
+    music_set_queue(music_request_ids,music_request_count,music_request_start);
+    music_start(music_pos);
+}
 static void music_begin(void) {
     music_begin_pending=FALSE;
-    if(!blades_guide_open) return;
+    if(!blades_guide_open) {music_play_request();return;}   /* the Guide was closed meanwhile: the request stands */
+    /* From the Half Guide the frame first slides to Full (HalfToFull, ~45 frames) and BeginPlayback fades in:
+       keep "Please wait" up long enough to be seen. */
+    BOOL full=!lstrcmpW(guide_state,L"Full");
     music_open(MP_BEGIN);
-    music_begin_wait=24;
+    music_begin_wait=full?24:24+45;
 }
 static void music_limit_done(int choice,void *ctx) {music_begin_pending=TRUE;}
 static void music_request(const int *ids,int n,int start) {
@@ -675,12 +688,13 @@ static void music_tick(void) {
     if(music_y_pending) {music_y_pending=FALSE;music_y();}
     if(music_begin_pending) music_begin();
     if(music_begin_wait>=0) {
-        if(music_top_kind()!=MP_BEGIN) music_begin_wait=-1;    /* B on BeginPlayback cancels */
+        /* Closing the Guide on "Please wait" does not cancel the request (only B / X on BeginPlayback do):
+           the mini player plays on with the Guide closed. */
+        if(!blades_guide_open) {music_begin_wait=-1;music_play_request();}
+        else if(music_top_kind()!=MP_BEGIN) music_begin_wait=-1;    /* B / X on BeginPlayback cancels */
         else if(music_begin_wait-- ==0) {
             music_begin_wait=-1;
-            music_close();
-            music_set_queue(music_request_ids,music_request_count,music_request_start);
-            music_start(music_pos);
+            music_play_request();
             music_close_picker();
             DWORD playlist=guide_find(blades_music_scene,L"btnPlaylist");if(playlist) xui_focus(playlist);
         }
@@ -702,9 +716,10 @@ static const GuideLegend *music_legend(DWORD scene) {
     BOOL any=music_ready() && music_song_count>0;
     l=(GuideLegend){0};
     if(ui_find_deep(scene,L"scnSelectMusicSource",0)) l=(GuideLegend){L"scnSelectMusicSource",any?L"Select":0,L"Back",0,any?L"Play All Music":0};
-    else if(ui_find_deep(scene,L"scnMusicLibrary",0)) l=(GuideLegend){L"scnMusicLibrary",L"Select",L"Back",0,L"Play All Music"};
-    else if(ui_find_deep(scene,L"scnMediaContainers",0)) l=(GuideLegend){L"scnMediaContainers",music_cont_count?L"Select":0,L"Back",0,music_cont_count?ys[music_cont_kind&3]:0};
-    else if(ui_find_deep(scene,L"scnSongs",0)) l=(GuideLegend){L"scnSongs",music_list_count?L"Select":0,L"Back",0,music_list_count?L"Play Song":0};
-    else if(ui_find_deep(scene,L"scnBeginPlayback",0)) l=(GuideLegend){L"scnBeginPlayback",0,0,0,0};
+    /* 570/572/576/BeginPlayback author btnX 'Cancel' (legend_X); 579's X is 'Return Control to Game' (no game here) */
+    else if(ui_find_deep(scene,L"scnMusicLibrary",0)) l=(GuideLegend){L"scnMusicLibrary",L"Select",L"Back",L"Cancel",L"Play All Music"};
+    else if(ui_find_deep(scene,L"scnMediaContainers",0)) l=(GuideLegend){L"scnMediaContainers",music_cont_count?L"Select":0,L"Back",L"Cancel",music_cont_count?ys[music_cont_kind&3]:0};
+    else if(ui_find_deep(scene,L"scnSongs",0)) l=(GuideLegend){L"scnSongs",music_list_count?L"Select":0,L"Back",L"Cancel",music_list_count?L"Play Song":0};
+    else if(ui_find_deep(scene,L"scnBeginPlayback",0)) l=(GuideLegend){L"scnBeginPlayback",0,L"Back",L"Cancel",0};
     return l.scene?&l:0;
 }
