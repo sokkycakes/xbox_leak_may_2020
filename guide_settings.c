@@ -138,6 +138,7 @@ static void settings_trim_rebind(DWORD e,int trim,int depth) {
     DWORD child=0;XUI_FN(0x7d32eb,HRESULT,DWORD,DWORD *)(e,&child);
     while(child) {if(child!=visual) settings_trim_rebind(child,trim,depth+1);XUI_FN(0x7d3363,HRESULT,DWORD,DWORD *)(child,&child);}
 }
+static DWORD settings_trim_reapply;
 static void settings_apply_trim(void) {
     if(!dash_app || !ui_external) return;
     int trim=setting_get_int(SETTING_TRIM,0);
@@ -149,6 +150,9 @@ static void settings_apply_trim(void) {
         log_wide(uri);log_value("Settings: trim skin",hr);
         if(FAILED(hr)) return;
         settings_trim_loaded[trim]=TRUE;
+        /* Rebinding in the same frame the skin was loaded only reaches part of the blade (the wings take
+           the trim, the blade bodies stay on the default visuals): bind again once it has settled. */
+        settings_trim_reapply=settings_frame+30;
     }
     if(trim==settings_trim_now) return;
     settings_rebound=0;
@@ -208,6 +212,7 @@ static void settings_ring_of_light(BOOL force) {
 static void settings_apply_all(void) {
     if(guide_scene && settings_applied_guide!=guide_scene) {settings_applied_guide=guide_scene;settings_ring_of_light(TRUE);settings_apply_background();}
     else if(guide_scene && settings_frame%10==0) {settings_ring_of_light(FALSE);settings_apply_background_to(FALSE);}
+    if(settings_trim_reapply && settings_frame>=settings_trim_reapply) {settings_trim_reapply=0;settings_trim_now=-1;settings_apply_trim();}
     if(dash_app && ui_external && settings_applied_dash!=ui_external) {settings_applied_dash=ui_external;settings_trim_now=-1;settings_apply_trim();}
 }
 

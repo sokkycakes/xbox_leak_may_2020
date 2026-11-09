@@ -394,9 +394,6 @@ static void blades_dispatch(DWORD button) {
     if(!lstrcmpW(id,L"btnY") && blades_guide_open) {
         while(blades_guide_stack.depth) blades_back();blades_guide(FALSE);return;
     }
-    if(!lstrcmpW(id,L"btnTurnOff")) {
-        blades_notice(L"Shut Down requires the Xbox console power service. This action does not shut down your PC.");return;
-    }
     int source=blades_source();
     if(source>=0 && !lstrcmpiW(blades_scenes[source].scene,L"CreateGamerProfile.xur") && !lstrcmpW(id,L"nextButton")) {
         blades_notice(L"Creating a gamer profile requires console profile storage and identity services. A profile has not been created.");return;
