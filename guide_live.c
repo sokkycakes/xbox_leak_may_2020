@@ -137,6 +137,7 @@ static void live_toast_close(void) {
    rendered text (probe actions toast, toastfriend, toastlong: the engine needs about 1.5x the TTF em width before it stops clipping the last letter). */
 #define LIVE_TEXT_EM 1.5f
 #define LIVE_TOAST_MIN_W 140.0f
+#define LIVE_TOAST_BOTTOM (58.7f+648.0f*660.0f/720.0f)   /* window y 648 = 90% of 720 */
 static float live_text_width(const WCHAR *text,float points) {
     static HDC dc;static HFONT font;static float cached_points;
     if(!dc) {
@@ -213,12 +214,15 @@ static void guide_toast(const WCHAR *text,const WCHAR *image) {
     float width=59.0f+live_text_width(live_toast.text,11.0f)+19.0f;
     if(width<LIVE_TOAST_MIN_W) width=LIVE_TOAST_MIN_W;
     if(width>460.0f) width=460.0f;
-    xui_bounds(scene,560.0f-width/2,592,width,87);
+    xui_bounds(scene,560.0f-width/2,LIVE_TOAST_BOTTOM-87.0f,width,87);
     if(control) xui_bounds(control,0,0,width,87);
-    /* The dash view shows canvas 1120x660 (y 58.7..718.7) in a 1280x720 window, which would
-       stretch the popup 1.14x wide and 1.09x tall and make its round disc oval. Its 32x32
-       icon slots match the 32x32 icons, so draw it 1:1 in window pixels instead. */
-    {XuiValue v={.type=7};float *f=(float *)&v.integer;f[0]=1120.0f/1280.0f;f[1]=660.0f/720.0f;f[2]=1.0f;
+    /* notify.xur is authored on a 640x480 canvas: XAM scaled it with the screen height, so on a
+       720-line screen it is 720/480 = 1.5x its authored size (uniformly, so the disc stays round).
+       The dash view shows canvas 1120x660 (y 58.7..718.7) in the 1280x720 window, i.e. 1.143x
+       wide and 1.091x tall, so the scene itself is scaled by 1.5 divided by those. Scaling
+       pivots on the popup's bottom centre, which sits at the title-safe bottom (90% of the
+       screen height). */
+    {XuiValue v={.type=7};float *f=(float *)&v.integer;f[0]=1.5f*1120.0f/1280.0f;f[1]=1.5f*660.0f/720.0f;f[2]=1.0f;
      XuiValue p={.type=7};float *g=(float *)&p.integer;g[0]=width/2;g[1]=87.0f;g[2]=0.0f;
      xui_property(scene,L"Pivot",&p);xui_property(scene,L"Scale",&v);}
     log_value("Notification width",(DWORD)width);
