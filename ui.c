@@ -51,7 +51,10 @@ static BOOL ui_focus_first(DWORD parent) {
     return FALSE;
 }
 static BOOL guide_filter(DWORD element,DWORD *message);
+static BOOL sound_filter(DWORD element,DWORD *message);
+static void sound_init(void);
 static HRESULT WINAPI ui_message_filter(DWORD element,DWORD *message) {
+    if(sound_filter(element,message)) return S_OK;  /* XuiSound play/stop (guide_sound.c) */
     if(guide_filter(element,message)) return S_OK;
     if(blades_message(element,message)) return S_OK;
     if(message[1]==0xe && message[4]) {
@@ -475,6 +478,7 @@ static BOOL music_key_y(BOOL down);
 #include "guide_settings.c"
 #include "guide_music.c"
 #include "guide_live.c"
+#include "guide_sound.c"
 static HRESULT ui_load_scene(const WCHAR *path,DWORD *app) {
     WCHAR uri[4096];
     if(FAILED(ui_resource_uri(path,uri))) return E_INVALIDARG;
@@ -599,6 +603,7 @@ static HRESULT independent_ui(SDL_Window *window, IDirect3DDevice9 *device, D3DP
     void *dc=0;
     UI_CHECK("XuiRenderCreateDC", XUI_FN(0x80863b,HRESULT,void **)(&dc));
     UI_CHECK("Xui sound classes", XUI_FN(0x7e40f0,HRESULT,void *,DWORD)(0,0));
+    sound_init();
     UI_CHECK("Xui resource provider", XUI_C(0x49c4f9,HRESULT,void)());
     for(int i=0;i<6;i++) ui_callbacks[i]=(void *)((BYTE *)self_image+((DWORD *)((BYTE *)self_image+0x1ea8))[i]-0x400000);
     ui_callbacks[1]=ui_missing_class; ui_callbacks[3]=ui_resource_error;
@@ -791,6 +796,7 @@ static HRESULT independent_ui(SDL_Window *window, IDirect3DDevice9 *device, D3DP
         }
         if(elapsed>100) elapsed=100;
         if(probe) elapsed=1000.0f/60.0f;
+        sound_timers();  /* XuiSound play timers (guide_sound.c) */
         XUI_FN(0x7e33de,void,float)(elapsed);
         blades_visibility();
         HRESULT prepared=XUI_THIS(0x48cd65,HRESULT,void *)(app);

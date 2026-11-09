@@ -166,6 +166,15 @@ source hash other than:
 447e2106fce0a529a26555db6aada35df28c7f1a7128385bc02211643abd8024
 ```
 
+UI sounds: the console packages carry their sounds as XMA (`*.xma`), which no PC
+audio API decodes. `assets/sounds/*.wav` are those files converted to 16-bit
+48 kHz PCM; the build copies them to `build/assets/sounds`. If `ffmpeg` is on
+PATH, `build.py` recreates any missing WAV from the `.xzp` packages. The host
+(`guide_sound.c`) plays them through winmm when the scenes' own XuiSound
+elements fire (Guide open/close, focus/select clicks, blade switches,
+notification popup). `XUI_SOUND_DUMP=file` writes the mixed output as raw
+s16le 48 kHz stereo for tests.
+
 ## Verification and diagnostics
 
 Run `python verify.py` after building; this also requires Pillow. It launches

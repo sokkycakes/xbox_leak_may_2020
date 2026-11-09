@@ -18,6 +18,44 @@ ROOT = Path(__file__).resolve().parent
 def align(n, a):
     return (n + a - 1) // a * a
 
+def sounds(out):
+    """UI sounds: the packages' .xma files (XMA1, which no PC API decodes) as PCM WAV.
+
+    assets/sounds/<name>.wav is committed; when ffmpeg is on PATH, missing files are made from the
+    x360/blades-converted/*.xzp entries (same-named entries are identical across packages).
+    The host (guide_sound.c) plays them when the engine's XuiSoundXAudio elements fire."""
+    folder = ROOT / 'assets' / 'sounds'
+    ffmpeg = shutil.which('ffmpeg')
+    if ffmpeg:
+        import tempfile
+        for package in sorted((ROOT / 'x360' / 'blades-converted').glob('*.xzp')):
+            blob = package.read_bytes()
+            if blob[:4] != b'XUIZ':
+                continue
+            count = struct.unpack_from('>H', blob, 20)[0]
+            data = 22 + struct.unpack_from('>I', blob, 16)[0]
+            at = 22
+            for _ in range(count):
+                size, offset, length = struct.unpack_from('>IIB', blob, at); at += 9
+                name = blob[at:at + length * 2].decode('utf-16-be'); at += length * 2
+                if not name.lower().endswith('.xma'):
+                    continue
+                target = folder / (name[:-4] + '.wav')
+                if target.exists():
+                    continue
+                folder.mkdir(parents=True, exist_ok=True)
+                with tempfile.TemporaryDirectory() as tmp:
+                    source = Path(tmp) / name
+                    source.write_bytes(blob[data + offset:data + offset + size])
+                    subprocess.run([ffmpeg, '-hide_banner', '-loglevel', 'error', '-y', '-i', str(source),
+                                    '-ar', '48000', '-c:a', 'pcm_s16le', '-map_metadata', '-1',
+                                    '-fflags', '+bitexact', '-flags:a', '+bitexact', str(target)], check=True)
+    destination = out / 'assets' / 'sounds'
+    if folder.is_dir():
+        destination.mkdir(parents=True, exist_ok=True)
+        for wav in folder.glob('*.wav'):
+            shutil.copy2(wav, destination / wav.name)
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--runtime', type=Path, default=Path('C:/Windows/SysWOW64/xlive.dll'))
@@ -37,6 +75,7 @@ def main():
     font_destination = out / 'assets' / 'fonts' / font_source.name
     font_destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(font_source, font_destination)
+    sounds(out)
     host_rva = align(pe.OPTIONAL_HEADER.SizeOfImage, 0x10000)
     host_base = pe.OPTIONAL_HEADER.ImageBase + host_rva
     defines = '#define ORIGINAL_ENTRY_RVA 0x%x\n' % pe.OPTIONAL_HEADER.AddressOfEntryPoint
