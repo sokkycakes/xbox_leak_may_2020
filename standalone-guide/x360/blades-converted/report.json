@@ -1,0 +1,463 @@
+{
+ "dash_accountm.xzp": {
+  "1500_AccountManagementHome.xur": [
+   "DashScene->XuiScene"
+  ],
+  "1501_MyMemberships.xur": [
+   "DashScene->XuiScene"
+  ],
+  "1502_ContactInformation.xur": "unchanged",
+  "1503_LivePassword.xur": "unchanged",
+  "15XX_AboutMSPointsList.xur": [
+   "DashScene->XuiScene"
+  ],
+  "15XX_StateListScene.xur": "unchanged",
+  "15XX_PassportSignIn.xur": "unchanged",
+  "15XX_PostalDataListScene.xur": "unchanged",
+  "2700_metaPane.xur": "unchanged",
+  "2700_PrivacySettings.xur": [
+   "DashScene->XuiScene"
+  ],
+  "2702_ThreeOptionList.xur": [
+   "DashScene->XuiScene"
+  ],
+  "2710_TwoOptionList.xur": [
+   "DashScene->XuiScene"
+  ],
+  "27XX_MarketingTwoOptionList.xur": [
+   "DashScene->XuiScene"
+  ],
+  "2620_LiveParentalControlsHome.xur": [
+   "DashScene->XuiScene"
+  ],
+  "2620_metaPane.xur": "unchanged",
+  "26XX_GameplayMetaPane.xur": "unchanged",
+  "26XX_ContentMetaPane.xur": "unchanged",
+  "2622_GameplaySettings.xur": [
+   "DashScene->XuiScene"
+  ],
+  "2622_metaPane.xur": "unchanged",
+  "2624_PrivacySettings.xur": [
+   "DashScene->XuiScene"
+  ],
+  "2626_ContentSettings.xur": [
+   "DashScene->XuiScene"
+  ],
+  "2628_OptionScreen.xur": [
+   "DashScene->XuiScene"
+  ],
+  "2629_MoreInfo.xur": [
+   "DashScene->XuiScene"
+  ],
+  "2800_PolicyDocuments.xur": [
+   "DashScene->XuiScene"
+  ],
+  "2802_PolicyText.xur": [
+   "DashScene->XuiScene"
+  ]
+ },
+ "dash_arcade.xzp": {
+  "2500_LiveArcadeHome.xur": [
+   "DashScene->XuiScene",
+   "XuiBOTDContainer->XuiScene"
+  ],
+  "2500_metaBanner.xur": "unchanged",
+  "2500_metaMyArcade.xur": "unchanged",
+  "2500_metaDownload.xur": "unchanged",
+  "2500_metaRecentGame.xur": "unchanged",
+  "2502_TitleSelectorScene.xur": [
+   "DashScene->XuiScene"
+  ],
+  "2504_TitleOptionsScene.xur": "unchanged"
+ },
+ "dash_botd.xzp": {
+  "defaultbanner0.xur": [
+   "XuiBOTDScene->XuiScene"
+  ],
+  "defaultbanner1.xur": [
+   "XuiBOTDScene->XuiScene"
+  ],
+  "defaultbanner2.xur": [
+   "XuiBOTDScene->XuiScene"
+  ],
+  "defaultbanner3.xur": [
+   "XuiBOTDScene->XuiScene"
+  ],
+  "defaultbanner4.xur": [
+   "XuiBOTDScene->XuiScene"
+  ],
+  "defaultbanner5.xur": [
+   "XuiBOTDScene->XuiScene"
+  ],
+  "defaultbanner6.xur": [
+   "XuiBOTDScene->XuiScene"
+  ],
+  "defaultbanner_games.xur": [
+   "XuiBOTDScene->XuiScene"
+  ]
+ },
+ "dash_consoles.xzp": {
+  "dashSysCslSet.xur": [
+   "DashScene->XuiScene"
+  ],
+  "dashSysCslSetDisplay.xur": [
+   "DashScene->XuiScene"
+  ],
+  "dashSysCslSetDisplayFormat.xur": [
+   "DashScene->XuiScene"
+  ],
+  "dashSysCslSetDisplayHiDef.xur": "unchanged",
+  "dashSysCslSetDisplayPal.xur": "unchanged",
+  "dashSysCslSetAudio.xur": [
+   "DashScene->XuiScene"
+  ],
+  "dashSysCslSetAudioAnalog.xur": "unchanged",
+  "dashSysCslSetAudioDigital.xur": "unchanged",
+  "dashSysCslSetLanguage.xur": "unchanged",
+  "dashSysCslSetClock.xur": [
+   "DashScene->XuiScene"
+  ],
+  "dashSysCslSetClockDaylightSavings.xur": "unchanged",
+  "dashSysCslSetClockFormat.xur": "unchanged",
+  "dashSysCslSetClockTime.xur": "unchanged",
+  "dashSysCslSetClockTimeZone.xur": "unchanged",
+  "dashSysCslSetCountry.xur": "unchanged",
+  "dashSysCslSetPControlSelect.xur": [
+   "DashScene->XuiScene"
+  ],
+  "dashSysCslSetPControl.xur": [
+   "DashScene->XuiScene"
+  ],
+  "dashSysCslSetPControlGame.xur": [
+   "DashScene->XuiScene"
+  ],
+  "dashSysCslSetPControlMovie.xur": [
+   "DashScene->XuiScene"
+  ],
+  "dashSysCslSetPControlLiveA.xur": "unchanged",
+  "dashSysCslSetPControlLiveC.xur": "unchanged",
+  "dashSysCslSetPControlXbox.xur": "unchanged",
+  "dashSysCslSetPControlPasscode.xur": "unchanged",
+  "dashSysCslSetPControlPasscodeHint.xur": "unchanged",
+  "dashSysCslSetAutoOff.xur": "unchanged",
+  "dashSysCslSetScreensaver.xur": "unchanged",
+  "dashSysCslSetPolicyInfo_System.xur": "unchanged",
+  "dashSysCslSetRemoteC.xur": "unchanged",
+  "metaPane_DisplayNormal.xur": "unchanged",
+  "metaPane_DisplayWidescreen.xur": "unchanged"
+ },
+ "dash_dashcomm.xzp": {
+  "1050_WmcSetupInfo.xur": "unchanged",
+  "1051_WmcAffiliation.xur": "unchanged",
+  "1052_WmcTroubleShooter.xur": "unchanged",
+  "742_metaByDevice.xur": "unchanged",
+  "742_SelectNetworkDevice.xur": [
+   "DashScene->XuiScene"
+  ],
+  "744_ManageAffiliation.xur": "unchanged",
+  "GenericWaitingScene.xur": "unchanged"
+ },
+ "dash_dashmain.xzp": {
+  "dashmain.xur": [
+   "DashScene->XuiScene"
+  ]
+ },
+ "dash_dashmark.xzp": {
+  "1400_StoreFrontScene.xur": [
+   "XuiBOTDContainer->XuiScene"
+  ],
+  "1401_GameCatalogTabScene.xur": [
+   "XuiBOTDContainer->XuiScene"
+  ],
+  "1403_DemosAndTrailersScene.xur": "unchanged",
+  "1405_HotListScene.xur": "unchanged",
+  "1406_MembershipsTabScene.xur": [
+   "XuiBOTDContainer->XuiScene"
+  ],
+  "1412_GameListScene.xur": "unchanged",
+  "1413_ContentListScene.xur": "unchanged",
+  "1414_DownloadHistoryScene.xur": "unchanged",
+  "1446_XeArcadeSubGenreListScene.xur": "unchanged"
+ },
+ "dash_dashskn1.xzp": {
+  "BladeSkin.xur": "unchanged"
+ },
+ "dash_dashskn2.xzp": {
+  "BladeSkin.xur": "unchanged"
+ },
+ "dash_dashuisk.xzp": {
+  "skin.xur": "unchanged"
+ },
+ "dash_download.xzp": {
+  "2400_WindowsMediaCenter.xur": "unchanged",
+  "2403_SlowWiredConnection.xur": "unchanged",
+  "2404_802bgWirelessNetwork.xur": "unchanged",
+  "2405_PCSoftwarePack.xur": "unchanged",
+  "2406_WelcomeSetupKey.xur": "unchanged",
+  "2407_WaitingScreen.xur": "unchanged",
+  "2410_AttemptingOldSoftware.xur": "unchanged",
+  "2413_UnableToConnect.xur": "unchanged",
+  "AcquiringNetworkSettings.xur": "unchanged",
+  "PcSoftwareError.xur": "unchanged",
+  "HomeNetworkConnectivityRequired.xur": "unchanged",
+  "LimitedNetworkConnectivity.xur": "unchanged",
+  "ReconfigureWireless.xur": "unchanged"
+ },
+ "dash_dvd.xzp": {
+  "1070_remoteControlLayout.xur": "unchanged",
+  "1071_remoteActionDisplay.xur": "unchanged",
+  "1072_displayControls.xur": "unchanged",
+  "1073_playbackControls.xur": "unchanged",
+  "1074_infoPane.xur": "unchanged",
+  "alert.xur": "unchanged",
+  "Splash169.xur": "unchanged",
+  "Splash43.xur": "unchanged",
+  "WmvPadPlayback.xur": "unchanged"
+ },
+ "dash_games.xzp": {
+  "401_GameDetails.xur": "unchanged",
+  "402_Achievements.xur": [
+   "DashScene->XuiScene"
+  ],
+  "408_GamesList.xur": "unchanged",
+  "404_DemosTrailers.xur": [
+   "DashScene->XuiScene"
+  ],
+  "405_DemoOptions.xur": "unchanged",
+  "406_TrailerOptions.xur": "unchanged"
+ },
+ "dash_gamesbla.xzp": {
+  "gamesMetaAchievements.xur": "unchanged",
+  "gamesMetaGames.xur": "unchanged",
+  "gamesMetaArcade.xur": "unchanged",
+  "gamesMetaDemos.xur": "unchanged",
+  "gamesMetaTrailers.xur": "unchanged",
+  "gamesMetaNewProfile.xur": "unchanged",
+  "gamesMetaMOTD.xur": "FAILED: list index out of range",
+  "gamesSignedOut.xur": [
+   "DashScene->XuiScene"
+  ],
+  "gamesSignedIn.xur": "FAILED: mask size 7"
+ },
+ "dash_live.xzp": {
+  "liveSignedOutUI.xur": "FAILED: element header",
+  "liveSignedInUI.xur": "FAILED: list index out of range",
+  "liveSignedInNLUI.xur": "FAILED: list index out of range",
+  "liveConnectedUI.xur": "FAILED: list index out of range",
+  "CommunityBar.xur": "unchanged"
+ },
+ "dash_mediabla.xzp": {
+  "mediaMetaMCX.xur": "unchanged",
+  "mediaMetaMusic.xur": "unchanged",
+  "mediaMetaPictures.xur": "unchanged",
+  "mediaMetaVideo.xur": "unchanged",
+  "mediaMetaMOTD.xur": "FAILED: element header",
+  "mediaSignedIn.xur": "FAILED: mask size 7",
+  "mediaSignedOut.xur": [
+   "DashScene->XuiScene"
+  ]
+ },
+ "dash_memory.xzp": {
+  "DeviceSelector.xur": "unchanged",
+  "DeviceDetails.xur": "unchanged",
+  "Categories.xur": "unchanged",
+  "EnumeratingContent.xur": "unchanged",
+  "Items.xur": "unchanged",
+  "ItemsGrid.xur": "unchanged",
+  "ItemsIcons.xur": "unchanged",
+  "ItemsIconsProfiles.xur": "unchanged",
+  "ItemDetails.xur": "unchanged",
+  "OperationProgress.xur": "unchanged",
+  "FormatHD.xur": "unchanged",
+  "DeleteMusic.xur": "unchanged"
+ },
+ "dash_music.xzp": {
+  "1000_MusicMain.xur": [
+   "DashScene->XuiScene"
+  ],
+  "1020_ripCDlist.xur": "unchanged",
+  "1021_RipProgress.xur": "unchanged",
+  "1023_TroubleshootConnectionAlert.xur": "unchanged",
+  "1024_DownloadInfoAlert.xur": "unchanged",
+  "1025_EditAlbumInfo.xur": "unchanged",
+  "1026_EditSongInfo.xur": "unchanged",
+  "1028_NowPlaying.xur": "unchanged",
+  "1030_EditPlaylist.xur": "unchanged",
+  "1031_SaveChangesAlert.xur": "unchanged",
+  "1003_IndividualDevice.xur": [
+   "DashScene->XuiScene"
+  ],
+  "1003_MediaContainerList.xur": "unchanged",
+  "1003_SongList.xur": "unchanged",
+  "1005_MediaContainerOptions.xur": "unchanged",
+  "1006_IndividualArtistMain.xur": "unchanged",
+  "1016_IndividualSongMain.xur": "unchanged",
+  "1048_IndividualDeviceMain.xur": "unchanged",
+  "1000_metaByDevice.xur": "unchanged",
+  "1004_DeviceNotBrowseable.xur": "unchanged",
+  "Meta_Songs.xur": "unchanged",
+  "Visualizer.xur": "unchanged"
+ },
+ "dash_neon.xzp": {},
+ "dash_network.xzp": {
+  "2000_NetworkConfigList.xur": "unchanged",
+  "2002_NetworkConfigAction.xur": [
+   "DashScene->XuiScene"
+  ],
+  "2004_NetworkDetails.xur": "unchanged",
+  "2008_ActivateConfiguration.xur": "unchanged",
+  "2010_TestingNetwork.xur": "unchanged",
+  "2011_TestingLAN.xur": "unchanged",
+  "2012_TestInformation.xur": "unchanged",
+  "2013_WindowsConnectNow.xur": "unchanged",
+  "2015_WirelessInformation.xur": "unchanged",
+  "2016_EditIPSettings.xur": [
+   "DashScene->XuiScene"
+  ],
+  "2018_IPSettings.xur": [
+   "DashScene->XuiScene"
+  ],
+  "2020_AvailableWirelessNetworks.xur": "unchanged",
+  "2022_WirelessSecuritySettings.xur": [
+   "DashScene->XuiScene"
+  ],
+  "2024_EnterSettings.xur": [
+   "DashScene->XuiScene"
+  ],
+  "2026_ChannelList.xur": [
+   "DashScene->XuiScene"
+  ],
+  "2028_WirelessModes.xur": [
+   "DashScene->XuiScene"
+  ],
+  "2030_ConfirmAction.xur": "unchanged",
+  "2032_connecNow.xur": "unchanged",
+  "2033_DNSConfig.xur": [
+   "DashScene->XuiScene"
+  ],
+  "2034_DNSSettings.xur": [
+   "DashScene->XuiScene"
+  ],
+  "2036_PPoESettings.xur": [
+   "DashScene->XuiScene"
+  ],
+  "2038_ConsoleInformation.xur": [
+   "DashScene->XuiScene"
+  ],
+  "2040_Ad-HocWirelessSecurity.xur": [
+   "DashScene->XuiScene"
+  ],
+  "Status.xur": "unchanged",
+  "ConnStatus.xur": [
+   "DashScene->XuiScene"
+  ],
+  "ConnStatus_2010.xur": "unchanged",
+  "ConnStatus_2011.xur": "unchanged"
+ },
+ "dash_oobe.xzp": {
+  "oobeLanguage.xur": [
+   "DashScene->XuiScene"
+  ],
+  "oobeProfileChoice.xur": [
+   "DashScene->XuiScene"
+  ],
+  "oobeStorageDevice.xur": "unchanged",
+  "oobeGamertile.xur": "unchanged",
+  "oobeWelcome.xur": "FAILED: cannot infer layout of DashScene",
+  "oobeProfileCreation.xur": "unchanged"
+ },
+ "dash_pictures.xzp": {
+  "900_PicturesMain.xur": [
+   "DashScene->XuiScene"
+  ],
+  "900_metaByDevice.xur": "unchanged",
+  "905_IndividualDeviceMain.xur": "unchanged",
+  "slideshowControls.xur": "unchanged"
+ },
+ "dash_signupbo.xzp": {
+  "DownloadLiveSignup.xur": "unchanged"
+ },
+ "dash_videos.xzp": {
+  "Video.xur": "unchanged",
+  "VideosMain.xur": [
+   "DashScene->XuiScene"
+  ]
+ },
+ "hud_hud.xzp": {
+  "ColorSelect.xur": [
+   "HUDScene->XuiScene"
+  ],
+  "DashStyleSelect.xur": [
+   "HUDScene->XuiScene"
+  ],
+  "InfoUpsellLive.xur": [
+   "HUDScene->XuiScene"
+  ],
+  "InfoMessage.xur": [
+   "HUDScene->XuiScene"
+  ],
+  "MainMenuSignedOut.xur": [
+   "HUDScene->XuiScene"
+  ],
+  "MainMenuSignedIn.xur": "FAILED: cannot infer layout of HUDScene",
+  "MiniMediaPlayer.xur": "unchanged",
+  "Options.xur": [
+   "HUDScene->XuiScene"
+  ],
+  "OptionsOnline.xur": [
+   "HUDScene->XuiScene"
+  ],
+  "OptionsVoice.xur": [
+   "HUDScene->XuiScene"
+  ],
+  "OptionsNotifications.xur": [
+   "HUDScene->XuiScene"
+  ],
+  "OptionsPersonalization.xur": [
+   "HUDScene->XuiScene"
+  ],
+  "OptionsController.xur": [
+   "HUDScene->XuiScene"
+  ],
+  "SkinSelect.xur": [
+   "HUDScene->XuiScene"
+  ],
+  "Status.xur": [
+   "HUDScene->XuiScene"
+  ],
+  "TileSelect.xur": [
+   "HUDScene->XuiScene"
+  ],
+  "CommunityBar.xur": "unchanged"
+ },
+ "huduiskin_skin.xzp": {
+  "skin.xur": [
+   "HUDScene->XuiScene"
+  ]
+ },
+ "signin_signin.xzp": {
+  "inspad.xur": "unchanged",
+  "join.xur": "unchanged",
+  "passcode.xur": "unchanged",
+  "signin1.xur": [
+   "HUDScene->XuiScene"
+  ],
+  "signin2.xur": [
+   "HUDScene->XuiScene"
+  ],
+  "signin4.xur": [
+   "HUDScene->XuiScene"
+  ],
+  "status.xur": "unchanged",
+  "UserList.xur": "unchanged"
+ },
+ "xam_gamercrd.xzp": {
+  "GamerCard.xur": "unchanged"
+ },
+ "xam_mplayer.xzp": {},
+ "xam_shrdres.xzp": {},
+ "xam_xam.xzp": {
+  "hudbkgnd.xur": "unchanged",
+  "notify.xur": "unchanged"
+ }
+}
