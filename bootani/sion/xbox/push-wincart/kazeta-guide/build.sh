@@ -1,6 +1,6 @@
 #!/bin/sh
-# Builds kazeta-guide: xbcompat's Guide (xbcompat/src/guide/guide.cpp with
-# guide-overlay-alpha.patch, on the frolickdash XUI runtime) plus host.cpp, as
+# Builds kazeta-guide: xbcompat's Guide (xbcompat/src/guide/guide.cpp, on the
+# frolickdash XUI runtime, with its HUD buffer) plus host.cpp, as
 # a 64-bit X11 client for gamescope inside Conty (glibc 2.41).
 #
 # Built on Ubuntu 24.04 (glibc 2.39): g++ 13, X11/GL/Xrender headers and
@@ -20,7 +20,6 @@ curl -fsSL https://github.com/libsdl-org/SDL/releases/download/release-2.30.0/SD
 mkdir -p "$W/lib" "$W/obj"
 ln -s "$(ldconfig -p | sed -n 's/.*libSDL2-2.0.so.0 (libc6,x86-64) => //p' | head -n1)" "$W/lib/libSDL2.so"
 cp "$XB/src/guide/guide.cpp" "$W/guide.cpp"
-(cd "$W" && patch -p4 < "$HERE/guide-overlay-alpha.patch")
 
 F="-O2 -g -fno-exceptions -fno-rtti -I$XB/tools/frolickdash/xui -I$W/SDL2-2.30.0/include -D_snprintf=snprintf -Wno-misleading-indentation"
 for f in "$W/guide.cpp" "$XB"/tools/frolickdash/xui/xui_parse.cpp "$XB"/tools/frolickdash/xui/xui_scene.cpp \

@@ -194,7 +194,10 @@ struct GLBackend : xui::Backend {
         else glDisable(GL_TEXTURE_2D);
         if (blend == xui::BlendAdd) blendSep(GL_SRC_ALPHA, GL_ONE, GL_ZERO, GL_ONE);
         else if (blend == xui::BlendMultiply) blendSep(GL_ZERO, GL_SRC_COLOR, GL_ZERO, GL_ONE);
-        else blendSep(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE);
+        // (Alpha gathers coverage: the HUD buffer is laid over the frame in
+        // one pass, premultiplied, and kazeta-guide's overlay window is
+        // composited by its alpha.)
+        else blendSep(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
         // Immediate mode: the title's client arrays and buffers stay as they were.
         glBegin(GL_TRIANGLES);
         for (int i = 0; i < ni; i++) {
@@ -2007,12 +2010,14 @@ static bool panel_span(float hx, float hs, float* l, float* r) {
     return true;
 }
 
-void guide_draw(int w, int h) {
-    // The frame is a 4:3 canvas (800x600); fit the height and stretch x to
-    // the window the way the game image is stretched.
+// The Guide's pass, into a w x h target.  In the HUD buffer (hud) the 4:3
+// canvas fits the height and sits in the middle of the buffer, square
+// pixels, the layout's own shape; drawn straight onto the window (no HUD
+// buffer) x is stretched to the window the way the game image is.
+static void draw_guide(int w, int h, bool hud) {
     float cw = g.frame->root->width(), ch = g.frame->root->height();
     float s = h / ch;
-    float kx = (w / cw) / s;
+    float kx = hud ? 1 : (w / cw) / s;
     { static const char* dbg = getenv("XBCOMPAT_GUIDE_DEBUG");
       if (dbg && strstr(dbg, "glerr")) { GLenum e = glGetError(); if (e) xlog("Guide: GL error %#x before drawing", e); } }
     // TV layout.  GFWL's frame was drawn for a PC window, its half-open
@@ -2041,7 +2046,7 @@ void guide_draw(int w, int h) {
     if (is_page(g.menu)) g.r->textZoom = 1;
     narrow_frame(n);
     fit_legends(cw * 0.1f, ch * 0.1f, cw * 0.9f, ch * 0.9f);
-    float fx = 0, fy = 0;
+    float fx = hud ? (w - cw * s) / 2 : 0, fy = 0;
     g.be.begin(w, h, kx);
     g.r->draw(g.frame, fx, fy, s);
     // The menu sits in the frame's AppHostElementId and fades with it.
@@ -2113,6 +2118,179 @@ void guide_draw(int w, int h) {
         }
     }
     g.be.end();
+}
+
+// ---- the HUD buffer ----------------------------------------------------
+// As the console's XAM does (xam.xex 2.0.1888: 0x818db5a0 picks the size,
+// the video scaler then fills the screen with it), the Guide is drawn into a
+// buffer of its own, 640x480 (852x480 with the widescreen video setting),
+// and that buffer is laid over the finished frame in one stretch.  So the
+// Guide's size and place don't depend on the game's resolution or the
+// output's: every game and both hosts (xbcompat, kazeta-guide) show the same
+// 480 lines.
+//   XBCOMPAT_GUIDE_HUD=4:3|16:9 forces the buffer's shape (default: the
+//   dashboard's widescreen setting, <hdd>/.eeprom-user); =off draws straight
+//   onto the window as before.
+
+#ifndef GL_FRAMEBUFFER
+#define GL_FRAMEBUFFER 0x8D40
+#endif
+#ifndef GL_COLOR_ATTACHMENT0
+#define GL_COLOR_ATTACHMENT0 0x8CE0
+#endif
+#ifndef GL_FRAMEBUFFER_COMPLETE
+#define GL_FRAMEBUFFER_COMPLETE 0x8CD5
+#endif
+#ifndef GL_DRAW_FRAMEBUFFER_BINDING
+#define GL_DRAW_FRAMEBUFFER_BINDING 0x8CA6
+#endif
+#ifndef GL_READ_FRAMEBUFFER_BINDING
+#define GL_READ_FRAMEBUFFER_BINDING 0x8CAA
+#endif
+#ifndef GL_DRAW_FRAMEBUFFER
+#define GL_DRAW_FRAMEBUFFER 0x8CA9
+#endif
+#ifndef GL_READ_FRAMEBUFFER
+#define GL_READ_FRAMEBUFFER 0x8CA8
+#endif
+
+namespace {
+
+typedef void (APIENTRY *PFNGENFBS)(GLsizei, GLuint*);
+typedef void (APIENTRY *PFNBINDFB)(GLenum, GLuint);
+typedef void (APIENTRY *PFNFBTEX2D)(GLenum, GLenum, GLenum, GLuint, GLint);
+typedef GLenum (APIENTRY *PFNCHECKFB)(GLenum);
+typedef GLboolean (APIENTRY *PFNISFB)(GLuint);
+
+struct HudBuffer {
+    GLuint fbo, tex; int w, h; bool broken;
+    PFNGENFBS genFbs; PFNBINDFB bindFb; PFNFBTEX2D fbTex2D; PFNCHECKFB checkFb; PFNISFB isFb;
+    HudBuffer() : fbo(0), tex(0), w(0), h(0), broken(false), genFbs(0), bindFb(0), fbTex2D(0), checkFb(0), isFb(0) {}
+} hud;
+
+// The dashboard's video setting: XC_VIDEO_FLAGS_WIDESCREEN (bit 0 of the
+// user settings' VideoFlags, offset 52 of <hdd>/.eeprom-user, misc.c).
+// Looked at again every few seconds, so a change in the dashboard shows.
+bool hud_widescreen() {
+    static Uint32 when; static bool wide, read;
+    Uint32 now = SDL_GetTicks();
+    if (read && now - when < 3000) return wide;
+    read = true; when = now; wide = false;
+    char path[PATH_MAX];
+    snprintf(path, sizeof path, "%s/.eeprom-user", fs_hdd_root() ? fs_hdd_root() : ".");
+    if (FILE* f = fopen(path, "rb")) {
+        unsigned char b[4];
+        if (fseek(f, 52, SEEK_SET) == 0 && fread(b, 1, 4, f) == 4) wide = b[0] & 1;
+        fclose(f);
+    }
+    return wide;
+}
+
+// 0: no HUD buffer; else its width (height 480).
+int hud_width() {
+    static const char* e = getenv("XBCOMPAT_GUIDE_HUD");
+    if (e && !strcasecmp(e, "off")) return 0;
+    if (e && !strcmp(e, "4:3")) return 640;
+    if (e && !strcmp(e, "16:9")) return 852;
+    return hud_widescreen() ? 852 : 640;
+}
+
+bool hud_ready(int w, int h) {
+    if (hud.broken) return false;
+    if (!hud.genFbs) {
+        hud.genFbs = (PFNGENFBS)SDL_GL_GetProcAddress("glGenFramebuffers");
+        hud.bindFb = (PFNBINDFB)SDL_GL_GetProcAddress("glBindFramebuffer");
+        hud.fbTex2D = (PFNFBTEX2D)SDL_GL_GetProcAddress("glFramebufferTexture2D");
+        hud.checkFb = (PFNCHECKFB)SDL_GL_GetProcAddress("glCheckFramebufferStatus");
+        hud.isFb = (PFNISFB)SDL_GL_GetProcAddress("glIsFramebuffer");
+        if (!hud.genFbs || !hud.bindFb || !hud.fbTex2D || !hud.checkFb || !hud.isFb) {
+            xlog("Guide: no framebuffer objects, drawing without a HUD buffer");
+            hud.broken = true;
+            return false;
+        }
+    }
+    // (A title that makes a new GL context loses the old objects.)
+    bool alive = hud.fbo && hud.isFb(hud.fbo) && glIsTexture(hud.tex);
+    if (alive && hud.w == w && hud.h == h) return true;
+    if (!alive) { hud.fbo = 0; hud.tex = 0; }
+    GLint prevTex = 0, prevPbo = 0;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &prevTex);
+    glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &prevPbo);
+    if (prevPbo && g.be.bindBuffer) g.be.bindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+    if (!hud.tex) glGenTextures(1, &hud.tex);
+    glBindTexture(GL_TEXTURE_2D, hud.tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, 0);
+    if (prevPbo && g.be.bindBuffer) g.be.bindBuffer(GL_PIXEL_UNPACK_BUFFER, prevPbo);
+    glBindTexture(GL_TEXTURE_2D, prevTex);
+    GLint prevFb = 0;
+    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevFb);
+    if (!hud.fbo) hud.genFbs(1, &hud.fbo);
+    hud.bindFb(GL_FRAMEBUFFER, hud.fbo);
+    hud.fbTex2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, hud.tex, 0);
+    GLenum st = hud.checkFb(GL_FRAMEBUFFER);
+    hud.bindFb(GL_FRAMEBUFFER, prevFb);
+    if (st != GL_FRAMEBUFFER_COMPLETE) {
+        xlog("Guide: HUD buffer %dx%d incomplete (%#x), drawing without it", w, h, st);
+        hud.broken = true;
+        return false;
+    }
+    hud.w = w; hud.h = h;
+    xlog("Guide: HUD buffer %dx%d", w, h);
+    return true;
+}
+
+}  // namespace
+
+void guide_draw(int w, int h) {
+    int hw = hud_width();
+    if (!hw || !hud_ready(hw, 480)) {
+        draw_guide(w, h, false);
+    } else {
+        GLint prevDraw = 0, prevRead = 0, vp[4];
+        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevDraw);
+        glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prevRead);
+        glGetIntegerv(GL_VIEWPORT, vp);
+        hud.bindFb(GL_FRAMEBUFFER, hud.fbo);
+        glViewport(0, 0, hud.w, hud.h);
+        glDisable(GL_SCISSOR_TEST);
+        glColorMask(1, 1, 1, 1);
+        glClearColor(0, 0, 0, 0);
+        glClear(GL_COLOR_BUFFER_BIT);
+        draw_guide(hud.w, hud.h, true);
+        // One stretch over the frame, premultiplied (the buffer's colour is
+        // already weighted by its coverage).  Coverage goes on into the
+        // target's alpha too: kazeta-guide's overlay window is composited
+        // by it (xbcompat's window ignores its alpha).
+        hud.bindFb(GL_DRAW_FRAMEBUFFER, prevDraw);
+        hud.bindFb(GL_READ_FRAMEBUFFER, prevRead);
+        glViewport(vp[0], vp[1], vp[2], vp[3]);
+        glDisable(GL_SCISSOR_TEST);
+        glMatrixMode(GL_TEXTURE); glPushMatrix(); glLoadIdentity();
+        glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity();
+        glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity();
+        if (g.be.activeTex) g.be.activeTex(GL_TEXTURE0);
+        glEnable(GL_TEXTURE_2D);
+        glBindTexture(GL_TEXTURE_2D, hud.tex);
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+        glEnable(GL_BLEND);
+        g.be.blendSep(GL_ONE, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+        glColor4f(1, 1, 1, 1);
+        glBegin(GL_TRIANGLE_STRIP);
+        glTexCoord2f(0, 0); glVertex2f(-1, -1);
+        glTexCoord2f(1, 0); glVertex2f(1, -1);
+        glTexCoord2f(0, 1); glVertex2f(-1, 1);
+        glTexCoord2f(1, 1); glVertex2f(1, 1);
+        glEnd();
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glDisable(GL_TEXTURE_2D);
+        glMatrixMode(GL_TEXTURE); glPopMatrix();
+        glMatrixMode(GL_PROJECTION); glPopMatrix();
+        glMatrixMode(GL_MODELVIEW); glPopMatrix();
+    }
     // Test aid: XBCOMPAT_GUIDE_SHOT=file.ppm saves the window (game and
     // Guide) after the Guide's Nth drawn frame (XBCOMPAT_GUIDE_SHOT_AT, 40).
     static int drawn;

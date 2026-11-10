@@ -1,0 +1,108 @@
+#!/bin/sh
+#
+# XBCOMPAT_LAUNCHER on a Sion with the Live dashboard installed (see
+# sion-install.sh, which sets it in /etc/default/xbox). The dashboard's
+# XBOX LIVE item launches C:\xodash\xonlinedash.xbe, as the retail
+# dashboards did; that one runs with the network card, next to the Live
+# server. Every other title goes on to the usual launcher, with the network
+# card too. Leaving the Live dashboard (L + R + Back + Start) brings the
+# normal dashboard back.
+#
+# xbcompat runs this as: launch-title IMAGE [options...]
+#
+# $L/service picks the service XBOX LIVE signs in to: "insignia" for
+# Insignia (insignia.live), anything else for the local test server. Each
+# keeps its own accounts: switching puts the other's machine account, user
+# accounts and ticket cache back on the hard disk (copies in
+# <hdd>/live-accounts/<service>).
+#
+L=/data/xbox-live
+X=/opt/xbcompat
+
+# Every title gets the Live server (games sign in through it too). The test
+# server has to know this console (its serial and online key, in the hdd's
+# console-id) for the retail dashboard to sign in.
+hdd=/data/xbox/hdd
+prev=
+for a in "$@"; do
+	[ "$prev" = --hdd ] && hdd=$a
+	prev=$a
+done
+service=$(cat $L/service 2> /dev/null)
+[ "$service" = insignia ] || service=local
+# Accounts on the hard disk belong to one service: config sector 1 (the
+# machine account) and 3-11 (users) of partition 0, and E:\CACHE (tickets).
+img=$hdd/partition0.img S=$hdd/live-accounts
+had=$(cat $S/current 2> /dev/null)
+[ -n "$had" ] || had=local
+if [ "$had" != "$service" ] && [ -f "$img" ]; then
+	mkdir -p $S/$had $S/$service
+	dd if=$img of=$S/$had/sector1 bs=512 skip=9 count=1 2> /dev/null
+	dd if=$img of=$S/$had/sectors3-11 bs=512 skip=11 count=9 2> /dev/null
+	rm -rf $S/$had/CACHE
+	[ -d $hdd/partition1/CACHE ] && mv $hdd/partition1/CACHE $S/$had/CACHE
+	if [ -s $S/$service/sector1 ]; then
+		dd if=$S/$service/sector1 of=$img bs=512 seek=9 count=1 conv=notrunc 2> /dev/null
+		dd if=$S/$service/sectors3-11 of=$img bs=512 seek=11 count=9 conv=notrunc 2> /dev/null
+	else
+		dd if=/dev/zero of=$img bs=512 seek=9 count=1 conv=notrunc 2> /dev/null
+		dd if=/dev/zero of=$img bs=512 seek=11 count=9 conv=notrunc 2> /dev/null
+	fi
+	[ -d $S/$service/CACHE ] && mv $S/$service/CACHE $hdd/partition1/CACHE
+	echo $service > $S/current
+	sync
+fi
+# The server: the whole test service, or (Insignia) only DNS pointing there.
+PID=/var/run/xbox-live-server.pid
+if [ -s $PID ] && kill -0 "$(cat $PID)" 2> /dev/null && [ "$(cat $PID.service 2> /dev/null)" != $service ]; then
+	kill "$(cat $PID)"
+	for i in 1 2 3; do
+		kill -0 "$(cat $PID)" 2> /dev/null || break
+		sleep 1
+	done
+	rm -f $PID
+fi
+if ! { [ -s $PID ] && kill -0 "$(cat $PID)" 2> /dev/null; }; then
+	opts="--db $L/live.json --console-id $hdd/console-id"
+	[ $service = insignia ] && opts=--insignia
+	PYTHONHOME=$X PYTHONDONTWRITEBYTECODE=1 setsid "$X/bin/python3" "$L/liveserver/liveserver.py" \
+		$opts > /var/log/xbox-live-server.log 2>&1 < /dev/null &
+	echo $! > $PID
+	echo $service > $PID.service
+	sleep 1
+fi
+case $1 in
+*/xodash/xonlinedash.xbe)
+	image=$1
+	shift
+	# An empty tray: with a game disc in, the retail Live dashboard goes back
+	# to the dashboard so the game can start, as on the console.
+	n=$#
+	while [ $n -gt 0 ]; do
+		case $1 in
+		--dvd|--dvd-drive) shift 2; n=$((n - 2)) ;;
+		*) set -- "$@" "$1"; shift; n=$((n - 1)) ;;
+		esac
+	done
+	mkdir -p /tmp/xbox-live-notray
+	# The system xbcompat (games and the Guide) runs Live too when it has
+	# the network card; its map is xodash.hlemap. Otherwise the Live
+	# dashboard's own older xbcompat, with the map made for it.
+	bin=$X/bin/xbcompat map=$L/xodash.hlemap
+	if ! grep -q XBCOMPAT_DNS $bin || [ ! -s $map ]; then
+		bin=$L/bin/xbcompat map=$L/xodash.hlemap.own
+		[ -s $map ] || map=$L/xodash.hlemap
+	fi
+	export XBCOMPAT_DNS=127.0.0.1:5353 XBCOMPAT_RESET=1
+	exec "$bin" --log /var/log/xbox-live-trace.log --hle "$map" --net nat --dvd /tmp/xbox-live-notray "$@" "$image"
+	;;
+esac
+# Games get the network card too, with their DNS through the server above, so
+# the ones Insignia serves can go online ("off" in $L/games-net stops that).
+if [ "$(cat $L/games-net 2> /dev/null)" != off ]; then
+	export XBCOMPAT_NET=${XBCOMPAT_NET:-nat} XBCOMPAT_DNS=${XBCOMPAT_DNS:-127.0.0.1:5353}
+fi
+next=${XBOX_LIVE_NEXT_LAUNCHER:-$X/bin/python3 $X/tools/xbrun.py}
+[ "$next" = "$0" ] && next="$X/bin/python3 $X/tools/xbrun.py"
+# shellcheck disable=SC2086
+exec $next "$@"
