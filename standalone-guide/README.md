@@ -1,0 +1,263 @@
+# Standalone Blades dashboard and XUI runtime
+
+**Launch the updated dashboard:** double-click `Blades Dashboard.cmd` or
+`Launch Dashboard.cmd`. `Launch Guide.cmd` opens the Xbox Guide over the Blades
+dashboard. These launchers now use `build/Blades-Dashboard.exe`.
+
+The host now follows the navigation paths in the supplied Xbox scenes, resolves
+their cross-package destinations, maintains separate dashboard and Guide menu
+histories, restores focus on Back, plays the supplied blade transitions, and
+updates submenu description panels from the original scene properties. The
+Guide retains its separate skin, opening/closing animation, clock, button
+legends, and supplied music panel. Checkboxes, radio controls, lists, and sliders
+receive focus through the native XUI engine.
+
+## Xbox Guide (2026-11-09)
+
+The Guide now works locally, in the console's own scenes, strings and art:
+
+- **Gamer profiles** (`guide_profiles.c`): create from the Guide or the dashboard
+  (on-screen keyboard or PC keyboard, name checks with the console's messages),
+  sign in from the list with gamer pictures, sign out, auto sign-in, rename,
+  change gamer picture (13 built-in pictures), Game Defaults, View Games, and
+  gamercards on the Guide and the signed-in blades. Profiles are stored in
+  `build\profiles\` (`console.ini`, `<n>.ini`).
+- **Personal Settings** (`guide_settings.c`): Online Status, Voice, Vibration,
+  Notifications, Themes, Dashboard Trim, Guide Background, Custom Color, Shut Down
+  (closes the app after Yes). Saved per profile, or console-wide when signed out.
+- **Music** (`guide_music.c`): the mini media player plays the music in your
+  Windows Music folder (play/pause, previous/next, shuffle, volume), with the
+  console's music picker pages (Albums, Artists, Saved Playlists, Songs, Genres).
+- **Message boxes, notifications and status pages** (`guide_msgbox.c`,
+  `guide_live.c`) use the console's own layouts.
+- **Xbox Live**: sign-in, Join, Recover Gamertag, Connect and Marketplace end in
+  the console's own offline "Can't connect to Xbox Live" behaviour.
+- **Sounds** (`guide_sound.c`): the console UI sounds play in the dashboard and
+  the Guide (see Build).
+
+Known limits: there is no Xbox Live service; the 576 song list uses a plain
+list because its visual `List_prgbr_2string` is not in any supplied package; the
+keyboard's Symbols/Accents tables, marketplace gamer pictures, the "Smoke" theme
+tile and `metal2.png` are not in the supplied packages. Some dashboard buttons
+outside the Guide (Initial Setup, Media Center, Open Tray, Windows-based PC)
+still have no reaction.
+
+The complete remaining-work inventory is `FUNCTIONALITY-REPORT.txt`. Its
+unresolved paths and native control inventory come from the runtime audit in
+`build/blades-verification/scene-audit.json`.
+
+## NXE Guide (2026-11-10)
+
+The Guide is the NXE one (dashboard 2.0.7371, 2008) when `x360\blades-converted\hud_nxe.xzp`
+and `huduiskin_nxe.xzp` are present; `--blades-guide` keeps the Blades (1888) Guide.
+
+- The packages come from the NXE dashboard files: hud.xex 1888 with the `$flash_hud.xexp` delta
+  patch applied (hud_nxe.xzp, 421 entries) and `$flash_huduiskin.xex` (the NXE hud skin). Tools:
+  `nxe-guide/tools` in the project files (xexpatch.py + lzxdelta, xurconv, fix_settings_in.py).
+- Five blades: Marketplace, Games, Home, Media, Settings, opening on Home with the blades coming in.
+  LB/RB (or Left/Right) switch blades with the NXE blade sounds. Home, Games and Settings change
+  with sign-in state (HomeTabSignedOut/SignedIn, GamesTab*, SettingsTab*), as on the console.
+- Buttons use the Guide features that already exist: Xbox Dashboard (and Y) closes to the dash;
+  Quick Launch opens the NXE Quick Launch (empty lists, no title history here); Sign In, Create
+  Profile, Recover Gamertag, Connect to Xbox LIVE, Profile and Achievements open the profile and
+  Live flows; Music Library opens Music Sources and the Media blade carries the mini player;
+  Video/Picture Library, Family Settings and System Settings close the Guide and open that
+  dashboard page; Preferences and Notifications open the Guide settings pages; Turn Off Console
+  asks to shut down. Marketplace buttons give the "sign in to Xbox Live" message.
+- Second-level pages are the 1888 Guide pages in the 1888 Guide panel: the NXE copies of those
+  pages belong to the NXE xam HUD frame, whose delta patch could not be decrypted here.
+- The NXE Guide is drawn at the console's HUD size (852x480 buffer, centred).
+
+## Full Screen Experience home app (2026-11-10)
+
+`Install FSE Home.cmd` makes the Blades dashboard the Home app of the Windows 11 Full Screen
+Experience (Xbox mode) in place of the Xbox app, and gives the Xbox button to the Blades Guide
+instead of Game Bar. `Uninstall FSE Home.cmd` undoes every change.
+
+- The installer registers this folder as the app package `Crimson.BladesDashboard`
+  (`AppxManifest.xml`, `CustomCapability.SCCD`, `Public\`, `fse\Assets\`), the way the MIT
+  projects SteamFSE and AnyFSE do: Developer Mode on (it asks permission if it is off), no signing.
+  It sets the FSE home app (`HKCU\...\GamingConfiguration GamingHomeApp`), turns off Game Bar on
+  the Xbox button (`HKCU\Software\Microsoft\GameBar LegacyGamepadXboxGuideButtonEnabled=0`,
+  `UseNexusForGameBarEnabled=0`), and offers to mark the PC as a handheld (OEM `DeviceForm=46`)
+  when Windows does not offer the Full Screen Experience yet. The settings from before the first
+  install are kept in `fse\settings-before-install.txt` for the uninstaller.
+- Started from the package (or with `--fse`, see `Blades Dashboard (FSE test).cmd`), the dashboard
+  runs full screen, one instance only (a second start brings it to the front), and keeps running
+  behind games without drawing. The Xbox button opens the Guide over the game in a topmost
+  window with the game dimmed to 30% as on the console; B closes it and gives the game back the
+  focus, Y brings the Blades dashboard to the front. Other pad input is ignored while a game is in
+  front. Notifications show over games without taking the focus. Escape no longer closes it.
+- Works over windowed and borderless games (most games on Windows 11). A game in true exclusive
+  full screen mode hides the Guide; Win+G still opens Game Bar.
+
+| Blades control | Action |
+| --- | --- |
+| Left / Right, Page Up / Page Down, controller LB / RB | Switch blades at the main level |
+| Up / Down, controller D-pad or left stick | Navigate the active menu |
+| Enter / controller A | Select |
+| Backspace / controller B | Back; close the Guide from its main menu |
+| Escape | Back from a submenu; close the Guide; exit from the dashboard main level |
+| F1 / controller Guide, Back, or Start | Toggle the Xbox Guide |
+| Y while the Guide is open | Return to the dashboard |
+| F2 | Original editable example dashboard |
+| F3 | Return to the Blades dashboard and its current submenu |
+| F11 | Toggle fullscreen |
+
+Build with `python build.py`. The default output is now `Blades-Dashboard.exe`;
+use `--output NAME.exe` when an alternate build filename is needed. The original
+PC Guide remains available with `build/Blades-Dashboard.exe --pc-guide`, and the
+editable example with `--dashboard`. The older `GFWL-Guide.exe` is a previous
+build and is not used by the updated launchers.
+
+Run `python verify_blades.py` for native input, nested navigation, Guide, graphics
+recovery, and scene/skin checks. Run `python verify.py` for the original standalone
+host compatibility checks. Reports, logs, and screenshots are written under
+`build/blades-verification/` and `build/verification.json`. The audit distinguishes
+scene files from skin libraries; loading a layout is not proof that its platform
+service callbacks work. Physical controller hardware remains untested.
+
+`blades.c` implements the host navigation. `blades_catalog.h` is generated by
+`scene_catalog.py` from the supplied packages. The original DashScene properties
+and native engine property schema are retained in `x360/scene-catalog.json` and
+`x360/xui-property-schema.json`; package paths are matched exactly, and ambiguous
+or missing destinations are recorded. The reverse-engineering helpers
+`recover_blades.py`, `analyze_functions.py`, and `InspectRuntime.java` inspect the
+supplied local binaries and save their evidence under `build/`.
+
+## Original PC host notes
+
+The original Games for Windows LIVE Guide now renders and accepts input in its
+own desktop application. The same application runs a new dashboard made with
+the original XUI engine and can load compatible external XUI scenes. It does
+not start a game, impersonate a game title, or call `XLiveInitialize`.
+
+The original PC views can be launched with `--pc-guide` or `--dashboard`.
+The executable is `build/Blades-Dashboard.exe`. Both views use Convection
+Medium, bundled at `build/assets/fonts/Convection-Medium.ttf`. Keep the `assets`
+folder beside the EXE when moving it. The font is copied from the local asset
+during the build; no system font installation is required.
+
+## Controls
+
+| Control | Action |
+| --- | --- |
+| F1 | Original Guide |
+| F2 | Editable example dashboard |
+| F3 | Return to the loaded external scene |
+| Arrow keys / controller D-pad | Navigate |
+| Enter / controller A | Select |
+| Controller B | Return to Guide |
+| Controller Start | Switch Guide / dashboard |
+| F11 | Toggle fullscreen |
+| Esc | Exit |
+
+Mouse input and the controller left stick are also connected. Physical
+controller hardware has not been tested. The dashboard's Games, Media, and
+Settings buttons currently update a status label; connect your own actions.
+
+The PC Guide uses the original scene, skin, controls, and opening animation.
+Its sign-in and profile buttons explain that account services are unavailable.
+There is no Xbox authentication, profile storage, friends service, marketplace,
+or connected sound backend. This is a working UI host, not a replacement for
+the GFWL service client or the complete Xbox 360 dashboard.
+
+## Make your own interface
+
+Start with `dashboard.c`: it creates a canvas, text, and native XUI buttons.
+`xui_api.h` supplies small wrappers for element creation, parenting, bounds,
+properties, text, focus, and visual updates. Rebuild with `python build.py` and
+launch with `--dashboard`. Button notifications are handled by
+`ui_message_filter` and dispatched on the main loop in `ui.c`; extend those
+handlers with your application's actions. These wrappers are a starting API,
+not a complete reconstructed XUI SDK. Check returned HRESULTs in new code.
+
+You can also load a compatible compiled scene without rebuilding:
+
+```powershell
+.\build\Blades-Dashboard.exe "--scene=C:\MyUI\Main.xur"
+.\build\Blades-Dashboard.exe "--scene=file://C:/MyUI/package.xzp#Main.xur"
+```
+
+Or drop an `.xur` file onto the executable or its running window. The runtime
+supports this PC build's XUIB version 5 scenes and XUIZ resource packages;
+arbitrary Xbox 360 dashboard files are not guaranteed compatible. Include the
+scene's referenced assets. Native application-specific classes need host
+implementations; missing extensions fall back to their declared base class and
+are logged. Loading a layout does not automatically implement its actions.
+
+The sample uses a 1280 x 720 canvas. The Guide is centered at its original
+800 x 600 size. The original skin is available to custom controls, including
+the `btn_standard` button visual used in the dashboard.
+
+## What is independent
+
+`build.py` converts the exact installed xlive 1.2.241.0 x86 image into native
+EXE sections and adds the standalone host. The original code, data, and all 14
+XUIZ resource packages are incorporated at build time. It does not extract,
+manually map, or load `xlive.dll` at runtime. The installed source DLL is read
+only and remains untouched. Self-module resource lookups resolve to the EXE.
+
+SDL 3.4.18 is statically linked for the window, input, and controller support.
+**Rendering still uses the original Direct3D 9 XUI backend.** A renderer port to
+SDL is not implemented. There is no `xlive.dll` or `SDL3.dll` runtime dependency,
+but Windows and legacy libraries remain, including the Visual C++ 2005 runtime,
+`d3dx9_33.dll`, `XINPUT1_3.dll`, and `msidcrl40.dll`. All imports are recorded in
+`build/build-report.json`. Running an isolated copy with its font asset was verified on this machine;
+a clean Windows installation has not been tested.
+
+This is Windows x86, tied to one verified binary build, with a fixed image base.
+It is not a portable source reimplementation. Direct XUI initialization avoids
+the old game's title/service startup path. The Guide background's service
+notification setup is adapted for the offline host; scene rendering, focus,
+animation, and controls still run through the original engine.
+
+## Build
+
+Requires Python with `pefile`, LLVM-MinGW (32-bit C and C++ drivers), CMake,
+and Ninja. Run from this directory:
+
+```powershell
+python prepare_sdl.py
+.\build-sdl.ps1
+python build.py
+```
+
+The first two commands prepare the statically linked SDL library; subsequent
+host edits need only `python build.py`. The SDL preparation script downloads a
+pinned official source archive and verifies its hash. Its license is included
+in the extracted source. The build reads `C:/Windows/SysWOW64/xlive.dll` by
+default; use `--runtime PATH` to select a different location. It refuses any
+source hash other than:
+
+```text
+447e2106fce0a529a26555db6aada35df28c7f1a7128385bc02211643abd8024
+```
+
+UI sounds: the console packages carry their sounds as XMA (`*.xma`), which no PC
+audio API decodes. `assets/sounds/*.wav` are those files converted to 16-bit
+48 kHz PCM; the build copies them to `build/assets/sounds`. If `ffmpeg` is on
+PATH, `build.py` recreates any missing WAV from the `.xzp` packages. The host
+(`guide_sound.c`) plays them through winmm when the scenes' own XuiSound
+elements fire (Guide open/close, focus/select clicks, blade switches,
+notification popup). `XUI_SOUND_DUMP=file` writes the mixed output as raw
+s16le 48 kHz stereo for tests.
+
+## Verification and diagnostics
+
+Run `python verify.py` after building; this also requires Pillow. It launches
+bounded graphics probes for the Guide, dashboard, external scene, missing-file
+error, and an isolated copy with its font asset. Successful probes exercise focus and selection,
+force a graphics device reset, capture the rendered result after recovery,
+and check scene cleanup and the loaded module list. Each process has a timeout.
+The Guide and dashboard checks assert their expected button notifications.
+
+Results are saved in `build/verification.json` with the tested executable's
+hash, plus per-case logs and PNG screenshots. These checks passed locally.
+They do not cover online services, every original scene, physical controller
+hardware, or all graphics drivers.
+
+The updated app writes `blades.log` beside the executable. `--probe` runs 180 frames,
+simulates Down and Enter, tests graphics recovery, captures a PNG, and exits.
+`--diagnostics` adds resource lookup and loaded-module details. `debug_probe.py`
+is an optional bounded native debugger for crashes.
