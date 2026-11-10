@@ -593,6 +593,18 @@ static HRESULT ui_load_scene(const WCHAR *path,DWORD *app) {
     ui_blade_root=ui_find_frames(scene,L"1To2",0);ui_blade=2;
     if(ui_blade_root) ui_dash_enter(2);
     if(ui_blade_root) blades_initialize();
+    if(ui_blade_root) {
+        /* dash.xex 0x920a5800 (RootScene init): with setup done and no launch reason, the dash sets tab 1
+           (Games) and plays BootGames..EndBootGames recursively on RootScene (0x920cbb80 lookups,
+           0x920cbb20 play); BootLive only when the user config flag 0x4 is set, BootOOBE before setup. */
+        int first=-1,last=-1;
+        XUI_FN(0x7d389d,HRESULT,DWORD,const WCHAR *,int *)(ui_blade_root,L"BootGames",&first);
+        XUI_FN(0x7d389d,HRESULT,DWORD,const WCHAR *,int *)(ui_blade_root,L"EndBootGames",&last);
+        if(first>=0 && last>=0) {
+            log_value("Boot intro",XUI_FN(0x7d3867,HRESULT,DWORD,int,int,int,BOOL,BOOL)(ui_blade_root,first,first,last,FALSE,TRUE));
+            profiles_blade_cards_hold(dash_root,3);
+        }
+    }
     if(ui_blade_root) log_text("Blades navigation ready (Left/Right or LB/RB)");
     if(requested_play[0]) {
         /* --play=Start[,End]: run a named timeline range, as the dashboard code would. */
