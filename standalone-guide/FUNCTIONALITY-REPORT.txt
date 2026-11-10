@@ -1,0 +1,122 @@
+XBOX BLADES DASHBOARD - FUNCTIONALITY AND REMAINING WORK
+
+This is a source-backed XUI navigation host, not a complete console OS port.
+The supplied scene menus load and native UI navigation is connected. Console
+service actions are not all implemented. They must not be mistaken for
+working authentication, storage, playback, configuration, or Xbox Live.
+
+BUILD AND VERIFICATION
+Executable: build/Blades-Dashboard.exe
+SHA-256: d36eebce783f55dca57f23928a7a6dcf1729577c50e828fa66bcb66dcf415e1c
+Native navigation/rendering cases passed: 23
+Standalone compatibility cases passed: 5
+Files audited: 324 (320 scenes, 4 skin libraries)
+Files successfully loaded/initialized: 324
+Authored navigation links resolving to a supplied scene: 133/146
+Unresolved authored links: 13
+Physical gamepad hardware: not tested.
+
+IMPLEMENTED
+- Exact scene catalog and cross-package navigation for supplied paths.
+- Dashboard and Guide submenu stacks, Back, saved focus, and Guide toggling.
+- Existing blade timelines; scene visibility enforced after their keyframes.
+- Scene-authored default focus, including native list/checkbox/radio/slider controls.
+- Original DashScene description and meta-scene properties for submenu panels.
+- Xbox Guide skin prefix, frame, animation, clock, legends and music slot.
+- Native keyboard/controller mapping; existing fullscreen and mouse support.
+- Graphics device reset recovery and explicit scene cleanup.
+- Unavailable-operation notices; profile creation is not falsely completed.
+- Launch Dashboard.cmd, Blades Dashboard.cmd and Launch Guide.cmd use the new EXE.
+
+CONSOLE FUNCTIONS STILL UNAVAILABLE
+1. Identity/profile storage: create/save/recover/sign in to a real Xbox gamer
+   profile, passcode validation, persisted profile preferences and signed-in
+   account data. The supplied profile/sign-in layouts load, but their console
+   handlers and storage provider are not connected. Next on Create Profile
+   reports that no profile was created rather than showing Congratulations.
+2. Xbox Live: friends, messages, recent players, voice chat/mail, presence,
+   account/membership/privacy changes, marketplace, points, purchasing,
+   downloads, achievements and server-driven billboards. Their templates
+   do not supply the account context, network services or returned data.
+3. Storage and content: console FATX devices, profiles/saves/title enumeration,
+   copy/move/delete/format, launching Xbox games, game details and actual
+   music/picture/video/CD/DVD device and library data. No console storage
+   devices are attached, so Storage Devices shows its authored empty state.
+4. Playback: media selection/queueing/ripping, decoding/playback, voice output
+   and the XMA dashboard sound backend. The Guide music controls are present
+   but no media playback service or selected song is connected.
+5. Configuration: console display/audio/locale/language/clock/remote/control
+   settings, configuration writes, persistent notification/voice/vibration
+   preferences, Family Settings policies and installed theme enumeration.
+   Native controls can receive input; this does not persist or apply their
+   values to an Xbox or to Windows. Hardware setting fields show availability.
+6. Network/computers: console adapter and configuration enumeration, connection
+   tests, PPPoE/wireless configuration, Windows Media Connect and Media Center
+   affiliation. The supplied network settings layouts load; no connection
+   is actually configured or tested by the host.
+7. System workflow: optical tray operation, power control, and Initial Setup.
+   Initial Setup calls the console setup state machine and configuration
+   services; the host does not guess a wizard state or jump to its completion
+   page. Shutdown does not power off the PC.
+8. Application-specific entry/callback data: virtual keyboard/passcode
+   completion, dynamic list providers, selection-dependent option panes,
+   progress/completion/results and other custom class callbacks. The
+   original native UI modules require these providers beyond their layouts.
+
+UNRESOLVED AUTHORED LINKS (EXACT RUNTIME AUDIT)
+These are not replaced with invented destinations. Where a name is stale
+or ambiguous, the original application callback/data is still required.
+
+dash_accountm.xzp#2700_PrivacySettings.xur
+  btnPartnerMarketing -> 2624_CommunicationSettings.xur
+  btnXboxMarketing -> 2624_CommunicationSettings.xur
+  btnBlockUserContent -> 2624_CommunicationSettings.xur
+  btnBlockProfileCust -> 2624_CommunicationSettings.xur
+  btnBlockProfileInfo -> 2624_CommunicationSettings.xur
+  btnBlockPresence -> 2624_CommunicationSettings.xur
+
+dash_accountm.xzp#2626_ContentSettings.xur
+  btnPurchaseContent -> 2628_TwoOptionList.xur
+  btnViewUserContent -> 2634_ThreeOptionList.xur
+
+dash_games.xzp#401_GameDetails.xur
+  btnManageGameFiles -> DeviceSelector.xur
+
+dash_music.xzp#1000_MusicMain.xur
+  navOption4 -> ico_32x_USB.png
+
+dash_oobe.xzp#oobeStorageDevice.xur
+  btnDone -> 2_ProfileChoice.xur
+  btnDontHave -> 6_WelcomeWithProfile.xur
+
+deviceselector_media.xzp#DeviceFull.xur
+  btn_ManageFiles -> ExitConfirmation.xur
+
+NATIVE ACTION-CONTROL INVENTORY
+The audit also records controls without an authored PressPath. This list
+includes handled A/B/X/Y legends and host-adapted entries as well as
+remaining platform actions; it is not a count of failed menu controls.
+Inspect the per-scene native_actions arrays in
+build/blades-verification/scene-audit.json for the complete inventory.
+
+SOURCE EVIDENCE AND REPRODUCTION
+- x360/scene-catalog.json: original inherited properties and DashScene panels.
+- x360/xui-property-schema.json: verified native PC XUI property definitions.
+- build/runtime-920a5558.c: original DashScene panel-property definition order.
+- build/runtime-920a5f58.c: System blade resource-package selection.
+- build/runtime-922009f8.c: original Media blade native resource routing.
+- build/runtime-913e94d0.c: Guide media child-scene creation.
+- build/runtime-913ead20.c and runtime-913eb208.c: profile-backed voice and
+  vibration reads; these demonstrate that layouts alone are insufficient.
+- build/runtime-92201af0.c: original Initial Setup state machine and config calls.
+- build/blades-verification/: interaction logs/screenshots and scene audit.
+- build/verification.json: compatibility/missing-file/isolated-executable checks.
+
+Rebuild: python build.py
+Verify: python verify_blades.py, then python verify.py
+Refresh this report after both pass: python functionality_report.py
+
+Scope of verification: native XUI layout creation/visual initialization,
+representative real input/navigation/rendered screenshots, focus/history,
+device reset and cleanup on this machine. Loading all scene files does not
+prove their console service callbacks, dynamic data or hardware operations.

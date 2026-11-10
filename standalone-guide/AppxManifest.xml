@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Windows 11 Full Screen Experience (Xbox mode) home app package for build\Blades-Dashboard.exe.
+     Registered in place from this folder by fse\Install-FSE.ps1 (Developer Mode, no signing).
+     Layout follows the MIT projects SteamFSE (ND091024/SteamFSE) and AnyFSE (ashpynov/AnyFSE):
+     the custom capability Microsoft.appCategory.gamingHome (see CustomCapability.SCCD) plus the
+     windows.gamingApp app extension make it selectable as the FSE Home app. -->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows10/3"
+  xmlns:uap4="http://schemas.microsoft.com/appx/manifest/uap/windows10/4"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap uap3 uap4 rescap">
+
+  <Identity
+    Name="Crimson.BladesDashboard"
+    ProcessorArchitecture="x86"
+    Publisher="CN=CrimsonLocal"
+    Version="1.0.0.0" />
+
+  <Properties>
+    <DisplayName>Blades Dashboard</DisplayName>
+    <PublisherDisplayName>Crimson (local)</PublisherDisplayName>
+    <Logo>fse\Assets\StoreLogo.png</Logo>
+  </Properties>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.26100.0" MaxVersionTested="10.0.26200.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-US"/>
+  </Resources>
+
+  <Applications>
+    <Application Id="App" Executable="build\Blades-Dashboard.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        DisplayName="Blades Dashboard"
+        Description="Xbox 360 Blades dashboard and Guide as the Full Screen Experience home"
+        BackgroundColor="#000000"
+        Square150x150Logo="fse\Assets\Square150x150Logo.png"
+        Square44x44Logo="fse\Assets\Square44x44Logo.png">
+        <uap:DefaultTile Wide310x150Logo="fse\Assets\Wide310x150Logo.png" />
+        <uap:SplashScreen Image="fse\Assets\SplashScreen.png" BackgroundColor="#000000"/>
+      </uap:VisualElements>
+      <Extensions>
+        <uap3:Extension Category="windows.appExtension">
+          <uap3:AppExtension Name="windows.gamingApp" Id="App" DisplayName="Blades Dashboard"
+            Description="Xbox 360 Blades dashboard and Guide" PublicFolder="Public"/>
+        </uap3:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+    <uap4:CustomCapability Name="Microsoft.appCategory.gamingHome_8wekyb3d8bbwe" />
+  </Capabilities>
+</Package>
