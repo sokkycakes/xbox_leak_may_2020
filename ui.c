@@ -90,6 +90,7 @@ static void ui_switch(int mode) {
    (1 xbox live, 2 games, 3 media, 4 system). */
 static DWORD ui_blade_root;
 static BOOL guide_open,guide_at_main;
+static BOOL fse_to_dash;   /* fse.c: Y closed the Guide (Xbox Dashboard) */
 static void ui_guide_toggle(void);
 static int ui_blade=2;
 static DWORD ui_find_deep(DWORD element,const WCHAR *id,int depth) {
@@ -500,6 +501,7 @@ static BOOL music_key_y(BOOL down);
 #include "guide_music.c"
 #include "guide_live.c"
 #include "guide_sound.c"
+#include "fse.c"
 
 /* xam.xex 2.0.1888 draws its HUD (the Guide frame hudbkgnd.xur and everything in it) into its
    own back buffer: 852x480 when the console is set to widescreen, 640x480 otherwise
@@ -790,6 +792,7 @@ static HRESULT independent_ui(SDL_Window *window, IDirect3DDevice9 *device, D3DP
         SDL_Event event;
         if(profiles_wants_text()!=SDL_TextInputActive(window)) {if(profiles_wants_text()) SDL_StartTextInput(window); else SDL_StopTextInput(window);}
         while(SDL_PollEvent(&event)) {
+            if(fse_drop_pad_event(&event)) continue;   /* a game is in front: only the Xbox button counts */
             if(event.type==SDL_EVENT_TEXT_INPUT) profiles_text(event.text.text);
             if(event.type==SDL_EVENT_KEY_DOWN && event.key.key==SDLK_F8) ui_dump_classes();
             if(event.type==SDL_EVENT_KEY_DOWN && event.key.key==SDLK_F1) ui_switch(0);
@@ -829,7 +832,7 @@ static HRESULT independent_ui(SDL_Window *window, IDirect3DDevice9 *device, D3DP
             if(event.type==SDL_EVENT_QUIT) running=FALSE;
             if(event.type==SDL_EVENT_KEY_DOWN && event.key.key==SDLK_ESCAPE) {
                 if(blades_ready && (blades_guide_open || blades_in_submenu() || blades_notice_root)) blades_pending_back=1;
-                else running=FALSE;
+                else if(!fse_mode) running=FALSE;   /* the FSE home does not close on Escape (Guide > Settings > Shut Down does) */
             }
         }
         if(probe && frame>=50 && frame%20==10) {
@@ -884,6 +887,7 @@ static HRESULT independent_ui(SDL_Window *window, IDirect3DDevice9 *device, D3DP
             XUI_C(0x808555,HRESULT,void)();
             if(ui_zoom_surface) {IDirect3DSurface9_Release(ui_zoom_surface);ui_zoom_surface=0;}
             if(ui_dim_state) {IDirect3DStateBlock9_Release(ui_dim_state);ui_dim_state=0;}
+            fse_device_lost();
             hr=IDirect3DDevice9_Reset(device,pp);
             if(SUCCEEDED(hr)) hr=XUI_FN(0x80989d,HRESULT,void *)(ri);
             if(SUCCEEDED(hr)) hr=XUI_FN(0x80863b,HRESULT,void **)(&dc);
@@ -902,9 +906,14 @@ static HRESULT independent_ui(SDL_Window *window, IDirect3DDevice9 *device, D3DP
         sound_timers();  /* XuiSound play timers (guide_sound.c) */
         XUI_FN(0x7e33de,void,float)(elapsed);
         blades_visibility();
+        /* FSE home mode (fse.c): nothing is drawn while a game is in front, and the HUD alone is
+           drawn into the overlay window while the Guide or a notification is up over it. */
+        int fse_draw=fse_frame();
+        if(!fse_draw) {SDL_Delay(15);continue;}
         HRESULT prepared=XUI_THIS(0x48cd65,HRESULT,void *)(app);
         if(frame==0) log_value("Xui prerender",prepared);
-        IDirect3DDevice9_Clear(device,0,0,D3DCLEAR_TARGET,0xff181b20,1,0);
+        BOOL fse_overlay_frame=fse_draw==2 && fse_overlay_begin(device);
+        if(!fse_overlay_frame) IDirect3DDevice9_Clear(device,0,0,D3DCLEAR_TARGET,0xff181b20,1,0);
         ui_dash_focus();ui_guide_watch();
         IDirect3DDevice9_BeginScene(device);
         float transform[16];
@@ -934,7 +943,8 @@ static HRESULT independent_ui(SDL_Window *window, IDirect3DDevice9 *device, D3DP
         DWORD render_data[5]={(DWORD)dc,0xffffffff,1,0,0};
         DWORD render_message[5]={20,0,0,20,(DWORD)render_data};
         HRESULT rendered=S_OK;
-        if(!hud_layer) rendered=XUI_FN(0x7dbd06,HRESULT,DWORD,void *)(app[2],render_message);
+        if(fse_overlay_frame) ;   /* over a game: no dashboard behind the HUD */
+        else if(!hud_layer) rendered=XUI_FN(0x7dbd06,HRESULT,DWORD,void *)(app[2],render_message);
         else {
             DWORD child=0;XUI_FN(0x7d32eb,HRESULT,DWORD,DWORD *)(app[2],&child);
             while(child) {
@@ -947,7 +957,7 @@ static HRESULT independent_ui(SDL_Window *window, IDirect3DDevice9 *device, D3DP
         }
         XUI_FN(0x8085cd,HRESULT,void *)(dc);
         IDirect3DDevice9_EndScene(device);
-        if(ui_dash_zoom) {
+        if(ui_dash_zoom && !fse_overlay_frame) {
             IDirect3DSurface9 *rt=0;
             if(SUCCEEDED(IDirect3DDevice9_GetRenderTarget(device,0,&rt))) {
                 D3DSURFACE_DESC desc;IDirect3DSurface9_GetDesc(rt,&desc);
@@ -965,7 +975,7 @@ static HRESULT independent_ui(SDL_Window *window, IDirect3DDevice9 *device, D3DP
         }
         if(hud_layer) {
             IDirect3DDevice9_BeginScene(device);
-            if(guide_scene && lstrcmpW(guide_state,L"Closed")) ui_hud_dim(device);
+            if(guide_scene && lstrcmpW(guide_state,L"Closed") && !fse_overlay_frame) ui_hud_dim(device);
             ui_hud_render(dc,render_message);
             IDirect3DDevice9_EndScene(device);
         }
@@ -990,7 +1000,8 @@ static HRESULT independent_ui(SDL_Window *window, IDirect3DDevice9 *device, D3DP
                 IDirect3DSurface9_Release(rt);
             }
         }
-        IDirect3DDevice9_Present(device,0,0,0,0);
+        if(fse_overlay_frame) fse_overlay_end(device);
+        else IDirect3DDevice9_Present(device,0,0,0,0);
         if(probe && ((!audit_scenes && frame>=probe_end) || blades_audit_done)) running=FALSE;
         SDL_Delay(1);
     }

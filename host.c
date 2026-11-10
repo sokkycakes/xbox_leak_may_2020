@@ -90,6 +90,8 @@ static void exit_watchdog(int code) {
 #include "ui.c"
 
 int main(void) {
+    /* FSE home app (fse.c): a second start only brings the running dashboard to the front. */
+    if(!fse_startup(wcsstr(GetCommandLineW(),L"--fse")!=0)) return 0;
     WCHAR path[MAX_PATH];GetModuleFileNameW(0,path,MAX_PATH);
     WCHAR *slash=wcsrchr(path,L'\\');
     blades_mode=!lstrcmpiW(slash+1,L"Blades-Dashboard.exe");
@@ -131,10 +133,18 @@ int main(void) {
     if(!attach(self_image,DLL_PROCESS_ATTACH,0)) {log_text("Runtime process initialization failed");return 10;}
     log_text("Standalone XUI: direct engine startup; no game or XLive services");
     SDL_SetMainReady();
+    if(fse_mode) {
+        /* The Xbox button must reach the dashboard while a game has the focus (fse.c drops every
+           other pad event then), and the full screen window must not minimise when it loses it. */
+        SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS,"1");
+        SDL_SetHint(SDL_HINT_VIDEO_MINIMIZE_ON_FOCUS_LOSS,"0");
+        log_text("FSE home mode");
+    }
     if(!SDL_Init(SDL_INIT_VIDEO|SDL_INIT_GAMEPAD)) {log_text(SDL_GetError());return 11;}
     SDL_Window *window=SDL_CreateWindow("Standalone XUI | F1 Guide | F2 Dashboard | Esc Exit",1280,720,SDL_WINDOW_HIDDEN);
     if(!window) {log_text(SDL_GetError());SDL_Quit();return 11;}
     HWND hwnd=SDL_GetPointerProperty(SDL_GetWindowProperties(window),SDL_PROP_WINDOW_WIN32_HWND_POINTER,0);
+    fse_window_init(window,hwnd);
     IDirect3D9 *d3d=Direct3DCreate9(D3D_SDK_VERSION);
     if(!d3d) {SDL_DestroyWindow(window);SDL_Quit();return 12;}
     D3DPRESENT_PARAMETERS pp={0};

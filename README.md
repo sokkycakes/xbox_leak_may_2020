@@ -46,6 +46,29 @@ The complete remaining-work inventory is `FUNCTIONALITY-REPORT.txt`. Its
 unresolved paths and native control inventory come from the runtime audit in
 `build/blades-verification/scene-audit.json`.
 
+## Full Screen Experience home app (2026-11-10)
+
+`Install FSE Home.cmd` makes the Blades dashboard the Home app of the Windows 11 Full Screen
+Experience (Xbox mode) in place of the Xbox app, and gives the Xbox button to the Blades Guide
+instead of Game Bar. `Uninstall FSE Home.cmd` undoes every change.
+
+- The installer registers this folder as the app package `Crimson.BladesDashboard`
+  (`AppxManifest.xml`, `CustomCapability.SCCD`, `Public\`, `fse\Assets\`), the way the MIT
+  projects SteamFSE and AnyFSE do: Developer Mode on (it asks permission if it is off), no signing.
+  It sets the FSE home app (`HKCU\...\GamingConfiguration GamingHomeApp`), turns off Game Bar on
+  the Xbox button (`HKCU\Software\Microsoft\GameBar LegacyGamepadXboxGuideButtonEnabled=0`,
+  `UseNexusForGameBarEnabled=0`), and offers to mark the PC as a handheld (OEM `DeviceForm=46`)
+  when Windows does not offer the Full Screen Experience yet. The settings from before the first
+  install are kept in `fse\settings-before-install.txt` for the uninstaller.
+- Started from the package (or with `--fse`, see `Blades Dashboard (FSE test).cmd`), the dashboard
+  runs full screen, one instance only (a second start brings it to the front), and keeps running
+  behind games without drawing. The Xbox button opens the Guide over the game in a topmost
+  window with the game dimmed to 30% as on the console; B closes it and gives the game back the
+  focus, Y brings the Blades dashboard to the front. Other pad input is ignored while a game is in
+  front. Notifications show over games without taking the focus. Escape no longer closes it.
+- Works over windowed and borderless games (most games on Windows 11). A game in true exclusive
+  full screen mode hides the Guide; Win+G still opens Game Bar.
+
 | Blades control | Action |
 | --- | --- |
 | Left / Right, Page Up / Page Down, controller LB / RB | Switch blades at the main level |
