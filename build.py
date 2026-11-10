@@ -90,7 +90,7 @@ def main():
         raise SystemExit('LLVM-MinGW clang is required.')
     sdl_flags = ['-I'+str(out/'SDL3-3.4.18'/'include'), str(out/'sdl-x86'/'libSDL3.a')]
     libraries = ['-lm','-lkernel32','-luser32','-lgdi32','-lwinmm','-limm32','-lole32',
-                 '-loleaut32','-lversion','-luuid','-ladvapi32','-lsetupapi','-lshell32','-ldinput8','-ld3d9']
+                 '-loleaut32','-lversion','-luuid','-ladvapi32','-lsetupapi','-lshell32','-ldinput8','-ld3d9','-lwininet']
     subprocess.run([clang, '--target=i686-w64-windows-gnu', '-Os', '-fno-builtin',
                     '-fno-stack-protector', '-I' + str(out),
                     str(ROOT / 'host.c'), '-o', str(out / 'host.exe'),

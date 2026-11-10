@@ -5,6 +5,7 @@
 #define XUI_GLOBAL(address, type) (*(type *)((BYTE *)self_image + (address) - 0x400000))
 #define UI_CHECK(label, expression) do { hr=(expression); log_value(label,hr); if (FAILED(hr)) return hr; } while(0)
 #include "xui_api.h"
+#include "relive.c"
 #include "dashboard.c"
 static HRESULT WINAPI ui_missing_class(void *self,const WCHAR *name,void **result) {
     log_text("Scene extension using its declared base class:"); log_wide(name); *result=0; return E_NOTIMPL;
@@ -244,6 +245,28 @@ static void dash_set_text(DWORD root,const WCHAR *id,const WCHAR *text) {
     DWORD e=root?ui_find_deep(root,id,0):0;
     if(e) xui_string(e,L"Text",text);  /* the SetText helper refuses dash controls (0x80300016) */
 }
+/* Live blade billboard: show ReLive's Banner of the Day and current featured title,
+   over the authored default banner. No-op until the worker has the content. */
+static DWORD relive_live_meta,relive_banner_el;
+static void relive_apply_banner(void) {
+    if(relive_banner_el || !relive_live_meta || !relive_banner_ready()) return;
+    DWORD img=0;
+    if(SUCCEEDED(xui_create(L"XuiImage",&img))) {
+        xui_bounds(img,0,-4,316,269);   /* 420x358 Blades billboard aspect (316*358/420) */
+        if(SUCCEEDED(xui_string(img,L"ImagePath",relive_banner_uri()))) {xui_add(relive_live_meta,img);relive_banner_el=img;xui_visuals(relive_live_meta);}
+        else XUI_FN(0x7dec45,HRESULT,DWORD)(img);
+    }
+}
+static void relive_decorate_live(DWORD meta) {
+    if(!meta) return;
+    relive_live_meta=meta;relive_banner_el=0;
+    const ReliveFeat *f=relive_feat_count()?relive_feat_at(0):0;
+    if(f) {
+        DWORD h=ui_find_deep(meta,L"label_header",0);if(h) xui_string(h,L"Text",f->name);
+        DWORD b=ui_find_deep(meta,L"label_Body",0);if(b) xui_string(b,L"Text",f->desc);
+    }
+    relive_apply_banner();
+}
 static void dash_show_meta(int blade,int index) {
     const DashBlade *b=&dash_blades[blade];
     if(!dash_panel[blade] || index<0 || !b->metas[index] || dash_shown[blade]==index) return;
@@ -261,6 +284,7 @@ static void dash_show_meta(int blade,int index) {
     }
     dash_meta[blade]=meta;dash_shown[blade]=index;
     profiles_meta(meta);    /* CBladeMOTD: billboard or "Create Gamer Profile" by profile count */
+    if(blade==0) relive_decorate_live(meta);   /* ReLive Banner of the Day + featured title on the Live blade */
 }
 static void ui_blade_contents(DWORD scene,const WCHAR *uri,DWORD *app) {
     WCHAR *slash;lstrcpynW(dash_base,uri,4096);
@@ -814,6 +838,7 @@ static HRESULT independent_ui(SDL_Window *window, IDirect3DDevice9 *device, D3DP
     SYSTEMTIME now;GetLocalTime(&now);WCHAR time_text[64];GetTimeFormatW(LOCALE_USER_DEFAULT,TIME_NOSECONDS,&now,0,time_text,64);
     xui_text(xui_find(background,L"DateTimeTextId"),time_text);
     ui_root=app[2];
+    relive_init();   /* begin fetching ReLive Live-blade content in the background */
     XUI_FN(0x7e2089,void,HWND)(pp->hDeviceWindow);
     XUI_FN(0x7e222b,HRESULT,DWORD,HWND)(ui_root,pp->hDeviceWindow);
     SDL_SetWindowsMessageHook(ui_window_message,0);

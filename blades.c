@@ -486,6 +486,7 @@ static void blades_tick(void) {
     if(blades_pending_back) {int action=blades_pending_back;blades_pending_back=0;blades_pending=0;if(action==2)blades_guide(FALSE);else blades_back();}
     if(blades_pending) {DWORD button=blades_pending;blades_pending=0;blades_dispatch(button);}
     if((ui_mode==2 || ui_mode==3) && !blades_notice_root) blades_meta();
+    relive_apply_banner();   /* apply the ReLive banner once the background fetch completes */
     guide_tick();
     nxe_tick();
 }
