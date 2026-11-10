@@ -507,6 +507,37 @@ static void ui_hud_matrix(float *m,float sx,float sy,float tx,float ty) {
     for(int i=0;i<16;i++) m[i]=i%5?0.0f:1.0f;
     m[0]=sx;m[5]=sy;m[12]=tx;m[13]=ty;
 }
+/* While the HUD is up, xam's compositor redraws the title's image under it through a pixel
+   shader whose colour constant is (0.3, 0.3, 0.3, 1) instead of (1, 1, 1, 1): 0x818dc0f8 /
+   0x818dc124 (constant 0.3 at 0x81872830), chosen by the HUD-active flags at 0x818dc38c
+   (the same +0x80 / +0x64 that 0x818de150 checks). So the dash behind the Guide is shown at
+   30% brightness. Here: one full-screen quad that multiplies the frame by 0.3 (77/255). */
+static IDirect3DStateBlock9 *ui_dim_state;
+static void ui_hud_dim(IDirect3DDevice9 *device) {
+    struct {float x,y,z,w;DWORD c;} v[4]={{-0.5f,-0.5f,0,1,0xff4d4d4d},{1279.5f,-0.5f,0,1,0xff4d4d4d},
+        {-0.5f,719.5f,0,1,0xff4d4d4d},{1279.5f,719.5f,0,1,0xff4d4d4d}};
+    if(!ui_dim_state) IDirect3DDevice9_CreateStateBlock(device,D3DSBT_ALL,&ui_dim_state);
+    if(ui_dim_state) IDirect3DStateBlock9_Capture(ui_dim_state);
+    IDirect3DDevice9_SetPixelShader(device,0);IDirect3DDevice9_SetVertexShader(device,0);
+    IDirect3DDevice9_SetTexture(device,0,0);
+    IDirect3DDevice9_SetTextureStageState(device,0,D3DTSS_COLOROP,D3DTOP_SELECTARG1);
+    IDirect3DDevice9_SetTextureStageState(device,0,D3DTSS_COLORARG1,D3DTA_DIFFUSE);
+    IDirect3DDevice9_SetTextureStageState(device,0,D3DTSS_ALPHAOP,D3DTOP_SELECTARG1);
+    IDirect3DDevice9_SetTextureStageState(device,0,D3DTSS_ALPHAARG1,D3DTA_DIFFUSE);
+    IDirect3DDevice9_SetTextureStageState(device,1,D3DTSS_COLOROP,D3DTOP_DISABLE);
+    IDirect3DDevice9_SetRenderState(device,D3DRS_ALPHABLENDENABLE,TRUE);
+    IDirect3DDevice9_SetRenderState(device,D3DRS_BLENDOP,D3DBLENDOP_ADD);
+    IDirect3DDevice9_SetRenderState(device,D3DRS_SRCBLEND,D3DBLEND_ZERO);
+    IDirect3DDevice9_SetRenderState(device,D3DRS_DESTBLEND,D3DBLEND_SRCCOLOR);
+    IDirect3DDevice9_SetRenderState(device,D3DRS_ALPHATESTENABLE,FALSE);
+    IDirect3DDevice9_SetRenderState(device,D3DRS_ZENABLE,FALSE);
+    IDirect3DDevice9_SetRenderState(device,D3DRS_CULLMODE,D3DCULL_NONE);
+    IDirect3DDevice9_SetRenderState(device,D3DRS_SCISSORTESTENABLE,FALSE);
+    IDirect3DDevice9_SetRenderState(device,D3DRS_COLORWRITEENABLE,0xf);
+    IDirect3DDevice9_SetFVF(device,D3DFVF_XYZRHW|D3DFVF_DIFFUSE);
+    IDirect3DDevice9_DrawPrimitiveUP(device,D3DPT_TRIANGLESTRIP,2,v,sizeof(v[0]));
+    if(ui_dim_state) IDirect3DStateBlock9_Apply(ui_dim_state);
+}
 static void ui_hud_render(void *dc,DWORD *render_message) {
     float to_x=1280.0f/HUD_BUFFER_W,to_y=720.0f/HUD_BUFFER_H,m[16];
     if(guide_scene) {
@@ -828,6 +859,7 @@ static HRESULT independent_ui(SDL_Window *window, IDirect3DDevice9 *device, D3DP
             XUI_FN(0x808693,HRESULT,void *)(dc);dc=0;
             XUI_C(0x808555,HRESULT,void)();
             if(ui_zoom_surface) {IDirect3DSurface9_Release(ui_zoom_surface);ui_zoom_surface=0;}
+            if(ui_dim_state) {IDirect3DStateBlock9_Release(ui_dim_state);ui_dim_state=0;}
             hr=IDirect3DDevice9_Reset(device,pp);
             if(SUCCEEDED(hr)) hr=XUI_FN(0x80989d,HRESULT,void *)(ri);
             if(SUCCEEDED(hr)) hr=XUI_FN(0x80863b,HRESULT,void **)(&dc);
@@ -909,6 +941,7 @@ static HRESULT independent_ui(SDL_Window *window, IDirect3DDevice9 *device, D3DP
         }
         if(hud_layer) {
             IDirect3DDevice9_BeginScene(device);
+            if(guide_scene && lstrcmpW(guide_state,L"Closed")) ui_hud_dim(device);
             ui_hud_render(dc,render_message);
             IDirect3DDevice9_EndScene(device);
         }
