@@ -122,9 +122,13 @@ static void guide_status_hide(void) {
 }
 
 /* ---------- xam notify.xur popup ---------- */
-static struct {DWORD scene,control,visual;int frames,serial,player;BOOL leaving;float width,height;WCHAR text[256],image[512];} live_toast;   /* serial: one per popup */
-#define TOAST_SHOW_FRAMES 300   /* TransTo loops until the popup is dismissed (~5 s) */
-#define TOAST_LEAVE_FRAMES 60   /* TransFrom 186..240 */
+static struct {DWORD scene,control,visual;int frames,serial,player;BOOL leaving;float width,height;ULONGLONG due;WCHAR text[256],image[512];} live_toast;   /* serial: one per popup */
+/* xam.xex NotifyPopupScene: when the popup is shown it arms timer 1000 for 5000 ms (0x818d6374;
+   600000 ms for a popup flagged to stay), and the timer (0x818d5488) plays TransFrom..EndTransFrom.
+   scr_Notification's TransTo runs frames 0..185 and holds; TransFrom is 186..240 (54 frames at
+   60 fps, ~0.9 s). Timed in milliseconds, not frames, so the display's refresh rate can't change it. */
+#define TOAST_SHOW_MS 5000
+#define TOAST_LEAVE_MS 900
 static DWORD live_toast_scene(void) {return live_toast.scene;}
 static void live_toast_close(void) {
     if(live_toast.scene) XUI_FN(0x7dec45,HRESULT,DWORD)(live_toast.scene);
@@ -244,7 +248,7 @@ static void guide_toast(const WCHAR *text,const WCHAR *image) {
     live_toast.height=height;
     live_toast.width=width;
     log_value("Notification width",(DWORD)width);
-    live_toast.scene=scene;live_toast.control=control;live_toast.frames=TOAST_SHOW_FRAMES;live_toast.leaving=FALSE;live_toast.serial++;
+    live_toast.scene=scene;live_toast.control=control;live_toast.due=GetTickCount64()+TOAST_SHOW_MS;live_toast.leaving=FALSE;live_toast.serial++;
     if(control) ui_play_tree(control,L"TransTo",L"EndTransTo",0);
     /* PopUpSound (NotifyPopup.xma) is played by guide_sound.c, which honours NotificationSound. */
     log_text("Notification");log_wide(live_toast.text);log_value("Notification player quadrant",player+1);
@@ -265,9 +269,9 @@ static void live_toast_tick(void) {
         DWORD visual=0;XUI_FN(0x7d32eb,HRESULT,DWORD,DWORD *)(live_toast.control,&visual);
         if(visual!=live_toast.visual) {log_text("Notification visual rebuilt: dressed again");live_toast_dress(live_toast.control);}
     }
-    if(!live_toast.scene || --live_toast.frames>0) return;
+    if(!live_toast.scene || GetTickCount64()<live_toast.due) return;
     if(!live_toast.leaving && live_toast.control) {
-        live_toast.leaving=TRUE;live_toast.frames=TOAST_LEAVE_FRAMES;
+        live_toast.leaving=TRUE;live_toast.due=GetTickCount64()+TOAST_LEAVE_MS;
         ui_play_tree(live_toast.control,L"TransFrom",L"EndTransFrom",0);
         return;
     }

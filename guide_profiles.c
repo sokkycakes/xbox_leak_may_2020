@@ -183,6 +183,19 @@ static DWORD prof_card_attach(DWORD slot,const WCHAR *frame,BOOL extended) {
     prof_card_fill(card,profile_signed);
     return card;
 }
+/* The blade move (1To2.. on the blades root, played recursively, ui_blade_move) also runs the
+   gamercard's own timelines over that frame range and leaves the card on a later key; put the blade
+   cards back on Macro right after it starts. */
+static void profiles_blade_cards_hold(DWORD *roots,int count) {
+    if(profile_signed<0) return;
+    for(int i=0;i<count;i++) {
+        DWORD slot=roots[i]?ui_find_deep(roots[i],L"ctlGamerCard",0):0;
+        DWORD root=slot?ui_find_deep(slot,L"gamerCardScene",0):0;
+        if(!root) continue;
+        prof_frame(root,L"Macro",L"EndMacro");
+        prof_frame(ui_find_deep(slot,L"offlineBaseScene",0),L"Macro",0);
+    }
+}
 /* Refresh every card on screen after a picture/name change. */
 static void prof_card_refresh_tree(DWORD root,int depth) {
     if(!root || depth>14) return;
@@ -290,7 +303,9 @@ static void profiles_dash_blades(void) {
         }
         dash_set_text(dash_root[i],L"labFoundProfiles",prof_count_text());
         dash_set_text(dash_root[i],L"btn_tray",L"Open Tray");                   /* dashStrings 31 */
-        if(in) prof_card_attach(ui_find_deep(dash_root[i],L"ctlGamerCard",0),L"Normal",FALSE);
+        /* The blades' ctlGamerCard slot is 345x129: GamerCard.xur's Macro frame is the one authored at
+           that size (Normal is the wider gamer-profile card, Mini the Guide's). */
+        if(in) prof_card_attach(ui_find_deep(dash_root[i],L"ctlGamerCard",0),L"Macro",FALSE);
     }
     for(int i=0;i<4;i++) {
         DWORD tab=ui_find_deep(ui_external,dash_blades[i].tab,0);

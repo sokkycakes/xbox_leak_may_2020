@@ -13,8 +13,8 @@
  *     registers it without one, and the console's files are XMA1, which no PC API decodes.
  * So the host answers 0x7f4/0x7f5/0x7f6 here, in the global message filter, with the same files
  * converted offline to PCM (build.py: assets/sounds/<name>.wav from the .xzp .xma entries).
- * Volume is the element's Volume (dB, default -12) mapped like the engine does for DirectSound:
- * hundredths of dB = Volume*10000/96, clamped to -10000..0.
+ * Volume is the element's Volume in dB (default -12), as the console's XuiSoundXAudio uses it:
+ * amplitude 10^(Volume/20), Volume clamped to -96..+6 (xam.xex 0x8192d200).
  *
  * Output: waveOut 48 kHz stereo 16-bit with a small software mixer on its own thread. Without an
  * audio device the mixer still runs on a timer (sounds start/finish, nothing is heard).
@@ -203,9 +203,11 @@ static void sound_play(DWORD element) {
     if(SUCCEEDED(xui_get(element,L"Volume",&v))) {if(v.type==4) volume=v.number;xui_value_free(&v);}
     BOOL loop=FALSE;
     if(SUCCEEDED(xui_get(element,L"Loop",&v))) {if(v.type==1) loop=v.integer!=0;xui_value_free(&v);}
-    int mb=(int)(volume*(10000.0f/96.0f)+(volume<0?-0.5f:0.5f));
-    if(mb<-10000) mb=-10000;
-    if(mb>0) mb=0;
+    /* The console's XuiSoundXAudio (xam.xex 0x8192d200) accepts -96..+6 and sets the XAudio voice
+       volume to 10^(Volume*0.05): Volume is plain dB. */
+    if(volume<-96) volume=-96;
+    if(volume>6) volume=6;
+    int mb=(int)(volume*100.0f+(volume<0?-0.5f:0.5f));
     if(XUI_GLOBAL(0x8f1228,DWORD)) mb=-10000;   /* the engine's global sound mute */
     double gain=pow(10.0,mb/2000.0);
     /* Log what fired it: the control whose visual owns the sound, or the scene. */

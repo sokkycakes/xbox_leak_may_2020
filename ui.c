@@ -112,6 +112,8 @@ static DWORD ui_find_frames(DWORD element,const WCHAR *frame,int depth) {
     return 0;
 }
 static void ui_dash_enter(int blade);
+static void profiles_blade_cards_hold(DWORD *roots,int count);
+static DWORD dash_root[4];
 static BOOL ui_blade_move(int step) {
     int next=ui_blade+step;
     if(!ui_blade_root || next<1 || next>4) return FALSE;
@@ -122,6 +124,7 @@ static BOOL ui_blade_move(int step) {
     if(first<0 || last<0) return FALSE;
     HRESULT hr=XUI_FN(0x7d3867,HRESULT,DWORD,int,int,int,BOOL,BOOL)(ui_blade_root,first,first,last,FALSE,TRUE);
     log_wide(start);log_value("Blade move",hr);
+    if(SUCCEEDED(hr)) profiles_blade_cards_hold(dash_root,3);
     if(SUCCEEDED(hr)) {ui_blade=next;ui_dash_enter(next);}
     return TRUE;
 }
@@ -221,7 +224,7 @@ static DashBlade dash_blades[4]={  /* the profiles module swaps blades 1-3 to th
          L"Connect your console to your home network or Xbox Live. Set up wireless network connections and test network settings.",
          L"Manage your connection to a Windows XP or Media Center PC.",
          L"Run the system setup that you saw the first time you started the console."}}};
-static DWORD dash_root[4],dash_panel[4],dash_meta[4],*dash_app;
+static DWORD dash_panel[4],dash_meta[4],*dash_app;
 static int dash_shown[4]={-1,-1,-1,-1};
 static DWORD dash_focused;
 static WCHAR dash_base[4096],ui_skin_uri[4096];
@@ -306,8 +309,17 @@ static void ui_dash_focus(void) {
 static void ui_dash_enter(int blade) {
     if(blade<1 || blade>4 || !dash_root[blade-1]) return;
     for(int i=0;i<4;i++) if(dash_root[i]) xui_bool(dash_root[i],L"DisableFocusRecursion",i!=blade-1);
-    DWORD first=ui_find_deep(dash_root[blade-1],dash_blades[blade-1].buttons[0],0);
-    if(first) xui_focus(first);
+    /* buttons[0] is the blade's gamercard/meta pane (baseMetaPane / btn_Gamercard); the blades land
+       on the first nav button below it, so the card keeps its 345x129 Macro look. */
+    const WCHAR *name=dash_blades[blade-1].buttons[0];
+    if(name && (!lstrcmpW(name,L"baseMetaPane") || !lstrcmpW(name,L"btn_Gamercard")) && dash_blades[blade-1].buttons[1])
+        name=dash_blades[blade-1].buttons[1];
+    DWORD first=name?ui_find_deep(dash_root[blade-1],name,0):0;
+    /* The engine's own scene/tab focus hand-over (XuiElementInitFocus 0x7d5c45 with bInit=1, as at
+       0x7d64c4 and 0x7ee7ab) raises the init counter 0x8f1344, so the button plays its InitFocus
+       frame, which has no sound, instead of Focus (btn_Focus.xma) over the blade whoosh. */
+    HRESULT hr=first?XUI_FN(0x7d5c45,HRESULT,DWORD,DWORD,BOOL)(first,0,TRUE):E_FAIL;
+    if(FAILED(hr) && first) xui_focus(first);
 }
 
 /* Xbox Guide (hud.xex). On the console the Guide is its own XUI module with its own skin
