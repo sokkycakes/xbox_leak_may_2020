@@ -244,6 +244,7 @@ static void prof_menu_fill(DWORD menu) {
     } else dash_set_text(menu,L"labelProfiles",prof_count_text());
 }
 static void profiles_guide_menu(void) {
+    if(guide_nxe) {nxe_fill_tabs();return;}   /* NXE Guide: Home/Games/Settings blades by sign-in state */
     if(!guide_scene || !guide_host || !guide_menu) return;
     BOOL want=profile_signed>=0,have=ui_find_deep(guide_menu,L"ctlGamerCard",0)!=0;
     if(want!=have) {

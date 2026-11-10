@@ -151,7 +151,7 @@ static DWORD blades_load(int index) {
 static int blades_source(void) {
     BladesPage *page=blades_page();
     if(page) return page->catalog;
-    if(blades_guide_open) return blades_catalog(L"hud_hud.xzp",profiles_menu_scene());
+    if(blades_guide_open) return guide_nxe?nxe_catalog():blades_catalog(L"hud_hud.xzp",profiles_menu_scene());
     if(ui_blade==4) return blades_catalog(L"dash_dashmain.xzp",L"dashmain.xur");
     return blades_catalog(dash_blades[ui_blade-1].package,dash_blades[ui_blade-1].content);
 }
@@ -270,7 +270,7 @@ static BOOL blades_navigate(int index) {
     }
     if(stack->depth>=BLADES_STACK_MAX) {log_text("Navigation: menu history full");return FALSE;}
     DWORD scene=blades_load(index);if(!scene) {log_text("Navigation: scene could not be loaded");return FALSE;}
-    DWORD parent=blades_guide_open?blades_guide_host:ui_root;
+    DWORD parent=blades_guide_open?(nxe_page(index)?nxe_scene:blades_guide_host):ui_root;   /* NXE pages (Quick Launch) open on GuideMain */
     HRESULT hr=xui_add(parent,scene);
     if(SUCCEEDED(hr)) hr=xui_visuals(scene);
     if(FAILED(hr)) {XUI_FN(0x7dec45,HRESULT,DWORD)(scene);return FALSE;}
@@ -316,8 +316,8 @@ static void blades_guide(BOOL open) {
         blades_visible(ui_external,TRUE);blades_visible(guide_scene,TRUE);
         if(!blades_music_scene) {
             /* hud.xex 913e8dd8 -> 913e94d0 loads the 913f2064 path into scnMusic. */
-            DWORD holder=ui_find_deep(guide_menu,L"scnMusic",0);
-            int music=blades_catalog(L"hud_hud.xzp",L"MiniMediaPlayer.xur");
+            DWORD holder=ui_find_deep(guide_nxe?nxe_scene:guide_menu,L"scnMusic",0);   /* NXE: the Media blade's */
+            int music=blades_catalog(guide_nxe?L"hud_nxe.xzp":L"hud_hud.xzp",L"MiniMediaPlayer.xur");
             if(holder && music>=0) {
                 blades_music_scene=blades_load(music);
                 if(blades_music_scene) {
@@ -332,11 +332,13 @@ static void blades_guide(BOOL open) {
         xui_bool(ui_external,L"DisableFocusRecursion",TRUE);
         if(blades_dash_stack.depth) xui_bool(blades_dash_stack.pages[blades_dash_stack.depth-1].scene,L"DisableFocusRecursion",TRUE);
         xui_bool(guide_scene,L"DisableFocusRecursion",FALSE);
+        if(nxe_scene) xui_bool(nxe_scene,L"DisableFocusRecursion",FALSE);
         blades_focus(blades_current(),blades_source());
     } else {
         if(guide_open) ui_guide_toggle();
         blades_guide_open=FALSE;ui_mode=2;
         xui_bool(guide_scene,L"DisableFocusRecursion",TRUE);
+        if(nxe_scene) xui_bool(nxe_scene,L"DisableFocusRecursion",TRUE);
         xui_bool(ui_external,L"DisableFocusRecursion",FALSE);
         if(blades_dash_stack.depth) xui_bool(blades_dash_stack.pages[blades_dash_stack.depth-1].scene,L"DisableFocusRecursion",FALSE);
         if(!blades_dashboard_focus || FAILED(xui_focus(blades_dashboard_focus))) blades_focus(blades_current(),blades_source());
@@ -368,6 +370,7 @@ static BOOL blades_in_submenu(void) {return blades_ready && blades_stack()->dept
 static BOOL blades_key(WORD key,BOOL down) {
     if(!blades_ready || ui_mode!=2) return FALSE;
     if(live_key(key,down)) return TRUE;
+    if(nxe_key(key,down)) return TRUE;   /* NXE Guide: LB/RB, Left/Right switch blades */
     if(key==VK_BACK || key==0x5801) {
         if(down) blades_pending_back=1;return TRUE;
     }
@@ -476,6 +479,7 @@ static void blades_visibility(void) {
         xui_bool(ui_external,L"DisableFocusRecursion",TRUE);
         for(int i=0;i<blades_dash_stack.depth;i++) xui_bool(blades_dash_stack.pages[i].scene,L"DisableFocusRecursion",TRUE);
     }
+    nxe_visibility();
 }
 static void blades_tick(void) {
     if(!blades_ready) return;
@@ -483,6 +487,7 @@ static void blades_tick(void) {
     if(blades_pending) {DWORD button=blades_pending;blades_pending=0;blades_dispatch(button);}
     if((ui_mode==2 || ui_mode==3) && !blades_notice_root) blades_meta();
     guide_tick();
+    nxe_tick();
 }
 static void blades_reset(void) {
     if(!blades_ready) return;
@@ -492,6 +497,7 @@ static void blades_reset(void) {
     memset(&blades_dash_stack,0,sizeof(blades_dash_stack));
     /* Guide pages and music are children of the Guide frame. */
     if(guide_scene) XUI_FN(0x7dec45,HRESULT,DWORD)(guide_scene);
+    if(nxe_scene) {XUI_FN(0x7dec45,HRESULT,DWORD)(nxe_scene);nxe_scene=0;}   /* NXE GuideMain is the root's child */
     memset(&blades_guide_stack,0,sizeof(blades_guide_stack));
     guide_scene=guide_menu=guide_host=guide_top=0;guide_seen_count=0;guide_open=guide_at_main=FALSE;
     lstrcpyW(guide_state,L"Closed");

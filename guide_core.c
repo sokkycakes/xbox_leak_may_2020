@@ -160,6 +160,8 @@ static const WCHAR *guide_full_scenes[]={
     L"808_editProfile.xur",L"809_ChangeGamerTile.xur",L"579_SelectMediaSource.xur",L"570_MusicLibrary.xur",
     L"572_SelectMediaContainer.xur",L"576_SelectSong.xur",L"FileView.xur",L"BeginPlayback.xur",0};
 static const WCHAR *guide_state_for(int catalog) {
+    /* NXE Guide: GuideMain and its own full-size pages (Quick Launch); the others open in hudbkgnd. */
+    if(guide_nxe && nxe_scene && (catalog<0 || nxe_page(catalog))) return L"Closed";
     if(catalog<0) return L"Half";
     /* every gamer profile page (gamerprofile_gp, XAM system UI) is a 855-wide page: Full */
     if(!lstrcmpiW(blades_scenes[catalog].package,L"gamerprofile_gp.xzp")) return L"Full";
@@ -167,7 +169,8 @@ static const WCHAR *guide_state_for(int catalog) {
     return L"Half";
 }
 static void guide_go(const WCHAR *state) {
-    if(!guide_scene || !lstrcmpW(guide_state,state) || !lstrcmpW(guide_state,L"Closed")) return;
+    if(!guide_scene || !lstrcmpW(guide_state,state)) return;
+    if(!lstrcmpW(guide_state,L"Closed") && !nxe_up()) return;
     guide_play(state);
 }
 
@@ -228,7 +231,7 @@ static const GuideLegend *guide_module_legend(DWORD scene) {
     return l;
 }
 static BOOL guide_dispatch(DWORD button,const WCHAR *id) {
-    return live_dispatch(button,id) || profiles_dispatch(button,id) || settings_dispatch(button,id) || music_dispatch(button,id);
+    return nxe_dispatch(button,id) || live_dispatch(button,id) || profiles_dispatch(button,id) || settings_dispatch(button,id) || music_dispatch(button,id);
 }
 static BOOL guide_back(void) {return live_back() || music_back() || profiles_back() || settings_back();}
 static void guide_page_shown(DWORD page,int catalog) {
@@ -260,6 +263,7 @@ static BOOL guide_skin_prefix(DWORD element,DWORD *message) {
     if(message[1]!=0x22 || !message[4] || !guide_scene || !blades_guide_open) return FALSE;
     for(DWORD e=element,depth=0;e && depth<64;depth++) {
         if(e==guide_scene) {*(const WCHAR **)message[4]=L"hud.";message[2]=1;return TRUE;}
+        if(e==nxe_scene) {*(const WCHAR **)message[4]=L"nxe.";message[2]=1;return TRUE;}
         DWORD parent=0;if(FAILED(XUI_FN(0x7d32af,HRESULT,DWORD,DWORD *)(e,&parent))) break;
         e=parent;
     }

@@ -46,6 +46,28 @@ The complete remaining-work inventory is `FUNCTIONALITY-REPORT.txt`. Its
 unresolved paths and native control inventory come from the runtime audit in
 `build/blades-verification/scene-audit.json`.
 
+## NXE Guide (2026-11-10)
+
+The Guide is the NXE one (dashboard 2.0.7371, 2008) when `x360\blades-converted\hud_nxe.xzp`
+and `huduiskin_nxe.xzp` are present; `--blades-guide` keeps the Blades (1888) Guide.
+
+- The packages come from the NXE dashboard files: hud.xex 1888 with the `$flash_hud.xexp` delta
+  patch applied (hud_nxe.xzp, 421 entries) and `$flash_huduiskin.xex` (the NXE hud skin). Tools:
+  `nxe-guide/tools` in the project files (xexpatch.py + lzxdelta, xurconv, fix_settings_in.py).
+- Five blades: Marketplace, Games, Home, Media, Settings, opening on Home with the blades coming in.
+  LB/RB (or Left/Right) switch blades with the NXE blade sounds. Home, Games and Settings change
+  with sign-in state (HomeTabSignedOut/SignedIn, GamesTab*, SettingsTab*), as on the console.
+- Buttons use the Guide features that already exist: Xbox Dashboard (and Y) closes to the dash;
+  Quick Launch opens the NXE Quick Launch (empty lists, no title history here); Sign In, Create
+  Profile, Recover Gamertag, Connect to Xbox LIVE, Profile and Achievements open the profile and
+  Live flows; Music Library opens Music Sources and the Media blade carries the mini player;
+  Video/Picture Library, Family Settings and System Settings close the Guide and open that
+  dashboard page; Preferences and Notifications open the Guide settings pages; Turn Off Console
+  asks to shut down. Marketplace buttons give the "sign in to Xbox Live" message.
+- Second-level pages are the 1888 Guide pages in the 1888 Guide panel: the NXE copies of those
+  pages belong to the NXE xam HUD frame, whose delta patch could not be decrypted here.
+- The NXE Guide is drawn at the console's HUD size (852x480 buffer, centred).
+
 ## Full Screen Experience home app (2026-11-10)
 
 `Install FSE Home.cmd` makes the Blades dashboard the Home app of the Windows 11 Full Screen

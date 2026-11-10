@@ -213,7 +213,7 @@ static BOOL fse_overlay_begin(IDirect3DDevice9 *device) {
     }
     if(FAILED(IDirect3DDevice9_GetRenderTarget(device,0,&fse_saved_rt))) fse_saved_rt=0;
     IDirect3DDevice9_SetRenderTarget(device,0,fse_rt);
-    BOOL dim=fse_game && lstrcmpW(guide_state,L"Closed");
+    BOOL dim=fse_game && (lstrcmpW(guide_state,L"Closed") || nxe_up());
     IDirect3DDevice9_Clear(device,0,0,D3DCLEAR_TARGET,dim?0xb3000000:0,1,0);
     /* Coverage: alpha = src + dst*(1-src) whatever colour blend the engine picks. */
     IDirect3DDevice9_SetRenderState(device,D3DRS_SEPARATEALPHABLENDENABLE,TRUE);

@@ -328,11 +328,28 @@ static void ui_dash_enter(int blade) {
    "hud." and every Guide element is rebound to the prefixed copy of the visual it got from
    the dashboard skin. An element's visual is its first child, whose id is the visual name. */
 static DWORD guide_scene;
+/* NXE Guide (guide_nxe.c). */
+static BOOL guide_nxe;
+static DWORD nxe_scene,nxe_content[5];
+static int nxe_blade;
+static BOOL nxe_wanted(void);
+static void nxe_build(void);
+static void nxe_show(BOOL open);
+static BOOL nxe_up(void);
+static BOOL nxe_page(int catalog);
+static int nxe_catalog(void);
+static void nxe_fill_tabs(void);
+static void nxe_visibility(void);
+static void nxe_tick(void);
+static BOOL nxe_key(WORD key,BOOL down);
+static BOOL nxe_dispatch(DWORD button,const WCHAR *id);
 static int guide_rebound;
 static const WCHAR *ui_element_id(DWORD e) {
     DWORD *data=e?XUI_FN(0x7d268f,void *,DWORD,DWORD)(e,XUI_GLOBAL(0x8f1188,DWORD)):0;
     return data?(const WCHAR *)data[1]:0;
 }
+/* Skin prefix the rebind uses: "hud." (Blades hud skin) or "nxe." (NXE hud skin, guide_nxe.c). */
+static const WCHAR *guide_pfx=L"hud.";
 static void guide_rebind(DWORD e,int depth) {
     if(depth>12) return;
     DWORD visual=0;XUI_FN(0x7d32eb,HRESULT,DWORD,DWORD *)(e,&visual);
@@ -347,17 +364,17 @@ static void guide_rebind(DWORD e,int depth) {
        class default (XuiButton), so rebinding from the instance's id loses the authored layout. */
     DWORD *control=XUI_FN(0x7d268f,void *,DWORD,DWORD)(e,XUI_GLOBAL(0x8f1194,DWORD));
     const WCHAR *authored=control?(const WCHAR *)control[2]:0;
-    if(authored && *authored && wcsncmp(authored,L"hud.",4)) {
-        WCHAR prefixed[128];wsprintfW(prefixed,L"hud.%s",authored);
+    if(authored && *authored && wcsncmp(authored,guide_pfx,4)) {
+        WCHAR prefixed[128];wsprintfW(prefixed,L"%s%s",guide_pfx,authored);
         if(SUCCEEDED(xui_string(e,L"Visual",prefixed))) {
             guide_rebound++;XUI_FN(0x7d32eb,HRESULT,DWORD,DWORD *)(e,&visual);name=ui_element_id(visual);
         }
     }
-    if(name && wcsncmp(name,L"hud.",4)) {
-        WCHAR prefixed[128];wsprintfW(prefixed,L"hud.%s",name);
+    if(name && wcsncmp(name,guide_pfx,4)) {
+        WCHAR prefixed[128];wsprintfW(prefixed,L"%s%s",guide_pfx,name);
         if(SUCCEEDED(xui_string(e,L"Visual",prefixed))) {guide_rebound++;XUI_FN(0x7d32eb,HRESULT,DWORD,DWORD *)(e,&visual);}
         else visual=0;
-    } else if(!name || wcsncmp(name,L"hud.",4)) visual=0;
+    } else if(!name || wcsncmp(name,guide_pfx,4)) visual=0;
     DWORD child=0;XUI_FN(0x7d32eb,HRESULT,DWORD,DWORD *)(e,&child);
     while(child) {if(child!=visual) guide_rebind(child,depth+1);XUI_FN(0x7d3363,HRESULT,DWORD,DWORD *)(child,&child);}
 }
@@ -407,7 +424,10 @@ static const WCHAR *guide_hud_visuals[][2]={
     {L"sliderVolume",L"hud.Slider_Volume"},{L"txtMessage",L"hud.txt_Starting"},
     {L"bg-Community",L"hud.btn_MetaPane_static"},{L"btnRecentPlayers",L"hud.xuiButtonImageLeftTextRight"},
     {L"btnFriends",L"hud.xuiButtonImageLeftTextRight"},{L"btnMessages",L"hud.xuiButtonImageLeftTextRight"}};
+static BOOL nxe_owns(DWORD element);
+static void nxe_rebind(DWORD scene);
 static void guide_prepare(DWORD scene) {
+    if(nxe_owns(scene)) {nxe_rebind(scene);return;}   /* NXE Guide pages: authored for the NXE skin */
     guide_rebind(scene,0);
     for(int i=0;i<(int)(sizeof guide_hud_visuals/sizeof *guide_hud_visuals);i++) {
         DWORD e=ui_find_deep(scene,guide_hud_visuals[i][0],0);
@@ -464,8 +484,13 @@ static BOOL guide_frame(void) {
             {L"graphic-base-error",L"hud.HUD_background"},{L"graphic-blade-error",L"hud.HUD_blade"},{L"ROL",L"hud.ringOfLight_Group"}};
         for(int i=0;guide_scene && i<5;i++) {DWORD e=ui_find_deep(guide_scene,named[i][0],0);if(e) xui_string(e,L"Visual",named[i][1]);}
         DWORD host=guide_scene?ui_find_deep(guide_scene,L"AppHostElementId",0):0;
-        guide_menu=host?dash_scene(profiles_menu_file()):0;
-        if(guide_menu) dash_attach(host,guide_menu,0,0);
+        guide_nxe=host && nxe_wanted();
+        if(guide_nxe) nxe_build();   /* NXE Guide (guide_nxe.c): GuideMain's blades are the main menu */
+        if(guide_nxe) guide_menu=nxe_content[nxe_blade-1];
+        else {
+            guide_menu=host?dash_scene(profiles_menu_file()):0;
+            if(guide_menu) dash_attach(host,guide_menu,0,0);
+        }
         if(!guide_menu) return FALSE;
         guide_host=host;ui_guide_watch();
         log_value("Guide visuals rebound",guide_rebound);
@@ -477,6 +502,12 @@ static BOOL guide_frame(void) {
 static void ui_guide_toggle(void) {
     if(!guide_frame()) return;
     guide_open=!guide_open;
+    if(guide_nxe) {   /* NXE Guide: GuideMain alone; hudbkgnd stays Closed until a 1888 page needs it */
+        if(guide_open) {guide_clock();nxe_show(TRUE);}
+        else {if(lstrcmpW(guide_state,L"Closed")) guide_play(L"Closed");nxe_show(FALSE);ui_dash_enter(ui_blade);}
+        log_value("Guide open (NXE)",guide_open);
+        return;
+    }
     if(guide_open) {
         guide_clock();guide_play(L"Half");
         if(guide_top) guide_legend(guide_top);
@@ -501,6 +532,7 @@ static BOOL music_key_y(BOOL down);
 #include "guide_music.c"
 #include "guide_live.c"
 #include "guide_sound.c"
+#include "guide_nxe.c"
 #include "fse.c"
 
 /* xam.xex 2.0.1888 draws its HUD (the Guide frame hudbkgnd.xur and everything in it) into its
@@ -554,6 +586,15 @@ static void ui_hud_dim(IDirect3DDevice9 *device) {
 }
 static void ui_hud_render(void *dc,DWORD *render_message) {
     float to_x=1280.0f/HUD_BUFFER_W,to_y=720.0f/HUD_BUFFER_H,m[16];
+    /* NXE GuideMain: authored in buffer units, centred on 852x480 (guide_nxe.c). Rendering a scene
+       directly ignores its own Show, so leave it out while a 1888 page has the Guide panel up. */
+    if(nxe_up() && (!lstrcmpW(guide_state,L"Closed") || !lstrcmpW(guide_state,L"Error"))) {
+        ui_hud_matrix(m,1280.0f/852.0f,720.0f/480.0f,0,0);
+        XUI_FN(0x808731,HRESULT,void *,void *)(dc,m);
+        XUI_FN(0x8085b0,HRESULT,void *,DWORD)(dc,0xff181b20);
+        XUI_FN(0x7dbd06,HRESULT,DWORD,void *)(nxe_scene,render_message);
+        XUI_FN(0x8085cd,HRESULT,void *)(dc);
+    }
     if(guide_scene) {
         float k=HUD_BUFFER_H/770.0f;
         ui_hud_matrix(m,k*to_x,k*to_y,HUD_OFFSET_X*to_x,0);
@@ -937,7 +978,7 @@ static HRESULT independent_ui(SDL_Window *window, IDirect3DDevice9 *device, D3DP
         }
         /* On the console the Guide and its popups are xam.xex's HUD, drawn over the title with
            xam's own view, not the dash's (see ui_hud_render). The dash pass leaves them out. */
-        BOOL hud_layer=ui_mode==2 && (guide_scene || live_toast.scene);
+        BOOL hud_layer=ui_mode==2 && (guide_scene || live_toast.scene || nxe_scene);
         XUI_FN(0x808731,HRESULT,void *,void *)(dc,transform);
         hr=XUI_FN(0x8085b0,HRESULT,void *,DWORD)(dc,0xff181b20);
         DWORD render_data[5]={(DWORD)dc,0xffffffff,1,0,0};
@@ -948,7 +989,7 @@ static HRESULT independent_ui(SDL_Window *window, IDirect3DDevice9 *device, D3DP
         else {
             DWORD child=0;XUI_FN(0x7d32eb,HRESULT,DWORD,DWORD *)(app[2],&child);
             while(child) {
-                if(child!=guide_scene && child!=live_toast.scene) {
+                if(child!=guide_scene && child!=live_toast.scene && child!=nxe_scene) {
                     HRESULT one=XUI_FN(0x7dbd06,HRESULT,DWORD,void *)(child,render_message);
                     if(FAILED(one)) rendered=one;
                 }
@@ -975,7 +1016,7 @@ static HRESULT independent_ui(SDL_Window *window, IDirect3DDevice9 *device, D3DP
         }
         if(hud_layer) {
             IDirect3DDevice9_BeginScene(device);
-            if(guide_scene && lstrcmpW(guide_state,L"Closed") && !fse_overlay_frame) ui_hud_dim(device);
+            if(guide_scene && (lstrcmpW(guide_state,L"Closed") || nxe_up()) && !fse_overlay_frame) ui_hud_dim(device);
             ui_hud_render(dc,render_message);
             IDirect3DDevice9_EndScene(device);
         }
