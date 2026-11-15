@@ -12,6 +12,7 @@ both   Windows\System32\dxcore.dll
 both   Windows\System32\d3d10warp.dll
 both   Windows\System32\D3DCompiler_47.dll
 game   Windows\System32\d3d9.dll
+game   Windows\System32\dsound.dll
 game   Windows\System32\d3d10*.dll
 both   Windows\System32\d2d1.dll
 both   Windows\System32\dwrite.dll

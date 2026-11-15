@@ -1,0 +1,39 @@
+diff --git a/common/snd_dma.c b/common/snd_dma.c
+index 8e4852b..bb035b4 100644
+--- a/common/snd_dma.c
++++ b/common/snd_dma.c
+@@ -280,6 +280,8 @@ void
+ S_ClearOverflow()
+ {
+     S_StopAllSounds(true);
++    if (!known_sfx)
++        return; /* sound never initialised (-nosound, or no audio device) */
+     struct known_sfx *known = known_sfx->overflow;
+ 
+     while (known) {
+diff --git a/common/vid_wgl.c b/common/vid_wgl.c
+index 422a9c3..619d5ba 100644
+--- a/common/vid_wgl.c
++++ b/common/vid_wgl.c
+@@ -307,6 +307,8 @@ VID_InitModeList(void)
+     memset(&devmode, 0, sizeof(devmode));
+     devmode.dmSize = sizeof(devmode);
+     success = EnumDisplaySettings(NULL, ENUM_REGISTRY_SETTINGS, &devmode);
++    if (!success) /* Windows PE keeps no saved display mode */
++        success = EnumDisplaySettings(NULL, ENUM_CURRENT_SETTINGS, &devmode);
+     if (!success)
+ 	Sys_Error("Unable to query desktop display settings");
+ 
+diff --git a/common/vid_win.c b/common/vid_win.c
+index 7c32aaa..3b23b26 100644
+--- a/common/vid_win.c
++++ b/common/vid_win.c
+@@ -427,6 +427,8 @@ VID_InitModeList(void)
+     memset(&devmode, 0, sizeof(devmode));
+     devmode.dmSize = sizeof(devmode);
+     success = EnumDisplaySettings(NULL, ENUM_REGISTRY_SETTINGS, &devmode);
++    if (!success) /* Windows PE keeps no saved display mode */
++        success = EnumDisplaySettings(NULL, ENUM_CURRENT_SETTINGS, &devmode);
+     if (!success)
+ 	Sys_Error("Unable to query desktop display settings");
+ 
