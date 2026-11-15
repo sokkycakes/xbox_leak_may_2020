@@ -140,6 +140,27 @@ def merge_registry(donor_dir, target_dir):
         dst.commit(None)
 
 
+def merge_winners(donor_dir, target_dir):
+    """32-bit SxS: Winners maps a requested version (e.g. common controls
+    6.0.0.0) to the installed one. PE lists only its 64-bit assemblies."""
+    k = "Microsoft\\Windows\\CurrentVersion\\SideBySide\\Winners"
+    src = hivex.Hivex(os.path.join(donor_dir, "SOFTWARE"))
+    dst = hivex.Hivex(os.path.join(target_dir, "SOFTWARE"), write=True)
+    s = find(src, k)
+    if not s:
+        print("  registry: donor has no SxS Winners")
+        return
+    d = ensure(dst, k)
+    n = 0
+    for c in src.node_children(s):
+        name = src.node_name(c)
+        if name.lower().startswith(("x86_", "wow64_")):
+            copy_key(src, c, dst, d, name)
+            n += 1
+    dst.commit(None)
+    print(f"  registry: {n} 32-bit SxS winners")
+
+
 # ---------- build ----------
 
 def donor_list(role):
@@ -214,8 +235,13 @@ def wow64_files(pe_paths, donor_index, donated):
                  parts[3].startswith("x86_microsoft.windows.gdiplus")):
             if len(parts) == 5:          # files inside the assembly folder
                 out.append(p)
-        if lp.startswith("/windows/winsxs/manifests/x86_microsoft.windows.common-controls") or \
-                lp.startswith("/windows/winsxs/manifests/x86_microsoft.windows.gdiplus"):
+        # every x86/wow64 manifest: WoW64's default context needs
+        # Microsoft.Windows.SystemCompatible (x86), which PE lacks
+        if lp.startswith(("/windows/winsxs/manifests/x86_", "/windows/winsxs/manifests/wow64_")):
+            out.append(p)
+        # catalogs: once a 32-bit ntdll is present smss maps the 32-bit
+        # KnownDLLs at boot, and code integrity rejects them without these
+        if lp.startswith("/windows/system32/catroot/") and lp.endswith(".cat") and len(parts) == 6:
             out.append(p)
     print(f"  wow64: {len(out)} files from the donor")
     return out
@@ -254,6 +280,8 @@ def build_role(role, iso_dir, work, out, host_addr, shell, minimal=False, no_wow
     run("wimlib-imagex", "extract", wim, "1", "/Windows/System32/config/SYSTEM",
         "/Windows/System32/config/SOFTWARE", f"--dest-dir={rw}/pe-hives", "--no-acls")
     merge_registry(f"{rw}/donor-hives", f"{rw}/pe-hives")
+    if role == "game" and not no_wow64:
+        merge_winners(f"{rw}/donor-hives", f"{rw}/pe-hives")
 
     # crimson payload
     cdir = os.path.join(rw, "Crimson")

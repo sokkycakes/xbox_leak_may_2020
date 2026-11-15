@@ -3,7 +3,7 @@
   copying their keys from the donor image's hives. Called by
   New-CrimsonEraImage.ps1.
 #>
-param([string] $Donor, [string] $Target, [string] $Role)
+param([string] $Donor, [string] $Target, [string] $Role, [switch] $Wow64)
 $ErrorActionPreference = 'Stop'
 
 function Load($name, $path) { & reg.exe load "HKLM\$name" $path | Out-Null; if ($LASTEXITCODE) { throw "reg load $path" } }
@@ -28,6 +28,19 @@ try {
     Copy-Key 'CR_D_SW\Microsoft\Windows NT\CurrentVersion\Drivers32' 'CR_T_SW\Microsoft\Windows NT\CurrentVersion\Drivers32'
     # COM class for the audio device enumerator (XAudio2 2.9 needs no COM registration)
     Copy-Key 'CR_D_SW\Classes\CLSID\{BCDE0395-E52F-467C-8E3D-C4579291692E}' 'CR_T_SW\Classes\CLSID\{BCDE0395-E52F-467C-8E3D-C4579291692E}'
+    # 32-bit SxS: Winners maps a requested version (common controls 6.0.0.0)
+    # to the installed one, and WinPE lists only its 64-bit assemblies.
+    if ($Wow64) {
+        $w = 'Microsoft\Windows\CurrentVersion\SideBySide\Winners'
+        $n = 0
+        foreach ($k in Get-ChildItem "Registry::HKLM\CR_D_SW\$w" -ErrorAction SilentlyContinue) {
+            if ($k.PSChildName -like 'x86_*' -or $k.PSChildName -like 'wow64_*') {
+                Copy-Key "CR_D_SW\$w\$($k.PSChildName)" "CR_T_SW\$w\$($k.PSChildName)"
+                $n++
+            }
+        }
+        Write-Host "  registry: $n 32-bit SxS winners"
+    }
 } finally {
     Unload CR_D_SYS; Unload CR_T_SYS; Unload CR_D_SW; Unload CR_T_SW
 }

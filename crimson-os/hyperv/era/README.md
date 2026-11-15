@@ -32,12 +32,22 @@ A game disk is a VHDX with `Crimson\launch-game.cmd` at its root.
 | Partition | WIM | ISO | Boot to agent connected |
 |---|---|---|---|
 | System OS | 279 MB | 283 MB | 31 s |
-| Game OS   | 313 MB | 317 MB | 32 s |
+| Game OS, 64-bit only (`--no-wow64`) | 286 MB | | |
+| Game OS with 32-bit support (default) | 487 MB | 491 MB | 50 s |
 
 Both stream 1280x720 frames to the host. Stock Windows PE from the same ISO
 is 539 MB. Fixed on the way: keep `WinSxS\Manifests` (removing it bugchecks
 with CRITICAL_PROCESS_DIED), leave WinPE's svchost groups alone
 (the donor's lack BFE, which kills networking), keep `net1ix64` (QEMU's e1000e).
+
+32-bit programs (Game OS): WinPE has no WoW64 layer and only part of SysWOW64,
+so the builder adds the wow64 DLLs, a SysWOW64 twin of every System32 file,
+all x86/wow64 manifests, the 32-bit SxS `Winners` keys and the System32
+`CatRoot` catalogs. Without the catalogs it resets about 30 s into boot (code
+integrity rejects the 32-bit KnownDLLs); without the manifests and Winners,
+every 32-bit exe fails with a side-by-side error. `samples/bitness-test` checks
+a 32-bit and a 64-bit GUI app with common controls 6 and OpenGL: both pass
+(OpenGL is Microsoft's software 1.1, "GDI Generic").
 
 ## Still open
 

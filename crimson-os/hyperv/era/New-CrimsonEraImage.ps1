@@ -46,7 +46,7 @@ param(
     [string] $GameDisk = "",                # VHDX holding the game, attached to the Game OS
     [switch] $NoGpuDriver,
     [switch] $KeepFonts,
-    [switch] $NoWow64,                      # leave out 32-bit support in the Game OS (saves ~90 MB)
+    [switch] $NoWow64,                      # leave out 32-bit support in the Game OS (saves ~200 MB)
     [switch] $CreateVms,
     [int]    $GameCores = 6, [int] $GameMemoryGB = 8,
     [int]    $SystemCores = 2, [int] $SystemMemoryGB = 2
@@ -131,15 +131,27 @@ function Build-Role([string] $Role) {
             }
         }
         foreach ($pat in 'x86_microsoft.windows.common-controls*', 'x86_microsoft.windows.gdiplus*') {
-            foreach ($src in Get-ChildItem "$donorMount\Windows\WinSxS\$pat", "$donorMount\Windows\WinSxS\Manifests\$pat" -ErrorAction SilentlyContinue) {
+            foreach ($src in Get-ChildItem "$donorMount\Windows\WinSxS\$pat" -ErrorAction SilentlyContinue) {
                 $dst = Join-Path $mount $src.FullName.Substring($donorMount.Length + 1)
                 Copy-Item $src.FullName $dst -Force -Recurse; $n++
             }
         }
+        # Every x86/wow64 manifest (WoW64's default context needs
+        # Microsoft.Windows.SystemCompatible x86), and the signature catalogs:
+        # with a 32-bit ntdll present, smss maps the 32-bit KnownDLLs at boot and
+        # code integrity rejects them unless their catalogs are there.
+        $more = @(Get-ChildItem "$donorMount\Windows\WinSxS\Manifests" -File -Force |
+                    Where-Object { $_.Name -like 'x86_*' -or $_.Name -like 'wow64_*' }) +
+                @(Get-ChildItem "$donorMount\Windows\System32\CatRoot\*\*.cat" -File -Force)
+        foreach ($src in $more) {
+            $dst = Join-Path $mount $src.FullName.Substring($donorMount.Length + 1)
+            New-Item -ItemType Directory -Force -Path (Split-Path $dst) | Out-Null
+            Copy-Item -LiteralPath $src.FullName $dst -Force; $n++
+        }
         Write-Host "  wow64: $n files"
     }
     # services and COM registrations for audio and hvsocket, merged from the donor's hives
-    & (Join-Path $here 'Import-EraRegistry.ps1') -Donor $donorMount -Target $mount -Role $Role
+    & (Join-Path $here 'Import-EraRegistry.ps1') -Donor $donorMount -Target $mount -Role $Role -Wow64:($Role -eq 'game' -and -not $NoWow64)
 
     # 4. host GPU driver for GPU-P
     if (-not $NoGpuDriver) {
