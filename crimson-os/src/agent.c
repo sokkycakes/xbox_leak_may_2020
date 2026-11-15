@@ -488,6 +488,7 @@ int main(int argc, char **argv)
          * the see-through key colour for the system. (WinPE draws no wallpaper.) */
         int elem = COLOR_DESKTOP;
         COLORREF c = g_role == CR_ROLE_SYSTEM ? RGB(CR_KEY_R, CR_KEY_G, CR_KEY_B) : RGB(0, 0, 0);
+        SystemParametersInfoA(SPI_SETDESKWALLPAPER, 0, (PVOID)"", SPIF_SENDCHANGE); /* else the colour never shows */
         SetSysColors(1, &elem, &c);
     }
     SetProcessDPIAware();
