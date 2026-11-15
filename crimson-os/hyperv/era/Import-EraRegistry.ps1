@@ -21,8 +21,8 @@ try {
     foreach ($svc in 'hvsocket', 'vpci', 'Audiosrv', 'AudioEndpointBuilder', 'MMCSS') {
         Copy-Key "CR_D_SYS\ControlSet001\Services\$svc" "CR_T_SYS\ControlSet001\Services\$svc"
     }
-    # svchost groups the audio services run in
-    Copy-Key 'CR_D_SW\Microsoft\Windows NT\CurrentVersion\Svchost' 'CR_T_SW\Microsoft\Windows NT\CurrentVersion\Svchost'
+    # Svchost groups are left as WinPE has them: they already list AudioSrv and
+    # AudioEndpointBuilder, and overwriting them drops BFE, which kills networking.
     # multimedia scheduler classes (games register as "Games" for priority)
     Copy-Key 'CR_D_SW\Microsoft\Windows NT\CurrentVersion\Multimedia' 'CR_T_SW\Microsoft\Windows NT\CurrentVersion\Multimedia'
     Copy-Key 'CR_D_SW\Microsoft\Windows NT\CurrentVersion\Drivers32' 'CR_T_SW\Microsoft\Windows NT\CurrentVersion\Drivers32'

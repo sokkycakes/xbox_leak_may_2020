@@ -36,8 +36,8 @@ A game disk is a VHDX with `Crimson\launch-game.cmd` at its root.
 
 Both stream 1280x720 frames to the host. Stock Windows PE from the same ISO
 is 539 MB. Fixed on the way: keep `WinSxS\Manifests` (removing it bugchecks
-with CRITICAL_PROCESS_DIED), merge the svchost groups instead of replacing
-them (replacing kills networking), keep `net1ix64` (QEMU's e1000e).
+with CRITICAL_PROCESS_DIED), leave WinPE's svchost groups alone
+(the donor's lack BFE, which kills networking), keep `net1ix64` (QEMU's e1000e).
 
 ## Still open
 

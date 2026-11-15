@@ -115,8 +115,9 @@ def merge_registry(donor_dir, target_dir):
     plan = {
         "SYSTEM": [f"ControlSet001\\Services\\{s}" for s in
                    ("vpci", "Audiosrv", "AudioEndpointBuilder", "MMCSS")],
-        "SOFTWARE": ["Microsoft\\Windows NT\\CurrentVersion\\Svchost",
-                     "Microsoft\\Windows NT\\CurrentVersion\\Multimedia",
+        # Svchost is left alone: WinPE's groups already hold the audio services, and
+        # the donor's LocalServiceNoNetwork lacks BFE, which takes networking down.
+        "SOFTWARE": ["Microsoft\\Windows NT\\CurrentVersion\\Multimedia",
                      "Microsoft\\Windows NT\\CurrentVersion\\Drivers32",
                      "Classes\\CLSID\\{BCDE0395-E52F-467C-8E3D-C4579291692E}"],
     }
