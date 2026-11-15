@@ -11,6 +11,35 @@ index 8e4852b..bb035b4 100644
      struct known_sfx *known = known_sfx->overflow;
  
      while (known) {
+diff --git a/common/vid_mode.c b/common/vid_mode.c
+index cfcc2ba..03f51db 100644
+--- a/common/vid_mode.c
++++ b/common/vid_mode.c
+@@ -31,6 +31,9 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ #include "sound.h"
+ #include "sys.h"
+ #include "vid.h"
++#ifdef _WIN32
++#include <windows.h>
++#endif
+ 
+ #ifdef NQ_HACK
+ #include "host.h"
+@@ -1222,6 +1225,14 @@ VID_GetCmdlineMode(void)
+ 	bpp = (com_argc > bpp + 1) ? atoi(com_argv[bpp + 1]) : 0;
+     fullscreen = COM_CheckParm("-fullscreen");
+     windowed = COM_CheckParm("-window") || COM_CheckParm("-w");
++#ifdef _WIN32
++    /* -desktopres: fullscreen at the desktop's size (no mode switch needed) */
++    if (COM_CheckParm("-desktopres")) {
++	width = GetSystemMetrics(SM_CXSCREEN);
++	height = GetSystemMetrics(SM_CYSCREEN);
++	fullscreen = 1;
++    }
++#endif
+ 
+     /* If nothing was specified, don't return a mode */
+     if (!width && !height && !bpp && !fullscreen && !windowed)
 diff --git a/common/vid_wgl.c b/common/vid_wgl.c
 index 422a9c3..619d5ba 100644
 --- a/common/vid_wgl.c
@@ -25,7 +54,7 @@ index 422a9c3..619d5ba 100644
  	Sys_Error("Unable to query desktop display settings");
  
 diff --git a/common/vid_win.c b/common/vid_win.c
-index 7c32aaa..3b23b26 100644
+index 7c32aaa..29c885f 100644
 --- a/common/vid_win.c
 +++ b/common/vid_win.c
 @@ -427,6 +427,8 @@ VID_InitModeList(void)
@@ -37,3 +66,23 @@ index 7c32aaa..3b23b26 100644
      if (!success)
  	Sys_Error("Unable to query desktop display settings");
  
+@@ -516,8 +518,17 @@ VID_SetDisplayMode(const qvidmode_t *mode)
+     gdevmode.dmSize = sizeof(gdevmode);
+ 
+     result = ChangeDisplaySettings(&gdevmode, CDS_FULLSCREEN);
+-    if (result != DISP_CHANGE_SUCCESSFUL)
+-	Sys_Error("Couldn't set fullscreen DIB mode");
++    if (result != DISP_CHANGE_SUCCESSFUL) {
++	/*
++	 * Windows PE's basic display driver can't switch modes. If the mode
++	 * asked for is the desktop's own size, the fullscreen popup simply
++	 * covers the desktop.
++	 */
++	if ((int)mode->width != GetSystemMetrics(SM_CXSCREEN) ||
++	    (int)mode->height != GetSystemMetrics(SM_CYSCREEN))
++	    Sys_Error("Couldn't set fullscreen DIB mode %dx%d (error %ld)",
++		      mode->width, mode->height, result);
++    }
+ 
+     modestate = MS_FULLSCREEN;
+     vid_fulldib_on_focus_mode = mode;

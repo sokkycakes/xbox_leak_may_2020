@@ -483,6 +483,13 @@ int main(int argc, char **argv)
         }
         free(cmd);
     }
+    if (g_src == SRC_DESKTOP) {
+        /* Inside a partition the desktop is the backdrop: black for the game,
+         * the see-through key colour for the system. (WinPE draws no wallpaper.) */
+        int elem = COLOR_DESKTOP;
+        COLORREF c = g_role == CR_ROLE_SYSTEM ? RGB(CR_KEY_R, CR_KEY_G, CR_KEY_B) : RGB(0, 0, 0);
+        SetSysColors(1, &elem, &c);
+    }
     SetProcessDPIAware();
     WSADATA wsa;
     WSAStartup(MAKEWORD(2, 2), &wsa);

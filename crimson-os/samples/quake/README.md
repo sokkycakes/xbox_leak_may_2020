@@ -3,8 +3,10 @@
 `tyr-quake.exe` is [TyrQuake](https://disenchant.net/tyrquake/) (GPL v2),
 built for 64-bit Windows with MinGW, software renderer, plus
 `tyrquake-winpe.patch`: it falls back to the current display mode when Windows
-PE has no saved one ("Unable to query desktop display settings"), and no longer
-crashes when the attract demo starts without a sound device.
+PE has no saved one ("Unable to query desktop display settings"), no longer
+crashes when the attract demo starts without a sound device, goes fullscreen
+without a mode switch when the requested size is the desktop's (WinPE's display
+driver can't switch modes), and adds `-desktopres` to pick that size.
 
 Tested in the Era Game OS under QEMU/KVM: the attract demo plays about 100 s
 after power-on. No sound yet (see below). The Game OS can't run 32-bit apps yet, so 64-bit only.

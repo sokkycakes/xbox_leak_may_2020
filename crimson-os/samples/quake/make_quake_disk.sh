@@ -15,8 +15,9 @@ mkdir -p "$work/game/id1"
 cp "$pak" "$work/game/id1/pak0.pak"
 cp "$here/tyr-quake.exe" "$work/game/"
 for f in SLICNSE.TXT LICINFO.TXT README.TXT; do cp "$(find "$work/x" -iname $f)" "$work/game/" 2>/dev/null || true; done
-# -dibonly: plain GDI output (no DirectDraw in the Game OS). -fullscreen: the
-# game owns the partition's display, switched to 640x480 like the original.
-ARGS="${QUAKE_ARGS:--dibonly -fullscreen -width 640 -height 480 -nocdaudio}" \
+# -dibonly: plain GDI output (no DirectDraw in the Game OS). -desktopres:
+# borderless fullscreen at the partition's resolution (WinPE's display driver
+# can't switch modes, so a 640x480 switch isn't possible).
+ARGS="${QUAKE_ARGS:--dibonly -desktopres -nocdaudio}" \
     "$here/../../tools/make_game_disk.sh" "$work/game" tyr-quake.exe "$out" 64
 rm -rf "$work"
