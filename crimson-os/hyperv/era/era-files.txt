@@ -35,7 +35,6 @@ both   Windows\System32\ksuser.dll
 both   Windows\System32\wdmaud.drv
 both   Windows\System32\msacm32.dll
 both   Windows\System32\XAudio2_9.dll
-both   Windows\System32\X3DAudio1_7.dll
 
 # Controller
 both   Windows\System32\xinput1_4.dll
@@ -44,7 +43,6 @@ both   Windows\System32\xinput9_1_0.dll
 # C/C++ runtime most games link against
 both   Windows\System32\msvcp140*.dll
 both   Windows\System32\vcruntime140*.dll
-both   Windows\System32\concrt140.dll
 
 # Video playback for cutscenes (game only)
 game   Windows\System32\mfplat.dll

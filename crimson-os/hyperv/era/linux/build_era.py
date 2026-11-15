@@ -77,6 +77,40 @@ def ensure(h, path):
     return node
 
 
+def merge_values(src, snode, dst, dnode):
+    """Add the donor's values that PE lacks; union REG_MULTI_SZ lists (svchost groups)."""
+    have = {dst.value_key(v).lower(): v for v in dst.node_values(dnode)}
+    vals = []
+    for v in dst.node_values(dnode):
+        t, raw = dst.value_value(v)
+        vals.append({"key": dst.value_key(v), "t": t, "value": raw})
+    index = {d["key"].lower(): d for d in vals}
+    for v in src.node_values(snode):
+        k = src.value_key(v)
+        t, raw = src.value_value(v)
+        if k.lower() not in have:
+            vals.append({"key": k, "t": t, "value": raw})
+        elif t == 7 and index[k.lower()]["t"] == 7:
+            def items(b):
+                return [x for x in b.decode("utf-16-le").split("\0") if x]
+            cur = items(index[k.lower()]["value"])
+            for x in items(raw):
+                if x.lower() not in (c.lower() for c in cur):
+                    cur.append(x)
+            index[k.lower()]["value"] = ("\0".join(cur) + "\0\0").encode("utf-16-le")
+    dst.node_set_values(dnode, vals)
+    for c in src.node_children(snode):
+        name = src.node_name(c)
+        existing = dst.node_get_child(dnode, name)
+        if existing:
+            merge_values(src, c, dst, existing)
+        else:
+            copy_key(src, c, dst, dnode, name)
+
+
+MERGE_KEYS = {"Microsoft\\Windows NT\\CurrentVersion\\Svchost"}
+
+
 def merge_registry(donor_dir, target_dir):
     plan = {
         "SYSTEM": [f"ControlSet001\\Services\\{s}" for s in
@@ -95,7 +129,12 @@ def merge_registry(donor_dir, target_dir):
                 print(f"  registry: not in donor: {hive}\\{k}")
                 continue
             parent, name = k.rsplit("\\", 1)
-            copy_key(src, s, dst, ensure(dst, parent), name)
+            existing = find(dst, k)
+            if k in MERGE_KEYS and existing:
+                # replacing this key removes PE's own groups and PE loses networking
+                merge_values(src, s, dst, existing)
+            else:
+                copy_key(src, s, dst, ensure(dst, parent), name)
             print(f"  registry: {hive}\\{k}")
         dst.commit(None)
 
@@ -124,7 +163,7 @@ KEEP_DRIVERS = (
     # Hyper-V guest devices
     "wvmbus", "wvmbushid", "wvmbusvideo", "wvpci", "wnetvsc", "wstorvsc", "wstorflt", "wdmvsc", "whyperkbd",
     # QEMU test devices (e1000e, AHCI/IDE CD)
-    "nete1e3e", "nete1g3e", "mshdc",
+    "net1ix64", "nete1e3e", "nete1g3e", "mshdc",
 )
 WINSXS_KEEP = ("microsoft.windows.common-controls", "microsoft.windows.gdiplus", "microsoft.windows.c..-controls")
 
@@ -141,9 +180,8 @@ def era_strip(lower, role, no_wow64):
         if lp.startswith("/windows/winsxs/") and len(parts) == 4 and parts[3] not in ("manifests",):
             if not any(k in parts[3] for k in WINSXS_KEEP):
                 out.append(lp)
-        if lp.startswith("/windows/winsxs/manifests/") and len(parts) == 5:
-            if not any(k in parts[4] for k in WINSXS_KEEP):
-                out.append(lp)
+        # WinSxS/Manifests stays whole (~4 MB): without it PE bugchecks with
+        # CRITICAL_PROCESS_DIED shortly after the kernel starts.
     out += ["/windows/boot", "/windows/servicing", "/windows/speech", "/windows/speech_onecore",
             "/windows/system32/speech", "/windows/system32/speech_onecore", "/windows/system32/dism",
             "/windows/system32/ntkrla57.exe", "/windows/system32/dbgeng.dll", "/windows/system32/chakra.dll",

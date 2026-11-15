@@ -27,16 +27,23 @@ Run (elevated, Windows ADK + WinPE add-on installed, donor ISO of the same build
 
 A game disk is a VHDX with `Crimson\launch-game.cmd` at its root.
 
-## Open questions (first boot will answer them)
+## Tested (QEMU + KVM, Windows 11 24H2 donor, `linux/build_era.py --minimal`)
 
-- **GPU partitioning inside WinPE** has not been tried. It needs `vpci.sys`
-  and the vendor driver to load in PE. If it doesn't, the partitions fall back
-  to software D3D (WARP), which works but is slow.
-- **No DWM in WinPE.** Capturing the screen with GDI should work for the
-  shell. A flip-model D3D game may capture black, in which case the agent
-  needs a DXGI capture path or the game must present through GDI-compatible
-  blt model.
-- **Audio** in PE works in community builds (PhoenixPE, Win10XPE) with this
-  same set of services; ours is untested.
-- None of the PowerShell here has been run yet; it was written in a Linux
-  cloud box without Windows.
+| Partition | WIM | ISO | Boot to agent connected |
+|---|---|---|---|
+| System OS | 279 MB | 283 MB | 31 s |
+| Game OS   | 313 MB | 317 MB | 32 s |
+
+Both stream 1280x720 frames to the host. Stock Windows PE from the same ISO
+is 539 MB. Fixed on the way: keep `WinSxS\Manifests` (removing it bugchecks
+with CRITICAL_PROCESS_DIED), merge the svchost groups instead of replacing
+them (replacing kills networking), keep `net1ix64` (QEMU's e1000e).
+
+## Still open
+
+- **GPU partitioning inside WinPE**: needs Hyper-V; not testable in QEMU.
+- **Frame rate**: about 2 updates/s in emulation with GDI capture, far below
+  the requested 10-15. Needs a faster capture path (DXGI) and checking on Hyper-V.
+- **No DWM in WinPE**: flip-model D3D games may capture black.
+- **Audio**: services are in place but no game has been tried.
+- The PowerShell builder (`New-CrimsonEraImage.ps1`) has not been run on Windows yet.
