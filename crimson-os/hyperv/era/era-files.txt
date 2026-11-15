@@ -1,0 +1,55 @@
+# Files copied from the donor Windows image into the WinPE base.
+# <role> <path relative to the donor root, wildcards allowed>
+# role: both | game | system
+# Keep this list short: every line is size the partition carries.
+
+# Direct3D / DXGI (WinPE has GDI but not the full D3D runtime)
+both   Windows\System32\d3d11.dll
+both   Windows\System32\d3d12.dll
+both   Windows\System32\d3d12core.dll
+both   Windows\System32\dxgi.dll
+both   Windows\System32\dxcore.dll
+both   Windows\System32\d3d10warp.dll
+both   Windows\System32\D3DCompiler_47.dll
+game   Windows\System32\d3d9.dll
+game   Windows\System32\d3d10*.dll
+both   Windows\System32\d2d1.dll
+both   Windows\System32\dwrite.dll
+both   Windows\System32\dcomp.dll
+
+# Hyper-V: socket to the host, virtual PCI for the GPU partition
+both   Windows\System32\drivers\hvsocket.sys
+both   Windows\System32\hvsocket.dll
+both   Windows\System32\drivers\vpci.sys
+
+# Audio stack (services registered by Import-EraRegistry.ps1)
+both   Windows\System32\audiosrv.dll
+both   Windows\System32\AudioEndpointBuilder.dll
+both   Windows\System32\audiodg.exe
+both   Windows\System32\AudioEng.dll
+both   Windows\System32\AUDIOKSE.dll
+both   Windows\System32\AudioSes.dll
+both   Windows\System32\MMDevAPI.dll
+both   Windows\System32\avrt.dll
+both   Windows\System32\ksuser.dll
+both   Windows\System32\wdmaud.drv
+both   Windows\System32\msacm32.dll
+both   Windows\System32\XAudio2_9.dll
+both   Windows\System32\X3DAudio1_7.dll
+
+# Controller
+both   Windows\System32\xinput1_4.dll
+both   Windows\System32\xinput9_1_0.dll
+
+# C/C++ runtime most games link against
+both   Windows\System32\msvcp140*.dll
+both   Windows\System32\vcruntime140*.dll
+both   Windows\System32\concrt140.dll
+
+# Video playback for cutscenes (game only)
+game   Windows\System32\mfplat.dll
+game   Windows\System32\mfreadwrite.dll
+game   Windows\System32\mf.dll
+game   Windows\System32\mfcore.dll
+game   Windows\System32\RTWorkQ.dll
+game   Windows\System32\msmpeg2vdec.dll
