@@ -1,0 +1,270 @@
+#!/usr/bin/env python3.12
+"""Linux build of the Era-style Crimson partitions, for testing in QEMU.
+
+Does what New-CrimsonEraImage.ps1 does, with wimlib and hivex instead of
+DISM and reg.exe, starting from a Windows ISO (its boot.wim index 1 is plain
+Windows PE, its install.wim is the donor). No ADK optional components and no
+GPU driver: QEMU has no GPU partitioning.
+
+  build_era.py --iso win11.iso --out outdir [--host-addr 10.0.2.2] [--shell DIR/EXE]
+
+Writes outdir/crimson-{game,system}.wim and .iso (BIOS + UEFI bootable).
+"""
+import argparse
+import glob
+import os
+import shutil
+import subprocess
+import sys
+
+import hivex
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ERA = os.path.dirname(HERE)
+AGENT = os.path.join(ERA, "..", "..", "build", "crimson-agent.exe")
+
+
+def run(*cmd, **kw):
+    print("+", " ".join(cmd), flush=True)
+    subprocess.run(cmd, check=True, **kw)
+
+
+def wim_update(wim, commands):
+    p = subprocess.run(["wimlib-imagex", "update", wim, "1"],
+                       input="\n".join(commands) + "\n", text=True, capture_output=True)
+    if p.returncode:
+        print(p.stdout, p.stderr)
+        raise SystemExit("wimlib update failed")
+
+
+def wim_paths(wim, index):
+    out = subprocess.run(["wimlib-imagex", "dir", wim, str(index)], check=True,
+                         capture_output=True, text=True).stdout
+    return out.splitlines()
+
+
+# ---------- registry ----------
+
+def copy_key(src, snode, dst, dparent, name):
+    """Recursively copy src key snode into dst under dparent as name (replacing it)."""
+    old = dst.node_get_child(dparent, name)
+    if old:
+        dst.node_delete_child(old)
+    dnode = dst.node_add_child(dparent, name)
+    vals = []
+    for v in src.node_values(snode):
+        t, raw = src.value_value(v)
+        vals.append({"key": src.value_key(v), "t": t, "value": raw})
+    dst.node_set_values(dnode, vals)
+    for c in src.node_children(snode):
+        copy_key(src, c, dst, dnode, src.node_name(c))
+
+
+def find(h, path):
+    node = h.root()
+    for part in path.split("\\"):
+        node = h.node_get_child(node, part)
+        if not node:
+            return None
+    return node
+
+
+def ensure(h, path):
+    node = h.root()
+    for part in path.split("\\"):
+        nxt = h.node_get_child(node, part)
+        node = nxt if nxt else h.node_add_child(node, part)
+    return node
+
+
+def merge_registry(donor_dir, target_dir):
+    plan = {
+        "SYSTEM": [f"ControlSet001\\Services\\{s}" for s in
+                   ("vpci", "Audiosrv", "AudioEndpointBuilder", "MMCSS")],
+        "SOFTWARE": ["Microsoft\\Windows NT\\CurrentVersion\\Svchost",
+                     "Microsoft\\Windows NT\\CurrentVersion\\Multimedia",
+                     "Microsoft\\Windows NT\\CurrentVersion\\Drivers32",
+                     "Classes\\CLSID\\{BCDE0395-E52F-467C-8E3D-C4579291692E}"],
+    }
+    for hive, keys in plan.items():
+        src = hivex.Hivex(os.path.join(donor_dir, hive))
+        dst = hivex.Hivex(os.path.join(target_dir, hive), write=True)
+        for k in keys:
+            s = find(src, k)
+            if not s:
+                print(f"  registry: not in donor: {hive}\\{k}")
+                continue
+            parent, name = k.rsplit("\\", 1)
+            copy_key(src, s, dst, ensure(dst, parent), name)
+            print(f"  registry: {hive}\\{k}")
+        dst.commit(None)
+
+
+# ---------- build ----------
+
+def donor_list(role):
+    out = []
+    for line in open(os.path.join(ERA, "era-files.txt"), encoding="utf-8"):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        roles, rel = line.split(None, 1)
+        if roles in ("both", role):
+            out.append(rel.replace("\\", "/"))
+    return out
+
+
+# Era profile: what a VM partition needs and nothing else.
+KEEP_DRIVERS = (
+    "c_", "acpi", "acpidev", "basicdisplay", "basicrender", "cdrom", "compdev", "cpu", "disk", "errdev",
+    "genpass", "hal", "input", "keyboard", "machine", "msmouse", "mssmbios", "pci", "prm", "ramdisk",
+    "rawsilo", "scsidev", "swenum", "umbus", "unknown", "vdrvroot", "volmgr", "volsnap", "volume", "uefi",
+    "tpm", "kdnic", "ndis", "netloop", "netip6", "nettcpip", "netserv", "netnb", "netmscli",
+    "hdaudbus", "hdaudio", "audioendpoint", "wdmaudio", "wdmaudiocoresystem",
+    # Hyper-V guest devices
+    "wvmbus", "wvmbushid", "wvmbusvideo", "wvpci", "wnetvsc", "wstorvsc", "wstorflt", "wdmvsc", "whyperkbd",
+    # QEMU test devices (e1000e, AHCI/IDE CD)
+    "nete1e3e", "nete1g3e", "mshdc",
+)
+WINSXS_KEEP = ("microsoft.windows.common-controls", "microsoft.windows.gdiplus", "microsoft.windows.c..-controls")
+
+
+def era_strip(lower, role, no_wow64):
+    out = []
+    for lp in lower:
+        parts = lp.split("/")
+        # driver packages for hardware a VM never has
+        if lp.startswith("/windows/system32/driverstore/filerepository/") and len(parts) == 6:
+            if not parts[5].startswith(KEEP_DRIVERS):
+                out.append(lp)
+        # component store: only the side-by-side assemblies apps load at run time
+        if lp.startswith("/windows/winsxs/") and len(parts) == 4 and parts[3] not in ("manifests",):
+            if not any(k in parts[3] for k in WINSXS_KEEP):
+                out.append(lp)
+        if lp.startswith("/windows/winsxs/manifests/") and len(parts) == 5:
+            if not any(k in parts[4] for k in WINSXS_KEEP):
+                out.append(lp)
+    out += ["/windows/boot", "/windows/servicing", "/windows/speech", "/windows/speech_onecore",
+            "/windows/system32/speech", "/windows/system32/speech_onecore", "/windows/system32/dism",
+            "/windows/system32/ntkrla57.exe", "/windows/system32/dbgeng.dll", "/windows/system32/chakra.dll",
+            "/windows/system32/wdi"]
+    if no_wow64 or role == "system":
+        out.append("/windows/syswow64")
+    return [x for x in out if x]
+
+
+def build_role(role, iso_dir, work, out, host_addr, shell, minimal=False, no_wow64=False):
+    print(f"\n=== {role} ===", flush=True)
+    rw = os.path.join(work, role)
+    shutil.rmtree(rw, ignore_errors=True)
+    os.makedirs(rw)
+    wim = os.path.join(out, f"crimson-{role}.wim")
+    if os.path.exists(wim):
+        os.remove(wim)
+    run("wimlib-imagex", "export", os.path.join(iso_dir, "sources/boot.wim"), "1", wim, "--compress=LZX")
+    install = glob.glob(os.path.join(iso_dir, "sources/install.*"))[0]
+
+    # donor files (case-insensitive match against the donor image listing)
+    donor_index = {p.lower(): p for p in wim_paths(install, 1)}
+    want = []
+    for pat in donor_list(role):
+        import fnmatch
+        hits = [p for lp, p in donor_index.items() if fnmatch.fnmatch(lp, "/" + pat.lower())]
+        if not hits:
+            print(f"  donor: missing {pat}")
+        want += hits
+    listfile = os.path.join(rw, "donor.lst")
+    with open(listfile, "w") as f:
+        f.write("\n".join(want) + "\n")
+    ddir = os.path.join(rw, "donor")
+    run("wimlib-imagex", "extract", install, "1", "@" + listfile, f"--dest-dir={ddir}",
+        "--preserve-dir-structure", "--no-acls", "--nullglob")
+    run("wimlib-imagex", "extract", install, "1", "/Windows/System32/config/SYSTEM",
+        "/Windows/System32/config/SOFTWARE", f"--dest-dir={rw}/donor-hives", "--no-acls")
+    run("wimlib-imagex", "extract", wim, "1", "/Windows/System32/config/SYSTEM",
+        "/Windows/System32/config/SOFTWARE", f"--dest-dir={rw}/pe-hives", "--no-acls")
+    merge_registry(f"{rw}/donor-hives", f"{rw}/pe-hives")
+
+    # crimson payload
+    cdir = os.path.join(rw, "Crimson")
+    os.makedirs(cdir)
+    shutil.copy(AGENT, cdir)
+    conn = f"--host {host_addr}" if host_addr else "--hv"
+    if role == "game":
+        args = f'--role game --name "Game OS (era)" {conn} --desktop --size 1280x720 --fps 15'
+        launch = r"C:\Crimson\launch-game.cmd"
+    else:
+        args = f'--role system --name "System OS (era)" {conn} --desktop --size 1280x720 --fps 10 --guide-key F1'
+        launch = ""
+        if shell:
+            shutil.copytree(os.path.dirname(shell), os.path.join(cdir, "shell"))
+            launch = "X:\\Crimson\\shell\\" + os.path.basename(shell)
+    lines = ["@echo off", "wpeinit", "wpeutil DisableFirewall",
+             "net start AudioEndpointBuilder >nul 2>&1", "net start Audiosrv >nul 2>&1",
+             "echo crimson era %DATE% %TIME% > X:\\Crimson\\booted.txt",
+             f"start \"\" /min X:\\Crimson\\crimson-agent.exe {args}"]
+    if launch:
+        lines.append(f'if exist "{launch}" start "" "{launch}"')
+    lines += [":idle", "ping -n 3600 127.0.0.1 >nul", "goto idle"]
+    open(os.path.join(cdir, "start.cmd"), "w", newline="\r\n").write("\n".join(lines) + "\n")
+    open(os.path.join(rw, "winpeshl.ini"), "w", newline="\r\n").write(
+        "[LaunchApps]\n%SYSTEMDRIVE%\\Crimson\\start.cmd\n")
+
+    cmds = [f'add "{ddir}" /', f'add "{rw}/pe-hives" /Windows/System32/config',
+            f'add "{cdir}" /Crimson', f'add "{rw}/winpeshl.ini" /Windows/System32/winpeshl.ini']
+    # strip what neither partition uses
+    pe_paths = wim_paths(wim, 1)
+    lower = {p.lower(): p for p in pe_paths}
+    strip = ["/windows/system32/recovery", "/windows/system32/windowspowershell", "/windows/system32/oobe",
+             "/windows/system32/sysprep", "/windows/system32/migration", "/windows/system32/spool",
+             "/sources", "/setup.exe"]
+    keep_fonts = ("segoeui", "seguisym", "consola", "cour", "arial", "marlett", "vga", "app", "cga",
+                  "ega", "8514", "ssee", "sseri", "serife", "smalle")
+    for lp, p in lower.items():
+        if lp.startswith("/windows/fonts/") and lp.count("/") == 3 and not os.path.basename(lp).startswith(keep_fonts):
+            strip.append(lp)
+        parts = lp.split("/")
+        if len(parts) == 4 and parts[1:3] == ["windows", "system32"] and len(parts[3]) == 5 \
+                and parts[3][2] == "-" and parts[3] != "en-us" and "." not in parts[3]:
+            strip.append(lp)
+    if minimal:
+        strip += era_strip(lower, role, no_wow64)
+    for s in sorted(set(strip)):
+        if s in lower:
+            cmds.append(f'delete --force --recursive "{lower[s]}"')
+    wim_update(wim, cmds)
+    run("wimlib-imagex", "optimize", wim, "--recompress", "--compress=LZX")
+    run("wimlib-imagex", "info", wim, "--boot", "1")
+
+    iso = os.path.join(out, f"crimson-{role}.iso")
+    run("mkwinpeimg", "--iso", f"--windows-dir={iso_dir}", f"--wim={wim}", iso)
+    info = subprocess.run(["wimlib-imagex", "info", wim, "1"], capture_output=True, text=True).stdout
+    total = next((l.split(":")[1].strip() for l in info.splitlines() if l.startswith("Total Bytes")), "?")
+    print(f"*** crimson-{role}: WIM {os.path.getsize(wim) // 2**20} MB, expanded {int(total) // 2**20 if total.isdigit() else total} MB, ISO {os.path.getsize(iso) // 2**20} MB")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--iso", required=True)
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--work", default=None)
+    ap.add_argument("--host-addr", default="", help="connect over TCP to this address instead of a Hyper-V socket")
+    ap.add_argument("--shell", default="", help="System OS shell exe (its folder is copied)")
+    ap.add_argument("--roles", default="game,system")
+    ap.add_argument("--minimal", action="store_true", help="Era profile: strip drivers, component store, WoW64 (system)")
+    ap.add_argument("--no-wow64", action="store_true", help="also drop 32-bit support from the game OS")
+    a = ap.parse_args()
+    out = os.path.abspath(a.out)
+    work = os.path.abspath(a.work or os.path.join(out, "work"))
+    os.makedirs(out, exist_ok=True)
+    iso_dir = os.path.join(work, "iso")
+    if not os.path.exists(os.path.join(iso_dir, "sources/boot.wim")):
+        os.makedirs(iso_dir, exist_ok=True)
+        run("7z", "x", "-y", f"-o{iso_dir}", a.iso, "bootmgr", "bootmgr.efi", "boot", "efi",
+            "sources/boot.wim", "sources/install.wim", "sources/install.esd", stdout=subprocess.DEVNULL)
+    for role in a.roles.split(","):
+        build_role(role, iso_dir, work, out, a.host_addr, a.shell, a.minimal, a.no_wow64)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
