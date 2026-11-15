@@ -144,7 +144,7 @@ function Build-Role([string] $Role) {
     Copy-Item $AgentExe $crimson
     if ($Role -eq 'game') {
         $agentArgs = '--role game --name "Game OS (era)" --hv --desktop --size 1920x1080 --fps 60'
-        $launch = 'C:\Crimson\launch-game.cmd'   # on the game disk, if one is attached
+        $launch = 'GAME'   # launch-game.cmd on whichever drive the game disk mounts as
     } else {
         $agentArgs = '--role system --name "System OS (era)" --hv --desktop --size 1920x1080 --fps 30 --guide-key F1'
         $launch = ''
@@ -163,7 +163,7 @@ net start Audiosrv >nul 2>&1
 rem saves/settings disk (D:) and, for the game OS, the game disk
 for %%d in (C D E F G) do if exist %%d:\Crimson\data.tag set CRIMSON_DATA=%%d:
 start "" /min X:\Crimson\crimson-agent.exe $agentArgs
-$(if ($launch) { "if exist `"$launch`" start `"`" `"$launch`"" })
+$(if ($launch -eq 'GAME') { 'for %%d in (C D E F G H I) do if exist %%d:\Crimson\launch-game.cmd (set CRIMSON_GAME=%%d:& start "" /d %%d:\ cmd /c %%d:\Crimson\launch-game.cmd)' } elseif ($launch) { "if exist `"$launch`" start `"`" `"$launch`"" })
 rem keep the session alive; nothing is shown, the host owns the screen
 :idle
 ping -n 3600 127.0.0.1 >nul

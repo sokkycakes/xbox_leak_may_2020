@@ -231,7 +231,7 @@ def build_role(role, iso_dir, work, out, host_addr, shell, minimal=False, no_wow
     conn = f"--host {host_addr}" if host_addr else "--hv"
     if role == "game":
         args = f'--role game --name "Game OS (era)" {conn} --desktop --size 1280x720 --fps 15'
-        launch = r"C:\Crimson\launch-game.cmd"
+        launch = "GAME"  # found on whichever drive the game disk mounts as
     else:
         args = f'--role system --name "System OS (era)" {conn} --desktop --size 1280x720 --fps 10 --guide-key F1'
         launch = ""
@@ -242,7 +242,9 @@ def build_role(role, iso_dir, work, out, host_addr, shell, minimal=False, no_wow
              "net start AudioEndpointBuilder >nul 2>&1", "net start Audiosrv >nul 2>&1",
              "echo crimson era %DATE% %TIME% > X:\\Crimson\\booted.txt",
              f"start \"\" /min X:\\Crimson\\crimson-agent.exe {args}"]
-    if launch:
+    if launch == "GAME":
+        lines.append('for %%d in (C D E F G H I) do if exist %%d:\\Crimson\\launch-game.cmd (set CRIMSON_GAME=%%d:& start "" /d %%d:\\ cmd /c %%d:\\Crimson\\launch-game.cmd)')
+    elif launch:
         lines.append(f'if exist "{launch}" start "" "{launch}"')
     lines += [":idle", "ping -n 3600 127.0.0.1 >nul", "goto idle"]
     open(os.path.join(cdir, "start.cmd"), "w", newline="\r\n").write("\n".join(lines) + "\n")
