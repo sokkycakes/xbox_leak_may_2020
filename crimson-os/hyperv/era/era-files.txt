@@ -60,3 +60,5 @@ game   Windows\System32\mf.dll
 game   Windows\System32\mfcore.dll
 game   Windows\System32\RTWorkQ.dll
 game   Windows\System32\msmpeg2vdec.dll
+# Steam client input (delay-loaded via ext-ms-win-mininput-inputhost; missing = silent exit 255)
+game   Windows\System32\InputHost.dll
