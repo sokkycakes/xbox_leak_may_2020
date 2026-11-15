@@ -37,6 +37,14 @@ both   Windows\System32\wdmaud.drv
 both   Windows\System32\msacm32.dll
 both   Windows\System32\XAudio2_9.dll
 
+# Common controls (dialogs, list views) and OpenGL 1.1, missing from WinPE
+both   Windows\System32\comctl32.dll
+both   Windows\System32\opengl32.dll
+both   Windows\System32\glu32.dll
+
+# WoW64 layer: lets the Game OS run 32-bit programs (SysWOW64 twins are added by the builder)
+game   Windows\System32\wow64*.dll
+
 # Controller
 both   Windows\System32\xinput1_4.dll
 both   Windows\System32\xinput9_1_0.dll

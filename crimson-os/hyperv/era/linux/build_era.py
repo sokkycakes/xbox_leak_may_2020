@@ -192,6 +192,35 @@ def era_strip(lower, role, no_wow64):
     return [x for x in out if x]
 
 
+def wow64_files(pe_paths, donor_index, donated):
+    """32-bit support. WinPE ships SysWOW64 half-empty and without the WoW64
+    layer itself, so 32-bit programs fail with a side-by-side error. Mirror the
+    64-bit set: every System32 file the image has gets its SysWOW64 twin from
+    the donor, plus the x86 common-controls/GDI+ assemblies."""
+    names = set()
+    for p in list(pe_paths) + donated:
+        lp = p.lower()
+        if lp.startswith("/windows/system32/") and lp.count("/") == 3:
+            names.add(lp.rsplit("/", 1)[1])
+    out = []
+    for n in sorted(names):
+        for cand in (f"/windows/syswow64/{n}", f"/windows/syswow64/en-us/{n}.mui"):
+            if cand in donor_index:
+                out.append(donor_index[cand])
+    for lp, p in donor_index.items():
+        parts = lp.split("/")
+        if len(parts) >= 4 and parts[1:3] == ["windows", "winsxs"] and \
+                (parts[3].startswith("x86_microsoft.windows.common-controls") or
+                 parts[3].startswith("x86_microsoft.windows.gdiplus")):
+            if len(parts) == 5:          # files inside the assembly folder
+                out.append(p)
+        if lp.startswith("/windows/winsxs/manifests/x86_microsoft.windows.common-controls") or \
+                lp.startswith("/windows/winsxs/manifests/x86_microsoft.windows.gdiplus"):
+            out.append(p)
+    print(f"  wow64: {len(out)} files from the donor")
+    return out
+
+
 def build_role(role, iso_dir, work, out, host_addr, shell, minimal=False, no_wow64=False):
     print(f"\n=== {role} ===", flush=True)
     rw = os.path.join(work, role)
@@ -212,6 +241,8 @@ def build_role(role, iso_dir, work, out, host_addr, shell, minimal=False, no_wow
         if not hits:
             print(f"  donor: missing {pat}")
         want += hits
+    if role == "game" and not no_wow64:
+        want += wow64_files(wim_paths(wim, 1), donor_index, want)
     listfile = os.path.join(rw, "donor.lst")
     with open(listfile, "w") as f:
         f.write("\n".join(want) + "\n")

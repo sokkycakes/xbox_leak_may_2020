@@ -46,6 +46,7 @@ param(
     [string] $GameDisk = "",                # VHDX holding the game, attached to the Game OS
     [switch] $NoGpuDriver,
     [switch] $KeepFonts,
+    [switch] $NoWow64,                      # leave out 32-bit support in the Game OS (saves ~90 MB)
     [switch] $CreateVms,
     [int]    $GameCores = 6, [int] $GameMemoryGB = 8,
     [int]    $SystemCores = 2, [int] $SystemMemoryGB = 2
@@ -112,6 +113,30 @@ function Build-Role([string] $Role) {
             New-Item -ItemType Directory -Force -Path (Split-Path $dst) | Out-Null
             Copy-Item $src.FullName $dst -Force -Recurse
         }
+    }
+    # 3b. 32-bit programs (Game OS). PE's SysWOW64 is half empty and the WoW64
+    #     layer itself is missing, so 32-bit exes fail with a side-by-side
+    #     error. Give every System32 file the image has its SysWOW64 twin,
+    #     plus the x86 common-controls and GDI+ assemblies.
+    if ($Role -eq 'game' -and -not $NoWow64) {
+        $n = 0
+        foreach ($f in Get-ChildItem "$mount\Windows\System32" -File -Force) {
+            foreach ($rel in "Windows\SysWOW64\$($f.Name)", "Windows\SysWOW64\en-US\$($f.Name).mui") {
+                $src = Join-Path $donorMount $rel
+                if (Test-Path -LiteralPath $src) {
+                    $dst = Join-Path $mount $rel
+                    New-Item -ItemType Directory -Force -Path (Split-Path $dst) | Out-Null
+                    Copy-Item -LiteralPath $src $dst -Force; $n++
+                }
+            }
+        }
+        foreach ($pat in 'x86_microsoft.windows.common-controls*', 'x86_microsoft.windows.gdiplus*') {
+            foreach ($src in Get-ChildItem "$donorMount\Windows\WinSxS\$pat", "$donorMount\Windows\WinSxS\Manifests\$pat" -ErrorAction SilentlyContinue) {
+                $dst = Join-Path $mount $src.FullName.Substring($donorMount.Length + 1)
+                Copy-Item $src.FullName $dst -Force -Recurse; $n++
+            }
+        }
+        Write-Host "  wow64: $n files"
     }
     # services and COM registrations for audio and hvsocket, merged from the donor's hives
     & (Join-Path $here 'Import-EraRegistry.ps1') -Donor $donorMount -Target $mount -Role $Role
