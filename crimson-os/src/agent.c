@@ -33,6 +33,8 @@ static int g_w = 1280, g_h = 720, g_fps = 30;
 static int g_base_w = 1280, g_base_h = 720; /* --size; g_w/g_h follow the slot's shape */
 static WORD g_guide_key = 0;
 static int g_follow_layout = 0, g_input = 1;
+static const char *g_run = NULL;   /* started hidden at boot (Era images) */
+static const char *g_log = NULL;
 
 static volatile LONG g_location = CR_LOC_HIDDEN, g_focused = 0;
 static volatile LONG g_layout_w, g_layout_h;
@@ -361,6 +363,16 @@ static void run_session(SOCKET s)
             }
         }
         if (capture(n)) {
+            if (g_role == CR_ROLE_SYSTEM) {
+                /* snap near-magenta (JPEG wallpaper, scaling) to the exact key */
+                uint32_t *px = (uint32_t *)g_bits;
+                for (size_t i = 0, e = (size_t)g_w * g_h; i < e; i++) {
+                    uint32_t c = px[i];
+                    int r = (c >> 16) & 255, g = (c >> 8) & 255, b = c & 255;
+                    if (r > 240 && g < 16 && b > 240)
+                        px[i] = (CR_KEY_R << 16) | (CR_KEY_G << 8) | CR_KEY_B;
+                }
+            }
             /* send only the band of rows that changed */
             int y0 = -1, y1 = -1;
             for (int y = 0; y < g_h; y++) {
@@ -415,7 +427,9 @@ static void usage(void)
             "  --fps N            stream rate (default 30)\n"
             "  --guide-key KEY    System OS: key that toggles the shell's Guide (e.g. F1)\n"
             "  --follow-layout    resize the captured window to its Fill/Snap slot\n"
-            "  --no-input         do not inject the host's controller as keys\n",
+            "  --no-input         do not inject the host's controller as keys\n"
+            "  --run CMDLINE      start this with no window (boot script in Era images)\n"
+            "  --log FILE         write status lines to FILE\n",
             CR_TCP_PORT);
 }
 
@@ -439,12 +453,36 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--guide-key") && v) { g_guide_key = parse_key(v); i++; }
         else if (!strcmp(a, "--follow-layout")) g_follow_layout = 1;
         else if (!strcmp(a, "--no-input")) g_input = 0;
+        else if (!strcmp(a, "--run") && v) { g_run = v; i++; }
+        else if (!strcmp(a, "--log") && v) { g_log = v; i++; }
         else { usage(); return 1; }
     }
     if (g_w < 64 || g_h < 64 || g_w > 3840 || g_h > 2160) g_w = 1280, g_h = 720;
     g_base_w = g_w; g_base_h = g_h;
     if (g_fps < 1 || g_fps > 120) g_fps = 30;
 
+    if (g_log) {
+        freopen(g_log, "a", stdout);
+        setvbuf(stdout, NULL, _IONBF, 0);
+    }
+    if (g_run) {
+        /* The partition's own boot script runs without a console window, so the
+         * only thing on screen is what the game draws. */
+        STARTUPINFOA si;
+        PROCESS_INFORMATION pi;
+        memset(&si, 0, sizeof si);
+        si.cb = sizeof si;
+        char *cmd = _strdup(g_run);
+        si.dwFlags = STARTF_USESHOWWINDOW;
+        si.wShowWindow = SW_HIDE;
+        if (CreateProcessA(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+        } else {
+            printf("could not start %s (%lu)\n", g_run, GetLastError());
+        }
+        free(cmd);
+    }
     SetProcessDPIAware();
     WSADATA wsa;
     WSAStartup(MAKEWORD(2, 2), &wsa);

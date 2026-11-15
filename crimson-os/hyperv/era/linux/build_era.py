@@ -238,21 +238,28 @@ def build_role(role, iso_dir, work, out, host_addr, shell, minimal=False, no_wow
         if shell:
             shutil.copytree(os.path.dirname(shell), os.path.join(cdir, "shell"))
             launch = "X:\\Crimson\\shell\\" + os.path.basename(shell)
-    lines = ["@echo off", "wpeinit", "wpeutil DisableFirewall",
+    # start.cmd runs with no window (the agent starts it hidden); only the game
+    # or shell draws on the partition's screen.
+    lines = ["@echo off",
              "net start AudioEndpointBuilder >nul 2>&1", "net start Audiosrv >nul 2>&1",
-             "echo crimson era %DATE% %TIME% > X:\\Crimson\\booted.txt",
-             f"start \"\" /min X:\\Crimson\\crimson-agent.exe {args}"]
+             "echo crimson era %DATE% %TIME% > X:\\Crimson\\booted.txt"]
     if launch == "GAME":
-        lines.append('for %%d in (C D E F G H I) do if exist %%d:\\Crimson\\launch-game.cmd (set CRIMSON_GAME=%%d:& start "" /d %%d:\\ cmd /c %%d:\\Crimson\\launch-game.cmd)')
+        lines.append('for %%d in (C D E F G H I) do if exist %%d:\\Crimson\\launch-game.cmd (set CRIMSON_GAME=%%d:& call %%d:\\Crimson\\launch-game.cmd)')
     elif launch:
         lines.append(f'if exist "{launch}" start "" "{launch}"')
-    lines += [":idle", "ping -n 3600 127.0.0.1 >nul", "goto idle"]
     open(os.path.join(cdir, "start.cmd"), "w", newline="\r\n").write("\n".join(lines) + "\n")
     open(os.path.join(rw, "winpeshl.ini"), "w", newline="\r\n").write(
-        "[LaunchApps]\n%SYSTEMDRIVE%\\Crimson\\start.cmd\n")
+        "[LaunchApps]\n%SYSTEMROOT%\\System32\\wpeinit.exe\n"
+        f"%SYSTEMDRIVE%\\Crimson\\crimson-agent.exe, {args} --log X:\\Crimson\\agent.log"
+        " --run \"cmd.exe /c X:\\Crimson\\start.cmd\"\n")
+    # plain desktop: black for the game, the see-through key colour for the system
+    wall = os.path.join(rw, "winpe.jpg")
+    subprocess.run(["convert", "-size", "64x64", "xc:" + ("#FF00FF" if role == "system" else "#000000"),
+                    "-quality", "100", wall], check=True)
 
     cmds = [f'add "{ddir}" /', f'add "{rw}/pe-hives" /Windows/System32/config',
-            f'add "{cdir}" /Crimson', f'add "{rw}/winpeshl.ini" /Windows/System32/winpeshl.ini']
+            f'add "{cdir}" /Crimson', f'add "{rw}/winpeshl.ini" /Windows/System32/winpeshl.ini',
+            f'add "{wall}" /Windows/System32/winpe.jpg']
     # strip what neither partition uses
     pe_paths = wim_paths(wim, 1)
     lower = {p.lower(): p for p in pe_paths}

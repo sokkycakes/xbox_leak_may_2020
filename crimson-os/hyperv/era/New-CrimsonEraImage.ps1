@@ -154,24 +154,24 @@ function Build-Role([string] $Role) {
             $launch = "X:\Crimson\shell\$(Split-Path $SystemShell -Leaf)"
         }
     }
+    # start.cmd runs with no window (the agent starts it hidden), so only the
+    # game or the shell draws on the partition's screen.
     @"
 @echo off
-wpeinit
-wpeutil DisableFirewall
 net start AudioEndpointBuilder >nul 2>&1
 net start Audiosrv >nul 2>&1
-rem saves/settings disk (D:) and, for the game OS, the game disk
 for %%d in (C D E F G) do if exist %%d:\Crimson\data.tag set CRIMSON_DATA=%%d:
-start "" /min X:\Crimson\crimson-agent.exe $agentArgs
-$(if ($launch -eq 'GAME') { 'for %%d in (C D E F G H I) do if exist %%d:\Crimson\launch-game.cmd (set CRIMSON_GAME=%%d:& start "" /d %%d:\ cmd /c %%d:\Crimson\launch-game.cmd)' } elseif ($launch) { "if exist `"$launch`" start `"`" `"$launch`"" })
-rem keep the session alive; nothing is shown, the host owns the screen
-:idle
-ping -n 3600 127.0.0.1 >nul
-goto idle
+$(if ($launch -eq 'GAME') { 'for %%d in (C D E F G H I) do if exist %%d:\Crimson\launch-game.cmd (set CRIMSON_GAME=%%d:& call %%d:\Crimson\launch-game.cmd)' } elseif ($launch) { "if exist `"$launch`" start `"`" `"$launch`"" })
 "@ | Set-Content (Join-Path $crimson 'start.cmd') -Encoding ASCII
-    "[LaunchApps]`r`n%SYSTEMDRIVE%\Crimson\start.cmd`r`n" |
+    "[LaunchApps]`r`n%SYSTEMROOT%\System32\wpeinit.exe`r`n%SYSTEMDRIVE%\Crimson\crimson-agent.exe, $agentArgs --log X:\Crimson\agent.log --run `"cmd.exe /c X:\Crimson\start.cmd`"`r`n" |
         Set-Content (Join-Path $mount 'Windows\System32\winpeshl.ini') -Encoding ASCII
-
+    # plain desktop: black for the game, the see-through key colour for the system
+    Add-Type -AssemblyName System.Drawing
+    $bmp = New-Object System.Drawing.Bitmap 64, 64
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.Clear($(if ($Role -eq 'system') { [System.Drawing.Color]::FromArgb(255, 0, 255) } else { [System.Drawing.Color]::Black }))
+    $bmp.Save((Join-Path $mount 'Windows\System32\winpe.jpg'), [System.Drawing.Imaging.ImageFormat]::Jpeg)
+    $g.Dispose(); $bmp.Dispose()
     # 6. strip what neither partition uses
     $strip = @(
         'Windows\System32\Recovery', 'Windows\System32\WindowsPowerShell', 'Windows\System32\oobe',
