@@ -1,0 +1,3817 @@
+From 4ebf24b0d3fefac9d737f02273f44ac6bd22a635 Mon Sep 17 00:00:00 2001
+From: sokkycakes <6889324+sokkycakes@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 04:28:36 +0000
+Subject: [PATCH 2/3] soc/amd/cyan_skillfish: Add early support for AMD Cyan
+ Skillfish
+
+Cyan Skillfish is the cut-down PS5 APU used on the ASRock BC-250. AMD's
+AGESA calls it RBN and its modules Ariel. It pairs Zen 2 cores with a
+Raven/Picasso style NBIO and SMU v10.
+
+Neither FSP nor openSIL exists for this SoC. Like Picasso, though, its
+PSP trains DRAM (GDDR6 here) with the ABL blobs and copies the x86 reset
+image into DRAM, so the common non-CAR boot flow is reused unchanged.
+This starts from the Picasso code with everything FSP-specific removed:
+
+- PSP blobs, APCB and VBIOS come from the stock BIOS, extracted into
+  3rdparty/bc250_blobs. The PSP directory mirrors the stock one entry
+  for entry, and the reset image is stored uncompressed like the
+  stock one.
+- cbmem_top() comes from TOP_MEM, and DRAM above 4 GiB from TOP_MEM2,
+  both programmed by the ABL.
+- Silicon init after memory training (what AGESA's NBIO, fabric, CCX
+  and FCH modules do), PCIe lane descriptors and PCI IRQ routing are
+  left as TODOs. Only devices at fixed addresses are listed in the
+  chipset devicetree.
+
+AI-generated
+---
+ src/soc/amd/common/block/i2c/Kconfig          |   2 +-
+ src/soc/amd/common/block/lpc/Kconfig          |   2 +-
+ src/soc/amd/common/block/spi/Kconfig          |   2 +-
+ src/soc/amd/cyan_skillfish/Kconfig            | 201 ++++++++
+ src/soc/amd/cyan_skillfish/Makefile.mk        | 116 +++++
+ src/soc/amd/cyan_skillfish/acpi.c             |  89 ++++
+ src/soc/amd/cyan_skillfish/acpi/acp.asl       |  14 +
+ src/soc/amd/cyan_skillfish/acpi/globalnvs.asl |  17 +
+ src/soc/amd/cyan_skillfish/acpi/mmio.asl      | 433 ++++++++++++++++++
+ .../amd/cyan_skillfish/acpi/northbridge.asl   |  23 +
+ src/soc/amd/cyan_skillfish/acpi/pci.asl       |  32 ++
+ .../amd/cyan_skillfish/acpi/pci_int_defs.asl  |  65 +++
+ src/soc/amd/cyan_skillfish/acpi/pnot.asl      |   9 +
+ src/soc/amd/cyan_skillfish/acpi/soc.asl       |  50 ++
+ src/soc/amd/cyan_skillfish/aoac.c             |  30 ++
+ src/soc/amd/cyan_skillfish/cbmem.c            |  26 ++
+ src/soc/amd/cyan_skillfish/chip.c             |  63 +++
+ src/soc/amd/cyan_skillfish/chip.h             | 307 +++++++++++++
+ src/soc/amd/cyan_skillfish/chipset.cb         |  33 ++
+ src/soc/amd/cyan_skillfish/cpu.c              |  20 +
+ src/soc/amd/cyan_skillfish/early_fch.c        |  72 +++
+ src/soc/amd/cyan_skillfish/fch.c              | 215 +++++++++
+ src/soc/amd/cyan_skillfish/fw.cfg             |  31 ++
+ src/soc/amd/cyan_skillfish/gpio.c             |  38 ++
+ src/soc/amd/cyan_skillfish/i2c.c              |  83 ++++
+ .../include/soc/amd_pci_int_defs.h            |  64 +++
+ .../cyan_skillfish/include/soc/aoac_defs.h    |  27 ++
+ src/soc/amd/cyan_skillfish/include/soc/cpu.h  |   9 +
+ .../cyan_skillfish/include/soc/data_fabric.h  | 137 ++++++
+ src/soc/amd/cyan_skillfish/include/soc/gpio.h | 300 ++++++++++++
+ src/soc/amd/cyan_skillfish/include/soc/i2c.h  |  30 ++
+ .../amd/cyan_skillfish/include/soc/iomap.h    |  84 ++++
+ src/soc/amd/cyan_skillfish/include/soc/lpc.h  |  16 +
+ src/soc/amd/cyan_skillfish/include/soc/msr.h  |  24 +
+ src/soc/amd/cyan_skillfish/include/soc/nvs.h  |  24 +
+ .../amd/cyan_skillfish/include/soc/pci_devs.h | 121 +++++
+ src/soc/amd/cyan_skillfish/include/soc/smi.h  | 184 ++++++++
+ src/soc/amd/cyan_skillfish/include/soc/smu.h  |  23 +
+ .../amd/cyan_skillfish/include/soc/soc_chip.h |   8 +
+ .../cyan_skillfish/include/soc/southbridge.h  |  94 ++++
+ src/soc/amd/cyan_skillfish/mca.c              |  49 ++
+ src/soc/amd/cyan_skillfish/memmap.c           |  78 ++++
+ src/soc/amd/cyan_skillfish/pci_routing.c      |  15 +
+ src/soc/amd/cyan_skillfish/root_complex.c     | 118 +++++
+ src/soc/amd/cyan_skillfish/uart.c             |  34 ++
+ 45 files changed, 3409 insertions(+), 3 deletions(-)
+ create mode 100644 src/soc/amd/cyan_skillfish/Kconfig
+ create mode 100644 src/soc/amd/cyan_skillfish/Makefile.mk
+ create mode 100644 src/soc/amd/cyan_skillfish/acpi.c
+ create mode 100644 src/soc/amd/cyan_skillfish/acpi/acp.asl
+ create mode 100644 src/soc/amd/cyan_skillfish/acpi/globalnvs.asl
+ create mode 100644 src/soc/amd/cyan_skillfish/acpi/mmio.asl
+ create mode 100644 src/soc/amd/cyan_skillfish/acpi/northbridge.asl
+ create mode 100644 src/soc/amd/cyan_skillfish/acpi/pci.asl
+ create mode 100644 src/soc/amd/cyan_skillfish/acpi/pci_int_defs.asl
+ create mode 100644 src/soc/amd/cyan_skillfish/acpi/pnot.asl
+ create mode 100644 src/soc/amd/cyan_skillfish/acpi/soc.asl
+ create mode 100644 src/soc/amd/cyan_skillfish/aoac.c
+ create mode 100644 src/soc/amd/cyan_skillfish/cbmem.c
+ create mode 100644 src/soc/amd/cyan_skillfish/chip.c
+ create mode 100644 src/soc/amd/cyan_skillfish/chip.h
+ create mode 100644 src/soc/amd/cyan_skillfish/chipset.cb
+ create mode 100644 src/soc/amd/cyan_skillfish/cpu.c
+ create mode 100644 src/soc/amd/cyan_skillfish/early_fch.c
+ create mode 100644 src/soc/amd/cyan_skillfish/fch.c
+ create mode 100644 src/soc/amd/cyan_skillfish/fw.cfg
+ create mode 100644 src/soc/amd/cyan_skillfish/gpio.c
+ create mode 100644 src/soc/amd/cyan_skillfish/i2c.c
+ create mode 100644 src/soc/amd/cyan_skillfish/include/soc/amd_pci_int_defs.h
+ create mode 100644 src/soc/amd/cyan_skillfish/include/soc/aoac_defs.h
+ create mode 100644 src/soc/amd/cyan_skillfish/include/soc/cpu.h
+ create mode 100644 src/soc/amd/cyan_skillfish/include/soc/data_fabric.h
+ create mode 100644 src/soc/amd/cyan_skillfish/include/soc/gpio.h
+ create mode 100644 src/soc/amd/cyan_skillfish/include/soc/i2c.h
+ create mode 100644 src/soc/amd/cyan_skillfish/include/soc/iomap.h
+ create mode 100644 src/soc/amd/cyan_skillfish/include/soc/lpc.h
+ create mode 100644 src/soc/amd/cyan_skillfish/include/soc/msr.h
+ create mode 100644 src/soc/amd/cyan_skillfish/include/soc/nvs.h
+ create mode 100644 src/soc/amd/cyan_skillfish/include/soc/pci_devs.h
+ create mode 100644 src/soc/amd/cyan_skillfish/include/soc/smi.h
+ create mode 100644 src/soc/amd/cyan_skillfish/include/soc/smu.h
+ create mode 100644 src/soc/amd/cyan_skillfish/include/soc/soc_chip.h
+ create mode 100644 src/soc/amd/cyan_skillfish/include/soc/southbridge.h
+ create mode 100644 src/soc/amd/cyan_skillfish/mca.c
+ create mode 100644 src/soc/amd/cyan_skillfish/memmap.c
+ create mode 100644 src/soc/amd/cyan_skillfish/pci_routing.c
+ create mode 100644 src/soc/amd/cyan_skillfish/root_complex.c
+ create mode 100644 src/soc/amd/cyan_skillfish/uart.c
+
+diff --git a/src/soc/amd/common/block/i2c/Kconfig b/src/soc/amd/common/block/i2c/Kconfig
+index 91f69078..dfad2469 100644
+--- a/src/soc/amd/common/block/i2c/Kconfig
++++ b/src/soc/amd/common/block/i2c/Kconfig
+@@ -20,7 +20,7 @@ config SOC_AMD_COMMON_BLOCK_I23C_PAD_CTRL
+ 
+ config SOC_AMD_COMMON_BLOCK_I2C3_TPM_SHARED_WITH_PSP
+ 	bool
+-	depends on !SOC_AMD_PICASSO && !SOC_AMD_STONEYRIDGE
++	depends on !SOC_AMD_PICASSO && !SOC_AMD_CYAN_SKILLFISH && !SOC_AMD_STONEYRIDGE
+ 	default n
+ 	help
+ 	  Enable PSP I2C arbitration if there is I2C3 controller with TPM device
+diff --git a/src/soc/amd/common/block/lpc/Kconfig b/src/soc/amd/common/block/lpc/Kconfig
+index 0843b7f9..20685190 100644
+--- a/src/soc/amd/common/block/lpc/Kconfig
++++ b/src/soc/amd/common/block/lpc/Kconfig
+@@ -14,7 +14,7 @@ config SOC_AMD_COMMON_BLOCK_LPC_SPI_DMA
+ 	bool
+ 	select X86_CUSTOM_BOOTMEDIA
+ 	select SOC_AMD_COMMON_BLOCK_SPI_4DW_BURST
+-	depends on !SOC_AMD_PICASSO && !SOC_AMD_STONEYRIDGE
++	depends on !SOC_AMD_PICASSO && !SOC_AMD_CYAN_SKILLFISH && !SOC_AMD_STONEYRIDGE
+ 	help
+ 	  Select this option to enable SPI DMA support.
+ 
+diff --git a/src/soc/amd/common/block/spi/Kconfig b/src/soc/amd/common/block/spi/Kconfig
+index d49fd542..b46622fb 100644
+--- a/src/soc/amd/common/block/spi/Kconfig
++++ b/src/soc/amd/common/block/spi/Kconfig
+@@ -42,7 +42,7 @@ config SOC_AMD_COMMON_BLOCK_SPI_HID2
+ config SOC_AMD_COMMON_BLOCK_SPI_MMAP_USE_ROM3
+ 	bool
+ 	default y if ROM_SIZE > 0x01000000
+-	depends on !SOC_AMD_PICASSO && !SOC_AMD_STONEYRIDGE
++	depends on !SOC_AMD_PICASSO && !SOC_AMD_CYAN_SKILLFISH && !SOC_AMD_STONEYRIDGE
+ 	depends on !SOC_AMD_COMMON_BLOCK_LPC_SPI_DMA
+ 	depends on USE_X86_64_SUPPORT
+ 	# Enable X86_CUSTOM_BOOTMEDIA because the fast SPI controller
+diff --git a/src/soc/amd/cyan_skillfish/Kconfig b/src/soc/amd/cyan_skillfish/Kconfig
+new file mode 100644
+index 00000000..2fff96d0
+--- /dev/null
++++ b/src/soc/amd/cyan_skillfish/Kconfig
+@@ -0,0 +1,201 @@
++# SPDX-License-Identifier: GPL-2.0-only
++
++# AMD Cyan Skillfish ("RBN" in AMD's AGESA, "Ariel" in its module names):
++# the cut-down PS5 APU on the ASRock BC-250. Family 17h model 47h, Zen 2
++# cores with a Raven/Picasso-style NBIO and SMU v10.
++#
++# There is no FSP and no openSIL for this SoC. The PSP trains GDDR6 with the
++# ABL blobs taken from the stock BIOS and copies the x86 reset image into
++# DRAM, exactly like Picasso, so the non-CAR boot flow is reused as-is.
++# Everything AGESA does after memory init still has to be written.
++
++config SOC_AMD_CYAN_SKILLFISH
++	bool
++	select ACPI_SOC_NVS
++	select ARCH_X86
++	select BOOT_DEVICE_SUPPORTS_WRITES if BOOT_DEVICE_SPI_FLASH
++	select DRIVERS_USB_PCI_XHCI
++	select GENERIC_GPIO_LIB
++	select HAVE_ACPI_TABLES
++	select HAVE_CF9_RESET
++	select HAVE_SMI_HANDLER
++	select IDT_IN_EVERY_STAGE
++	select PARALLEL_MP_AP_WORK
++	select PROVIDES_ROM_SHARING
++	select RTC
++	select AMD_FWM_POSITION_820000_DEFAULT
++	select SOC_AMD_COMMON
++	select SOC_AMD_COMMON_BLOCK_ACPI
++	select SOC_AMD_COMMON_BLOCK_ACPIMMIO
++	select SOC_AMD_COMMON_BLOCK_ACPIMMIO_PM_IO_ACCESS
++	select SOC_AMD_COMMON_BLOCK_ACPI_CPU_POWER_STATE
++	select SOC_AMD_COMMON_BLOCK_ACPI_GPIO
++	select SOC_AMD_COMMON_BLOCK_ACPI_IVRS
++	select SOC_AMD_COMMON_BLOCK_ACPI_MADT
++	select SOC_AMD_COMMON_BLOCK_AOAC
++	select SOC_AMD_COMMON_BLOCK_APOB
++	select SOC_AMD_COMMON_BLOCK_BANKED_GPIOS
++	select SOC_AMD_COMMON_BLOCK_CONFIG
++	select SOC_AMD_COMMON_BLOCK_CPUFREQ_FAM17H_19H
++	select SOC_AMD_COMMON_BLOCK_DATA_FABRIC
++	select SOC_AMD_COMMON_BLOCK_DATA_FABRIC_DOMAIN
++	select SOC_AMD_COMMON_BLOCK_HAS_ESPI
++	select SOC_AMD_COMMON_BLOCK_I2C
++	select SOC_AMD_COMMON_BLOCK_I2C_PAD_CTRL
++	select SOC_AMD_COMMON_BLOCK_IOMMU
++	select SOC_AMD_COMMON_BLOCK_LPC
++	select SOC_AMD_COMMON_BLOCK_MCAX
++	select SOC_AMD_COMMON_BLOCK_NONCAR
++	select SOC_AMD_COMMON_BLOCK_PCI
++	select SOC_AMD_COMMON_BLOCK_PM
++	select SOC_AMD_COMMON_BLOCK_PM_CHIPSET_STATE_SAVE
++	select SOC_AMD_COMMON_BLOCK_PSP_GEN2
++	select SOC_AMD_COMMON_BLOCK_RESET
++	select SOC_AMD_COMMON_BLOCK_SMBUS
++	select SOC_AMD_COMMON_BLOCK_SMI
++	select SOC_AMD_COMMON_BLOCK_SMIHANDLER
++	select SOC_AMD_COMMON_BLOCK_SMM
++	select SOC_AMD_COMMON_BLOCK_SMU
++	select SOC_AMD_COMMON_BLOCK_SMU_SX_ENTRY
++	select SOC_AMD_COMMON_BLOCK_SPI
++	select SOC_AMD_COMMON_BLOCK_SVI2
++	select SOC_AMD_COMMON_BLOCK_TSC
++	select SOC_AMD_COMMON_BLOCK_UART
++	select SOC_AMD_COMMON_BLOCK_UCODE
++	select SOC_AMD_SUPPORTS_WARM_RESET
++	select SSE2
++	select X86_AMD_FIXED_MTRRS
++	select HAVE_X86_64_SUPPORT
++	help
++	  AMD Cyan Skillfish (BC-250) support
++
++if SOC_AMD_CYAN_SKILLFISH
++
++config CHIPSET_DEVICETREE
++	string
++	default "soc/amd/cyan_skillfish/chipset.cb"
++
++config EARLY_RESERVED_DRAM_BASE
++	hex
++	default 0x3ff0000
++	help
++	  Base of the DRAM coreboot uses before ramstage. The early stack sits
++	  here, directly below the APOB at 0x4000000 (where the stock BIOS has
++	  the ABL put it), followed by bootblock and romstage.
++
++config EARLYRAM_BSP_STACK_SIZE
++	hex
++	default 0x1000
++
++config PSP_APOB_DRAM_ADDRESS
++	hex
++	default 0x4000000
++	help
++	  Where the PSP copies the AGESA PSP Output Block. 0x4000000 is what
++	  the stock BC-250 BIOS directory uses, so the stock ABL is known to
++	  accept it.
++
++config PSP_APOB_DRAM_SIZE
++	hex
++	default 0x10000
++
++config PSP_SHAREDMEM_BASE
++	hex
++	default 0x0
++
++config PSP_SHAREDMEM_SIZE
++	hex
++	default 0x0
++
++config PRERAM_CBMEM_CONSOLE_SIZE
++	hex
++	default 0x1600
++
++config C_ENV_BOOTBLOCK_SIZE
++	hex
++	default 0x20000
++
++config ROMSTAGE_ADDR
++	hex
++	default 0x4050000
++
++config ROMSTAGE_SIZE
++	hex
++	default 0x70000
++
++config ECAM_MMCONF_BASE_ADDRESS
++	default 0xF8000000
++
++config ECAM_MMCONF_BUS_NUMBER
++	default 64
++
++config MAX_CPUS
++	int
++	default 16
++	help
++	  8 Zen 2 cores with SMT. Stock BC-250 boards ship with 6 enabled.
++
++config VGA_BIOS_ID
++	string
++	default "1002,13fe"
++
++config VGA_BIOS_FILE
++	string
++	default "3rdparty/bc250_blobs/vbios-113-AMDRBN-003.bin"
++
++config S3_VGA_ROM_RUN
++	bool
++	default n
++
++config SERIRQ_CONTINUOUS_MODE
++	bool
++	default n
++
++config CONSOLE_UART_BASE_ADDRESS
++	depends on (CONSOLE_SERIAL || CONSOLE_SERIAL_RUNTIME) && AMD_SOC_CONSOLE_UART
++	hex
++	default 0xfedc9000 if UART_FOR_CONSOLE = 0
++	default 0xfedca000 if UART_FOR_CONSOLE = 1
++	default 0xfedce000 if UART_FOR_CONSOLE = 2
++	default 0xfedcf000 if UART_FOR_CONSOLE = 3
++
++config SMM_TSEG_SIZE
++	hex
++	default 0x800000 if HAVE_SMI_HANDLER
++	default 0x0
++
++config SMM_RESERVED_SIZE
++	hex
++	default 0x180000
++
++config SMM_MODULE_STACK_SIZE
++	hex
++	default 0x800
++
++config DRIVERS_I2C_DESIGNWARE_CLOCK_MHZ
++	int
++	default 150
++
++config DISABLE_SPI_FLASH_ROM_SHARING
++	def_bool n
++
++config DISABLE_KEYBOARD_RESET_PIN
++	bool
++
++menu "PSP Configuration Options"
++
++config AMDFW_CONFIG_FILE
++	string
++	default "src/soc/amd/cyan_skillfish/fw.cfg"
++
++config CYAN_SKILLFISH_BLOBS_DIR
++	string "Directory with the PSP blobs extracted from a stock BIOS"
++	default "3rdparty/bc250_blobs"
++	help
++	  Output directory of extract_stock_blobs.py. coreboot ships no AMD
++	  blobs for this SoC; every PSP entry, the APCB and the VBIOS are
++	  copied verbatim from ASRock's BC-250 BIOS.
++
++endmenu
++
++endif # SOC_AMD_CYAN_SKILLFISH
+diff --git a/src/soc/amd/cyan_skillfish/Makefile.mk b/src/soc/amd/cyan_skillfish/Makefile.mk
+new file mode 100644
+index 00000000..b6a43a29
+--- /dev/null
++++ b/src/soc/amd/cyan_skillfish/Makefile.mk
+@@ -0,0 +1,116 @@
++# SPDX-License-Identifier: BSD-3-Clause
++
++ifeq ($(CONFIG_SOC_AMD_CYAN_SKILLFISH),y)
++
++all-y += aoac.c
++all-y += i2c.c
++
++all_x86-y += gpio.c
++all_x86-y += uart.c
++
++bootblock-y += early_fch.c
++
++
++ramstage-$(CONFIG_HAVE_ACPI_TABLES) += acpi.c
++romstage-y += cbmem.c
++ramstage-y += cbmem.c
++ramstage-y += chip.c
++ramstage-y += cpu.c
++ramstage-y += fch.c
++ramstage-y += mca.c
++ramstage-y += pci_routing.c
++ramstage-y += memmap.c
++ramstage-y += root_complex.c
++
++ifeq ($(CONFIG_DEBUG_SMI),y)
++smm-y += uart.c
++endif
++smm-y += gpio.c
++smm-y += root_complex.c
++
++CPPFLAGS_common += -I$(src)/soc/amd/cyan_skillfish/include
++CPPFLAGS_common += -I$(src)/soc/amd/cyan_skillfish/acpi
++
++#
++# PSP image. Everything except the x86 reset image is copied verbatim from
++# the stock BC-250 BIOS (see fw.cfg and extract_stock_blobs.py), and the
++# directory layout mirrors the stock one:
++#   EFS -> one $PSP directory -> one $BHD directory
++#   $BHD: APCB (0x60), APOB (0x61), reset image (0x62), APOB NV (0x63)
++# The stock reset image is stored uncompressed, so ours is too.
++#
++
++BC250_BLOBS=$(call strip_quotes,$(CONFIG_CYAN_SKILLFISH_BLOBS_DIR))
++
++# type = 0x60
++PSP_APCB_FILES=$(BC250_BLOBS)/APCB.bin
++
++# type = 0x61
++PSP_APOB_BASE=$(CONFIG_PSP_APOB_DRAM_ADDRESS)
++
++# type = 0x62
++PSP_BIOSBIN_FILE=$(obj)/amd_biospsp.img
++PSP_ELF_FILE=$(objcbfs)/bootblock_fixed_data.elf
++PSP_BIOSBIN_SIZE=$(shell $(READELF_bootblock) -Wl $(PSP_ELF_FILE) | grep LOAD | awk '{print $$5}')
++PSP_BIOSBIN_DEST=$(shell $(READELF_bootblock) -Wl $(PSP_ELF_FILE) | grep LOAD | awk '{print $$3}')
++
++# type = 0x63 - the stock image has an (erased) APOB NV copy; keep the entry.
++APOB_NV_SIZE=$(call get_fmap_value,FMAP_SECTION_RW_MRC_CACHE_SIZE)
++APOB_NV_BASE=$(call get_fmap_value,FMAP_SECTION_RW_MRC_CACHE_START)
++
++add_opt_prefix=$(if $(call strip_quotes, $(1)), $(2) $(call strip_quotes, $(1)), )
++
++OPT_PSP_APCB_FILES=$(call add_opt_prefix, $(PSP_APCB_FILES), --instance 0 --apcb)
++OPT_APOB_ADDR=$(call add_opt_prefix, $(PSP_APOB_BASE), --apob-base)
++OPT_PSP_BIOSBIN_FILE=$(call add_opt_prefix, $(PSP_BIOSBIN_FILE), --bios-bin)
++OPT_PSP_BIOSBIN_DEST=$(call add_opt_prefix, $(PSP_BIOSBIN_DEST), --bios-bin-dest)
++OPT_PSP_BIOSBIN_SIZE=$(call add_opt_prefix, $(PSP_BIOSBIN_SIZE), --bios-uncomp-size)
++OPT_APOB_NV_SIZE=$(call add_opt_prefix, $(APOB_NV_SIZE), --apob-nv-size)
++OPT_APOB_NV_BASE=$(call add_opt_prefix, $(APOB_NV_BASE), --apob-nv-base)
++OPT_EFS_SPI_READ_MODE=$(call add_opt_prefix, $(CONFIG_EFS_SPI_READ_MODE), --spi-read-mode)
++OPT_EFS_SPI_SPEED=$(call add_opt_prefix, $(CONFIG_EFS_SPI_SPEED), --spi-speed)
++OPT_EFS_SPI_MICRON_FLAG=$(call add_opt_prefix, $(CONFIG_EFS_SPI_MICRON_FLAG), --spi-micron-flag)
++
++# The stock EFS also points at an "IMC" and an xHCI blob.
++OPT_IMC_FILE=--imc $(BC250_BLOBS)/Imc.bin
++OPT_XHCI_FILE=--xhci $(BC250_BLOBS)/Xhci.bin
++
++$(obj)/amdfw.rom:	$(call strip_quotes, $(PSP_BIOSBIN_FILE)) \
++			$(PSP_APCB_FILES) \
++			$(AMDFWTOOL) \
++			$(obj)/fmap_config.h \
++			$(objcbfs)/bootblock_fixed_data.elf # this target also creates the .map file
++	$(if $(wildcard $(PSP_APCB_FILES)), ,$(error $(PSP_APCB_FILES) missing: run extract_stock_blobs.py on a stock BC-250 BIOS first))
++	rm -f $@
++	@printf "    AMDFWTOOL  $(subst $(obj)/,,$(@))\n"
++	$(AMDFWTOOL) \
++		$(OPT_PSP_APCB_FILES) \
++		$(OPT_APOB_ADDR) \
++		$(OPT_DEBUG_AMDFWTOOL) \
++		$(OPT_PSP_BIOSBIN_FILE) \
++		$(OPT_PSP_BIOSBIN_DEST) \
++		$(OPT_PSP_BIOSBIN_SIZE) \
++		--bios-bin-uncomp \
++		$(OPT_APOB_NV_SIZE) \
++		$(OPT_APOB_NV_BASE) \
++		$(OPT_IMC_FILE) \
++		$(OPT_XHCI_FILE) \
++		--use-pspsecureos \
++		$(OPT_EFS_SPI_READ_MODE) \
++		$(OPT_EFS_SPI_SPEED) \
++		$(OPT_EFS_SPI_MICRON_FLAG) \
++		--config $(CONFIG_AMDFW_CONFIG_FILE) \
++		--flashsize $(CONFIG_ROM_SIZE) \
++		--location $(CONFIG_AMD_FWM_POSITION) \
++		--output $@
++
++# Copy the first PT_LOAD segment of the bootblock ELF out uncompressed. The
++# PSP copies it to PSP_BIOSBIN_DEST and releases the x86 at
++# PSP_BIOSBIN_DEST + PSP_BIOSBIN_SIZE - 0x10.
++$(PSP_BIOSBIN_FILE): $(PSP_ELF_FILE) $(AMDCOMPRESS)
++	rm -f $@
++	@printf "    AMDCOMPRS  $(subst $(obj)/,,$(@))\n"
++	$(AMDCOMPRESS) --infile $(PSP_ELF_FILE) --outfile $@ --elfcopy \
++		--maxsize $(PSP_BIOSBIN_SIZE)
++
++endif # ($(CONFIG_SOC_AMD_CYAN_SKILLFISH),y)
+diff --git a/src/soc/amd/cyan_skillfish/acpi.c b/src/soc/amd/cyan_skillfish/acpi.c
+new file mode 100644
+index 00000000..90e57dab
+--- /dev/null
++++ b/src/soc/amd/cyan_skillfish/acpi.c
+@@ -0,0 +1,89 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++
++/*
++ * ACPI - create the Fixed ACPI Description Tables (FADT)
++ */
++
++#include <console/console.h>
++#include <acpi/acpi.h>
++#include <acpi/acpigen.h>
++#include <arch/ioapic.h>
++#include <arch/smp/mpspec.h>
++#include <cpu/amd/cpuid.h>
++#include <device/device.h>
++#include <device/pci.h>
++#include <gpio.h>
++#include <amdblocks/acpimmio.h>
++#include <amdblocks/acpi.h>
++#include <amdblocks/chip.h>
++#include <amdblocks/cpu.h>
++#include <amdblocks/ioapic.h>
++#include <soc/pci_devs.h>
++#include <soc/southbridge.h>
++#include "chip.h"
++
++/*
++ * Reference section 5.2.9 Fixed ACPI Description Table (FADT)
++ * in the ACPI 3.0b specification.
++ */
++void acpi_fill_fadt(acpi_fadt_t *fadt)
++{
++	const struct soc_amd_common_config *cfg = soc_get_common_config();
++
++	printk(BIOS_DEBUG, "pm_base: 0x%04x\n", ACPI_IO_BASE);
++
++
++	fadt->pm1a_evt_blk = ACPI_PM_EVT_BLK;
++	fadt->pm1a_cnt_blk = ACPI_PM1_CNT_BLK;
++	fadt->pm_tmr_blk = ACPI_PM_TMR_BLK;
++	fadt->gpe0_blk = ACPI_GPE0_BLK;
++
++	fadt->pm1_evt_len = 4;	/* 32 bits */
++	fadt->pm1_cnt_len = 2;	/* 16 bits */
++	fadt->pm_tmr_len = 4;	/* 32 bits */
++	fadt->gpe0_blk_len = 8;	/* 64 bits */
++
++	fill_fadt_extended_pm_io(fadt);
++
++	fadt->iapc_boot_arch = cfg->fadt_boot_arch; /* legacy free default */
++	fadt->flags |=	ACPI_FADT_WBINVD | /* See table 5-34 ACPI 6.3 spec */
++			ACPI_FADT_C1_SUPPORTED |
++			ACPI_FADT_SLEEP_BUTTON |
++			ACPI_FADT_S4_RTC_WAKE |
++			ACPI_FADT_32BIT_TIMER |
++			ACPI_FADT_PCI_EXPRESS_WAKE |
++			ACPI_FADT_PLATFORM_CLOCK |
++			ACPI_FADT_S4_RTC_VALID |
++			ACPI_FADT_REMOTE_POWER_ON;
++	fadt->flags |= cfg->fadt_flags; /* additional board-specific flags */
++}
++
++unsigned long soc_acpi_write_tables(const struct device *device, unsigned long current,
++				    acpi_rsdp_t *rsdp)
++{
++	/* IVRS */
++	current = acpi_add_ivrs_table(current, rsdp);
++
++	/* Add SRAT, MSCT, SLIT if needed in the future */
++
++	return current;
++}
++
++const acpi_cstate_t cstate_cfg_table[] = {
++	[0] = {
++		.ctype = 1,
++		.latency = 1,
++		.power = 0,
++	},
++	[1] = {
++		.ctype = 2,
++		.latency = 400,
++		.power = 0,
++	},
++};
++
++const acpi_cstate_t *get_cstate_config_data(size_t *size)
++{
++	*size = ARRAY_SIZE(cstate_cfg_table);
++	return cstate_cfg_table;
++}
+diff --git a/src/soc/amd/cyan_skillfish/acpi/acp.asl b/src/soc/amd/cyan_skillfish/acpi/acp.asl
+new file mode 100644
+index 00000000..184fe157
+--- /dev/null
++++ b/src/soc/amd/cyan_skillfish/acpi/acp.asl
+@@ -0,0 +1,14 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/* ACP Audio Configuration */
++Scope (\_SB.PCI0.GP41) {
++	Device (ACPD) {
++		/* Device addressing for ACP (Audio Coprocessor) */
++		Name (_ADR, 0x05)  /* Device 0, Function 5 */
++
++		Name (STAT, 0x3) /* Decoding Resources, Hide from UI */
++		Method (_STA, 0x0, NotSerialized)
++		{
++			Return (STAT)
++		}
++	}
++}
+diff --git a/src/soc/amd/cyan_skillfish/acpi/globalnvs.asl b/src/soc/amd/cyan_skillfish/acpi/globalnvs.asl
+new file mode 100644
+index 00000000..35c35680
+--- /dev/null
++++ b/src/soc/amd/cyan_skillfish/acpi/globalnvs.asl
+@@ -0,0 +1,17 @@
++/* SPDX-License-Identifier: GPL-2.0-or-later */
++
++/*
++ * NOTE: The layout of the GNVS structure below must match the layout in
++ * soc/amd/cyan_skillfish/include/soc/nvs.h !!!
++ *
++ */
++
++Field (GNVS, ByteAcc, NoLock, Preserve)
++{
++	/* Miscellaneous */
++	PM1I,	64,	// 0x00 - 0x07 - System Wake Source - PM1 Index
++	GPEI,	64,	// 0x08 - 0x0f - GPE Wake Source
++	TMPS,	8,	// 0x10 - Temperature Sensor ID
++	TCRT,	8,	// 0x11 - Critical Threshold
++	TPSV,	8,	// 0x12 - Passive Threshold
++}
+diff --git a/src/soc/amd/cyan_skillfish/acpi/mmio.asl b/src/soc/amd/cyan_skillfish/acpi/mmio.asl
+new file mode 100644
+index 00000000..d20f9ccb
+--- /dev/null
++++ b/src/soc/amd/cyan_skillfish/acpi/mmio.asl
+@@ -0,0 +1,433 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++
++#include <soc/amd/common/acpi/aoac.asl>
++#include <soc/aoac_defs.h>
++#include <soc/gpio.h>
++#include <soc/iomap.h>
++#include <amdblocks/acpimmio_map.h>
++
++Device (AAHB)
++{
++	Name (_HID, "AAHB0000")
++	Name (_UID, 0x0)
++	Name (_CRS, ResourceTemplate()
++	{
++		Memory32Fixed (ReadWrite, ALINK_AHB_ADDRESS, 0x1000)
++	})
++	Method (_STA, 0x0, NotSerialized)
++	{
++		Return (0x0b)
++	}
++}
++
++Device (GPIO)
++{
++	Name (_HID, GPIO_DEVICE_NAME)
++	Name (_CID, GPIO_DEVICE_NAME)
++	Name (_UID, 0)
++	Name (_DDN, GPIO_DEVICE_DESC)
++
++	Method (_CRS, 0) {
++		Local0 = ResourceTemplate() {
++			Interrupt (
++				ResourceConsumer,
++				Level,
++				ActiveLow,
++				Shared, , , IRQR)
++			{ 0 }
++			Memory32Fixed (ReadWrite, ACPIMMIO_GPIO0_BASE, 0x400)
++		}
++		CreateDWordField (Local0, IRQR._INT, IRQN)
++		If (PICM) {
++			IRQN = IGPI
++		} Else {
++			IRQN = PGPI
++		}
++		If (IRQN == 0x1f) {
++			Return (ResourceTemplate() {
++				Memory32Fixed (ReadWrite, ACPIMMIO_GPIO0_BASE, 0x400)
++			})
++		} Else {
++			Return (Local0)
++		}
++	}
++
++	Method (_STA, 0x0, NotSerialized)
++	{
++		Return (0x0F)
++	}
++}
++
++Device (MMC0)
++{
++	Name (_HID, "AMDI0040")
++	Name (_UID, 0x0)
++	Method (_CRS, 0) {
++		Local0 = ResourceTemplate() {
++			Interrupt (
++				ResourceConsumer,
++				Level,
++				ActiveLow,
++				Exclusive, , , IRQR)
++			{ 0 }
++			Memory32Fixed (ReadWrite, APU_EMMC_BASE, 0x1000)
++		}
++		CreateDWordField (Local0, IRQR._INT, IRQN)
++		If (PICM) {
++			IRQN = IMMC
++		} Else {
++			IRQN = PMMC
++		}
++		If (IRQN == 0x1f) {
++			Return (ResourceTemplate(){
++				Memory32Fixed (ReadWrite, APU_EMMC_BASE, 0x1000)
++			})
++		} Else {
++			Return (Local0)
++		}
++	}
++
++	Name (STAT, 0x0)
++	Method (_STA, 0x0, NotSerialized)
++	{
++		Return (STAT)
++	}
++
++	Device (CARD)
++	{
++		Name (_ADR, 0x00000008)
++		Method (_RMV, 0, NotSerialized)
++		{
++			Return (0)
++		}
++	}
++}
++
++Device (FUR0)
++{
++	Name (_HID, "AMDI0020")
++	Name (_UID, 0x0)
++	Method (_CRS, 0) {
++		Local0 = ResourceTemplate() {
++			Interrupt (
++				ResourceConsumer,
++				Edge,
++				ActiveHigh,
++				Exclusive, , , IRQR)
++			{ 0 }
++			Memory32Fixed (ReadWrite, APU_UART0_BASE, 0x1000)
++			Memory32Fixed (ReadWrite, APU_DMAC0_BASE, 0x1000)
++		}
++		CreateDWordField (Local0, IRQR._INT, IRQN)
++		If (PICM) {
++			IRQN = IUA0
++		} Else {
++			IRQN = PUA0
++		}
++		If (IRQN == 0x1f) {
++			Return (ResourceTemplate() {
++				Memory32Fixed (ReadWrite, APU_UART0_BASE, 0x1000)
++				Memory32Fixed (ReadWrite, APU_DMAC0_BASE, 0x1000)
++			})
++		} Else {
++			Return (Local0)
++		}
++	}
++
++	Name (STAT, 0x0)
++	Method (_STA, 0x0, NotSerialized)
++	{
++		Return (STAT)
++	}
++
++	AOAC_DEVICE(FCH_AOAC_DEV_UART0, 0)
++}
++
++Device (FUR1) {
++	Name (_HID, "AMDI0020")
++	Name (_UID, 0x1)
++	Method (_CRS, 0) {
++		Local0 = ResourceTemplate() {
++			Interrupt (
++				ResourceConsumer,
++				Edge,
++				ActiveHigh,
++				Exclusive, , , IRQR)
++			{ 0 }
++			Memory32Fixed (ReadWrite, APU_UART1_BASE, 0x1000)
++			Memory32Fixed (ReadWrite, APU_DMAC1_BASE, 0x1000)
++		}
++		CreateDWordField (Local0, IRQR._INT, IRQN)
++		If (PICM) {
++			IRQN = IUA1
++		} Else {
++			IRQN = PUA1
++		}
++		If (IRQN == 0x1f) {
++			Return (ResourceTemplate() {
++				Memory32Fixed (ReadWrite, APU_UART1_BASE, 0x1000)
++				Memory32Fixed (ReadWrite, APU_DMAC1_BASE, 0x1000)
++			})
++		} Else {
++			Return (Local0)
++		}
++	}
++
++	Name (STAT, 0x0)
++	Method (_STA, 0x0, NotSerialized)
++	{
++		Return (STAT)
++	}
++
++	AOAC_DEVICE(FCH_AOAC_DEV_UART1, 0)
++}
++
++Device (FUR2) {
++	Name (_HID, "AMDI0020")
++	Name (_UID, 0x2)
++	Method (_CRS, 0) {
++		Local0 = ResourceTemplate() {
++			Interrupt (
++				ResourceConsumer,
++				Edge,
++				ActiveHigh,
++				Exclusive, , , IRQR)
++			{ 0 }
++			Memory32Fixed (ReadWrite, APU_UART2_BASE, 0x1000)
++			Memory32Fixed (ReadWrite, APU_DMAC2_BASE, 0x1000)
++		}
++		CreateDWordField (Local0, IRQR._INT, IRQN)
++		If (PICM) {
++			IRQN = IUA2
++		} Else {
++			IRQN = PUA2
++		}
++		If (IRQN == 0x1f) {
++			Return (ResourceTemplate() {
++				Memory32Fixed (ReadWrite, APU_UART2_BASE, 0x1000)
++				Memory32Fixed (ReadWrite, APU_DMAC2_BASE, 0x1000)
++			})
++		} Else {
++			Return (Local0)
++		}
++	}
++
++	Name (STAT, 0x0)
++	Method (_STA, 0x0, NotSerialized)
++	{
++		Return (STAT)
++	}
++
++	AOAC_DEVICE(FCH_AOAC_DEV_UART2, 0)
++}
++
++Device (FUR3) {
++	Name (_HID, "AMDI0020")
++	Name (_UID, 0x3)
++	Method (_CRS, 0) {
++		Local0 = ResourceTemplate() {
++			Interrupt (
++				ResourceConsumer,
++				Edge,
++				ActiveHigh,
++				Exclusive, , , IRQR)
++			{ 0 }
++			Memory32Fixed (ReadWrite, APU_UART3_BASE, 0x1000)
++			Memory32Fixed (ReadWrite, APU_DMAC3_BASE, 0x1000)
++		}
++		CreateDWordField (Local0, IRQR._INT, IRQN)
++		If (PICM) {
++			IRQN = IUA3
++		} Else {
++			IRQN = PUA3
++		}
++		If (IRQN == 0x1f) {
++			Return (ResourceTemplate() {
++				Memory32Fixed (ReadWrite, APU_UART3_BASE, 0x1000)
++				Memory32Fixed (ReadWrite, APU_DMAC3_BASE, 0x1000)
++			})
++		} Else {
++			Return (Local0)
++		}
++	}
++
++	Name (STAT, 0x0)
++	Method (_STA, 0x0, NotSerialized)
++	{
++		Return (STAT)
++	}
++
++	AOAC_DEVICE(FCH_AOAC_DEV_UART3, 0)
++}
++
++#if CONFIG(PSP_LOAD_MP2_FW)
++Device (I2C0) {
++	Name (_HID, "AMDI0011")
++	Name (_UID, 0x0)
++	Method (_CRS, 0) {
++		Local0 = ResourceTemplate() {
++			Interrupt (
++				ResourceConsumer,
++				Edge,
++				ActiveHigh,
++				Exclusive, , , IRQR)
++			{ 0 }
++			Memory32Fixed (ReadWrite, APU_I2C0_BASE, 0x1000)
++		}
++		CreateDWordField (Local0, IRQR._INT, IRQN)
++		If (PICM) {
++			IRQN = II20
++		} Else {
++			IRQN = PI20
++		}
++		If (IRQN == 0x1f) {
++			Return (ResourceTemplate() {
++				Memory32Fixed (ReadWrite, APU_I2C0_BASE, 0x1000)
++			})
++		} Else {
++			Return (Local0)
++		}
++	}
++
++	Name (STAT, 0x0)
++	Method (_STA, 0x0, NotSerialized)
++	{
++		Return (STAT)
++	}
++
++	AOAC_DEVICE(5, 0)
++}
++
++Device (I2C1) {
++	Name (_HID, "AMDI0011")
++	Name (_UID, 0x1)
++	Method (_CRS, 0) {
++		Local0 = ResourceTemplate() {
++			Interrupt (
++				ResourceConsumer,
++				Edge,
++				ActiveHigh,
++				Exclusive, , , IRQR)
++			{ 0 }
++			Memory32Fixed (ReadWrite, APU_I2C1_BASE, 0x1000)
++		}
++		CreateDWordField (Local0, IRQR._INT, IRQN)
++		If (PICM) {
++			IRQN = II21
++		} Else {
++			IRQN = PI21
++		}
++		If (IRQN == 0x1f) {
++			Return (ResourceTemplate() {
++				Memory32Fixed (ReadWrite, APU_I2C1_BASE, 0x1000)
++			})
++		} Else {
++			Return (Local0)
++		}
++	}
++
++	Name (STAT, 0x0)
++	Method (_STA, 0x0, NotSerialized)
++	{
++		Return (STAT)
++	}
++
++	AOAC_DEVICE(6, 0)
++}
++#endif /* CONFIG(PSP_LOAD_MP2_FW) */
++
++Device (I2C2) {
++	Name (_HID, "AMDI0010")
++	Name (_UID, 0x2)
++	Method (_CRS, 0) {
++		Local0 = ResourceTemplate() {
++			Interrupt (
++				ResourceConsumer,
++				Edge,
++				ActiveHigh,
++				Exclusive, , , IRQR)
++			{ 0 }
++			Memory32Fixed (ReadWrite, APU_I2C2_BASE, 0x1000)
++		}
++		CreateDWordField (Local0, IRQR._INT, IRQN)
++		If (PICM) {
++			IRQN = II22
++		} Else {
++			IRQN = PI22
++		}
++		If (IRQN == 0x1f) {
++			Return (ResourceTemplate() {
++				Memory32Fixed (ReadWrite, APU_I2C2_BASE, 0x1000)
++			})
++		} Else {
++			Return (Local0)
++		}
++	}
++
++	Name (STAT, 0x0)
++	Method (_STA, 0x0, NotSerialized)
++	{
++		Return (STAT)
++	}
++
++	AOAC_DEVICE(FCH_AOAC_DEV_I2C2, 0)
++}
++
++Device (I2C3)
++{
++	Name (_HID, "AMDI0010")
++	Name (_UID, 0x3)
++	Method (_CRS, 0) {
++		Local0 = ResourceTemplate() {
++			Interrupt (
++				ResourceConsumer,
++				Edge,
++				ActiveHigh,
++				Exclusive, , , IRQR)
++			{ 0 }
++			Memory32Fixed (ReadWrite, APU_I2C3_BASE, 0x1000)
++		}
++		CreateDWordField (Local0, IRQR._INT, IRQN)
++		If (PICM) {
++			IRQN = II23
++		} Else {
++			IRQN = PI23
++		}
++		If (IRQN == 0x1f) {
++			Return (ResourceTemplate() {
++				Memory32Fixed (ReadWrite, APU_I2C3_BASE, 0x1000)
++			})
++		} Else {
++			Return (Local0)
++		}
++	}
++
++	Name (STAT, 0x0)
++	Method (_STA, 0x0, NotSerialized)
++	{
++		Return (STAT)
++	}
++
++	AOAC_DEVICE(FCH_AOAC_DEV_I2C3, 0)
++}
++
++Device (MISC)
++{
++	Name (_HID, "AMD0040")
++	Name (_UID, 0x3)
++	Name (_CRS, ResourceTemplate() {
++		Memory32Fixed (ReadWrite, ACPIMMIO_MISC_BASE, 0x100)
++	})
++	Name (_DSD, Package ()
++	{
++		ToUUID ("daffd814-6eba-4d8c-8a91-bc9bbf4aa301"),
++		Package ()
++		{
++			Package () { "is-rv", 1 },
++		},
++	})
++	Method (_STA, 0x0, NotSerialized)
++	{
++		Return (0x0b)
++	}
++}
+diff --git a/src/soc/amd/cyan_skillfish/acpi/northbridge.asl b/src/soc/amd/cyan_skillfish/acpi/northbridge.asl
+new file mode 100644
+index 00000000..bec9b46d
+--- /dev/null
++++ b/src/soc/amd/cyan_skillfish/acpi/northbridge.asl
+@@ -0,0 +1,23 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++
++/* Describe the Northbridge devices */
++
++/* PCI Routing Table */
++Name(PR0, Package(){
++	/* Bus 0, Dev 0x00 - F2: IOMMU */
++	Package() { 0x0000FFFF, 0, INTA, 0 },
++	Package() { 0x0000FFFF, 0, INTB, 0 },
++	Package() { 0x0000FFFF, 0, INTC, 0 },
++	Package() { 0x0000FFFF, 0, INTD, 0 },
++
++	/* Bus 0, Dev 0x14 - F[0:SMBus 3:LPC] */
++	Package() { 0x0014FFFF, 0, INTA, 0 },
++	Package() { 0x0014FFFF, 1, INTB, 0 },
++	Package() { 0x0014FFFF, 2, INTC, 0 },
++	Package() { 0x0014FFFF, 3, INTD, 0 },
++})
++
++Method(_PRT,0, NotSerialized)
++{
++	Return(PR0)
++}
+diff --git a/src/soc/amd/cyan_skillfish/acpi/pci.asl b/src/soc/amd/cyan_skillfish/acpi/pci.asl
+new file mode 100644
+index 00000000..4f119fe4
+--- /dev/null
++++ b/src/soc/amd/cyan_skillfish/acpi/pci.asl
+@@ -0,0 +1,32 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++
++#include <soc/amd/common/acpi/pci_template.asl>
++
++/*
++ * Keep name in sync with SSDT generator pcie_gpp_acpi_name()!
++ * Currently the name is hex representation of dev->path.pci.devfn.
++ */
++
++/* Root complex */
++Device (GNB)
++{
++	Name (_ADR, 0)
++	Method (_STA, 0, NotSerialized)
++	{
++		Return (0x0F)
++	}
++}
++
++/* PCIe GPP */
++ACPI_PCI_DEV(GP09, 1, 1)
++ACPI_PCI_DEV(GP0A, 1, 2)
++ACPI_PCI_DEV(GP0B, 1, 3)
++ACPI_PCI_DEV(GP0C, 1, 4)
++ACPI_PCI_DEV(GP0D, 1, 5)
++ACPI_PCI_DEV(GP0E, 1, 6)
++ACPI_PCI_DEV(GP0F, 1, 7)
++
++/* Internal GPP bridges */
++ACPI_PCI_DEV(GP41, 8, 1)
++ACPI_PCI_DEV(GP42, 8, 2)
++ACPI_PCI_DEV(GP43, 8, 3)
+diff --git a/src/soc/amd/cyan_skillfish/acpi/pci_int_defs.asl b/src/soc/amd/cyan_skillfish/acpi/pci_int_defs.asl
+new file mode 100644
+index 00000000..0e1a5b63
+--- /dev/null
++++ b/src/soc/amd/cyan_skillfish/acpi/pci_int_defs.asl
+@@ -0,0 +1,65 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++
++/* PCI IRQ mapping registers, C00h-C01h. */
++OperationRegion(PRQM, SystemIO, 0x00000c00, 0x00000002)
++	Field(PRQM, ByteAcc, NoLock, Preserve) {
++	PRQI, 0x00000008,
++	PRQD, 0x00000008,  /* Offset: 1h */
++}
++IndexField(PRQI, PRQD, ByteAcc, NoLock, Preserve) {
++	PIRA, 0x00000008,	/* Index 0: INTA */
++	PIRB, 0x00000008,	/* Index 1: INTB */
++	PIRC, 0x00000008,	/* Index 2: INTC */
++	PIRD, 0x00000008,	/* Index 3: INTD */
++	PIRE, 0x00000008,	/* Index 4: INTE */
++	PIRF, 0x00000008,	/* Index 5: INTF */
++	PIRG, 0x00000008,	/* Index 6: INTG */
++	PIRH, 0x00000008,	/* Index 7: INTH */
++
++	Offset (0x43),
++	PMMC, 0x00000008,	/* Index 0x43: eMMC */
++
++	Offset (0x62),
++	PGPI, 0x00000008,	/* Index 0x62: GPIO */
++
++	Offset (0x70),
++	PI20, 0x00000008,	/* Index 0x70: I2C0 */
++	PI21, 0x00000008,	/* Index 0x71: I2C1 */
++	PI22, 0x00000008,	/* Index 0x72: I2C2 */
++	PI23, 0x00000008,	/* Index 0x73: I2C3 */
++	PUA0, 0x00000008,	/* Index 0x74: UART0 */
++	PUA1, 0x00000008,	/* Index 0x75: UART1 */
++	PI24, 0x00000008,	/* Index 0x76: I2C4 */
++	PI25, 0x00000008,	/* Index 0x77: I2C5 */
++	PUA2, 0x00000008,	/* Index 0x78: UART2 */
++	PUA3, 0x00000008,	/* Index 0x79: UART3 */
++
++	/* IO-APIC IRQs */
++	Offset (0x80),
++	IORA, 0x00000008,	/* Index 0x80: INTA */
++	IORB, 0x00000008,	/* Index 0x81: INTB */
++	IORC, 0x00000008,	/* Index 0x82: INTC */
++	IORD, 0x00000008,	/* Index 0x83: INTD */
++	IORE, 0x00000008,	/* Index 0x84: INTE */
++	IORF, 0x00000008,	/* Index 0x85: INTF */
++	IORG, 0x00000008,	/* Index 0x86: INTG */
++	IORH, 0x00000008,	/* Index 0x87: INTH */
++
++	Offset (0xC3),
++	IMMC, 0x00000008,	/* Index 0xC3: eMMC */
++
++	Offset (0xE2),
++	IGPI, 0x00000008,	/* Index 0xE2: GPIO */
++
++	Offset (0xF0),
++	II20, 0x00000008,	/* Index 0xF0: I2C0 */
++	II21, 0x00000008,	/* Index 0xF1: I2C1 */
++	II22, 0x00000008,	/* Index 0xF2: I2C2 */
++	II23, 0x00000008,	/* Index 0xF3: I2C3 */
++	IUA0, 0x00000008,	/* Index 0xF4: UART0 */
++	IUA1, 0x00000008,	/* Index 0xF5: UART1 */
++	II24, 0x00000008,	/* Index 0xF6: I2C4 */
++	II25, 0x00000008,	/* Index 0xF7: I2C5 */
++	IUA2, 0x00000008,	/* Index 0xF8: UART2 */
++	IUA3, 0x00000008,	/* Index 0xF9: UART3 */
++}
+diff --git a/src/soc/amd/cyan_skillfish/acpi/pnot.asl b/src/soc/amd/cyan_skillfish/acpi/pnot.asl
+new file mode 100644
+index 00000000..29b5b5a4
+--- /dev/null
++++ b/src/soc/amd/cyan_skillfish/acpi/pnot.asl
+@@ -0,0 +1,9 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++
++#include <soc/amd/common/acpi/alib.asl>
++
++Method (PNOT)
++{
++	/* Report AC/DC state to ALIB using WAL1() */
++	\WAL1 ()
++}
+diff --git a/src/soc/amd/cyan_skillfish/acpi/soc.asl b/src/soc/amd/cyan_skillfish/acpi/soc.asl
+new file mode 100644
+index 00000000..67eb3f57
+--- /dev/null
++++ b/src/soc/amd/cyan_skillfish/acpi/soc.asl
+@@ -0,0 +1,50 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++
++#include <soc/amd/common/acpi/pci_root.asl>
++#include "globalnvs.asl"
++
++/* Power state notification to ALIB */
++#include "pnot.asl"
++
++/* Contains the supported sleep states for this chipset */
++#include <soc/amd/common/acpi/sleepstates.asl>
++
++/* Contains _SWS methods */
++#include <soc/amd/common/acpi/acpi_wake_source.asl>
++
++/* System Bus */
++Scope(\_SB) { /* Start \_SB scope */
++	/* global utility methods expected within the \_SB scope */
++	#include <arch/x86/acpi/globutil.asl>
++
++	ROOT_BRIDGE(PCI0)
++
++	Scope(PCI0) {
++		/* Describe the AMD Northbridge */
++		#include "northbridge.asl"
++		#include "pci.asl"
++
++		/* Describe the AMD Fusion Controller Hub */
++		#include <soc/amd/common/acpi/lpc.asl>
++		#include <soc/amd/common/acpi/platform.asl>
++	}
++
++	/* PCI IRQ mapping for the Southbridge */
++	#include "pci_int_defs.asl"
++
++	/* Describe PCI INT[A-H] for the Southbridge */
++	#include <soc/amd/common/acpi/pci_int.asl>
++
++	/* Describe the MMIO devices in the FCH */
++	#include "mmio.asl"
++
++	#include "acp.asl"
++
++	/* Add GPIO library */
++	#include <soc/amd/common/acpi/gpio_bank_lib.asl>
++
++	#if CONFIG(SOC_AMD_COMMON_BLOCK_ACPI_DPTC)
++	#include <soc/amd/common/acpi/dptc.asl>
++	#endif
++
++} /* End \_SB scope */
+diff --git a/src/soc/amd/cyan_skillfish/aoac.c b/src/soc/amd/cyan_skillfish/aoac.c
+new file mode 100644
+index 00000000..94fa5045
+--- /dev/null
++++ b/src/soc/amd/cyan_skillfish/aoac.c
+@@ -0,0 +1,30 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++
++#include <amdblocks/aoac.h>
++#include <soc/aoac_defs.h>
++#include <types.h>
++
++#if CONFIG(AMD_SOC_CONSOLE_UART) && FCH_AOAC_UART_FOR_CONSOLE == -1
++# error Unsupported UART_FOR_CONSOLE chosen
++#endif
++
++/*
++ * Devices that need their AOAC registers enabled during early FCH init.
++ * Console UART is included when AMD_SOC_CONSOLE_UART is selected.
++ */
++static const unsigned int aoac_devs[] = {
++	FCH_AOAC_DEV_AMBA,
++	FCH_AOAC_DEV_I2C2,
++	FCH_AOAC_DEV_I2C3,
++	FCH_AOAC_DEV_I2C4,
++	FCH_AOAC_DEV_ESPI,
++#if CONFIG(AMD_SOC_CONSOLE_UART)
++	FCH_AOAC_UART_FOR_CONSOLE,
++#endif
++};
++
++const unsigned int *soc_get_aoac_devices(size_t *num)
++{
++	*num = ARRAY_SIZE(aoac_devs);
++	return aoac_devs;
++}
+diff --git a/src/soc/amd/cyan_skillfish/cbmem.c b/src/soc/amd/cyan_skillfish/cbmem.c
+new file mode 100644
+index 00000000..155ad35a
+--- /dev/null
++++ b/src/soc/amd/cyan_skillfish/cbmem.c
+@@ -0,0 +1,26 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++
++#include <cbmem.h>
++#include <commonlib/bsd/helpers.h>
++#include <cpu/amd/mtrr.h>
++
++/*
++ * Without FSP or openSIL there is no HOB to ask where usable low DRAM ends.
++ * The PSP's ABL programs TOP_MEM before the x86 starts, so use that.
++ *
++ * TODO: the stock BIOS can carve the GPU's UMA frame buffer out of low DRAM.
++ * Its base is in the APOB system memory map; read it from there and put
++ * cbmem below it once graphics init exists.
++ */
++uintptr_t cbmem_top_chipset(void)
++{
++	uintptr_t top_mem = get_top_of_mem_below_4gb();
++
++	/* The TSEG MSR has an 8M granularity and TSEG has to be size-aligned. */
++	if (CONFIG_SMM_TSEG_SIZE) {
++		top_mem -= CONFIG_SMM_TSEG_SIZE;
++		top_mem = ALIGN_DOWN(top_mem, CONFIG_SMM_TSEG_SIZE);
++	}
++
++	return top_mem;
++}
+diff --git a/src/soc/amd/cyan_skillfish/chip.c b/src/soc/amd/cyan_skillfish/chip.c
+new file mode 100644
+index 00000000..58fad5c1
+--- /dev/null
++++ b/src/soc/amd/cyan_skillfish/chip.c
+@@ -0,0 +1,63 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++
++#include <acpi/acpigen_pci.h>
++#include <amdblocks/acpi.h>
++#include <amdblocks/data_fabric.h>
++#include <amdblocks/root_complex.h>
++#include <console/console.h>
++#include <device/device.h>
++#include <device/pci.h>
++#include <drivers/i2c/designware/dw_i2c.h>
++#include <soc/cpu.h>
++#include <soc/iomap.h>
++#include <soc/pci_devs.h>
++#include <soc/southbridge.h>
++#include "chip.h"
++
++static const char *soc_acpi_name(const struct device *dev)
++{
++	if (dev->path.type == DEVICE_PATH_DOMAIN)
++		return "PCI0";
++
++	if (dev->path.type != DEVICE_PATH_PCI)
++		return NULL;
++
++	printk(BIOS_WARNING, "Unknown PCI device: dev: %d, fn: %d\n",
++	       PCI_SLOT(dev->path.pci.devfn), PCI_FUNC(dev->path.pci.devfn));
++	return NULL;
++};
++
++struct device_operations cyan_skillfish_pci_domain_ops = {
++	.read_resources	= amd_pci_domain_read_resources,
++	.set_resources	= pci_domain_set_resources,
++	.scan_bus	= amd_pci_domain_scan_bus,
++	.init		= amd_pci_domain_init,
++	.acpi_name	= soc_acpi_name,
++	.acpi_fill_ssdt	= amd_pci_domain_fill_ssdt,
++};
++
++static void soc_init(void *chip_info)
++{
++	default_dev_ops_root.write_acpi_tables = soc_acpi_write_tables;
++
++	/*
++	 * TODO: this is where Picasso runs FSP-S. For Cyan Skillfish the work
++	 * AGESA's AmdNbio*ARI, AmdFabricAri, AmdCcxVhAri and Fch modules do
++	 * after memory init has to be reimplemented here.
++	 */
++
++	data_fabric_print_mmio_conf();
++
++	fch_init(chip_info);
++}
++
++static void soc_final(void *chip_info)
++{
++	fch_final(chip_info);
++}
++
++struct chip_operations soc_amd_cyan_skillfish_ops = {
++	.name = "AMD Cyan Skillfish SOC",
++	.init = soc_init,
++	.final = soc_final
++};
+diff --git a/src/soc/amd/cyan_skillfish/chip.h b/src/soc/amd/cyan_skillfish/chip.h
+new file mode 100644
+index 00000000..e37c82a5
+--- /dev/null
++++ b/src/soc/amd/cyan_skillfish/chip.h
+@@ -0,0 +1,307 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++
++#ifndef __CYAN_SKILLFISH_CHIP_H__
++#define __CYAN_SKILLFISH_CHIP_H__
++
++#include <amdblocks/chip.h>
++#include <amdblocks/pci_clk_req.h>
++#include <commonlib/helpers.h>
++#include <drivers/i2c/designware/dw_i2c.h>
++#include <gpio.h>
++#include <soc/i2c.h>
++#include <soc/iomap.h>
++#include <soc/southbridge.h>
++#include <arch/x86/include/arch/smp/mpspec.h> /* point from top level */
++#include <types.h>
++
++/*
++  USB 2.0 PHY Parameters
++*/
++struct __packed usb2_phy_tune {
++	/* Disconnect Threshold Adjustment. Range 0 - 0x7 */
++	uint8_t	com_pds_tune;
++	/* Squelch Threshold Adjustment. Range 0 - 0x7 */
++	uint8_t	sq_rx_tune;
++	/* FS/LS Source Impedance Adjustment. Range 0 - 0xF */
++	uint8_t	tx_fsls_tune;
++	/* HS Transmitter Pre-Emphasis Current Control. Range 0 - 0x3 */
++	uint8_t	tx_pre_emp_amp_tune;
++	/* HS Transmitter Pre-Emphasis Duration Control. Range: 0 - 0x1 */
++	uint8_t	tx_pre_emp_pulse_tune;
++	/* HS Transmitter Rise/Fall Time Adjustment. Range: 0 - 0x3 */
++	uint8_t	tx_rise_tune;
++	/* HS DC Voltage Level Adjustment. Range 0 - 0xF */
++	uint8_t	tx_vref_tune;
++	/* Transmitter High-Speed Crossover Adjustment. Range 0 - 0x3 */
++	uint8_t	tx_hsxv_tune;
++	/* USB Source Impedance Adjustment. Range 0 - 0x3. */
++	uint8_t	tx_res_tune;
++};
++
++/* force USB3 port to gen1, bit0 - controller0 Port0, bit1 - Port1, etc */
++union __packed usb3_force_gen1 {
++		struct {
++			uint8_t xhci0_port0:1;
++			uint8_t xhci0_port1:1;
++			uint8_t xhci0_port2:1;
++			uint8_t xhci0_port3:1;
++		} ports;
++		uint8_t usb3_port_force_gen1_en;
++};
++
++enum rfmux_configuration_setting {
++	USB_PD_RFMUX_SAFE_STATE = 0x0,
++	USB_PD_RFMUX_USB31_MODE = 0x1,
++	USB_PD_RFMUX_USB31_MODE_FLIP = 0x2,
++	USB_PD_RFMUX_ATE_MODE = 0x3,
++	USB_PD_RFMUX_DP_X2_MODE = 0x4,
++	USB_PD_RFMUX_MF_MODE_ALT_D_F = 0x6,
++	USB_PD_RFMUX_DP_X2_MODE_FLIP = 0x8,
++	USB_PD_RFMUX_MF_MODE_ALT_D_F_FLIP = 0x9,
++	USB_PD_RFMUX_DP_X4_MODE = 0xc,
++};
++
++struct usb_pd_control {
++		uint8_t rfmux_override_en;
++		uint32_t rfmux_config;
++};
++
++#define USB_PORT_COUNT	6
++
++struct __packed usb3_phy_tune {
++	uint8_t rx_eq_delta_iq_ovrd_val;
++	uint8_t rx_eq_delta_iq_ovrd_en;
++};
++/* the RV2 USB3 port count */
++#define RV2_USB3_PORT_COUNT 4
++#define USB_PD_PORT_COUNT 2
++
++enum sd_emmc_driver_strength {
++	SD_EMMC_DRIVE_STRENGTH_B,
++	SD_EMMC_DRIVE_STRENGTH_A,
++	SD_EMMC_DRIVE_STRENGTH_C,
++	SD_EMMC_DRIVE_STRENGTH_D,
++};
++
++/* dpphy_override */
++enum sysinfo_dpphy_override {
++	ENABLE_DVI_TUNINGSET = 0x01,
++	ENABLE_HDMI_TUNINGSET = 0x02,
++	ENABLE_HDMI6G_TUNINGSET = 0x04,
++	ENABLE_DP_TUNINGSET = 0x08,
++	ENABLE_DP_HBR3_TUNINGSET = 0x10,
++	ENABLE_DP_HBR_TUNINGSET = 0x20,
++	ENABLE_DP_HBR2_TUNINGSET = 0x40,
++	ENABLE_EDP_TUNINGSET = 0x80,
++};
++
++struct soc_amd_cyan_skillfish_config {
++	struct soc_amd_common_config common_config;
++	/*
++	 * If sb_reset_i2c_peripherals() is called, this devicetree register
++	 * defines which I2C SCL will be toggled 9 times at 100 KHz.
++	 * For example, should we need I2C0 and  I2C3 have their peripheral
++	 * devices reset by toggling SCL, use:
++	 *
++	 * register i2c_scl_reset = (GPIO_I2C0_SCL | GPIO_I2C3_SCL)
++	 */
++	u8 i2c_scl_reset;
++	struct dw_i2c_bus_config i2c[I2C_CTRLR_COUNT];
++
++	/* System config index */
++	uint8_t system_config;
++
++	/* STAPM Configuration */
++	uint32_t fast_ppt_limit_mW;
++	uint32_t slow_ppt_limit_mW;
++	uint32_t slow_ppt_time_constant_s;
++	uint32_t stapm_time_constant_s;
++	uint32_t sustained_power_limit_mW;
++
++	/* STAPM Configuration for tablet mode */
++	uint32_t fast_ppt_limit_tablet_mode_mW;
++	uint32_t slow_ppt_limit_tablet_mode_mW;
++	uint32_t sustained_power_limit_tablet_mode_mW;
++
++	/* PROCHOT_L de-assertion Ramp Time */
++	uint32_t prochot_l_deassertion_ramp_time_ms;
++
++	enum {
++		DOWNCORE_AUTO = 0,
++		DOWNCORE_1 = 1, /* Run with 1 physical core */
++		DOWNCORE_2 = 3, /* Run with 2 physical cores */
++		DOWNCORE_3 = 4, /* Run with 3 physical cores */
++	} downcore_mode;
++	bool smt_disable; /* true=disable SMT on all physical cores */
++
++	/* Lower die temperature limit */
++	uint32_t thermctl_limit_degreeC;
++	uint32_t thermctl_limit_tablet_mode_degreeC;
++
++	/* FP5 Processor Voltage Supply PSI Currents. 0 indicates use SOC default */
++	uint32_t psi0_current_limit_mA;
++	uint32_t psi0_soc_current_limit_mA;
++	uint32_t vddcr_soc_voltage_margin_mV;
++	uint32_t vddcr_vdd_voltage_margin_mV;
++
++	/* VRM Limits. 0 indicates use SOC default */
++	uint32_t vrm_maximum_current_limit_mA;
++	uint32_t vrm_soc_maximum_current_limit_mA;
++	uint32_t vrm_current_limit_mA;
++	uint32_t vrm_soc_current_limit_mA;
++
++	/* Misc SMU settings */
++	uint8_t sb_tsi_alert_comparator_mode_en;
++	uint8_t core_dldo_bypass;
++	uint8_t min_soc_vid_offset;
++	uint8_t aclk_dpm0_freq_400MHz;
++	uint32_t telemetry_vddcr_vdd_slope_mA;
++	int32_t telemetry_vddcr_vdd_offset;
++	uint32_t telemetry_vddcr_soc_slope_mA;
++	int32_t telemetry_vddcr_soc_offset;
++
++	/*
++	 * HDMI 2.0 disable setting
++	 * bit0~3: disable HDMI 2.0 DDI0~3
++	*/
++	uint8_t hdmi2_disable;
++
++	struct {
++		/*
++		 * SDHCI doesn't directly support eMMC. There is an implicit mapping between
++		 * eMMC timing modes and SDHCI UHS-I timing modes defined in the linux
++		 * kernel.
++		 *
++		 *  HS    -> UHS_SDR12 (0x00)
++		 *  DDR52 -> UHS_DDR50 (0x04)
++		 *  HS200 -> UHS_SDR104 (0x03)
++		 *  HS400 -> NONE (0x05)
++		 *
++		 * The kernel driver uses a heuristic to determine if HS400 is supported.
++		 *
++		 * If the eMMC MMIO device is disabled in the devicetree,
++		 * fsps_update_emmc_config will set timing to SD_EMMC_DISABLE.
++		*/
++		enum {
++			SD_EMMC_DISABLE,
++			SD_EMMC_SD_LOW_SPEED,
++			SD_EMMC_SD_HIGH_SPEED,
++			SD_EMMC_SD_UHS_I_SDR_50,
++			SD_EMMC_SD_UHS_I_DDR_50,
++			SD_EMMC_SD_UHS_I_SDR_104,
++			SD_EMMC_EMMC_SDR_26,
++			SD_EMMC_EMMC_SDR_52,
++			SD_EMMC_EMMC_DDR_104,
++			SD_EMMC_EMMC_HS200,
++			SD_EMMC_EMMC_HS400,
++			SD_EMMC_EMMC_HS300,
++		} timing;
++
++		/*
++		 * Sets the driver strength reflected in the SDHCI Preset Value Registers.
++		 *
++		 * According to the SDHCI spec:
++		 *   The host should select the weakest drive strength that meets rise /
++		 *   fall time requirement at system operating frequency.
++		 */
++		enum sd_emmc_driver_strength sdr104_hs400_driver_strength;
++		enum sd_emmc_driver_strength ddr50_driver_strength;
++		enum sd_emmc_driver_strength sdr50_driver_strength;
++
++		/*
++		 * Sets the frequency in kHz reflected in the Initialization Preset Value
++		 * Register.
++		 *
++		 * This value is used while in open-drain mode, and has a maximum value of
++		 * 400 kHz.
++		 */
++		uint16_t init_khz_preset;
++	} emmc_config;
++
++	/* Force USB3 port to gen1, bit0 - controller0 Port0, bit1 - Port1 */
++	union usb3_force_gen1 usb3_port_force_gen1;
++
++	bool has_usb2_phy_tune_params;
++	struct usb2_phy_tune usb_2_port_tune_params[USB_PORT_COUNT];
++	enum {
++		USB_OC_PIN_0	= 0x0,
++		USB_OC_PIN_1	= 0x1,
++		USB_OC_PIN_2	= 0x2,
++		USB_OC_PIN_3	= 0x3,
++		USB_OC_PIN_4	= 0x4,
++		USB_OC_PIN_5	= 0x5,
++		USB_OC_NONE	= 0xf,
++	} usb_port_overcurrent_pin[USB_PORT_COUNT];
++
++	/* RV2 SOC Usb 3.1 PHY Parameters */
++	uint8_t usb3_phy_override;
++	/*
++	 * 1,RX_EQ_DELTA_IQ_OVRD_VAL- Override value for rx_eq_delta_iq. Range 0-0xF
++	 * 2,RX_EQ_DELTA_IQ_OVRD_EN - Enable override value for rx_eq_delta_iq. Range 0-0x1
++	 */
++	struct usb3_phy_tune usb3_phy_tune_params[RV2_USB3_PORT_COUNT];
++	/* Override value for rx_vref_ctrl. Range 0 - 0x1F */
++	uint8_t usb3_rx_vref_ctrl;
++	/* Enable override value for rx_vref_ctrl. Range 0 - 0x1 */
++	uint8_t usb3_rx_vref_ctrl_en;
++	/* Override value for tx_vboost_lvl: 0 - 0x7. */
++	uint8_t usb_3_tx_vboost_lvl;
++	/* Enable override value for tx_vboost_lvl. Range: 0 - 0x1 */
++	uint8_t usb_3_tx_vboost_lvl_en;
++	/* Override value for rx_vref_ctrl. Range 0 - 0x1F.*/
++	uint8_t usb_3_rx_vref_ctrl_x;
++	/* Enable override value for rx_vref_ctrl. Range 0 - 0x1. */
++	uint8_t usb_3_rx_vref_ctrl_en_x;
++	/* Override value for tx_vboost_lvl: 0 - 0x7. */
++	uint8_t usb_3_tx_vboost_lvl_x;
++	/* Enable override value for tx_vboost_lvl. Range: 0 - 0x1. */
++	uint8_t usb_3_tx_vboost_lvl_en_x;
++
++	/* The array index is the general purpose PCIe clock output number. Values in here
++	   aren't the values written to the register to have the default to be always on. */
++	enum gpp_clk_req gpp_clk_config[GPP_CLK_OUTPUT_COUNT];
++
++	/* performance policy for the PCIe links: power consumption vs. link speed */
++	enum {
++		DXIO_PSPP_DISABLED = 0,
++		DXIO_PSPP_PERFORMANCE,
++		DXIO_PSPP_BALANCED,
++		DXIO_PSPP_POWERSAVE,
++	} pspp_policy;
++
++	/* If using an external 48MHz OSC for codec, will disable internal X48M_OSC */
++	bool acp_i2s_use_external_48mhz_osc;
++
++	/* eDP phy tuning settings */
++	uint16_t edp_phy_override;
++	/* bit vector of phy, bit0=1: DP0, bit1=1: DP1, bit2=1: DP2 bit3=1: DP3 */
++	uint8_t edp_physel;
++
++	struct {
++		uint8_t dp_vs_pemph_level;
++		uint8_t deemph_6db4;
++		uint8_t boostadj;
++		uint16_t margin_deemph;
++	} edp_tuningset;
++
++	/*
++	 * eDP panel power sequence control
++	 * all pwr sequence numbers below are in uint of 4ms and "0" as default value
++	 */
++	uint8_t edp_pwr_adjust_enable;
++	uint8_t pwron_digon_to_de;
++	uint8_t pwron_de_to_varybl;
++	uint8_t pwrdown_varybloff_to_de;
++	uint8_t pwrdown_de_to_digoff;
++	uint8_t pwroff_delay;
++	uint8_t pwron_varybl_to_blon;
++	uint8_t pwrdown_bloff_to_varybloff;
++	uint8_t min_allowed_bl_level;
++
++	/* allow USB PD port setting override */
++	struct usb_pd_control usb_pd_config_override[USB_PD_PORT_COUNT];
++};
++
++typedef struct soc_amd_cyan_skillfish_config soc_amd_config_t;
++
++#endif /* __CYAN_SKILLFISH_CHIP_H__ */
+diff --git a/src/soc/amd/cyan_skillfish/chipset.cb b/src/soc/amd/cyan_skillfish/chipset.cb
+new file mode 100644
+index 00000000..7cdffba8
+--- /dev/null
++++ b/src/soc/amd/cyan_skillfish/chipset.cb
+@@ -0,0 +1,33 @@
++# SPDX-License-Identifier: GPL-2.0-only
++
++# Only devices whose location is fixed across Zen APUs are listed. The rest of
++# the Cyan Skillfish PCI topology (GPP bridges, internal buses A/B, GPU, xHCI)
++# is left to dynamic enumeration until it has been mapped on a real BC-250.
++
++chip soc/amd/cyan_skillfish
++	device cpu_cluster 0 on
++		ops amd_cpu_bus_ops
++	end
++	device domain 0 on
++		ops cyan_skillfish_pci_domain_ops
++		device pci 00.0 alias gnb on ops cyan_skillfish_root_complex_operations end
++		device pci 00.2 alias iommu off ops amd_iommu_ops end
++		device pci 14.0 alias smbus on ops amd_smbus_ops end # primary FCH function
++		device pci 14.3 alias lpc_bridge on ops amd_lpc_ops end
++		device pci 18.0 alias data_fabric_0 on ops amd_data_fabric_ops end
++		device pci 18.1 alias data_fabric_1 on ops amd_data_fabric_ops end
++		device pci 18.2 alias data_fabric_2 on ops amd_data_fabric_ops end
++		device pci 18.3 alias data_fabric_3 on ops amd_data_fabric_ops end
++		device pci 18.4 alias data_fabric_4 on ops amd_data_fabric_ops end
++		device pci 18.5 alias data_fabric_5 on ops amd_data_fabric_ops end
++		device pci 18.6 alias data_fabric_6 on ops amd_data_fabric_ops end
++		device pci 18.7 alias data_fabric_7 on ops amd_data_fabric_ops end
++	end
++
++	device mmio 0xfedc4000 alias i2c_2 off ops soc_amd_i2c_mmio_ops end
++	device mmio 0xfedc5000 alias i2c_3 off ops soc_amd_i2c_mmio_ops end
++	device mmio 0xfedc9000 alias uart_0 off ops amd_uart_mmio_ops end
++	device mmio 0xfedca000 alias uart_1 off ops amd_uart_mmio_ops end
++	device mmio 0xfedce000 alias uart_2 off ops amd_uart_mmio_ops end
++	device mmio 0xfedcf000 alias uart_3 off ops amd_uart_mmio_ops end
++end
+diff --git a/src/soc/amd/cyan_skillfish/cpu.c b/src/soc/amd/cyan_skillfish/cpu.c
+new file mode 100644
+index 00000000..bd5191d6
+--- /dev/null
++++ b/src/soc/amd/cyan_skillfish/cpu.c
+@@ -0,0 +1,20 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++
++#include <amdblocks/cpu.h>
++#include <cpu/cpu.h>
++#include <device/device.h>
++#include <soc/cpu.h>
++
++static struct device_operations cpu_dev_ops = {
++	.init = amd_cpu_init,
++};
++
++static struct cpu_device_id cpu_table[] = {
++	{ X86_VENDOR_AMD, CYAN_SKILLFISH_CPUID, CPUID_ALL_STEPPINGS_MASK },
++	CPU_TABLE_END
++};
++
++static const struct cpu_driver model_17 __cpu_driver = {
++	.ops      = &cpu_dev_ops,
++	.id_table = cpu_table,
++};
+diff --git a/src/soc/amd/cyan_skillfish/early_fch.c b/src/soc/amd/cyan_skillfish/early_fch.c
+new file mode 100644
+index 00000000..f563a0b3
+--- /dev/null
++++ b/src/soc/amd/cyan_skillfish/early_fch.c
+@@ -0,0 +1,72 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++
++#include <amdblocks/acpimmio.h>
++#include <amdblocks/aoac.h>
++#include <amdblocks/espi.h>
++#include <amdblocks/i2c.h>
++#include <amdblocks/lpc.h>
++#include <amdblocks/pmlib.h>
++#include <amdblocks/smbus.h>
++#include <amdblocks/spi.h>
++#include <amdblocks/uart.h>
++#include <soc/i2c.h>
++#include <soc/southbridge.h>
++#include <types.h>
++
++#include "chip.h"
++
++static void lpc_configure_decodes(void)
++{
++	if (CONFIG(POST_IO) && (CONFIG_POST_IO_PORT == 0x80))
++		lpc_enable_port80();
++}
++
++/* Before console init */
++void fch_pre_init(void)
++{
++	/* Enable_acpimmio_decode_pm04 to enable the ACPIMMIO decode which is needed to access
++	   the GPIO registers. */
++	enable_acpimmio_decode_pm04();
++	/* Setup SPI base by calling lpc_early_init before setting up eSPI. */
++	lpc_early_init();
++
++	/* Setup eSPI to enable port80 routing if the board is using eSPI and the eSPI
++	   interface hasn't already been set up in verstage on PSP */
++	if (CONFIG(SOC_AMD_COMMON_BLOCK_USE_ESPI) && !CONFIG(VBOOT_STARTS_BEFORE_BOOTBLOCK))
++		configure_espi_with_mb_hook();
++
++	if (!CONFIG(SOC_AMD_COMMON_BLOCK_USE_ESPI))
++		lpc_configure_decodes();
++
++	fch_spi_early_init();
++	fch_smbus_init();
++	fch_enable_cf9_io();
++	fch_enable_legacy_io();
++	enable_aoac_devices();
++
++	/*
++	 * On reset Range_0 defaults to enabled. We want to start with a clean
++	 * slate to not have things unexpectedly enabled.
++	 */
++	clear_uart_legacy_config();
++
++	if (CONFIG(AMD_SOC_CONSOLE_UART))
++		set_uart_config(CONFIG_UART_FOR_CONSOLE);
++
++	/* disable the keyboard reset function before mainboard GPIO setup */
++	if (CONFIG(DISABLE_KEYBOARD_RESET_PIN))
++		fch_disable_kb_rst();
++}
++
++/* After console init */
++void fch_early_init(void)
++{
++	reset_i2c_peripherals();
++	pm_set_power_failure_state();
++	fch_print_pmxc0_status();
++	i2c_soc_early_init();
++	show_spi_speeds_and_modes();
++
++	if (CONFIG(DISABLE_SPI_FLASH_ROM_SHARING))
++		lpc_disable_spi_rom_sharing();
++}
+diff --git a/src/soc/amd/cyan_skillfish/fch.c b/src/soc/amd/cyan_skillfish/fch.c
+new file mode 100644
+index 00000000..bd81653c
+--- /dev/null
++++ b/src/soc/amd/cyan_skillfish/fch.c
+@@ -0,0 +1,215 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++
++#include <device/mmio.h>
++#include <bootstate.h>
++#include <cpu/x86/smm.h>
++#include <device/device.h>
++#include <device/pci.h>
++#include <amdblocks/amd_pci_util.h>
++#include <amdblocks/pci_clk_req.h>
++#include <amdblocks/reset.h>
++#include <amdblocks/acpimmio.h>
++#include <amdblocks/acpi.h>
++#include <amdblocks/gpio.h>
++#include <amdblocks/i2c.h>
++#include <amdblocks/smi.h>
++#include <soc/cpu.h>
++#include <soc/i2c.h>
++#include <soc/iomap.h>
++#include <soc/southbridge.h>
++#include <soc/smi.h>
++#include <soc/amd_pci_int_defs.h>
++#include <soc/pci_devs.h>
++#include <static.h>
++#include <types.h>
++#include "chip.h"
++
++/*
++ * Table of APIC register index and associated IRQ name. Using IDX_XXX_NAME
++ * provides a visible association with the index, therefore helping
++ * maintainability of table. If a new index/name is defined in
++ * amd_pci_int_defs.h, just add the pair at the end of this table.
++ * Order is not important.
++ */
++static const struct irq_idx_name irq_association[] = {
++	{ PIRQ_A,	"INTA#" },
++	{ PIRQ_B,	"INTB#" },
++	{ PIRQ_C,	"INTC#" },
++	{ PIRQ_D,	"INTD#" },
++	{ PIRQ_E,	"INTE#" },
++	{ PIRQ_F,	"INTF#/GENINT2" },
++	{ PIRQ_G,	"INTG#" },
++	{ PIRQ_H,	"INTH#" },
++	{ PIRQ_MISC,	"Misc" },
++	{ PIRQ_MISC0,	"Misc0" },
++	{ PIRQ_MISC1,	"Misc1" },
++	{ PIRQ_MISC2,	"Misc2" },
++	{ PIRQ_SIRQA,	"Ser IRQ INTA" },
++	{ PIRQ_SIRQB,	"Ser IRQ INTB" },
++	{ PIRQ_SIRQC,	"Ser IRQ INTC" },
++	{ PIRQ_SIRQD,	"Ser IRQ INTD" },
++	{ PIRQ_SCI,	"SCI" },
++	{ PIRQ_SMBUS,	"SMBUS" },
++	{ PIRQ_ASF,	"ASF" },
++	{ PIRQ_PMON,	"PerMon" },
++	{ PIRQ_SD,	"SD" },
++	{ PIRQ_SDIO,	"SDIO" },
++	{ PIRQ_CIR,	"CIR" },
++	{ PIRQ_GPIOA,	"GPIOa" },
++	{ PIRQ_GPIOB,	"GPIOb" },
++	{ PIRQ_GPIOC,	"GPIOc" },
++	{ PIRQ_SATA,	"SATA" },
++	{ PIRQ_EMMC,	"eMMC" },
++	{ PIRQ_GPP0,	"GPP0" },
++	{ PIRQ_GPP1,	"GPP1" },
++	{ PIRQ_GPP2,	"GPP2" },
++	{ PIRQ_GPP3,	"GPP3" },
++	{ PIRQ_GPIO,	"GPIO" },
++	{ PIRQ_I2C0,	"I2C0" },
++	{ PIRQ_I2C1,	"I2C1" },
++	{ PIRQ_I2C2,	"I2C2" },
++	{ PIRQ_I2C3,	"I2C3" },
++	{ PIRQ_UART0,	"UART0" },
++	{ PIRQ_UART1,	"UART1" },
++	{ PIRQ_I2C4,	"I2C4" },
++	{ PIRQ_I2C5,	"I2C5" },
++	{ PIRQ_UART2,	"UART2" },
++	{ PIRQ_UART3,	"UART3" },
++};
++
++const struct irq_idx_name *sb_get_apic_reg_association(size_t *size)
++{
++	*size = ARRAY_SIZE(irq_association);
++	return irq_association;
++}
++
++static void fch_clk_output_48Mhz(void)
++{
++	u32 ctrl;
++	const struct soc_amd_cyan_skillfish_config *cfg = config_of_soc();
++
++	ctrl = misc_read32(MISC_CLK_CNTL1);
++	/* If used external clock source for I2S, disable the internal clock output */
++	if (cfg->acp_i2s_use_external_48mhz_osc &&
++			cfg->common_config.acp_config.acp_pin_cfg == I2S_PINS_I2S_TDM)
++		ctrl &= ~BP_X48M0_OUTPUT_EN;
++	else
++		ctrl |= BP_X48M0_OUTPUT_EN;
++	misc_write32(MISC_CLK_CNTL1, ctrl);
++}
++
++static void sb_rfmux_config_override(void)
++{
++	u8 port;
++	const struct soc_amd_cyan_skillfish_config *cfg;
++
++	cfg = config_of_soc();
++
++	for (port = 0; port < USB_PD_PORT_COUNT; port++) {
++		if (cfg->usb_pd_config_override[port].rfmux_override_en) {
++			write32p(USB_PD_PORT_CONTROL + PD_PORT_MUX_OFFSET(port),
++				cfg->usb_pd_config_override[port].rfmux_config
++				| USB_PD_RFMUX_OVERRIDE);
++		}
++	}
++}
++
++static void fch_init_acpi_ports(void)
++{
++	u32 reg;
++
++	/* We use some of these ports in SMM regardless of whether or not
++	 * ACPI tables are generated. Enable these ports indiscriminately.
++	 */
++
++	pm_write16(PM_EVT_BLK, ACPI_PM_EVT_BLK);
++	pm_write16(PM1_CNT_BLK, ACPI_PM1_CNT_BLK);
++	pm_write16(PM_TMR_BLK, ACPI_PM_TMR_BLK);
++	pm_write16(PM_GPE0_BLK, ACPI_GPE0_BLK);
++
++	if (CONFIG(HAVE_SMI_HANDLER)) {
++		/* APMC - SMI Command Port */
++		pm_write16(PM_ACPI_SMI_CMD, APM_CNT);
++		configure_smi(SMITYPE_SMI_CMD_PORT, SMI_MODE_SMI);
++
++		/* SMI on SlpTyp requires sending SMI before completion
++		   response of the I/O write. */
++		reg = pm_read32(PM_PCI_CTRL);
++		reg |= FORCE_SLPSTATE_RETRY;
++		pm_write32(PM_PCI_CTRL, reg);
++
++		/* Disable SlpTyp feature */
++		reg = pm_read8(PM_RST_CTRL1);
++		reg &= ~SLPTYPE_CONTROL_EN;
++		pm_write8(PM_RST_CTRL1, reg);
++
++		configure_smi(SMITYPE_SLP_TYP, SMI_MODE_SMI);
++	} else {
++		pm_write16(PM_ACPI_SMI_CMD, 0);
++	}
++
++	/* Decode ACPI registers and enable standard features */
++	pm_write8(PM_ACPI_CONF, PM_ACPI_DECODE_STD |
++				PM_ACPI_GLOBAL_EN |
++				PM_ACPI_RTC_EN_EN |
++				PM_ACPI_TIMER_EN_EN);
++}
++
++/*
++ * A-Link to AHB bridge, part of the AMBA fabric. These are internal clocks
++ * and unneeded for Raven/Picasso so gate them to save power.
++ */
++static void al2ahb_clock_gate(void)
++{
++	uint8_t al2ahb_val;
++	uintptr_t al2ahb_base = ALINK_AHB_ADDRESS;
++
++	al2ahb_val = read8p(al2ahb_base + AL2AHB_CONTROL_CLK_OFFSET);
++	al2ahb_val |= AL2AHB_CLK_GATE_EN;
++	write8p(al2ahb_base + AL2AHB_CONTROL_CLK_OFFSET, al2ahb_val);
++	al2ahb_val = read8p(al2ahb_base + AL2AHB_CONTROL_HCLK_OFFSET);
++	al2ahb_val |= AL2AHB_HCLK_GATE_EN;
++	write8p(al2ahb_base + AL2AHB_CONTROL_HCLK_OFFSET, al2ahb_val);
++}
++
++void fch_init(void *chip_info)
++{
++	i2c_soc_init();
++	fch_init_acpi_ports();
++
++	acpi_pm_gpe_add_events_print_events();
++	gpio_add_events();
++
++	al2ahb_clock_gate();
++
++
++	fch_clk_output_48Mhz();
++
++	sb_rfmux_config_override();
++}
++
++void fch_final(void *chip_info)
++{
++}
++
++/*
++ * Update the PCI devices with a valid IRQ number
++ * that is set in the mainboard PCI_IRQ structures.
++ */
++static void set_pci_irqs(void *unused)
++{
++	/* Write PCI_INTR regs 0xC00/0xC01 */
++	write_pci_int_table();
++
++	/* pirq_data is consumed by `write_pci_cfg_irqs` */
++	populate_pirq_data();
++
++	/* Write IRQs for all devicetree enabled devices */
++	write_pci_cfg_irqs();
++}
++
++/*
++ * Hook this function into the PCI state machine
++ * on entry into BS_DEV_ENABLE.
++ */
++BOOT_STATE_INIT_ENTRY(BS_DEV_ENABLE, BS_ON_ENTRY, set_pci_irqs, NULL);
+diff --git a/src/soc/amd/cyan_skillfish/fw.cfg b/src/soc/amd/cyan_skillfish/fw.cfg
+new file mode 100644
+index 00000000..40f32e55
+--- /dev/null
++++ b/src/soc/amd/cyan_skillfish/fw.cfg
+@@ -0,0 +1,31 @@
++# PSP fw config file for AMD Cyan Skillfish (ASRock BC-250)
++#
++# Every file here is copied verbatim out of the stock BC-250 BIOS by
++# extract_stock_blobs.py; the list mirrors the stock level-1 PSP directory
++# entry for entry. amdfwtool's CyanSkillfish platform lays it out like
++# Picasso (single-level directories, pre-second-gen EFS) minus the soft fuse
++# and PSB signature entries, which the stock image does not have.
++
++FIRMWARE_LOCATION      3rdparty/bc250_blobs
++SOC_NAME               CyanSkillfish
++
++# type                    file
++PSPBTLDR_FILE          PspBootLoader.sbin
++PSPSECUREOS_FILE       PspSecureOs.sbin
++PSP_SMUFW1_SUB0_FILE   SmuFirmware.csbin
++PSP_SEC_DBG_KEY_FILE   SecureDebugPublicKey.bin
++PSP_SMUFW2_SUB0_FILE   SmuFirmware2.csbin
++PSP_SEC_DEBUG_FILE     SecureDebugUnlock.sbin
++PSP_HW_IPCFG_FILE_SUB0 HwIpConfig.sbin
++PSP_SECG0_FILE         SecGasket.sbin
++PSP_DRIVERS_FILE       PspDrivers.sbin
++PSP_ABL0_FILE          AgesaBootloader0.csbin
++PSP_ABL1_FILE          AgesaBootloader1.csbin
++PSP_ABL2_FILE          AgesaBootloader2.csbin
++PSP_ABL3_FILE          AgesaBootloader3.csbin
++PSP_ABL4_FILE          AgesaBootloader4.csbin
++UNIFIEDUSB_FILE        UsbPhy.sbin
++SECURE_POLICY_L1_FILE  TosSecurityPolicy.sbin
++PSP_UMC_FW_FILE        UmcFirmware.csbin
++KEYDBBL_FILE           KeyDbBootloader.bin
++KEYDB_TOS_FILE         KeyDbTos.bin
+diff --git a/src/soc/amd/cyan_skillfish/gpio.c b/src/soc/amd/cyan_skillfish/gpio.c
+new file mode 100644
+index 00000000..3a302f7b
+--- /dev/null
++++ b/src/soc/amd/cyan_skillfish/gpio.c
+@@ -0,0 +1,38 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++
++#include <amdblocks/gpio.h>
++#include <gpio.h>
++#include <types.h>
++
++static const struct soc_amd_event gpio_event_table[] = {
++	{ GPIO_0, GEVENT_21 }, /* GPIO0 may only be used as PWR_BTN_L in ACPI */
++	{ GPIO_1, GEVENT_19 },
++	{ GPIO_2, GEVENT_8 },
++	{ GPIO_3, GEVENT_2 },
++	{ GPIO_4, GEVENT_4 },
++	{ GPIO_5, GEVENT_7 },
++	{ GPIO_6, GEVENT_10 },
++	{ GPIO_7, GEVENT_11 },
++	{ GPIO_8, GEVENT_23 },
++	{ GPIO_9, GEVENT_22 },
++	{ GPIO_16, GEVENT_12 },
++	{ GPIO_17, GEVENT_13 },
++	{ GPIO_18, GEVENT_14 },
++	{ GPIO_21, GEVENT_5 },
++	{ GPIO_22, GEVENT_3 },
++	{ GPIO_23, GEVENT_16 },
++	{ GPIO_24, GEVENT_15 },
++	{ GPIO_40, GEVENT_20 },
++	{ GPIO_84, GEVENT_18 },
++	{ GPIO_86, GEVENT_9 },
++	{ GPIO_89, GEVENT_0 },
++	{ GPIO_90, GEVENT_1 },
++	{ GPIO_91, GEVENT_6 },
++	{ GPIO_129, GEVENT_17 },
++};
++
++void soc_get_gpio_event_table(const struct soc_amd_event **table, size_t *items)
++{
++	*table = gpio_event_table;
++	*items = ARRAY_SIZE(gpio_event_table);
++}
+diff --git a/src/soc/amd/cyan_skillfish/i2c.c b/src/soc/amd/cyan_skillfish/i2c.c
+new file mode 100644
+index 00000000..afeba6c6
+--- /dev/null
++++ b/src/soc/amd/cyan_skillfish/i2c.c
+@@ -0,0 +1,83 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++
++#include <console/console.h>
++#include <amdblocks/acpimmio.h>
++#include <amdblocks/i2c.h>
++#include <soc/i2c.h>
++#include <soc/iomap.h>
++#include <soc/pci_devs.h>
++#include <soc/southbridge.h>
++#include <static.h>
++#include "chip.h"
++
++/* Table to switch SCL pins to outputs to initially reset the I2C peripherals */
++static const struct soc_i2c_scl_pin i2c_scl_pins[] = {
++	I2C_RESET_SCL_PIN(I2C2_SCL_PIN, GPIO_I2C2_SCL),
++	I2C_RESET_SCL_PIN(I2C3_SCL_PIN, GPIO_I2C3_SCL),
++	/* I2C4 is a peripheral device only */
++};
++
++#if ENV_X86
++/* Preferably keep all the I2C controllers operating in a specific mode together. */
++static const struct soc_i2c_ctrlr_info i2c_ctrlr[I2C_CTRLR_COUNT] = {
++	{ I2C_MASTER_MODE, 0, "" },
++	{ I2C_MASTER_MODE, 0, "" },
++	{ I2C_MASTER_MODE, APU_I2C2_BASE, "I2C2" },
++	{ I2C_MASTER_MODE, APU_I2C3_BASE, "I2C3" },
++	{ I2C_PERIPHERAL_MODE, APU_I2C4_BASE, "I2C4" } /* Can only be used in peripheral mode */
++};
++#else
++static struct soc_i2c_ctrlr_info i2c_ctrlr[I2C_CTRLR_COUNT] = {
++	{ I2C_MASTER_MODE, 0, ""},
++	{ I2C_MASTER_MODE, 0, "" },
++	{ I2C_MASTER_MODE, 0, "" },
++	{ I2C_MASTER_MODE, 0, "" },
++	{ I2C_PERIPHERAL_MODE, 0, "" },
++};
++
++void i2c_set_bar(unsigned int bus, uintptr_t bar)
++{
++	if (bus >= ARRAY_SIZE(i2c_ctrlr)) {
++		printk(BIOS_ERR, "i2c index out of bounds: %u.\n", bus);
++		return;
++	}
++
++	i2c_ctrlr[bus].bar = bar;
++}
++#endif
++
++void reset_i2c_peripherals(void)
++{
++	const struct soc_amd_cyan_skillfish_config *cfg = config_of_soc();
++	struct soc_i2c_peripheral_reset_info reset_info;
++
++	reset_info.i2c_scl_reset_mask = cfg->i2c_scl_reset & GPIO_I2C_MASK;
++	reset_info.i2c_scl = i2c_scl_pins;
++	reset_info.num_pins = ARRAY_SIZE(i2c_scl_pins);
++	sb_reset_i2c_peripherals(&reset_info);
++}
++
++void soc_i2c_misc_init(unsigned int bus, const struct dw_i2c_bus_config *cfg)
++{
++	/* TODO: Picasso supports I2C RX pad configurations 3.3V, 1.8V and off, so make this
++	   configurable. */
++	const struct i2c_pad_control ctrl = {
++		.rx_level = I2C_PAD_RX_3_3V,
++	};
++
++	fch_i2c_pad_init(bus, cfg->speed, &ctrl);
++}
++
++const struct soc_i2c_ctrlr_info *soc_get_i2c_ctrlr_info(size_t *num_ctrlrs)
++{
++	*num_ctrlrs = ARRAY_SIZE(i2c_ctrlr);
++	return i2c_ctrlr;
++}
++
++const struct dw_i2c_bus_config *soc_get_i2c_bus_config(size_t *num_buses)
++{
++	const struct soc_amd_cyan_skillfish_config *config = config_of_soc();
++
++	*num_buses = ARRAY_SIZE(config->i2c);
++	return config->i2c;
++}
+diff --git a/src/soc/amd/cyan_skillfish/include/soc/amd_pci_int_defs.h b/src/soc/amd/cyan_skillfish/include/soc/amd_pci_int_defs.h
+new file mode 100644
+index 00000000..c7e26162
+--- /dev/null
++++ b/src/soc/amd/cyan_skillfish/include/soc/amd_pci_int_defs.h
+@@ -0,0 +1,64 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++
++#ifndef AMD_CYAN_SKILLFISH_AMD_PCI_INT_DEFS_H
++#define AMD_CYAN_SKILLFISH_AMD_PCI_INT_DEFS_H
++
++/*
++ * PIRQ and device routing - these define the index into the
++ * FCH PCI_INTR 0xC00/0xC01 interrupt routing table.
++ */
++
++#define PIRQ_NC		0x1f	/* Not Used */
++#define PIRQ_A		0x00	/* INT A */
++#define PIRQ_B		0x01	/* INT B */
++#define PIRQ_C		0x02	/* INT C */
++#define PIRQ_D		0x03	/* INT D */
++#define PIRQ_E		0x04	/* INT E */
++#define PIRQ_F		0x05	/* INT F */
++#define PIRQ_G		0x06	/* INT G */
++#define PIRQ_H		0x07	/* INT H */
++#define PIRQ_MISC	0x08	/* Miscellaneous IRQ Settings */
++#define PIRQ_MISC0	0x09	/* Miscellaneous0 IRQ Settings */
++#define PIRQ_MISC1	0x0a	/* Miscellaneous1 IRQ Settings */
++#define PIRQ_MISC2	0x0b	/* Miscellaneous2 IRQ Settings */
++#define PIRQ_SIRQA	0x0c	/* Serial IRQ INTA */
++#define PIRQ_SIRQB	0x0d	/* Serial IRQ INTB */
++#define PIRQ_SIRQC	0x0e	/* Serial IRQ INTC */
++#define PIRQ_SIRQD	0x0f	/* Serial IRQ INTD */
++#define PIRQ_SCI	0x10	/* SCI IRQ */
++#define PIRQ_SMBUS	0x11	/* SMBUS */
++#define PIRQ_ASF	0x12	/* ASF */
++/* 0x13-0x15 reserved */
++#define PIRQ_PMON	0x16	/* Performance Monitor */
++#define PIRQ_SD		0x17	/* SD */
++#define PIRQ_SDIO	0x1a	/* SDIO */
++/* 0x1b-0x1f reserved */
++#define PIRQ_CIR	0x20	/* CIR, no IRQ connected */
++#define PIRQ_GPIOA	0x21	/* GPIOa from PAD_FANIN0 */
++#define PIRQ_GPIOB	0x22	/* GPIOb from PAD_FANOUT0 */
++#define PIRQ_GPIOC	0x23	/* GPIOc no IRQ connected */
++/* 0x24-0x48 reserved */
++#define PIRQ_SATA	0x41	/* SATA */
++/* 0x42 reserved */
++#define PIRQ_EMMC	0x43	/* eMMC */
++/* 0x44-0x4f reserved */
++#define PIRQ_GPP0	0x50	/* GPPInt0 */
++#define PIRQ_GPP1	0x51	/* GPPInt1 */
++#define PIRQ_GPP2	0x52	/* GPPInt2 */
++#define PIRQ_GPP3	0x53	/* GPPInt3 */
++/* 0x54-0x61 reserved */
++#define PIRQ_GPIO	0x62	/* GPIO Controller Interrupt */
++/* 0x63-0x6f reserved */
++#define PIRQ_I2C0	0x70	/* I2C0 */
++#define PIRQ_I2C1	0x71	/* I2C1 */
++#define PIRQ_I2C2	0x72	/* I2C2 */
++#define PIRQ_I2C3	0x73	/* I2C3 */
++#define PIRQ_UART0	0x74	/* UART0 */
++#define PIRQ_UART1	0x75	/* UART1 */
++#define PIRQ_I2C4	0x76	/* I2C4 */
++#define PIRQ_I2C5	0x77	/* I2C5 */
++#define PIRQ_UART2	0x78	/* UART2 */
++#define PIRQ_UART3	0x79	/* UART3 */
++/* 0x7a-0x7f reserved */
++
++#endif /* AMD_CYAN_SKILLFISH_AMD_PCI_INT_DEFS_H */
+diff --git a/src/soc/amd/cyan_skillfish/include/soc/aoac_defs.h b/src/soc/amd/cyan_skillfish/include/soc/aoac_defs.h
+new file mode 100644
+index 00000000..12f12076
+--- /dev/null
++++ b/src/soc/amd/cyan_skillfish/include/soc/aoac_defs.h
+@@ -0,0 +1,27 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++
++#ifndef AMD_CYAN_SKILLFISH_AOAC_DEFS_H
++#define AMD_CYAN_SKILLFISH_AOAC_DEFS_H
++
++/* FCH AOAC device offsets for AOAC_DEV_D3_CTL/AOAC_DEV_D3_STATE */
++#define FCH_AOAC_DEV_CLK_GEN		0
++#define FCH_AOAC_DEV_I2C2		7
++#define FCH_AOAC_DEV_I2C3		8
++#define FCH_AOAC_DEV_I2C4		9
++#define FCH_AOAC_DEV_UART0		11
++#define FCH_AOAC_DEV_UART1		12
++#define FCH_AOAC_DEV_UART2		16
++#define FCH_AOAC_DEV_AMBA		17
++#define FCH_AOAC_DEV_UART3		26
++#define FCH_AOAC_DEV_ESPI		27
++#define FCH_AOAC_DEV_EMMC		28
++
++/* FCH helper define to determine UART_FOR_CONSOLE */
++#define FCH_AOAC_UART_FOR_CONSOLE \
++		(CONFIG_UART_FOR_CONSOLE == 0 ? FCH_AOAC_DEV_UART0 \
++		: CONFIG_UART_FOR_CONSOLE == 1 ? FCH_AOAC_DEV_UART1 \
++		: CONFIG_UART_FOR_CONSOLE == 2 ? FCH_AOAC_DEV_UART2 \
++		: CONFIG_UART_FOR_CONSOLE == 3 ? FCH_AOAC_DEV_UART3 \
++		: -1)
++
++#endif /* AMD_CYAN_SKILLFISH_AOAC_DEFS_H */
+diff --git a/src/soc/amd/cyan_skillfish/include/soc/cpu.h b/src/soc/amd/cyan_skillfish/include/soc/cpu.h
+new file mode 100644
+index 00000000..79af08ad
+--- /dev/null
++++ b/src/soc/amd/cyan_skillfish/include/soc/cpu.h
+@@ -0,0 +1,9 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++
++#ifndef AMD_CYAN_SKILLFISH_CPU_H
++#define AMD_CYAN_SKILLFISH_CPU_H
++
++/* Family 17h model 47h, as reported by Linux on the BC-250. */
++#define CYAN_SKILLFISH_CPUID		CPUID_FROM_FMS(0x17, 0x47, 0)
++
++#endif /* AMD_CYAN_SKILLFISH_CPU_H */
+diff --git a/src/soc/amd/cyan_skillfish/include/soc/data_fabric.h b/src/soc/amd/cyan_skillfish/include/soc/data_fabric.h
+new file mode 100644
+index 00000000..6dc7c540
+--- /dev/null
++++ b/src/soc/amd/cyan_skillfish/include/soc/data_fabric.h
+@@ -0,0 +1,137 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++
++#ifndef AMD_CYAN_SKILLFISH_DATA_FABRIC_H
++#define AMD_CYAN_SKILLFISH_DATA_FABRIC_H
++
++#include <amdblocks/data_fabric_defs.h>
++#include <types.h>
++
++#define IOMS0_FABRIC_ID			9
++
++#define D18F0_VGAEN			DF_REG_ID(0, 0x80)
++#define   VGA_ADDR_ENABLE		BIT(0)
++
++#define DF_PCI_CFG_MAP0			DF_REG_ID(0, 0xa0)
++
++#define DF_PCI_CFG_MAP_COUNT		8
++
++#define DF_PCI_CFG_MAP(reg)		(DF_PCI_CFG_MAP0 + (reg) * sizeof(uint32_t))
++
++union df_pci_cfg_map {
++	struct {
++		uint32_t re		: 1; /* [ 0.. 0] */
++		uint32_t we		: 1; /* [ 1.. 1] */
++		uint32_t		: 2; /* [ 2.. 3] */
++		uint32_t dst_fabric_id	: 8; /* [ 4..11] */
++		uint32_t		: 4; /* [12..15] */
++		uint32_t bus_num_base	: 8; /* [16..23] */
++		uint32_t bus_num_limit	: 8; /* [24..31] */
++	};
++	uint32_t raw;
++};
++
++#define DF_IO_BASE0			DF_REG_ID(0, 0xc0)
++#define DF_IO_LIMIT0			DF_REG_ID(0, 0xc4)
++
++#define DF_IO_REG_COUNT			8
++
++#define DF_IO_REG_OFFSET(instance)	((instance) * 2 * sizeof(uint32_t))
++#define DF_IO_BASE(reg)			(DF_IO_BASE0 + DF_IO_REG_OFFSET(reg))
++#define DF_IO_LIMIT(reg)		(DF_IO_LIMIT0 + DF_IO_REG_OFFSET(reg))
++
++union df_io_base {
++	struct {
++		uint32_t re		:  1; /* [ 0.. 0] */
++		uint32_t we		:  1; /* [ 1.. 1] */
++		uint32_t		:  3; /* [ 2.. 4] */
++		uint32_t ie		:  1; /* [ 5.. 5] */
++		uint32_t		:  6; /* [ 6..11] */
++		uint32_t io_base	: 13; /* [12..24] */
++		uint32_t		:  7; /* [25..31] */
++	};
++	uint32_t raw;
++};
++
++union df_io_limit {
++	struct {
++		uint32_t dst_fabric_id	:  8; /* [ 0.. 7] */
++		uint32_t		:  4; /* [ 8..11] */
++		uint32_t io_limit	: 13; /* [12..24] */
++		uint32_t		:  7; /* [25..31] */
++	};
++	uint32_t raw;
++};
++
++#define DF_IO_ADDR_SHIFT		12
++
++#define DF_DRAM_HOLE_CTL		DF_REG_ID(0, 0x104)
++#define   DRAM_HOLE_CTL_VALID		BIT(0)
++#define   DRAM_HOLE_CTL_BASE_SHFT	24
++#define   DRAM_HOLE_CTL_BASE		(0xff << DRAM_HOLE_CTL_BASE_SHFT)
++
++#define DF_DRAM_BASE0			DF_REG_ID(0, 0x110)
++#define   DRAM_BASE_REG_VALID		BIT(0)
++#define   DRAM_BASE_HOLE_EN		BIT(1)
++#define   DRAM_BASE_INTLV_CH_SHFT	4
++#define   DRAM_BASE_INTLV_CH		(0xf << DRAM_BASE_INTLV_CH_SHFT)
++#define   DRAM_BASE_INTLV_SEL_SHFT	8
++#define   DRAM_BASE_INTLV_SEL		(0x7 << DRAM_BASE_INTLV_SEL_SHFT)
++#define   DRAM_BASE_ADDR_SHFT		12
++#define   DRAM_BASE_ADDR		(0xfffff << DRAM_BASE_ADDR_SHFT)
++
++#define DF_DRAM_LIMIT0			DF_REG_ID(0, 0x114)
++#define   DRAM_LIMIT_DST_ID_SHFT		0
++#define   DRAM_LIMIT_DST_ID			(0xff << DRAM_LIMIT_DST_ID_SHFT)
++#define   DRAM_LIMIT_INTLV_NUM_SOCK_SHFT	8
++#define   DRAM_LIMIT_INTLV_NUM_SOCK		(0x1 << DRAM_LIMIT_INTLV_NUM_SOCK_SHFT)
++#define   DRAM_LIMIT_INTLV_NUM_DIE_SHFT		10
++#define   DRAM_LIMIT_INTLV_NUM_DIE		(0x3 << DRAM_LIMIT_INTLV_NUM_DIE_SHFT)
++#define   DRAM_LIMIT_ADDR_SHFT			12
++#define   DRAM_LIMIT_ADDR			(0xfffff << DRAM_LIMIT_ADDR_SHFT)
++
++#define PICASSO_NUM_DRAM_REG		2
++
++#define DF_DRAM_BASE(dram_map_pair)	((dram_map_pair) * 2 * sizeof(uint32_t) \
++						+ DF_DRAM_BASE0)
++#define DF_DRAM_LIMIT(dram_map_pair)	((dram_map_pair) * 2 * sizeof(uint32_t) \
++						+ DF_DRAM_LIMIT0)
++
++#define DF_MMIO_BASE0			DF_REG_ID(0, 0x200)
++#define DF_MMIO_LIMIT0			DF_REG_ID(0, 0x204)
++#define   DF_MMIO_SHIFT			16
++#define DF_MMIO_CTRL0			DF_REG_ID(0, 0x208)
++
++#define DF_MMIO_REG_SET_SIZE		4
++#define DF_MMIO_REG_SET_COUNT		8
++
++union df_mmio_control {
++	struct {
++		uint32_t re		:  1; /* [ 0.. 0] */
++		uint32_t we		:  1; /* [ 1.. 1] */
++		uint32_t		:  2; /* [ 3.. 2] */
++		uint32_t dst_fabric_id	:  8; /* [11.. 4] */
++		uint32_t np		:  1; /* [12..12] */
++		uint32_t		: 19; /* [31..13] */
++	};
++	uint32_t raw;
++};
++
++#define DF_FICAA_BIOS			DF_REG_ID(4, 0x5C)
++#define DF_FICAD_LO			DF_REG_ID(4, 0x98)
++#define DF_FICAD_HI			DF_REG_ID(4, 0x9C)
++
++union df_ficaa {
++	struct {
++		uint32_t cfg_inst_acc_en : 1; /* [ 0.. 0] */
++		uint32_t                 : 1; /* [ 1.. 1] */
++		uint32_t reg_num         : 9; /* [10.. 2] */
++		uint32_t func_num        : 3; /* [13..11] */
++		uint32_t b64_en          : 1; /* [14..14] */
++		uint32_t                 : 1; /* [15..15] */
++		uint32_t inst_id         : 8; /* [23..16] */
++		uint32_t                 : 8; /* [31..24] */
++	};
++	uint32_t raw;
++};
++
++#endif /* AMD_CYAN_SKILLFISH_DATA_FABRIC_H */
+diff --git a/src/soc/amd/cyan_skillfish/include/soc/gpio.h b/src/soc/amd/cyan_skillfish/include/soc/gpio.h
+new file mode 100644
+index 00000000..2c3ff850
+--- /dev/null
++++ b/src/soc/amd/cyan_skillfish/include/soc/gpio.h
+@@ -0,0 +1,300 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++
++#ifndef AMD_CYAN_SKILLFISH_GPIO_H
++#define AMD_CYAN_SKILLFISH_GPIO_H
++
++#define GPIO_DEVICE_NAME	"AMD0030"
++#define GPIO_DEVICE_DESC	"GPIO Controller"
++
++#ifndef __ACPI__
++#include <soc/iomap.h>
++#include <amdblocks/gpio.h>
++#endif /* !__ACPI__ */
++
++#include <amdblocks/gpio_defs.h>
++
++/* The following sections describe only the GPIOs defined for this SOC */
++
++#define SOC_GPIO_TOTAL_PINS		145
++
++/* Bank 0: GPIO_0 - GPIO_63 */
++#define GPIO_0				0
++#define GPIO_1				1
++#define GPIO_2				2
++#define GPIO_3				3
++#define GPIO_4				4
++#define GPIO_5				5
++#define GPIO_6				6
++#define GPIO_7				7
++#define GPIO_8				8
++#define GPIO_9				9
++#define GPIO_10				10
++#define GPIO_11				11
++#define GPIO_12				12
++#define GPIO_13				13
++#define GPIO_14				14
++#define GPIO_16				16
++#define GPIO_17				17
++#define GPIO_18				18
++#define GPIO_19				19
++#define GPIO_20				20
++#define GPIO_21				21
++#define GPIO_22				22
++#define GPIO_23				23
++#define GPIO_24				24
++#define GPIO_26				26
++#define GPIO_27				27
++#define GPIO_29				29
++#define GPIO_30				30
++#define GPIO_31				31
++#define GPIO_32				32
++#define GPIO_40				40
++#define GPIO_42				42
++
++/* Bank 1: GPIO_64 - GPIO_127 */
++#define GPIO_67				67
++#define GPIO_68				68
++#define GPIO_69				69
++#define GPIO_70				70
++#define GPIO_74				74
++#define GPIO_75				75
++#define GPIO_76				76
++#define GPIO_84				84
++#define GPIO_85				85
++#define GPIO_86				86
++#define GPIO_87				87
++#define GPIO_88				88
++#define GPIO_89				89
++#define GPIO_90				90
++#define GPIO_91				91
++#define GPIO_92				92
++#define GPIO_103			103
++#define GPIO_104			104
++#define GPIO_105			105
++#define GPIO_106			106
++#define GPIO_107			107
++#define GPIO_108			108
++#define GPIO_109			109
++#define GPIO_113			113
++#define GPIO_114			114
++#define GPIO_115			115
++#define GPIO_116			116
++#define GPIO_120			120
++#define GPIO_121			121
++
++/* Bank 2: GPIO_128 - GPIO_191 */
++#define GPIO_129			129
++#define GPIO_130			130
++#define GPIO_131			131
++#define GPIO_132			132
++#define GPIO_135			135
++#define GPIO_136			136
++#define GPIO_137			137
++#define GPIO_138			138
++#define GPIO_139			139
++#define GPIO_140			140
++#define GPIO_141			141
++#define GPIO_142			142
++#define GPIO_143			143
++#define GPIO_144			144
++
++#define GPIO_SCL_HIGH			0
++#define GPIO_SCL_LOW			GPIO_OUTPUT_ENABLE
++
++/* IOMUX function names and values generated from PPR. */
++#define GPIO_0_IOMUX_PWR_BTN_L 0
++#define GPIO_0_IOMUX_GPIOxx 1
++#define GPIO_1_IOMUX_SYS_RESET_L 0
++#define GPIO_1_IOMUX_GPIOxx 1
++#define GPIO_2_IOMUX_WAKE_L 0
++#define GPIO_2_IOMUX_GPIOxx 1
++#define GPIO_3_IOMUX_GPIOxx 0
++#define GPIO_4_IOMUX_GPIOxx 0
++#define GPIO_5_IOMUX_GPIOxx 0
++#define GPIO_5_IOMUX_DEVSLP0 1
++#define GPIO_6_IOMUX_GPIOxx 0
++#define GPIO_6_IOMUX_DEVSLP1 1
++#define GPIO_7_IOMUX_GPIOxx 0
++#define GPIO_7_IOMUX_ACP_I2S_SDIN 1
++#define GPIO_8_IOMUX_GPIOxx 0
++#define GPIO_8_IOMUX_ACP_I2S_LRCLK 1
++#define GPIO_9_IOMUX_GPIOxx 0
++#define GPIO_9_IOMUX_SGPIO_DATAOUT 1
++#define GPIO_9_IOMUX_MDIO1_SCL 2
++#define GPIO_10_IOMUX_GPIOxx 0
++#define GPIO_10_IOMUX_S0A3_GPIO 1
++#define GPIO_10_IOMUX_SGPIO_CLK 2
++#define GPIO_10_IOMUX_MDIO0_SCL 3
++#define GPIO_11_IOMUX_GPIOxx 0
++#define GPIO_11_IOMUX_BLINK 1
++#define GPIO_12_IOMUX_LLB_L 0
++#define GPIO_12_IOMUX_GPIOxx 1
++#define GPIO_13_IOMUX_USB_OC5_L 0
++#define GPIO_13_IOMUX_GPIOxx 1
++#define GPIO_14_IOMUX_USB_OC4_L 0
++#define GPIO_14_IOMUX_GPIOxx 1
++#define GPIO_16_IOMUX_USB_OC0_L 0
++#define GPIO_16_IOMUX_GPIOxx 1
++#define GPIO_17_IOMUX_USB_OC1_L 0
++#define GPIO_17_IOMUX_GPIOxx 1
++#define GPIO_18_IOMUX_USB_OC2_L 0
++#define GPIO_18_IOMUX_GPIOxx 1
++#define GPIO_19_IOMUX_SCL1 0
++#define GPIO_19_IOMUX_I2C3_SCL 1
++#define GPIO_19_IOMUX_GPIOxx 2
++#define GPIO_20_IOMUX_SDA1 0
++#define GPIO_20_IOMUX_I2C3_SDA 1
++#define GPIO_20_IOMUX_GPIOxx 2
++#define GPIO_21_IOMUX_LPC_PD_L 0
++#define GPIO_21_IOMUX_EMMC_CMD 1
++#define GPIO_21_IOMUX_GPIOxx 2
++#define GPIO_22_IOMUX_LPC_PME_L 0
++#define GPIO_22_IOMUX_EMMC_PWR_CTRL 1
++#define GPIO_22_IOMUX_GPIOxx 2
++#define GPIO_23_IOMUX_AC_PRES 0
++#define GPIO_23_IOMUX_SGPIO_LOAD 1
++#define GPIO_23_IOMUX_MDIO1_SDA 2
++#define GPIO_23_IOMUX_GPIOxx 3
++#define GPIO_24_IOMUX_USB_OC3_L 0
++#define GPIO_24_IOMUX_GPIOxx 1
++#define GPIO_26_IOMUX_PCIE_RST_L 0
++#define GPIO_26_IOMUX_GPIOxx 1
++#define GPIO_27_IOMUX_GPIOxx 0
++#define GPIO_27_IOMUX_PCIE_RST1_L 1
++#define GPIO_29_IOMUX_SPI_TPM_CS_L 0
++#define GPIO_29_IOMUX_GPIOxx 1
++#define GPIO_29_IOMUX_USB_OC6_L 2
++#define GPIO_30_IOMUX_SPI_CS2_L 0
++#define GPIO_30_IOMUX_ESPI_CS_L 1
++#define GPIO_30_IOMUX_GPIOxx 2
++#define GPIO_31_IOMUX_SPI_CS3_L 0
++#define GPIO_31_IOMUX_ESPI_CS_L 1
++#define GPIO_31_IOMUX_GPIOxx 2
++#define GPIO_32_IOMUX_LPC_RST_L 0
++#define GPIO_32_IOMUX_SD_WP_L 1
++#define GPIO_32_IOMUX_GPIOxx 2
++#define GPIO_40_IOMUX_GPIOxx 0
++#define GPIO_40_IOMUX_SGPIO_DATAIN 1
++#define GPIO_40_IOMUX_MDIO0_SDA 2
++#define GPIO_42_IOMUX_GPIOxx 0
++#define GPIO_67_IOMUX_SPI_ROM_REQ 0
++#define GPIO_67_IOMUX_GPIOxx 1
++#define GPIO_68_IOMUX_GPIOxx 0
++#define GPIO_68_IOMUX_EMMC_CD 1
++#define GPIO_69_IOMUX_GPIOxx 0
++#define GPIO_70_IOMUX_GPIOxx 0
++#define GPIO_70_IOMUX_EMMC_CLK 1
++#define GPIO_70_IOMUX_SD_CLK 2
++#define GPIO_74_IOMUX_LPCCLK0 0
++#define GPIO_74_IOMUX_EMMC_DATA4 1
++#define GPIO_74_IOMUX_GPIOxx 2
++#define GPIO_75_IOMUX_LPCCLK1 0
++#define GPIO_75_IOMUX_EMMC_DATA6 1
++#define GPIO_75_IOMUX_GPIOxx 2
++#define GPIO_76_IOMUX_SPI_ROM_GNT 0
++#define GPIO_76_IOMUX_GPIOxx 1
++#define GPIO_84_IOMUX_FANIN0 0
++#define GPIO_84_IOMUX_GPIOxx 1
++#define GPIO_85_IOMUX_FANOUT0 0
++#define GPIO_85_IOMUX_GPIOxx 1
++#define GPIO_86_IOMUX_LPC_SMI_L 0
++#define GPIO_86_IOMUX_GPIOxx 1
++#define GPIO_87_IOMUX_SERIRQ 0
++#define GPIO_87_IOMUX_EMMC_DATA7 1
++#define GPIO_87_IOMUX_GPIOxx 2
++#define GPIO_88_IOMUX_LPC_CLKRUN_L 0
++#define GPIO_88_IOMUX_EMMC_DATA5 1
++#define GPIO_88_IOMUX_GPIOxx 2
++#define GPIO_89_IOMUX_GENINT1_L 0
++#define GPIO_89_IOMUX_PSP_INTR0 1
++#define GPIO_89_IOMUX_GPIOxx 2
++#define GPIO_90_IOMUX_GENINT2_L 0
++#define GPIO_90_IOMUX_PSP_INTR1 1
++#define GPIO_90_IOMUX_GPIOxx 2
++#define GPIO_91_IOMUX_SPKR 0
++#define GPIO_91_IOMUX_GPIOxx 1
++#define GPIO_92_IOMUX_CLK_REQ0_L 0
++#define GPIO_92_IOMUX_SATA_IS0_L 1
++#define GPIO_92_IOMUX_SATA_ZP0_L 2
++#define GPIO_92_IOMUX_GPIOxx 3
++#define GPIO_95_IOMUX_GPIOxx 0
++#define GPIO_95_IOMUX_SD0_CLK 1
++#define GPIO_96_IOMUX_GPIOxx 0
++#define GPIO_96_IOMUX_SD0_CMD 1
++#define GPIO_97_IOMUX_GPIOxx 0
++#define GPIO_97_IOMUX_SD0_DATA0 1
++#define GPIO_98_IOMUX_GPIOxx 0
++#define GPIO_98_IOMUX_SD0_DATA1 1
++#define GPIO_99_IOMUX_GPIOxx 0
++#define GPIO_99_IOMUX_SD0_DATA2 1
++#define GPIO_100_IOMUX_GPIOxx 0
++#define GPIO_100_IOMUX_SD0_DATA3 1
++#define GPIO_104_IOMUX_LAD0 0
++#define GPIO_104_IOMUX_EMMC_DATA0 1
++#define GPIO_104_IOMUX_GPIOxx 3
++#define GPIO_105_IOMUX_LAD1 0
++#define GPIO_105_IOMUX_EMMC_DATA1 1
++#define GPIO_105_IOMUX_GPIOxx 3
++#define GPIO_106_IOMUX_LAD2 0
++#define GPIO_106_IOMUX_EMMC_DATA2 1
++#define GPIO_106_IOMUX_GPIOxx 3
++#define GPIO_107_IOMUX_LAD3 0
++#define GPIO_107_IOMUX_EMMC_DATA3 1
++#define GPIO_107_IOMUX_GPIOxx 3
++#define GPIO_108_IOMUX_LDRQ0_L 0
++#define GPIO_108_IOMUX_ESPI_ALERT_L 1
++#define GPIO_108_IOMUX_GPIOxx 2
++#define GPIO_109_IOMUX_LFRAME_L 0
++#define GPIO_109_IOMUX_EMMC_DS 1
++#define GPIO_109_IOMUX_GPIOxx 2
++#define GPIO_113_IOMUX_SCL0 0
++#define GPIO_113_IOMUX_I2C2_SCL 1
++#define GPIO_113_IOMUX_GPIOxx 2
++#define GPIO_114_IOMUX_SDA0 0
++#define GPIO_114_IOMUX_I2C2_SDA 1
++#define GPIO_114_IOMUX_GPIOxx 2
++#define GPIO_115_IOMUX_CLK_REQ1_L 0
++#define GPIO_115_IOMUX_GPIOxx 1
++#define GPIO_116_IOMUX_CLK_REQ2_L 0
++#define GPIO_116_IOMUX_GPIOxx 1
++#define GPIO_120_IOMUX_CLK_REQ5_L 0
++#define GPIO_120_IOMUX_GPIOxx 1
++#define GPIO_121_IOMUX_CLK_REQ6_L 0
++#define GPIO_121_IOMUX_GPIOxx 1
++#define GPIO_129_IOMUX_KBRST_L 0
++#define GPIO_129_IOMUX_GPIOxx 1
++#define GPIO_130_IOMUX_SATA_ACT_L 0
++#define GPIO_130_IOMUX_GPIOxx 1
++#define GPIO_131_IOMUX_CLK_REQ3_L 0
++#define GPIO_131_IOMUX_SATA_IS1_L 1
++#define GPIO_131_IOMUX_SATA_ZP1_L 2
++#define GPIO_131_IOMUX_GPIOxx 3
++#define GPIO_132_IOMUX_CLK_REQ4_L 0
++#define GPIO_132_IOMUX_OSCIN 1
++#define GPIO_132_IOMUX_GPIOxx 2
++#define GPIO_135_IOMUX_UART0_CTS_L 0
++#define GPIO_135_IOMUX_UART2_RXD 1
++#define GPIO_135_IOMUX_GPIOxx 2
++#define GPIO_136_IOMUX_UART0_RXD 0
++#define GPIO_136_IOMUX_GPIOxx 1
++#define GPIO_137_IOMUX_UART0_RTS_L 0
++#define GPIO_137_IOMUX_UART2_TXD 1
++#define GPIO_137_IOMUX_GPIOxx 2
++#define GPIO_138_IOMUX_UART0_TXD 0
++#define GPIO_138_IOMUX_GPIOxx 1
++#define GPIO_139_IOMUX_UART0_INTR 0
++#define GPIO_139_IOMUX_GPIOxx 1
++#define GPIO_140_IOMUX_UART1_CTS_L 0
++#define GPIO_140_IOMUX_UART3_TXD 1
++#define GPIO_140_IOMUX_GPIOxx 2
++#define GPIO_141_IOMUX_UART1_RXD 0
++#define GPIO_141_IOMUX_GPIOxx 1
++#define GPIO_142_IOMUX_UART1_RTS_L 0
++#define GPIO_142_IOMUX_UART3_RXD 1
++#define GPIO_142_IOMUX_GPIOxx 2
++#define GPIO_143_IOMUX_UART1_TXD 0
++#define GPIO_143_IOMUX_GPIOxx 1
++#define GPIO_144_IOMUX_UART1_INTR 0
++#define GPIO_144_IOMUX_GPIOxx 1
++
++#endif /* AMD_CYAN_SKILLFISH_GPIO_H */
+diff --git a/src/soc/amd/cyan_skillfish/include/soc/i2c.h b/src/soc/amd/cyan_skillfish/include/soc/i2c.h
+new file mode 100644
+index 00000000..5e5b0842
+--- /dev/null
++++ b/src/soc/amd/cyan_skillfish/include/soc/i2c.h
+@@ -0,0 +1,30 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++
++#ifndef AMD_CYAN_SKILLFISH_I2C_H
++#define AMD_CYAN_SKILLFISH_I2C_H
++
++#include <gpio.h>
++#include <types.h>
++
++#define GPIO_I2C2_SCL		BIT(2)
++#define GPIO_I2C3_SCL		BIT(3)
++#define GPIO_I2C_MASK		(GPIO_I2C2_SCL | GPIO_I2C3_SCL)
++
++#define I2C2_SCL_PIN			GPIO_113
++#define I2C3_SCL_PIN			GPIO_19
++
++#define I2C2_SCL_PIN_IOMUX_GPIOxx	GPIO_113_IOMUX_GPIOxx
++#define I2C3_SCL_PIN_IOMUX_GPIOxx	GPIO_19_IOMUX_GPIOxx
++
++#define I2C4_USB_PD_CTRL_OFFSET	0x600
++#define USB_PD_PORT_CONTROL	(APU_I2C4_BASE + I2C4_USB_PD_CTRL_OFFSET)
++#define PD_PORT_MUX_OFFSET(x)	(0x10 * (x))
++#define DP_REVERSE	BIT(4)
++#define USB_PD_RFMUX_OVERRIDE	BIT(8)
++#define USB_PD_DP_OVERRIDE	BIT(9)
++
++/* Sets the base address for the specific I2C bus. */
++void i2c_set_bar(unsigned int bus, uintptr_t bar);
++void reset_i2c_peripherals(void);
++
++#endif /* AMD_CYAN_SKILLFISH_I2C_H */
+diff --git a/src/soc/amd/cyan_skillfish/include/soc/iomap.h b/src/soc/amd/cyan_skillfish/include/soc/iomap.h
+new file mode 100644
+index 00000000..b48f531c
+--- /dev/null
++++ b/src/soc/amd/cyan_skillfish/include/soc/iomap.h
+@@ -0,0 +1,84 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++
++#ifndef AMD_CYAN_SKILLFISH_IOMAP_H
++#define AMD_CYAN_SKILLFISH_IOMAP_H
++
++#if ENV_X86
++
++/* MMIO Ranges */
++/* IO_APIC_ADDR defined in arch/x86	0xfec00000 */
++#define GNB_IO_APIC_ADDR		0xfec01000
++#define SPI_BASE_ADDRESS		0xfec10000
++
++/* FCH AL2AHB Registers */
++#define ALINK_AHB_ADDRESS		0xfedc0000
++#define AL2AHB_CONTROL_CLK_OFFSET	0x10
++#define   AL2AHB_CLK_GATE_EN		(1 << 1)
++#define AL2AHB_CONTROL_HCLK_OFFSET	0x30
++#define   AL2AHB_HCLK_GATE_EN		(1 << 1)
++
++/* Reserved				0xfecd1000-0xfedc3fff */
++
++#endif /* ENV_X86 */
++
++/*
++ * Picasso/Dali have I2C0 and I2C1 wired to the Sensor Fusion Hub (SFH/MP2).
++ * The controllers are not directly accessible via the x86.
++ *
++ * On Pollock, I2C0 and I2C1 are routed to the x86 domain, but unfortunately the
++ * interrupts weren't. This effectively makes the I2C controllers useless, so we
++ * pretend they don't exist.
++ *
++ * We want the device tree numbering to match the I2C numbers, so we allocate
++ * I2C0 and I2C1 even though they are not functional.
++ */
++#define I2C_MASTER_DEV_COUNT		4
++#define I2C_PERIPHERAL_DEV_COUNT	1
++#define I2C_CTRLR_COUNT			(I2C_MASTER_DEV_COUNT + I2C_PERIPHERAL_DEV_COUNT)
++
++#if ENV_X86
++
++#define APU_I2C0_BASE			0xfedc2000
++#define APU_I2C1_BASE			0xfedc3000
++#define APU_I2C2_BASE			0xfedc4000
++#define APU_I2C3_BASE			0xfedc5000
++#define APU_I2C4_BASE			0xfedc6000
++
++#define APU_DMAC0_BASE			0xfedc7000
++#define APU_DMAC1_BASE			0xfedc8000
++#define APU_UART0_BASE			0xfedc9000
++#define APU_UART1_BASE			0xfedca000
++/* Reserved				0xfedcb000 */
++#define APU_DMAC2_BASE			0xfedcc000
++#define APU_DMAC3_BASE			0xfedcd000
++#define APU_UART2_BASE			0xfedce000
++#define APU_UART3_BASE			0xfedcf000
++/* Reserved				0xfedd0000-0xfedd4fff */
++#define APU_EMMC_BASE			0xfedd5000
++#define APU_EMMC_CONFIG_BASE		0xfedd5800
++
++#endif /* ENV_X86 */
++
++#define FLASH_BASE_ADDR			((0xffffffff - CONFIG_ROM_SIZE) + 1)
++
++/* I/O Ranges */
++#define ACPI_IO_BASE			0x400
++#define  ACPI_PM_EVT_BLK	(ACPI_IO_BASE + 0x00)     /* 4 bytes */
++#define  ACPI_PM1_STS		(ACPI_PM_EVT_BLK + 0x00)	  /* 2 bytes */
++#define  ACPI_PM1_EN		(ACPI_PM_EVT_BLK + 0x02)	  /* 2 bytes */
++#define  ACPI_PM1_CNT_BLK	(ACPI_IO_BASE + 0x04)     /* 2 bytes */
++#define  ACPI_PM_TMR_BLK	(ACPI_IO_BASE + 0x08)     /* 4 bytes */
++#define  ACPI_CSTATE_CONTROL	(ACPI_IO_BASE + 0x10)     /* 8 bytes */
++/* doc says 0x14 for GPE0_BLK but 8 bytes from ACPI_CSTATE_CONTROL on are trapped in CPU core */
++#define  ACPI_GPE0_BLK		(ACPI_IO_BASE + 0x20)     /* 8 bytes */
++#define  ACPI_GPE0_STS		(ACPI_GPE0_BLK + 0x00)		  /* 4 bytes */
++#define  ACPI_GPE0_EN		(ACPI_GPE0_BLK + 0x04)		  /* 4 bytes */
++#define SMB_BASE_ADDR			0xb00
++#define PM2_INDEX			0xcd0
++#define PM2_DATA			0xcd1
++#define BIOSRAM_INDEX			0xcd4
++#define BIOSRAM_DATA			0xcd5
++#define AB_INDX				0xcd8
++#define AB_DATA				(AB_INDX + 4)
++
++#endif /* AMD_CYAN_SKILLFISH_IOMAP_H */
+diff --git a/src/soc/amd/cyan_skillfish/include/soc/lpc.h b/src/soc/amd/cyan_skillfish/include/soc/lpc.h
+new file mode 100644
+index 00000000..774861d1
+--- /dev/null
++++ b/src/soc/amd/cyan_skillfish/include/soc/lpc.h
+@@ -0,0 +1,16 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++
++#ifndef AMD_CYAN_SKILLFISH_LPC_H
++#define AMD_CYAN_SKILLFISH_LPC_H
++
++#define SPI_BASE_ADDRESS_REGISTER	0xa0
++#define   SPI_BASE_ALIGNMENT		BIT(8)
++#define   SPI_BASE_RESERVED		(BIT(5) | BIT(6) | BIT(7))
++#define   PSP_SPI_MMIO_SEL		BIT(4)
++#define   ROUTE_TPM_2_SPI		BIT(3)
++#define   SPI_ABORT_ENABLE		BIT(2)
++#define   SPI_ROM_ENABLE		BIT(1)
++#define   SPI_ROM_ALT_ENABLE		BIT(0)
++#define   SPI_PRESERVE_BITS		(BIT(0) | BIT(1) | BIT(2) | BIT(3) | BIT(4))
++
++#endif /* AMD_CYAN_SKILLFISH_LPC_H */
+diff --git a/src/soc/amd/cyan_skillfish/include/soc/msr.h b/src/soc/amd/cyan_skillfish/include/soc/msr.h
+new file mode 100644
+index 00000000..3e73b7ae
+--- /dev/null
++++ b/src/soc/amd/cyan_skillfish/include/soc/msr.h
+@@ -0,0 +1,24 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++
++/* This file applies to AMD64 products.
++ * The definitions come from the device's PPR.
++ */
++
++#ifndef AMD_CYAN_SKILLFISH_MSR_H
++#define AMD_CYAN_SKILLFISH_MSR_H
++
++/* MSRC001_00[6B:64] P-state [7:0] bit definitions */
++union pstate_msr {
++	struct {
++		uint64_t cpu_fid_0_7	:  8; /* [ 0.. 7] */
++		uint64_t cpu_dfs_id	:  6; /* [ 8..13] */
++		uint64_t cpu_vid_0_7	:  8; /* [14..21] */
++		uint64_t idd_value	:  8; /* [22..29] */
++		uint64_t idd_div	:  2; /* [30..31] */
++		uint64_t		: 31; /* [32..62] */
++		uint64_t pstate_en	:  1; /* [63..63] */
++	};
++	uint64_t raw;
++};
++
++#endif /* AMD_CYAN_SKILLFISH_MSR_H */
+diff --git a/src/soc/amd/cyan_skillfish/include/soc/nvs.h b/src/soc/amd/cyan_skillfish/include/soc/nvs.h
+new file mode 100644
+index 00000000..a7a00e05
+--- /dev/null
++++ b/src/soc/amd/cyan_skillfish/include/soc/nvs.h
+@@ -0,0 +1,24 @@
++/* SPDX-License-Identifier: GPL-2.0-or-later */
++
++/*
++ * NOTE: The layout of the global_nvs structure below must match the layout
++ * in soc/soc/amd/cyan_skillfish/acpi/globalnvs.asl !!!
++ *
++ */
++
++#ifndef AMD_CYAN_SKILLFISH_NVS_H
++#define AMD_CYAN_SKILLFISH_NVS_H
++
++#include <stdint.h>
++#include <soc/southbridge.h>
++
++struct __packed global_nvs {
++	/* Miscellaneous */
++	uint64_t	pm1i; /* 0x00 - 0x07 - System Wake Source - PM1 Index */
++	uint64_t	gpei; /* 0x08 - 0x0f - GPE Wake Source */
++	uint8_t		tmps; /* 0x10 - Temperature Sensor ID */
++	uint8_t		tcrt; /* 0x11 - Critical Threshold */
++	uint8_t		tpsv; /* 0x12 - Passive Threshold */
++};
++
++#endif /* AMD_CYAN_SKILLFISH_NVS_H */
+diff --git a/src/soc/amd/cyan_skillfish/include/soc/pci_devs.h b/src/soc/amd/cyan_skillfish/include/soc/pci_devs.h
+new file mode 100644
+index 00000000..044ff23e
+--- /dev/null
++++ b/src/soc/amd/cyan_skillfish/include/soc/pci_devs.h
+@@ -0,0 +1,121 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++
++#ifndef AMD_CYAN_SKILLFISH_PCI_DEVS_H
++#define AMD_CYAN_SKILLFISH_PCI_DEVS_H
++
++#include <device/pci_def.h>
++#include <amdblocks/pci_devs.h>
++
++/* GNB Root Complex */
++#define GNB_DEV			0x0
++#define GNB_FUNC		0
++#define GNB_DEVFN		PCI_DEVFN(GNB_DEV, GNB_FUNC)
++#define SOC_GNB_DEV		_SOC_DEV(GNB_DEV, GNB_FUNC)
++
++/* IOMMU */
++#define IOMMU_DEV		0x0
++#define IOMMU_FUNC		2
++#define IOMMU_DEVFN		PCI_DEVFN(IOMMU_DEV, IOMMU_FUNC)
++#define SOC_IOMMU_DEV		_SOC_DEV(IOMMU_DEV, IOMMU_FUNC)
++
++/* PCIe GPP Bridges 0 - 6 */
++#define PCIE_HOST_BRIDGE_06_DEV	0x1
++
++#define PCIE_GPP_0_FUNC		1
++#define PCIE_GPP_0_DEVFN	PCI_DEVFN(PCIE_HOST_BRIDGE_06_DEV, PCIE_GPP_0_FUNC)
++#define SOC_GPP_0_DEV		_SOC_DEV(PCIE_HOST_BRIDGE_06_DEV, PCIE_GPP_0_FUNC)
++
++#define PCIE_GPP_1_FUNC		2
++#define PCIE_GPP_1_DEVFN	PCI_DEVFN(PCIE_HOST_BRIDGE_06_DEV, PCIE_GPP_1_FUNC)
++#define SOC_GPP_1_DEV		_SOC_DEV(PCIE_HOST_BRIDGE_06_DEV, PCIE_GPP_1_FUNC)
++
++#define PCIE_GPP_2_FUNC		3
++#define PCIE_GPP_2_DEVFN	PCI_DEVFN(PCIE_HOST_BRIDGE_06_DEV, PCIE_GPP_2_FUNC)
++#define SOC_GPP_2_DEV		_SOC_DEV(PCIE_HOST_BRIDGE_06_DEV, PCIE_GPP_2_FUNC)
++
++#define PCIE_GPP_3_FUNC		4
++#define PCIE_GPP_3_DEVFN	PCI_DEVFN(PCIE_HOST_BRIDGE_06_DEV, PCIE_GPP_3_FUNC)
++#define SOC_GPP_3_DEV		_SOC_DEV(PCIE_HOST_BRIDGE_06_DEV, PCIE_GPP_3_FUNC)
++
++#define PCIE_GPP_4_FUNC		5
++#define PCIE_GPP_4_DEVFN	PCI_DEVFN(PCIE_HOST_BRIDGE_06_DEV, PCIE_GPP_4_FUNC)
++#define SOC_GPP_4_DEV		_SOC_DEV(PCIE_HOST_BRIDGE_06_DEV, PCIE_GPP_4_FUNC)
++
++#define PCIE_GPP_5_FUNC		6
++#define PCIE_GPP_5_DEVFN	PCI_DEVFN(PCIE_HOST_BRIDGE_06_DEV, PCIE_GPP_5_FUNC)
++#define SOC_GPP_5_DEV		_SOC_DEV(PCIE_HOST_BRIDGE_06_DEV, PCIE_GPP_5_FUNC)
++
++#define PCIE_GPP_6_FUNC		7
++#define PCIE_GPP_6_DEVFN	PCI_DEVFN(PCIE_HOST_BRIDGE_06_DEV, PCIE_GPP_6_FUNC)
++#define SOC_GPP_6_DEV		_SOC_DEV(PCIE_HOST_BRIDGE_06_DEV, PCIE_GPP_6_FUNC)
++
++/* PCIe GPP Bridges to Bus A and Bus B devices */
++#define PCIE_HOST_BRIDGE_AB_DEV	0x8
++
++#define PCIE_GPP_A_FUNC		1
++#define PCIE_GPP_A_DEVFN	PCI_DEVFN(PCIE_HOST_BRIDGE_AB_DEV, PCIE_GPP_A_FUNC)
++#define SOC_PCIE_GPP_A_DEV	_SOC_DEV(PCIE_HOST_BRIDGE_AB_DEV, PCIE_GPP_A_FUNC)
++#define   GFX_DEV		0x0
++#define   GFX_FUNC		0
++#define   GFX_DEVFN		PCI_DEVFN(GFX_DEV, GFX_FUNC)
++
++#define   XHCI0_DEV		0x0
++#define   XHCI0_FUNC		3
++#define   XHCI0_DEVFN		PCI_DEVFN(XHCI0_DEV, XHCI0_FUNC)
++
++#define   XHCI1_DEV		0x0
++#define   XHCI1_FUNC		4
++#define   XHCI1_DEVFN		PCI_DEVFN(XHCI1_DEV, XHCI1_FUNC)
++
++#define   AUDIO_DEV		0x0
++#define   AUDIO_FUNC		5
++#define   AUDIO_DEVFN		PCI_DEVFN(AUDIO_DEV, AUDIO_FUNC)
++
++#define   HD_AUDIO_DEV		0x0
++#define   HD_AUDIO_FUNC		6
++#define   HD_AUDIO_DEVFN	PCI_DEVFN(HD_AUDIO_DEV, HD_AUDIO_FUNC)
++
++#define PCIE_GPP_B_FUNC		2
++#define PCIE_GPP_B_DEVFN	PCI_DEVFN(PCIE_HOST_BRIDGE_AB_DEV, PCIE_GPP_B_FUNC)
++#define SOC_PCIE_GPP_B_DEV	_SOC_DEV(PCIE_HOST_BRIDGE_AB_DEV, PCIE_GPP_B_FUNC)
++#define   SATA_DEV		0x0
++#define   SATA_FUNC		0
++#define   SATA_DEVFN		PCI_DEVFN(SATA_DEV, SATA_FUNC)
++
++/* Data Fabric functions */
++#define DF_DEV			0x18
++
++#define DF_F0_DEVFN		PCI_DEVFN(DF_DEV, 0)
++#define SOC_DF_F0_DEV		_SOC_DEV(DF_DEV, 0)
++
++#define DF_F1_DEVFN		PCI_DEVFN(DF_DEV, 1)
++#define SOC_DF_F1_DEV		_SOC_DEV(DF_DEV, 1)
++
++#define DF_F2_DEVFN		PCI_DEVFN(DF_DEV, 2)
++#define SOC_DF_F2_DEV		_SOC_DEV(DF_DEV, 2)
++
++#define DF_F3_DEVFN		PCI_DEVFN(DF_DEV, 3)
++#define SOC_DF_F3_DEV		_SOC_DEV(DF_DEV, 3)
++
++#define DF_F4_DEVFN		PCI_DEVFN(DF_DEV, 4)
++#define SOC_DF_F4_DEV		_SOC_DEV(DF_DEV, 4)
++
++#define DF_F5_DEVFN		PCI_DEVFN(DF_DEV, 5)
++#define SOC_DF_F5_DEV		_SOC_DEV(DF_DEV, 5)
++
++#define DF_F6_DEVFN		PCI_DEVFN(DF_DEV, 6)
++#define SOC_DF_F6_DEV		_SOC_DEV(DF_DEV, 6)
++
++/* SMBUS */
++#define SMBUS_DEV		0x14
++#define SMBUS_FUNC		0
++#define SMBUS_DEVFN		PCI_DEVFN(SMBUS_DEV, SMBUS_FUNC)
++#define SOC_SMBUS_DEV		_SOC_DEV(SMBUS_DEV, SMBUS_FUNC)
++
++/* LPC BUS */
++#define PCU_DEV			0x14
++#define LPC_FUNC		3
++#define LPC_DEVFN		PCI_DEVFN(PCU_DEV, LPC_FUNC)
++#define SOC_LPC_DEV		_SOC_DEV(PCU_DEV, LPC_FUNC)
++
++#endif /* AMD_CYAN_SKILLFISH_PCI_DEVS_H */
+diff --git a/src/soc/amd/cyan_skillfish/include/soc/smi.h b/src/soc/amd/cyan_skillfish/include/soc/smi.h
+new file mode 100644
+index 00000000..a37c525b
+--- /dev/null
++++ b/src/soc/amd/cyan_skillfish/include/soc/smi.h
+@@ -0,0 +1,184 @@
++/* SPDX-License-Identifier: GPL-2.0-or-later */
++
++#ifndef AMD_CYAN_SKILLFISH_SMI_H
++#define AMD_CYAN_SKILLFISH_SMI_H
++
++#include <types.h>
++
++#define SMI_GEVENTS			24
++#define SCIMAPS				59 /* 0..58 */
++#define SCI_GPES			32
++#define NUMBER_SMITYPES			160
++
++#define SMI_EVENT_STATUS		0x0
++#define SMI_EVENT_ENABLE		0x04
++#define SMI_SCI_TRIG			0x08
++#define SMI_SCI_LEVEL			0x0c
++#define SMI_SCI_STATUS			0x10
++#define SMI_SCI_EN			0x14
++#define SMI_SCI_MAP0			0x40
++# define SMI_SCI_MAP(X)			(SMI_SCI_MAP0 + (X))
++
++/* SMI source and status */
++#define SMITYPE_G_GENINT1_L		0
++#define SMITYPE_G_GENINT2_L		1
++#define SMITYPE_G_AGPIO3		2
++#define SMITYPE_G_LPCPME		3
++#define SMITYPE_G_AGPIO4		4
++#define SMITYPE_G_LPCPD			5
++#define SMITYPE_G_SPKR			6
++#define SMITYPE_G_AGPIO5		7
++#define SMITYPE_G_WAKE_L		8
++#define SMITYPE_G_LPC_SMI_L		9
++#define SMITYPE_G_AGPIO6		10
++#define SMITYPE_G_AGPIO7		11
++#define SMITYPE_G_USBOC0_L		12
++#define SMITYPE_G_USBOC1_L		13
++#define SMITYPE_G_USBOC2_L		14
++#define SMITYPE_G_USBOC3_L		15
++#define SMITYPE_G_AGPIO23		16
++#define SMITYPE_G_ESPI_RESET_L		17
++#define SMITYPE_G_FANIN0		18
++#define SMITYPE_G_SYSRESET_L		19
++#define SMITYPE_G_AGPIO40		20
++#define SMITYPE_G_PWR_BTN_L		21
++#define SMITYPE_G_AGPIO9		22
++#define SMITYPE_G_AGPIO8		23
++#define GEVENT_MASK ((1 << SMITYPE_G_GENINT1_L)		\
++		   | (1 << SMITYPE_G_GENINT2_L)		\
++		   | (1 << SMITYPE_G_AGPIO3)		\
++		   | (1 << SMITYPE_G_LPCPME)		\
++		   | (1 << SMITYPE_G_AGPIO4)		\
++		   | (1 << SMITYPE_G_LPCPD)		\
++		   | (1 << SMITYPE_G_SPKR)		\
++		   | (1 << SMITYPE_G_AGPIO5)		\
++		   | (1 << SMITYPE_G_WAKE_L)		\
++		   | (1 << SMITYPE_G_LPC_SMI_L)		\
++		   | (1 << SMITYPE_G_AGPIO6)		\
++		   | (1 << SMITYPE_G_AGPIO7)		\
++		   | (1 << SMITYPE_G_USBOC0_L)		\
++		   | (1 << SMITYPE_G_USBOC1_L)		\
++		   | (1 << SMITYPE_G_USBOC2_L)		\
++		   | (1 << SMITYPE_G_USBOC3_L)		\
++		   | (1 << SMITYPE_G_AGPIO23)		\
++		   | (1 << SMITYPE_G_ESPI_RESET_L)	\
++		   | (1 << SMITYPE_G_FANIN0)		\
++		   | (1 << SMITYPE_G_SYSRESET_L)	\
++		   | (1 << SMITYPE_G_AGPIO40)		\
++		   | (1 << SMITYPE_G_PWR_BTN_L)		\
++		   | (1 << SMITYPE_G_AGPIO9)		\
++		   | (1 << SMITYPE_G_AGPIO8))
++#define SMITYPE_MP2_WAKE		24
++#define SMITYPE_MP2_GPIO0		25
++#define SMITYPE_ESPI_SYS		26
++#define SMITYPE_ESPI_WAKE_PME		27
++#define SMITYPE_MP2_GPIO1		28
++#define SMITYPE_GPP_PME			29
++#define SMITYPE_NB_GPP_HOT_PLUG		30
++/* 31 Reserved */
++#define SMITYPE_WAKE_L2			32
++#define SMITYPE_PSP			33
++/* 33 - 38 Reserved */
++#define SMITYPE_AZPME			39
++#define SMITYPE_USB_PD_I2C4		40
++#define SMITYPE_GPIO_CTL		41
++/* 42 Reserved */
++#define SMITYPE_ALT_HPET_ALARM		43
++#define SMITYPE_FAN_THERMAL		44
++#define SMITYPE_ASF_MASTER_SLAVE	45
++#define SMITYPE_I2S_WAKE		46
++#define SMITYPE_SMBUS0_MASTER		47
++#define SMITYPE_TWARN			48
++#define SMITYPE_TRAFFIC_MON		49
++#define SMITYPE_ILLB			50
++#define SMITYPE_PWRBUTTON_UP		51
++#define SMITYPE_PROCHOT			52
++#define SMITYPE_APU_HW			53
++#define SMITYPE_NB_SCI			54
++#define SMITYPE_RAS_SERR		55
++#define SMITYPE_XHC0_PME		56
++#define SMITYPE_XHC1_PME		57
++#define SMITYPE_ACDC_TIMER		58
++/* 59-63 Reserved */
++#define SMITYPE_KB_RESET		64
++#define SMITYPE_SLP_TYP			65
++#define SMITYPE_AL2H_ACPI		66
++#define SMITYPE_AHCI			67
++#define SMITYPE_NB_GPP_PME_PULSE	68
++#define SMITYPE_NB_GPP_HP_PULSE		69
++#define SMITYPE_USBPD_I2C_INT		70
++/* 71 Reserved */
++#define SMITYPE_GBL_RLS			72
++#define SMITYPE_BIOS_RLS		73
++#define SMITYPE_PWRBUTTON_DOWN		74
++#define SMITYPE_SMI_CMD_PORT		75
++#define SMITYPE_USB_SMI			76
++#define SMITYPE_SERIRQ			77
++#define SMITYPE_SMBUS0_INTR		78
++/* 79-80 Reserved */
++#define SMITYPE_INTRUDER		81
++#define SMITYPE_VBAT_LOW		82
++#define SMITYPE_PROTHOT			83
++#define SMITYPE_PCI_SERR		84
++#define SMITYPE_GPP_SERR		85
++/* 85-89 Reserved */
++#define SMITYPE_EMUL60_64		90
++/* 91-132 Reserved */
++#define SMITYPE_FANIN0			133
++/* 134-140 Reserved */
++#define SMITYPE_CF9_WRITE		141
++#define SMITYPE_SHORT_TIMER		142
++#define SMITYPE_LONG_TIMER		143
++#define SMITYPE_AB_SMI			144
++/* 145 Reserved */
++#define SMITYPE_ESPI_SMI		146
++/* 147 Reserved */
++#define SMITYPE_IOTRAP0			148
++#define SMITYPE_IOTRAP1			149
++#define SMITYPE_IOTRAP2			150
++#define SMITYPE_IOTRAP3			151
++#define SMITYPE_MEMTRAP0		152
++/* 153-155 Reserved */
++#define SMITYPE_CFGTRAP0		156
++/* 157-159 Reserved */
++
++#define TYPE_TO_MASK(X)				(1 << (X) % 32)
++
++#define SMI_REG_SMISTS0			0x80
++#define SMI_REG_SMISTS1			0x84
++#define SMI_REG_SMISTS2			0x88
++#define SMI_REG_SMISTS3			0x8c
++#define SMI_REG_SMISTS4			0x90
++
++#define SMI_REG_POINTER			0x94
++# define SMI_STATUS_SRC_SCI			BIT(0)
++# define SMI_STATUS_SRC_0			BIT(1) /* SMIx80 */
++# define SMI_STATUS_SRC_1			BIT(2) /* SMIx84... */
++# define SMI_STATUS_SRC_2			BIT(3)
++# define SMI_STATUS_SRC_3			BIT(4)
++# define SMI_STATUS_SRC_4			BIT(5)
++
++#define SMI_TIMER			0x96
++#define SMI_TIMER_MASK				0x7fff
++#define SMI_TIMER_EN				(1 << 15)
++
++#define SMI_REG_SMITRIG0		0x98
++# define SMITRIG0_PSP				BIT(25)
++# define SMITRG0_EOS				BIT(28)
++# define SMI_TIMER_SEL				BIT(29)
++# define SMITRG0_SMIENB				BIT(31)
++
++#define SMI_REG_CONTROL0		0xa0
++#define SMI_REG_CONTROL1		0xa4
++#define SMI_REG_CONTROL2		0xa8
++#define SMI_REG_CONTROL3		0xac
++#define SMI_REG_CONTROL4		0xb0
++#define SMI_REG_CONTROL5		0xb4
++#define SMI_REG_CONTROL6		0xb8
++#define SMI_REG_CONTROL7		0xbc
++#define SMI_REG_CONTROL8		0xc0
++#define SMI_REG_CONTROL9		0xc4
++
++#define SMI_MODE_MASK			0x03
++
++#endif /* AMD_CYAN_SKILLFISH_SMI_H */
+diff --git a/src/soc/amd/cyan_skillfish/include/soc/smu.h b/src/soc/amd/cyan_skillfish/include/soc/smu.h
+new file mode 100644
+index 00000000..2197629f
+--- /dev/null
++++ b/src/soc/amd/cyan_skillfish/include/soc/smu.h
+@@ -0,0 +1,23 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++
++#ifndef AMD_CYAN_SKILLFISH_SMU_H
++#define AMD_CYAN_SKILLFISH_SMU_H
++
++/* SMU mailbox register offsets in SMN */
++#define SMN_SMU_MESG_ID		0x3b10528
++#define SMN_SMU_MESG_RESP	0x3b10564
++#define SMN_SMU_MESG_ARGS_BASE	0x3b10998
++
++#define SMU_NUM_ARGS		6
++
++enum smu_message_id {
++	SMC_MSG_S3ENTRY = 0x0c,
++};
++
++/*
++ * Request the SMU put system into S3, S4, or S5. On entry, SlpTyp determines S-State and
++ * SlpTypeEn gets set by the SMU. Function does not return if successful.
++ */
++void smu_sx_entry(void);
++
++#endif /* AMD_CYAN_SKILLFISH_SMU_H */
+diff --git a/src/soc/amd/cyan_skillfish/include/soc/soc_chip.h b/src/soc/amd/cyan_skillfish/include/soc/soc_chip.h
+new file mode 100644
+index 00000000..db1db603
+--- /dev/null
++++ b/src/soc/amd/cyan_skillfish/include/soc/soc_chip.h
+@@ -0,0 +1,8 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++
++#ifndef AMD_CYAN_SKILLFISH_SOC_CHIP_H
++#define AMD_CYAN_SKILLFISH_SOC_CHIP_H
++
++#include "../../chip.h"
++
++#endif /* AMD_CYAN_SKILLFISH_SOC_CHIP_H */
+diff --git a/src/soc/amd/cyan_skillfish/include/soc/southbridge.h b/src/soc/amd/cyan_skillfish/include/soc/southbridge.h
+new file mode 100644
+index 00000000..ddfc56c1
+--- /dev/null
++++ b/src/soc/amd/cyan_skillfish/include/soc/southbridge.h
+@@ -0,0 +1,94 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++
++#ifndef AMD_CYAN_SKILLFISH_SOUTHBRIDGE_H
++#define AMD_CYAN_SKILLFISH_SOUTHBRIDGE_H
++
++#include <types.h>
++#include <device/device.h>
++#include <soc/iomap.h>
++
++/*
++ * AcpiMmio Region
++ *  - fixed addresses offset from 0xfed80000
++ */
++
++/* Power management registers:  0xfed80300 or index/data at IO 0xcd6/cd7 */
++#define PM_PCI_CTRL			0x08
++#define   FORCE_STPCLK_RETRY		BIT(24)
++#define   FORCE_SLPSTATE_RETRY		BIT(25)
++
++#define PWR_RESET_CFG			0x10
++#define   TOGGLE_ALL_PWR_GOOD		BIT(1)
++
++#define PM_SERIRQ_CONF			0x54
++#define   PM_SERIRQ_NUM_BITS_17		0x0000
++#define   PM_SERIRQ_NUM_BITS_18		0x0004
++#define   PM_SERIRQ_NUM_BITS_19		0x0008
++#define   PM_SERIRQ_NUM_BITS_20		0x000c
++#define   PM_SERIRQ_NUM_BITS_21		0x0010
++#define   PM_SERIRQ_NUM_BITS_22		0x0014
++#define   PM_SERIRQ_NUM_BITS_23		0x0018
++#define   PM_SERIRQ_NUM_BITS_24		0x001c
++#define   PM_SERIRQ_MODE		BIT(6)
++#define   PM_SERIRQ_ENABLE		BIT(7)
++
++#define PM_EVT_BLK			0x60
++#define   WAK_STS			BIT(15) /*AcpiPmEvtBlkx00 Pm1Status */
++#define   PCIEXPWAK_STS			BIT(14)
++#define   RTC_STS			BIT(10)
++#define   PWRBTN_STS			BIT(8)
++#define   GBL_STS			BIT(5)
++#define   BM_STS			BIT(4)
++#define   TIMER_STS			BIT(0)
++#define   PCIEXPWAK_DIS			BIT(14) /*AcpiPmEvtBlkx02 Pm1Enable */
++#define   RTC_EN			BIT(10)
++#define   PWRBTN_EN			BIT(8)
++#define   GBL_EN			BIT(5)
++#define   TIMER_STS			BIT(0)
++#define PM1_CNT_BLK			0x62
++#define PM_TMR_BLK			0x64
++#define PM_GPE0_BLK			0x68
++#define PM_ACPI_SMI_CMD			0x6a
++#define PM_ACPI_CONF			0x74
++#define   PM_ACPI_DECODE_STD		BIT(0)
++#define   PM_ACPI_GLOBAL_EN		BIT(1)
++#define   PM_ACPI_RTC_EN_EN		BIT(2)
++#define   PM_ACPI_TIMER_EN_EN		BIT(4)
++#define   PM_ACPI_MASK_ARB_DIS		BIT(6)
++#define   PM_ACPI_BIOS_RLS		BIT(7)
++#define   PM_ACPI_PWRBTNEN_EN		BIT(8)
++#define   PM_ACPI_REDUCED_HW_EN		BIT(9)
++#define   PM_ACPI_BLOCK_PCIE_PME	BIT(24)
++#define   PM_ACPI_PCIE_WAK_MASK		BIT(25)
++#define   PM_ACPI_WAKE_AS_GEVENT	BIT(27)
++#define   PM_ACPI_NB_PME_GEVENT		BIT(28)
++#define   PM_ACPI_RTC_WAKE_EN		BIT(29)
++#define PM_LPC_GATING			0xec
++#define   PM_LPC_AB_NO_BYPASS_EN	BIT(2)
++#define   PM_LPC_A20_EN			BIT(1)
++#define   PM_LPC_ENABLE			BIT(0)
++
++#define PM1_LIMIT			16
++#define GPE0_LIMIT			32
++#define TOTAL_BITS(a)			(8 * sizeof(a))
++
++#define MISC_CGPLL_CONFIG1		0x08
++#define   CG1PLL_SPREAD_SPECTRUM_ENABLE	BIT(0)
++#define MISC_CLK_CNTL1			0x40
++#define   BP_X48M0_OUTPUT_EN		BIT(2) /* 1=En, unlike Hudson, Kern */
++
++#define FCH_LEGACY_UART_DECODE		(ALINK_AHB_ADDRESS + 0x20) /* 0xfedc0020 */
++
++/* SATA Controller D11F0 */
++#define SATA_MISC_CONTROL_REG		0x40
++#define SATA_MISC_SUBCLASS_WREN		BIT(0)
++/* Register in AHCIBaseAddress (BAR5 at D11F0x24) */
++#define SATA_CAPABILITIES_REG		0xfc
++#define SATA_CAPABILITY_SPM		BIT(12)
++
++void fch_pre_init(void);
++void fch_early_init(void);
++void fch_init(void *chip_info);
++void fch_final(void *chip_info);
++
++#endif /* AMD_CYAN_SKILLFISH_SOUTHBRIDGE_H */
+diff --git a/src/soc/amd/cyan_skillfish/mca.c b/src/soc/amd/cyan_skillfish/mca.c
+new file mode 100644
+index 00000000..91b58ac3
+--- /dev/null
++++ b/src/soc/amd/cyan_skillfish/mca.c
+@@ -0,0 +1,49 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++
++#include <amdblocks/mca.h>
++#include <cpu/x86/msr.h>
++#include <types.h>
++
++static const char *const mca_bank_name[] = {
++	[0]  = "Load-store unit",
++	[1]  = "Instruction fetch unit",
++	[2]  = "L2 cache unit",
++	[3]  = "Decode unit",
++	[4]  = "",
++	[5]  = "Execution unit",
++	[6]  = "Floating point unit",
++	[7]  = "L3 cache unit",
++	[8]  = "L3 cache unit",
++	[9]  = "L3 cache unit",
++	[10] = "L3 cache unit",
++	[11] = "L3 cache unit",
++	[12] = "L3 cache unit",
++	[13] = "L3 cache unit",
++	[14] = "L3 cache unit",
++	[15] = "UMC",
++	[16] = "UMC",
++	[17] = "SMU",
++	[18] = "PSP",
++	[19] = "PB",
++	[20] = "CS",
++	[21] = "CS",
++	[22] = "PIE",
++};
++
++bool mca_has_expected_bank_count(void)
++{
++	return ARRAY_SIZE(mca_bank_name) == mca_get_bank_count();
++}
++
++bool mca_is_valid_bank(unsigned int bank)
++{
++	return (bank < ARRAY_SIZE(mca_bank_name) && mca_bank_name[bank] != NULL);
++}
++
++const char *mca_get_bank_name(unsigned int bank)
++{
++	if (mca_is_valid_bank(bank))
++		return mca_bank_name[bank];
++	else
++		return "";
++}
+diff --git a/src/soc/amd/cyan_skillfish/memmap.c b/src/soc/amd/cyan_skillfish/memmap.c
+new file mode 100644
+index 00000000..0b2ab8ba
+--- /dev/null
++++ b/src/soc/amd/cyan_skillfish/memmap.c
+@@ -0,0 +1,78 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++
++#include <amdblocks/acpimmio_map.h>
++#include <amdblocks/memmap.h>
++#include <cbmem.h>
++#include <cpu/amd/mtrr.h>
++#include <amdblocks/iomap.h>
++#include <amdblocks/root_complex.h>
++#include <device/device.h>
++#include <soc/iomap.h>
++#include <stdint.h>
++
++/*
++ *                     +--------------------------------+
++ *                     |                                |
++ *                     |                                |
++ *                     |                                |
++ *                     |                                |
++ *                     |                                |
++ *                     |                                |
++ *                     |                                |
++ *   reserved_dram_end +--------------------------------+
++ *                     |                                |
++ *                     |       verstage (if reqd)       |
++ *                     |          (VERSTAGE_SIZE)       |
++ *                     +--------------------------------+ VERSTAGE_ADDR
++ *                     |                                |
++ *                     |            FSP-M               |
++ *                     |         (FSP_M_SIZE)           |
++ *                     +--------------------------------+ FSP_M_ADDR
++ *                     |           romstage             |
++ *                     |        (ROMSTAGE_SIZE)         |
++ *                     +--------------------------------+ ROMSTAGE_ADDR = BOOTBLOCK_END
++ *                     |                                | X86_RESET_VECTOR = BOOTBLOCK_END  - 0x10
++ *                     |           bootblock            |
++ *                     |     (C_ENV_BOOTBLOCK_SIZE)     |
++ *                     +--------------------------------+ BOOTBLOCK_ADDR = BOOTBLOCK_END - C_ENV_BOOTBLOCK_SIZE
++ *                     |          Unused hole           |
++ *                     |            (86KiB)             |
++ *                     +--------------------------------+
++ *                     |     FMAP cache (FMAP_SIZE)     |
++ *                     +--------------------------------+ PSP_SHAREDMEM_BASE + PSP_SHAREDMEM_SIZE + PRERAM_CBMEM_CONSOLE_SIZE + 0x200
++ *                     |  Early Timestamp region (512B) |
++ *                     +--------------------------------+ PSP_SHAREDMEM_BASE + PSP_SHAREDMEM_SIZE + PRERAM_CBMEM_CONSOLE_SIZE
++ *                     |      Preram CBMEM console      |
++ *                     |   (PRERAM_CBMEM_CONSOLE_SIZE)  |
++ *                     +--------------------------------+ PSP_SHAREDMEM_BASE + PSP_SHAREDMEM_SIZE
++ *                     |   PSP shared (vboot workbuf)   |
++ *                     |      (PSP_SHAREDMEM_SIZE)      |
++ *                     +--------------------------------+ PSP_SHAREDMEM_BASE
++ *                     |          APOB (64KiB)          |
++ *                     +--------------------------------+ PSP_APOB_DRAM_ADDRESS
++ *                     |        Early BSP stack         |
++ *                     |   (EARLYRAM_BSP_STACK_SIZE)    |
++ * reserved_dram_start +--------------------------------+ EARLY_RESERVED_DRAM_BASE
++ *                     |              DRAM              |
++ *                     +--------------------------------+ 0x100000
++ *                     |           Option ROM           |
++ *                     +--------------------------------+ 0xc0000
++ *                     |           Legacy VGA           |
++ *                     +--------------------------------+ 0xa0000
++ *                     |              DRAM              |
++ *                     +--------------------------------+ 0x0
++ */
++void read_soc_memmap_resources(struct device *dev, unsigned long *idx)
++{
++	read_lower_soc_memmap_resources(dev, idx);
++
++	/* Reserve fixed IOMMU MMIO region */
++	mmio_range(dev, (*idx)++, IOMMU_RESERVED_MMIO_BASE, IOMMU_RESERVED_MMIO_SIZE);
++
++	/* cbmem_top() - TOP_MEM: TSEG and alignment slack */
++	reserved_ram_from_to(dev, (*idx)++, cbmem_top(), get_top_of_mem_below_4gb());
++
++	/* DRAM above 4 GiB, as programmed into TOP_MEM2 by the ABL. */
++	if (get_top_of_mem_above_4gb() > 4ULL * GiB)
++		ram_from_to(dev, (*idx)++, 4ULL * GiB, get_top_of_mem_above_4gb());
++}
+diff --git a/src/soc/amd/cyan_skillfish/pci_routing.c b/src/soc/amd/cyan_skillfish/pci_routing.c
+new file mode 100644
+index 00000000..05cb34ae
+--- /dev/null
++++ b/src/soc/amd/cyan_skillfish/pci_routing.c
+@@ -0,0 +1,15 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++
++#include <amdblocks/amd_pci_util.h>
++#include <stddef.h>
++
++/*
++ * TODO: Picasso derives this from the FSP's DXIO descriptors. The BC-250's
++ * PCIe lane map (M.2 slot, RTL8111H) has to be read out of the stock
++ * AmdNbioPcieARI modules or a running board first.
++ */
++const struct pci_routing_info *get_pci_routing_table(size_t *entries)
++{
++	*entries = 0;
++	return NULL;
++}
+diff --git a/src/soc/amd/cyan_skillfish/root_complex.c b/src/soc/amd/cyan_skillfish/root_complex.c
+new file mode 100644
+index 00000000..17b3d5a5
+--- /dev/null
++++ b/src/soc/amd/cyan_skillfish/root_complex.c
+@@ -0,0 +1,118 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++
++#include <acpi/acpigen.h>
++#include <amdblocks/alib.h>
++#include <amdblocks/data_fabric.h>
++#include <amdblocks/ioapic.h>
++#include <amdblocks/root_complex.h>
++#include <arch/ioapic.h>
++#include <device/device.h>
++#include <device/pci.h>
++#include <static.h>
++#include <stdint.h>
++#include <soc/iomap.h>
++#include "chip.h"
++
++#define DPTC_TOTAL_UPDATE_PARAMS	4
++
++struct dptc_input {
++	uint16_t size;
++	struct alib_dptc_param params[DPTC_TOTAL_UPDATE_PARAMS];
++} __packed;
++
++#define DPTC_INPUTS(_thermctllmit, _sustained, _fast, _slow)			\
++	{									\
++		.size = sizeof(struct dptc_input),				\
++		.params = {							\
++			{							\
++				.id = ALIB_DPTC_THERMAL_CONTROL_LIMIT_ID,	\
++				.value = _thermctllmit,				\
++			},							\
++			{							\
++				.id = ALIB_DPTC_SUSTAINED_POWER_LIMIT_ID,	\
++				.value = _sustained,				\
++			},							\
++			{							\
++				.id = ALIB_DPTC_FAST_PPT_LIMIT_ID,		\
++				.value = _fast,					\
++			},							\
++			{							\
++				.id = ALIB_DPTC_SLOW_PPT_LIMIT_ID,		\
++				.value = _slow,					\
++			},							\
++		},								\
++	}
++
++static void acipgen_dptci(void)
++{
++	const struct soc_amd_cyan_skillfish_config *config = config_of_soc();
++
++	/* Normal mode DPTC values. */
++	struct dptc_input default_input = DPTC_INPUTS(config->thermctl_limit_degreeC,
++							config->sustained_power_limit_mW,
++							config->fast_ppt_limit_mW,
++							config->slow_ppt_limit_mW);
++	acpigen_write_alib_dptc_default((uint8_t *)&default_input, sizeof(default_input));
++
++	/* Tablet Mode */
++	struct dptc_input tablet_mode_input = DPTC_INPUTS(
++					config->thermctl_limit_tablet_mode_degreeC,
++					config->sustained_power_limit_tablet_mode_mW,
++					config->fast_ppt_limit_tablet_mode_mW,
++					config->slow_ppt_limit_tablet_mode_mW);
++	acpigen_write_alib_dptc_tablet((uint8_t *)&tablet_mode_input,
++		sizeof(tablet_mode_input));
++}
++
++static void root_complex_fill_ssdt(const struct device *device)
++{
++	if (CONFIG(SOC_AMD_COMMON_BLOCK_ACPI_DPTC))
++		acipgen_dptci();
++}
++
++static const char *gnb_acpi_name(const struct device *dev)
++{
++	return "GNB";
++}
++
++struct device_operations cyan_skillfish_root_complex_operations = {
++	/* The root complex has no PCI BARs implemented, so there's no need to call
++	   pci_dev_read_resources for it */
++	.read_resources		= noop_read_resources,
++	.set_resources		= noop_set_resources,
++	.enable_resources	= pci_dev_enable_resources,
++	.acpi_name		= gnb_acpi_name,
++	.acpi_fill_ssdt		= root_complex_fill_ssdt,
++};
++
++static const struct domain_iohc_info iohc_info[] = {
++	[0] = {
++		.fabric_id = IOMS0_FABRIC_ID,
++		.misc_smn_base = SMN_IOHC_MISC_BASE_13B1,
++	},
++};
++
++const struct domain_iohc_info *get_iohc_info(size_t *count)
++{
++	*count = ARRAY_SIZE(iohc_info);
++	return iohc_info;
++}
++
++static const struct non_pci_mmio_reg non_pci_mmio[] = {
++	{ 0x2e0, 0xfffffff00000ull,   1 * MiB, NON_PCI_RES_IDX_AUTO },
++	{ 0x2e8, 0xfffffff00000ull,   1 * MiB, NON_PCI_RES_IDX_AUTO },
++	/* The hardware has a 256 byte alignment requirement for the IOAPIC MMIO base, but we
++	   tell the FSP to configure a 4k-aligned base address and this is reported as 4 KiB
++	   resource. */
++	{ 0x2f0, 0xffffffffff00ull,   4 * KiB, IOMMU_IOAPIC_IDX },
++	{ 0x2f8, 0xfffffff00000ull,   1 * MiB, NON_PCI_RES_IDX_AUTO },
++	{ 0x300, 0xfffffff00000ull,   1 * MiB, NON_PCI_RES_IDX_AUTO },
++	{ 0x308, 0xfffffffff000ull,   4 * KiB, NON_PCI_RES_IDX_AUTO },
++	{ 0x318, 0xfffffff80000ull, 512 * KiB, NON_PCI_RES_IDX_AUTO },
++};
++
++const struct non_pci_mmio_reg *get_iohc_non_pci_mmio_regs(size_t *count)
++{
++	*count = ARRAY_SIZE(non_pci_mmio);
++	return non_pci_mmio;
++}
+diff --git a/src/soc/amd/cyan_skillfish/uart.c b/src/soc/amd/cyan_skillfish/uart.c
+new file mode 100644
+index 00000000..3e6ac5ed
+--- /dev/null
++++ b/src/soc/amd/cyan_skillfish/uart.c
+@@ -0,0 +1,34 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++
++#include <amdblocks/gpio.h>
++#include <amdblocks/uart.h>
++#include <commonlib/helpers.h>
++#include <gpio.h>
++#include <soc/aoac_defs.h>
++#include <soc/iomap.h>
++#include <types.h>
++
++static const struct soc_uart_ctrlr_info uart_info[] = {
++	[0] =	{ APU_UART0_BASE, FCH_AOAC_DEV_UART0, "FUR0", {
++			PAD_NF(GPIO_138, UART0_TXD, PULL_NONE),
++			PAD_NF(GPIO_136, UART0_RXD, PULL_NONE),
++		} },
++	[1] =	{ APU_UART1_BASE, FCH_AOAC_DEV_UART1, "FUR1", {
++			PAD_NF(GPIO_143, UART1_TXD, PULL_NONE),
++			PAD_NF(GPIO_141, UART1_RXD, PULL_NONE),
++		} },
++	[2] =	{ APU_UART2_BASE, FCH_AOAC_DEV_UART2, "FUR2", {
++			PAD_NF(GPIO_137, UART2_TXD, PULL_NONE),
++			PAD_NF(GPIO_135, UART2_RXD, PULL_NONE),
++		} },
++	[3] =	{ APU_UART3_BASE, FCH_AOAC_DEV_UART3, "FUR3", {
++			PAD_NF(GPIO_140, UART3_TXD, PULL_NONE),
++			PAD_NF(GPIO_142, UART3_RXD, PULL_NONE),
++		} },
++};
++
++const struct soc_uart_ctrlr_info *soc_get_uart_ctrlr_info(size_t *num_ctrlrs)
++{
++	*num_ctrlrs = ARRAY_SIZE(uart_info);
++	return uart_info;
++}
+-- 
+2.43.0
+

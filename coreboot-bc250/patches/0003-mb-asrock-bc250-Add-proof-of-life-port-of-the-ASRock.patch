@@ -1,0 +1,298 @@
+From 97bb53bba3cc462c92ba7ed8c27fe3fd2774b42c Mon Sep 17 00:00:00 2001
+From: sokkycakes <6889324+sokkycakes@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 04:28:36 +0000
+Subject: [PATCH 3/3] mb/asrock/bc250: Add proof-of-life port of the ASRock
+ BC-250
+
+The bootblock prints the CPU name and CPUID, checks that the stock ABL
+left an APOB at 0x4000000, and then halts, resets in a loop (for boards
+without a serial console) or continues, depending on Kconfig. Reaching
+the bootblock at all shows that the PSP accepted the image, trained
+memory and handed control to coreboot.
+
+The console uses FCH UART0 by default. Where the BC-250 brings out any
+FCH UART is not known yet.
+
+AI-generated
+---
+ src/mainboard/asrock/bc250/Kconfig        | 83 +++++++++++++++++++++++
+ src/mainboard/asrock/bc250/Kconfig.name   |  4 ++
+ src/mainboard/asrock/bc250/Makefile.mk    |  4 ++
+ src/mainboard/asrock/bc250/board.fmd      |  7 ++
+ src/mainboard/asrock/bc250/board_info.txt |  8 +++
+ src/mainboard/asrock/bc250/bootblock.c    | 65 ++++++++++++++++++
+ src/mainboard/asrock/bc250/devicetree.cb  |  6 ++
+ src/mainboard/asrock/bc250/dsdt.asl       | 16 +++++
+ src/mainboard/asrock/bc250/mainboard.c    | 11 +++
+ 9 files changed, 204 insertions(+)
+ create mode 100644 src/mainboard/asrock/bc250/Kconfig
+ create mode 100644 src/mainboard/asrock/bc250/Kconfig.name
+ create mode 100644 src/mainboard/asrock/bc250/Makefile.mk
+ create mode 100644 src/mainboard/asrock/bc250/board.fmd
+ create mode 100644 src/mainboard/asrock/bc250/board_info.txt
+ create mode 100644 src/mainboard/asrock/bc250/bootblock.c
+ create mode 100644 src/mainboard/asrock/bc250/devicetree.cb
+ create mode 100644 src/mainboard/asrock/bc250/dsdt.asl
+ create mode 100644 src/mainboard/asrock/bc250/mainboard.c
+
+diff --git a/src/mainboard/asrock/bc250/Kconfig b/src/mainboard/asrock/bc250/Kconfig
+new file mode 100644
+index 00000000..946280d5
+--- /dev/null
++++ b/src/mainboard/asrock/bc250/Kconfig
+@@ -0,0 +1,83 @@
++## SPDX-License-Identifier: GPL-2.0-only
++
++if BOARD_ASROCK_BC250
++
++config BOARD_SPECIFIC_OPTIONS
++	def_bool y
++	select SOC_AMD_CYAN_SKILLFISH
++	select BOARD_ROMSIZE_KB_16384
++	select AMD_SOC_CONSOLE_UART
++
++config MAINBOARD_DIR
++	default "asrock/bc250"
++
++config MAINBOARD_PART_NUMBER
++	default "BC-250"
++
++config FMDFILE
++	default "src/mainboard/asrock/bc250/board.fmd"
++
++config CBFS_SIZE
++	default 0xfef000
++
++config UART_FOR_CONSOLE
++	int "FCH UART used for the coreboot console (0-3)"
++	default 0
++	help
++	  Which FCH UART to use. Where (or whether) the BC-250 brings any of
++	  them out to a header or test pads is still unknown; finding it is
++	  part of the bring-up.
++
++choice
++	prompt "Proof-of-life behaviour"
++	default BC250_PROOF_OF_LIFE_HALT
++	help
++	  Silicon init after memory training is not written yet, so a full
++	  boot cannot work. These options decide what the bootblock does once
++	  it has shown that the PSP handed control to coreboot.
++
++config BC250_PROOF_OF_LIFE_HALT
++	bool "Print to serial, then halt"
++
++config BC250_PROOF_OF_LIFE_RESET_LOOP
++	bool "Print to serial, then reset every few seconds"
++	help
++	  For boards with no serial console yet: a coreboot image that runs
++	  makes the board power-cycle on a fixed rhythm (fans spin up again
++	  every few seconds), which is easy to tell apart from a PSP that
++	  refused the image (no reset loop at all).
++
++config BC250_PROOF_OF_LIFE_CONTINUE
++	bool "Continue to romstage and ramstage"
++	help
++	  For porting work. Without silicon init this is expected to fail
++	  somewhere in ramstage.
++
++endchoice
++
++config BC250_RESET_LOOP_SECONDS
++	int "Seconds before each reset"
++	default 5
++	depends on BC250_PROOF_OF_LIFE_RESET_LOOP
++
++if !EM100
++config EFS_SPI_READ_MODE
++	default 0	# Normal read (1-1-1), the most conservative choice
++
++config EFS_SPI_SPEED
++	default 1	# 33MHz
++
++config EFS_SPI_MICRON_FLAG
++	default 0
++
++config NORMAL_READ_SPI_SPEED
++	default 1	# 33MHz
++
++config ALT_SPI_SPEED
++	default 1	# 33MHz
++
++config TPM_SPI_SPEED
++	default 1	# 33MHz
++endif # !EM100
++
++endif # BOARD_ASROCK_BC250
+diff --git a/src/mainboard/asrock/bc250/Kconfig.name b/src/mainboard/asrock/bc250/Kconfig.name
+new file mode 100644
+index 00000000..26d7b8e7
+--- /dev/null
++++ b/src/mainboard/asrock/bc250/Kconfig.name
+@@ -0,0 +1,4 @@
++## SPDX-License-Identifier: GPL-2.0-only
++
++config BOARD_ASROCK_BC250
++	bool "BC-250 (AMD Cyan Skillfish)"
+diff --git a/src/mainboard/asrock/bc250/Makefile.mk b/src/mainboard/asrock/bc250/Makefile.mk
+new file mode 100644
+index 00000000..bec0219a
+--- /dev/null
++++ b/src/mainboard/asrock/bc250/Makefile.mk
+@@ -0,0 +1,4 @@
++# SPDX-License-Identifier: GPL-2.0-only
++
++bootblock-y += bootblock.c
++ramstage-y += mainboard.c
+diff --git a/src/mainboard/asrock/bc250/board.fmd b/src/mainboard/asrock/bc250/board.fmd
+new file mode 100644
+index 00000000..70538794
+--- /dev/null
++++ b/src/mainboard/asrock/bc250/board.fmd
+@@ -0,0 +1,7 @@
++FLASH 16M {
++	BIOS {
++		RW_MRC_CACHE 64K
++		COREBOOT(CBFS)
++		FMAP 4K
++	}
++}
+diff --git a/src/mainboard/asrock/bc250/board_info.txt b/src/mainboard/asrock/bc250/board_info.txt
+new file mode 100644
+index 00000000..4ffdc025
+--- /dev/null
++++ b/src/mainboard/asrock/bc250/board_info.txt
+@@ -0,0 +1,8 @@
++Vendor name: ASRock
++Board name: BC-250
++Category: mini
++ROM package: SOIC-8
++ROM protocol: SPI
++ROM socketed: n
++Flashrom support: y
++Release year: 2022
+diff --git a/src/mainboard/asrock/bc250/bootblock.c b/src/mainboard/asrock/bc250/bootblock.c
+new file mode 100644
+index 00000000..6ff638e7
+--- /dev/null
++++ b/src/mainboard/asrock/bc250/bootblock.c
+@@ -0,0 +1,65 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++
++/*
++ * BC-250 proof of life.
++ *
++ * Getting here at all means the PSP accepted this image: it ran the stock
++ * ABL from our PSP directory, trained the GDDR6, copied this bootblock into
++ * DRAM and released the x86 core. The APOB check below confirms the ABL ran.
++ */
++
++#include <amdblocks/apob_cache.h>
++#include <bootblock_common.h>
++#include <console/console.h>
++#include <cpu/cpu.h>
++#include <cpu/x86/name.h>
++#include <delay.h>
++#include <halt.h>
++#include <cf9_reset.h>
++#include <stdint.h>
++
++struct apob_header_peek {
++	uint32_t signature;
++	uint32_t version;
++	uint32_t size;
++};
++
++static void report_apob(void)
++{
++	const struct apob_header_peek *apob =
++		(const void *)(uintptr_t)CONFIG_PSP_APOB_DRAM_ADDRESS;
++
++	if (apob->signature == APOB_SIGNATURE)
++		printk(BIOS_INFO, "BC-250: APOB at 0x%x, version 0x%x, %u bytes: "
++		       "the stock ABL trained memory\n",
++		       CONFIG_PSP_APOB_DRAM_ADDRESS, apob->version, apob->size);
++	else
++		printk(BIOS_ERR, "BC-250: no APOB at 0x%x (found 0x%08x)\n",
++		       CONFIG_PSP_APOB_DRAM_ADDRESS, apob->signature);
++}
++
++void bootblock_mainboard_init(void)
++{
++	char name[49];
++
++	post_code(0x25);
++	fill_processor_name(name);
++	printk(BIOS_INFO, "\nBC-250: coreboot bootblock is running from DRAM\n");
++	printk(BIOS_INFO, "BC-250: CPU \"%s\", CPUID 1 EAX = 0x%08x\n",
++	       name, cpuid_eax(1));
++	report_apob();
++
++	if (CONFIG(BC250_PROOF_OF_LIFE_HALT)) {
++		printk(BIOS_INFO, "BC-250: proof of life done, halting\n");
++		post_code(0x2f);
++		halt();
++	}
++
++	if (CONFIG(BC250_PROOF_OF_LIFE_RESET_LOOP)) {
++		printk(BIOS_INFO, "BC-250: proof of life done, resetting in %d s\n",
++		       CONFIG_BC250_RESET_LOOP_SECONDS);
++		post_code(0x2e);
++		mdelay(CONFIG_BC250_RESET_LOOP_SECONDS * 1000);
++		full_reset();
++	}
++}
+diff --git a/src/mainboard/asrock/bc250/devicetree.cb b/src/mainboard/asrock/bc250/devicetree.cb
+new file mode 100644
+index 00000000..9d8bbfe4
+--- /dev/null
++++ b/src/mainboard/asrock/bc250/devicetree.cb
+@@ -0,0 +1,6 @@
++# SPDX-License-Identifier: GPL-2.0-only
++
++chip soc/amd/cyan_skillfish
++	device domain 0 on
++	end
++end
+diff --git a/src/mainboard/asrock/bc250/dsdt.asl b/src/mainboard/asrock/bc250/dsdt.asl
+new file mode 100644
+index 00000000..7b8982a6
+--- /dev/null
++++ b/src/mainboard/asrock/bc250/dsdt.asl
+@@ -0,0 +1,16 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++
++#include <acpi/acpi.h>
++DefinitionBlock (
++	"dsdt.aml",
++	"DSDT",
++	ACPI_DSDT_REV_2,
++	OEM_ID,
++	ACPI_TABLE_CREATOR,
++	0x00010001	/* OEM Revision */
++	)
++{
++	#include <acpi/dsdt_top.asl>
++
++	#include <soc.asl>
++}
+diff --git a/src/mainboard/asrock/bc250/mainboard.c b/src/mainboard/asrock/bc250/mainboard.c
+new file mode 100644
+index 00000000..46762cc0
+--- /dev/null
++++ b/src/mainboard/asrock/bc250/mainboard.c
+@@ -0,0 +1,11 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++
++#include <amdblocks/amd_pci_util.h>
++#include <stddef.h>
++
++/* TODO: fill in from the stock BIOS's interrupt routing once mapped. */
++const struct fch_irq_routing *mb_get_fch_irq_mapping(size_t *length)
++{
++	*length = 0;
++	return NULL;
++}
+-- 
+2.43.0
+
