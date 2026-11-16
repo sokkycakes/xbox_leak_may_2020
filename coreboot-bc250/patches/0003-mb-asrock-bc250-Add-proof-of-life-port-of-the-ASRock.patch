@@ -1,4 +1,4 @@
-From 97bb53bba3cc462c92ba7ed8c27fe3fd2774b42c Mon Sep 17 00:00:00 2001
+From 3d9087e39df7951be96c74e8705c36a4e31e9f0d Mon Sep 17 00:00:00 2001
 From: sokkycakes <6889324+sokkycakes@users.noreply.github.com>
 Date: Mon, 16 Nov 2026 04:28:36 +0000
 Subject: [PATCH 3/3] mb/asrock/bc250: Add proof-of-life port of the ASRock
@@ -10,21 +10,23 @@ without a serial console) or continues, depending on Kconfig. Reaching
 the bootblock at all shows that the PSP accepted the image, trained
 memory and handed control to coreboot.
 
-The console uses FCH UART0 by default. Where the BC-250 brings out any
-FCH UART is not known yet.
+The console defaults to the Super I/O COM1 that the stock DSDT
+declares: a Nuvoton NCT6686D at 0x2E, logical device 2, 0x3F8, set up
+with the NCT6687D code. The FCH UARTs remain selectable. Whether either
+reaches a header on the board is not known yet.
 
 AI-generated
 ---
- src/mainboard/asrock/bc250/Kconfig        | 83 +++++++++++++++++++++++
- src/mainboard/asrock/bc250/Kconfig.name   |  4 ++
- src/mainboard/asrock/bc250/Makefile.mk    |  4 ++
- src/mainboard/asrock/bc250/board.fmd      |  7 ++
- src/mainboard/asrock/bc250/board_info.txt |  8 +++
- src/mainboard/asrock/bc250/bootblock.c    | 65 ++++++++++++++++++
- src/mainboard/asrock/bc250/devicetree.cb  |  6 ++
- src/mainboard/asrock/bc250/dsdt.asl       | 16 +++++
- src/mainboard/asrock/bc250/mainboard.c    | 11 +++
- 9 files changed, 204 insertions(+)
+ src/mainboard/asrock/bc250/Kconfig        | 103 ++++++++++++++++++++++
+ src/mainboard/asrock/bc250/Kconfig.name   |   4 +
+ src/mainboard/asrock/bc250/Makefile.mk    |   4 +
+ src/mainboard/asrock/bc250/board.fmd      |   7 ++
+ src/mainboard/asrock/bc250/board_info.txt |   8 ++
+ src/mainboard/asrock/bc250/bootblock.c    |  82 +++++++++++++++++
+ src/mainboard/asrock/bc250/devicetree.cb  |   6 ++
+ src/mainboard/asrock/bc250/dsdt.asl       |  16 ++++
+ src/mainboard/asrock/bc250/mainboard.c    |  11 +++
+ 9 files changed, 241 insertions(+)
  create mode 100644 src/mainboard/asrock/bc250/Kconfig
  create mode 100644 src/mainboard/asrock/bc250/Kconfig.name
  create mode 100644 src/mainboard/asrock/bc250/Makefile.mk
@@ -37,10 +39,10 @@ AI-generated
 
 diff --git a/src/mainboard/asrock/bc250/Kconfig b/src/mainboard/asrock/bc250/Kconfig
 new file mode 100644
-index 00000000..946280d5
+index 00000000..67334b21
 --- /dev/null
 +++ b/src/mainboard/asrock/bc250/Kconfig
-@@ -0,0 +1,83 @@
+@@ -0,0 +1,103 @@
 +## SPDX-License-Identifier: GPL-2.0-only
 +
 +if BOARD_ASROCK_BC250
@@ -49,7 +51,9 @@ index 00000000..946280d5
 +	def_bool y
 +	select SOC_AMD_CYAN_SKILLFISH
 +	select BOARD_ROMSIZE_KB_16384
-+	select AMD_SOC_CONSOLE_UART
++	select AMD_SOC_CONSOLE_UART if BC250_CONSOLE_FCH_UART
++	select SUPERIO_NUVOTON_NCT6687D if BC250_CONSOLE_SIO_COM1
++	select DRIVERS_UART_8250IO if BC250_CONSOLE_SIO_COM1
 +
 +config MAINBOARD_DIR
 +	default "asrock/bc250"
@@ -63,13 +67,31 @@ index 00000000..946280d5
 +config CBFS_SIZE
 +	default 0xfef000
 +
++choice
++	prompt "Serial console"
++	default BC250_CONSOLE_SIO_COM1
++
++config BC250_CONSOLE_SIO_COM1
++	bool "Super I/O COM1 (0x3F8)"
++	help
++	  The stock BIOS's DSDT declares a 16550 COM port (UAR1) at 0x3F8,
++	  IRQ 4, on logical device 2 of the Super I/O at config port 0x2E.
++	  The BC-250's Super I/O is a Nuvoton NCT6686D; its COM1 logical
++	  device matches the NCT6687D that coreboot supports. Whether its
++	  TX pin reaches a header or pad on the board is not confirmed.
++
++config BC250_CONSOLE_FCH_UART
++	bool "FCH UART (memory mapped)"
++	help
++	  One of the SoC's own UARTs. The stock BIOS configures none of
++	  them, so these pins are probably not wired anywhere.
++
++endchoice
++
 +config UART_FOR_CONSOLE
 +	int "FCH UART used for the coreboot console (0-3)"
++	depends on BC250_CONSOLE_FCH_UART
 +	default 0
-+	help
-+	  Which FCH UART to use. Where (or whether) the BC-250 brings any of
-+	  them out to a header or test pads is still unknown; finding it is
-+	  part of the bring-up.
 +
 +choice
 +	prompt "Proof-of-life behaviour"
@@ -173,10 +195,10 @@ index 00000000..4ffdc025
 +Release year: 2022
 diff --git a/src/mainboard/asrock/bc250/bootblock.c b/src/mainboard/asrock/bc250/bootblock.c
 new file mode 100644
-index 00000000..6ff638e7
+index 00000000..21e25e6b
 --- /dev/null
 +++ b/src/mainboard/asrock/bc250/bootblock.c
-@@ -0,0 +1,65 @@
+@@ -0,0 +1,82 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +
 +/*
@@ -188,6 +210,7 @@ index 00000000..6ff638e7
 + */
 +
 +#include <amdblocks/apob_cache.h>
++#include <amdblocks/lpc.h>
 +#include <bootblock_common.h>
 +#include <console/console.h>
 +#include <cpu/cpu.h>
@@ -196,6 +219,8 @@ index 00000000..6ff638e7
 +#include <halt.h>
 +#include <cf9_reset.h>
 +#include <stdint.h>
++#include <superio/nuvoton/common/nuvoton.h>
++#include <superio/nuvoton/nct6687d/nct6687d.h>
 +
 +struct apob_header_peek {
 +	uint32_t signature;
@@ -215,6 +240,20 @@ index 00000000..6ff638e7
 +	else
 +		printk(BIOS_ERR, "BC-250: no APOB at 0x%x (found 0x%08x)\n",
 +		       CONFIG_PSP_APOB_DRAM_ADDRESS, apob->signature);
++}
++
++/*
++ * Super I/O COM1, as declared in the stock DSDT: Nuvoton at 0x2E/0x2F,
++ * logical device 2, 0x3F8. Runs before console init.
++ */
++void bootblock_mainboard_early_init(void)
++{
++	if (!CONFIG(BC250_CONSOLE_SIO_COM1))
++		return;
++
++	lpc_enable_sio_decode(LPC_SELECT_SIO_2E2F);
++	lpc_enable_decode(DECODE_ENABLE_SERIAL_PORT0);
++	nuvoton_enable_serial(PNP_DEV(0x2e, NCT6687D_SP1), CONFIG_TTYS0_BASE);
 +}
 +
 +void bootblock_mainboard_init(void)

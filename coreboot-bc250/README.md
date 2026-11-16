@@ -41,9 +41,12 @@ APOB at `0x4000000` (proof the stock ABL trained memory), then:
   up each time, is running coreboot. A board that never resets means the
   PSP refused the image or something died before the bootblock.
 
-Serial goes to FCH UART0 (`0xFEDC9000`, 115200 8N1). **Where the BC-250
-brings out an FCH UART, if anywhere, is not known yet.** Finding it, or
-wiring one up, is the next hardware task.
+Serial goes to the Super I/O's COM1: 0x3F8, 115200 8N1. The stock BIOS's
+own ACPI tables declare that port (`UAR1`, Nuvoton NCT6686D at config port
+0x2E, logical device 2), so it is the most likely console. **Whether its TX
+pin reaches a header or test pad on the board is not confirmed.** The FCH's
+own UARTs are still selectable in Kconfig, but the stock BIOS configures
+none of them.
 
 ## Before flashing anything
 
@@ -79,6 +82,18 @@ Building the cross-compiler the first time takes about 20 minutes.
 - `extract_stock_blobs.py`: pulls the PSP entries, APCB, EFS blobs, VBIOS
   and GOP driver out of a stock image.
 - `compare_psp_layout.py`: checks a built image against the stock one.
+
+## What the stock image says about the board
+
+Found by decompiling the stock DSDT and AMD's CPM tables (no hardware):
+
+- **PCI layout matches Picasso:** GPP bridges at 00:01.1-01.7, internal
+  buses at 00:08.1 (GPU, xHCI, audio) and 00:08.2 (SATA), FCH at 00:14.x.
+- **Serial:** COM1 on the Super I/O, see above. No FCH UART is declared.
+- **AMD CPM GPIO tables are empty.** The stock firmware sets almost no
+  GPIOs itself (one pin, GPIO 61), so the board relies on strap and reset
+  defaults. That is good news for the port: there is little GPIO setup to
+  reproduce. The OEM tables are AMD's "Piccolo" reference template.
 
 ## Known differences from the stock layout
 
