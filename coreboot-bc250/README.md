@@ -70,6 +70,12 @@ pass as the second argument, extracts the blobs, builds, and runs
 `compare_psp_layout.py` to prove every stock PSP blob made it in unchanged.
 Building the cross-compiler the first time takes about 20 minutes.
 
+## LinuxBoot from USB
+
+`linuxboot/` has a LinuxBoot kernel (Linux + u-root) that the stock UEFI
+boots from a USB stick and that kexecs into Bazzite. It tests LinuxBoot on
+this board without flashing. See `linuxboot/README.md`.
+
 ## Files
 
 - `patches/0001` amdfwtool: PSP type `0x4F` (UMC firmware) and a
