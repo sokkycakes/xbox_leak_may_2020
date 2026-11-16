@@ -5,7 +5,7 @@
 echo ""
 echo "=== LinuxBoot on BC-250 ==="
 cat /proc/version
-grep -m1 "model name" /proc/cpuinfo
+grep "model name" /proc/cpuinfo | head -n 1
 grep MemTotal /proc/meminfo
 echo "=== PCI devices ==="
 pci
