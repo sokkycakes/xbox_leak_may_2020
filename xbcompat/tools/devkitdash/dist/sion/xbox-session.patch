@@ -1,8 +1,6 @@
-diff --git a/xbox-session b/xbox-session
-index c6fb8234..ad7cc804 100755
 --- a/xbox-session
 +++ b/xbox-session
-@@ -74,6 +74,31 @@ for f in "$X"/cache/xbcompat/maps/*.map; do
+@@ -74,6 +74,37 @@
  done
  export XDG_CACHE_HOME=$XB/cache
  
@@ -14,7 +12,8 @@ index c6fb8234..ad7cc804 100755
 +# leading back.  A game quitting to the dashboard with launch data (to its
 +# Memory or Settings screen) gets the stock dashboard too.  While the
 +# devkit dashboard is in use xbox-hostinfo keeps E:\DEVKIT\hostinfo.txt
-+# current with this machine's name and addresses.
++# current with this machine's name and addresses, and xbox-bluetooth pairs
++# Bluetooth controllers for its Settings page (E:\DEVKIT\BT).
 +DEVKIT=$X/dash/devkit
 +devkit=
 +if [ "$XBOX_DASH" = devkit ]; then
@@ -26,6 +25,11 @@ index c6fb8234..ad7cc804 100755
 +		if [ -f "$hostinfo" ]; then
 +			sh "$hostinfo" "$HDD/partition1/DEVKIT/hostinfo.txt" 5 $$ < /dev/null > /dev/null 2>&1 &
 +		fi
++		bluetooth=/usr/libexec/xbox-bluetooth
++		[ -x "$bluetooth" ] || bluetooth="$DEVKIT/xbox-bluetooth"
++		if [ -f "$bluetooth" ]; then
++			sh "$bluetooth" "$HDD/partition1/DEVKIT/BT" $$ < /dev/null > /dev/null 2>&1 &
++		fi
 +	else
 +		echo "XBOX_DASH=devkit, but $DEVKIT/devkitdash.xbe is missing: running the Xbox dashboard"
 +	fi
@@ -34,7 +38,7 @@ index c6fb8234..ad7cc804 100755
  # KMS allows one master: wait for anything else on the display (Theseus,
  # when "sion restart xbox" takes over from it) to be gone.
  for _ in $(seq 1 50); do
-@@ -106,12 +131,44 @@ while true; do
+@@ -106,12 +137,44 @@
  	fi
  	[ -e "$LOG" ] && mv "$LOG" "$LOG.1"
  	start=$(cut -d. -f1 /proc/uptime)
@@ -85,7 +89,7 @@ index c6fb8234..ad7cc804 100755
  	rc=$?
  	ran=$(( $(cut -d. -f1 /proc/uptime) - start ))
  	echo "$(date '+%F %T') exited with $rc after ${ran}s"
-@@ -121,6 +178,8 @@ while true; do
+@@ -121,6 +184,8 @@
  	fi
  	if grep -q 'XLaunchNewImage:' "$LOG"; then
  		quick_fails=0          # a game ran and quit

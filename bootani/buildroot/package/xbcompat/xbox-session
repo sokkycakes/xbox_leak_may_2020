@@ -82,7 +82,8 @@ export XDG_CACHE_HOME=$XB/cache
 # leading back.  A game quitting to the dashboard with launch data (to its
 # Memory or Settings screen) gets the stock dashboard too.  While the
 # devkit dashboard is in use xbox-hostinfo keeps E:\DEVKIT\hostinfo.txt
-# current with this machine's name and addresses.
+# current with this machine's name and addresses, and xbox-bluetooth pairs
+# Bluetooth controllers for its Settings page (E:\DEVKIT\BT).
 DEVKIT=$X/dash/devkit
 devkit=
 if [ "$XBOX_DASH" = devkit ]; then
@@ -93,6 +94,11 @@ if [ "$XBOX_DASH" = devkit ]; then
 		[ -x "$hostinfo" ] || hostinfo="$DEVKIT/xbox-hostinfo"
 		if [ -f "$hostinfo" ]; then
 			sh "$hostinfo" "$HDD/partition1/DEVKIT/hostinfo.txt" 5 $$ < /dev/null > /dev/null 2>&1 &
+		fi
+		bluetooth=/usr/libexec/xbox-bluetooth
+		[ -x "$bluetooth" ] || bluetooth="$DEVKIT/xbox-bluetooth"
+		if [ -f "$bluetooth" ]; then
+			sh "$bluetooth" "$HDD/partition1/DEVKIT/BT" $$ < /dev/null > /dev/null 2>&1 &
 		fi
 	else
 		echo "XBOX_DASH=devkit, but $DEVKIT/devkitdash.xbe is missing: running the Xbox dashboard"

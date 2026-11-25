@@ -70,6 +70,7 @@ DWORD WINAPI XWriteTitleInfoAndRebootA( LPCSTR pszLaunchPath, LPCSTR pszDDrivePa
 #define LIST_Y          182
 #define LIST_W          360
 #define ROW_H           30
+#define BT_W            480     // the Settings page's controller list
 #define LIST_ROWS       6
 
 #define MAX_TITLES      64
@@ -124,6 +125,36 @@ static BOOL               g_bDirty = TRUE;
 static WCHAR              g_szStatus[TEXT_MAX];
 static DWORD              g_dwStatusUntil;
 static BOOL               g_bLaunching;
+
+// Buttons, as Input() reports them (pressed this frame)
+enum { IN_UP = 1, IN_DOWN = 2, IN_A = 4, IN_X = 8, IN_Y = 16, IN_PAGEUP = 32, IN_PAGEDOWN = 64,
+       IN_B = 128, IN_START = 256, IN_BACK = 512 };
+enum { PAGE_MAIN, PAGE_SETTINGS };
+static INT                g_iPage = PAGE_MAIN;
+
+// Bluetooth, as xbox-bluetooth reports it in E:\DEVKIT\BT\state.txt.
+#define MAX_BT 16
+enum { BT_NOHELPER, BT_NONE, BT_NOADAPTER, BT_READY };
+struct BTDEV
+{
+    CHAR  szMac[18];
+    BOOL  bPaired, bConnected;
+    CHAR  szName[64];
+};
+struct BTSTATE
+{
+    INT    iAdapter;
+    BOOL   bPowered, bScanning;
+    CHAR   szBusy[96];
+    CHAR   szMessage[128];
+    BTDEV  aDev[MAX_BT];
+    UINT   uDev;
+};
+static BTSTATE            g_bt;
+static UINT               g_uBtSel;
+static UINT               g_uBtTop;
+static DWORD              g_dwForgetArmed;          // X pressed once: when
+static CHAR               g_szForgetMac[18];
 
 //----------------------------------------------------------------------------
 // Small helpers
@@ -751,18 +782,292 @@ static INT DrawButton( INT x, INT y, const WCHAR* szLetter, DWORD color, const W
     return x + 2 * ORB_R + 6 + (INT)w + 22;
 }
 
-static VOID Compose()
+// START, drawn as the controller's oval button with its word in it.
+static INT DrawStart( INT x, INT y, const WCHAR* szLabel )
 {
-    memcpy( g_pCanvas, g_pBackground, SCREEN_W * SCREEN_H * 4 );
-    WCHAR sz[TEXT_MAX];
+    UINT tw = TextWidth( g_pFontBold, 11, L"START" );
+    INT  w = (INT)tw + 12;
+    const FLOAT cy = (FLOAT)y + ORB_R;
+    FillCircle( (FLOAT)x + 8, cy, 8.0f, 0xFFD8D8E0 );
+    FillCircle( (FLOAT)(x + w) - 8, cy, 8.0f, 0xFFD8D8E0 );
+    FillRect( x + 8, y + ORB_R - 8, x + w - 8, y + ORB_R + 8, 0xFFD8D8E0 );
+    INT L, T, R, B;
+    if( InkBox( g_pFontBold, 11, L"START", &L, &T, &R, &B ) )
+        DrawText( g_pFontBold, 11, (INT)(x + w / 2.0f - (L + R) / 2.0f + 0.5f),
+                  (INT)(cy - (T + B) / 2.0f + 0.5f), L"START", 0xFF101010, 0, 0 );
+    INT ty = y + 1;
+    if( InkBox( g_pFont, 16, L"H", &L, &T, &R, &B ) )
+        ty = (INT)(cy - (T + B) / 2.0f + 0.5f);
+    UINT lw = DrawText( g_pFont, 16, x + w + 6, ty, szLabel, COL_TEXT, COL_SHADOW, 0 );
+    return x + w + 6 + (INT)lw + 22;
+}
 
-    // Header: what this is, the clock on the right.
+static VOID DrawHeader()
+{
+    WCHAR sz[TEXT_MAX];
     DrawText( g_pFontBold, 16, SAFE_L, SAFE_T, L"CRIMSON DEVELOPMENT KIT", COL_ACCENT, COL_SHADOW, 0 );
     SYSTEMTIME st;
     GetLocalTime( &st );
     swprintf( sz, L"%04u-%02u-%02u  %02u:%02u", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute );
     UINT w = TextWidth( g_pFont, 16, sz );
     DrawText( g_pFont, 16, SAFE_R - (INT)w, SAFE_T, sz, COL_DIM, COL_SHADOW, 0 );
+}
+
+//----------------------------------------------------------------------------
+// Settings: Bluetooth controllers (through xbox-bluetooth on the host)
+//----------------------------------------------------------------------------
+static BTSTATE s_btNew;
+
+static VOID BtKey( const CHAR* key, const CHAR* value )
+{
+    if( !_stricmp( key, "adapter" ) )
+        s_btNew.iAdapter = !_stricmp( value, "yes" ) ? BT_READY : !_stricmp( value, "none" ) ? BT_NONE : BT_NOADAPTER;
+    else if( !_stricmp( key, "powered" ) )
+        s_btNew.bPowered = !_stricmp( value, "yes" );
+    else if( !_stricmp( key, "scanning" ) )
+        s_btNew.bScanning = !_stricmp( value, "yes" );
+    else if( !_stricmp( key, "busy" ) )
+        strncpy( s_btNew.szBusy, value, sizeof(s_btNew.szBusy) - 1 );
+    else if( !_stricmp( key, "message" ) )
+        strncpy( s_btNew.szMessage, value, sizeof(s_btNew.szMessage) - 1 );
+    else if( !_stricmp( key, "dev" ) && s_btNew.uDev < MAX_BT )
+    {
+        // MAC|paired|connected|icon|name
+        CHAR f[5][64];
+        UINT n = 0, k = 0;
+        memset( f, 0, sizeof(f) );
+        for( const CHAR* c = value; *c && n < 5; c++ )
+        {
+            if( *c == '|' && n < 4 ) { n++; k = 0; continue; }
+            if( k < 63 ) f[n][k++] = *c;
+        }
+        if( n < 4 || strlen( f[0] ) != 17 )
+            return;
+        // Game controllers and other input devices, and anything paired;
+        // phones, speakers and the like stay out of the list.
+        BOOL bPaired = !_stricmp( f[1], "yes" );
+        if( !bPaired && f[3][0] && _strnicmp( f[3], "input-", 6 ) )
+            return;
+        BTDEV* d = &s_btNew.aDev[s_btNew.uDev++];
+        strcpy( d->szMac, f[0] );
+        d->bPaired = bPaired;
+        d->bConnected = !_stricmp( f[2], "yes" );
+        strncpy( d->szName, f[4], sizeof(d->szName) - 1 );
+    }
+}
+
+static INT BtRank( const BTDEV* d ) { return d->bConnected ? 0 : d->bPaired ? 1 : 2; }
+
+static VOID LoadBtState()
+{
+    CHAR buf[4096];
+    memset( &s_btNew, 0, sizeof(s_btNew) );
+    if( ReadSmallFile( "E:\\DEVKIT\\BT\\state.txt", buf, sizeof(buf) ) >= 0 )
+    {
+        s_btNew.iAdapter = BT_NOADAPTER;
+        ParseLines( buf, BtKey );
+    }
+    else
+        s_btNew.iAdapter = BT_NOHELPER;
+    // Connected, then paired, then new; by name within each.
+    for( UINT i = 1; i < s_btNew.uDev; i++ )
+    {
+        BTDEV t = s_btNew.aDev[i];
+        UINT j = i;
+        while( j > 0 )
+        {
+            BTDEV* p = &s_btNew.aDev[j - 1];
+            INT c = BtRank( p ) - BtRank( &t );
+            if( c == 0 )
+                c = _stricmp( p->szName, t.szName );
+            if( c <= 0 )
+                break;
+            s_btNew.aDev[j] = *p;
+            j--;
+        }
+        s_btNew.aDev[j] = t;
+    }
+    if( memcmp( &s_btNew, &g_bt, sizeof(g_bt) ) )
+    {
+        CHAR szSel[18] = "";
+        if( g_uBtSel < g_bt.uDev )
+            strcpy( szSel, g_bt.aDev[g_uBtSel].szMac );
+        g_bt = s_btNew;
+        g_uBtSel = g_bt.uDev ? (g_uBtSel < g_bt.uDev ? g_uBtSel : g_bt.uDev - 1) : 0;
+        for( UINT i = 0; i < g_bt.uDev; i++ )
+            if( !strcmp( g_bt.aDev[i].szMac, szSel ) )
+                g_uBtSel = i;
+        g_bDirty = TRUE;
+    }
+}
+
+static VOID BtRequest( const CHAR* szCmd, const CHAR* szMac )
+{
+    CHAR line[64];
+    INT n = _snprintf( line, sizeof(line), szMac ? "%s %s\n" : "%s\n", szCmd, szMac );
+    CreateDirectoryA( "E:\\DEVKIT", NULL );
+    CreateDirectoryA( "E:\\DEVKIT\\BT", NULL );
+    if( n <= 0 || !WriteSmallFile( "E:\\DEVKIT\\BT\\request.txt", line, n ) )
+        SetStatus( L"Could not reach the Bluetooth helper" );
+}
+
+static VOID SettingsInput( DWORD in )
+{
+    if( in & (IN_B | IN_BACK | IN_START) )
+    {
+        g_iPage = PAGE_MAIN;
+        g_bDirty = TRUE;
+        return;
+    }
+    if( g_bt.iAdapter != BT_READY )
+        return;
+    if( (in & IN_UP) && g_uBtSel > 0 )
+        { g_uBtSel--; g_bDirty = TRUE; }
+    if( (in & IN_DOWN) && g_uBtSel + 1 < g_bt.uDev )
+        { g_uBtSel++; g_bDirty = TRUE; }
+    if( in & IN_Y )
+    {
+        BtRequest( "scan", NULL );
+        SetStatus( L"Searching: hold the controller's pairing button" );
+    }
+    if( g_uBtSel >= g_bt.uDev )
+        return;
+    BTDEV* d = &g_bt.aDev[g_uBtSel];
+    WCHAR sz[TEXT_MAX], szName[64];
+    AtoW( szName, d->szName, 64 );
+    if( in & IN_A )
+    {
+        // One pairing at a time: the helper says when it is busy with one.
+        if( !d->bPaired && g_bt.szBusy[0] )
+            return;
+        if( !d->bPaired )
+            BtRequest( "pair", d->szMac );
+        else if( d->bConnected )
+            BtRequest( "disconnect", d->szMac );
+        else
+            BtRequest( "connect", d->szMac );
+        swprintf( sz, !d->bPaired ? L"Pairing %s..." : d->bConnected ? L"Disconnecting %s" : L"Connecting %s...", szName );
+        SetStatus( sz );
+    }
+    else if( (in & IN_X) && d->bPaired )
+    {
+        // Forgetting takes a second press, within three seconds.
+        if( g_dwForgetArmed && GetTickCount() - g_dwForgetArmed < 3000 && !strcmp( g_szForgetMac, d->szMac ) )
+        {
+            BtRequest( "remove", d->szMac );
+            g_dwForgetArmed = 0;
+            swprintf( sz, L"Forgetting %s", szName );
+        }
+        else
+        {
+            g_dwForgetArmed = GetTickCount();
+            strcpy( g_szForgetMac, d->szMac );
+            swprintf( sz, L"Press X again to forget %s", szName );
+        }
+        SetStatus( sz );
+    }
+}
+
+static VOID ComposeSettings()
+{
+    WCHAR sz[TEXT_MAX];
+    DrawText( g_pFontBold, 44, SAFE_L - 2, SAFE_T + 22, L"Settings", COL_TEXT, COL_SHADOW, 0 );
+    DrawText( g_pFont, 15, SAFE_L, SAFE_T + 82, L"BLUETOOTH CONTROLLERS", COL_DIM, COL_SHADOW, 0 );
+
+    const WCHAR* szState = NULL;
+    switch( g_bt.iAdapter )
+    {
+    case BT_NOHELPER:  szState = L"The Bluetooth helper is not running"; break;
+    case BT_NONE:      szState = L"This system image has no Bluetooth support"; break;
+    case BT_NOADAPTER: szState = L"No Bluetooth adapter found"; break;
+    default:
+        szState = g_bt.bScanning ? L"Searching..." : g_bt.bPowered ? L"On" : L"Off";
+        break;
+    }
+    DrawText( g_pFontBold, 20, SAFE_L, SAFE_T + 102, szState, g_bt.iAdapter == BT_READY ? COL_TEXT : 0xFFFFD27A,
+              COL_SHADOW, SAFE_R - SAFE_L );
+
+    INT rows = g_bt.uDev < LIST_ROWS ? (INT)g_bt.uDev : LIST_ROWS;
+    if( g_bt.iAdapter != BT_READY )
+        rows = -1;      // no list: the state line says why
+    if( rows == 0 )
+        rows = 2;
+    INT panelB = LIST_Y + 28 + rows * ROW_H + 8;
+    if( rows >= 0 )
+    {
+        FillRect( LIST_X - 10, LIST_Y - 8, LIST_X + BT_W + 10, panelB, COL_PANEL );
+        swprintf( sz, L"CONTROLLERS  (%u)", g_bt.uDev );
+        DrawText( g_pFont, 15, LIST_X, LIST_Y - 2, sz, COL_DIM, 0, 0 );
+    }
+    if( g_bt.uDev == 0 && g_bt.iAdapter == BT_READY )
+    {
+        DrawText( g_pFont, 17, LIST_X, LIST_Y + 30, L"None yet. Press Y to search, then", COL_TEXT, 0, BT_W );
+        DrawText( g_pFont, 17, LIST_X, LIST_Y + 52, L"hold the controller's pairing button.", COL_TEXT, 0, BT_W );
+    }
+    if( g_uBtSel < g_uBtTop )
+        g_uBtTop = g_uBtSel;
+    if( g_uBtSel >= g_uBtTop + LIST_ROWS )
+        g_uBtTop = g_uBtSel - LIST_ROWS + 1;
+    for( INT i = 0; i < LIST_ROWS && g_uBtTop + i < g_bt.uDev; i++ )
+    {
+        UINT idx = g_uBtTop + i;
+        BTDEV* d = &g_bt.aDev[idx];
+        INT y = LIST_Y + 24 + i * ROW_H;
+        BOOL sel = idx == g_uBtSel;
+        if( sel )
+            FillRect( LIST_X - 6, y, LIST_X + BT_W + 6, y + ROW_H - 2, COL_HILITE );
+        WCHAR szName[64];
+        AtoW( szName, d->szName, 64 );
+        DrawText( g_pFontBold, 18, LIST_X + 2, y + 5, szName, sel ? COL_HILITE_TXT : COL_TEXT, 0, BT_W - 110 );
+        const WCHAR* szWhat = d->bConnected ? L"Connected" : d->bPaired ? L"Paired" : L"New";
+        UINT ww = TextWidth( g_pFont, 14, szWhat );
+        DrawText( g_pFont, 14, LIST_X + BT_W - (INT)ww, y + 8, szWhat,
+                  sel ? 0xFFFFD6E2 : d->bConnected ? 0xFF8FE08A : COL_DIM, 0, 0 );
+    }
+    if( g_uBtTop > 0 )
+        DrawText( g_pFont, 14, LIST_X + BT_W - 8, LIST_Y - 2, L"\x25B2", COL_DIM, 0, 0 );
+    if( g_uBtTop + LIST_ROWS < g_bt.uDev )
+        DrawText( g_pFont, 14, LIST_X + BT_W - 8, panelB - 18, L"\x25BC", COL_DIM, 0, 0 );
+
+    // What the helper is doing, else what the dashboard last asked.
+    WCHAR szLine[TEXT_MAX];
+    szLine[0] = 0;
+    if( g_bt.szBusy[0] )
+        AtoW( szLine, g_bt.szBusy, TEXT_MAX );
+    else if( g_szStatus[0] && GetTickCount() < g_dwStatusUntil )
+        wcscpy( szLine, g_szStatus );
+    else if( g_bt.szMessage[0] && g_bt.iAdapter == BT_READY )
+        AtoW( szLine, g_bt.szMessage, TEXT_MAX );
+    if( szLine[0] )
+        DrawText( g_pFont, 16, SAFE_L, SAFE_B - 44, szLine, 0xFFFFD27A, COL_SHADOW, SAFE_R - SAFE_L );
+    if( !(g_szStatus[0] && GetTickCount() < g_dwStatusUntil) )
+        g_szStatus[0] = 0;
+
+    INT x = SAFE_L, y = SAFE_B - 22;
+    if( g_bt.iAdapter == BT_READY )
+    {
+        if( g_uBtSel < g_bt.uDev && !(g_bt.szBusy[0] && !g_bt.aDev[g_uBtSel].bPaired) )
+        {
+            BTDEV* d = &g_bt.aDev[g_uBtSel];
+            x = DrawButton( x, y, L"A", 0xFF6CC24A, !d->bPaired ? L"Pair" : d->bConnected ? L"Disconnect" : L"Connect" );
+            if( d->bPaired )
+                x = DrawButton( x, y, L"X", 0xFF3A8EE6, L"Forget" );
+        }
+        x = DrawButton( x, y, L"Y", 0xFFF2C230, g_bt.bScanning ? L"Searching" : L"Search" );
+    }
+    DrawButton( x, y, L"B", 0xFFE04A3C, L"Back" );
+}
+
+static VOID Compose()
+{
+    memcpy( g_pCanvas, g_pBackground, SCREEN_W * SCREEN_H * 4 );
+    WCHAR sz[TEXT_MAX];
+    DrawHeader();
+    if( g_iPage == PAGE_SETTINGS )
+    {
+        ComposeSettings();
+        return;
+    }
 
     // The console's name and address.
     WCHAR szName[64], szIp[64];
@@ -842,7 +1147,8 @@ static VOID Compose()
         x = DrawButton( x, y, L"A", 0xFF6CC24A, szDev );
         x = DrawButton( x, y, L"X", 0xFF3A8EE6, L"Launch" );
     }
-    DrawButton( x, y, L"Y", 0xFFF2C230, g_bShowList ? L"Hide list" : L"Applications" );
+    x = DrawButton( x, y, L"Y", 0xFFF2C230, g_bShowList ? L"Hide list" : L"Applications" );
+    DrawStart( x, y, L"Settings" );
 }
 
 static VOID Upload()
@@ -923,7 +1229,6 @@ static HANDLE g_ahPads[4];
 static WORD   g_awPrevButtons[4];
 static BYTE   g_abPrevAnalog[4][8];
 
-enum { IN_UP = 1, IN_DOWN = 2, IN_A = 4, IN_X = 8, IN_Y = 16, IN_PAGEUP = 32, IN_PAGEDOWN = 64 };
 
 static VOID OpenPads()
 {
@@ -966,6 +1271,7 @@ static DWORD ReadPads()
         BOOL a  = s.Gamepad.bAnalogButtons[XINPUT_GAMEPAD_A] > 30;
         BOOL x  = s.Gamepad.bAnalogButtons[XINPUT_GAMEPAD_X] > 30;
         BOOL y  = s.Gamepad.bAnalogButtons[XINPUT_GAMEPAD_Y] > 30;
+        BOOL bb = s.Gamepad.bAnalogButtons[XINPUT_GAMEPAD_B] > 30;
         BOOL lt = s.Gamepad.bAnalogButtons[XINPUT_GAMEPAD_LEFT_TRIGGER] > 60;
         BOOL rt = s.Gamepad.bAnalogButtons[XINPUT_GAMEPAD_RIGHT_TRIGGER] > 60;
         BYTE* prev = g_abPrevAnalog[i];
@@ -974,9 +1280,13 @@ static DWORD ReadPads()
         if( y && !prev[2] )  dwPressed |= IN_Y;
         if( lt && !prev[3] ) dwPressed |= IN_PAGEUP;
         if( rt && !prev[4] ) dwPressed |= IN_PAGEDOWN;
+        if( bb && !prev[5] ) dwPressed |= IN_B;
         prev[0] = (BYTE)a; prev[1] = (BYTE)x; prev[2] = (BYTE)y; prev[3] = (BYTE)lt; prev[4] = (BYTE)rt;
+        prev[5] = (BYTE)bb;
         if( nb & XINPUT_GAMEPAD_START )
-            dwPressed |= IN_A;
+            dwPressed |= IN_START;
+        if( nb & XINPUT_GAMEPAD_BACK )
+            dwPressed |= IN_BACK;
 
         BOOL up   = (b & XINPUT_GAMEPAD_DPAD_UP) || s.Gamepad.sThumbLY > 16000;
         BOOL down = (b & XINPUT_GAMEPAD_DPAD_DOWN) || s.Gamepad.sThumbLY < -16000;
@@ -1048,6 +1358,18 @@ VOID __cdecl main()
     for( ;; )
     {
         DWORD in = ReadPads();
+        if( g_iPage == PAGE_SETTINGS )
+        {
+            SettingsInput( in );
+            in = 0;
+        }
+        else if( in & IN_START )
+        {
+            g_iPage = PAGE_SETTINGS;
+            LoadBtState();
+            g_bDirty = TRUE;
+            in = 0;
+        }
         if( g_uTitles && g_bShowList )
         {
             if( (in & IN_UP) && g_uSel > 0 )
@@ -1076,6 +1398,12 @@ VOID __cdecl main()
             LoadHostInfo();
             ScanTitles();
             dwNextPoll = now + 2000;
+        }
+        static DWORD s_dwNextBt;
+        if( g_iPage == PAGE_SETTINGS && (LONG)(now - s_dwNextBt) >= 0 )
+        {
+            LoadBtState();
+            s_dwNextBt = now + 500;
         }
         SYSTEMTIME st;
         GetLocalTime( &st );

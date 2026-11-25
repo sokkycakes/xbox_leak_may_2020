@@ -25,7 +25,8 @@ for another address.
 | media/background.bmp | /opt/xbcompat/dash/devkit/media/ | the background; any 24 or 32-bit BMP works, scaled to 640x480 |
 | media/font.ttf, fontb.ttf | /opt/xbcompat/dash/devkit/media/ | DejaVu Sans and Sans Bold, drawn with XFONT |
 | xbox-hostinfo | /usr/libexec/ | writes the name and addresses to E:\DEVKIT\hostinfo.txt every 5 s |
-| xbox-session | /usr/libexec/ | the session, taught `XBOX_DASH=devkit`; the image's copy is kept as `xbox-session.pre-devkit`. The installer applies `xbox-session.patch` to the image's own session, and only uses the whole file when that session is the one the patch was made from (`xbox-session.base.sha256`) |
+| xbox-bluetooth | /usr/libexec/ | pairs Bluetooth controllers for the Settings page through bluetoothctl (E:\DEVKIT\BT) |
+| xbox-session | /usr/libexec/ | the session, taught `XBOX_DASH=devkit`; the image's copy is kept as `xbox-session.pre-devkit`. The installer applies `xbox-session.patch` to the image's own session, and only uses the whole file when that session is the one the patch was made from (`xbox-session.base.sha256`). A session patched by an earlier kit is patched again from `xbox-session.pre-devkit` |
 | (one line) | /etc/default/xbox | `XBOX_DASH=devkit` |
 
 Everything is kept across reboots with `sion persist`. Without
@@ -39,6 +40,12 @@ Everything is kept across reboots with `sion persist`. Without
   debugger starts a title. A title reads it with `XGetLaunchInfo`.
 - **X** launches it plainly, as the retail dashboard would.
 - **Y** hides or shows the list (remembered).
+- **Start** opens Settings, where Bluetooth controllers are paired: Y
+  searches, A pairs the selected controller (put it in pairing mode first),
+  connects or disconnects it, X twice forgets it, B goes back. Paired
+  controllers reconnect by themselves when switched on. This needs an image
+  with BlueZ (built from this commit on); on older images the page says
+  "This system image has no Bluetooth support".
 - On **Xbox Dashboard**, A runs the stock dashboard the way the session
   always runs it. L + R + Back + Start (or a tap of the power button) comes
   back to the devkit dashboard, as does quitting any game.

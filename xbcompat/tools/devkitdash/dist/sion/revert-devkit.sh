@@ -18,6 +18,7 @@ if [ "$1" = all ]; then
 	fi
 	rm -rf /opt/xbcompat/dash/devkit /data/overlay/opt/xbcompat/dash/devkit
 	rm -f /usr/libexec/xbox-hostinfo /data/overlay/usr/libexec/xbox-hostinfo
+	rm -f /usr/libexec/xbox-bluetooth /data/overlay/usr/libexec/xbox-bluetooth
 	sync
 fi
 /etc/init.d/S98xbox start > /dev/null

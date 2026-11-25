@@ -26,7 +26,34 @@ as one quad every frame. It links the XDK's `xfont.lib`, `d3d8`,
 | A | `XWriteTitleInfoAndReboot` with `LDT_FROM_DEBUGGER_CMDLINE` and the command line from `E:\DEVKIT\devkit.ini` (`cmdline=`, default `-dev`): what a devkit's debugger hands a title. xbcompat logs it on launch ("launched with a debugger command line"). |
 | X | the same launch with no launch data |
 | Y | hides or shows the list (`launcher=` in devkit.ini) |
+| Start | Settings: pairing Bluetooth controllers (below) |
 | Xbox Dashboard | writes `E:\DEVKIT\run-xboxdash` and returns to firmware; `xbox-session` runs the stock dashboard once, exactly as it does without the devkit dashboard, with the soft reset on so L + R + Back + Start comes back |
+
+## Settings: Bluetooth controllers
+
+![Pairing Bluetooth controllers](screenshot-settings.png)
+
+Start opens Settings. Y searches for 30 seconds; controllers in pairing
+mode show up as "New" (phones, speakers and other non-input devices are
+left out), A pairs one, and once paired it is trusted and connected, so it
+reconnects by itself whenever it is switched on. On a paired controller A
+connects or disconnects it and X twice forgets it. B, Back or Start goes
+back.
+
+The dashboard can't reach Bluetooth itself; `xbox-bluetooth`
+(bootani/buildroot/package/xbcompat), which the session runs next to
+`xbox-hostinfo`, drives BlueZ's `bluetoothctl` for it through two files in
+`E:\DEVKIT\BT`: `request.txt` (one command the dashboard writes: `scan`,
+`pair MAC`, `connect MAC`, `disconnect MAC`, `remove MAC`) and `state.txt`
+(the adapter, the devices and what is going on, rewritten every 2 s). The
+dashboard says so when the helper isn't running, the image has no BlueZ, or
+there is no adapter.
+
+The Sion image carries BlueZ, the Intel cards' Bluetooth firmware and the
+kernel's Bluetooth HID support from the commit that added this page on;
+pairings are kept in `/data/bluetooth`. `run.sh` runs the helper too, and
+`BTCTL=FAKE run.sh` runs it against `tests/fake-bluetoothctl`, a stand-in
+with four devices (one that never pairs) for testing without a radio.
 
 Title ID FFFE0000 like the other dashboards, so xbcompat doesn't offer the
 soft reset or the Guide over it.

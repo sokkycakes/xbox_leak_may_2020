@@ -210,7 +210,7 @@ done
 DK="$XBC/tools/devkitdash/dist/sion"
 if [ -f "$DK/devkitdash.xbe" ]; then
     mkdir -p "$OUT/dash/devkit/media"
-    cp "$DK/devkitdash.xbe" "$DK/devkitdash.map" "$DK/xbox-hostinfo" "$OUT/dash/devkit/"
+    cp "$DK/devkitdash.xbe" "$DK/devkitdash.map" "$DK/xbox-hostinfo" "$DK/xbox-bluetooth" "$OUT/dash/devkit/"
     cp "$DK"/media/* "$OUT/dash/devkit/media/"
 fi
 # Library maps for the two titles, and the leak's signatures for any other

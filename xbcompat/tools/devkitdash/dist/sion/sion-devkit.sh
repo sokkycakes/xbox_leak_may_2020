@@ -15,7 +15,7 @@ fi
 sha256sum -c SHA256SUMS > /dev/null 2>&1 || shasum -a 256 -c SHA256SUMS > /dev/null || { echo 'the kit is damaged'; exit 1; }
 echo "Copying to the Sion ($HOST)..."
 ssh $OPT "$HOST" 'rm -rf /tmp/devkit && mkdir -p /tmp/devkit/media' &&
-scp $OPT -q devkitdash.xbe devkitdash.map xbox-hostinfo xbox-session xbox-session.patch xbox-session.base.sha256 \
+scp $OPT -q devkitdash.xbe devkitdash.map xbox-hostinfo xbox-bluetooth xbox-session xbox-session.patch xbox-session.base.sha256 \
 	install-devkit.sh SHA256SUMS "$HOST:/tmp/devkit/" &&
 scp $OPT -q media/* "$HOST:/tmp/devkit/media/" || { echo 'Copy failed: is the Sion on and on the network?'; exit 1; }
 ssh $OPT "$HOST" 'sh /tmp/devkit/install-devkit.sh; rm -rf /tmp/devkit'

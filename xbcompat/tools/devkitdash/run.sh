@@ -13,7 +13,9 @@
 # DASHWORK names a tools/dashbuild work directory (default /tmp/xbdash),
 # the stock dashboard's files.  RUNS=N stops after N dashboard runs
 # (default 1, plus the stock dashboard's run when the devkit one asks for it;
-# the Sion's session goes on forever).
+# the Sion's session goes on forever).  xbox-bluetooth serves the Settings
+# page's Bluetooth controllers through the host's bluetoothctl; BTCTL=FAKE
+# uses tests/fake-bluetoothctl instead (state in WORK/run/fakebt.json).
 HERE=$(cd "$(dirname "$0")" && pwd)
 XBC=$(cd "$HERE/../.." && pwd)
 WORK=${1:-/tmp/devkitdash}; shift
@@ -28,6 +30,12 @@ cp -r "$WORK/devkit" "$HDD/partition2/devkit"
 
 HOSTINFO="$XBC/../bootani/buildroot/package/xbcompat/xbox-hostinfo"
 "$HOSTINFO" "$HDD/partition1/DEVKIT/hostinfo.txt" 5 $$ &
+
+BLUETOOTH="$XBC/../bootani/buildroot/package/xbcompat/xbox-bluetooth"
+if [ "$BTCTL" = FAKE ]; then
+    export BTCTL="$HERE/tests/fake-bluetoothctl" FAKEBT_STATE="$WORK/run/fakebt.json"
+fi
+TMPDIR="$WORK/run" sh "$BLUETOOTH" "$HDD/partition1/DEVKIT/BT" $$ &
 
 runs=0
 while :; do
