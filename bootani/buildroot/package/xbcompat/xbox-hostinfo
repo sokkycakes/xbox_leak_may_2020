@@ -1,0 +1,59 @@
+#!/bin/sh
+#
+# xbox-hostinfo FILE [SECONDS] [PID]
+#
+# Keeps FILE (E:\DEVKIT\hostinfo.txt for the devkit dashboard) current with
+# this machine's name and addresses, every SECONDS (default 5), for as long
+# as PID runs (default: forever):
+#
+#   name=sion
+#   ip=192.168.1.247              the address of the default route
+#   if=wlan0 192.168.1.247        one line per interface with an address
+#
+# The file is replaced whole (written beside it, then renamed), so a reader
+# never sees half of it.
+#
+
+out=$1
+every=${2:-5}
+parent=$3
+[ -n "$out" ] || { echo "usage: xbox-hostinfo FILE [SECONDS] [PID]" >&2; exit 2; }
+mkdir -p "$(dirname "$out")"
+
+write_info() {
+	name=$(hostname 2>/dev/null || cat /proc/sys/kernel/hostname)
+	primary=
+	ifs=
+	if command -v ip > /dev/null 2>&1; then
+		# "1.1.1.1 via 192.168.1.1 dev wlan0 src 192.168.1.247 uid 0"
+		primary=$(ip -4 route get 1.1.1.1 2>/dev/null |
+			sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -n 1)
+		# "3: wlan0    inet 192.168.1.247/24 brd ... scope global wlan0"
+		ifs=$(ip -4 -o addr show scope global 2>/dev/null |
+			awk '{ split($4, a, "/"); print $2 " " a[1] }')
+	fi
+	if [ -z "$ifs" ] && command -v ifconfig > /dev/null 2>&1; then
+		ifs=$(ifconfig 2>/dev/null | awk '
+			/^[^ \t]/ { dev = $1; sub(":$", "", dev) }
+			/inet / { a = $2; sub("addr:", "", a); if (a !~ /^127\./) print dev " " a }')
+	fi
+	if [ -z "$ifs" ] && [ -r /proc/net/fib_trie ]; then
+		# No tools: the local addresses the kernel routes to itself.
+		ifs=$(awk '/^ +\|-- / { a = $2 } /\/32 host LOCAL/ && a !~ /^127\./ { print "net " a }' \
+			/proc/net/fib_trie | sort -u)
+	fi
+	[ -n "$primary" ] || primary=$(echo "$ifs" | awk 'NF { print $2; exit }')
+	{
+		echo "name=$name"
+		echo "ip=$primary"
+		echo "$ifs" | awk 'NF { print "if=" $0 }'
+	} > "$out.new" && mv -f "$out.new" "$out"
+}
+
+while :; do
+	write_info
+	if [ -n "$parent" ] && ! kill -0 "$parent" 2>/dev/null; then
+		exit 0
+	fi
+	sleep "$every"
+done

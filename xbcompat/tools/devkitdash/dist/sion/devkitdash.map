@@ -1,0 +1,672 @@
+_XboxTimeZoneNameToWstr@8 0x29ccd
+_XboxTimeZoneDateToSystemTime@8 0x29cee
+_XapipQueryTimeZoneInformation@8 0x29d26
+_FileTimeToSystemTime@8 0x29dd8
+_SystemTimeToFileTime@8 0x29e43
+_RtlpCutoverTimeToSystemTime@16 0x29eb8
+_GetTimeZoneInformation@4 0x2a0c2
+_XapipGetTimeZoneBias@4 0x2a21e
+_GetLocalTime@4 0x2a274
+_GetFileAttributesA@4 0x2a2f3
+_DeleteFileA@4 0x2a33e
+_CloseHandle@4 0x2a3cc
+_ResetEvent@4 0x2a3cc
+_ReadFile@20 0x2a3ea
+_ReadFileScatter@20 0x2a3ea
+_WriteFile@20 0x2a4d7
+_WriteFileGather@20 0x2a4d7
+_SetFilePointer@16 0x2a5ad
+_FlushFileBuffers@4 0x2a6a7
+_GetFileSizeEx@8 0x2a6ce
+_GetFileSize@8 0x2a70c
+_CreateFileA@28 0x2a747
+_CreateDirectoryA@8 0x2a8d2
+_XapiDirectoryInformationToFindData@8 0x2a93e
+_FindFirstFileA@8 0x2a9aa
+_FindNextFileA@8 0x2aab7
+_XWriteTitleInfoNoReboot@20 0x2ab08
+_XWriteTitleInfoAndRebootA@20 0x2abe2
+_XLaunchNewImageA@8 0x2ac27
+_HeapFree@12 0x2ad3a
+_LocalAlloc@8 0x2ad57
+_GlobalAlloc@8 0x2ad57
+_LocalFree@4 0x2ad74
+_mainXapiStartup@4 0x2ad92
+_mainCRTStartup 0x2ae01
+_GetLastError@0 0x2ae73
+_SetLastError@4 0x2ae9b
+_XapiSetLastNTError@4 0x2aec9
+_UnicodeToUTF8@16 0x2aee0
+_WideCharToMultiByte@32 0x2af98
+_XQueryValue@20 0x2b05d
+_XGetParentalControlSetting@0 0x2b07f
+_lstrcpynA@12 0x2b0a4
+_RtlpCreateUnCommittedRange@4 0x2b109
+_RtlpDestroyUnCommittedRange@8 0x2b229
+_RtlpInsertUnCommittedPages@12 0x2b24a
+_RtlpFindAndCommitPages@16 0x2b2dd
+_RtlpCoalesceFreeBlocks@16 0x2b468
+_RtlpInsertFreeBlock@12 0x2b70d
+_RtlpInitializeHeapSegment@28 0x2b807
+_RtlpExtendHeap@8 0x2b925
+_RtlpDeCommitFreeBlock@12 0x2baac
+_RtlCreateHeap@24 0x2bd56
+_RtlAllocateHeap@12 0x2c17a
+_RtlFreeHeap@12 0x2c8fc
+_XapiValidateDiskPartitionEx@8 0x2cacc
+_XapiCopySectionToFile@16 0x2cb44
+_XapiMapLetterToDirectory@24 0x2cc2b
+_XapiSetupPerTitleDriveLetters@8 0x2cf5f
+_XapiBootToDash@12 0x2cfb4
+_XapiVerifyMediaInDrive@0 0x2d019
+_XapiValidateDiskPartition@4 0x2d0f5
+_XapiInitProcess@0 0x2d106
+__cinit@0 0x2d227
+__rtinit@0 0x2d27f
+_XapiCallThreadNotifyRoutines@4 0x2d2a8
+_UnhandledExceptionFilter@4 0x2d2e0
+_XRegisterThreadNotifyRoutine@8 0x2d2fd
+_XapiThreadStartup@8 0x2d346
+_CreateThread@24 0x2d3de
+_GetCurrentThreadId@0 0x2d44c
+_XAutoPowerDownResetTimer@0 0x2d464
+_XapiAutoPowerDownTimeout@16 0x2d47f
+_XapiInitAutoPowerDown@0 0x2d491
+_XGetSectionHandleA@4 0x2d4fb
+_XLoadSectionByHandle@4 0x2d562
+_XFreeSectionByHandle@4 0x2d583
+_XGetSectionSize@4 0x2d5a1
+_XapiSelectCachePartition@12 0x2d5ab
+_XMountUtilityDrive@4 0x2d7af
+_XapiFormatFATVolumeEx@8 0x2d8b4
+_OutputDebugStringA@4 0x32828
+_Direct3D_CreateDevice@24 0x32860
+_D3DDevice_SetRenderState_MultiSampleMode@4 0x32920
+_D3DDevice_SetRenderState_MultiSampleRenderTargetMode@4 0x32950
+_D3DDevice_SetRenderState_PSTextureModes@4 0x32980
+@D3DDevice_SetRenderState_Simple@8 0x329b0
+_D3DDevice_SetRenderStateNotInline@8 0x329e0
+?UpdateProjectionViewportTransform@D3D@@YGXXZ 0x32a40
+_D3DDevice_SetRenderState_EdgeAntiAlias@4 0x32b80
+_D3DDevice_SetRenderState_ShadowFunc@4 0x32bc0
+_D3DDevice_SetRenderState_FogColor@4 0x32c00
+_D3DDevice_SetRenderState_CullMode@4 0x32c50
+_D3DDevice_SetRenderState_FrontFace@4 0x32cc0
+_D3DDevice_SetRenderState_NormalizeNormals@4 0x32d00
+_D3DDevice_SetRenderState_TextureFactor@4 0x32d40
+_D3DDevice_SetRenderState_LineWidth@4 0x32da0
+_D3DDevice_SetRenderState_Dxt1NoiseEnable@4 0x32e10
+_D3DDevice_SetRenderState_ZBias@4 0x32e90
+_D3DDevice_SetRenderState_LogicOp@4 0x32f10
+_D3DDevice_SetRenderState_FillMode@4 0x32f70
+_D3DDevice_SetRenderState_BackFillMode@4 0x32fc0
+_D3DDevice_SetRenderState_TwoSidedLighting@4 0x33020
+_D3DDevice_SetRenderState_VertexBlend@4 0x33090
+_D3DDevice_SetTextureState_TexCoordIndex@8 0x330e0
+_D3DDevice_SetTextureState_BumpEnv@12 0x33200
+_D3DDevice_SetTextureState_BorderColor@8 0x33270
+_D3DDevice_SetTextureState_ColorKeyColor@8 0x332b0
+_D3DDevice_SetTextureStageStateNotInline@12 0x332f0
+?CommonSetTextureBumpEnv@D3D@@YIPCKPAVCDevice@1@PCK@Z 0x333e0
+?CommonSetViewport@D3D@@YIPCKPAVCDevice@1@PCK@Z 0x33430
+?CommonSetControl0@D3D@@YIPCKPAVCDevice@1@PCK@Z 0x33610
+?CommonSetDebugRegisters@D3D@@YIXXZ 0x33670
+_D3DDevice_SetRenderState_ZEnable@4 0x33740
+_D3DDevice_SetRenderState_StencilEnable@4 0x337e0
+_D3DDevice_SetRenderState_StencilFail@4 0x33870
+_D3DDevice_SetRenderState_YuvEnable@4 0x338e0
+_D3DDevice_SetRenderState_OcclusionCullEnable@4 0x33910
+_D3DDevice_SetRenderState_StencilCullEnable@4 0x33980
+_D3DDevice_SetRenderState_RopZCmpAlwaysRead@4 0x339f0
+_D3DDevice_SetRenderState_RopZRead@4 0x33a10
+_D3DDevice_SetRenderState_DoNotCullUncompressed@4 0x33a30
+_D3DDevice_SetRenderState_MultiSampleAntiAlias@4 0x33a50
+_D3DDevice_SetRenderState_MultiSampleMask@4 0x33ab0
+?SwapSaveState@D3D@@YGXPAUSwapSavedState@1@@Z 0x33b10
+?SwapFirstFlip@D3D@@YGXPAVCDevice@1@@Z 0x33c60
+?SwapSetState@D3D@@YGXPAUSwapSavedState@1@@Z 0x33d70
+?SwapRestoreState@D3D@@YGXPAUSwapSavedState@1@@Z 0x33e40
+?SwapSaveSurfaces@D3D@@YGXPAVCDevice@1@@Z 0x33f40
+?SwapRestoreSurfaces@D3D@@YGXPAVCDevice@1@@Z 0x33fa0
+?SwapCopyBlt@D3D@@YGXPAVCDevice@1@@Z 0x34000
+?SwapCopy@D3D@@YGXPAVCDevice@1@K@Z 0x341d0
+?SwapFlip@D3D@@YGXPAVCDevice@1@@Z 0x343b0
+?SwapFinish@D3D@@YGXPAVCDevice@1@@Z 0x344c0
+_D3DDevice_Swap@4 0x34500
+_D3DDevice_CreateTexture@28 0x345c0
+_D3DDevice_SetTransform@8 0x345f0
+_D3DDevice_BlockUntilVerticalBlank@0 0x34700
+_D3DDevice_SetFlickerFilter@4 0x34730
+_D3DDevice_SetSoftDisplayFilter@4 0x34780
+?GetPitch@PixelJar@D3D@@YGKPAUD3DPixelContainer@@@Z 0x347e0
+_D3DDevice_SetRenderTarget@8 0x34840
+_D3DDevice_SetViewport@4 0x34d70
+_D3DDevice_SetTexture@8 0x34ed0
+_D3DDevice_IsBusy@0 0x35050
+_D3DDevice_SetTile@8 0x35090
+_D3DDevice_SetScissors@12 0x35150
+_D3DDevice_SetScreenSpaceOffset@8 0x352f0
+_D3DDevice_Clear@24 0x35340
+?FastCopyToWC@D3D@@YGXPCKPAKK@Z 0x35730
+_D3DDevice_DrawVerticesUP@16 0x357c0
+?InitializeVertexShaderFromFvf@D3D@@YGXPAUVertexShader@1@K@Z 0x35920
+?ShadowVertexShaderState@D3D@@YGXPAUVertexShader@1@K@Z 0x35a60
+?ParseProgram@D3D@@YGPCKPCKPBKK@Z 0x35b10
+_D3DDevice_LoadVertexShader@8 0x35b80
+_D3DDevice_SelectVertexShader@8 0x35be0
+_D3DDevice_SetShaderConstantMode@4 0x35c60
+?RestoreVertexShaders@D3D@@YGXPBKK@Z 0x35d60
+?CommonSetPassthroughProgram@D3D@@YIXPAVCDevice@1@@Z 0x35da0
+_D3DDevice_SetVertexShader@4 0x35e90
+_D3DTexture_LockRect@20 0x35ff0
+?CreateTexture@D3D@@YGJKKKKKW4_D3DFORMAT@@_N1PAPAUD3DBaseTexture@@@Z 0x36020
+_Direct3DCreate8@4 0x360e0
+?InitializeSurface@D3D@@YGXPAUD3DSurface@@KKPAX@Z 0x360f0
+?InitializeKelvin@D3D@@YGXXZ 0x36120
+?InitializeHardware@D3D@@YGXXZ 0x36210
+?InitializeD3dState@D3D@@YGXXZ 0x362f0
+?FreeFrameBuffers@CDevice@D3D@@QAEXXZ 0x363b0
+?InitializeFrameBuffers@CDevice@D3D@@QAEJPAU_D3DPRESENT_PARAMETERS_@@@Z 0x364d0
+?Init@CDevice@D3D@@QAEJPAU_D3DPRESENT_PARAMETERS_@@@Z 0x36a10
+?UnInit@CDevice@D3D@@QAEXXZ 0x36f40
+?BusyLoop@D3D@@YGXXZ 0x370e0
+?DumpMatrixTransposed@D3D@@YGXPCKKPBU_D3DMATRIX@@@Z 0x37100
+?InitializePushBuffer@CDevice@D3D@@QAEJXZ 0x37170
+?UninitializePushBuffer@CDevice@D3D@@QAEXXZ 0x37220
+?ComputeGap@D3D@@YIKPAVCDevice@1@PAUFence@1@@Z 0x37240
+?FindFence@D3D@@YGPAUFence@1@K@Z 0x372b0
+?FlushWCCache@D3D@@YGXXZ 0x373d0
+?KickOff@CDevice@D3D@@QAEXXZ 0x37400
+?SetFence@D3D@@YGKK@Z 0x374f0
+?BlockOnTime@D3D@@YGXKH@Z 0x375a0
+?MakeRequestedSpace@D3D@@YGPCKKK@Z 0x37690
+_XMETAL_StartPushCount@8 0x37820
+?KickOffAndWaitForIdle@D3D@@YGXXZ 0x37870
+?BlockOnResource@D3D@@YGXPAUD3DResource@@@Z 0x37890
+?ScaleVector3@D3D@@YGXPAU_D3DVECTOR@@PBU2@M@Z 0x37910
+?AddVectors3@D3D@@YGXPAU_D3DVECTOR@@PBU2@1@Z 0x37940
+?XformBy4x3@D3D@@YGXPAU_D3DVECTOR@@PBU2@MPBU_D3DMATRIX@@@Z 0x37970
+?MatrixProduct4x4@D3D@@YGXPAU_D3DMATRIX@@PBU2@1@Z 0x379d0
+?Explut@D3D@@YGXMPAM0@Z 0x37ad0
+?JBInvSqrt@D3D@@YGMM@Z 0x37bb0
+?NormalizeVector3@D3D@@YGXPAU_D3DVECTOR@@@Z 0x37c20
+?Inverse4x4@D3D@@YGHPAU_D3DMATRIX@@PBU2@H@Z 0x37c70
+?FloatToLong@D3D@@YGJM@Z 0x381d0
+?Exp@D3D@@YGMM@Z 0x381e0
+?Log@D3D@@YGMM@Z 0x38240
+?CleanPrivateData@D3D@@YGXPAX@Z 0x38250
+?GetDataFromResource@D3D@@YGPAEPAUD3DResource@@@Z 0x382a0
+?DestroyResource@D3D@@YGXPAUD3DResource@@@Z 0x382b0
+?IsResourceSetInDevice@D3D@@YGHPAUD3DResource@@@Z 0x38350
+?InternalAddRefSurface@D3D@@YGXPAUD3DResource@@@Z 0x38390
+_D3DResource_AddRef@4 0x383d0
+_D3DResource_Release@4 0x38410
+?InternalReleaseSurface@D3D@@YGXPAUD3DResource@@@Z 0x38460
+?GetColorMaterial@D3D@@YGKXZ 0x384d0
+?LazySetPointParams@D3D@@YGXPAVCDevice@1@@Z 0x38570
+?LazySetShaderStageProgram@D3D@@YGXPAVCDevice@1@@Z 0x386e0
+?LazySetTextureState@D3D@@YGXPAVCDevice@1@@Z 0x38850
+?LazySetSpecFogCombiner@D3D@@YGXPAVCDevice@1@@Z 0x38a40
+?LazySetTextureTransform@D3D@@YGXPAVCDevice@1@@Z 0x38c20
+?SetLightColors@D3D@@YGPCKPCKPBULight@1@KK@Z 0x38fe0
+?SetSceneAmbientAndMaterialEmission@D3D@@YGPCKPCKK@Z 0x390e0
+?SetSpecularParameters@D3D@@YGPCKPCK@Z 0x39280
+?LazySetLights@D3D@@YGXPAVCDevice@1@@Z 0x393c0
+?LazySetTransform@D3D@@YGXPAVCDevice@1@@Z 0x39700
+?SetState@D3D@@YGXXZ 0x39900
+?SetStateUP@CDevice@D3D@@QAEXXZ 0x39980
+_D3DDevice_SetPixelShader@4 0x39ac0
+?DacProgramVideoStart@CMiniport@D3D@@QAEXK@Z 0x39c90
+?DacProgramGammaRamp@CMiniport@D3D@@QAEXPAU_D3DGAMMARAMP@@@Z 0x39d12
+?Log2@D3D@@YIKK@Z 0x39d60
+?MapToLinearD3DFORMAT@D3D@@YG?AW4_D3DFORMAT@@W42@@Z 0x39d70
+?VideoBitsPerPixelOfD3DFORMAT@D3D@@YGKK@Z 0x39e30
+?CalcTilePitch@D3D@@YGKKW4_D3DFORMAT@@@Z 0x39e60
+?GetSurfaceFormat@PixelJar@D3D@@YGKPAUD3DPixelContainer@@0@Z 0x39ea0
+?GetDepthBufferScale@PixelJar@D3D@@YGXPAUD3DPixelContainer@@PAM@Z 0x39fc0
+?FindSurfaceWithinTexture@PixelJar@D3D@@YGXPAUD3DPixelContainer@@W4_D3DCUBEMAP_FACES@@IPAPAEPAK333@Z 0x3a030
+?Lock2DSurface@PixelJar@D3D@@YGXPAUD3DPixelContainer@@W4_D3DCUBEMAP_FACES@@IPAU_D3DLOCKED_RECT@@PBUtagRECT@@K@Z 0x3a260
+?EncodeFormat@PixelJar@D3D@@YGKKKKKW4_D3DFORMAT@@K_N1PAK2@Z 0x3a300
+?GetDisplayCapabilities@CMiniport@D3D@@SGKXZ 0x3a500
+?GetTableForCurrentAvInfo@D3D@@YGPBUDISPLAYMODE@1@XZ 0x3a51f
+?SetVideoMode@CMiniport@D3D@@QAEXKKKKW4_D3DFORMAT@@KK@Z 0x3a598
+?IsFlipPending@CMiniport@D3D@@QAEHXZ 0x3a770
+?Isr@CMiniport@D3D@@SGEPAU_KINTERRUPT@@PAX@Z 0x3a7a0
+?VBlankFlip@CMiniport@D3D@@AAEXKK@Z 0x3a8c0
+?VBlank@CMiniport@D3D@@AAEKXZ 0x3a940
+?FixupPushBuffer@CMiniport@D3D@@QAEXPAUPUSHBUFFERFIXUPINFO@12@K@Z 0x3aae0
+?SoftwareMethod@CMiniport@D3D@@AAEXKK@Z 0x3ab60
+?ShutdownNotification@CMiniport@D3D@@SGXPAU_HAL_SHUTDOWN_REGISTRATION@@@Z 0x3add0
+?ServiceGrInterrupt@CMiniport@D3D@@AAEKXZ 0x3ae10
+?ServiceFifoInterrupt@CMiniport@D3D@@AAEKXZ 0x3af00
+?Dpc@CMiniport@D3D@@SGXPAU_KDPC@@PAX11@Z 0x3b080
+?ReserveInstMem@CMiniport@D3D@@AAEKK@Z 0x3b130
+?InitGammaRamp@CMiniport@D3D@@AAEXK@Z 0x3b143
+?InitDMAChannel@CMiniport@D3D@@QAEHKPAUOBJECTINFO@12@0KPAPAX@Z 0x3b183
+?BindToChannel@CMiniport@D3D@@QAEHPAUOBJECTINFO@12@@Z 0x3b1e6
+?MapRegisters@CMiniport@D3D@@AAEHXZ 0x3b21a
+?GetGeneralInfo@CMiniport@D3D@@AAEHXZ 0x3b245
+?InitEngines@CMiniport@D3D@@AAEHXZ 0x3b286
+?LoadEngines@CMiniport@D3D@@AAEHXZ 0x3b390
+?GetAddressInfo@CMiniport@D3D@@AAEXPAXPAPAXPAKH@Z 0x3b4c9
+?CreateCtxDmaObject@CMiniport@D3D@@QAEHKKPAXKPAUOBJECTINFO@12@@Z 0x3b523
+?CreateGrObject@CMiniport@D3D@@QAEHKKPAUOBJECTINFO@12@@Z 0x3b5f2
+?TilingUpdateIdle@CMiniport@D3D@@QAEXPAK@Z 0x3b682
+?InitHardware@CMiniport@D3D@@QAEHXZ 0x3b6ed
+?CreateTile@CMiniport@D3D@@QAEHKKKKKKK@Z 0x3b84f
+?DestroyTile@CMiniport@D3D@@QAEHKK@Z 0x3ba3d
+?ShutdownEngines@CMiniport@D3D@@QAEXXZ 0x3baff
+?CombinerInput@D3D@@YGKKKK@Z 0x3bcb0
+?LazySetCombiners@D3D@@YGXPAVCDevice@1@@Z 0x3bd50
+?HalMcControlInit@CMiniport@D3D@@AAEXXZ 0x3c2e0
+?HalFbControlInit@CMiniport@D3D@@AAEXXZ 0x3c447
+?HalDacControlInit@CMiniport@D3D@@AAEXXZ 0x3c545
+?HalVideoControlInit@CMiniport@D3D@@AAEXXZ 0x3c614
+?HalGrControlInit@CMiniport@D3D@@AAEXXZ 0x3c64a
+?HalFifoControlInit@CMiniport@D3D@@AAEXXZ 0x3c67a
+?HalGrIdle@CMiniport@D3D@@AAEXXZ 0x3c6eb
+?HalGrUnloadChannelContext@CMiniport@D3D@@AAEXK@Z 0x3c72a
+?HalFifoContextSwitch@CMiniport@D3D@@AAEXK@Z 0x3c763
+?HalDacLoad@CMiniport@D3D@@AAEXXZ 0x3c960
+?HalFifoAllocDMA@CMiniport@D3D@@AAEXKKKPAUOBJECTINFO@12@@Z 0x3c972
+?HalFifoHashAdd@CMiniport@D3D@@AAEXKKKKK@Z 0x3caff
+?HalGrInitObjectContext@CMiniport@D3D@@AAEXKK@Z 0x3cb38
+?HalGrInit3d@CMiniport@D3D@@AAEXXZ 0x3cbad
+?HalGrLoadChannelContext@CMiniport@D3D@@AAEXK@Z 0x3d58c
+?HalFifoControlLoad@CMiniport@D3D@@AAEXXZ 0x3d6af
+?HalGrControlLoad@CMiniport@D3D@@AAEXXZ 0x3d730
+_XID_Init@4 0x41f5c
+_USBD_Init@8 0x420b3
+_USBD_NewHostController@8 0x42141
+?GetMaxDeviceTypeCount@IUsbInit@@QAEKPAU_XPP_DEVICE_TYPE@@@Z 0x421ba
+?UseDefaultCount@IUsbInit@@QAEHXZ 0x421f1
+?RegisterResources@IUsbInit@@QAEXPAU_USB_RESOURCE_REQUIREMENTS@@@Z 0x421fd
+?Process@IUsbInit@@QAEXXZ 0x423ff
+??_H@YGXPAXIHP6EPAX0@Z@Z 0x42522
+?Init@CDeviceTree@@QAEXKK@Z 0x42544
+_HCD_DriverEntry@4 0x425e3
+_HCD_EnumHardware@0 0x425ef
+_HCD_NewHostController@12 0x42631
+_USBHUB_Init@4 0x4275b
+@OHCD_RootHubInitialize@4 0x4277c
+@OHCD_fPoolInit@4 0x4282c
+@OHCD_ScheduleInitialize@4 0x429f1
+_OHCD_DevSysCheckHardware@4 0x42a52
+_OHCD_DevSysTakeControl@4 0x42a5d
+_XInputOpen@16 0x42abf
+_XInputClose@4 0x42b15
+_XInputGetState@8 0x42b21
+_XdReportDeviceInsertionRemoval@12 0x42b90
+_XGetDevices@4 0x42bb7
+_XGetDeviceChanges@12 0x42bd9
+?GetTypeInformation@@YIPAU_XID_TYPE_INFORMATION@@EPAE@Z 0x42c46
+?GetTypeInformation@@YIPAU_XID_TYPE_INFORMATION@@PAU_XPP_DEVICE_TYPE@@@Z 0x42c7d
+?XID_SetEnumWatchdog@@YGXXZ 0x42ca8
+?XID_WatchdogTimerProc@@YGXPAU_KDPC@@PAX11@Z 0x42cc3
+?XID_fRemoveDeviceComplete@@YIXPAU_XID_DEVICE_NODE@@@Z 0x42cd4
+?XID_fFindNode@@YIPAU_XID_DEVICE_NODE@@PAU_XID_TYPE_INFORMATION@@K@Z 0x42cf7
+?XID_fOpenEndpoints@@YIJPAU_XID_OPEN_DEVICE@@PAU_XINPUT_POLLING_PARAMETERS@@@Z 0x42d61
+?XID_CloseEndpointStateMachine@@YGXPAU_URB_CLOSE_ENDPOINT@@PAU_XID_OPEN_DEVICE@@@Z 0x42e0c
+?XID_NewInterruptData@@YGXPAT_URB@@PAU_XID_OPEN_DEVICE@@@Z 0x42ebd
+?XID_ClearInputStallComplete@@YGXPAT_URB@@PAU_XID_OPEN_DEVICE@@@Z 0x42f4e
+?XID_ProcessGamepadData@@YIXPAU_XID_OPEN_DEVICE@@@Z 0x42fd8
+?XID_ProcessIRRemoteData@@YIXPAU_XID_OPEN_DEVICE@@@Z 0x43019
+?XID_ProcessNewKeyboardData@@YIXPAU_XID_OPEN_DEVICE@@@Z 0x4303d
+?XID_EnumKeyboardComplete@@YGXPAT_URB@@PAU_XID_DEVICE_NODE@@@Z 0x43060
+?XID_fCloseEndpoints@@YIXPAU_XID_OPEN_DEVICE@@@Z 0x430d0
+?XID_EnumKeyboard@@YGXPAT_URB@@PAU_XID_DEVICE_NODE@@@Z 0x430ee
+_XID_RemoveDevice@4 0x43179
+?XID_fCloseDevice@@YIXPAU_XID_OPEN_DEVICE@@@Z 0x431be
+?XID_EnumLegacy1@@YGXPAT_URB@@PAU_XID_DEVICE_NODE@@@Z 0x4325f
+?XID_EnumStage1@@YGXPAT_URB@@PAU_XID_DEVICE_NODE@@@Z 0x43323
+?XID_fOpenDevice@@YIKPAU_XID_TYPE_INFORMATION@@KPAPAU_XID_OPEN_DEVICE@@PAU_XINPUT_POLLING_PARAMETERS@@@Z 0x433e3
+_XID_AddDevice@4 0x43617
+?GetParent@IUsbDevice@@QBEPAV1@XZ 0x4376b
+?GetFirstChild@IUsbDevice@@QBEPAV1@XZ 0x43782
+?GetSibling@IUsbDevice@@QBEPAV1@XZ 0x43799
+?XID_SyncComplete@@YGXPAT_URB@@PAU_KEVENT@@@Z 0x437b0
+?USBD_SubmitSynchronousRequestComplete@@YGXPAT_URB@@PAU_KEVENT@@@Z 0x437b0
+?CancelRequest@IUsbDevice@@QAEJPAT_URB@@@Z 0x437c1
+?SetExtension@IUsbDevice@@QAEPAXPAX@Z 0x437d8
+?SetClassSpecificType@IUsbDevice@@QAEXE@Z 0x437e9
+?Win32FromUsbdStatus@IUsbDevice@@SGKJ@Z 0x437f3
+?GetEndpointDescriptor@IUsbDevice@@QBEPBU_USB_ENDPOINT_DESCRIPTOR@@EEE@Z 0x43867
+?OpenDefaultEndpoint@IUsbDevice@@AAEJPAT_URB@@@Z 0x438e1
+?CloseDefaultEndpoint@IUsbDevice@@AAEJPAT_URB@@@Z 0x43967
+?FindChild@IUsbDevice@@QBEPAV1@E@Z 0x439d3
+?InsertChild@IUsbDevice@@QAEXPAV1@@Z 0x43a04
+?RemoveChild@IUsbDevice@@QAEEPAV1@@Z 0x43a4c
+?SetExternalPortWithoutHub@IUsbDevice@@QAEXPAPAV1@I@Z 0x43aa8
+?SubmitRequest@IUsbDevice@@QAEJPAT_URB@@@Z 0x43b0f
+?SetExternalPortWithHub@IUsbDevice@@QAEXPAPAV1@I@Z 0x43bfc
+?SetExternalPort@IUsbDevice@@QAEXXZ 0x43c3e
+??0IUsbInit@@QAE@KPAU_XDEVICE_PREALLOC_TYPE@@@Z 0x43c89
+?AllocDevice@CDeviceTree@@QAEPAVIUsbDevice@@XZ 0x43ce3
+_USBD_CompleteRequest@4 0x43d33
+_USBD_CalculateUsbBandwidth@12 0x43d47
+?USBD_FindClassDriver@@YGPAU_USB_CLASS_DRIVER_DESCRIPTION@@T_PNP_CLASS_ID@@@Z 0x43d90
+??0IUsbDevice@@QAE@XZ 0x43dc5
+?FreeDevice@CDeviceTree@@QAEXPAVIUsbDevice@@@Z 0x43dd7
+?DeviceConnected@IUsbDevice@@QAEXEE@Z 0x43e09
+?USBD_SetEnumWatchDog@@YGXXZ 0x43ed0
+?USBD_DeviceEnumStagePre1@@YGXJPAX@Z 0x43ef2
+?USBD_DeviceEnumStagePre4@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x43f43
+?USBD_AllocateUsbAddress@@YIEPAU_USBD_HOST_CONTROLLER@@@Z 0x43f6e
+?USBD_FreeUsbAddress@@YIXPAU_USBD_HOST_CONTROLLER@@E@Z 0x43f9f
+_USBD_DeviceConnected@8 0x43fd3
+?USBD_DeviceEnumStage0@@YGXXZ 0x43fe8
+?RemoveComplete@IUsbDevice@@QAEXXZ 0x4404f
+?USBD_CompleteDeviceDisconnected@@YGXPAVIUsbDevice@@@Z 0x440c5
+?USBD_DeviceEnumNextPending@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x44117
+?DeviceDisconnected@IUsbDevice@@QAEXE@Z 0x441b8
+?DeviceNotResponding@IUsbDevice@@QAEXXZ 0x4422f
+?USBD_fDeviceAbortEnum2@@YIXPAVIUsbDevice@@@Z 0x44274
+_USBD_DeviceDisconnected@8 0x442f5
+?DisableComplete@IUsbDevice@@QAEXJPAX@Z 0x44308
+?USBD_DeviceAbortEnum@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x4433b
+?USBD_DeviceEnumStage3@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x443a8
+?AddComplete@IUsbDevice@@QAEXJ@Z 0x4440d
+?USBD_LoadClassDriver@@YIXPAVIUsbDevice@@T_PNP_CLASS_ID@@@Z 0x44540
+?USBD_DeviceEnumStage2@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x44574
+?USBD_DeviceEnumStage6@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x4464f
+?USBD_fDeviceEnumStage1@@YIXPAVIUsbDevice@@@Z 0x4478c
+?USBD_DeviceEnumStage5@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x44889
+?USBD_fDeviceEnumStage4@@YIXPAT_URB@@PAVIUsbDevice@@@Z 0x44942
+?USBD_DeviceEnumTimerProc@@YGXPAU_KDPC@@PAX11@Z 0x44a8d
+_OHCD_PoolAllocateEndpoint@0 0x44ae1
+@OHCD_fOpenEndpoint@8 0x44af4
+@OHCD_fGetEndpointState@8 0x44c68
+@OHCD_fSetEndpointState@8 0x44c89
+@OHCD_fDequeueControlTransfer@8 0x44cb7
+@OHCD_fDequeueBulkTransfer@8 0x44cf0
+@OHCD_fDequeueInterruptTransfer@8 0x44d29
+@OHCD_fCancelQueuedUrbs@8 0x44d58
+@OHCD_fPauseEndpoint@8 0x44dce
+_OHCD_ShutDown@4 0x44e0b
+_HCD_CancelRequest@8 0x44e46
+@OHCD_fCloseEndpoint@8 0x44efd
+@OHCD_fAbortEndpoint@8 0x44f64
+_HCD_SubmitRequest@8 0x44fb7
+?USBHUB_WatchdogTimerProc@@YGXPAU_KDPC@@PAX11@Z 0x450cf
+?USBHUB_SetEnumWatchdog@@YGXK@Z 0x45123
+?USBHUB_RemoveHubComplete@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x45153
+?USBHUB_ResetComplete@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x45192
+?USBHUB_DisableComplete@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x451be
+?USBHUB_RelatchPortSpeed@@YGXPAVIUsbDevice@@@Z 0x451e2
+?USBHUB_PortProcessChange@@YGXPAVIUsbDevice@@@Z 0x4523f
+?USBHUB_RemoveHubStage2@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x4538d
+?USBHUB_DisableResetPort@@YGXPAVIUsbDevice@@EPAXE@Z 0x453af
+?USBHUB_RemoveHubStage1@@YGXPAVIUsbDevice@@@Z 0x45496
+?USBHUB_ClearInterruptStallComplete@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x454c8
+?USBHUB_PortStatusChange2@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x45559
+?USBHUB_ClearHubFeatureComplete@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x455b4
+_USBHUB_RemoveDevice@4 0x4560f
+?USBHUB_ChangeNotifyComplete@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x4565f
+?USBHUB_HubStatusChange@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x45706
+?USBHUB_PoweringPorts@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x457c6
+?USBHUB_PortStatusChange1@@YGXPAVIUsbDevice@@@Z 0x45831
+?USBHUB_ClearPortFeatureComplete@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x458fa
+?USBHUB_RelatchPortSpeedComplete@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x4592a
+?USBHUB_EnumHubComplete@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x459aa
+?USBHUB_EnumHubStage2@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x45a40
+?USBHUB_EnumHubStage1@@YGXPAT_URB@@PAVIUsbDevice@@@Z 0x45abc
+_USBHUB_AddDevice@4 0x45ba8
+@OHCD_RootHubProcessHotPlug@8 0x45c8e
+_HCD_ResetRootHubPort@16 0x45d1d
+_HCD_DisableRootHubPort@8 0x45d6a
+_OHCD_RootHubResetDpc@16 0x45d87
+@OHCD_RootHubProcessInterrupt@4 0x45db2
+_OHCD_PoolFreeTD@4 0x45e71
+@OHCD_ScheduleAddEndpointControlOrBulk@8 0x45e8e
+@OHCD_ScheduleRemoveEndpointControlOrBulk@8 0x45ecb
+@OHCD_ReverseBits@8 0x45f1b
+@OHCD_HookNewEndpointToChildren@12 0x45f31
+@OHCD_ScheduleAddEndpointPeriodic@8 0x45fa8
+@OHCD_ScheduleRemoveEndpointPeriodic@8 0x46184
+_OHCD_InterruptService@8 0x462fd
+@OHCD_Get32BitFrameNumber@4 0x46393
+@OHCD_fCompleteRequest@12 0x463b7
+@OHCD_fCreditTDQuota@8 0x46433
+@OHCD_fProcessFailedTD@8 0x46465
+@OHCD_fProcessDoneTD@8 0x46559
+@OHCD_fProcessCancelPendingList@8 0x46605
+@OHCD_fCleanEndpointTDs@8 0x46707
+@OHCD_fProcessAbortPendingList@8 0x4675d
+@OHCD_fProcessClosePendingList@8 0x467e4
+_OHCD_IsrDpc@16 0x468be
+_OHCD_IsochPoolAllocateEndpoint@0 0x469cc
+@OHCD_fIsochOpenEndpoint@8 0x469de
+@OHCD_fIsochCloseEndpoint@8 0x46b8b
+@OHCD_fIsochCompleteCloseEndpoint@8 0x46bcf
+@OHCD_fIsochAttachBuffer@8 0x46c58
+@OHCD_fIsochStartTransfer@8 0x46dbf
+@OHCD_fIsochStopTransfer@8 0x46ede
+@OHCD_fIsochProcessTD@8 0x46f38
+_OHCD_PoolAllocateTD@4 0x47028
+_OHCD_PoolDebitControlTDQuota@4 0x47048
+_OHCD_PoolDebitBulkTDQuota@4 0x47067
+@OHCD_fGetTDsRequired@8 0x47086
+@OHCD_fMapTransfer@12 0x470b9
+@OHCD_fProgramTransfer@12 0x470f3
+@OHCD_fProgramInterruptTransfer@8 0x473f1
+@OHCD_fProgramBulkTransfer@4 0x47444
+@OHCD_fProgramControlTransfer@4 0x47491
+@OHCD_fQueueInterruptTransfer@12 0x474de
+@OHCD_fQueueBulkTransfer@8 0x47511
+@OHCD_fQueueControlTransfer@8 0x4754d
+@OHCD_fQueueTransferRequest@8 0x47589
+_main 0x12cd6
+@RtlFindFirstSetRightMember@4 0x2d460
+__snprintf 0x2dec1
+_wcslen 0x2e03f
+_memmove 0x2e120
+__alldiv 0x2e4d0
+__allmul 0x2e5b0
+__SEH_prolog 0x2e5e4
+__SEH_epilog 0x2e61d
+__snwprintf 0x2e62e
+_sprintf 0x2e69e
+_DbgPrint 0x32816
+_ExQueryNonVolatileSetting@20 0x3281c
+?MakeSpace@D3D@@YGPCKXZ 0x37810
+?GetTime@CMiniport@D3D@@QAEKXZ 0x3a790
+?GetExtension@IUsbDevice@@QBEPAXXZ 0x437d4
+?GetInterfaceNumber@IUsbDevice@@QBEEXZ 0x437e5
+?GetInterfaceDescriptor@IUsbDevice@@QBEPBU_USB_INTERFACE_DESCRIPTOR@@XZ 0x43861
+?GetPort@IUsbDevice@@QBEKXZ 0x438dd
+?ResetComplete@IUsbDevice@@QAEXJPAX@Z 0x4404a
+__tls_array 0x4 data
+?g_TextureFormat@D3D@@3QBEB 0x3d9c8 data
+?g_ComplexRenderStateFunctionTable@D3D@@3QBQ6GXK@ZB 0x3da10 data
+?g_AntiAliasedTextureStates@D3D@@3QBKB 0x3da88 data
+?g_AntiAliasedRenderStates@D3D@@3QBKB 0x3dae0 data
+?g_TilePitches@D3D@@3QBKB 0x3db88 data
+?g_TransformDirtyTable@D3D@@3QBKB 0x3dbf0 data
+?g_LODBias2x@D3D@@3QBMB 0x3dc18 data
+?g_IdentityMatrix@D3D@@3U_D3DMATRIX@@B 0x3dc30 data
+?g_UnitsOfElement@D3D@@3QBEB 0x3dc70 data
+?g_BytesPerUnit@D3D@@3QBEB 0x3dc78 data
+?g_FixedFunctionPipelineConstants@D3D@@3QBKB 0x3dc80 data
+?g_PassthruProgramWFog@D3D@@3QBKB 0x3dcb0 data
+?g_PassthruProgramZFog@D3D@@3QBKB 0x3dd70 data
+?g_PassthruProgramSpecularFog@D3D@@3QBKB 0x3de20 data
+?g_TextureCount@D3D@@3QBKB 0x3dee0 data
+?g_MinFilter@D3D@@3QAY02$$CBKA 0x3def0 data
+?g_InitialTextureStates@D3D@@3QBEB 0x3df08 data
+?g_InitialRenderStates@D3D@@3QBKB 0x3df28 data
+?g_Mar@D3D@@3QBMB 0x3e098 data
+?g_Lar@D3D@@3QBMB 0x3e118 data
+?g_EyeDirection@D3D@@3U_D3DVECTOR@@B 0x3e1a0 data
+?g_DisplayModes@D3D@@3QBUDISPLAYMODE@1@B 0x3e1b0 data
+??_C@_0HG@FBJOLOBL@Graphics?5hardware?5error?5informat@ 0x3eac0 data
+??_C@_0EB@CBFHLLBF@Graphics?5Parse?5error?5information@ 0x3eb38 data
+?g_Device@D3D@@3VCDevice@1@A 0x3eb90 data
+?g_pDevice@D3D@@3PAVCDevice@1@A 0x41670 data
+_g_pPushBuffer 0x41674 data
+_D3D__AvInfo 0x41678 data
+_D3D__GpuReg 0x4167c data
+?g_NullHardwareGetPut@@3PAKA 0x41680 data
+_D3D__NullHardware 0x41688 data
+_D3D__DirtyFlags 0x41690 data
+_D3D__TextureState 0x41698 data
+_D3D__RenderState 0x41898 data
+?g_SoftDisplayFilterValue@D3D@@3HA 0x41ae4 data
+?g_FlickerFilterValue@D3D@@3KA 0x41ae8 data
+?g_SoftDisplayFilterSet@D3D@@3HA 0x41aec data
+?g_FlickerFilterSet@D3D@@3HA 0x41af0 data
+?g_Stream@D3D@@3PAUStream@1@A 0x41af8 data
+?g_DirectVertexShader@D3D@@3UVertexShader@1@A 0x41bb8 data
+?g_FvfVertexShader@D3D@@3UVertexShader@1@A 0x41cd0 data
+?m_PushSegmentSize@CDevice@D3D@@2KA 0x41de8 data
+?m_PushBufferSize@CDevice@D3D@@2KA 0x41dec data
+?g_VideoOffset@D3D@@3KA 0x41df4 data
+?XID_BeginTypeDescriptionTable@@3KA 0x41e00 data
+?XID_EndTypeDescriptionTable@@3KA 0x41e10 data
+_USBD_BeginClassDescriptionTable 0x41e14 data
+_USBD_EndClassDescriptionTable 0x41e24 data
+_XDEVICE_TYPE_DEBUG_KEYBOARD_TABLE 0x41e80 data
+?XID_pKeyboardServices@@3PAU_XID_KEYBOARD_SERVICES@@A 0x41efc data
+_XID_Description 0x41f00 data
+_XID_1Description 0x41f18 data
+?XID_gResourceRequirements@@3U_USB_RESOURCE_REQUIREMENTS@@A 0x41f30 data
+__imp__IoCreateSymbolicLink@8 0x47620 data
+__imp__HalReturnToFirmware@4 0x47628 data
+__imp__AvSetSavedDataAddress@4 0x4762c data
+__imp__MmFreeContiguousMemory@4 0x47630 data
+__imp__MmPersistContiguousMemory@12 0x47634 data
+__imp__MmQueryAllocationSize@4 0x47638 data
+__imp__AvGetSavedDataAddress@0 0x4763c data
+__imp__AvSendTVEncoderOption@16 0x47640 data
+__imp__AvSetDisplayMode@24 0x47644 data
+__imp__MmAllocateContiguousMemoryEx@20 0x47648 data
+__imp__KeWaitForSingleObject@20 0x4764c data
+__imp__KeInsertQueueDpc@12 0x47650 data
+__imp__KeSetEvent@12 0x47654 data
+__imp__RtlTimeToTimeFields@8 0x4765c data
+__imp__KeQuerySystemTime@4 0x47660 data
+__imp__HalReadWritePCISpace@24 0x47664 data
+__imp__HalRegisterShutdownNotification@8 0x47668 data
+__imp__KeConnectInterrupt@4 0x4766c data
+__imp__KeInitializeInterrupt@28 0x47670 data
+__imp__HalGetInterruptVector@8 0x47674 data
+__imp__KeInitializeDpc@12 0x47678 data
+__imp__KeDisconnectInterrupt@4 0x4767c data
+__imp__MmClaimGpuInstanceMemory@8 0x47680 data
+__imp__KeStallExecutionProcessor@4 0x47684 data
+__imp__RtlTimeFieldsToTime@8 0x4768c data
+__imp__NtClose@4 0x47690 data
+__imp__NtClearEvent@4 0x47690 data
+__imp__NtSetInformationFile@20 0x47694 data
+__imp__NtOpenFile@24 0x47698 data
+__imp__RtlInitAnsiString@8 0x4769c data
+__imp__NtQueryFullAttributesFile@8 0x476a0 data
+__imp__NtQueryDirectoryFile@40 0x476a4 data
+__imp__NtWaitForSingleObject@12 0x476a8 data
+__imp__NtReadFile@32 0x476ac data
+__imp__NtReadFileScatter@32 0x476ac data
+__imp__NtWriteFile@32 0x476b0 data
+__imp__NtWriteFileGather@32 0x476b0 data
+__imp__NtQueryInformationFile@20 0x476b4 data
+__imp__NtQueryVolumeInformationFile@20 0x476b8 data
+__imp__NtFlushBuffersFile@8 0x476bc data
+__imp__NtFsControlFile@40 0x476c0 data
+__imp__NtDeviceIoControlFile@40 0x476c4 data
+__imp__NtCreateFile@36 0x476c8 data
+__imp__MmAllocateContiguousMemory@4 0x476cc data
+_LaunchDataPage 0x476d0 data
+__imp__RtlNtStatusToDosError@4 0x476d4 data
+__imp__NtQuerySymbolicLinkObject@12 0x476d8 data
+__imp__NtOpenSymbolicLinkObject@8 0x476dc data
+__imp_@KfLowerIrql@4 0x476e0 data
+__imp__KeRaiseIrqlToDpcLevel@0 0x476e4 data
+__imp__RtlUnicodeStringToAnsiString@12 0x476e8 data
+__imp__RtlLeaveCriticalSection@4 0x476f0 data
+__imp__RtlEnterCriticalSection@4 0x476f4 data
+__imp__NtFreeVirtualMemory@12 0x476f8 data
+__imp__NtAllocateVirtualMemory@20 0x476fc data
+__imp__RtlCompareMemoryUlong@12 0x47700 data
+__imp__RtlInitializeCriticalSection@4 0x47704 data
+__imp__NtQueryVirtualMemory@8 0x47708 data
+__imp__RtlRaiseException@4 0x4770c data
+__imp__KeInitializeTimerEx@8 0x47710 data
+__imp__ExAllocatePool@4 0x47714 data
+__imp__KeSetTimer@16 0x47718 data
+__imp__KeCancelTimer@4 0x4771c data
+_XboxHardwareInfo 0x47720 data
+__imp__ExFreePool@4 0x47724 data
+__imp__PsTerminateSystemThread@4 0x47728 data
+__imp__PsCreateSystemThreadEx@40 0x4772c data
+__imp__KeDelayExecutionThread@12 0x47730 data
+__imp__KeQueryInterruptTime@0 0x47734 data
+__imp__HalInitiateShutdown@0 0x47738 data
+__imp_@KfRaiseIrql@4 0x4773c data
+__imp__RtlEqualString@12 0x47740 data
+__imp__XeLoadSection@4 0x47744 data
+__imp__XeUnloadSection@4 0x47748 data
+_HalDiskCachePartitionCount 0x4774c data
+__imp__MmGetPhysicalAddress@4 0x47750 data
+__imp__MmLockUnlockBufferPages@12 0x47754 data
+__imp__MmLockUnlockPhysicalPage@8 0x47758 data
+_D3DDIRTYFROMTEXTURESTATE 0x47768 data
+_D3DDIRTYFROMRENDERSTATE 0x477c0 data
+_D3DSIMPLERENDERSTATEENCODE 0x47850 data
+__real@3f800000 0x48f40 data
+__real@bf000000 0x48f44 data
+__real@3f000000 0x48f48 data
+__real@4f800000 0x48f4c data
+__real@41000000 0x48f50 data
+__real@3e800000 0x48f54 data
+__real@00000000 0x48f58 data
+__real@40800000 0x48f5c data
+__real@40000000 0x48f60 data
+__real@46293e5939a08cea 0x48f68 data
+__real@407fff0000000000 0x48f70 data
+__real@4b7fffff 0x48f78 data
+__real@477fff00 0x48f7c data
+__real@40400000 0x48f80 data
+__real@43800000 0x48f84 data
+__real@be596d0b 0x48f88 data
+__real@bdb8aa0a 0x48f8c data
+__real@3b808081 0x48f90 data
+_XapiHardDisk 0x4923c data
+??_C@_1CA@NCOAEKIF@?$AA?$CF?$AAl?$AAc?$AA?$CF?$AAl?$AAs?$AA?$CF?$AAl?$AAc?$AA?$CF?$AAl?$AAs?$AA?$CF?$AAl?$AAs?$AA?$AA@ 0x493f8 data
+??_C@_09ECGHCENE@$$XSIMAGE?$AA@ 0x49418 data
+??_C@_09IHMABKFK@$$XTIMAGE?$AA@ 0x49424 data
+??_C@_08BBCMAOON@$$XTINFO?$AA@ 0x49430 data
+??_C@_05CLMJGDKL@?$CF08lx?$AA@ 0x4943c data
+__tls_used 0x49444 data
+___xri_a 0x49e00 data
+___xri_z 0x49e0c data
+___xc_a 0x49e10 data
+___xc_z 0x49e14 data
+___xi_a 0x49e18 data
+___xi_z 0x49e24 data
+?g_SlotMapping@D3D@@3PAEA 0x4a8ec data
+_MmHeapSegmentReserve 0x4b008 data
+_MmHeapSegmentCommit 0x4b00c data
+_MmHeapDeCommitTotalFreeThreshold 0x4b010 data
+_MmHeapDeCommitFreeBlockThreshold 0x4b014 data
+_DDrive 0x4b018 data
+_CdDevice 0x4b020 data
+_MainVol 0x4b028 data
+_TDrive 0x4b030 data
+_TitleData 0x4b038 data
+_UDrive 0x4b040 data
+_UserData 0x4b048 data
+_XapiProcessLock 0x4b050 data
+_XapiThreadNotifyRoutineList 0x4b06c data
+__FPinit 0x4b4f0 data
+?XID_Globals@@3U_XID_GLOBALS@@A 0x58480 data
+?GLOBAL_HostControllerCount@@3EA 0x58520 data
+__tls_index 0x58524 data
+?g_DeviceTree@@3VCDeviceTree@@A 0x58528 data
+?GLOBAL_HubEnum@@3U_USBHUB_ENUM_BLOCK@@A 0x58618 data
+?GLOBAL_HubInfo@@3U_USBHUB_INFO@@A 0x586c8 data
+_IsrEntryCount 0x58850 data
+_OHCD_GlobalPool 0x58be0 data
+_OHCD_InterruptObject 0x58c20 data
+_XapiAutoPowerDownGlobals 0x58ca0 data
+_XapiCurrentTopLevelFilter 0x58cf0 data
+_XapiTlsSize 0x58cf4 data
+_NtGlobalFlag 0x58cf8 data
+_XapiProcessHeap 0x58d00 data

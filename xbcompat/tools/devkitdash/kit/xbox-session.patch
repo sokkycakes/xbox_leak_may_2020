@@ -1,0 +1,96 @@
+diff --git a/xbox-session b/xbox-session
+index c6fb8234..ad7cc804 100755
+--- a/xbox-session
++++ b/xbox-session
+@@ -74,6 +74,31 @@ for f in "$X"/cache/xbcompat/maps/*.map; do
+ done
+ export XDG_CACHE_HOME=$XB/cache
+ 
++# XBOX_DASH=devkit (in /etc/default/xbox): the devkit dashboard
++# (xbcompat/tools/devkitdash, installed in C:\devkit) runs in the
++# dashboard's place.  xboxdash.xbe stays where it is: the devkit dashboard
++# lists it, and asking for it (E:\DEVKIT\run-xboxdash) runs it here once,
++# as it always runs, with L + R + Back + Start or a tap of the power button
++# leading back.  A game quitting to the dashboard with launch data (to its
++# Memory or Settings screen) gets the stock dashboard too.  While the
++# devkit dashboard is in use xbox-hostinfo keeps E:\DEVKIT\hostinfo.txt
++# current with this machine's name and addresses.
++DEVKIT=$X/dash/devkit
++devkit=
++if [ "$XBOX_DASH" = devkit ]; then
++	if [ -f "$DEVKIT/devkitdash.xbe" ]; then
++		devkit=1
++		mkdir -p "$HDD/partition1/DEVKIT"
++		hostinfo=/usr/libexec/xbox-hostinfo
++		[ -x "$hostinfo" ] || hostinfo="$DEVKIT/xbox-hostinfo"
++		if [ -f "$hostinfo" ]; then
++			sh "$hostinfo" "$HDD/partition1/DEVKIT/hostinfo.txt" 5 $$ < /dev/null > /dev/null 2>&1 &
++		fi
++	else
++		echo "XBOX_DASH=devkit, but $DEVKIT/devkitdash.xbe is missing: running the Xbox dashboard"
++	fi
++fi
++
+ # KMS allows one master: wait for anything else on the display (Theseus,
+ # when "sion restart xbox" takes over from it) to be gone.
+ for _ in $(seq 1 50); do
+@@ -106,12 +131,44 @@ while true; do
+ 	fi
+ 	[ -e "$LOG" ] && mv "$LOG" "$LOG.1"
+ 	start=$(cut -d. -f1 /proc/uptime)
+-	echo "$(date '+%F %T') starting the dashboard${launch:+ with launch data}"
+-	# shellcheck disable=SC2086
+-	"$XBCOMPAT_BIN" --hle "$X/dash/xboxdash.map" --hdd "$HDD" --dvd "$XB/disc" \
+-		--dvd-drive "${XBOX_DVD_DRIVE:-/dev/sr0}" \
+-		--d-path '\Device\CdRom0' --xbe-path xboxdash.xbe $launch $XBOX_SHOT_ARGS $XBOX_ARGS \
+-		"$HDD/partition2/xboxdash.xbe" > "$LOG" 2>&1
++	stock=1
++	if [ -n "$devkit" ]; then
++		stock=
++		if [ -e "$HDD/partition1/DEVKIT/run-xboxdash" ]; then
++			rm -f "$HDD/partition1/DEVKIT/run-xboxdash"
++			stock=1
++		fi
++		[ -n "$launch" ] && stock=1
++	fi
++	if [ -n "$stock" ]; then
++		echo "$(date '+%F %T') starting the dashboard${launch:+ with launch data}"
++		# From the devkit dashboard: the soft reset leads back to it.
++		reset=${devkit:+1}
++		# shellcheck disable=SC2086
++		XBCOMPAT_RESET=${reset:-$XBCOMPAT_RESET} \
++		"$XBCOMPAT_BIN" --hle "$X/dash/xboxdash.map" --hdd "$HDD" --dvd "$XB/disc" \
++			--dvd-drive "${XBOX_DVD_DRIVE:-/dev/sr0}" \
++			--d-path '\Device\CdRom0' --xbe-path xboxdash.xbe $launch $XBOX_SHOT_ARGS $XBOX_ARGS \
++			"$HDD/partition2/xboxdash.xbe" > "$LOG" 2>&1
++	else
++		echo "$(date '+%F %T') starting the devkit dashboard"
++		# With its HLE map from the kit, or through xbrun.py
++		# (XBCOMPAT_LAUNCHER), which makes one, when the kit has none.
++		img="$HDD/partition2/devkit/devkitdash.xbe"
++		if [ -f "$DEVKIT/devkitdash.map" ]; then
++			# shellcheck disable=SC2086
++			"$XBCOMPAT_BIN" --hle "$DEVKIT/devkitdash.map" --hdd "$HDD" --dvd "$XB/disc" \
++				--dvd-drive "${XBOX_DVD_DRIVE:-/dev/sr0}" \
++				--d-path '\Device\Harddisk0\Partition2\devkit' --xbe-path devkitdash.xbe \
++				$XBOX_SHOT_ARGS $XBOX_ARGS "$img" > "$LOG" 2>&1
++		else
++			# shellcheck disable=SC2086
++			$XBCOMPAT_LAUNCHER "$img" --hdd "$HDD" --dvd "$XB/disc" \
++				--dvd-drive "${XBOX_DVD_DRIVE:-/dev/sr0}" \
++				--d-path '\Device\Harddisk0\Partition2\devkit' --xbe-path devkitdash.xbe \
++				$XBOX_SHOT_ARGS $XBOX_ARGS > "$LOG" 2>&1
++		fi
++	fi
+ 	rc=$?
+ 	ran=$(( $(cut -d. -f1 /proc/uptime) - start ))
+ 	echo "$(date '+%F %T') exited with $rc after ${ran}s"
+@@ -121,6 +178,8 @@ while true; do
+ 	fi
+ 	if grep -q 'XLaunchNewImage:' "$LOG"; then
+ 		quick_fails=0          # a game ran and quit
++	elif [ -n "$devkit" ] && [ -e "$HDD/partition1/DEVKIT/run-xboxdash" ]; then
++		quick_fails=0          # the devkit dashboard asked for the stock one
+ 	elif [ "$ran" -lt 20 ]; then
+ 		quick_fails=$((quick_fails + 1))
+ 		if [ "$quick_fails" -ge 3 ]; then
