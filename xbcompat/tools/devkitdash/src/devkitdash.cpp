@@ -78,10 +78,10 @@ DWORD WINAPI XWriteTitleInfoAndRebootA( LPCSTR pszLaunchPath, LPCSTR pszDDrivePa
 
 #define COL_TEXT        0xFFFFFFFF
 #define COL_DIM         0xFFB8B4D4
-#define COL_ACCENT      0xFF9ADB3E   // the devkit's green
+#define COL_ACCENT      0xFFF27BB4   // Crimson pink
 #define COL_SHADOW      0xFF15131F
 #define COL_PANEL       0xB01A1828
-#define COL_HILITE      0xFF9ADB3E
+#define COL_HILITE      0xFFF27BB4
 #define COL_HILITE_TXT  0xFF141220
 
 //----------------------------------------------------------------------------
@@ -815,7 +815,7 @@ static VOID Compose()
             UINT ww = TextWidth( g_pFont, 14, szWhere );
             UINT maxw = 130;
             INT wx = LIST_X + LIST_W - (INT)(ww < maxw ? ww : maxw);
-            DrawText( g_pFont, 14, wx, y + 8, szWhere, sel ? 0xFF2C3A18 : COL_DIM, 0, maxw );
+            DrawText( g_pFont, 14, wx, y + 8, szWhere, sel ? 0xFF4A1830 : COL_DIM, 0, maxw );
         }
         // Scroll marks
         if( g_uTop > 0 )
