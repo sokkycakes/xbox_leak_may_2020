@@ -1,6 +1,6 @@
 # Devkit dashboard
 
-A dashboard for the Sion in the manner of the XDK's devkit launcher: a
+A dashboard for the Sion in the manner of the XDK's devkit launcher, titled "Crimson Development Kit": a
 background picture, the console's host name and IP address drawn with
 XFONT, and an optional list of the titles on the hard disk that A launches
 with a developer command line. It boots in place of the Xbox dashboard

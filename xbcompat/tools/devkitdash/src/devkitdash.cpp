@@ -607,25 +607,63 @@ static VOID FillRect( INT x0, INT y0, INT x1, INT y1, DWORD argb )
             g_pCanvas[y * SCREEN_W + x] = Blend( g_pCanvas[y * SCREEN_W + x], argb & 0xFFFFFF, a );
 }
 
-static VOID FillCircle( INT cx, INT cy, INT r, DWORD argb )
+// A disc centred on (cx, cy) in pixel-edge coordinates: a disc at (10, 10)
+// with radius 10 covers pixels 0..19 exactly.  4x4 samples per pixel.
+static VOID FillCircle( FLOAT cx, FLOAT cy, FLOAT r, DWORD argb )
 {
     UINT a = argb >> 24;
-    for( INT y = -r; y <= r; y++ )
-        for( INT x = -r; x <= r; x++ )
+    INT x0 = (INT)(cx - r) - 1, x1 = (INT)(cx + r) + 1;
+    INT y0 = (INT)(cy - r) - 1, y1 = (INT)(cy + r) + 1;
+    for( INT py = y0; py <= y1; py++ )
+        for( INT px = x0; px <= x1; px++ )
         {
-            // 4x4 supersampled edge
+            if( px < 0 || py < 0 || px >= SCREEN_W || py >= SCREEN_H )
+                continue;
             UINT cover = 0;
             for( INT sy = 0; sy < 4; sy++ )
                 for( INT sx = 0; sx < 4; sx++ )
                 {
-                    INT fx = x * 4 + sx - 2 + 1, fy = y * 4 + sy - 2 + 1;   // quarter pixels
-                    if( fx * fx + fy * fy <= r * r * 16 )
+                    FLOAT fx = px + (sx + 0.5f) / 4.0f - cx;
+                    FLOAT fy = py + (sy + 0.5f) / 4.0f - cy;
+                    if( fx * fx + fy * fy <= r * r )
                         cover++;
                 }
-            INT px = cx + x, py = cy + y;
-            if( cover && px >= 0 && py >= 0 && px < SCREEN_W && py < SCREEN_H )
+            if( cover )
                 g_pCanvas[py * SCREEN_W + px] = Blend( g_pCanvas[py * SCREEN_W + px], argb & 0xFFFFFF, a * cover / 16 );
         }
+}
+
+// Where XFONT puts a string's ink when drawn at (0, 0): the left, top,
+// right and bottom of the pixels it covers (right and bottom exclusive).
+static BOOL InkBox( XFONT* f, UINT uHeight, const WCHAR* sz, INT* pL, INT* pT, INT* pR, INT* pB )
+{
+    if( !f || !sz[0] )
+        return FALSE;
+    UINT w = 0;
+    unsigned uCell = 0, uDescent = 0;
+    XFONT_SetTextHeight( f, uHeight );
+    XFONT_GetTextExtent( f, sz, (UINT)-1, &w );
+    XFONT_GetFontMetrics( f, &uCell, &uDescent );
+    INT W = (INT)w + 8, H = (INT)uCell + 8;
+    if( W > SCREEN_W ) W = SCREEN_W;
+    if( H > SCREEN_H ) H = SCREEN_H;
+    for( INT r = 0; r < H; r++ )
+        memset( g_pScratch + r * SCREEN_W, 0, W );
+    XFONT_TextOutToMemory( f, g_pScratch, SCREEN_W, SCREEN_W, SCREEN_H, D3DFMT_LIN_A8, sz, (UINT)-1, 2, 2 );
+    INT L = W, T = H, R = -1, B = -1;
+    for( INT y = 0; y < H; y++ )
+        for( INT x = 0; x < W; x++ )
+            if( g_pScratch[y * SCREEN_W + x] > 24 )
+            {
+                if( x < L ) L = x;
+                if( x > R ) R = x;
+                if( y < T ) T = y;
+                if( y > B ) B = y;
+            }
+    if( R < 0 )
+        return FALSE;
+    *pL = L - 2; *pT = T - 2; *pR = R + 1 - 2; *pB = B + 1 - 2;
+    return TRUE;
 }
 
 static UINT TextWidth( XFONT* f, UINT uHeight, const WCHAR* sz )
@@ -690,14 +728,27 @@ static UINT DrawText( XFONT* f, UINT uHeight, INT x, INT y, const WCHAR* szIn, D
     return w;
 }
 
-// A controller button: a coloured disc with its letter.
+// A controller button: a coloured orb with its letter centred in it, and
+// the label beside it with its capitals centred on the orb's middle.
+#define ORB_R 10
 static INT DrawButton( INT x, INT y, const WCHAR* szLetter, DWORD color, const WCHAR* szLabel )
 {
-    FillCircle( x + 9, y + 10, 9, color );
-    UINT lw = TextWidth( g_pFontBold, 14, szLetter );
-    DrawText( g_pFontBold, 14, x + 9 - (INT)lw / 2, y + 2, szLetter, 0xFF101010, 0, 0 );
-    UINT w = DrawText( g_pFont, 16, x + 24, y + 1, szLabel, COL_TEXT, COL_SHADOW, 0 );
-    return x + 24 + (INT)w + 22;
+    const FLOAT cx = (FLOAT)x + ORB_R, cy = (FLOAT)y + ORB_R;
+    FillCircle( cx, cy, (FLOAT)ORB_R, color );
+    INT L, T, R, B;
+    if( InkBox( g_pFontBold, 14, szLetter, &L, &T, &R, &B ) )
+    {
+        // the ink's centre on the orb's: (L + R) / 2 at cx, rounded to the pixel
+        INT lx = (INT)(cx - (L + R) / 2.0f + 0.5f);
+        INT ly = (INT)(cy - (T + B) / 2.0f + 0.5f);
+        DrawText( g_pFontBold, 14, lx, ly, szLetter, 0xFF101010, 0, 0 );
+    }
+    // The label: capitals ("H") centred on the orb's middle line.
+    INT ty = y + 1;
+    if( InkBox( g_pFont, 16, L"H", &L, &T, &R, &B ) )
+        ty = (INT)(cy - (T + B) / 2.0f + 0.5f);
+    UINT w = DrawText( g_pFont, 16, x + 2 * ORB_R + 6, ty, szLabel, COL_TEXT, COL_SHADOW, 0 );
+    return x + 2 * ORB_R + 6 + (INT)w + 22;
 }
 
 static VOID Compose()
@@ -706,7 +757,7 @@ static VOID Compose()
     WCHAR sz[TEXT_MAX];
 
     // Header: what this is, the clock on the right.
-    DrawText( g_pFontBold, 16, SAFE_L, SAFE_T, L"XBOX DEVELOPMENT KIT", COL_ACCENT, COL_SHADOW, 0 );
+    DrawText( g_pFontBold, 16, SAFE_L, SAFE_T, L"CRIMSON DEVELOPMENT KIT", COL_ACCENT, COL_SHADOW, 0 );
     SYSTEMTIME st;
     GetLocalTime( &st );
     swprintf( sz, L"%04u-%02u-%02u  %02u:%02u", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute );
