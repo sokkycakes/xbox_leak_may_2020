@@ -8,7 +8,7 @@
 #   WORK/devkit/            what goes to C:\devkit on the Sion
 #       devkitdash.xbe
 #       media/background.bmp  (BG=file.png to use another picture)
-#       media/font.ttf, media/fontb.ttf  (DejaVu Sans unless FONT=/FONTB= say otherwise)
+#       media/font.ttf, media/fontb.ttf  (Liberation Sans, metric-compatible with Arial, unless FONT=/FONTB= say otherwise)
 #
 # Needs wine + wine32 (apt: libgd3:i386 first, then wine wine32:i386) and
 # python3 with PIL for the background.
@@ -52,8 +52,8 @@ cp devkitdash.xbe "$WORK/devkit/"
 
 # The background, as a 640x480 24-bit BMP the dashboard reads.
 python3 "$HERE/tools/mkbg.py" "${BG:-$HERE/art/dashbg.png}" "$WORK/devkit/media/background.bmp"
-FONT=${FONT:-/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf}
-FONTB=${FONTB:-/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf}
+FONT=${FONT:-/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf}
+FONTB=${FONTB:-/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf}
 cp "$FONT" "$WORK/devkit/media/font.ttf"
 cp "$FONTB" "$WORK/devkit/media/fontb.ttf"
 echo "built $WORK/devkit; run it with $HERE/run.sh $WORK"

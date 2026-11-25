@@ -23,7 +23,7 @@ for another address.
 | devkitdash.xbe | /opt/xbcompat/dash/devkit/ (C:\devkit) | the dashboard, title ID FFFE0000 |
 | devkitdash.map | /opt/xbcompat/dash/devkit/ | its HLE symbol map (`xbrun.py --map-only`) |
 | media/background.bmp | /opt/xbcompat/dash/devkit/media/ | the background; any 24 or 32-bit BMP works, scaled to 640x480 |
-| media/font.ttf, fontb.ttf | /opt/xbcompat/dash/devkit/media/ | DejaVu Sans and Sans Bold, drawn with XFONT |
+| media/font.ttf, fontb.ttf | /opt/xbcompat/dash/devkit/media/ | Liberation Sans and Sans Bold (metric-compatible with Arial), drawn with XFONT; any TrueType font works |
 | xbox-hostinfo | /usr/libexec/ | writes the name and addresses to E:\DEVKIT\hostinfo.txt every 5 s |
 | xbox-bluetooth | /usr/libexec/ | pairs Bluetooth controllers for the Settings page through bluetoothctl (E:\DEVKIT\BT) |
 | xbox-session | /usr/libexec/ | the session, taught `XBOX_DASH=devkit`; the image's copy is kept as `xbox-session.pre-devkit`. The installer applies `xbox-session.patch` to the image's own session, and only uses the whole file when that session is the one the patch was made from (`xbox-session.base.sha256`). A session patched by an earlier kit is patched again from `xbox-session.pre-devkit` |
@@ -58,7 +58,9 @@ The list is `C:\xboxdash.xbe`, the disc in the drive, then
 
 On the Sion, E: is `/data/xbox/hdd/partition1`.
 
-The fonts are DejaVu Sans (Bitstream Vera / DejaVu licence, free to
-redistribute).
+The fonts are Liberation Sans, made to match Arial's letter widths (SIL Open
+Font Licence, free to redistribute; Arial itself can't be shipped). To use
+Arial itself, copy arial.ttf and arialbd.ttf over media/font.ttf and
+media/fontb.ttf.
 
 Check the files with `sha256sum -c SHA256SUMS`.
