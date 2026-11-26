@@ -143,6 +143,10 @@ fi
 # --- u-root initramfs with the menu ------------------------------------------
 rm -rf u-root/cmds/exp/crimsonboot
 cp -r "$HERE/crimsonboot" u-root/cmds/exp/crimsonboot
+# The graphical menu draws its text with golang.org/x/image (fonts, scaling);
+# u-root builds from its vendor directory, so add it there once.
+grep -q 'golang.org/x/image ' u-root/go.mod || \
+	(cd u-root && go get golang.org/x/image@v0.24.0 && go mod vendor)
 (cd u-root && go build -o u-root . && GOARCH=amd64 ./u-root \
 	-build=bb \
 	-initcmd=crimsonboot \

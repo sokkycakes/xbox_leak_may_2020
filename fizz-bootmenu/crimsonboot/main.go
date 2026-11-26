@@ -2,7 +2,8 @@
 
 // crimsonboot is the LinuxBoot boot menu for the Sion (Acer Chromebox CXI3,
 // Google fizz). coreboot starts it in place of edk2. It shows a menu on the
-// TV at the 15 kHz 2880x480i super resolution, with:
+// TV, drawn with a font and pictures at a 15 kHz 2880x240p super resolution
+// (gfx.go; the console itself runs at 2880x480i), with:
 //
 //	Crimson                  kexec EFI/BOOT/BOOTX64.EFI on the SIONBOOT partition
 //	Crimson, previous image  kexec EFI/sion/previous.efi (if there is one)
@@ -26,6 +27,11 @@
 //	                       0 boots it at once, -1 waits forever)
 //	crimsonboot.cmos=0xNN  CMOS offset of the payload byte (default 0x6c,
 //	                       must match CONFIG_PAYLOAD_CMOS_SELECT_OFFSET)
+//	crimsonboot.menu=text  the plain text menu instead of the graphical one
+//	                       (see gfx.go; it falls back to text by itself when
+//	                       DRM can't be used)
+//	crimsonboot.menures=480 draw the graphical menu at the console's 480i
+//	                       instead of switching to 2880x240p
 //	crimsonboot.font=0     keep the kernel's font (no widening for 480i)
 //	crimsonboot.font=tall  also double the font's height (less interlace
 //	                       flicker, but tall letters and 15 rows)
@@ -123,6 +129,10 @@ func parseCmdline() {
 			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 				holdWait = time.Duration(n) * time.Millisecond
 			}
+		case "crimsonboot.menu":
+			gfxMenu = v != "text"
+		case "crimsonboot.menures":
+			menu240 = v != "480"
 		case "crimsonboot.font":
 			widenFont = v != "0"
 			tallFont = v == "tall"
@@ -638,10 +648,20 @@ func uefiOnce() error {
 // ---------------------------------------------------------------------------
 // Drawing.
 
+// menuScreen shows the menu: the text one (screen) or the graphical one
+// (gfxScreen). release hands the display back to the console before an
+// entry runs.
+type menuScreen interface {
+	draw(entries []entry, sel int, footer, status string)
+	release()
+}
+
 type screen struct {
 	tty        *os.File
 	cols, rows int
 }
+
+func (s *screen) release() {}
 
 func (s *screen) at(row int, text string, attr string) {
 	col := (s.cols - len(text)) / 2
@@ -654,6 +674,7 @@ func (s *screen) at(row int, text string, attr string) {
 func (s *screen) clear() { fmt.Fprint(s.tty, "\x1b[0m\x1b[2J\x1b[H\x1b[?25l") }
 
 func (s *screen) draw(entries []entry, sel int, footer, status string) {
+	s.cols, s.rows = termSize(s.tty)
 	s.clear()
 	// Keep clear of the TV's overscan: a line top and bottom.
 	top := 1
@@ -967,7 +988,17 @@ func main() {
 	if len(known) == 0 {
 		status = "No Crimson boot partition found"
 	}
-	scr := &screen{tty: tty}
+	scr := newScreen(tty, func() string {
+		// The theme comes from the internal SIONBOOT, else any.
+		best := ""
+		for _, e := range known {
+			d := e.dir + "/sion/menu"
+			if isDir(d) && (best == "" || !e.removable) {
+				best = d
+			}
+		}
+		return best
+	})
 
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
@@ -978,13 +1009,14 @@ func main() {
 			fbW, fbH = w, h
 			fitFont(tty)
 		}
-		scr.cols, scr.rows = termSize(tty)
 		footer := "Up/Down to choose, Enter or A to start"
 		if left >= 0 {
 			footer = fmt.Sprintf("%s in %d", entries[sel].label, left)
 		}
 		if left == 0 {
 			left = -1
+			scr.draw(entries, sel, "Starting "+entries[sel].label, "")
+			scr.release()
 			if err := entries[sel].run(); err != nil {
 				status = err.Error()
 			}
@@ -1033,6 +1065,7 @@ func main() {
 		}
 		if pick >= 0 {
 			scr.draw(entries, pick, "Starting "+entries[pick].label, "")
+			scr.release()
 			if err := entries[pick].run(); err != nil {
 				status = err.Error()
 			} else {

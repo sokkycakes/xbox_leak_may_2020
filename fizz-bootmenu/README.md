@@ -212,3 +212,34 @@ over it, and with a quick stand-in for bootani the frame it leaves in fb0
 stays on screen and LinuxBoot kexecs Crimson with `sion.bootani=done` and
 `sion.esp=` when it exits. iris, HDMI audio and the kept display across
 kexec only run on the Sion itself.
+
+## Graphical menu at 240p (ROM `…20261126g`)
+
+The menu (held button at power-on, or a press during the animation) is now
+drawn with a font and pictures instead of console text (`crimsonboot/gfx.go`):
+
+- **240p super resolution:** while the menu is up the screen switches to
+  2880x240p, the 2880x480i mode made progressive: same 54 MHz clock and
+  15.734 kHz line, 262 lines, about 60.05 Hz. The menu is drawn on a
+  320x240 canvas (square pixels on a 4:3 TV) and each pixel is shown 9 wide
+  and one line tall. If i915 refuses 240p it draws the same picture at
+  480i. `crimsonboot.menures=480` skips 240p, `crimsonboot.menu=text`
+  brings back the text menu (also used by itself when DRM fails).
+- **Handover:** before an entry runs, the last menu picture ("Starting
+  Crimson") is copied into the console framebuffer and the screen goes back
+  to 480i, so Crimson starts from that picture and not from text.
+- **Theme** (all optional) in SIONBOOT's `sion/menu/`: `font.ttf`,
+  `font-bold.ttf`, `background.png` (scaled to 320x240), `logo.png`
+  (replaces the CRIMSON title, fits in 288x40), `icons/crimson.png`,
+  `uefi.png`, `shell.png`, `reboot.png`, `poweroff.png` (16x16) and
+  `theme.conf` with `accent=`, `text=`, `dim=`, `status=`, `top=`,
+  `bottom=` (`#rrggbb`; top and bottom are the background gradient) and
+  `size=` (entry text size, default 13). Without it: Go fonts, a dark red
+  gradient and the Crimson red. `menu-240p-preview.png` shows the default.
+- Costs about 0.2 MB of flash (Go fonts and image code); about 4.2 MB of
+  the COREBOOT region stays free.
+
+Tested in QEMU (bochs): the menu draws through DRM, the shell entry hands
+the screen back and the menu comes back after `exit`, and the "Starting
+Crimson" picture stays up through the kexec. QEMU's display has no
+interlaced modes, so the 480i to 240p switch itself only runs on the Sion.
