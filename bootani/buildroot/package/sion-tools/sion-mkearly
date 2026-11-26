@@ -16,6 +16,13 @@ E=$T.early
 rm -rf "$E"
 mkdir -p "$E"
 cd "$T"
+# The directory links first (lib64 -> lib, ...): the dynamic loader looks for
+# libraries in /lib64 and /usr/lib64 only.
+for l in lib64 lib32 usr/lib64 usr/lib32; do
+	[ -L "$l" ] || continue
+	mkdir -p "$E/$(dirname "$l")"
+	cp -a "$l" "$E/$l"
+done
 
 copy() {
 	local f l
@@ -81,9 +88,10 @@ cd "$E"
 mkdir -p dev proc sys run tmp etc newroot
 mkdir -p var bin
 ln -sfn ../run var/run
+ln -sfn ../proc/self/mounts etc/mtab
 # The busybox applets sion-early-init and sion-lib.sh use.
 for a in sh mount umount mkdir rmdir cat sed tr cut seq sleep date mv cp rm \
-	sync reboot switch_root mountpoint mktemp od dd head ls find touch awk \
+	sync reboot switch_root mountpoint mktemp od dd head ls find touch awk grep \
 	readlink losetup df; do
 	[ -e "bin/$a" ] || [ -e "sbin/$a" ] || [ -e "usr/bin/$a" ] || [ -e "usr/sbin/$a" ] || ln -s busybox "bin/$a"
 done

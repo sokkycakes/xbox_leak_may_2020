@@ -22,6 +22,12 @@ mount -t proc proc /proc
 mount -t sysfs sysfs /sys
 mount -t tmpfs -o mode=0755 tmpfs /run
 exec < /dev/null > /dev/null 2>> "$SION_LOG"
+# sion.debug on the kernel command line: everything on the console as well.
+if grep -q 'sion\.debug' /proc/cmdline; then
+	exec > /dev/console 2>&1
+	SION_LOG=/dev/console
+	set -x
+fi
 
 . /usr/lib/sion/sion-lib.sh
 
@@ -66,10 +72,11 @@ no_system() {
 		else
 			echo "$(date '+%F %T') $*; rebooting" | sed 's/$/\r/' >> "$m/sion/logs/update.txt"
 		fi
-		cp "$SION_LOG" "$m/sion/logs/early.txt" 2>/dev/null
+		[ -f "$SION_LOG" ] && cp "$SION_LOG" "$m/sion/logs/early.txt"
 		esp_umount "$m"
 	fi
 	sync
+	umount "$SION_DATA" 2>/dev/null
 	sleep 2
 	reboot -f
 }
@@ -143,6 +150,6 @@ for d in "$SQ" "$RW" "$SION_DATA" /media/sion/esp; do
 done
 mount --move /dev "$NEW/dev"
 # S03sion adds it to /var/log/sion.log (/var/log is on a tmpfs init mounts).
-cp "$SION_LOG" "$NEW$SION_EARLY.log"
+[ -f "$SION_LOG" ] && cp "$SION_LOG" "$NEW$SION_EARLY.log"
 umount /run /sys /proc
 exec switch_root "$NEW" /sbin/init

@@ -125,7 +125,9 @@ case "$1" in
 		start;;
 	stop)
 		sync
-		mountpoint -q "$SION_DATA" && umount "$SION_DATA"
+		# Busy when the system itself is on it (sion-early-init): init
+		# remounts it read-only at the very end instead.
+		mountpoint -q "$SION_DATA" && umount "$SION_DATA" 2>/dev/null
 		;;
 	*)
 		echo "Usage: $0 {start|stop}"

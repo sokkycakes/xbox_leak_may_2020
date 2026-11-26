@@ -28,6 +28,7 @@ SION_TOOLS_IMAGE_VERSION = $(shell date -u +%Y-%m-%dT%H:%MZ) $(shell git -C $(BR
 define SION_TOOLS_INSTALL_INIT_SYSV
 	$(INSTALL) -D -m 0755 $(SION_TOOLS_PKGDIR)/S03sion $(TARGET_DIR)/etc/init.d/S03sion
 	$(INSTALL) -D -m 0755 $(SION_TOOLS_PKGDIR)/S41sion-net $(TARGET_DIR)/etc/init.d/S41sion-net
+	$(INSTALL) -D -m 0755 $(SION_TOOLS_PKGDIR)/S99zscreen $(TARGET_DIR)/etc/init.d/S99zscreen
 endef
 
 ifeq ($(BR2_PACKAGE_SION_TOOLS_SPLIT_ROOT),y)
