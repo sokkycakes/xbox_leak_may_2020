@@ -21,6 +21,9 @@ elif [ -x /usr/libexec/xbox-title ]; then
 fi
 
 # The display mode bootani uses (KMS_MODE=WxH), straight through KMSDRM.
+# sion-video sets it first (once a boot): 2880x480i, 15 kHz for a VGA
+# transcoder, or 720x480 for the HDMI-to-AV box.
+[ -x /usr/libexec/sion-video ] && /usr/libexec/sion-video apply >> /var/log/sion-video.log 2>&1
 # shellcheck source=/dev/null
 [ -r /etc/default/kms ] && . /etc/default/kms
 export KMS_MODE
@@ -74,6 +77,18 @@ if grep -q 'Raspberry Pi' /proc/device-tree/model 2>/dev/null; then
 			export AUDIODEV=plughw:CARD=Headphones,DEV=0
 		fi
 	fi
+fi
+
+# A USB sound card, when one is plugged in, takes the sound: the Chromebox's
+# own headphone jack has no driver, and a VGA output carries none.
+if [ -z "$AUDIODEV" ]; then
+	for c in /proc/asound/card[0-9]*; do
+		if [ -e "$c/usbid" ] && [ -e "$c/pcm0p" ]; then
+			AUDIODEV=plughw:CARD=$(cat "$c/id"),DEV=0
+			export AUDIODEV
+			break
+		fi
+	done
 fi
 
 # Same sound output bootani picks: the ALSA default (card 0, device 0) if

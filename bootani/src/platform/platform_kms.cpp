@@ -261,11 +261,13 @@ void Kms_ShowFrame(unsigned int fbo, int width, int height)
 {
     int dw = g_mode.hdisplay, dh = g_mode.vdisplay;
     int w = dw, h = dh, x = 0, y = 0;
-    // Standard-definition TV modes (720x480 NTSC, 720x576 PAL, and their
-    // 704-wide forms) are 4:3 pictures with non-square pixels. Fill them,
-    // as the Xbox's video encoder stretched its 640x480 frame across the
-    // whole signal. Anything else has square pixels: letterbox to 4:3.
-    bool sd_tv = (dw == 720 || dw == 704) && (dh == 480 || dh == 576);
+    // Standard-definition TV modes (720x480 NTSC, 720x576 PAL, their
+    // 704-wide forms, and the 2880x480i the Sion sends a 15 kHz VGA
+    // transcoder) are 4:3 pictures with pixels of whatever width the line
+    // is cut into. Fill them, as the Xbox's video encoder stretched its
+    // 640x480 frame across the whole signal. Anything else has square
+    // pixels: letterbox to 4:3.
+    bool sd_tv = dh == 480 || dh == 576;
     if (!sd_tv) {
         h = dw * height / width;
         if (h > dh) { h = dh; w = dh * width / height; }
