@@ -64,7 +64,7 @@ done
 say "merged ROM: $W/merged.rom ($(md5sum < "$W/merged.rom" | cut -c1-32))"
 
 say "writing the BIOS region"
-"$FR" -p internal --ifd -i bios -w "$W/merged.rom" > "$W/write.log" 2>&1 || { tail -20 "$W/write.log"; die "WRITE FAILED: do not power off; run '$FR -p internal --ifd -i bios -w $B' to put the backup back"; }
-"$FR" -p internal --ifd -i bios -v "$W/merged.rom" > "$W/verify.log" 2>&1 || { tail -20 "$W/verify.log"; die "VERIFY FAILED: do not power off; run '$FR -p internal --ifd -i bios -w $B' to put the backup back"; }
+"$FR" -p internal --ifd -i bios -N -w "$W/merged.rom" > "$W/write.log" 2>&1 || { tail -20 "$W/write.log"; die "WRITE FAILED: do not power off; run '$FR -p internal --ifd -i bios -N -w $B' to put the backup back"; }
+"$FR" -p internal --ifd -i bios -N -v "$W/merged.rom" > "$W/verify.log" 2>&1 || { tail -20 "$W/verify.log"; die "VERIFY FAILED: do not power off; run '$FR -p internal --ifd -i bios -N -w $B' to put the backup back"; }
 sync
 say "flashed and verified. Reboot to start the boot menu. Logs and the merged ROM: $W"
