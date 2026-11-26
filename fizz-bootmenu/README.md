@@ -60,9 +60,11 @@ as soon as it can (it looks for a held button until 2.5 s after the kernel
 starts, so a USB pad has time to show up). To get the menu, hold one of these
 while the Sion powers on, until the menu appears:
 
-- the **power button** (press it to turn the Sion on and keep holding; the
-  menu reads it from the Chrome EC, so this is the one that needs nothing
-  plugged in). Don't hold it past about 8 s, or the EC forces power off;
+- the **power button**: press it once to power on, then press it again and
+  hold it while the screen is still black, until the menu appears (tested
+  on the Sion; the press that powers it on doesn't count, the EC has
+  already handled it). Don't hold it past about 8 s, or the EC forces
+  power off;
 - any **key** on a USB keyboard;
 - any **button** on a wired USB gamepad (a wireless pad usually isn't
   connected that early).
