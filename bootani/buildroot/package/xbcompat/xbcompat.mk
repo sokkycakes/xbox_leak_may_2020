@@ -7,6 +7,9 @@
 # Prebuilt by xbcompat/tools/sion/bundle.sh (a 32-bit tree with its own
 # loader and libraries); nothing to download or build here.
 XBCOMPAT_VERSION = local
+# /opt/xbcompat is a 32-bit (i386) tree with its own loader beside the 64-bit
+# system, on purpose: keep Buildroot's architecture check out of it.
+XBCOMPAT_BIN_ARCH_EXCLUDE = /opt/xbcompat
 XBCOMPAT_SOURCE =
 XBCOMPAT_LICENSE = Proprietary (Microsoft Xbox titles), MIT (XbSymbolDatabase), LGPL (glibc), Zlib (SDL2), MIT (Mesa)
 XBCOMPAT_BUNDLE = $(call qstrip,$(BR2_PACKAGE_XBCOMPAT_BUNDLE))
