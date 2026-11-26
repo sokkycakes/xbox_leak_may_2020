@@ -58,20 +58,21 @@ DWORD WINAPI XWriteTitleInfoAndRebootA( LPCSTR pszLaunchPath, LPCSTR pszDDrivePa
 #define DK_TITLE_ID    0xFFFE0000   // a dashboard's, as imagebld stamps it
 
 //----------------------------------------------------------------------------
-// Screen layout (640x480, inside the title-safe area)
+// Screen layout (640x480).  Everything, panels included, stays inside the
+// NTSC title-safe area, the middle 80% of the screen (64 and 48 pixels in).
 //----------------------------------------------------------------------------
 #define SCREEN_W        640
 #define SCREEN_H        480
-#define SAFE_L          48
-#define SAFE_T          36
-#define SAFE_R          (SCREEN_W - 48)
-#define SAFE_B          (SCREEN_H - 36)
-#define LIST_X          SAFE_L
-#define LIST_Y          182
+#define SAFE_L          64
+#define SAFE_T          48
+#define SAFE_R          (SCREEN_W - 64)
+#define SAFE_B          (SCREEN_H - 48)
+#define LIST_X          (SAFE_L + 10)       // panels reach 10 to the left
+#define LIST_Y          (SAFE_T + 144)
 #define LIST_W          360
 #define ROW_H           30
 #define BT_W            480     // the Settings page's controller list
-#define LIST_ROWS       6
+#define LIST_ROWS       5
 
 #define MAX_TITLES      64
 #define MAX_IFACES      4

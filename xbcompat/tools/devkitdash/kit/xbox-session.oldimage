@@ -17,6 +17,18 @@ FAILED=/var/run/xbox/dash-failed
 # shellcheck source=/dev/null
 [ -r /etc/default/xbox ] && . /etc/default/xbox
 
+# Hold the display between titles from here on (xbox-av, see xbox-env), on
+# images whose xbox-env has it.  Started before bootani is done, so its exit
+# doesn't hand the screen to the console.
+command -v xbox_av_start > /dev/null 2>&1 && xbox_av_start
+
+# The real DVD drive (XBOX_DVD_DRIVE, default /dev/sr0), for an xbcompat
+# that knows --dvd-drive.
+dvd_drive=
+if "$X/bin/xbcompat" --help 2>&1 | grep -q -- '--dvd-drive'; then
+	dvd_drive="--dvd-drive ${XBOX_DVD_DRIVE:-/dev/sr0}"
+fi
+
 # The boot animation owns the display until its last frame; KMS allows one
 # master.
 if [ -r "$BOOTANI_PIDFILE" ]; then
@@ -124,13 +136,13 @@ while true; do
 		echo "$(date '+%F %T') starting the dashboard${launch:+ with launch data}"
 		# shellcheck disable=SC2086
 		"$X/bin/xbcompat" --hle "$X/dash/xboxdash.map" --hdd "$HDD" --dvd "$XB/disc" \
-			--d-path '\Device\CdRom0' --xbe-path xboxdash.xbe $launch $XBOX_ARGS \
+			--d-path '\Device\CdRom0' --xbe-path xboxdash.xbe $launch $XBOX_ARGS $dvd_drive \
 			"$HDD/partition2/xboxdash.xbe" > "$LOG" 2>&1
 	else
 		echo "$(date '+%F %T') starting the devkit dashboard"
 		# shellcheck disable=SC2086
 		"$X/bin/xbcompat" --hle "$DEVKIT/devkitdash.map" --hdd "$HDD" --dvd "$XB/disc" \
-			--d-path '\Device\Harddisk0\Partition2\devkit' --xbe-path devkitdash.xbe $XBOX_ARGS \
+			--d-path '\Device\Harddisk0\Partition2\devkit' --xbe-path devkitdash.xbe $XBOX_ARGS $dvd_drive \
 			"$HDD/partition2/devkit/devkitdash.xbe" > "$LOG" 2>&1
 	fi
 	rc=$?
@@ -145,6 +157,7 @@ while true; do
 		if [ "$quick_fails" -ge 3 ]; then
 			echo "the dashboard failed to start 3 times; starting Theseus (log: $LOG)"
 			touch "$FAILED"
+			killall -q xbox-av
 			[ -x /etc/init.d/S99theseus ] && /etc/init.d/S99theseus start
 			exit 1
 		fi
