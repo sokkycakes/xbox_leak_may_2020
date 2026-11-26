@@ -21,6 +21,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <linux/fb.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
 
 static int                 g_fd = -1;
 static uint32_t            g_crtc_id;
@@ -261,11 +264,13 @@ void Kms_ShowFrame(unsigned int fbo, int width, int height)
 {
     int dw = g_mode.hdisplay, dh = g_mode.vdisplay;
     int w = dw, h = dh, x = 0, y = 0;
-    // Standard-definition TV modes (720x480 NTSC, 720x576 PAL, and their
-    // 704-wide forms) are 4:3 pictures with non-square pixels. Fill them,
-    // as the Xbox's video encoder stretched its 640x480 frame across the
-    // whole signal. Anything else has square pixels: letterbox to 4:3.
-    bool sd_tv = (dw == 720 || dw == 704) && (dh == 480 || dh == 576);
+    // Standard-definition TV modes (720x480 NTSC, 720x576 PAL, their
+    // 704-wide forms, and the 2880x480i the Sion sends a 15 kHz VGA
+    // transcoder) are 4:3 pictures with pixels of whatever width the line
+    // is cut into. Fill them, as the Xbox's video encoder stretched its
+    // 640x480 frame across the whole signal. Anything else has square
+    // pixels: letterbox to 4:3.
+    bool sd_tv = dh == 480 || dh == 576;
     if (!sd_tv) {
         h = dw * height / width;
         if (h > dh) { h = dh; w = dh * width / height; }
@@ -315,4 +320,42 @@ void Kms_ShowFrame(unsigned int fbo, int width, int height)
     }
     if (g_shown_bo) gbm_surface_release_buffer(g_gbm_surface, g_shown_bo);
     g_shown_bo = bo;
+}
+
+// Copy the frame on screen into a framebuffer device (the console's
+// /dev/fb0). When bootani exits, the console's framebuffer goes back on the
+// screen, so with the same picture in it the last frame simply stays. The
+// LinuxBoot boot menu uses this to hold the final frame through kexec.
+bool Kms_CopyToFbdev(const char* path)
+{
+    if (!g_shown_bo) return false;
+    int fd = open(path, O_RDWR | O_CLOEXEC);
+    if (fd < 0) { fprintf(stderr, "bootani: cannot open %s: %s\n", path, strerror(errno)); return false; }
+    struct fb_var_screeninfo var;
+    struct fb_fix_screeninfo fix;
+    if (ioctl(fd, FBIOGET_VSCREENINFO, &var) || ioctl(fd, FBIOGET_FSCREENINFO, &fix) || var.bits_per_pixel != 32) {
+        fprintf(stderr, "bootani: %s is not a 32-bit framebuffer\n", path);
+        close(fd);
+        return false;
+    }
+    size_t len = (size_t)fix.line_length * var.yres_virtual;
+    unsigned char* fb = (unsigned char*)mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (fb == MAP_FAILED) { fprintf(stderr, "bootani: mmap %s failed\n", path); close(fd); return false; }
+    uint32_t w = gbm_bo_get_width(g_shown_bo), h = gbm_bo_get_height(g_shown_bo), stride = 0;
+    void* map_data = NULL;
+    unsigned char* src = (unsigned char*)gbm_bo_map(g_shown_bo, 0, 0, w, h, GBM_BO_TRANSFER_READ, &stride, &map_data);
+    bool ok = src != NULL;
+    if (ok) {
+        uint32_t rows = h < var.yres ? h : var.yres;
+        uint32_t cols = w < var.xres ? w : var.xres;
+        unsigned char* dst = fb + (size_t)var.yoffset * fix.line_length + (size_t)var.xoffset * 4;
+        for (uint32_t y = 0; y < rows; y++)
+            memcpy(dst + (size_t)y * fix.line_length, src + (size_t)y * stride, (size_t)cols * 4);
+        gbm_bo_unmap(g_shown_bo, map_data);
+    } else {
+        fprintf(stderr, "bootani: cannot map the last frame\n");
+    }
+    munmap(fb, len);
+    close(fd);
+    return ok;
 }

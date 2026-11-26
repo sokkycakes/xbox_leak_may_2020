@@ -31,6 +31,9 @@ const char* Platform_Describe();          // e.g. "SDL2 window" / "EGL (headless
 // the top; it is scaled to the window with the aspect ratio preserved.
 void  Platform_ShowFrame(unsigned int fbo, int width, int height);
 
+// KMS: copy the frame on screen into a framebuffer device such as /dev/fb0.
+bool  Platform_CopyToFbdev(const char* path);
+
 // Handle window events. Returns false once the user asked to quit.
 bool  Platform_PumpEvents();
 

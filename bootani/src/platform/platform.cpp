@@ -75,6 +75,15 @@ void Platform_Shutdown()
     g_backend = BACKEND_NONE;
 }
 
+bool Platform_CopyToFbdev(const char* path)
+{
+#ifdef BOOTANI_HAVE_KMS
+    if (g_backend == BACKEND_KMS) return Kms_CopyToFbdev(path);
+#endif
+    (void)path;
+    return false;
+}
+
 void* Platform_GetProcAddress(const char* name)
 {
 #ifdef BOOTANI_HAVE_EGL

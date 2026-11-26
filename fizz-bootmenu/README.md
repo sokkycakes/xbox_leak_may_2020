@@ -170,3 +170,39 @@ instead of u-root's init, which printed its banner, a log line and let the
 kernel's cgroup warnings onto the TV. It does the same root filesystem
 setup with the console log level at 1, and the payload uses `loglevel=1`,
 so a plain boot shows nothing between power-on and Crimson's animation.
+
+## Boot animation from the firmware (ROM `…20261126e`)
+
+With nothing held, LinuxBoot now plays the native bootani as soon as i915
+is up (about 2.5 to 3 s after power-on), loads Crimson while it plays, and
+kexecs it when the animation ends:
+
+- **What's in the payload:** bootani (KMS, sound through the kernel's PCM
+  ioctls, no libasound) and a trimmed Mesa: iris built for gfx9 (Kaby Lake)
+  only, Kaby Lake perf metrics only, no LLVM, LTO
+  (`mesa-patches/`, Mesa 24.0.9), plus the host's glibc. LinuxBoot grows from
+  5.8 MB to 9.9 MB; 0.4 MB of the COREBOOT region stays free.
+- **No black gap:** bootani copies its last frame into the console
+  framebuffer (`--to-fbdev /dev/fb0`, which i915 keeps in stolen memory),
+  fbcon only takes the screen once something prints
+  (`FRAMEBUFFER_CONSOLE_DEFERRED_TAKEOVER`), and
+  `linux-patches/0001` with `i915.kexec_keep_display=1` leaves the pipe
+  running through the kexec. Crimson's i915 (fastboot, same EDID) takes the
+  plane over as its initial framebuffer, and Crimson gets
+  `sion.bootani=done`, so it skips its own animation and keeps that frame up
+  until the dashboard draws (needs the Crimson image from the "Speed up Sion
+  boot time" work; an older image plays its animation again).
+- **Menu:** a button held at power-on, or pressed any time during the
+  animation, stops it and opens the menu. If bootani fails, Crimson is
+  booted without `sion.bootani=done` and plays its own.
+- **Sound:** HDMI through Intel HD Audio (built into the LinuxBoot kernel),
+  first HDMI port, retried while the codec probes.
+- Options: `crimsonboot.bootani=0` (no animation),
+  `crimsonboot.bootaniargs=--short` (comma-separated bootani options);
+  `BOOTANI=0 ./build.sh` leaves it all out.
+
+Tested in QEMU with a software Mesa (softpipe) standing in for iris: the
+animation starts and renders (slowly), a key opens the menu over it, and with
+a quick stand-in for bootani the frame it leaves in fb0 stays on screen and
+LinuxBoot kexecs Crimson with `sion.bootani=done` when it exits. iris, HDMI audio and the kept display across kexec only run on
+the Sion itself.

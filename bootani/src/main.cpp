@@ -50,6 +50,7 @@ struct Options
     std::string drm_device;
     std::string audio_device;            // ALSA PCM name
     bool        hold = false;            // keep the last frame up until killed
+    std::string to_fbdev;                // KMS: leave the last frame in this fbdev
 };
 
 Options      g_opt;
@@ -85,6 +86,8 @@ void Usage()
 "  --drm-device PATH     with --kms, the card to use (default: first with a display)\n"
 "  --audio-device NAME   ALSA device for sound without SDL2 (default: ALSA default, then HDMI)\n"
 "  --hold                after the animation, keep the last frame on screen until killed\n"
+"  --to-fbdev PATH       KMS: at the end, copy the last frame into this framebuffer device\n"
+"                        (e.g. /dev/fb0), so it stays up after bootani exits\n"
 "  --verbose             print progress and debug output\n");
 }
 
@@ -108,6 +111,7 @@ bool ParseArgs(int argc, char** argv)
         else if (a == "--kms") g_opt.kms = true;
         else if (a == "--hold") g_opt.hold = true;
         else if (a == "--drm-device" && next) { g_opt.drm_device = next; i++; }
+        else if (a == "--to-fbdev" && next) { g_opt.to_fbdev = next; i++; }
         else if (a == "--audio-device" && next) { g_opt.audio_device = next; i++; }
         else if (a == "--size" && next) { if (!ParseSize(next, &g_opt.window_w, &g_opt.window_h)) return false; i++; }
         else if (a == "--msaa" && next) { g_opt.msaa = atoi(next); i++; }
@@ -325,6 +329,8 @@ int main(int argc, char** argv)
                g_frame, g_opt.headless ? g_virtual_ms / 1000.0 : (t1 - t0) / 1000.0, (t1 - t0) / 1000.0);
 
     if (g_audio_device) Platform_AudioClose();
+    // Interrupted (SIGTERM): no frame to keep.
+    if (!g_opt.to_fbdev.empty() && !g_quit) Platform_CopyToFbdev(g_opt.to_fbdev.c_str());
     Platform_Shutdown();
     return ok ? 0 : 1;
 }

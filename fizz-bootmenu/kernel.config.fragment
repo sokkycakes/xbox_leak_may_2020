@@ -202,3 +202,16 @@ CONFIG_DRM_BOCHS=y
 CONFIG_VIRTIO_MENU=y
 CONFIG_VIRTIO_PCI=y
 CONFIG_VIRTIO_BLK=y
+
+# Boot animation (bootani, played by crimsonboot while Crimson loads):
+# HDMI audio through Intel HD Audio, and fbcon only once something prints,
+# so the animation's last frame stays in fb0 untouched through the kexec.
+CONFIG_SOUND=y
+CONFIG_SND=y
+CONFIG_SND_PCI=y
+CONFIG_SND_HDA_INTEL=y
+CONFIG_SND_HDA_CODEC_HDMI=y
+CONFIG_SND_HDA_CODEC_HDMI_INTEL=y
+CONFIG_SND_HDA_I915=y
+CONFIG_SND_HDA_PREALLOC_SIZE=2048
+CONFIG_FRAMEBUFFER_CONSOLE_DEFERRED_TAKEOVER=y

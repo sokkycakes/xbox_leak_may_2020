@@ -1,0 +1,62 @@
+diff --git a/drivers/gpu/drm/i915/i915_driver.c b/drivers/gpu/drm/i915/i915_driver.c
+index a28c3710c..5ef3b91e4 100644
+--- a/drivers/gpu/drm/i915/i915_driver.c
++++ b/drivers/gpu/drm/i915/i915_driver.c
+@@ -30,6 +30,7 @@
+ #include <linux/aperture.h>
+ #include <linux/acpi.h>
+ #include <linux/device.h>
++#include <linux/kexec.h>
+ #include <linux/module.h>
+ #include <linux/oom.h>
+ #include <linux/pci.h>
+@@ -970,6 +971,20 @@ static void i915_driver_postclose(struct drm_device *dev, struct drm_file *file)
+ 	i915_gem_flush_free_objects(to_i915(dev));
+ }
+ 
++static bool kexec_keep_display;
++module_param(kexec_keep_display, bool, 0400);
++MODULE_PARM_DESC(kexec_keep_display,
++	"Leave the display running across a kexec, so the next kernel can take over the picture on screen (flicker-free handoff)");
++
++static bool keep_display_on(void)
++{
++#ifdef CONFIG_KEXEC_CORE
++	return kexec_keep_display && kexec_in_progress;
++#else
++	return false;
++#endif
++}
++
+ void i915_driver_shutdown(struct drm_i915_private *i915)
+ {
+ 	struct intel_display *display = i915->display;
+@@ -983,7 +998,14 @@ void i915_driver_shutdown(struct drm_i915_private *i915)
+ 		drm_kms_helper_poll_disable(&i915->drm);
+ 		intel_display_driver_disable_user_access(display);
+ 
+-		drm_atomic_helper_shutdown(&i915->drm);
++		/*
++		 * Kexec with kexec_keep_display: keep the pipes, planes and
++		 * ports as they are. The next kernel's i915 reads the plane
++		 * back as its initial framebuffer (stolen memory survives a
++		 * kexec) and with fastboot takes the mode over unchanged.
++		 */
++		if (!keep_display_on())
++			drm_atomic_helper_shutdown(&i915->drm);
+ 	}
+ 
+ 	intel_dp_mst_suspend(display);
+@@ -994,8 +1016,10 @@ void i915_driver_shutdown(struct drm_i915_private *i915)
+ 	if (intel_display_device_present(display))
+ 		intel_display_driver_suspend_access(display);
+ 
+-	intel_encoder_suspend_all(display);
+-	intel_encoder_shutdown_all(display);
++	if (!keep_display_on()) {
++		intel_encoder_suspend_all(display);
++		intel_encoder_shutdown_all(display);
++	}
+ 
+ 	intel_dmc_suspend(display);
+ 

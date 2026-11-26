@@ -1,0 +1,65 @@
+--- a/src/gallium/drivers/iris/iris_screen.c
++++ b/src/gallium/drivers/iris/iris_screen.c
+@@ -62,24 +62,9 @@
+ 
+ #define genX_call(devinfo, func, ...)             \
+    switch ((devinfo)->verx10) {                   \
+-   case 200:                                      \
+-      gfx20_##func(__VA_ARGS__);                  \
+-      break;                                      \
+-   case 125:                                      \
+-      gfx125_##func(__VA_ARGS__);                 \
+-      break;                                      \
+-   case 120:                                      \
+-      gfx12_##func(__VA_ARGS__);                  \
+-      break;                                      \
+-   case 110:                                      \
+-      gfx11_##func(__VA_ARGS__);                  \
+-      break;                                      \
+    case 90:                                       \
+       gfx9_##func(__VA_ARGS__);                   \
+       break;                                      \
+-   case 80:                                       \
+-      gfx8_##func(__VA_ARGS__);                   \
+-      break;                                      \
+    default:                                       \
+       unreachable("Unknown hardware generation"); \
+    }
+--- a/src/gallium/drivers/iris/iris_context.c
++++ b/src/gallium/drivers/iris/iris_context.c
+@@ -256,24 +256,9 @@
+ 
+ #define genX_call(devinfo, func, ...)             \
+    switch ((devinfo)->verx10) {                   \
+-   case 200:                                      \
+-      gfx20_##func(__VA_ARGS__);                  \
+-      break;                                      \
+-   case 125:                                      \
+-      gfx125_##func(__VA_ARGS__);                 \
+-      break;                                      \
+-   case 120:                                      \
+-      gfx12_##func(__VA_ARGS__);                  \
+-      break;                                      \
+-   case 110:                                      \
+-      gfx11_##func(__VA_ARGS__);                  \
+-      break;                                      \
+    case 90:                                       \
+       gfx9_##func(__VA_ARGS__);                   \
+       break;                                      \
+-   case 80:                                       \
+-      gfx8_##func(__VA_ARGS__);                   \
+-      break;                                      \
+    default:                                       \
+       unreachable("Unknown hardware generation"); \
+    }
+--- a/src/gallium/drivers/iris/meson.build
++++ b/src/gallium/drivers/iris/meson.build
+@@ -71,7 +71,7 @@
+ )
+ 
+ iris_per_hw_ver_libs = []
+-foreach v : ['80', '90', '110', '120', '125', '200']
++foreach v : ['90']
+   iris_per_hw_ver_libs += static_library(
+     'iris_per_hw_ver@0@'.format(v),
+     ['iris_blorp.c', 'iris_query.c', 'iris_state.c', gen_xml_pack],

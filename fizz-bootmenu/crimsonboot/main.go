@@ -33,6 +33,11 @@
 //	                       button is held while LinuxBoot starts (the power
 //	                       button, any key, or any gamepad button); the menu
 //	                       then waits for a choice. Default: always show it.
+//	crimsonboot.bootani=0  with show=hold, don't play the boot animation
+//	                       (/usr/bin/bootani, when the ROM has it) while
+//	                       Crimson loads
+//	crimsonboot.bootaniargs=A,B  extra bootani options, comma-separated
+//	                       (e.g. --short or --msaa,1)
 //	crimsonboot.holdwait=MS how long to look for a held button, counted from
 //	                       kernel start (default 2500), so a USB gamepad has
 //	                       time to show up
@@ -70,6 +75,8 @@ var (
 	widenFont  = true
 	tallFont   = false
 	hideMenu   = false
+	playAni    = true
+	aniArgs    []string
 	holdWait   = 2500 * time.Millisecond
 )
 
@@ -106,6 +113,10 @@ func parseCmdline() {
 			if n, err := strconv.ParseInt(v, 0, 64); err == nil && n >= 0x0e && n <= 0x7f {
 				cmosOffset = n
 			}
+		case "crimsonboot.bootani":
+			playAni = v != "0"
+		case "crimsonboot.bootaniargs":
+			aniArgs = strings.Split(v, ",")
 		case "crimsonboot.show":
 			hideMenu = v == "hold"
 		case "crimsonboot.holdwait":
@@ -193,15 +204,23 @@ func heldInput() string {
 	return ""
 }
 
+// buttonHeld reports a held power button, key or gamepad button.
+func buttonHeld() bool {
+	if ecPowerButtonHeld() {
+		logf("power button held")
+		return true
+	}
+	if n := heldInput(); n != "" {
+		logf("button held on %q", n)
+		return true
+	}
+	return false
+}
+
 // menuWanted looks for a held button until holdWait after kernel start.
 func menuWanted() bool {
 	for {
-		if ecPowerButtonHeld() {
-			logf("power button held: showing the menu")
-			return true
-		}
-		if n := heldInput(); n != "" {
-			logf("button held on %q: showing the menu", n)
+		if buttonHeld() {
 			return true
 		}
 		var ts unix.Timespec
@@ -531,6 +550,21 @@ func crimsonEntries(e *esp) []entry {
 // sion/video-boot.cpio and its video= option when that kit is installed,
 // plus anything in sion/linuxboot-cmdline.txt.
 func kexecCrimson(e *esp, kernel string) error {
+	if err := loadCrimson(e, kernel, nil); err != nil {
+		return err
+	}
+	return startLoaded()
+}
+
+// startLoaded boots the kernel loadCrimson loaded.
+func startLoaded() error {
+	unmountAll()
+	unix.Sync()
+	return unix.Reboot(unix.LINUX_REBOOT_CMD_KEXEC)
+}
+
+// loadCrimson loads a Crimson image for kexec, with extra kernel options.
+func loadCrimson(e *esp, kernel string, extra []string) error {
 	k, err := os.Open(kernel)
 	if err != nil {
 		return err
@@ -549,6 +583,7 @@ func kexecCrimson(e *esp, kernel string) error {
 		flags = 0
 		cmdline = append(cmdline, "video=HDMI-A-1:2880x480M@30i")
 	}
+	cmdline = append(cmdline, extra...)
 	if b, err := os.ReadFile(e.dir + "/sion/linuxboot-cmdline.txt"); err == nil {
 		for _, l := range strings.Split(string(b), "\n") {
 			if l = strings.TrimSpace(l); l != "" && !strings.HasPrefix(l, "#") {
@@ -561,9 +596,7 @@ func kexecCrimson(e *esp, kernel string) error {
 	if err := unix.KexecFileLoad(int(k.Fd()), initrd, c, flags); err != nil {
 		return &bootError{fmt.Sprintf("loading %s failed: %v", filepath.Base(kernel), err)}
 	}
-	unmountAll()
-	unix.Sync()
-	return unix.Reboot(unix.LINUX_REBOOT_CMD_KEXEC)
+	return nil
 }
 
 func unmountAll() {
@@ -636,14 +669,46 @@ func (s *screen) draw(entries []entry, sel int, footer, status string) {
 // ---------------------------------------------------------------------------
 
 // bootHidden is crimsonboot.show=hold: with no button held it kexecs the
-// default Crimson without drawing anything. It returns only when the menu
-// should come up, with the reason.
+// default Crimson without drawing any menu. When the ROM has bootani, the
+// boot animation plays meanwhile: it starts as soon as the GPU is up,
+// Crimson is loaded while it runs, and the kexec happens when it ends. Its
+// last frame stays on the screen through the kexec (bootani copies it into
+// the console framebuffer, and i915 here leaves the pipe running), and
+// Crimson gets sion.bootani=done so it keeps that frame instead of playing
+// the animation again. A button pressed during the animation stops it and
+// brings up the menu. bootHidden returns only when the menu should come up,
+// with the reason.
 func bootHidden() string {
+	ani := startBootani()
+	aniDone := make(chan error, 1)
+	aniRunning := ani != nil
+	if ani != nil {
+		go func() { aniDone <- ani.Wait() }()
+	}
+	stopAni := func() {
+		if !aniRunning {
+			return
+		}
+		ani.Process.Signal(unix.SIGTERM)
+		select {
+		case <-aniDone:
+		case <-time.After(3 * time.Second):
+			ani.Process.Kill()
+			<-aniDone
+		}
+		aniRunning = false
+	}
+	toMenu := func(why string) string {
+		stopAni()
+		unmountAll()
+		return why
+	}
+
+	if menuWanted() {
+		return toMenu("button held")
+	}
 	known := map[string]*esp{}
 	tried := map[string]bool{}
-	if menuWanted() {
-		return "button held"
-	}
 	for {
 		scanESPs(known, tried)
 		if len(known) > 0 {
@@ -653,7 +718,7 @@ func bootHidden() string {
 		var ts unix.Timespec
 		unix.ClockGettime(unix.CLOCK_BOOTTIME, &ts)
 		if time.Duration(ts.Nano()) >= holdWait+2*time.Second {
-			return "no Crimson boot partition found"
+			return toMenu("no Crimson boot partition found")
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -664,13 +729,75 @@ func bootHidden() string {
 		}
 	}
 	clearPendingMark()
-	es := crimsonEntries(def)
-	if err := es[0].run(); err != nil {
-		logf("booting %s: %v", es[0].label, err)
-		unmountAll()
-		return "booting Crimson failed"
+	kernel := def.dir + "/EFI/BOOT/BOOTX64.EFI"
+	var extra []string
+	if aniRunning {
+		extra = []string{"sion.bootani=done"}
 	}
-	return "kexec returned"
+	if err := loadCrimson(def, kernel, extra); err != nil {
+		logf("loading Crimson: %v", err)
+		return toMenu("loading Crimson failed")
+	}
+	if aniRunning {
+		// Let the animation finish; a button pressed meanwhile opens the menu.
+		tick := time.NewTicker(50 * time.Millisecond)
+	wait:
+		for {
+			select {
+			case err := <-aniDone:
+				aniRunning = false
+				if err != nil {
+					// It didn't play through: let Crimson play its own.
+					logf("bootani: %v", err)
+					if err := loadCrimson(def, kernel, nil); err != nil {
+						logf("loading Crimson: %v", err)
+						tick.Stop()
+						return toMenu("loading Crimson failed")
+					}
+				}
+				break wait
+			case <-tick.C:
+				if buttonHeld() {
+					tick.Stop()
+					return toMenu("button pressed during the animation")
+				}
+			}
+		}
+		tick.Stop()
+	}
+	if err := startLoaded(); err != nil {
+		logf("kexec: %v", err)
+	}
+	return toMenu("booting Crimson failed")
+}
+
+// startBootani starts the boot animation once the GPU is up, or returns nil
+// when there is none to play.
+func startBootani() *exec.Cmd {
+	const bin = "/usr/bin/bootani"
+	if !playAni || !isFile(bin) {
+		return nil
+	}
+	// i915 probes in the background of the kernel's boot.
+	for i := 0; i < 60 && !(exists("/dev/dri/card0") && exists("/dev/fb0")); i++ {
+		time.Sleep(50 * time.Millisecond)
+	}
+	cmd := exec.Command(bin, append([]string{"--kms", "--to-fbdev", "/dev/fb0"}, aniArgs...)...)
+	cmd.Env = append(os.Environ(), "LD_LIBRARY_PATH=/usr/lib")
+	if log, err := os.Create("/run/bootani.log"); err == nil {
+		cmd.Stdout, cmd.Stderr = log, log
+	}
+	if err := cmd.Start(); err != nil {
+		logf("starting bootani: %v", err)
+		return nil
+	}
+	logf("bootani started")
+	return cmd
+}
+
+func exists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
 }
 
 // clearPendingMark tells coreboot that LinuxBoot works.
@@ -696,15 +823,9 @@ func initSystem() {
 	libinit.SetEnv()
 	libinit.CreateRootfs()
 	log.SetOutput(os.Stderr)
-	// Reap orphans (gosh's children, mount helpers) in the background.
-	go func() {
-		var ws unix.WaitStatus
-		for {
-			if _, err := unix.Wait4(-1, &ws, 0, nil); err != nil {
-				time.Sleep(time.Second)
-			}
-		}
-	}()
+	// No reaper for orphans: a wait(-1) would also take bootani's and gosh's
+	// exit status away from exec.Cmd.Wait. The few orphans a session here
+	// can leave stay zombies until the kexec or reboot.
 }
 
 func main() {

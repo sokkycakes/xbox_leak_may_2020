@@ -53,6 +53,9 @@ Options: `-DBOOTANI_WITH_SDL2=OFF`, `-DBOOTANI_WITH_EGL=OFF`,
 `-DBOOTANI_WITH_KMS=OFF` or `-DBOOTANI_WITH_ALSA=OFF` drop a backend. KMS
 needs EGL plus `libdrm` and `gbm`, ALSA needs `alsa`, both found with
 pkg-config (`apt install libdrm-dev libgbm-dev libasound2-dev`). Configuration fails if neither is available.
+`-DBOOTANI_ALSA_RAW=ON` plays sound through the kernel's PCM ioctls instead
+of libasound (no ALSA library or configuration files needed; `--audio-device`
+then takes `hw:C,D`), for tiny images such as the Sion's LinuxBoot firmware.
 
 ## Run
 
@@ -73,6 +76,7 @@ pkg-config (`apt install libdrm-dev libgbm-dev libasound2-dev`). Configuration f
 | `--wav FILE` | Headless: write the boot sound, in sync with the frames |
 | `--kms` | Linux console: draw full screen straight to the display (DRM/KMS + GBM), no X11 or Wayland |
 | `--drm-device PATH` | With `--kms`, the card to use (default: the first with a connected display) |
+| `--to-fbdev PATH` | With `--kms`, copy the last frame into a framebuffer device (e.g. `/dev/fb0`) at the end, so it stays on screen after bootani exits |
 | `--audio-device NAME` | ALSA device, used when the window is not SDL's (default: ALSA default, then HDMI) |
 | `--hold` | After the animation, keep the last frame up until killed (SIGTERM), Esc or Q |
 | `--verbose` | Print backend, GL renderer and debug output |

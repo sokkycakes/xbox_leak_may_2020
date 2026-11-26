@@ -24,6 +24,12 @@
 #                  the power button, a key, or a gamepad button
 #   SHOW=always    the menu every boot, with the TIMEOUT countdown
 #   HOLDWAIT=2500  ms after kernel start to look for a held button
+#   BOOTANI=1      (default) with SHOW=hold, the boot animation plays from
+#                  the firmware while Crimson loads, and its last frame stays
+#                  up through the handoff. Builds a trimmed Intel Mesa (iris
+#                  for Kaby Lake, no LLVM) and bootani on the host: needs
+#                  meson, python3-mako, cmake, libdrm-dev and zlib1g-dev.
+#                  BOOTANI=0 leaves it out (the screen stays black).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -39,6 +45,9 @@ CONNECTOR="${CONNECTOR:-HDMI-A-1}"
 TIMEOUT="${TIMEOUT:-3}"
 SHOW="${SHOW:-hold}"
 HOLDWAIT="${HOLDWAIT:-2500}"
+BOOTANI="${BOOTANI:-1}"
+[ "$SHOW" = hold ] || BOOTANI=0
+MESA_VERSION="${MESA_VERSION:-24.0.9}"
 
 PAYLOAD="$WORK/payload"
 mkdir -p "$PAYLOAD"
@@ -63,6 +72,9 @@ if [ ! -d coreboot/src/drivers/payload_select ]; then
 fi
 
 # --- Kernel ------------------------------------------------------------------
+if ! grep -q kexec_keep_display linux/drivers/gpu/drm/i915/i915_driver.c; then
+	git -C linux apply "$HERE"/linux-patches/*.patch
+fi
 sed "s|@FIRMWARE_DIR@|$HERE/firmware|" "$HERE/kernel.config.fragment" \
 	> "$WORK/kernel.config.fragment"
 make -C linux allnoconfig
@@ -77,6 +89,58 @@ make -C linux -j"$JOBS" bzImage \
 	KBUILD_BUILD_USER=linuxboot KBUILD_BUILD_HOST=fizz
 cp linux/arch/x86/boot/bzImage "$PAYLOAD/bzImage"
 
+# --- bootani: trimmed Mesa + the animation, for the initramfs ----------------
+UROOT_FILES=()
+if [ "$BOOTANI" = 1 ]; then
+	if [ ! -d "mesa-$MESA_VERSION" ]; then
+		curl -fsSL "https://archive.mesa3d.org/mesa-$MESA_VERSION.tar.xz" | tar -xJ
+		for p in "$HERE"/mesa-patches/*.patch; do patch -d "mesa-$MESA_VERSION" -p1 < "$p"; done
+	fi
+	MESA="$WORK/mesa-stage"
+	if [ ! -f "$MESA/usr/lib/dri/iris_dri.so" ]; then
+		(cd "mesa-$MESA_VERSION" && rm -rf build &&
+		meson setup build --prefix=/usr --libdir=lib -Dbuildtype=minsize \
+			-Db_ndebug=true -Db_lto=true -Dstrip=true \
+			-Dc_args="-ffunction-sections -fdata-sections" \
+			-Dcpp_args="-ffunction-sections -fdata-sections" \
+			-Dc_link_args="-Wl,--gc-sections" \
+			-Dcpp_link_args="-static-libstdc++ -static-libgcc -Wl,--gc-sections" \
+			-Dgallium-drivers=iris -Dvulkan-drivers= -Dplatforms= \
+			-Degl=enabled -Dgbm=enabled -Dopengl=true -Dgles1=disabled \
+			-Dgles2=disabled -Dglx=disabled -Dllvm=disabled -Dshared-glapi=enabled \
+			-Dgallium-va=disabled -Dgallium-vdpau=disabled -Dgallium-xa=disabled \
+			-Dgallium-nine=false -Dgallium-opencl=disabled -Dgallium-rusticl=false \
+			-Dvideo-codecs= -Dtools= -Dshader-cache=disabled -Dzstd=disabled \
+			-Dexpat=disabled -Dxmlconfig=disabled -Dlibunwind=disabled \
+			-Dvalgrind=disabled -Dintel-clc=disabled -Dglvnd=false \
+			-Dlmsensors=disabled -Dbuild-tests=false &&
+		ninja -C build && rm -rf "$MESA" && DESTDIR="$MESA" ninja -C build install)
+	fi
+	rm -rf bootani-build
+	PKG_CONFIG_PATH="$MESA/usr/lib/pkgconfig" cmake -S "$HERE/../bootani" -B bootani-build \
+		-DCMAKE_BUILD_TYPE=MinSizeRel -DBOOTANI_WITH_SDL2=OFF -DBOOTANI_WITH_EGL=ON \
+		-DBOOTANI_WITH_KMS=ON -DBOOTANI_ALSA_RAW=ON -DCMAKE_PREFIX_PATH="$MESA/usr" \
+		-DCMAKE_C_FLAGS="-I$MESA/usr/include" -DCMAKE_CXX_FLAGS="-I$MESA/usr/include" \
+		-DCMAKE_EXE_LINKER_FLAGS="-L$MESA/usr/lib -Wl,-rpath-link,$MESA/usr/lib -static-libstdc++ -static-libgcc -s"
+	cmake --build bootani-build -j"$JOBS"
+	# bootani and Mesa in /usr/lib, the host's glibc, libdrm and zlib where
+	# its loader looks (u-root also adds bootani's own libraries there).
+	BR="$WORK/bootani-root"
+	rm -rf "$BR" && mkdir -p "$BR/usr/lib/dri" "$BR/lib/x86_64-linux-gnu" "$BR/lib64"
+	cp bootani-build/bootani "$BR/bootani"
+	cp "$MESA/usr/lib/dri/iris_dri.so" "$BR/usr/lib/dri/"
+	for l in libEGL.so.1 libgbm.so.1 libglapi.so.0; do cp -L "$MESA/usr/lib/$l" "$BR/usr/lib/"; done
+	for l in libdrm.so.2 libz.so.1 libc.so.6 libm.so.6; do
+		cp -L "/lib/x86_64-linux-gnu/$l" "$BR/lib/x86_64-linux-gnu/"
+	done
+	cp -L /lib64/ld-linux-x86-64.so.2 "$BR/lib64/"
+	strip -s "$BR"/usr/lib/*.so* "$BR"/usr/lib/dri/*.so 2>/dev/null || true
+	UROOT_FILES+=(-files "$BR/bootani:usr/bin/bootani" -files "$BR/lib64/ld-linux-x86-64.so.2:lib64/ld-linux-x86-64.so.2")
+	for f in "$BR"/lib/x86_64-linux-gnu/* "$BR"/usr/lib/*.so* "$BR"/usr/lib/dri/*.so; do
+		UROOT_FILES+=(-files "$f:${f#"$BR"/}")
+	done
+fi
+
 # --- u-root initramfs with the menu ------------------------------------------
 rm -rf u-root/cmds/exp/crimsonboot
 cp -r "$HERE/crimsonboot" u-root/cmds/exp/crimsonboot
@@ -84,16 +148,18 @@ cp -r "$HERE/crimsonboot" u-root/cmds/exp/crimsonboot
 	-build=bb \
 	-initcmd=crimsonboot \
 	-defaultsh=gosh \
+	"${UROOT_FILES[@]}" \
 	-o "$WORK/initramfs.cpio" \
 	./cmds/exp/crimsonboot \
 	./cmds/core/{gosh,ls,cat,cp,mkdir,mount,umount,dmesg,grep,ps,kexec,shutdown,sync,pci,hexdump,io,echo,sleep,uname})
-xz --stdout --force --check=crc32 --lzma2=dict=1MiB "$WORK/initramfs.cpio" \
+xz --stdout --force --check=crc32 --lzma2=preset=9e,dict=16MiB "$WORK/initramfs.cpio" \
 	> "$PAYLOAD/initramfs.cpio.xz"
 
 CMDLINE="console=tty0 quiet loglevel=1 vt.global_cursor_default=0 i915.fastboot=1 crimsonboot.timeout=$TIMEOUT"
 CMDLINE="$CMDLINE crimsonboot.cmos=$(sed -n 's/^CONFIG_PAYLOAD_CMOS_SELECT_OFFSET=//p' "$HERE/config.fizz.bootmenu")"
 case "$SHOW" in
-hold) CMDLINE="$CMDLINE crimsonboot.show=hold crimsonboot.holdwait=$HOLDWAIT" ;;
+hold) CMDLINE="$CMDLINE crimsonboot.show=hold crimsonboot.holdwait=$HOLDWAIT"
+	[ "$BOOTANI" = 1 ] && CMDLINE="$CMDLINE i915.kexec_keep_display=1" ;;
 always) ;;
 *) echo "SHOW must be hold or always" >&2; exit 1 ;;
 esac

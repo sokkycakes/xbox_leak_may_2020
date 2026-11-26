@@ -1,0 +1,105 @@
+--- a/src/intel/perf/intel_perf.c
++++ b/src/intel/perf/intel_perf.c
+@@ -438,20 +438,20 @@
+ {
+    switch (devinfo->platform) {
+    case INTEL_PLATFORM_HSW:
+-      return intel_oa_register_queries_hsw;
++      return NULL;
+    case INTEL_PLATFORM_CHV:
+-      return intel_oa_register_queries_chv;
++      return NULL;
+    case INTEL_PLATFORM_BDW:
+-      return intel_oa_register_queries_bdw;
++      return NULL;
+    case INTEL_PLATFORM_BXT:
+-      return intel_oa_register_queries_bxt;
++      return NULL;
+    case INTEL_PLATFORM_SKL:
+       if (devinfo->gt == 2)
+-         return intel_oa_register_queries_sklgt2;
++         return NULL;
+       if (devinfo->gt == 3)
+-         return intel_oa_register_queries_sklgt3;
++         return NULL;
+       if (devinfo->gt == 4)
+-         return intel_oa_register_queries_sklgt4;
++         return NULL;
+       return NULL;
+    case INTEL_PLATFORM_KBL:
+       if (devinfo->gt == 2)
+@@ -460,42 +460,42 @@
+          return intel_oa_register_queries_kblgt3;
+       return NULL;
+    case INTEL_PLATFORM_GLK:
+-      return intel_oa_register_queries_glk;
++      return NULL;
+    case INTEL_PLATFORM_CFL:
+       if (devinfo->gt == 2)
+-         return intel_oa_register_queries_cflgt2;
++         return NULL;
+       if (devinfo->gt == 3)
+-         return intel_oa_register_queries_cflgt3;
++         return NULL;
+       return NULL;
+    case INTEL_PLATFORM_ICL:
+-      return intel_oa_register_queries_icl;
++      return NULL;
+    case INTEL_PLATFORM_EHL:
+-      return intel_oa_register_queries_ehl;
++      return NULL;
+    case INTEL_PLATFORM_TGL:
+       if (devinfo->gt == 1)
+-         return intel_oa_register_queries_tglgt1;
++         return NULL;
+       if (devinfo->gt == 2)
+-         return intel_oa_register_queries_tglgt2;
++         return NULL;
+       return NULL;
+    case INTEL_PLATFORM_RKL:
+-      return intel_oa_register_queries_rkl;
++      return NULL;
+    case INTEL_PLATFORM_DG1:
+-      return intel_oa_register_queries_dg1;
++      return NULL;
+    case INTEL_PLATFORM_ADL:
+    case INTEL_PLATFORM_RPL:
+-      return intel_oa_register_queries_adl;
++      return NULL;
+    case INTEL_PLATFORM_DG2_G10:
+-      return intel_oa_register_queries_acmgt3;
++      return NULL;
+    case INTEL_PLATFORM_DG2_G11:
+-      return intel_oa_register_queries_acmgt1;
++      return NULL;
+    case INTEL_PLATFORM_DG2_G12:
+-      return intel_oa_register_queries_acmgt2;
++      return NULL;
+    case INTEL_PLATFORM_MTL_U:
+    case INTEL_PLATFORM_MTL_H:
+       if (intel_device_info_eu_total(devinfo) <= 64)
+-         return intel_oa_register_queries_mtlgt2;
++         return NULL;
+       if (intel_device_info_eu_total(devinfo) <= 128)
+-         return intel_oa_register_queries_mtlgt3;
++         return NULL;
+       return NULL;
+    default:
+       return NULL;
+--- a/src/intel/perf/meson.build
++++ b/src/intel/perf/meson.build
+@@ -1,14 +1,5 @@
+ intel_hw_metrics = [
+-  'hsw',
+-  'bdw', 'chv',
+-  'sklgt2', 'sklgt3', 'sklgt4',
+   'kblgt2', 'kblgt3',
+-  'cflgt2', 'cflgt3',
+-  'bxt', 'glk',
+-  'icl', 'ehl',
+-  'tglgt1', 'tglgt2', 'rkl', 'dg1', 'adl',
+-  'acmgt1', 'acmgt2', 'acmgt3',
+-  'mtlgt2', 'mtlgt3',
+ ]
+ 
+ intel_hw_metrics_xml_files = []
