@@ -247,3 +247,12 @@ interlaced modes, so the 480i to 240p switch itself only runs on the Sion.
 Flashed on the Sion 2026-11-26 (backup md5 9c39f3ff… on the PC in
 `~/sion-firmware-backup/`): sokky reports the menu works, and the boot
 screen stays up until Crimson's own animation shows.
+
+## Images from the sionroot branch (ROM `…20261126h`)
+
+Crimson images whose kernel version string has `@sionroot-` (read from the
+bzImage setup header, `kernel_version` at 0x20e) set 480i from the EDID
+themselves. For those, the menu no longer passes `sion/video-boot.cpio` or
+its `video=HDMI-A-1:2880x480M@30i`: that video= is a CVT-timed mode, not
+the EDID's VIC 10 one, and made Crimson's i915 do a full modeset (a 31 kHz
+blip) instead of keeping LinuxBoot's frame. Older images still get both.

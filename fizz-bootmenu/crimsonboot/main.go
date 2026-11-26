@@ -589,7 +589,7 @@ func loadCrimson(e *esp, kernel string, extra []string) error {
 	}
 	initrd := -1
 	flags := unix.KEXEC_FILE_NO_INITRAMFS
-	if cpio := e.dir + "/sion/video-boot.cpio"; isFile(cpio) {
+	if cpio := e.dir + "/sion/video-boot.cpio"; isFile(cpio) && !sionrootImage(k) {
 		f, err := os.Open(cpio)
 		if err != nil {
 			return err
@@ -613,6 +613,30 @@ func loadCrimson(e *esp, kernel string, extra []string) error {
 		return &bootError{fmt.Sprintf("loading %s failed: %v", filepath.Base(kernel), err)}
 	}
 	return nil
+}
+
+// sionrootImage reports whether a Crimson image is built from the sionroot
+// branch ("@sionroot-" in its kernel version string). Those set 480i from the
+// EDID themselves: video-boot.cpio's video= (a CVT-timed mode, not the EDID's
+// VIC 10) would make their i915 do a full modeset instead of keeping the
+// frame LinuxBoot leaves on screen, so they get neither the cpio nor video=.
+func sionrootImage(k *os.File) bool {
+	var hdr [0x210]byte
+	if _, err := k.ReadAt(hdr[:], 0); err != nil || string(hdr[0x202:0x206]) != "HdrS" {
+		return false
+	}
+	off := int64(binary.LittleEndian.Uint16(hdr[0x20e:]))
+	if off == 0 {
+		return false
+	}
+	var ver [256]byte
+	n, _ := k.ReadAt(ver[:], off+0x200)
+	v := string(ver[:n])
+	if i := strings.IndexByte(v, 0); i >= 0 {
+		v = v[:i]
+	}
+	logf("kernel version: %s", v)
+	return strings.Contains(v, "@sionroot-")
 }
 
 // partUUID is a partition's GPT (or MBR) partition UUID, from sysfs.
