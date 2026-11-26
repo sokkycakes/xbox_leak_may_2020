@@ -7,6 +7,7 @@
 #   sh sion-install-bootani.sh            install or update
 #   sh sion-install-bootani.sh --remove   take it off (LinuxBoot then boots
 #                                         Crimson without an animation)
+#   sh sion-install-bootani.sh [--remove] /dev/sdXN   that partition
 #
 # It finds SIONBOOT by the sion.esp= the firmware passed (the partition this
 # boot came from), else by its label. Nothing else on the partition changes.
@@ -15,14 +16,16 @@ set -e
 D=$(cd "$(dirname "$0")" && pwd)
 [ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 1; }
 
-dev=
+remove=
+[ "$1" = --remove ] && { remove=1; shift; }
+dev=$1
 esp=$(sed -n 's/.*sion\.esp=\([^ ]*\).*/\1/p' /proc/cmdline)
-[ -n "$esp" ] && [ -e "/dev/disk/by-partuuid/$esp" ] && dev=$(readlink -f "/dev/disk/by-partuuid/$esp")
-if [ -z "$dev" ]; then
+[ -z "$dev" ] && [ -n "$esp" ] && [ -e "/dev/disk/by-partuuid/$esp" ] && dev=$(readlink -f "/dev/disk/by-partuuid/$esp")
+if [ -z "$dev" ] && [ -n "$esp" ]; then
 	for p in /sys/class/block/*; do
 		n=${p##*/}
 		[ -e "$p/partition" ] || continue
-		if [ -n "$esp" ] && grep -qix "PARTUUID=$esp" "$p/uevent"; then dev=/dev/$n; break; fi
+		if grep -qix "PARTUUID=$esp" "$p/uevent"; then dev=/dev/$n; break; fi
 	done
 fi
 [ -z "$dev" ] && [ -e /dev/disk/by-label/SIONBOOT ] && dev=$(readlink -f /dev/disk/by-label/SIONBOOT)
@@ -51,7 +54,7 @@ trap cleanup EXIT
 [ -f "$mnt/EFI/BOOT/BOOTX64.EFI" ] || { echo "$dev doesn't look like SIONBOOT" >&2; exit 1; }
 echo "SIONBOOT: $dev (at $mnt)"
 
-if [ "$1" = --remove ]; then
+if [ -n "$remove" ]; then
 	rm -rf "$mnt/sion/bootani" "$mnt/sion/bootani.new"
 	echo "Removed sion/bootani."
 	exit 0
