@@ -108,8 +108,8 @@ Keep a recovery path (SuzyQ/CCD or a SPI clip plus the backup).
   still starting makes the next boot fall back (seen in two of three tries;
   the odd one booted LinuxBoot again).
 - The same LinuxBoot kernel in QEMU: menu, keys, the widened font at a
-  2880x480 framebuffer (32x32 font, 90x15 text, normal shapes once the TV
-  squeezes it to 4:3), and the Crimson entry kexecs the real Sion
+  2880x480 framebuffer (32x16 font, 90x30 text, normal shapes once the TV
+  squeezes it to 4:3; `crimsonboot.font=tall` doubles the height), and the Crimson entry kexecs the real Sion
   `BOOTX64.EFI` through to its login prompt.
 - Not testable here: i915 and the 480i EDID on real hardware (QEMU's VGA
   refuses interlaced modes), the CMOS byte surviving on the Sion, edk2
@@ -121,3 +121,16 @@ Keep a recovery path (SuzyQ/CCD or a SPI clip plus the backup).
 flashing. Tested in QEMU with OVMF: UEFI started `crimsonboot.efi`, the menu
 counted down and kexeced the real Sion image, which also kept its EFI
 system table.
+
+## On the Sion (2026-11-26)
+
+The no-flash test ran on the Sion: UEFI started the menu, the TV showed it at
+480i, and it booted Crimson (2880x480i, with UEFI variables still there).
+The first build's 32x32 font looked squished; the ROM now uses 32x16, and
+re-widens the font when i915 replaces the firmware's framebuffer.
+
+`flash-kit/` flashes it from Crimson: `sh sion-flash.sh` as root. It backs the
+firmware up to /data/sion, refuses unless the FMAP matches and write protect
+is off, carries RO_VPD, SMMSTORE and RW_MRC_CACHE over, writes the BIOS
+region only and verifies. The flashrom in it is a static 1.4.0 build
+(internal programmer only).

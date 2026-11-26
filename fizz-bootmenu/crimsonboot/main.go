@@ -27,6 +27,8 @@
 //	crimsonboot.cmos=0xNN  CMOS offset of the payload byte (default 0x6c,
 //	                       must match CONFIG_PAYLOAD_CMOS_SELECT_OFFSET)
 //	crimsonboot.font=0     keep the kernel's font (no widening for 480i)
+//	crimsonboot.font=tall  also double the font's height (less interlace
+//	                       flicker, but tall letters and 15 rows)
 package main
 
 import (
@@ -56,6 +58,7 @@ var (
 	timeout    = 3
 	cmosOffset = int64(0x6c)
 	widenFont  = true
+	tallFont   = false
 )
 
 // ---------------------------------------------------------------------------
@@ -93,6 +96,7 @@ func parseCmdline() {
 			}
 		case "crimsonboot.font":
 			widenFont = v != "0"
+			tallFont = v == "tall"
 		}
 	}
 }
@@ -150,11 +154,10 @@ func fbSize() (int, int, bool) {
 	return w, h, w > 0 && h > 0
 }
 
-// fitFont widens (and for 480 lines, doubles) the console font so text has
-// normal proportions on a 4:3 TV. 2880x480: each pixel is a quarter of a
-// normal 720-wide one, so the 8x16 font becomes 32x32 (90x15 characters,
-// each one 8 TV pixels wide and 16 lines of one field tall, which also stops
-// one-line strokes from flickering in interlace).
+// fitFont widens the console font so text has normal proportions on a 4:3
+// TV. 2880x480: each pixel is a quarter of a normal 720-wide one, so the
+// 8x16 font becomes 32x16 (90x30 characters, like 8x16 text on a 720x480
+// screen). crimsonboot.font=tall doubles the height too (32x32, 90x15).
 func fitFont(tty *os.File) {
 	w, h, ok := fbSize()
 	if !ok || !widenFont {
@@ -168,7 +171,7 @@ func fitFont(tty *os.File) {
 		sx = 4
 	}
 	sy := 1
-	if h <= 576 && sx >= 2 {
+	if tallFont && h <= 576 && sx >= 2 {
 		sy = 2
 	}
 	if sx == 1 && sy == 1 {
@@ -563,6 +566,7 @@ func main() {
 		time.Sleep(100 * time.Millisecond)
 	}
 	fitFont(tty)
+	fbW, fbH, _ := fbSize()
 
 	keys := make(chan key, 8)
 	go watchInput(keys)
@@ -643,6 +647,12 @@ func main() {
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
 	for {
+		// The firmware's framebuffer (efifb/simpledrm) can be fb0 first and
+		// i915's 2880x480i one replace it later: widen the font again then.
+		if w, h, ok := fbSize(); ok && (w != fbW || h != fbH) {
+			fbW, fbH = w, h
+			fitFont(tty)
+		}
 		scr.cols, scr.rows = termSize(tty)
 		footer := "Up/Down to choose, Enter or A to start"
 		if left >= 0 {
