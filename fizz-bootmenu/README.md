@@ -114,3 +114,10 @@ Keep a recovery path (SuzyQ/CCD or a SPI clip plus the backup).
 - Not testable here: i915 and the 480i EDID on real hardware (QEMU's VGA
   refuses interlaced modes), the CMOS byte surviving on the Sion, edk2
   booting after it.
+
+## Trying it first without flashing
+
+`test-from-uefi/` boots the same menu once from today's UEFI (BootNext), no
+flashing. Tested in QEMU with OVMF: UEFI started `crimsonboot.efi`, the menu
+counted down and kexeced the real Sion image, which also kept its EFI
+system table.
