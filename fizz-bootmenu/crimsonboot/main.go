@@ -34,7 +34,7 @@
 //	                       button, any key, or any gamepad button); the menu
 //	                       then waits for a choice. Default: always show it.
 //	crimsonboot.bootani=0  with show=hold, don't play the boot animation
-//	                       (/usr/bin/bootani, when the ROM has it) while
+//	                       (from SIONBOOT's sion/bootani/, when installed) while
 //	                       Crimson loads
 //	crimsonboot.bootaniargs=A,B  extra bootani options, comma-separated
 //	                       (e.g. --short or --msaa,1)
@@ -689,7 +689,7 @@ func (s *screen) draw(entries []entry, sel int, footer, status string) {
 // ---------------------------------------------------------------------------
 
 // bootHidden is crimsonboot.show=hold: with no button held it kexecs the
-// default Crimson without drawing any menu. When the ROM has bootani, the
+// default Crimson without drawing any menu. When SIONBOOT has bootani, the
 // boot animation plays meanwhile: it starts as soon as the GPU is up,
 // Crimson is loaded while it runs, and the kexec happens when it ends. Its
 // last frame stays on the screen through the kexec (bootani copies it into
@@ -699,7 +699,37 @@ func (s *screen) draw(entries []entry, sel int, footer, status string) {
 // brings up the menu. bootHidden returns only when the menu should come up,
 // with the reason.
 func bootHidden() string {
-	ani := startBootani()
+	// Find Crimson first: the animation lives next to it, in SIONBOOT's
+	// sion/bootani/. SATA is there at once; a USB stick gets until 2 s past
+	// the hold window.
+	known := map[string]*esp{}
+	tried := map[string]bool{}
+	var def *esp
+	for {
+		scanESPs(known, tried)
+		for _, e := range known {
+			if def == nil || (def.removable && !e.removable) || (def.removable == e.removable && e.dev < def.dev) {
+				def = e
+			}
+		}
+		if def != nil && !def.removable {
+			break
+		}
+		var ts unix.Timespec
+		unix.ClockGettime(unix.CLOCK_BOOTTIME, &ts)
+		if time.Duration(ts.Nano()) >= holdWait+2*time.Second {
+			break
+		}
+		if def != nil && time.Duration(ts.Nano()) >= holdWait {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	var ani *exec.Cmd
+	if def != nil {
+		ani = startBootani(def.dir + "/sion/bootani")
+	}
 	aniDone := make(chan error, 1)
 	aniRunning := ani != nil
 	if ani != nil {
@@ -727,26 +757,8 @@ func bootHidden() string {
 	if menuWanted() {
 		return toMenu("button held")
 	}
-	known := map[string]*esp{}
-	tried := map[string]bool{}
-	for {
-		scanESPs(known, tried)
-		if len(known) > 0 {
-			break
-		}
-		// No Crimson yet: give a USB stick until 2 s past the hold window.
-		var ts unix.Timespec
-		unix.ClockGettime(unix.CLOCK_BOOTTIME, &ts)
-		if time.Duration(ts.Nano()) >= holdWait+2*time.Second {
-			return toMenu("no Crimson boot partition found")
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	var def *esp
-	for _, e := range known {
-		if def == nil || (def.removable && !e.removable) || (def.removable == e.removable && e.dev < def.dev) {
-			def = e
-		}
+	if def == nil {
+		return toMenu("no Crimson boot partition found")
 	}
 	clearPendingMark()
 	kernel := def.dir + "/EFI/BOOT/BOOTX64.EFI"
@@ -791,19 +803,24 @@ func bootHidden() string {
 	return toMenu("booting Crimson failed")
 }
 
-// startBootani starts the boot animation once the GPU is up, or returns nil
-// when there is none to play.
-func startBootani() *exec.Cmd {
-	const bin = "/usr/bin/bootani"
-	if !playAni || !isFile(bin) {
+// startBootani starts the boot animation from dir (SIONBOOT's sion/bootani/,
+// installed by bootani-esp/sion-install-bootani.sh) once the GPU is up, or
+// returns nil when there is none to play. dir holds bootani with its own
+// loader, libraries (lib/) and Mesa driver (dri/); it runs through that
+// loader, so nothing needs execute permission or a fixed path on FAT.
+func startBootani(dir string) *exec.Cmd {
+	ld := dir + "/ld-linux-x86-64.so.2"
+	if !playAni || !isFile(ld) || !isFile(dir+"/bootani") {
 		return nil
 	}
 	// i915 probes in the background of the kernel's boot.
 	for i := 0; i < 60 && !(exists("/dev/dri/card0") && exists("/dev/fb0")); i++ {
 		time.Sleep(50 * time.Millisecond)
 	}
-	cmd := exec.Command(bin, append([]string{"--kms", "--to-fbdev", "/dev/fb0"}, aniArgs...)...)
-	cmd.Env = append(os.Environ(), "LD_LIBRARY_PATH=/usr/lib")
+	args := append([]string{"--library-path", dir + "/lib", dir + "/bootani",
+		"--kms", "--to-fbdev", "/dev/fb0"}, aniArgs...)
+	cmd := exec.Command(ld, args...)
+	cmd.Env = append(os.Environ(), "LIBGL_DRIVERS_PATH="+dir+"/dri", "GBM_DRIVERS_PATH="+dir+"/dri")
 	if log, err := os.Create("/run/bootani.log"); err == nil {
 		cmd.Stdout, cmd.Stderr = log, log
 	}
@@ -811,7 +828,7 @@ func startBootani() *exec.Cmd {
 		logf("starting bootani: %v", err)
 		return nil
 	}
-	logf("bootani started")
+	logf("bootani started from %s", dir)
 	return cmd
 }
 

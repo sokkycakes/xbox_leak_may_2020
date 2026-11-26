@@ -24,12 +24,13 @@
 #                  the power button, a key, or a gamepad button
 #   SHOW=always    the menu every boot, with the TIMEOUT countdown
 #   HOLDWAIT=2500  ms after kernel start to look for a held button
-#   BOOTANI=1      (default) with SHOW=hold, the boot animation plays from
-#                  the firmware while Crimson loads, and its last frame stays
-#                  up through the handoff. Builds a trimmed Intel Mesa (iris
-#                  for Kaby Lake, no LLVM) and bootani on the host: needs
-#                  meson, python3-mako, cmake, libdrm-dev and zlib1g-dev.
-#                  BOOTANI=0 leaves it out (the screen stays black).
+#   BOOTANI=1      (default) with SHOW=hold, LinuxBoot plays the boot
+#                  animation while Crimson loads, from SIONBOOT's
+#                  sion/bootani/, and its last frame stays up through the
+#                  handoff. Also builds that bundle (work/bootani-esp/): a
+#                  trimmed Intel Mesa (iris for Kaby Lake, no LLVM) and
+#                  bootani, on the host: needs meson, python3-mako, cmake,
+#                  libdrm-dev and zlib1g-dev. BOOTANI=0 skips the bundle.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -89,8 +90,7 @@ make -C linux -j"$JOBS" bzImage \
 	KBUILD_BUILD_USER=linuxboot KBUILD_BUILD_HOST=fizz
 cp linux/arch/x86/boot/bzImage "$PAYLOAD/bzImage"
 
-# --- bootani: trimmed Mesa + the animation, for the initramfs ----------------
-UROOT_FILES=()
+# --- bootani for SIONBOOT: trimmed Mesa + the animation -----------------------
 if [ "$BOOTANI" = 1 ]; then
 	if [ ! -d "mesa-$MESA_VERSION" ]; then
 		curl -fsSL "https://archive.mesa3d.org/mesa-$MESA_VERSION.tar.xz" | tar -xJ
@@ -123,22 +123,21 @@ if [ "$BOOTANI" = 1 ]; then
 		-DCMAKE_C_FLAGS="-I$MESA/usr/include" -DCMAKE_CXX_FLAGS="-I$MESA/usr/include" \
 		-DCMAKE_EXE_LINKER_FLAGS="-L$MESA/usr/lib -Wl,-rpath-link,$MESA/usr/lib -static-libstdc++ -static-libgcc -s"
 	cmake --build bootani-build -j"$JOBS"
-	# bootani and Mesa in /usr/lib, the host's glibc, libdrm and zlib where
-	# its loader looks (u-root also adds bootani's own libraries there).
-	BR="$WORK/bootani-root"
-	rm -rf "$BR" && mkdir -p "$BR/usr/lib/dri" "$BR/lib/x86_64-linux-gnu" "$BR/lib64"
-	cp bootani-build/bootani "$BR/bootani"
-	cp "$MESA/usr/lib/dri/iris_dri.so" "$BR/usr/lib/dri/"
-	for l in libEGL.so.1 libgbm.so.1 libglapi.so.0; do cp -L "$MESA/usr/lib/$l" "$BR/usr/lib/"; done
+	# The SSD bundle: bootani with its own loader, glibc, libdrm, zlib and
+	# Mesa, for SIONBOOT's sion/bootani/ (crimsonboot runs it through the
+	# loader). Installed from Crimson with bootani-esp/sion-install-bootani.sh.
+	B="$WORK/bootani-esp/sion/bootani"
+	rm -rf "$WORK/bootani-esp" && mkdir -p "$B/lib" "$B/dri"
+	cp bootani-build/bootani "$B/"
+	cp "$MESA/usr/lib/dri/iris_dri.so" "$B/dri/"
+	for l in libEGL.so.1 libgbm.so.1 libglapi.so.0; do cp -L "$MESA/usr/lib/$l" "$B/lib/"; done
 	for l in libdrm.so.2 libz.so.1 libc.so.6 libm.so.6; do
-		cp -L "/lib/x86_64-linux-gnu/$l" "$BR/lib/x86_64-linux-gnu/"
+		cp -L "/lib/x86_64-linux-gnu/$l" "$B/lib/"
 	done
-	cp -L /lib64/ld-linux-x86-64.so.2 "$BR/lib64/"
-	strip -s "$BR"/usr/lib/*.so* "$BR"/usr/lib/dri/*.so 2>/dev/null || true
-	UROOT_FILES+=(-files "$BR/bootani:usr/bin/bootani" -files "$BR/lib64/ld-linux-x86-64.so.2:lib64/ld-linux-x86-64.so.2")
-	for f in "$BR"/lib/x86_64-linux-gnu/* "$BR"/usr/lib/*.so* "$BR"/usr/lib/dri/*.so; do
-		UROOT_FILES+=(-files "$f:${f#"$BR"/}")
-	done
+	cp -L /lib64/ld-linux-x86-64.so.2 "$B/"
+	strip -s "$B"/lib/*.so* "$B"/dri/*.so 2>/dev/null || true
+	cp "$HERE/bootani-esp/sion-install-bootani.sh" "$WORK/bootani-esp/"
+	(cd "$WORK/bootani-esp" && find sion -type f | sort | xargs md5sum > MD5SUMS)
 fi
 
 # --- u-root initramfs with the menu ------------------------------------------
@@ -148,7 +147,6 @@ cp -r "$HERE/crimsonboot" u-root/cmds/exp/crimsonboot
 	-build=bb \
 	-initcmd=crimsonboot \
 	-defaultsh=gosh \
-	"${UROOT_FILES[@]}" \
 	-o "$WORK/initramfs.cpio" \
 	./cmds/exp/crimsonboot \
 	./cmds/core/{gosh,ls,cat,cp,mkdir,mount,umount,dmesg,grep,ps,kexec,shutdown,sync,pci,hexdump,io,echo,sleep,uname})
