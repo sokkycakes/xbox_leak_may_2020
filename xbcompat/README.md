@@ -124,3 +124,9 @@ Mesa, python3 for `xbrun.py`, the boot animation and the dashboard, all as a
 `bootani/buildroot/README.md` for how the image boots it. On KMSDRM the
 window is always the display mode, so a back buffer of another size is drawn
 into a framebuffer object and stretched over the screen at each Present.
+
+The devkit dashboard (`tools/devkitdash`) can boot in the Xbox dashboard's
+place: `XBOX_DASH=devkit` in `/etc/default/xbox`. It shows the Sion's host
+name and IP address and launches the titles on the hard disk with a
+developer command line; the Xbox dashboard stays installed and is listed in
+it.

@@ -1,0 +1,122 @@
+#!/usr/bin/env python3
+"""A stand-in for BlueZ's bluetoothctl, for testing xbox-bluetooth and the
+devkit dashboard's Bluetooth page without a radio.
+
+State lives in $FAKEBT_STATE (JSON).  Interactive mode (commands on stdin,
+as xbox-bluetooth runs it) changes it; one-shot calls ("show", "devices",
+"info MAC") read it.  While a scan runs, the devices in SEED appear one by
+one; "pair" succeeds after two seconds unless the name has "Stubborn" in it.
+"""
+import json, os, sys, time, fcntl
+
+PATH = os.environ.get("FAKEBT_STATE", "/tmp/fakebt.json")
+SEED = [
+    ("98:7A:14:00:00:01", "Xbox Wireless Controller", "input-gaming"),
+    ("A4:AE:12:00:00:02", "DualSense Wireless Controller", "input-gaming"),
+    ("3C:22:FB:00:00:03", "Someone's Phone", "phone"),
+    ("D8:4F:57:00:00:04", "Stubborn Pad", "input-gaming"),
+]
+
+
+def load():
+    try:
+        with open(PATH) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {"powered": False, "scan_since": None, "devices": {}, "pairing": {}}
+
+
+def save(st):
+    tmp = PATH + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(st, f)
+    os.replace(tmp, PATH)
+
+
+def locked(fn):
+    with open(PATH + ".lock", "w") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        st = load()
+        r = fn(st)
+        settle(st)
+        save(st)
+        return r
+
+
+def settle(st):
+    now = time.time()
+    if st["scan_since"] is not None:
+        n = int((now - st["scan_since"]) / 1.0)
+        for mac, name, icon in SEED[:n]:
+            st["devices"].setdefault(mac, {"name": name, "icon": icon, "paired": False,
+                                           "trusted": False, "connected": False})
+    for mac, t in list(st["pairing"].items()):
+        d = st["devices"].get(mac)
+        if d and now - t >= 2 and "Stubborn" not in d["name"]:
+            d["paired"] = True
+            del st["pairing"][mac]
+
+
+def oneshot(args):
+    def run(st):
+        cmd = args[0]
+        if cmd == "show":
+            if os.environ.get("FAKEBT_NO_ADAPTER"):
+                print("No default controller available")
+                return 1
+            print("Controller 00:1A:7D:DA:71:13 (public)")
+            print("\tName: sion")
+            print("\tPowered: " + ("yes" if st["powered"] else "no"))
+            print("\tDiscovering: " + ("yes" if st["scan_since"] is not None else "no"))
+        elif cmd == "devices":
+            for mac, d in st["devices"].items():
+                print(f"Device {mac} {d['name']}")
+        elif cmd == "info":
+            d = st["devices"].get(args[1])
+            if not d:
+                print(f"Device {args[1]} not available")
+                return 1
+            print(f"Device {args[1]} (public)")
+            print(f"\tName: {d['name']}")
+            print(f"\tIcon: {d['icon']}")
+            for k in ("paired", "trusted", "connected"):
+                print(f"\t{k.capitalize()}: {'yes' if d[k] else 'no'}")
+        return 0
+    return locked(run)
+
+
+def interactive():
+    for line in sys.stdin:
+        words = line.split()
+        if not words:
+            continue
+        cmd, arg = words[0], (words[1] if len(words) > 1 else None)
+        if cmd == "quit":
+            break
+
+        def run(st):
+            d = st["devices"].get(arg) if arg else None
+            if cmd == "power":
+                st["powered"] = arg == "on"
+            elif cmd == "scan":
+                st["scan_since"] = time.time() if arg == "on" else None
+            elif cmd == "pair" and d:
+                st["pairing"][arg] = time.time()
+            elif cmd == "cancel-pairing":
+                st["pairing"].pop(arg, None)
+            elif cmd == "trust" and d:
+                d["trusted"] = True
+            elif cmd == "connect" and d and d["paired"]:
+                d["connected"] = True
+            elif cmd == "disconnect" and d:
+                d["connected"] = False
+            elif cmd == "remove" and d:
+                del st["devices"][arg]
+        locked(run)
+        print(f"[fake] {line.strip()}", flush=True)
+
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1:
+        sys.exit(oneshot(sys.argv[1:]))
+    interactive()

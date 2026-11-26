@@ -185,6 +185,12 @@ void launch_init(int argc, char **argv, const char *d_path, const char *launch_d
             memset(LaunchDataPage, 0, 4096);
             if (fread(LaunchDataPage, 1, 4096, f) != 4096) xlog("launch data %s is short", launch_data_file);
             fclose(f);
+            /* LAUNCH_DATA_PAGE: header (type, title ID, path[520]) then the data.
+               A devkit launch (the devkit dashboard's A) carries a command line. */
+            const uint32_t *hdr = LaunchDataPage;
+            if (hdr[0] == 3 /* LDT_FROM_DEBUGGER_CMDLINE */)
+                xlog("launched with a debugger command line: \"%.200s\" (from title %08x)",
+                     (const char *)LaunchDataPage + 1024, (unsigned)hdr[1]);
         }
     }
 }

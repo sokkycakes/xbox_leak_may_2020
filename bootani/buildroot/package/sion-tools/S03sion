@@ -67,6 +67,12 @@ setup_data() {
 	fi
 	mkdir -p "$SION_DATA/overlay" "$SION_DATA/sion/ssh"
 	chmod 700 "$SION_DATA/sion/ssh"
+	# Bluetooth pairings (BlueZ's link keys) live on /data, so controllers
+	# stay paired across reboots and image updates.
+	mkdir -p "$SION_DATA/bluetooth" /var/lib
+	chmod 700 "$SION_DATA/bluetooth"
+	rm -rf /var/lib/bluetooth
+	ln -s "$SION_DATA/bluetooth" /var/lib/bluetooth
 	if [ -n "$(ls -A "$SION_DATA/overlay")" ]; then
 		log "applying /data/overlay"
 		cp -a "$SION_DATA/overlay/." /

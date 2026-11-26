@@ -205,6 +205,14 @@ for d in "$WORK"/dash/run/hdd/partition2/Audio/*; do
     mkdir -p "$OUT/dash/Audio/$n"
     cp -L "$src"/* "$OUT/dash/Audio/$n/"
 done
+# The devkit dashboard (tools/devkitdash, its prebuilt Sion kit) in C:\devkit,
+# off until /etc/default/xbox says XBOX_DASH=devkit.
+DK="$XBC/tools/devkitdash/dist/sion"
+if [ -f "$DK/devkitdash.xbe" ]; then
+    mkdir -p "$OUT/dash/devkit/media"
+    cp "$DK/devkitdash.xbe" "$DK/devkitdash.map" "$DK/xbox-hostinfo" "$DK/xbox-bluetooth" "$OUT/dash/devkit/"
+    cp "$DK"/media/* "$OUT/dash/devkit/media/"
+fi
 # Library maps for the two titles, and the leak's signatures for any other
 # XDK 4400 title (mksigs needs the leak's .lib files, which the Sion hasn't).
 export XDG_CACHE_HOME=$OUT/cache XBCOMPAT_BIN=$OUT/bin/xbcompat

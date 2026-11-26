@@ -52,6 +52,12 @@ BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_8000C=y
 BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_8265=y
 BR2_PACKAGE_LINUX_FIRMWARE_RTL_8169=y
 BR2_PACKAGE_LINUX_FIRMWARE_RTL_815X=y
+# Bluetooth for game controllers: BlueZ (bluetoothd, bluetoothctl, the HID
+# and HOG input plugins) and the Intel cards' Bluetooth firmware.
+BR2_PACKAGE_BLUEZ5_UTILS=y
+BR2_PACKAGE_BLUEZ5_UTILS_CLIENT=y
+BR2_PACKAGE_BLUEZ5_UTILS_PLUGINS_HID=y
+BR2_PACKAGE_LINUX_FIRMWARE_IBT=y
 BR2_PACKAGE_HOST_E2FSPROGS=y
 # The Xbox's own boot animation and dashboard under xbcompat; the bundle is
 # built by xbcompat/tools/sion/bundle.sh.
