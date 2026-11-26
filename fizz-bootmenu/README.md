@@ -243,3 +243,7 @@ Tested in QEMU (bochs): the menu draws through DRM, the shell entry hands
 the screen back and the menu comes back after `exit`, and the "Starting
 Crimson" picture stays up through the kexec. QEMU's display has no
 interlaced modes, so the 480i to 240p switch itself only runs on the Sion.
+
+Flashed on the Sion 2026-11-26 (backup md5 9c39f3ff… on the PC in
+`~/sion-firmware-backup/`): sokky reports the menu works, and the boot
+screen stays up until Crimson's own animation shows.
