@@ -155,10 +155,16 @@ is off, carries RO_VPD, SMMSTORE and RW_MRC_CACHE over, writes the BIOS
 region only and verifies. The flashrom in it is a static 1.4.0 build
 (internal programmer only).
 
-## Hidden menu (2026-11-26, ROM `…20261126c`)
+## Hidden menu (2026-11-26, ROM `…20261126d`)
 
 Tested in QEMU: with nothing held the menu never draws and Crimson boots
 directly; a key held during the window brings the menu up without a
 countdown. Not testable here: the power button (the EC's switch byte at
 LPC 0x930, bit 1, only exists on the real board) and a held Xbox pad.
 Flash it with the same `flash-kit/` (`sh sion-flash.sh`).
+
+Silent plain boot (ROM `…20261126d`): crimsonboot is now PID 1 itself
+instead of u-root's init, which printed its banner, a log line and let the
+kernel's cgroup warnings onto the TV. It does the same root filesystem
+setup with the console log level at 1, and the payload uses `loglevel=1`,
+so a plain boot shows nothing between power-on and Crimson's animation.

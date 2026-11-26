@@ -41,6 +41,8 @@ package main
 import (
 	"encoding/binary"
 	"fmt"
+	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -50,6 +52,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/u-root/u-root/pkg/libinit"
 	"golang.org/x/sys/unix"
 )
 
@@ -681,7 +684,33 @@ func clearPendingMark() {
 	}
 }
 
+// initSystem stands in for u-root's init when crimsonboot is PID 1 (the
+// ROM's /init): the same root filesystem setup, but nothing on the screen.
+// u-root's init prints a banner, its log lines and lets the kernel's
+// warnings through while it mounts things.
+func initSystem() {
+	// Only emergencies reach the console from here on (quiet loglevel= is
+	// for the kernel's own boot; this covers what init and kexec print).
+	unix.Syscall(unix.SYS_SYSLOG, unix.SYSLOG_ACTION_CONSOLE_LEVEL, 0, 1)
+	log.SetOutput(io.Discard)
+	libinit.SetEnv()
+	libinit.CreateRootfs()
+	log.SetOutput(os.Stderr)
+	// Reap orphans (gosh's children, mount helpers) in the background.
+	go func() {
+		var ws unix.WaitStatus
+		for {
+			if _, err := unix.Wait4(-1, &ws, 0, nil); err != nil {
+				time.Sleep(time.Second)
+			}
+		}
+	}()
+}
+
 func main() {
+	if os.Getpid() == 1 {
+		initSystem()
+	}
 	parseCmdline()
 	os.MkdirAll(mountRoot, 0o755)
 
@@ -750,6 +779,9 @@ func main() {
 				fmt.Fprintln(tty, "LinuxBoot shell. Type exit to go back to the menu.")
 				cmd := exec.Command("gosh")
 				cmd.Stdin, cmd.Stdout, cmd.Stderr = tty, tty, tty
+				// Its own session with the console as controlling tty, so
+				// Ctrl-C reaches what it runs.
+				cmd.SysProcAttr = &unix.SysProcAttr{Setsid: true, Setctty: true, Ctty: 0}
 				cmd.Run()
 				restore = quiet(tty)
 				// Keys typed into the shell also reached the menu's evdev

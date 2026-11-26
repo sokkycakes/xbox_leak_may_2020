@@ -82,16 +82,15 @@ rm -rf u-root/cmds/exp/crimsonboot
 cp -r "$HERE/crimsonboot" u-root/cmds/exp/crimsonboot
 (cd u-root && go build -o u-root . && GOARCH=amd64 ./u-root \
 	-build=bb \
-	-initcmd=init \
-	-uinitcmd=crimsonboot \
+	-initcmd=crimsonboot \
 	-defaultsh=gosh \
 	-o "$WORK/initramfs.cpio" \
 	./cmds/exp/crimsonboot \
-	./cmds/core/{init,gosh,ls,cat,cp,mkdir,mount,umount,dmesg,grep,ps,kexec,shutdown,sync,pci,hexdump,io,echo,sleep,uname})
+	./cmds/core/{gosh,ls,cat,cp,mkdir,mount,umount,dmesg,grep,ps,kexec,shutdown,sync,pci,hexdump,io,echo,sleep,uname})
 xz --stdout --force --check=crc32 --lzma2=dict=1MiB "$WORK/initramfs.cpio" \
 	> "$PAYLOAD/initramfs.cpio.xz"
 
-CMDLINE="console=tty0 quiet loglevel=3 vt.global_cursor_default=0 i915.fastboot=1 crimsonboot.timeout=$TIMEOUT"
+CMDLINE="console=tty0 quiet loglevel=1 vt.global_cursor_default=0 i915.fastboot=1 crimsonboot.timeout=$TIMEOUT"
 CMDLINE="$CMDLINE crimsonboot.cmos=$(sed -n 's/^CONFIG_PAYLOAD_CMOS_SELECT_OFFSET=//p' "$HERE/config.fizz.bootmenu")"
 case "$SHOW" in
 hold) CMDLINE="$CMDLINE crimsonboot.show=hold crimsonboot.holdwait=$HOLDWAIT" ;;
