@@ -571,6 +571,12 @@ func loadCrimson(e *esp, kernel string, extra []string) error {
 	}
 	defer k.Close()
 	cmdline := []string{"sion.loader=linuxboot"}
+	// Which SIONBOOT this is: Crimson's early init picks its ESP by it
+	// (there is no BootCurrent without UEFI), not by a label a backup stick
+	// can share.
+	if u := partUUID(e.dev); u != "" {
+		cmdline = append(cmdline, "sion.esp="+u)
+	}
 	initrd := -1
 	flags := unix.KEXEC_FILE_NO_INITRAMFS
 	if cpio := e.dir + "/sion/video-boot.cpio"; isFile(cpio) {
@@ -597,6 +603,20 @@ func loadCrimson(e *esp, kernel string, extra []string) error {
 		return &bootError{fmt.Sprintf("loading %s failed: %v", filepath.Base(kernel), err)}
 	}
 	return nil
+}
+
+// partUUID is a partition's GPT (or MBR) partition UUID, from sysfs.
+func partUUID(dev string) string {
+	b, err := os.ReadFile("/sys/class/block/" + dev + "/uevent")
+	if err != nil {
+		return ""
+	}
+	for _, l := range strings.Split(string(b), "\n") {
+		if v, ok := strings.CutPrefix(l, "PARTUUID="); ok {
+			return strings.ToLower(v)
+		}
+	}
+	return ""
 }
 
 func unmountAll() {
