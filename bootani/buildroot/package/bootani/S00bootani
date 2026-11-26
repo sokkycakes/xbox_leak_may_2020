@@ -15,12 +15,27 @@ BOOTANI_ARGS="--kms"
 [ -r /etc/default/kms ] && . /etc/default/kms
 export KMS_MODE
 
-# The Xbox's own boot animation under xbcompat (package/xbcompat), when
-# the image has it, unless BOOT_ANIMATION=bootani. It falls back to bootani.
+# bootani, the native animation, unless BOOT_ANIMATION=xbox asks for the
+# Xbox's own under xbcompat (package/xbcompat, which falls back to bootani).
+# On images with a split system (package/sion-tools), /data/overlay is in
+# place this early, so /etc/default/bootani there counts.
+#
+# With the Xbox dashboard, bootani then keeps its last frame (the logo) on
+# screen until the dashboard's session starts its display keeper (xbox-av),
+# gives the frame to it, and xbox-av keeps it there until the dashboard's
+# first frame: as on the Xbox, the logo stays up until the dashboard draws.
 CMD="/usr/bin/$DAEMON $BOOTANI_ARGS"
-if [ -x /usr/libexec/xbox-boot ] && [ "$BOOT_ANIMATION" != bootani ]; then
+if [ -x /usr/libexec/xbox-boot ] && [ "$BOOT_ANIMATION" = xbox ]; then
 	CMD=/usr/libexec/xbox-boot
+elif [ -x /opt/xbcompat/bin/xbox-av ] && [ -x /usr/libexec/dashboard ] &&
+	[ "$(/usr/libexec/dashboard)" = xbox ]; then
+	CMD="$CMD --handoff /var/run/xbox-av.sock"
 fi
+
+# The LinuxBoot boot menu played the animation already (sion.bootani=done),
+# and left its last frame on screen for the dashboard to take over.
+SKIP=
+grep -q 'sion\.bootani=done' /proc/cmdline 2>/dev/null && SKIP=yes
 
 start() {
 	# The signal for the TV (sion-video: 15 kHz 480i for a VGA transcoder,
@@ -36,6 +51,10 @@ start() {
 	# anything else: black in the session's mode, and the console never
 	# drawn again. Only for the Xbox animation: bootani needs the display
 	# to itself.
+	if [ -n "$SKIP" ]; then
+		echo "Starting $DAEMON: played by the boot menu"
+		return 0
+	fi
 	if [ "$CMD" = /usr/libexec/xbox-boot ]; then
 		# shellcheck source=/dev/null
 		. /usr/lib/xbox/xbox-env

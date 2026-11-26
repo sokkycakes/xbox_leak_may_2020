@@ -1,11 +1,15 @@
 # Shared by S03sion, S41sion-net, sion-netd and sion.
 #
 # The boot disk has two partitions:
-#   1  SIONBOOT  FAT EFI system partition: EFI/BOOT/BOOTX64.EFI (the whole
-#                system: kernel + root filesystem), EFI/sion/ (previous and
+#   1  SIONBOOT  FAT EFI system partition: EFI/BOOT/BOOTX64.EFI (the kernel
+#                and a small early root filesystem), EFI/sion/ (previous and
 #                trial images), sion/ (settings, keys, logs), theseus/
-#   2  SIONDATA  ext4, mounted on /data (persistent; the root filesystem
-#                itself lives in RAM and starts fresh at every boot)
+#   2  SIONDATA  ext4, mounted on /data (persistent). sion/root/ holds the
+#                system itself, one squashfs per image (ID.sqfs), which the
+#                early root filesystem (sion-early-init) mounts read-only
+#                with /data/overlay and a RAM layer over it, so / still
+#                starts fresh at every boot. Older images carry the whole
+#                system in BOOTX64.EFI and unpack it into RAM.
 #
 # The EFI partition is mounted only while it is read or written, each time on
 # a private mount point, so pulling the stick (or the power) leaves a clean
@@ -13,7 +17,10 @@
 
 SION_RUN=/var/run/sion
 SION_DATA=/data
-SION_LOG=/var/log/sion.log
+SION_LOG=${SION_LOG:-/var/log/sion.log}
+# The system squashfs files (see above), and what sion-early-init found.
+SION_ROOTS=$SION_DATA/sion/root
+SION_EARLY=/etc/sion-early
 EFI_GLOBAL=8be4df61-93ca-11d2-aa0d-00e098032b8c
 EFIVARS=/sys/firmware/efi/efivars
 
@@ -153,4 +160,47 @@ efi_boot_current() {
 mount_efivars() {
 	[ -d /sys/firmware/efi ] || return 1
 	mountpoint -q "$EFIVARS" || mount -t efivarfs efivarfs "$EFIVARS" 2>/dev/null
+}
+
+# Grow SIONDATA over the free space after it (a fresh stick is mostly empty
+# space past the image). Runs before anything on the disk is mounted
+# (sion-early-init, or S03sion on images without it).
+grow_data() {
+	data=$1
+	disk=$(part_disk "$data")
+	n=$(part_num "$data")
+	sysd=/sys/class/block/${disk##*/}
+	sysp=/sys/class/block/${data##*/}
+	for p in "$sysd"/*/partition; do
+		[ "$(cat "$p")" -gt "$n" ] && return 0
+	done
+	end=$(( $(cat "$sysp/start") + $(cat "$sysp/size") ))
+	# GPT keeps a 33-sector backup at the end; grow only for more than 64 MiB.
+	free=$(( $(cat "$sysd/size") - end - 34 ))
+	[ "$free" -gt 131072 ] || return 0
+	# At most 16 GiB: growing ext4 over a whole large stick writes gigabytes
+	# of inode tables at once, which cheap sticks handle badly.
+	size=$(( $(cat "$sysp/size") + free ))
+	max=$(( 16 * 1024 * 1024 * 2 ))
+	[ "$size" -gt "$max" ] && size=$max
+	[ "$size" -gt "$(cat "$sysp/size")" ] || return 0
+	log "growing $data to $((size / 2048)) MiB"
+	sfdisk -q --relocate gpt-bak-std "$disk" >> "$SION_LOG" 2>&1
+	echo ", $size" | sfdisk -q --no-reread -N "$n" "$disk" >> "$SION_LOG" 2>&1
+	partx -u "$disk" >> "$SION_LOG" 2>&1
+	sleep 0.5
+	e2fsck -fy "$data" >> "$SION_LOG" 2>&1
+	resize2fs "$data" >> "$SION_LOG" 2>&1
+}
+
+
+# The system squashfs an image needs, from its kernel's version string
+# ("6.18.7 (root@sionroot-ID) #1 ..."; the build sets the host part), the
+# same ID as in its early root filesystem's /etc/sion-root-id. Prints
+# nothing for images that carry their whole system (older ones).
+efi_root_id() {
+	off=$(od -An -tu2 -j526 -N2 "$1" 2>/dev/null | tr -d ' ')
+	[ -n "$off" ] || return 1
+	dd if="$1" bs=1 skip=$(( off + 512 )) count=160 2>/dev/null | tr '\000' '\n' | head -n1 |
+		sed -n 's/.*@sionroot-\([0-9a-f]\{1,64\}\)).*/\1/p'
 }

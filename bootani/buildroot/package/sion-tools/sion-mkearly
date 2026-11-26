@@ -1,0 +1,99 @@
+#!/bin/sh
+#
+# sion-mkearly TARGET READELF: cuts Buildroot's copy of the root filesystem
+# for rootfs.cpio (TARGET) down to the Sion's early root filesystem, which
+# the kernel carries as its initramfs: sion-early-init as /init, what it
+# runs (busybox, blkid, efibootmgr, e2fsck, sfdisk, partx, resize2fs) and
+# their libraries, the firmware i915 and the 15 kHz EDID need before init
+# runs, and the image's ID. The whole system goes into rootfs.squashfs.
+#
+set -e
+T=${1:?usage: sion-mkearly TARGET READELF}
+[ -d "$T/etc" ] || { echo "sion-mkearly: $T is not a root filesystem" >&2; exit 1; }
+READELF=${2:-readelf}
+E=$T.early
+
+rm -rf "$E"
+mkdir -p "$E"
+cd "$T"
+
+copy() {
+	local f l
+	for f in "$@"; do
+		[ -e "$f" ] || [ -L "$f" ] || continue
+		mkdir -p "$E/$(dirname "$f")"
+		cp -a "$f" "$E/$f"
+		# A link brings what it points at.
+		if [ -L "$f" ]; then
+			l=$(readlink "$f")
+			case "$l" in
+				/*) copy "${l#/}" ;;
+				*) copy "$(dirname "$f")/$l" ;;
+			esac
+		fi
+	done
+}
+
+# Executables and, through their DT_NEEDED entries, every library they use.
+copy_elf() {
+	local f lib found d interp
+	for f in "$@"; do
+		[ -e "$f" ] || { echo "sion-mkearly: no $f in the target" >&2; exit 1; }
+		[ -e "$E/$f" ] && continue
+		copy "$f"
+		for lib in $($READELF -d "$f" 2>/dev/null | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p'); do
+			found=
+			for d in lib usr/lib lib64 usr/lib64; do
+				if [ -e "$d/$lib" ]; then
+					copy_elf "$d/$lib"
+					found=yes
+					break
+				fi
+			done
+			[ -n "$found" ] || { echo "sion-mkearly: $f needs $lib, not in the target" >&2; exit 1; }
+		done
+		interp=$($READELF -l "$f" 2>/dev/null | sed -n 's/.*interpreter: \/\(.*\)\]/\1/p')
+		[ -n "$interp" ] && copy_elf "$interp"
+	done
+	return 0
+}
+
+copy_elf bin/busybox
+for tool in blkid efibootmgr e2fsck sfdisk partx resize2fs; do
+	path=
+	for d in usr/sbin sbin usr/bin bin; do
+		# util-linux's and e2fsprogs' own, not busybox's applet.
+		[ -e "$d/$tool" ] || continue
+		case "$(readlink "$d/$tool")" in *busybox) continue ;; esac
+		path=$d/$tool
+		break
+	done
+	[ -n "$path" ] || { echo "sion-mkearly: no $tool in the target" >&2; exit 1; }
+	copy_elf "$path"
+done
+# Firmware the kernel loads before /init can run anything: the EDID that
+# makes the first frame 15 kHz 480i, and i915's display microcontroller.
+copy lib/firmware/edid usr/share/sion/crimson-480i.edid
+for f in lib/firmware/i915/kbl_dmc_*.bin; do copy "$f"; done
+copy etc/sion-root-id usr/lib/sion/sion-lib.sh bin/sh
+
+cd "$E"
+mkdir -p dev proc sys run tmp etc newroot
+mkdir -p var bin
+ln -sfn ../run var/run
+# The busybox applets sion-early-init and sion-lib.sh use.
+for a in sh mount umount mkdir rmdir cat sed tr cut seq sleep date mv cp rm \
+	sync reboot switch_root mountpoint mktemp od dd head ls find touch awk \
+	readlink losetup df; do
+	[ -e "bin/$a" ] || [ -e "sbin/$a" ] || [ -e "usr/bin/$a" ] || [ -e "usr/sbin/$a" ] || ln -s busybox "bin/$a"
+done
+cp "$T/usr/lib/sion/sion-early-init" init
+chmod 0755 init
+# Buildroot's own cpio hook, after this one, adds dev/console.
+
+# Replace the target copy with the early tree.
+cd /
+find "$T" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+cp -a "$E/." "$T/"
+rm -rf "$E"
+du -sh "$T" | sed 's/^/sion-mkearly: early root filesystem: /'

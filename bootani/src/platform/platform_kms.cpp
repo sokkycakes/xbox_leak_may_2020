@@ -20,7 +20,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
+#include <vector>
 
 static int                 g_fd = -1;
 static uint32_t            g_crtc_id;
@@ -31,6 +34,7 @@ static struct gbm_device*  g_gbm;
 static struct gbm_surface* g_gbm_surface;
 static struct gbm_bo*      g_shown_bo;      // on screen now
 static bool                g_crtc_set;
+static bool                g_handed_off;    // the display is a keeper's now
 static EGLDisplay          g_display = EGL_NO_DISPLAY;
 static EGLContext          g_context = EGL_NO_CONTEXT;
 static EGLSurface          g_surface = EGL_NO_SURFACE;
@@ -225,7 +229,7 @@ void Kms_Shutdown()
     g_surface = EGL_NO_SURFACE;
     // Give the display back to the console as we found it.
     if (g_saved_crtc) {
-        if (g_crtc_set)
+        if (g_crtc_set && !g_handed_off)
             drmModeSetCrtc(g_fd, g_saved_crtc->crtc_id, g_saved_crtc->buffer_id, g_saved_crtc->x,
                            g_saved_crtc->y, &g_connector_id, 1, &g_saved_crtc->mode);
         drmModeFreeCrtc(g_saved_crtc);
@@ -234,6 +238,7 @@ void Kms_Shutdown()
     if (g_shown_bo && g_gbm_surface) gbm_surface_release_buffer(g_gbm_surface, g_shown_bo);
     g_shown_bo = NULL;
     g_crtc_set = false;
+    g_handed_off = false;
     if (g_gbm_surface) gbm_surface_destroy(g_gbm_surface);
     if (g_gbm) gbm_device_destroy(g_gbm);
     g_gbm_surface = NULL;
@@ -317,4 +322,64 @@ void Kms_ShowFrame(unsigned int fbo, int width, int height)
     }
     if (g_shown_bo) gbm_surface_release_buffer(g_gbm_surface, g_shown_bo);
     g_shown_bo = bo;
+}
+
+static bool WriteAll(int fd, const void* buf, size_t n)
+{
+    const uint8_t* p = (const uint8_t*)buf;
+    while (n) {
+        ssize_t r = write(fd, p, n);
+        if (r < 0 && errno == EINTR) continue;
+        if (r <= 0) return false;
+        p += r;
+        n -= (size_t)r;
+    }
+    return true;
+}
+
+bool Kms_HandOff(const char* path)
+{
+    if (!g_crtc_set || !g_shown_bo) return false;
+    int s = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (s < 0) return false;
+    struct sockaddr_un sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sun_family = AF_UNIX;
+    snprintf(sa.sun_path, sizeof(sa.sun_path), "%s", path);
+    // Connected first: while a client is connected the keeper doesn't grab
+    // the display on its own (and paint it black) the moment we let go.
+    if (connect(s, (struct sockaddr*)&sa, sizeof(sa)) != 0) { close(s); return false; }
+
+    // The frame on screen, at the display's size (letterboxing included).
+    uint32_t w = gbm_bo_get_width(g_shown_bo), h = gbm_bo_get_height(g_shown_bo);
+    std::vector<uint8_t> px((size_t)w * h * 4);
+    uint32_t stride = 0;
+    void* map_data = NULL;
+    uint8_t* map = (uint8_t*)gbm_bo_map(g_shown_bo, 0, 0, w, h, GBM_BO_TRANSFER_READ, &stride, &map_data);
+    if (map) {
+        for (uint32_t y = 0; y < h; y++) memcpy(&px[(size_t)y * w * 4], map + (size_t)y * stride, (size_t)w * 4);
+        gbm_bo_unmap(g_shown_bo, map_data);
+    } else {
+        fprintf(stderr, "bootani: can't read the last frame back; handing over black\n");
+        w = h = 0;
+    }
+
+    // The keeper becomes DRM master when it gets the frame; the picture on
+    // screen is ours until it sets its own, so nothing flashes.
+    if (drmDropMaster(g_fd) != 0) fprintf(stderr, "bootani: dropping DRM master: %s\n", strerror(errno));
+    uint32_t wh[2] = { w, h };
+    char ok = 0;
+    bool sent = WriteAll(s, "S", 1) && WriteAll(s, wh, sizeof(wh)) && (!w || WriteAll(s, px.data(), px.size()));
+    if (sent) {
+        struct pollfd p = { s, POLLIN, 0 };
+        if (poll(&p, 1, 5000) > 0 && read(s, &ok, 1) != 1) ok = 0;
+    }
+    close(s);
+    if (ok != 'k') {
+        fprintf(stderr, "bootani: the display keeper at %s didn't take the frame\n", path);
+        // Put ours back, so the screen isn't left to the console.
+        if (drmSetMaster(g_fd) == 0) return false;
+    }
+    g_handed_off = true;
+    return true;
 }

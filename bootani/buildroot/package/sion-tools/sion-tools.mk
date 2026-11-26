@@ -10,6 +10,7 @@ define SION_TOOLS_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(SION_TOOLS_PKGDIR)/sion $(TARGET_DIR)/usr/sbin/sion
 	$(INSTALL) -D -m 0755 $(SION_TOOLS_PKGDIR)/sion-install-internal $(TARGET_DIR)/usr/sbin/sion-install-internal
 	$(INSTALL) -D -m 0644 $(SION_TOOLS_PKGDIR)/sion-lib.sh $(TARGET_DIR)/usr/lib/sion/sion-lib.sh
+	$(INSTALL) -D -m 0755 $(SION_TOOLS_PKGDIR)/sion-early-init $(TARGET_DIR)/usr/lib/sion/sion-early-init
 	$(INSTALL) -D -m 0755 $(SION_TOOLS_PKGDIR)/sion-netd $(TARGET_DIR)/usr/libexec/sion-netd
 	$(INSTALL) -D -m 0755 $(SION_TOOLS_PKGDIR)/sion-video $(TARGET_DIR)/usr/libexec/sion-video
 	$(INSTALL) -D -m 0644 $(SION_TOOLS_PKGDIR)/crimson-480i.edid $(TARGET_DIR)/usr/share/sion/crimson-480i.edid
@@ -28,5 +29,23 @@ define SION_TOOLS_INSTALL_INIT_SYSV
 	$(INSTALL) -D -m 0755 $(SION_TOOLS_PKGDIR)/S03sion $(TARGET_DIR)/etc/init.d/S03sion
 	$(INSTALL) -D -m 0755 $(SION_TOOLS_PKGDIR)/S41sion-net $(TARGET_DIR)/etc/init.d/S41sion-net
 endef
+
+ifeq ($(BR2_PACKAGE_SION_TOOLS_SPLIT_ROOT),y)
+# A new ID at every build, in the system (rootfs.squashfs) and the early
+# root filesystem (rootfs.cpio, inside the kernel) alike. The kernel's
+# version string carries it too (KBUILD_BUILD_HOST, see external.mk), so
+# "sion update" can tell from a BOOTX64.EFI which system it needs.
+define SION_TOOLS_ROOT_ID
+	head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n' > $(TARGET_DIR)/etc/sion-root-id
+	echo >> $(TARGET_DIR)/etc/sion-root-id
+endef
+SION_TOOLS_TARGET_FINALIZE_HOOKS += SION_TOOLS_ROOT_ID
+
+# rootfs.cpio becomes the early root filesystem.
+define SION_TOOLS_EARLY_ROOTFS
+	$(SION_TOOLS_PKGDIR)/sion-mkearly $(TARGET_DIR) $(TARGET_READELF)
+endef
+ROOTFS_CPIO_PRE_GEN_HOOKS += SION_TOOLS_EARLY_ROOTFS
+endif
 
 $(eval $(generic-package))

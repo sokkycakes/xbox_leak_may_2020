@@ -10,7 +10,7 @@ Once it's on the network:
 
   ssh root@sion.local                      a shell
   scp -r mydir root@sion.local:/opt/       copy files in (they last until
-                                           reboot; the system runs from RAM)
+                                           reboot; / starts fresh each boot)
   ssh root@sion.local sion persist /opt/x  keep them across reboots
   ssh root@sion.local sion restart dashboard   restart the dashboard
 
@@ -19,9 +19,10 @@ sion.conf), or Theseus (DASHBOARD="theseus"). Its hard disk is /data/xbox/hdd
 (E: is partition1, with saves and E:\Games); put an extracted game disc in
 /data/xbox/disc to have it in the tray. Its log: sion logs xbox.
 
-Updating the whole system image (a new BOOTX64.EFI):
+Updating the whole system image (a new BOOTX64.EFI and its system file,
+crimson-root-ID.sqfs):
 
-  scp BOOTX64.EFI root@sion.local:/data/
+  scp BOOTX64.EFI crimson-root-*.sqfs root@sion.local:/data/
   ssh root@sion.local sion update /data/BOOTX64.EFI
 
 The new image boots once on trial. It's kept if it comes up; if it panics,

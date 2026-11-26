@@ -31,6 +31,14 @@ const char* Platform_Describe();          // e.g. "SDL2 window" / "EGL (headless
 // the top; it is scaled to the window with the aspect ratio preserved.
 void  Platform_ShowFrame(unsigned int fbo, int width, int height);
 
+// KMS only: give the frame on screen to a display keeper listening on the
+// Unix socket at path (xbox-av's protocol: 'S', width, height, XRGB8888
+// pixels top row first; answered with 'k'), so it stays up after bootani
+// exits. Returns false, with the display untouched, if the socket isn't
+// there yet; after a true return the display is the keeper's, and
+// Platform_Shutdown leaves it alone.
+bool  Platform_HandOff(const char* path);
+
 // Handle window events. Returns false once the user asked to quit.
 bool  Platform_PumpEvents();
 

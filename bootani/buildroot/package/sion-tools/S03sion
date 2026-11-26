@@ -3,41 +3,13 @@
 # Early setup from the boot disk, right after the boot animation starts:
 # - settings (sion/sion.conf) and SSH keys from the EFI partition
 # - the SIONDATA partition on /data, grown to fill the disk on first boot
-# - /data/overlay copied over the root filesystem
+#   (sion-early-init has done that already on images with a split system)
+# - /data/overlay copied over the root filesystem (unless it is a layer of
+#   it already)
 # - the check that keeps or drops a trial image (see "sion update")
 #
 
 . /usr/lib/sion/sion-lib.sh
-
-# Grow SIONDATA over the free space after it (a fresh stick is mostly empty
-# space past the image). Runs before anything on the disk is mounted.
-grow_data() {
-	data=$1
-	disk=$(part_disk "$data")
-	n=$(part_num "$data")
-	sysd=/sys/class/block/${disk##*/}
-	sysp=/sys/class/block/${data##*/}
-	for p in "$sysd"/*/partition; do
-		[ "$(cat "$p")" -gt "$n" ] && return 0
-	done
-	end=$(( $(cat "$sysp/start") + $(cat "$sysp/size") ))
-	# GPT keeps a 33-sector backup at the end; grow only for more than 64 MiB.
-	free=$(( $(cat "$sysd/size") - end - 34 ))
-	[ "$free" -gt 131072 ] || return 0
-	# At most 16 GiB: growing ext4 over a whole large stick writes gigabytes
-	# of inode tables at once, which cheap sticks handle badly.
-	size=$(( $(cat "$sysp/size") + free ))
-	max=$(( 16 * 1024 * 1024 * 2 ))
-	[ "$size" -gt "$max" ] && size=$max
-	[ "$size" -gt "$(cat "$sysp/size")" ] || return 0
-	log "growing $data to $((size / 2048)) MiB"
-	sfdisk -q --relocate gpt-bak-std "$disk" >> "$SION_LOG" 2>&1
-	echo ", $size" | sfdisk -q --no-reread -N "$n" "$disk" >> "$SION_LOG" 2>&1
-	partx -u "$disk" >> "$SION_LOG" 2>&1
-	sleep 0.5
-	e2fsck -fy "$data" >> "$SION_LOG" 2>&1
-	resize2fs "$data" >> "$SION_LOG" 2>&1
-}
 
 copy_from_esp() {
 	m=$(esp_mount) || return 1
@@ -56,14 +28,18 @@ copy_from_esp() {
 }
 
 setup_data() {
-	data=$(find_data) || { log "no SIONDATA partition: nothing persists"; return 1; }
-	[ -e "$SION_RUN/grown" ] || { grow_data "$data"; touch "$SION_RUN/grown"; }
-	e2fsck -p "$data" >> "$SION_LOG" 2>&1
-	mkdir -p "$SION_DATA"
-	if ! mount -t ext4 -o noatime "$data" "$SION_DATA"; then
-		log "mounting $data failed; repairing it"
-		e2fsck -fy "$data" >> "$SION_LOG" 2>&1
-		mount -t ext4 -o noatime "$data" "$SION_DATA" || { log "mounting $data failed"; return 1; }
+	if [ -n "$EARLY_DATA" ] && mountpoint -q "$SION_DATA"; then
+		: # sion-early-init grew, checked and mounted it
+	else
+		data=$(find_data) || { log "no SIONDATA partition: nothing persists"; return 1; }
+		[ -e "$SION_RUN/grown" ] || { grow_data "$data"; touch "$SION_RUN/grown"; }
+		e2fsck -p "$data" >> "$SION_LOG" 2>&1
+		mkdir -p "$SION_DATA"
+		if ! mount -t ext4 -o noatime "$data" "$SION_DATA"; then
+			log "mounting $data failed; repairing it"
+			e2fsck -fy "$data" >> "$SION_LOG" 2>&1
+			mount -t ext4 -o noatime "$data" "$SION_DATA" || { log "mounting $data failed"; return 1; }
+		fi
 	fi
 	mkdir -p "$SION_DATA/overlay" "$SION_DATA/sion/ssh"
 	chmod 700 "$SION_DATA/sion/ssh"
@@ -73,7 +49,9 @@ setup_data() {
 	chmod 700 "$SION_DATA/bluetooth"
 	rm -rf /var/lib/bluetooth
 	ln -s "$SION_DATA/bluetooth" /var/lib/bluetooth
-	if [ -n "$(ls -A "$SION_DATA/overlay")" ]; then
+	if [ "$EARLY_OVERLAY" = layer ]; then
+		log "/data/overlay is a layer of / (sion-early-init)"
+	elif [ -n "$(ls -A "$SION_DATA/overlay")" ]; then
 		log "applying /data/overlay"
 		cp -a "$SION_DATA/overlay/." /
 	fi
@@ -109,8 +87,21 @@ setup_ssh() {
 	fi
 }
 
+# What sion-early-init did (images whose system is a squashfs on SIONDATA).
+early_state() {
+	EARLY_DATA= EARLY_OVERLAY=
+	[ -r "$SION_EARLY" ] || return 0
+	cat "$SION_EARLY.log" >> "$SION_LOG" 2>/dev/null
+	EARLY_DATA=$(sed -n 's/^DATA=//p' "$SION_EARLY")
+	EARLY_OVERLAY=$(sed -n 's/^OVERLAY=//p' "$SION_EARLY")
+	[ -r "$SION_EARLY.esp-dev" ] && cp "$SION_EARLY.esp-dev" "$SION_RUN/esp-dev"
+	[ -e "$SION_EARLY.grown" ] && touch "$SION_RUN/grown"
+	return 0
+}
+
 start() {
 	printf 'Starting sion: '
+	early_state
 	mount_efivars
 	if ! find_esp > /dev/null; then
 		log "no boot EFI partition found"

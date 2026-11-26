@@ -50,10 +50,12 @@ struct Options
     std::string drm_device;
     std::string audio_device;            // ALSA PCM name
     bool        hold = false;            // keep the last frame up until killed
+    std::string handoff;                 // ...or until this display keeper's socket is up
 };
 
 Options      g_opt;
 volatile sig_atomic_t g_quit = 0;
+volatile sig_atomic_t g_release = 0;   // SIGUSR1: don't hold the last frame
 double       g_virtual_ms = 0.0;
 int          g_frame = 0;
 size_t       g_next_capture = 0;
@@ -85,6 +87,10 @@ void Usage()
 "  --drm-device PATH     with --kms, the card to use (default: first with a display)\n"
 "  --audio-device NAME   ALSA device for sound without SDL2 (default: ALSA default, then HDMI)\n"
 "  --hold                after the animation, keep the last frame on screen until killed\n"
+"  --handoff SOCKET      with --kms, hold the last frame until a display keeper (xbox-av)\n"
+"                        listens on SOCKET, then give it the frame and exit\n"
+"                        (SIGUSR1: exit after the animation instead, for a program\n"
+"                        that takes the display itself)\n"
 "  --verbose             print progress and debug output\n");
 }
 
@@ -107,6 +113,7 @@ bool ParseArgs(int argc, char** argv)
         else if (a == "--verbose") g_opt.verbose = true;
         else if (a == "--kms") g_opt.kms = true;
         else if (a == "--hold") g_opt.hold = true;
+        else if (a == "--handoff" && next) { g_opt.handoff = next; g_opt.hold = true; i++; }
         else if (a == "--drm-device" && next) { g_opt.drm_device = next; i++; }
         else if (a == "--audio-device" && next) { g_opt.audio_device = next; i++; }
         else if (a == "--size" && next) { if (!ParseSize(next, &g_opt.window_w, &g_opt.window_h)) return false; i++; }
@@ -255,12 +262,18 @@ void OnSignal(int)
     g_quit = 1;
 }
 
+void OnRelease(int)
+{
+    g_release = 1;
+}
+
 int main(int argc, char** argv)
 {
     if (!ParseArgs(argc, argv)) { Usage(); return 2; }
     // Stop cleanly (and hand the display back) when init or the user asks.
     signal(SIGTERM, OnSignal);
     signal(SIGINT, OnSignal);
+    signal(SIGUSR1, OnRelease);
     g_bShortVersion = g_opt.short_version;
     g_bBootaniLoop = g_opt.loop && !g_opt.headless;
 
@@ -310,9 +323,16 @@ int main(int argc, char** argv)
     uint64_t t1 = Platform_TicksMs();
 
     if (g_opt.hold && !g_opt.headless) {
-        // The last frame stays on screen; wait for SIGTERM, Esc or Q.
-        while (!g_quit && Platform_PumpEvents())
+        // The last frame stays on screen; wait for SIGTERM, Esc or Q, or
+        // for the display keeper to take it over (as the Xbox's logo stays
+        // up until the dashboard draws).
+        while (!g_quit && !g_release && Platform_PumpEvents()) {
+            if (!g_opt.handoff.empty() && Platform_HandOff(g_opt.handoff.c_str())) {
+                if (g_opt.verbose) printf("bootani: handed the last frame to %s\n", g_opt.handoff.c_str());
+                break;
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
     }
 
     if (g_wav) {

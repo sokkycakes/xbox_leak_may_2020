@@ -1,0 +1,148 @@
+#!/bin/sh
+#
+# /init of the Sion's early root filesystem: the small initramfs built into
+# BOOTX64.EFI (see sion-mkearly). The system itself is a squashfs on the
+# SIONDATA partition, sion/root/ID.sqfs, ID being this image's
+# /etc/sion-root-id. This mounts it with /data/overlay over it and a RAM
+# layer on top, so / behaves as before (writable, fresh at every boot, the
+# overlay's files in place) without unpacking anything into RAM, and starts
+# the system's own init in it.
+#
+# Nothing here writes to the screen: i915 already shows the 15 kHz mode
+# (and, from the LinuxBoot menu, maybe a picture it left), and bootani
+# takes the display next. The log ends up in /var/log/sion.log.
+#
+
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+SION_LOG=/run/sion-early.log
+NEW=/newroot
+
+mount -t devtmpfs devtmpfs /dev 2>/dev/null
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t tmpfs -o mode=0755 tmpfs /run
+exec < /dev/null > /dev/null 2>> "$SION_LOG"
+
+. /usr/lib/sion/sion-lib.sh
+
+ID=$(cat /etc/sion-root-id)
+SQ=/media/sion/ro
+RW=/media/sion/rw
+mkdir -p "$SQ" "$RW" "$SION_DATA" "$NEW"
+
+esp_dev() {
+	# The LinuxBoot menu has no UEFI variables to tell: it names the
+	# partition it booted from (sion.esp=PARTUUID).
+	want=$(sed -n 's/.*sion\.esp=\([0-9A-Fa-f-]*\).*/\1/p' /proc/cmdline | tr 'A-F' 'a-f')
+	if [ -n "$want" ]; then
+		for _ in $(seq 1 50); do
+			for dev in $(partitions); do
+				if [ "$(blkid -s PARTUUID -o value "$dev" 2>/dev/null)" = "$want" ]; then
+					echo "$dev" > "$SION_RUN/esp-dev"
+					echo "$dev"
+					return 0
+				fi
+			done
+			sleep 0.1
+		done
+	fi
+	mount_efivars
+	find_esp
+}
+
+# The way back when this image's system isn't on the disk (it was copied
+# over without it, by an older "sion update"): if this image is the
+# current one, swap the previous one back in, as "sion rollback" does, and
+# reboot. A trial image just reboots; the firmware goes back by itself.
+no_system() {
+	log "$*"
+	m=$(esp_mount)
+	if [ -n "$m" ]; then
+		mkdir -p "$m/sion/logs"
+		if [ "$(efi_root_id "$m/EFI/BOOT/BOOTX64.EFI")" = "$ID" ] && [ -e "$m/EFI/sion/previous.efi" ]; then
+			mv "$m/EFI/BOOT/BOOTX64.EFI" "$m/EFI/sion/failed.efi"
+			mv "$m/EFI/sion/previous.efi" "$m/EFI/BOOT/BOOTX64.EFI"
+			echo "$(date '+%F %T') $*; went back to the previous image (this one is EFI/sion/failed.efi)" | sed 's/$/\r/' >> "$m/sion/logs/update.txt"
+		else
+			echo "$(date '+%F %T') $*; rebooting" | sed 's/$/\r/' >> "$m/sion/logs/update.txt"
+		fi
+		cp "$SION_LOG" "$m/sion/logs/early.txt" 2>/dev/null
+		esp_umount "$m"
+	fi
+	sync
+	sleep 2
+	reboot -f
+}
+
+log "early root $ID"
+esp=$(esp_dev) || no_system "no boot EFI partition found"
+log "boot partition $esp"
+
+# /data: grown on first boot, checked, then mounted for good.
+data=$(find_data)
+if [ -n "$data" ]; then
+	[ -e "$SION_RUN/grown" ] || { grow_data "$data"; touch "$SION_RUN/grown"; }
+	e2fsck -p "$data" >> "$SION_LOG" 2>&1
+	if ! mount -t ext4 -o noatime "$data" "$SION_DATA"; then
+		log "mounting $data failed; repairing it"
+		e2fsck -fy "$data" >> "$SION_LOG" 2>&1
+		mount -t ext4 -o noatime "$data" "$SION_DATA" || { log "mounting $data failed"; data=; }
+	fi
+fi
+
+# The system: on /data, or (a disk without SIONDATA) in the EFI partition,
+# which then stays mounted.
+img=$SION_ROOTS/$ID.sqfs
+if [ ! -r "$img" ]; then
+	esp_m=/media/sion/esp
+	mkdir -p "$esp_m"
+	mount -t vfat -o rw,noatime,flush "$esp" "$esp_m" && img=$esp_m/EFI/sion/root/$ID.sqfs
+fi
+[ -r "$img" ] || no_system "this image's system ($ID.sqfs) is missing"
+mount -t squashfs -o ro,loop "$img" "$SQ" || no_system "mounting $img failed"
+[ "$(cat "$SQ/etc/sion-root-id" 2>/dev/null)" = "$ID" ] || no_system "$img is not this image's system"
+
+# /data/overlay as a layer of its own, instead of copying it into RAM at
+# every boot. A copy follows symbolic links the layer would hide
+# (overlay/lib64/... with /lib64 -> lib), so such an overlay is still
+# copied by S03sion.
+lower=$SQ
+ov=$SION_DATA/overlay
+if [ -n "$data" ] && [ -d "$ov" ] && [ -n "$(ls -A "$ov")" ]; then
+	clash=$(cd "$ov" && find . -mindepth 1 -type d | while read -r d; do
+		[ -L "$SQ/${d#./}" ] && echo "${d#./}" && break
+	done)
+	if [ -z "$clash" ]; then
+		lower=$ov:$SQ
+	else
+		log "/data/overlay has /$clash, a link in the system; S03sion copies it instead"
+	fi
+fi
+mount -t tmpfs -o mode=0755 tmpfs "$RW"
+mkdir -p "$RW/upper" "$RW/work"
+mount -t overlay -o "lowerdir=$lower,upperdir=$RW/upper,workdir=$RW/work" overlay "$NEW" ||
+	no_system "mounting the overlay failed"
+
+{
+	echo "ID=$ID"
+	echo "ESP=$esp"
+	echo "DATA=$data"
+	echo "SYSTEM=$img"
+	[ "$lower" != "$SQ" ] && echo "OVERLAY=layer"
+} > "$NEW$SION_EARLY"
+cp "$SION_RUN"/esp-dev "$NEW$SION_EARLY.esp-dev" 2>/dev/null
+[ -e "$SION_RUN/grown" ] && touch "$NEW$SION_EARLY.grown"
+log "system $img${data:+, /data on $data}, overlay ${lower%%:*}"
+
+# Everything mounted here moves into the system: /data, the layers (under
+# /media/sion, to look at), /dev.
+for d in "$SQ" "$RW" "$SION_DATA" /media/sion/esp; do
+	mountpoint -q "$d" || continue
+	mkdir -p "$NEW$d"
+	mount --move "$d" "$NEW$d"
+done
+mount --move /dev "$NEW/dev"
+# S03sion adds it to /var/log/sion.log (/var/log is on a tmpfs init mounts).
+cp "$SION_LOG" "$NEW$SION_EARLY.log"
+umount /run /sys /proc
+exec switch_root "$NEW" /sbin/init

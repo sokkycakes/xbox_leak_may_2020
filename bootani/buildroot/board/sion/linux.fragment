@@ -13,3 +13,26 @@ CONFIG_DRM_LOAD_EDID_FIRMWARE=y
 # Legacy HD Audio driver for the HDMI output (the headphone jack is on an I2S
 # codec that needs the audio DSP, which this image leaves out).
 CONFIG_CMDLINE="console=tty1 quiet loglevel=3 vt.global_cursor_default=0 drm.edid_firmware=HDMI-A-1:edid/crimson-480i.edid snd_intel_dspcfg.dsp_driver=1 i915.fastboot=1"
+# The system is a squashfs on SIONDATA (package/sion-tools, split root):
+# the small initramfs in the kernel mounts it through a loop device with
+# overlayfs over it (tmpfs on top, which needs xattrs for overlayfs), so
+# all of that and the boot disk's drivers are built in. zstd for the
+# squashfs and for the kernel itself.
+CONFIG_SQUASHFS=y
+CONFIG_SQUASHFS_ZSTD=y
+CONFIG_SQUASHFS_FILE_DIRECT=y
+CONFIG_SQUASHFS_DECOMP_MULTI_PERCPU=y
+CONFIG_BLK_DEV_LOOP=y
+CONFIG_OVERLAY_FS=y
+CONFIG_TMPFS=y
+CONFIG_TMPFS_XATTR=y
+CONFIG_ATA=y
+CONFIG_SATA_AHCI=y
+CONFIG_BLK_DEV_NVME=y
+CONFIG_USB_STORAGE=y
+CONFIG_USB_UAS=y
+CONFIG_VFAT_FS=y
+CONFIG_KERNEL_ZSTD=y
+# A picture the boot menu (LinuxBoot) leaves on screen stays until something
+# is written to the console.
+CONFIG_FRAMEBUFFER_CONSOLE_DEFERRED_TAKEOVER=y

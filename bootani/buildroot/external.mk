@@ -1,5 +1,12 @@
 include $(sort $(wildcard $(BR2_EXTERNAL_BOOTANI_PATH)/package/*/*.mk))
 
+# The Sion's split root filesystem (package/sion-tools): the kernel's
+# version string names the system it needs, "(buildroot@sionroot-ID)".
+ifeq ($(BR2_PACKAGE_SION_TOOLS_SPLIT_ROOT),y)
+LINUX_MAKE_ENV += \
+	KBUILD_BUILD_HOST=sionroot-$$(cat $(TARGET_DIR)/etc/sion-root-id 2>/dev/null || echo none)
+endif
+
 # Mesa's iris driver pulls in libclc (through BR2_PACKAGE_MESA3D_OPENCL), but
 # Mesa 26 only links libclc for OpenCL through rusticl, which this image
 # leaves out. Buildroot's libclc package does not configure against LLVM 23

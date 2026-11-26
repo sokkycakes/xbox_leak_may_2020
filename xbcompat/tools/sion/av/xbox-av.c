@@ -31,6 +31,10 @@
  *   xbox-av [--socket PATH]     (default $XBOX_AV_SOCKET, /run/xbox-av.sock)
  *
  * KMS_MODE=WxH picks the mode the session starts in, as bootani does.
+ *
+ * When the Sion's LinuxBoot menu played the boot animation (the kernel
+ * command line has sion.bootani=done), its last frame is still on screen:
+ * xbox-av starts by keeping that instead of black.
  */
 #define _GNU_SOURCE
 #define _FILE_OFFSET_BITS 64
@@ -270,6 +274,17 @@ static int read_full(int fd, void *buf, size_t n)
 
 static void on_signal(int s) { (void)s; quit = 1; }
 
+static int boot_menu_frame(void)
+{
+    char buf[4096] = { 0 };
+    FILE *f = fopen("/proc/cmdline", "r");
+    if (!f) return 0;
+    size_t n = fread(buf, 1, sizeof buf - 1, f);
+    fclose(f);
+    buf[n] = 0;
+    return strstr(buf, "sion.bootani=done") != NULL;
+}
+
 int main(int argc, char **argv)
 {
     const char *sock = getenv("XBOX_AV_SOCKET");
@@ -300,7 +315,12 @@ int main(int argc, char **argv)
     sigaction(SIGINT, &act, NULL);
     signal(SIGPIPE, SIG_IGN);
 
-    take_over(NULL, 0, 0, 0);   /* black in the session's mode, if the display is free */
+    if (boot_menu_frame() && set_master(0) == 0) {
+        state = OWN;   /* the CRTC keeps the frame it shows; nothing to set */
+        say("keeping the boot menu's last frame");
+    } else {
+        take_over(NULL, 0, 0, 0);   /* black in the session's mode, if the display is free */
+    }
 
     int cl = -1;
     uint8_t *px = NULL;
