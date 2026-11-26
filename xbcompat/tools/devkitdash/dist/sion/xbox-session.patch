@@ -38,7 +38,7 @@
  # KMS allows one master: wait for anything else on the display (Theseus,
  # when "sion restart xbox" takes over from it) to be gone.
  for _ in $(seq 1 50); do
-@@ -106,12 +137,44 @@
+@@ -106,12 +137,53 @@
  	fi
  	[ -e "$LOG" ] && mv "$LOG" "$LOG.1"
  	start=$(cut -d. -f1 /proc/uptime)
@@ -55,7 +55,16 @@
 +			rm -f "$HDD/partition1/DEVKIT/run-xboxdash"
 +			stock=1
 +		fi
-+		[ -n "$launch" ] && stock=1
++		# Only launch data meant for the dashboard (LDT_LAUNCH_DASHBOARD, 1:
++		# a game's "open the Memory screen") goes to the stock one; a game
++		# that just quits leaves LDT_NONE (ffffffff) and comes back here.
++		if [ -n "$launch" ]; then
++			if [ "$(od -An -tx1 -N4 /var/run/xbox/dashlaunch 2>/dev/null | tr -d ' \n')" = 01000000 ]; then
++				stock=1
++			else
++				launch=
++			fi
++		fi
 +	fi
 +	if [ -n "$stock" ]; then
 +		echo "$(date '+%F %T') starting the dashboard${launch:+ with launch data}"
@@ -89,7 +98,7 @@
  	rc=$?
  	ran=$(( $(cut -d. -f1 /proc/uptime) - start ))
  	echo "$(date '+%F %T') exited with $rc after ${ran}s"
-@@ -121,6 +184,8 @@
+@@ -121,6 +193,8 @@
  	fi
  	if grep -q 'XLaunchNewImage:' "$LOG"; then
  		quick_fails=0          # a game ran and quit

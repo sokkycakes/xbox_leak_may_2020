@@ -144,7 +144,16 @@ while true; do
 			rm -f "$HDD/partition1/DEVKIT/run-xboxdash"
 			stock=1
 		fi
-		[ -n "$launch" ] && stock=1
+		# Only launch data meant for the dashboard (LDT_LAUNCH_DASHBOARD, 1:
+		# a game's "open the Memory screen") goes to the stock one; a game
+		# that just quits leaves LDT_NONE (ffffffff) and comes back here.
+		if [ -n "$launch" ]; then
+			if [ "$(od -An -tx1 -N4 /var/run/xbox/dashlaunch 2>/dev/null | tr -d ' \n')" = 01000000 ]; then
+				stock=1
+			else
+				launch=
+			fi
+		fi
 	fi
 	if [ -n "$stock" ]; then
 		echo "$(date '+%F %T') starting the dashboard${launch:+ with launch data}"

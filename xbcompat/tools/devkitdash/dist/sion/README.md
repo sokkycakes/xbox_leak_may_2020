@@ -27,6 +27,7 @@ for another address.
 | xbox-hostinfo | /usr/libexec/ | writes the name and addresses to E:\DEVKIT\hostinfo.txt every 5 s |
 | xbox-bluetooth | /usr/libexec/ | pairs Bluetooth controllers for the Settings page through bluetoothctl (E:\DEVKIT\BT) |
 | xbox-session | /usr/libexec/ | the session, taught `XBOX_DASH=devkit`; the image's copy is kept as `xbox-session.pre-devkit`. The installer applies `xbox-session.patch` to the image's own session, and only uses the whole file when that session is the one the patch was made from (`xbox-session.base.sha256`). A session patched by an earlier kit is patched again from `xbox-session.pre-devkit` |
+| xbox-session.oldimage | /usr/libexec/xbox-session | on images from before the map cache (October 2026), which the patch doesn't fit: that image's session with the devkit dashboard added. The Xbox dashboard has no reset combination on those images; a game started from it comes back to the devkit dashboard when it quits, or `sion restart xbox` |
 | (one line) | /etc/default/xbox | `XBOX_DASH=devkit` |
 
 Everything is kept across reboots with `sion persist`. Without

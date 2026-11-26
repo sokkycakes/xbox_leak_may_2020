@@ -19,8 +19,8 @@ chmod 644 "$OUT/devkitdash.map"
 cp "$PKG/xbox-hostinfo" "$PKG/xbox-bluetooth" "$PKG/xbox-session" "$OUT/"
 # The session change as a patch too, for an image whose session differs
 # from this tree's, with the hash of the session it was made against.
-cp "$HERE/kit/xbox-session.patch" "$HERE/kit/xbox-session.base.sha256" "$OUT/"
+cp "$HERE/kit/xbox-session.patch" "$HERE/kit/xbox-session.base.sha256" "$HERE/kit/xbox-session.oldimage" "$OUT/"
 cp "$HERE"/kit/*.sh "$HERE/kit/README.md" "$OUT/"
 (cd "$OUT" && sha256sum devkitdash.xbe devkitdash.map xbox-hostinfo xbox-bluetooth xbox-session xbox-session.patch \
-    xbox-session.base.sha256 install-devkit.sh media/* > SHA256SUMS)
+    xbox-session.base.sha256 xbox-session.oldimage install-devkit.sh media/* > SHA256SUMS)
 echo "kit in $OUT"

@@ -33,6 +33,12 @@ if ! grep -q 'XBOX_DASH' "$base"; then
 		:
 	elif [ "$(sha256sum < "$base" | cut -d' ' -f1)" = "$(cut -d' ' -f1 "$K/xbox-session.base.sha256")" ]; then
 		cp "$K/xbox-session" /tmp/devkit-session/xbox-session
+	elif ! grep -q 'XBCOMPAT_BIN' "$base" && grep -q '"$X/bin/xbcompat" --hle "$X/dash/xboxdash.map"' "$base" &&
+	     grep -q 'quick_fails' "$base"; then
+		# An image from before the map cache (October 2026): its own session
+		# with the devkit dashboard added (xbox-session.oldimage).
+		echo "an older image: installing the devkit session made for it"
+		cp "$K/xbox-session.oldimage" /tmp/devkit-session/xbox-session
 	else
 		echo "this image's $S is not one the kit knows how to change; nothing was installed"
 		exit 1
