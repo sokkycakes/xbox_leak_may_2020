@@ -11,8 +11,10 @@ VGA-to-composite transcoder:
 
 ```
 power on ─ coreboot ─┬─ CMOS byte says "UEFI once"? ── edk2 (UEFI) ── its boot order (the "Sion" entry, USB, Windows…)
-                     └─ otherwise ── LinuxBoot ── i915 lights the TV at 480i ── menu
-                                                   ├─ Crimson                  kexec EFI/BOOT/BOOTX64.EFI  (default, 3 s)
+                     └─ otherwise ── LinuxBoot ── i915 lights the TV at 480i ─┐
+                                    nothing held ──── kexec Crimson straight away
+                                    button held ───── menu:
+                                                   ├─ Crimson                  kexec EFI/BOOT/BOOTX64.EFI
                                                    ├─ Crimson, previous image  kexec EFI/sion/previous.efi
                                                    ├─ UEFI (edk2)              set the byte, reboot
                                                    ├─ LinuxBoot shell
@@ -53,7 +55,23 @@ LinuxBoot can't lock you out of the machine.
 
 ## Using the menu
 
-Keyboard: Up/Down, Enter, or 1-9. Gamepad: d-pad or left stick, A or Start
+**The menu is hidden by default.** With nothing held, LinuxBoot boots Crimson
+as soon as it can (it looks for a held button until 2.5 s after the kernel
+starts, so a USB pad has time to show up). To get the menu, hold one of these
+while the Sion powers on, until the menu appears:
+
+- the **power button** (press it to turn the Sion on and keep holding; the
+  menu reads it from the Chrome EC, so this is the one that needs nothing
+  plugged in). Don't hold it past about 8 s, or the EC forces power off;
+- any **key** on a USB keyboard;
+- any **button** on a wired USB gamepad (a wireless pad usually isn't
+  connected that early).
+
+Shown that way, the menu waits for a choice (no countdown). If Crimson isn't
+found or fails to start, the menu comes up by itself. `SHOW=always ./build.sh`
+builds the old behaviour: the menu every boot with a countdown.
+
+In the menu: keyboard Up/Down, Enter, or 1-9. Gamepad: d-pad or left stick, A or Start
 (Xbox 360/One pads through `xpad`, other USB pads through hid-generic). Any
 input stops the countdown. USB sticks plugged in while the menu is up are
 added. With no Crimson partition found, it counts down 10 s to UEFI.
@@ -73,6 +91,8 @@ push-480i-boot's installer (efibootmgr) only works when booted through UEFI.
 ```sh
 ./build.sh            # work/coreboot_bootmenu-fizz-mrchromebox_<date>.rom
 VIDEO=native ./build.sh            # no 480i EDID: the display's own mode
+SHOW=always ./build.sh             # menu every boot, with a countdown
+HOLDWAIT=4000 ./build.sh           # look for a held button for longer (ms)
 CONNECTOR=HDMI-A-2 TIMEOUT=5 ./build.sh
 ```
 
@@ -134,3 +154,11 @@ firmware up to /data/sion, refuses unless the FMAP matches and write protect
 is off, carries RO_VPD, SMMSTORE and RW_MRC_CACHE over, writes the BIOS
 region only and verifies. The flashrom in it is a static 1.4.0 build
 (internal programmer only).
+
+## Hidden menu (2026-11-26, ROM `…20261126c`)
+
+Tested in QEMU: with nothing held the menu never draws and Crimson boots
+directly; a key held during the window brings the menu up without a
+countdown. Not testable here: the power button (the EC's switch byte at
+LPC 0x930, bit 1, only exists on the real board) and a held Xbox pad.
+Flash it with the same `flash-kit/` (`sh sion-flash.sh`).

@@ -29,6 +29,13 @@
 //	crimsonboot.font=0     keep the kernel's font (no widening for 480i)
 //	crimsonboot.font=tall  also double the font's height (less interlace
 //	                       flicker, but tall letters and 15 rows)
+//	crimsonboot.show=hold  hide the menu: boot Crimson straight away unless a
+//	                       button is held while LinuxBoot starts (the power
+//	                       button, any key, or any gamepad button); the menu
+//	                       then waits for a choice. Default: always show it.
+//	crimsonboot.holdwait=MS how long to look for a held button, counted from
+//	                       kernel start (default 2500), so a USB gamepad has
+//	                       time to show up
 package main
 
 import (
@@ -59,6 +66,8 @@ var (
 	cmosOffset = int64(0x6c)
 	widenFont  = true
 	tallFont   = false
+	hideMenu   = false
+	holdWait   = 2500 * time.Millisecond
 )
 
 // ---------------------------------------------------------------------------
@@ -94,6 +103,12 @@ func parseCmdline() {
 			if n, err := strconv.ParseInt(v, 0, 64); err == nil && n >= 0x0e && n <= 0x7f {
 				cmosOffset = n
 			}
+		case "crimsonboot.show":
+			hideMenu = v == "hold"
+		case "crimsonboot.holdwait":
+			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+				holdWait = time.Duration(n) * time.Millisecond
+			}
 		case "crimsonboot.font":
 			widenFont = v != "0"
 			tallFont = v == "tall"
@@ -124,6 +139,76 @@ func cmosAccess(write bool, v byte) (byte, error) {
 
 func cmosRead() (byte, error) { return cmosAccess(false, 0) }
 func cmosWrite(v byte) error  { _, err := cmosAccess(true, v); return err }
+
+// ---------------------------------------------------------------------------
+// "Show the menu" triggers for crimsonboot.show=hold.
+
+// ecPowerButtonHeld reads the Chrome EC's switch byte from its LPC memory map
+// (0x900 + EC_MEMMAP_SWITCHES). The EC sees the button itself, so a press
+// that powered the machine on still reads as held here. The map is only
+// trusted when it carries the EC's "EC" signature (QEMU reads 0xff).
+func ecPowerButtonHeld() bool {
+	f, err := os.Open("/dev/port")
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	b := make([]byte, 2)
+	if _, err := f.ReadAt(b, 0x900+0x20); err != nil || b[0] != 'E' || b[1] != 'C' {
+		return false
+	}
+	if _, err := f.ReadAt(b[:1], 0x900+0x30); err != nil {
+		return false
+	}
+	return b[0]&0x02 != 0 // EC_SWITCH_POWER_BUTTON_PRESSED
+}
+
+// heldInput names the first input device that has a key or button down
+// right now (EVIOCGKEY), so a button held since before the device appeared
+// counts as well as one pressed later.
+func heldInput() string {
+	paths, _ := filepath.Glob("/dev/input/event*")
+	for _, p := range paths {
+		f, err := os.Open(p)
+		if err != nil {
+			continue
+		}
+		var bits [96]byte // KEY_MAX 0x2ff
+		req := uintptr(2<<30 | len(bits)<<16 | 'E'<<8 | 0x18)
+		_, _, e := unix.Syscall(unix.SYS_IOCTL, f.Fd(), req, uintptr(unsafe.Pointer(&bits[0])))
+		f.Close()
+		if e != 0 {
+			continue
+		}
+		for _, c := range bits {
+			if c != 0 {
+				name, _ := os.ReadFile("/sys/class/input/" + filepath.Base(p) + "/device/name")
+				return strings.TrimSpace(string(name))
+			}
+		}
+	}
+	return ""
+}
+
+// menuWanted looks for a held button until holdWait after kernel start.
+func menuWanted() bool {
+	for {
+		if ecPowerButtonHeld() {
+			logf("power button held: showing the menu")
+			return true
+		}
+		if n := heldInput(); n != "" {
+			logf("button held on %q: showing the menu", n)
+			return true
+		}
+		var ts unix.Timespec
+		unix.ClockGettime(unix.CLOCK_BOOTTIME, &ts)
+		if time.Duration(ts.Nano()) >= holdWait {
+			return false
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
 
 // ---------------------------------------------------------------------------
 // Console: a font widened for the 2880x480i super resolution, ANSI drawing.
@@ -547,6 +632,55 @@ func (s *screen) draw(entries []entry, sel int, footer, status string) {
 
 // ---------------------------------------------------------------------------
 
+// bootHidden is crimsonboot.show=hold: with no button held it kexecs the
+// default Crimson without drawing anything. It returns only when the menu
+// should come up, with the reason.
+func bootHidden() string {
+	known := map[string]*esp{}
+	tried := map[string]bool{}
+	if menuWanted() {
+		return "button held"
+	}
+	for {
+		scanESPs(known, tried)
+		if len(known) > 0 {
+			break
+		}
+		// No Crimson yet: give a USB stick until 2 s past the hold window.
+		var ts unix.Timespec
+		unix.ClockGettime(unix.CLOCK_BOOTTIME, &ts)
+		if time.Duration(ts.Nano()) >= holdWait+2*time.Second {
+			return "no Crimson boot partition found"
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	var def *esp
+	for _, e := range known {
+		if def == nil || (def.removable && !e.removable) || (def.removable == e.removable && e.dev < def.dev) {
+			def = e
+		}
+	}
+	clearPendingMark()
+	es := crimsonEntries(def)
+	if err := es[0].run(); err != nil {
+		logf("booting %s: %v", es[0].label, err)
+		unmountAll()
+		return "booting Crimson failed"
+	}
+	return "kexec returned"
+}
+
+// clearPendingMark tells coreboot that LinuxBoot works.
+func clearPendingMark() {
+	if v, err := cmosRead(); err != nil {
+		logf("reading CMOS: %v", err)
+	} else if v == cmosAltPending {
+		if err := cmosWrite(0); err != nil {
+			logf("clearing the CMOS mark: %v", err)
+		}
+	}
+}
+
 func main() {
 	parseCmdline()
 	os.MkdirAll(mountRoot, 0o755)
@@ -556,6 +690,13 @@ func main() {
 		tty = os.Stdout
 	}
 	restore := quiet(tty)
+
+	if hideMenu {
+		if quick := bootHidden(); quick != "" {
+			logf("%s: showing the menu", quick)
+		}
+		timeout = -1
+	}
 
 	// i915 (or bochs in QEMU) needs a moment to probe; the menu needs its
 	// framebuffer to pick the font.
@@ -582,13 +723,7 @@ func main() {
 	}
 
 	// The menu is up: tell coreboot LinuxBoot works.
-	if v, err := cmosRead(); err != nil {
-		logf("reading CMOS: %v", err)
-	} else if v == cmosAltPending {
-		if err := cmosWrite(0); err != nil {
-			logf("clearing the CMOS mark: %v", err)
-		}
-	}
+	clearPendingMark()
 
 	build := func() []entry {
 		var es []entry

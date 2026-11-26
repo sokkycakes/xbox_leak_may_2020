@@ -19,7 +19,11 @@
 #                  so the menu and the handoff are 15 kHz 2880x480i
 #   VIDEO=native   no EDID override: the display's own preferred mode
 #   CONNECTOR=HDMI-A-1   the port the transcoder hangs off
-#   TIMEOUT=3      seconds before Crimson boots by itself
+#   TIMEOUT=3      seconds before Crimson boots by itself (menu shown)
+#   SHOW=hold      (default) no menu unless a button is held at power-on:
+#                  the power button, a key, or a gamepad button
+#   SHOW=always    the menu every boot, with the TIMEOUT countdown
+#   HOLDWAIT=2500  ms after kernel start to look for a held button
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -33,6 +37,8 @@ JOBS="${JOBS:-$(nproc)}"
 VIDEO="${VIDEO:-480i}"
 CONNECTOR="${CONNECTOR:-HDMI-A-1}"
 TIMEOUT="${TIMEOUT:-3}"
+SHOW="${SHOW:-hold}"
+HOLDWAIT="${HOLDWAIT:-2500}"
 
 PAYLOAD="$WORK/payload"
 mkdir -p "$PAYLOAD"
@@ -87,6 +93,11 @@ xz --stdout --force --check=crc32 --lzma2=dict=1MiB "$WORK/initramfs.cpio" \
 
 CMDLINE="console=tty0 quiet loglevel=3 vt.global_cursor_default=0 i915.fastboot=1 crimsonboot.timeout=$TIMEOUT"
 CMDLINE="$CMDLINE crimsonboot.cmos=$(sed -n 's/^CONFIG_PAYLOAD_CMOS_SELECT_OFFSET=//p' "$HERE/config.fizz.bootmenu")"
+case "$SHOW" in
+hold) CMDLINE="$CMDLINE crimsonboot.show=hold crimsonboot.holdwait=$HOLDWAIT" ;;
+always) ;;
+*) echo "SHOW must be hold or always" >&2; exit 1 ;;
+esac
 case "$VIDEO" in
 480i) CMDLINE="$CMDLINE drm.edid_firmware=$CONNECTOR:edid/crimson-480i.edid" ;;
 native) ;;
