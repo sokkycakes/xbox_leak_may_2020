@@ -3,8 +3,11 @@
 # Flash the boot-menu ROM on the Sion (Acer CXI3, google/fizz), from Crimson,
 # as root, from this folder:   sh sion-flash.sh
 #
-# 1. Reads the current firmware twice (the reads must match) and keeps it as
-#    /data/sion/firmware-backup-<time>.rom. Copy that off the Sion.
+# 1. Reads the current BIOS region twice (the reads must match) and keeps it
+#    as /data/sion/firmware-backup-<time>.rom. Copy that off the Sion. The ME
+#    region can't be read from the OS (it's locked) and is never written, so
+#    the backup holds the BIOS region and 0xff elsewhere: restore it with
+#    --ifd -i bios, or with a clip, a layout that writes 0x200000-0xffffff.
 # 2. Refuses unless the current flash has the same FMAP layout as the new
 #    ROM (true for MrChromebox's fizz full ROM) and write protect is off.
 # 3. Carries over from the backup: RO_VPD (MAC address, serial),
@@ -31,9 +34,9 @@ say() { echo "sion-flash: $*"; }
 chmod +x "$FR"
 mkdir -p "$W"
 
-say "reading the current firmware (twice)"
-"$FR" -p internal -r "$W/read1.rom" > "$W/read1.log" 2>&1 || { cat "$W/read1.log"; die "read failed"; }
-"$FR" -p internal -r "$W/read2.rom" > "$W/read2.log" 2>&1 || { cat "$W/read2.log"; die "second read failed"; }
+say "reading the current BIOS region (twice)"
+"$FR" -p internal --ifd -i bios -r "$W/read1.rom" > "$W/read1.log" 2>&1 || { cat "$W/read1.log"; die "read failed"; }
+"$FR" -p internal --ifd -i bios -r "$W/read2.rom" > "$W/read2.log" 2>&1 || { cat "$W/read2.log"; die "second read failed"; }
 cmp -s "$W/read1.rom" "$W/read2.rom" || die "the two reads differ; not flashing"
 cp "$W/read1.rom" "$B"
 sync
