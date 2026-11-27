@@ -92,8 +92,11 @@ bring_up() {
 	fi
 	if ! alive "$SION_RUN/udhcpc.$ifc.pid"; then
 		ip link set "$ifc" up
+		# udhcpc -b only goes to the background after its first tries
+		# (-t 5 -T 3: 15 s and more); on an unplugged port that held up
+		# every interface after it, Wi-Fi included. Not waiting for it.
 		udhcpc -b -S -R -t 5 -T 3 -A 10 -i "$ifc" -x "hostname:$HOSTNAME" \
-			-p "$SION_RUN/udhcpc.$ifc.pid" > /dev/null 2>&1
+			-p "$SION_RUN/udhcpc.$ifc.pid" > /dev/null 2>&1 &
 	fi
 }
 
