@@ -32,6 +32,7 @@ void  Kms_Shutdown();
 void* Kms_GetProcAddress(const char* name);
 const char* Kms_Describe();
 void  Kms_ShowFrame(unsigned int fbo, int width, int height);
+bool  Kms_HandOff(const char* path);
 #endif
 
 #ifdef BOOTANI_HAVE_ALSA

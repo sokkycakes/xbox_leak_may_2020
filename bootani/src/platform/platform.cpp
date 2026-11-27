@@ -112,6 +112,15 @@ void Platform_ShowFrame(unsigned int fbo, int width, int height)
     (void)fbo; (void)width; (void)height;
 }
 
+bool Platform_HandOff(const char* path)
+{
+#ifdef BOOTANI_HAVE_KMS
+    if (g_backend == BACKEND_KMS) return Kms_HandOff(path);
+#endif
+    (void)path;
+    return false;
+}
+
 bool Platform_PumpEvents()
 {
 #ifdef BOOTANI_HAVE_SDL2

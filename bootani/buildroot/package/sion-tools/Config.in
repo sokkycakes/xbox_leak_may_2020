@@ -34,6 +34,26 @@ config BR2_PACKAGE_SION_TOOLS
 	  Settings come from sion/sion.conf on the boot disk's EFI
 	  partition.
 
+if BR2_PACKAGE_SION_TOOLS
+
+config BR2_PACKAGE_SION_TOOLS_SPLIT_ROOT
+	bool "system on SIONDATA, small early initramfs"
+	depends on BR2_TARGET_ROOTFS_INITRAMFS
+	depends on BR2_TARGET_ROOTFS_SQUASHFS
+	help
+	  Instead of carrying the whole root filesystem in the kernel
+	  (unpacked into RAM at every boot, seconds for a few hundred
+	  MB), the kernel carries a small early root filesystem
+	  (sion-early-init and what it needs) and the system goes into
+	  rootfs.squashfs, installed as sion/root/ID.sqfs on SIONDATA.
+	  The early init mounts it with /data/overlay and a RAM layer
+	  over it. "sion update" installs both files.
+
+	  Needs the kernel to have squashfs, loop, overlayfs, tmpfs
+	  xattrs and the boot disk's drivers built in.
+
+endif
+
 comment "sion-tools needs a toolchain w/ threads, dynamic library"
 	depends on BR2_USE_MMU
 	depends on BR2_PACKAGE_EFIVAR_ARCH_SUPPORTS

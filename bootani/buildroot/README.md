@@ -11,7 +11,9 @@ screen, with no X11 or Wayland.
   script. On SIGTERM it hands the screen back to the console.
 - The kernel is a UEFI executable with the whole root filesystem inside it
   as an initramfs, so the GPU driver, its firmware and bootani are all there
-  before any disk is touched.
+  before any disk is touched. On the Sion the kernel carries only a small
+  early root filesystem and the system is a squashfs on the disk (see
+  "The Sion's split system" below).
 
 ## The Xbox's own boot animation and dashboard (xbcompat)
 
@@ -19,10 +21,17 @@ With `package/xbcompat` (on in `sion_bootani_defconfig`), the Sion boots the
 way an Xbox does, with the leak's own programs run by xbcompat (`xbcompat/`
 in this repository), straight on KMSDRM:
 
-- `S00bootani` plays the original boot animation, ani2's `Bootscreen.xbe`,
-  through `/usr/libexec/xbox-boot`. If xbcompat can't start, bootani plays
-  instead. `BOOT_ANIMATION=bootani` in `/etc/default/bootani` always plays
-  bootani.
+- `S00bootani` plays bootani, the native animation. Its last frame, the
+  logo, stays on screen until the dashboard draws, as on the Xbox: bootani
+  holds it (`--handoff`) until the dashboard's session starts its display
+  keeper (`xbox-av`), gives the frame to it, and `xbox-av` keeps it up
+  until the dashboard's first frame. `BOOT_ANIMATION=xbox` in
+  `/etc/default/bootani` (or in `/data/overlay/etc/default/bootani`) plays
+  the original instead, ani2's `Bootscreen.xbe`, through
+  `/usr/libexec/xbox-boot`; if xbcompat can't start, bootani plays. When
+  the kernel command line has `sion.bootani=done` (the LinuxBoot boot menu
+  played it already), nothing plays, and `xbox-av` keeps the menu's last
+  frame until the dashboard draws.
 - `S98xbox` then runs the dashboard, `xboxdash.xbe`, through
   `/usr/libexec/xbox-session`. A game it starts replaces it in the same
   process; when the game quits (or asks for the dashboard with launch data),
@@ -90,8 +99,8 @@ reachable for testing and lets it take new images safely:
   system partition with `EFI/BOOT/BOOTX64.EFI` (the whole system), room for
   two more images, and the folders a PC edits: `sion/` and `theseus/`.
   `SIONDATA` (ext4) is mounted on `/data` and grows (up to 16 GiB) on
-  first boot. The root filesystem still runs from RAM, so `/data` is the
-  only thing that persists.
+  first boot. It also holds the system itself (see below), read-only; `/`
+  is a RAM layer over it, so `/data` is the only thing that persists.
 - **Network.** `sion/sion.conf` on the stick holds the Wi-Fi network
   (`WIFI_SSID`, `WIFI_PASSWORD`), the root password and the hostname. Wired
   Ethernet and USB Ethernet adapters (ASIX, Realtek, CDC ECM/NCM, RNDIS)
@@ -103,10 +112,13 @@ reachable for testing and lets it take new images safely:
   `/data/sion/ssh/authorized_keys`). Host keys are kept on `/data`, so the
   machine's identity survives reboots.
 - **Pushing files.** Anything copied in with `scp` lasts until reboot.
-  `sion persist PATH...` copies files into `/data/overlay`, which is copied
-  over `/` at every boot (before everything but the boot animation).
+  `sion persist PATH...` copies files into `/data/overlay`, which is a
+  layer of `/` from the start of every boot (images before the split
+  system copied it over `/` after the boot animation started).
   `sion restart theseus` restarts the dashboard.
-- **Image updates.** `sion update FILE` writes a new `BOOTX64.EFI` to
+- **Image updates.** `sion update FILE [SYSTEM]` first copies the image's
+  system (`crimson-root-ID.sqfs`, found next to `FILE` when not given) to
+  `/data/sion/root/ID.sqfs`, then writes the new `BOOTX64.EFI` to
   `EFI/sion/trial.efi`, adds a UEFI boot entry for it and sets `BootNext`,
   so the firmware boots it exactly once. If that boot has `sshd` (and the
   dashboard, when the image has one) up for 30 seconds, the trial becomes
@@ -124,10 +136,58 @@ reachable for testing and lets it take new images safely:
 From a PC on the same network (Windows has `ssh` and `scp` built in):
 
     ssh root@sion.local sion status
-    scp BOOTX64.EFI root@sion.local:/data/
+    scp BOOTX64.EFI crimson-root-*.sqfs root@sion.local:/data/
     ssh root@sion.local sion update /data/BOOTX64.EFI
 
-## Build
+The first update from an image older than the split system runs that
+image's `sion`, which only copies `BOOTX64.EFI`. Put the system in place by
+hand first, under its ID (the part of the file name after `crimson-root-`):
+
+    ssh root@sion.local "mkdir -p /data/sion/root && cp /data/crimson-root-ID.sqfs /data/sion/root/ID.sqfs"
+
+If it's missing anyway, the new image goes back to the previous one by
+itself (see below).
+
+## The Sion's split system
+
+The whole system used to be an initramfs inside `BOOTX64.EFI`: about 600 MB,
+gzip-compressed twice (once as the initramfs, once with the kernel), which
+the firmware read and the EFI stub and the kernel unpacked into RAM before
+i915 could even show a picture; on the Sion that took about 4 seconds after
+the kernel started, plus the firmware's share, and then `S03sion` copied
+`/data/overlay` (hundreds of MB of pushed files) over it during the
+animation.
+
+With `BR2_PACKAGE_SION_TOOLS_SPLIT_ROOT` (on in `sion_bootani_defconfig`):
+
+- `rootfs.squashfs` (zstd) is the system. `post-image.sh` names it
+  `crimson-root-ID.sqfs` and puts it on the image's SIONDATA as
+  `sion/root/ID.sqfs`. ID is new at every build; the system has it in
+  `/etc/sion-root-id`, and the kernel's version string says
+  `buildroot@sionroot-ID`, which is how `sion update` tells which system a
+  `BOOTX64.EFI` needs.
+- `rootfs.cpio`, the kernel's initramfs, is cut down by `sion-mkearly` to a
+  few MB: busybox, `blkid`, `efibootmgr`, `e2fsck`, `sfdisk`, `partx`,
+  `resize2fs` and their libraries, the 15 kHz EDID and i915's DMC firmware,
+  and `sion-early-init` as `/init`.
+- `sion-early-init` finds the boot disk as `S03sion` does (UEFI's
+  `BootCurrent`, or `sion.esp=PARTUUID` from the LinuxBoot menu, then the
+  `SIONBOOT` label), grows, checks and mounts SIONDATA on `/data`, mounts
+  `sion/root/ID.sqfs`, and puts an overlayfs over it: a tmpfs on top (so
+  `/` is writable and starts fresh at every boot, as before), then
+  `/data/overlay`, then the system. Then it starts the system's init. The
+  layers are on `/media/sion/` to look at; `sion status` shows them.
+- If the system file is missing (an older `sion update` copied only the
+  image), the early init swaps `EFI/sion/previous.efi` back in, as
+  `sion rollback` does, and reboots; a trial image just reboots, back to
+  the previous one. `sion/logs/update.txt` and `sion/logs/early.txt` on the
+  EFI partition say what happened.
+- `/data/overlay` is copied over `/` the old way only when it has a
+  directory where the system has a symbolic link (such as `lib64/`), which
+  a layer would hide instead of following.
+- Without a SIONDATA partition, the system can sit on the EFI partition as
+  `EFI/sion/root/ID.sqfs`.
+
 
     git clone https://gitlab.com/buildroot.org/buildroot.git
     cd buildroot
@@ -136,7 +196,9 @@ From a PC on the same network (Windows has `ssh` and `scp` built in):
 
 Outputs in `output/images/`:
 
-- `bzImage`: the kernel with the root filesystem built in, bootable from UEFI
+- `bzImage`: the kernel with the root filesystem (on the Sion, the early
+  root filesystem) built in, bootable from UEFI
+- `crimson-root-ID.sqfs` (Sion): the system, for `sion update`
 - `bootani-usb.img`: a GPT disk image with that kernel as `EFI/BOOT/BOOTX64.EFI`
 
 Write the image to a USB stick with `dd if=output/images/bootani-usb.img of=/dev/sdX bs=4M`.

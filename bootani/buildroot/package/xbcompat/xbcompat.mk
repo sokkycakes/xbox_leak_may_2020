@@ -7,6 +7,9 @@
 # Prebuilt by xbcompat/tools/sion/bundle.sh (a 32-bit tree with its own
 # loader and libraries); nothing to download or build here.
 XBCOMPAT_VERSION = local
+# /opt/xbcompat is a 32-bit (i386) tree with its own loader beside the 64-bit
+# system, on purpose: keep Buildroot's architecture check out of it.
+XBCOMPAT_BIN_ARCH_EXCLUDE = /opt/xbcompat
 XBCOMPAT_SOURCE =
 XBCOMPAT_LICENSE = Proprietary (Microsoft Xbox titles), MIT (XbSymbolDatabase), LGPL (glibc), Zlib (SDL2), MIT (Mesa)
 XBCOMPAT_BUNDLE = $(call qstrip,$(BR2_PACKAGE_XBCOMPAT_BUNDLE))
@@ -84,6 +87,8 @@ define XBCOMPAT_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(@D)/build-buildroot/xbox-av $(TARGET_DIR)/opt/xbcompat/bin/xbox-av
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/xbox-boot $(TARGET_DIR)/usr/libexec/xbox-boot
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/xbox-session $(TARGET_DIR)/usr/libexec/xbox-session
+	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/xbox-hostinfo $(TARGET_DIR)/usr/libexec/xbox-hostinfo
+	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/xbox-bluetooth $(TARGET_DIR)/usr/libexec/xbox-bluetooth
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/xbox-title $(TARGET_DIR)/usr/libexec/xbox-title
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/xbox-env $(TARGET_DIR)/usr/lib/xbox/xbox-env
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/dashboard $(TARGET_DIR)/usr/libexec/dashboard
@@ -111,6 +116,8 @@ define XBCOMPAT_INSTALL_TARGET_CMDS
 	tar -C $(TARGET_DIR)/opt -xzf $(XBCOMPAT_BUNDLE)
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/xbox-boot $(TARGET_DIR)/usr/libexec/xbox-boot
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/xbox-session $(TARGET_DIR)/usr/libexec/xbox-session
+	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/xbox-hostinfo $(TARGET_DIR)/usr/libexec/xbox-hostinfo
+	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/xbox-bluetooth $(TARGET_DIR)/usr/libexec/xbox-bluetooth
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/xbox-title $(TARGET_DIR)/usr/libexec/xbox-title
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/xbox-env $(TARGET_DIR)/usr/lib/xbox/xbox-env
 	$(INSTALL) -D -m 0755 $(XBCOMPAT_PKGDIR)/dashboard $(TARGET_DIR)/usr/libexec/dashboard

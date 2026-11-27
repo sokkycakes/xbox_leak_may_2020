@@ -21,8 +21,11 @@ if [ -x /usr/libexec/theseus-stick ]; then
 fi
 
 # bootani owns the display until its last frame; KMS allows one master.
+# SIGUSR1: it may be holding its last frame for xbox-av, which this
+# dashboard doesn't use; this makes it leave when the animation ends.
 if [ -r "$BOOTANI_PIDFILE" ]; then
 	pid=$(cat "$BOOTANI_PIDFILE")
+	[ -n "$pid" ] && kill -USR1 "$pid" 2>/dev/null
 	while [ -n "$pid" ] && [ -d "/proc/$pid" ]; do
 		sleep 0.1
 	done

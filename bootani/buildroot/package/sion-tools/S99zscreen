@@ -1,0 +1,27 @@
+#!/bin/sh
+#
+# Shutdown and reboot: the TV gets no signal from here on, instead of
+# whatever the console's mode is once the dashboard (and xbox-av, which
+# holds the display) stops. The VGA-to-composite transcoder must never see
+# 31 kHz. Named to be the first script rcK stops.
+#
+# Each connected display connector is forced "off": when the last program
+# holding the display lets go, the kernel's console finds nothing to light
+# up and turns the output off. The next boot starts with every connector
+# back on "detect".
+#
+
+case "$1" in
+	start)
+		;;
+	stop)
+		for s in /sys/class/drm/card*-*/status; do
+			[ -w "$s" ] || continue
+			[ "$(cat "$s")" = connected ] && echo off > "$s" 2>/dev/null
+		done
+		;;
+	*)
+		echo "Usage: $0 {start|stop}"
+		exit 1
+esac
+exit 0

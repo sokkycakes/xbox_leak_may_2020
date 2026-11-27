@@ -1,0 +1,211 @@
+#!/bin/sh
+#
+# xbox-bluetooth DIR [PID]
+#
+# Bluetooth controller pairing for the devkit dashboard, through BlueZ's
+# bluetoothctl, for as long as PID runs (default: forever).  The dashboard
+# and this script talk through two small files in DIR (E:\DEVKIT\BT):
+#
+#   request.txt   written by the dashboard, one command and a newline:
+#                 "scan", "pair MAC", "connect MAC", "disconnect MAC",
+#                 "remove MAC"; taken (deleted) here once read
+#   state.txt     written here every two seconds, replaced whole:
+#                   adapter=yes|no|none    (none: no Bluetooth on this system)
+#                   powered=yes|no
+#                   scanning=yes|no
+#                   busy=Pairing Xbox Wireless Controller   (while it lasts)
+#                   message=Paired Xbox Wireless Controller (for a while after)
+#                   dev=MAC|paired|connected|icon|name      (one per device)
+#
+# One bluetoothctl stays open on a pipe for the whole run, so its agent
+# (NoInputNoOutput: game controllers pair with "just works") and a running
+# scan last; the state is read with one-shot bluetoothctl calls.  Paired
+# devices are trusted, so a controller reconnects by itself when it is
+# switched on.
+#
+
+dir=$1
+parent=$2
+BTCTL=${BTCTL:-bluetoothctl}
+[ -n "$dir" ] || { echo "usage: xbox-bluetooth DIR [PID]" >&2; exit 2; }
+mkdir -p "$dir"
+req="$dir/request.txt"
+state="$dir/state.txt"
+rm -f "$req"
+
+now() { cut -d. -f1 /proc/uptime; }
+alive() { [ -z "$parent" ] || kill -0 "$parent" 2>/dev/null; }
+
+put_state() { # the whole file, from stdin
+	cat > "$state.new" && mv -f "$state.new" "$state"
+}
+
+if ! command -v "$BTCTL" > /dev/null 2>&1; then
+	printf 'adapter=none\nmessage=This system has no Bluetooth support\n' | put_state
+	while alive; do sleep 5; done
+	exit 0
+fi
+
+# Xbox One controllers on their first Bluetooth firmware (classic, not LE)
+# only connect with ERTM off.
+if [ -w /sys/module/bluetooth/parameters/disable_ertm ]; then
+	echo Y > /sys/module/bluetooth/parameters/disable_ertm 2>/dev/null
+fi
+
+fifo=${TMPDIR:-/tmp}/xbox-bluetooth.$$
+rm -f "$fifo"
+mkfifo "$fifo" || exit 1
+# The long-lived bluetoothctl reads the pipe; fd 3 holds it open for writing.
+"$BTCTL" < "$fifo" > "${TMPDIR:-/tmp}/xbox-bluetooth.log" 2>&1 &
+ctl=$!
+exec 3> "$fifo"
+cleanup() {
+	echo "scan off" >&3 2>/dev/null
+	echo "quit" >&3 2>/dev/null
+	exec 3>&-
+	sleep 0.3
+	kill "$ctl" 2>/dev/null
+	rm -f "$fifo"
+}
+trap 'cleanup; exit 0' INT TERM
+say() { echo "$*" >&3; }
+
+say "agent NoInputNoOutput"
+say "default-agent"
+say "power on"
+say "pairable on"
+
+scan_until=0
+pair_mac=
+pair_until=0
+busy=
+message=
+message_until=0
+
+name_of() { # MAC
+	"$BTCTL" info "$1" 2>/dev/null | sed -n 's/^[[:space:]]*Name: //p' | head -n 1
+}
+
+set_message() {
+	message=$1
+	message_until=$(( $(now) + 6 ))
+}
+
+valid_mac() {
+	echo "$1" | grep -Eq '^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$'
+}
+
+handle_request() {
+	[ -s "$req" ] || return
+	# Only a whole line: the dashboard may still be writing it.
+	[ "$(tail -c 1 "$req" | wc -l)" -eq 1 ] || return
+	line=$(head -n 1 "$req" | tr -d '\r')
+	rm -f "$req"
+	dirty=1
+	cmd=${line%% *}
+	mac=${line#* }
+	[ "$mac" = "$line" ] && mac=
+	if [ -n "$mac" ] && ! valid_mac "$mac"; then
+		return
+	fi
+	case $cmd in
+	scan)
+		say "power on"
+		say "scan on"
+		scan_until=$(( $(now) + 30 ))
+		;;
+	pair)
+		[ -n "$mac" ] || return
+		n=$(name_of "$mac")
+		[ -n "$pair_mac" ] && [ "$pair_mac" != "$mac" ] && say "cancel-pairing $pair_mac"
+		say "scan off"
+		scan_until=0
+		say "pair $mac"
+		pair_mac=$mac
+		pair_until=$(( $(now) + 30 ))
+		busy="Pairing ${n:-$mac}"
+		;;
+	connect)
+		[ -n "$mac" ] && say "connect $mac"
+		set_message "Connecting $(name_of "$mac")"
+		;;
+	disconnect)
+		[ -n "$mac" ] && say "disconnect $mac"
+		set_message "Disconnected $(name_of "$mac")"
+		;;
+	remove)
+		[ -n "$mac" ] || return
+		n=$(name_of "$mac")
+		say "remove $mac"
+		set_message "Forgot ${n:-$mac}"
+		;;
+	esac
+}
+
+check_pairing() {
+	[ -n "$pair_mac" ] || return
+	info=$("$BTCTL" info "$pair_mac" 2>/dev/null)
+	n=$(echo "$info" | sed -n 's/^[[:space:]]*Name: //p' | head -n 1)
+	if echo "$info" | grep -q 'Paired: yes'; then
+		say "trust $pair_mac"
+		say "connect $pair_mac"
+		set_message "Paired ${n:-$pair_mac}"
+		pair_mac=
+		busy=
+	elif [ "$(now)" -ge "$pair_until" ]; then
+		say "cancel-pairing $pair_mac"
+		set_message "Could not pair ${n:-$pair_mac}: hold its pairing button and try again"
+		pair_mac=
+		busy=
+	fi
+}
+
+write_state() {
+	show=$("$BTCTL" show 2>/dev/null)
+	if ! echo "$show" | grep -q '^Controller '; then
+		printf 'adapter=no\n' | put_state
+		return
+	fi
+	powered=no
+	echo "$show" | grep -q 'Powered: yes' && powered=yes
+	scanning=no
+	echo "$show" | grep -q 'Discovering: yes' && scanning=yes
+	[ "$(now)" -ge "$message_until" ] && message=
+	{
+		echo "adapter=yes"
+		echo "powered=$powered"
+		echo "scanning=$scanning"
+		[ -n "$busy" ] && echo "busy=$busy"
+		[ -n "$message" ] && echo "message=$message"
+		"$BTCTL" devices 2>/dev/null | sed -n 's/^Device \([0-9A-Fa-f:]\{17\}\) .*/\1/p' | head -n 24 |
+		while read -r mac; do
+			info=$("$BTCTL" info "$mac" 2>/dev/null)
+			n=$(echo "$info" | sed -n 's/^[[:space:]]*Name: //p' | head -n 1 | tr -d '|')
+			[ -n "$n" ] || continue      # nameless advertisers: nothing to show
+			p=no; c=no
+			echo "$info" | grep -q 'Paired: yes' && p=yes
+			echo "$info" | grep -q 'Connected: yes' && c=yes
+			icon=$(echo "$info" | sed -n 's/^[[:space:]]*Icon: //p' | head -n 1)
+			echo "dev=$mac|$p|$c|$icon|$n"
+		done
+	} | put_state
+}
+
+tick=0
+dirty=1
+while alive && kill -0 "$ctl" 2>/dev/null; do
+	handle_request
+	check_pairing
+	if [ "$scan_until" -gt 0 ] && [ "$(now)" -ge "$scan_until" ]; then
+		say "scan off"
+		scan_until=0
+	fi
+	# The state every two seconds, and at once after a request.
+	if [ -n "$dirty" ] || [ $((tick % 2)) -eq 0 ] || [ -n "$pair_mac" ]; then
+		write_state
+		dirty=
+	fi
+	tick=$((tick + 1))
+	sleep 1
+done
+cleanup

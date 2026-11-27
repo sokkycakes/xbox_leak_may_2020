@@ -21,7 +21,11 @@ usage() {
 Usage: sion COMMAND
 
   status                 image version, boot disk, update state, addresses
-  update FILE [OPTIONS]  install FILE (a BOOTX64.EFI) as the system image
+  update FILE [SYSTEM] [OPTIONS]
+                         install FILE (a BOOTX64.EFI) as the system image;
+                         newer images also need their system file
+                         (crimson-root-ID.sqfs), found next to FILE if
+                         SYSTEM isn't given
       --no-reboot          install, but don't reboot into it yet
       --direct             replace the image now, with no trial boot (for
                            firmware that can't boot an entry once)
@@ -29,7 +33,7 @@ Usage: sion COMMAND
   rollback [--no-reboot] swap back to the previous image
   reboot                 reboot into this stick, whatever the boot order says
   persist PATH...        keep files across reboots: copies them into
-                         /data/overlay, which is copied over / at every boot
+                         /data/overlay, which is laid over / at every boot
   overlay list|clear     show or empty /data/overlay
   restart dashboard|xbox|theseus|net|ssh
   logs [sion|xbox|xbox-session|theseus|bootani|messages|dmesg]
@@ -105,14 +109,69 @@ promote() {
 	sync
 }
 
+# The system file (ID.sqfs) for an image's ID: given on the command line, or
+# next to the image, under the name the build gives it or as ID.sqfs.
+find_system() {
+	for f in $systems "$(dirname "$1")/crimson-root-$2.sqfs" "$(dirname "$1")/$2.sqfs"; do
+		[ -r "$f" ] && echo "$f" && return 0
+	done
+	return 1
+}
+
+# Where system files go: SIONDATA, or the EFI partition (mounted on $1)
+# when there is none.
+systems_dir() {
+	if mountpoint -q "$SION_DATA"; then
+		echo "$SION_ROOTS"
+	else
+		echo "$1/$EFI_DIR/root"
+	fi
+}
+
+# Copies the system file $1 in as $2/$3.sqfs, checked against the disk.
+install_system() {
+	src=$1 dir=$2 id=$3
+	mkdir -p "$dir"
+	[ "$(sha256sum "$src" | cut -d' ' -f1)" = "$(sha256sum "$dir/$id.sqfs" 2>/dev/null | cut -d' ' -f1)" ] && return 0
+	need=$(( $(size_of "$src") / 1024 + 1024 ))
+	free=$(df -k "$dir" | awk 'NR == 2 { print $4 }')
+	[ "$free" -gt "$need" ] || die "not enough room for the system in $dir (${free} KiB free, ${need} KiB needed)"
+	echo "copying the system, $(( $(size_of "$src") / 1048576 )) MiB..."
+	ssha=$(sha256sum "$src" | cut -d' ' -f1)
+	cp "$src" "$dir/$id.tmp" || die "copying the system failed"
+	sync
+	echo 3 > /proc/sys/vm/drop_caches
+	[ "$(sha256sum "$dir/$id.tmp" | cut -d' ' -f1)" = "$ssha" ] || die "the system's copy on the disk doesn't match; the disk may be failing"
+	mv "$dir/$id.tmp" "$dir/$id.sqfs"
+	sync
+}
+
+# Removes system files no image on the EFI partition (mounted on $1) or
+# the running system uses.
+prune_systems() {
+	keep=" $(cat /etc/sion-root-id 2>/dev/null) "
+	for f in "$1/$CURRENT" "$1/$EFI_DIR/previous.efi" "$1/$EFI_DIR/trial.efi" "$1/$EFI_DIR/failed.efi"; do
+		[ -e "$f" ] && keep="$keep$(efi_root_id "$f") "
+	done
+	for dir in "$SION_ROOTS" "$1/$EFI_DIR/root"; do
+		for f in "$dir"/*.sqfs "$dir"/*.tmp; do
+			[ -e "$f" ] || continue
+			id=$(basename "$f"); id=${id%.*}
+			case "$keep" in *" $id "*) [ "${f%.tmp}" = "$f" ] && continue ;; esac
+			rm -f "$f" && log "removed the unused system $f"
+		done
+	done
+}
+
 cmd_update() {
-	file= reboot=yes direct= want_sha=
+	file= reboot=yes direct= want_sha= systems=
 	while [ $# -gt 0 ]; do
 		case "$1" in
 			--no-reboot) reboot= ;;
 			--direct) direct=yes ;;
 			--sha256) want_sha=$2; shift ;;
 			-*) die "unknown option $1" ;;
+			*.sqfs) systems="$systems $1" ;;
 			*) file=$1 ;;
 		esac
 		shift
@@ -122,6 +181,12 @@ cmd_update() {
 	is_efi_image "$file" || die "$file is not a UEFI executable"
 	sha=$(sha256sum "$file" | cut -d' ' -f1)
 	[ -z "$want_sha" ] || [ "$want_sha" = "$sha" ] || die "SHA-256 mismatch: $file is $sha"
+	id=$(efi_root_id "$file")
+	system=
+	if [ -n "$id" ]; then
+		system=$(find_system "$file" "$id") || [ -r "$SION_ROOTS/$id.sqfs" ] ||
+			die "$file needs its system, crimson-root-$id.sqfs: copy it next to $file (or name it after $file)"
+	fi
 
 	m=$(esp_mount) || die "boot EFI partition not found"
 	trap 'esp_umount "$m"' EXIT
@@ -130,6 +195,9 @@ cmd_update() {
 	need=$(( $(size_of "$file") / 1024 + 1024 ))
 	free=$(df -k "$m" | awk 'NR == 2 { print $4 }')
 	[ "$free" -gt "$need" ] || die "not enough room on the EFI partition (${free} KiB free, ${need} KiB needed)"
+
+	# The system first: the image is useless without it.
+	[ -n "$system" ] && install_system "$system" "$(systems_dir "$m")" "$id"
 
 	echo "copying $(( $(size_of "$file") / 1048576 )) MiB to the boot disk..."
 	cp "$file" "$m/$EFI_DIR/trial.tmp" || die "copy failed"
@@ -154,6 +222,7 @@ cmd_update() {
 		printf 'ENTRY=%s\nSHA=%s\nINSTALLED="%s"\n' "$entry" "$sha" "$(date '+%F %T')" > "$m/$EFI_DIR/trial.txt"
 		update_log "installed $sha as a trial (Boot$entry, boots once)"
 	fi
+	prune_systems "$m"
 	trap - EXIT
 	esp_umount "$m"
 	if [ -n "$reboot" ]; then
@@ -289,6 +358,11 @@ cmd_boot_check() {
 
 cmd_status() {
 	echo "image:     $(cat /etc/sion-version 2>/dev/null || echo unknown)"
+	if [ -r "$SION_EARLY" ]; then
+		echo "system:    $(sed -n 's/^SYSTEM=//p' "$SION_EARLY") (squashfs$(grep -q '^OVERLAY=layer' "$SION_EARLY" && echo ', /data/overlay as a layer'))"
+	else
+		echo "system:    in the image, unpacked into RAM"
+	fi
 	echo "kernel:    $(uname -r), up $(uptime_s)s"
 	echo "hostname:  $(hostname)"
 	echo "addresses: $(ip -4 -o addr show scope global | awk '{ printf "%s %s  ", $2, $4 }')"
@@ -302,7 +376,7 @@ cmd_status() {
 	mount_efivars && echo "uefi:      BootCurrent=$(efi_boot_current)"
 	m=$(esp_mount) || return 0
 	for f in "$CURRENT" "$EFI_DIR/previous.efi" "$EFI_DIR/trial.efi" "$EFI_DIR/failed.efi"; do
-		[ -e "$m/$f" ] && printf '  %-24s %s MiB\n' "$f" "$(( $(size_of "$m/$f") / 1048576 ))"
+		[ -e "$m/$f" ] && printf '  %-24s %s MiB%s\n' "$f" "$(( $(size_of "$m/$f") / 1048576 ))" "$(id=$(efi_root_id "$m/$f"); [ -n "$id" ] && echo ", system $id")"
 	done
 	[ -r "$m/$EFI_DIR/trial.txt" ] && echo "trial pending: $(tr '\n' ' ' < "$m/$EFI_DIR/trial.txt")"
 	[ -r "$m/sion/logs/update.txt" ] && echo "last update: $(tail -n1 "$m/sion/logs/update.txt" | tr -d '\r')"
